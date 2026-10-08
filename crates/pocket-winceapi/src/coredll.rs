@@ -14240,6 +14240,7 @@ fn set_clipboard_data(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 const FAKE_HWAVEOUT: u32 = 0xDEAD_4001;
 const FIRST_HWAVEOUT: u32 = 0xDEAD_4100;
 const MMSYSERR_NOERROR: u32 = 0;
+const MMSYSERR_ALLOCATED: u32 = 4;
 
 /// `WAVEHDR.dwFlags` bits we care about.
 const WHDR_DONE: u32 = 0x1;
@@ -14443,6 +14444,19 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if flags & 0x1 != 0 {
         return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR));
     }
+
+    // Windows CE waveOutOpen is not an unbounded handle allocator: the
+    // wave manager / driver may reject a real open once its mixer stream
+    // resources are exhausted.  Keep format-query calls side-effect free,
+    // and bound only simultaneously live playback streams.
+    //
+    // 32 is the emulated software mixer's stream capacity.  It is deliberately
+    // independent of any application's handle table; closed streams free a slot.
+    const MAX_WAVE_OUT_STREAMS: usize = 32;
+    if ctx.kernel.wave_out.devices.len() >= MAX_WAVE_OUT_STREAMS {
+        return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_ALLOCATED));
+    }
+
     let kind = match flags & 0x0007_0000 {
         0x0001_0000 => WaveCallbackKind::Window,
         0x0002_0000 => WaveCallbackKind::Thread,
