@@ -14,6 +14,22 @@ use pocket_library::{
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpscaleFilter { Bicubic, Lanczos, Bilinear, Nearest }
+impl UpscaleFilter {
+    const ALL: [Self; 4] = [Self::Bicubic, Self::Lanczos, Self::Bilinear, Self::Nearest];
+    fn label(self) -> &'static str {
+        match self { Self::Bicubic => "Bicubic", Self::Lanczos => "Lanczos — sharp",
+            Self::Bilinear => "Bilinear — soft", Self::Nearest => "Nearest — crisp pixels" }
+    }
+    fn image_filter(self) -> image::imageops::FilterType {
+        match self { Self::Bicubic => image::imageops::FilterType::CatmullRom,
+            Self::Lanczos => image::imageops::FilterType::Lanczos3,
+            Self::Bilinear => image::imageops::FilterType::Triangle,
+            Self::Nearest => image::imageops::FilterType::Nearest }
+    }
+}
+
 // Virtual button layout for the Run screen — modelled after the
 // j2me-loader gamepad: a D-pad on the left and three action buttons
 // (A / B / Start) on the right. Pressing a button sends a
@@ -30,8 +46,15 @@ pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, egui::TextureHandle>,
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
     gizmondo_skin: Option<egui::TextureHandle>,
+    upscale_x2: bool,
+    upscale_filter: UpscaleFilter,
+    upscale_window_size: Option<Vec2>,
+    console_fit_pending: bool,
+    library_window_size: Option<Vec2>,
+    display_fullscreen: bool,
     library: Library,
     selected_game: Option<String>,
+    rename_draft: Option<(String, String, bool)>,
     screen: Screen,
     runner: Runner,
     events_rx: Receiver<UiEvent>,
@@ -57,7 +80,7 @@ pub struct PocketLauncher {
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
     last_frame_texture: Option<egui::TextureHandle>,
-    /// Latest unscaled guest framebuffer, retained for pixel-perfect PNG screenshots.
+    /// Latest native guest framebuffer, retained for input and filtered screenshots.
     last_frame_snapshot: Option<FrameSnapshot>,
     last_frame_status: Option<String>,
     frame_stats: FrameStats,
@@ -538,14 +561,30 @@ impl FrameStats {
 }
 
 impl PocketLauncher {
-    pub fn new(_cc: &eframe::CreationContext<'_>, library: Library) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, library: Library) -> Self {
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = Color32::from_rgb(23, 25, 30);
+        visuals.window_fill = Color32::from_rgb(41, 45, 54);
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(37, 40, 48);
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(41, 45, 54);
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(65, 71, 82);
+        visuals.selection.bg_fill = Color32::from_rgb(65, 71, 82);
+        visuals.override_text_color = Some(Color32::from_rgb(230, 232, 237));
+        cc.egui_ctx.set_visuals(visuals);
         let (tx, rx) = mpsc::channel();
         Self {
             library,
             icon_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
             gizmondo_skin: None,
+            upscale_x2: false,
+            upscale_filter: UpscaleFilter::Bicubic,
+            upscale_window_size: None,
+            console_fit_pending: false,
+            library_window_size: None,
+            display_fullscreen: false,
             selected_game: None,
+            rename_draft: None,
             screen: Screen::Library,
             runner: Runner::new(),
             events_rx: rx,
@@ -607,18 +646,52 @@ impl PocketLauncher {
     }
 
     fn upload_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
-        // Keep the raw guest pixels as well as the GPU texture. Screenshots must
-        // capture the framebuffer itself, not the scaled launcher presentation.
+        // Keep native pixels for input coordinates and rebuilding filtered images.
         self.last_frame_snapshot = Some(frame.clone());
-        let size = [frame.width as usize, frame.height as usize];
-        let img = egui::ColorImage::from_rgba_unmultiplied(size, &frame.rgba);
-        if let Some(tex) = self.last_frame_texture.as_mut() {
-            tex.set(img, egui::TextureOptions::NEAREST);
-        } else {
-            let tex = ctx.load_texture("pockethle-fb", img, egui::TextureOptions::NEAREST);
-            self.last_frame_texture = Some(tex);
-        }
+        self.refresh_frame_texture(ctx, frame);
         self.frame_stats.record_frame();
+    }
+
+    fn filtered_frame_image(&self, frame: &FrameSnapshot, factor: u32) -> Result<image::RgbaImage, String> {
+        let source = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
+            .ok_or_else(|| "invalid RGBA framebuffer size".to_string())?;
+        if factor == 1 { return Ok(source); }
+        Ok(image::imageops::resize(&source, frame.width * factor, frame.height * factor,
+            self.upscale_filter.image_filter()))
+    }
+
+    fn refresh_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let smooth_scale = self.running_is_gizmondo && (self.upscale_x2 || fullscreen);
+        let factor = if smooth_scale { 2 } else { 1 };
+        let source = match self.filtered_frame_image(frame, factor) {
+            Ok(source) => source,
+            Err(error) => { log::warn!("{error}"); return; }
+        };
+        let img = egui::ColorImage::from_rgba_unmultiplied(
+            [source.width() as usize, source.height() as usize], source.as_raw());
+        let options = if smooth_scale && self.upscale_filter != UpscaleFilter::Nearest {
+            egui::TextureOptions::LINEAR
+        } else { egui::TextureOptions::NEAREST };
+        if let Some(tex) = self.last_frame_texture.as_mut() { tex.set(img, options); }
+        else { self.last_frame_texture = Some(ctx.load_texture("pockethle-fb", img, options)); }
+    }
+
+    fn set_upscale_x2(&mut self, ctx: &egui::Context, enabled: bool) {
+        if self.upscale_x2 == enabled { return; }
+        self.release_all_keys();
+        self.pointer_down_at = None;
+        self.upscale_x2 = enabled;
+        self.console_fit_pending = true;
+        if enabled {
+            self.upscale_window_size = ctx.input(|input| input.viewport().inner_rect.map(|r| r.size()));
+
+        } else if let Some(size) = self.upscale_window_size.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        if let Some(frame) = self.last_frame_snapshot.clone() {
+            self.refresh_frame_texture(ctx, &frame);
+        }
     }
 
     fn save_framebuffer_screenshot(&self) -> Result<std::path::PathBuf, String> {
@@ -642,17 +715,22 @@ impl PocketLauncher {
             .as_millis();
         let path = dir.join(format!("{safe_name}_{millis}.png"));
 
+        let factor = if self.running_is_gizmondo && self.upscale_x2 { 2 } else { 1 };
+        let pixels = self.filtered_frame_image(frame, factor)?;
         image::save_buffer_with_format(
-            &path,
-            &frame.rgba,
-            frame.width,
-            frame.height,
-            image::ColorType::Rgba8,
-            image::ImageFormat::Png,
+            &path, pixels.as_raw(), pixels.width(), pixels.height(),
+            image::ColorType::Rgba8, image::ImageFormat::Png,
         )
         .map_err(|e| format!("could not write {}: {e}", path.display()))?;
 
         Ok(path)
+    }
+
+    fn capture_screenshot(&mut self) {
+        match self.save_framebuffer_screenshot() {
+            Ok(path) => self.status = format!("Screenshot saved: {}", path.display()),
+            Err(error) => self.status = format!("Screenshot failed: {error}"),
+        }
     }
 
     fn reload_library(&mut self) {
@@ -671,41 +749,91 @@ impl PocketLauncher {
                     .color(Color32::from_gray(160)),
             );
             ui.add_space(16.0);
-            if ui
-                .selectable_label(self.screen == Screen::Library, "Library")
-                .clicked()
-            {
-                self.screen = Screen::Library;
-            }
-            if ui
-                .selectable_label(self.screen == Screen::Settings, "Settings")
-                .clicked()
-            {
-                self.config_draft = Some(self.library.config().clone());
-                self.screen = Screen::Settings;
-            }
-            let can_screenshot = self.running_game.is_some() && self.last_frame_snapshot.is_some();
-            if ui
-                .add_enabled(can_screenshot, egui::Button::new("Screenshot"))
-                .on_hover_text("Save the native guest framebuffer as a PNG")
-                .clicked()
-            {
-                match self.save_framebuffer_screenshot() {
-                    Ok(path) => {
-                        self.status = format!("Screenshot saved: {}", path.display());
-                    }
-                    Err(err) => {
-                        self.status = format!("Screenshot failed: {err}");
-                    }
+            ui.menu_button("Game library", |ui| {
+                if ui.button("Open library").clicked() {
+                    self.return_to_library(ui.ctx()); ui.close_menu();
                 }
+                if ui.button("Import .CAB / .ZIP / .RAR…").clicked() {
+                    self.spawn_import_dialog(); ui.close_menu();
+                }
+            });
+            ui.menu_button("Settings", |ui| self.ui_settings_menu(ui));
+            let can_screenshot = self.last_frame_snapshot.is_some();
+            if ui
+                .add_enabled(can_screenshot, egui::Button::new("Screenshot (F11)"))
+                .on_hover_text("Save a PNG at native size, or 640×480 with Upscale ×2")
+                .clicked()
+            {
+                self.capture_screenshot();
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Import .CAB / .ZIP / .RAR...").clicked() {
-                    self.spawn_import_dialog();
+        });
+        ui.separator();
+    }
+
+    fn return_to_library(&mut self, ctx: &egui::Context) {
+        self.release_all_keys();
+        if let Some(tx) = self.input_tx.as_ref() { let _ = tx.send(InputCommand::Stop); }
+        self.set_upscale_x2(ctx, false);
+        self.console_fit_pending = false;
+        if let Some(size) = self.library_window_size.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        self.screen = Screen::Library;
+    }
+
+    fn ui_settings_menu(&mut self, ui: &mut egui::Ui) {
+        if self.running_game.is_some() && self.screen != Screen::Run && ui.button("Return to game").clicked() {
+            self.screen = Screen::Run; ui.close_menu();
+        }
+        ui.separator();
+        ui.add_enabled_ui(self.running_is_gizmondo && self.last_frame_snapshot.is_some(), |ui| {
+            let mut enabled = self.upscale_x2;
+            if ui.checkbox(&mut enabled, "Upscale ×2").changed() {
+                self.set_upscale_x2(ui.ctx(), enabled);
+            }
+            ui.menu_button("Filter", |ui| {
+                let previous = self.upscale_filter;
+                for filter in UpscaleFilter::ALL {
+                    if ui.selectable_value(&mut self.upscale_filter, filter, filter.label()).clicked() { ui.close_menu(); }
+                }
+                if previous != self.upscale_filter {
+                    if let Some(frame) = self.last_frame_snapshot.clone() { self.refresh_frame_texture(ui.ctx(), &frame); }
+                }
+            });
+        });
+        ui.add_enabled_ui(self.last_frame_snapshot.is_some(), |ui| {
+            ui.menu_button("Rotation", |ui| {
+                let mut rotation = self.game_rotation;
+                for choice in RotationPref::ALL {
+                    if ui.selectable_value(&mut rotation, choice, choice.label()).clicked() { ui.close_menu(); }
+                }
+                if rotation != self.game_rotation {
+                    self.release_all_keys();
+                    self.game_rotation = rotation; self.persist_rotation(rotation);
                 }
             });
         });
         ui.separator();
+        let game_id = self.running_game_id.clone().or_else(|| self.selected_game.clone());
+        let game = game_id.and_then(|id| self.library.games().iter().find(|g| g.id == id).cloned());
+        if ui.add_enabled(game.is_some(), egui::Button::new("Game options…")).clicked() {
+            if let Some(game) = game {
+                self.release_all_keys();
+                self.game_settings_draft = Some((game.id, game.settings));
+                self.screen = Screen::GameSettings; ui.close_menu();
+            }
+        }
+        if ui.button("Emulator options…").clicked() {
+            self.release_all_keys();
+            self.config_draft = Some(self.library.config().clone());
+            self.screen = Screen::Settings; ui.close_menu();
+        }
+        if ui.button("Fullscreen").clicked() {
+            let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+            ui.close_menu();
+        }
+
     }
 
     fn ui_library(&mut self, ui: &mut egui::Ui) {
@@ -775,7 +903,11 @@ impl PocketLauncher {
 
         let menu_rect = Rect::from_min_size(Pos2::new(card_rect.right()-36.0, card_rect.top()+3.0), Vec2::splat(30.0));
         let mut menu_ui = ui.child_ui(menu_rect, egui::Layout::right_to_left(egui::Align::Center));
-        let menu_response = menu_ui.menu_button(RichText::new("⋮").size(22.0), |ui| {
+        let menu_response = menu_ui.menu_button("   ", |ui| {
+            if ui.button("Rename...").clicked() {
+                self.rename_draft = Some((game.id.clone(), game.display_name.clone(), true));
+                ui.close_menu();
+            }
             if ui.button("Settings").clicked() {
                 self.selected_game = Some(game.id.clone());
                 self.game_settings_draft = Some((game.id.clone(), game.settings.clone()));
@@ -800,13 +932,34 @@ impl PocketLauncher {
                 if let Ok(bytes) = std::fs::read(path) {
                     if let Ok(image) = load_image_bytes(&bytes) {
                         let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| icon_ui.ctx().load_texture(format!("icon-{}", game.id), image, egui::TextureOptions::LINEAR));
-                        icon_ui.add(egui::Image::from_texture(&*texture).fit_to_exact_size(Vec2::splat(94.0)));
+                        icon_ui.add(egui::Image::from_texture(&*texture).fit_to_exact_size(Vec2::splat(120.0)));
                         drew_icon = true;
                     }
                 }
             }
-            if !drew_icon { icon_ui.label(RichText::new("📱").size(58.0)); }
+            if !drew_icon {
+                // Draw the Pocket PC fallback ourselves: emoji coverage and
+                // font metrics otherwise leave a tiny icon or a missing glyph.
+                let device = Rect::from_center_size(icon_rect.center(), Vec2::new(82.0, 116.0));
+                let painter = ui.painter();
+                painter.rect(device, 10.0, Color32::from_rgb(98, 112, 130),
+                    egui::Stroke::new(1.5, Color32::from_rgb(158, 174, 193)));
+                let screen = Rect::from_min_max(device.min + Vec2::new(8.0, 11.0),
+                    device.max - Vec2::new(8.0, 24.0));
+                painter.rect_filled(screen, 3.0, Color32::from_rgb(38, 61, 80));
+                painter.text(screen.center(), egui::Align2::CENTER_CENTER, "Pocket PC",
+                    egui::FontId::proportional(12.0), Color32::from_rgb(198, 220, 234));
+                painter.circle_filled(Pos2::new(device.center().x, device.bottom() - 12.0),
+                    5.0, Color32::from_rgb(204, 214, 225));
+            }
         }
+
+        let dots = menu_response.response.rect.center();
+        for dx in [-6.0, 0.0, 6.0] {
+            ui.painter().circle_filled(dots + Vec2::new(dx, 0.0), 1.8,
+                Color32::from_rgb(210, 218, 228));
+        }
+        menu_response.response.clone().on_hover_text("Game actions");
 
         let label_rect = Rect::from_min_size(Pos2::new(card_rect.left(), card_rect.bottom()-78.0), Vec2::new(size.x, 78.0));
         ui.painter().rect_filled(label_rect, 0.0, Color32::from_rgb(28,29,32));
@@ -819,6 +972,39 @@ impl PocketLauncher {
 
         if card_response.clicked() && !menu_response.response.clicked() { self.selected_game = Some(game.id.clone()); }
         if card_response.double_clicked() { self.spawn_run(game); }
+    }
+
+    fn ui_rename_game(&mut self, ctx: &egui::Context) {
+        let Some((id, mut name, first_frame)) = self.rename_draft.take() else { return; };
+        let mut save = false;
+        let mut cancel = false;
+        let mut open = true;
+        egui::Window::new("Rename game").id(egui::Id::new("rename_game"))
+            .collapsible(false).resizable(false).open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Game name");
+                let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(300.0));
+                if first_frame { edit.request_focus(); }
+                let valid = !name.trim().is_empty();
+                ui.horizontal(|ui| {
+                    save = ui.add_enabled(valid, egui::Button::new("Save")).clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid { save = true; }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) { cancel = true; }
+            });
+        if cancel || !open { return; }
+        if save {
+            match self.library.rename_game(&id, &name) {
+                Ok(()) => {
+                    self.status = format!("Renamed game to {}", name.trim());
+                    return;
+                }
+                Err(error) => { self.status = format!("Rename failed: {error}"); }
+            }
+        }
+        self.rename_draft = Some((id, name, false));
     }
 
     fn ui_game_details(&mut self, ui: &mut egui::Ui, game: &GameEntry) {
@@ -859,7 +1045,7 @@ impl PocketLauncher {
         };
         let mut save_clicked = false;
         let mut cancel_clicked = false;
-        ui.heading("Launcher settings");
+        ui.heading("Emulator options");
         ui.add_space(8.0);
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")
@@ -924,9 +1110,9 @@ impl PocketLauncher {
             } else {
                 self.status = "Settings saved.".to_string();
             }
-            self.screen = Screen::Library;
+            self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else if cancel_clicked {
-            self.screen = Screen::Library;
+            self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else {
             self.config_draft = Some(draft);
         }
@@ -1150,64 +1336,54 @@ impl PocketLauncher {
             } else {
                 self.status = "Game settings saved.".to_string();
             }
-            self.screen = Screen::Library;
+            self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else if cancel_clicked {
-            self.screen = Screen::Library;
+            self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else {
             self.game_settings_draft = Some((id, draft));
         }
     }
 
-    fn ui_run(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Run output");
-        ui.add_space(8.0);
-        if let Some(name) = self.running_game.as_ref() {
-            ui.label(format!("Running {name}…"));
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Rotation");
-            let mut rotation = self.game_rotation;
-            egui::ComboBox::from_id_source("game_rotation")
-                .selected_text(rotation.label())
-                .show_ui(ui, |ui| {
-                    for choice in RotationPref::ALL {
-                        ui.selectable_value(&mut rotation, choice, choice.label());
-                    }
-                });
-            if rotation != self.game_rotation {
-                self.game_rotation = rotation;
-                self.persist_rotation(rotation);
-            }
-            if ui.button("Fullscreen (F11)").clicked() {
-                let fullscreen = ui
-                    .ctx()
-                    .input(|input| input.viewport().fullscreen.unwrap_or(false));
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Back to library").clicked() {
-                    // Best-effort — if the runner thread already
-                    // exited the channel will just drop the message.
-                    if let Some(tx) = self.input_tx.as_ref() {
-                        let _ = tx.send(InputCommand::Stop);
-                    }
-                    self.release_all_keys();
-                    self.screen = Screen::Library;
-                }
-            });
+    fn fit_console_window(&mut self, ui: &egui::Ui) {
+        if !self.console_fit_pending { return; }
+        let (inner, fullscreen, maximized) = ui.ctx().input(|input| {
+            let viewport = input.viewport();
+            (viewport.inner_rect.map(|r| r.size()), viewport.fullscreen.unwrap_or(false),
+                viewport.maximized.unwrap_or(false))
         });
-        ui.add_space(6.0);
-        if self.running_is_gizmondo {
-            self.ui_gizmondo(ui);
-        } else {
-            ui.horizontal_top(|ui| {
-                self.ui_run_screen(ui);
-                ui.add_space(12.0);
-                self.ui_virtual_pad(ui);
-            });
+        if fullscreen || maximized { return; }
+        if let Some(inner) = inner {
+            self.library_window_size.get_or_insert(inner);
+            let scale = if self.upscale_x2 { 2.0 } else { 1.0 };
+            let width = (320.0 / 0.3920) * scale;
+            let body = Vec2::new(width, width * 928.0 / 1648.0);
+            // Keep only the measured top/status bars around the console.
+            // Measuring avoids fixed guesses about title bars or display DPI.
+            let chrome = inner - ui.available_size();
+            let target = body + chrome;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                Vec2::new(target.x.ceil(), target.y.ceil())));
+            self.console_fit_pending = false;
         }
+    }
+
+    fn ui_run(&mut self, ui: &mut egui::Ui) {
+        if self.running_is_gizmondo {
+            self.fit_console_window(ui);
+            if ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+                self.ui_gizmondo(ui);
+            } else { ScrollArea::both().show(ui, |ui| self.ui_gizmondo(ui)); }
+            return;
+        }
+        if let Some(name) = self.running_game.as_ref() {
+            ui.label(RichText::new(name).small().color(Color32::from_gray(170)));
+        }
+        ui.add_space(6.0);
+        ui.horizontal_top(|ui| {
+            self.ui_run_screen(ui);
+            ui.add_space(12.0);
+            self.ui_virtual_pad(ui);
+        });
         ui.add_space(8.0);
         if let Some(s) = self.last_frame_status.as_ref() {
             ui.label(RichText::new(s).small().color(Color32::from_gray(170)));
@@ -1231,11 +1407,17 @@ impl PocketLauncher {
 
         // The supplied skin is 1648x928. Keep that ratio so all hitboxes and
         // the LCD remain locked to the photographed controls while resizing.
-        let avail = ui.available_size();
         let aspect = 1648.0 / 928.0;
-        let w = avail.x.min(avail.y * aspect).min(1200.0).max(480.0);
+        let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let available = ui.available_size();
+        let w = if fullscreen { available.x.min(available.y * aspect).max(1.0) }
+            else { (320.0 / 0.3920) * if self.upscale_x2 { 2.0 } else { 1.0 } };
         let h = w / aspect;
-        let (body, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+        let scale = w * 0.3920 / 320.0;
+        let body = if fullscreen {
+            let (canvas, _) = ui.allocate_exact_size(available, Sense::hover());
+            Rect::from_center_size(canvas.center(), Vec2::new(w, h))
+        } else { ui.allocate_exact_size(Vec2::new(w, h), Sense::hover()).0 };
         let rr = |x: f32, y: f32, rw: f32, rh: f32| Rect::from_min_size(
             Pos2::new(body.left() + x * w, body.top() + y * h),
             Vec2::new(rw * w, rh * h),
@@ -1253,7 +1435,12 @@ impl PocketLauncher {
 
         // Replace the static picture in the skin with the emulator's live
         // 320x240 framebuffer. These coordinates are measured from the skin.
-        let screen = rr(0.3016, 0.2252, 0.3920, 0.5280);
+        let lcd = rr(0.3016, 0.2252, 0.3920, 0.5280);
+        let screen = Rect::from_center_size(lcd.center(), Vec2::new(320.0, 240.0) * scale);
+        // Cover the skin's entire photographed LCD, including the small
+        // bands outside the exact 4:3 game rectangle. Otherwise its old
+        // picture shows through above/below the live framebuffer at ×2.
+        ui.painter().rect_filled(lcd.expand(1.0 / ui.ctx().pixels_per_point()), 0.0, Color32::BLACK);
         if let Some(tex) = self.last_frame_texture.clone() {
             let uv = rotation_uv(self.game_rotation);
             let mut mesh = Mesh::with_texture(tex.id());
@@ -1264,7 +1451,10 @@ impl PocketLauncher {
             }
             mesh.indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3]);
             ui.painter().add(egui::Shape::mesh(mesh));
-            self.handle_pointer(ui.ctx(), &screen, tex.size_vec2());
+            let guest_size = self.last_frame_snapshot.as_ref()
+                .map(|frame| Vec2::new(frame.width as f32, frame.height as f32))
+                .unwrap_or(Vec2::new(320.0, 240.0));
+            self.handle_pointer(ui.ctx(), &screen, guest_size);
         } else {
             ui.painter().rect_filled(screen, 0.0, Color32::BLACK);
             ui.painter().text(screen.center(), egui::Align2::CENTER_CENTER, "Starting…",
@@ -1543,9 +1733,6 @@ impl PocketLauncher {
     }
 
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
-        if self.screen != Screen::Run {
-            return;
-        }
         let events = ctx.input(|input| input.events.clone());
         for event in events {
             let egui::Event::Key {
@@ -1557,11 +1744,11 @@ impl PocketLauncher {
             else {
                 continue;
             };
-            if key == egui::Key::F11 && pressed && !repeat {
-                let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+            if key == egui::Key::F11 {
+                if pressed && !repeat && self.last_frame_snapshot.is_some() { self.capture_screenshot(); }
                 continue;
             }
+            if self.screen != Screen::Run { continue; }
             // Both PocketPC and Gizmondo use the same configurable host-key map.
             // The skin is only presentation; Settings are the single source of truth.
             let vk = self.library.config().keybindings.vk_for_key(key.name());
@@ -1653,6 +1840,7 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
+        self.console_fit_pending = self.running_is_gizmondo;
         let (frame_tx, frame_rx) = mpsc::channel();
         let (input_tx, input_rx) = mpsc::channel();
         self.frame_rx = Some(frame_rx);
@@ -1724,10 +1912,17 @@ impl eframe::App for PocketLauncher {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if fullscreen != self.display_fullscreen {
+            self.display_fullscreen = fullscreen;
+            if !fullscreen { self.console_fit_pending = self.running_is_gizmondo; }
+            if let Some(frame) = self.last_frame_snapshot.clone() { self.refresh_frame_texture(ctx, &frame); }
+        }
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&self.status).small());
+                ui.label(RichText::new(self.status.lines().next().unwrap_or("")).small())
+                    .on_hover_text(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
@@ -1737,12 +1932,17 @@ impl eframe::App for PocketLauncher {
                 });
             });
         });
-        egui::CentralPanel::default().show(ctx, |ui| match self.screen {
+        let central = egui::CentralPanel::default();
+        let central = if self.screen == Screen::Run && self.running_is_gizmondo {
+            central.frame(egui::Frame::none())
+        } else { central };
+        central.show(ctx, |ui| match self.screen {
             Screen::Library => self.ui_library(ui),
             Screen::Settings => self.ui_settings(ui),
             Screen::GameSettings => self.ui_game_settings(ui),
             Screen::Run => self.ui_run(ui),
         });
+        self.ui_rename_game(ctx);
         // While a game is running we want to drain the live frame
         // channel as fast as the runner produces frames; the original
         // 250 ms cadence capped the launcher at 4 fps, which is most
@@ -1762,6 +1962,7 @@ impl eframe::App for PocketLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use pocket_core::kernel::gapi;
     use pocket_library::KeyBindings;
 

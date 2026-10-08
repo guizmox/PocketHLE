@@ -56,6 +56,8 @@ pub enum LibraryError {
     NotFound(String),
     #[error("the cabinet does not contain any ARM PE32 executable")]
     NoExecutable,
+    #[error("game name must not be empty")]
+    InvalidName,
     #[error("invalid game id `{0}`")]
     InvalidId(String),
     #[error("file `{0}` is not an ARM PE32 executable")]
@@ -1388,6 +1390,27 @@ impl Library {
         self.save()
     }
 
+    /// Change only the display name, preserving the stable id and all paths.
+    /// Commit both manifests before publishing the new in-memory entry.
+    pub fn rename_game(&mut self, id: &str, name: &str) -> Result<(), LibraryError> {
+        let name = name.trim();
+        if name.is_empty() { return Err(LibraryError::InvalidName); }
+        let original = self.get(id).ok_or_else(|| LibraryError::NotFound(id.into()))?.clone();
+        let mut next = self.library.clone();
+        let game = next.games.iter_mut().find(|g| g.id == id).unwrap();
+        game.display_name = name.into();
+        let renamed = game.clone();
+        next.games.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        let manifest = self.root.join("games").join(id).join("game.json");
+        write_json(&manifest, &renamed)?;
+        if let Err(error) = write_json(&self.root.join("library.json"), &next) {
+            let _ = write_json(&manifest, &original);
+            return Err(error);
+        }
+        self.library = next;
+        Ok(())
+    }
+
     /// Update the per-game settings and save the library.
     pub fn update_settings(
         &mut self,
@@ -2353,6 +2376,29 @@ mod tests {
         .unwrap();
         let lib2 = Library::open(&root2).unwrap();
         assert!(lib2.config().show_fps);
+    }
+
+    #[test]
+    fn rename_game_persists_both_manifests_without_changing_identity() {
+        let root = tmpdir("rename");
+        let mut lib = Library::open(&root).unwrap();
+        let original = entry_with_install_dir(Some("\\Program Files\\Spore"));
+        lib.library.games.push(original.clone());
+        lib.save().unwrap();
+        lib.rename_game(&original.id, "  01 — Spore  ").unwrap();
+        let reopened = Library::open(&root).unwrap();
+        let game = reopened.get(&original.id).unwrap();
+        assert_eq!(game.display_name, "01 — Spore");
+        assert_eq!(game.id, original.id);
+        assert_eq!(game.executable, original.executable);
+        assert_eq!(game.install_dir, original.install_dir);
+        let manifest: GameEntry = serde_json::from_slice(&fs::read(root.join("games/spore/game.json")).unwrap()).unwrap();
+        assert_eq!(manifest.display_name, game.display_name);
+        let before = fs::read(root.join("library.json")).unwrap();
+        assert!(matches!(lib.rename_game(&original.id, "   "), Err(LibraryError::InvalidName)));
+        assert!(matches!(lib.rename_game("missing", "Name"), Err(LibraryError::NotFound(_))));
+        assert_eq!(fs::read(root.join("library.json")).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
