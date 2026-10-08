@@ -58,6 +58,57 @@ const DDRAW_METHODS: [&str; 25] = [
     "ddraw_get_device_identifier",
 ];
 
+// Older CE DXPAK applications (including SkyStriker) explicitly query
+// IDirectDraw4. Its retained slots must not be collapsed into the newer
+// Windows Mobile IDirectDraw table above: SetCooperativeLevel is slot 20,
+// not 17, and CreateSurface is slot 6, not 5.
+const IID_DDRAW4: [u8; 16] = [
+    0x9a, 0x50, 0x59, 0x9c, 0xbd, 0x39, 0xd1, 0x11,
+    0x8c, 0x4a, 0x00, 0xc0, 0x4f, 0xd9, 0x30, 0xc5,
+];
+const IID_SURFACE4: [u8; 16] = [
+    0x30, 0x86, 0x2b, 0x0b, 0x35, 0xad, 0xd0, 0x11,
+    0x8e, 0xa6, 0x00, 0x60, 0x97, 0x97, 0xea, 0x5b,
+];
+const IID_SURFACE_CE: [u8; 16] = [
+    0xe4, 0x83, 0x0e, 0x0b, 0x7f, 0xf3, 0xd2, 0x11,
+    0x8b, 0x15, 0x00, 0xc0, 0x4f, 0x68, 0x92, 0x92,
+];
+const DDRAW4_METHODS: [&str; 28] = [
+    "ddraw_qi", "ddraw_add_ref", "ddraw_release", "ddraw_compact",
+    "ddraw_create_clipper", "ddraw_create_palette", "ddraw4_create_surface",
+    "ddraw_duplicate_surface", "ddraw_enum_display_modes", "ddraw_enum_surfaces",
+    "ddraw_flip_to_gdi", "ddraw_get_caps", "ddraw_get_display_mode",
+    "ddraw_get_fourcc_codes", "ddraw_get_gdi_surface", "ddraw_get_monitor_frequency",
+    "ddraw_get_scan_line", "ddraw_get_vertical_blank_status", "ddraw_initialize",
+    "ddraw_restore_display_mode", "ddraw_set_cooperative_level", "ddraw_set_display_mode",
+    "ddraw_wait_for_vertical_blank", "ddraw_get_available_vid_mem",
+    "ddraw_get_surface_from_dc", "ddraw_restore_all_surfaces",
+    "ddraw_test_cooperative_level", "ddraw_get_device_identifier",
+];
+const SURFACE4_METHODS: [&str; 45] = [
+    "surface_qi", "surface_add_ref", "surface_release", "surface_add_attached",
+    "surface_add_overlay_dirty", "surface_blt", "surface_blt_batch", "surface_blt_fast",
+    "surface_delete_attached", "surface_enum_attached", "surface_enum_overlay", "surface_flip",
+    "surface_get_attached", "surface_get_blt_status", "surface_get_caps", "surface_get_clipper",
+    "surface_get_color_key", "surface_get_dc", "surface_get_flip_status",
+    "surface_get_overlay_position", "surface_get_palette", "surface_get_pixel_format",
+    "surface_get_surface_desc", "surface_initialize", "surface_is_lost", "surface_lock",
+    "surface_release_dc", "surface_restore", "surface_set_clipper", "surface_set_color_key",
+    "surface_set_overlay_position", "surface_set_palette", "surface_unlock", "surface_update_overlay",
+    "surface_update_overlay_display", "surface_update_overlay_z_order", "surface_get_dd_interface",
+    "surface_page_lock", "surface_page_unlock", "surface_set_surface_desc", "surface_set_private_data",
+    "surface_get_private_data", "surface_free_private_data", "surface_get_uniqueness_value",
+    "surface_change_uniqueness_value",
+];
+
+fn requested_iid(ctx: &mut CallCtx<'_>) -> Result<[u8; 16], KernelError> {
+    let ptr = ctx.arg_u32(1)?;
+    let mut iid = [0u8; 16];
+    ctx.cpu.read_mem_into(ptr, &mut iid)?;
+    Ok(iid)
+}
+
 /// `IDirectDrawPalette` on Windows CE — `Initialize` is absent, because CE
 /// DirectDraw has no `CoCreateInstance` path for an interface to be
 /// initialized after the fact.
@@ -131,6 +182,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler("coredll.dll", "DirectDrawCreate", direct_draw_create);
     for name in DDRAW_METHODS
         .iter()
+        .chain(DDRAW4_METHODS.iter())
+        .chain(SURFACE4_METHODS.iter())
         .chain(PALETTE_METHODS.iter())
         .chain(CLIPPER_METHODS.iter())
         .chain(SURFACE_METHODS.iter())
@@ -140,6 +193,7 @@ pub fn register(d: &mut WinCeDispatcher) {
             "ddraw_add_ref" => add_ref,
             "ddraw_release" => release,
             "ddraw_create_surface" => ddraw_create_surface,
+            "ddraw4_create_surface" => ddraw4_create_surface,
             "ddraw_flip_to_gdi" => ddraw_flip_to_gdi_or_create_surface,
             "ddraw_create_palette" => ddraw_create_palette,
             "ddraw_create_clipper" => ddraw_create_clipper,
@@ -337,8 +391,15 @@ fn ddraw_create_clipper(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
 fn ddraw_qi(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(2)?;
     if out != 0 {
-        let object = ctx.arg_u32(0)?;
+        let object = if requested_iid(ctx)? == IID_DDRAW4 {
+            alloc_object(ctx, &DDRAW4_METHODS, FAKE_DDRAW)?
+        } else {
+            ctx.arg_u32(0)?
+        };
         ctx.cpu.write_mem(out, &object.to_le_bytes())?;
+        if object == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(0x8000_000e));
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -400,12 +461,13 @@ fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> SurfaceRecord {
         return panel;
     }
     let word = |ctx: &mut CallCtx<'_>, offset: u32| ctx.cpu.read_u32_le(desc + offset).unwrap_or(0);
-    if word(ctx, 0) != DDSURFACEDESC_SIZE {
+    let size = word(ctx, 0);
+    if !matches!(size, DDSURFACEDESC_SIZE | 124) {
         return panel;
     }
     let flags = word(ctx, 4);
     let caps = if flags & 0x0000_0001 != 0 {
-        word(ctx, 100)
+        word(ctx, if size == 124 { 104 } else { 100 })
     } else {
         0
     };
@@ -451,11 +513,23 @@ fn ddraw_create_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     // surface pointer it will draw through.
     if desc != 0 {
         let size = ctx.cpu.read_u32_le(desc).unwrap_or(0);
-        if size == DDSURFACEDESC_SIZE {
-            write_surface_desc(ctx, desc, SYNTHETIC_FRAMEBUFFER_BASE)?;
+        if matches!(size, DDSURFACEDESC_SIZE | 124) {
+            write_record_desc(ctx, desc, record)?;
         }
     }
     Ok(outcome)
+}
+
+fn ddraw4_create_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let desc = ctx.arg_u32(1)?;
+    let out = ctx.arg_u32(2)?;
+    ensure_framebuffer(ctx)?;
+    let record = surface_from_desc(ctx, desc);
+    let object = alloc_object_with(ctx, &SURFACE4_METHODS, FAKE_SURFACE, &record.private_words())?;
+    if out != 0 {
+        ctx.cpu.write_mem(out, &object.to_le_bytes())?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(if object == 0 { 0x8000_000e } else { 0 }))
 }
 
 /// Slot 8 is `FlipToGDISurface`, which takes no arguments at all.
@@ -589,8 +663,26 @@ fn release(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn surface_qi(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(2)?;
     if out != 0 {
-        let object = ctx.arg_u32(0)?;
+        let this = ctx.arg_u32(0)?;
+        let iid = requested_iid(ctx)?;
+        let table = if iid == IID_SURFACE_CE {
+            Some(SURFACE_METHODS.as_slice())
+        } else if iid == IID_SURFACE4 {
+            Some(SURFACE4_METHODS.as_slice())
+        } else {
+            None
+        };
+        let object = if let (Some(table), Some(record)) = (table, surface_record(ctx, this)) {
+            // Interface views share pixel storage and geometry, not a fresh
+            // framebuffer. SkyStriker switches Surface4 to the CE interface.
+            alloc_object_with(ctx, table, FAKE_SURFACE, &record.private_words())?
+        } else {
+            this
+        };
         ctx.cpu.write_mem(out, &object.to_le_bytes())?;
+        if object == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(0x8000_000e));
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -644,6 +736,19 @@ fn surface_desc_bytes(width: u32, height: u32, pitch: u32, surface: u32) -> [u8;
     bytes
 }
 
+/// The retained DirectDraw4 ABI uses DDSURFACEDESC2 (124 bytes).
+/// Its pointer/pixel format/caps offsets differ from the 108-byte CE struct.
+fn surface_desc2_bytes(width: u32, height: u32, pitch: u32, surface: u32, primary: bool) -> [u8; 124] {
+    let mut bytes = [0u8; 124];
+    let flags = 0x1u32 | 0x2 | 0x4 | 0x8 | 0x800 | 0x1000;
+    for (offset, value) in [(0, 124u32), (4, flags), (8, height), (12, width),
+        (16, pitch), (36, surface), (104, if primary { 0x40 } else { 0x40_0000 })] {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[72..104].copy_from_slice(&pixel_format_bytes());
+    bytes
+}
+
 fn write_surface_desc(ctx: &mut CallCtx<'_>, desc: u32, surface: u32) -> Result<(), KernelError> {
     let record = panel_record(ctx);
     write_record_desc(
@@ -664,8 +769,14 @@ fn write_record_desc(
     if desc == 0 {
         return Ok(());
     }
-    let bytes = surface_desc_bytes(record.width, record.height, record.pitch, record.pixels);
-    ctx.cpu.write_mem(desc, &bytes)?;
+    let size = ctx.cpu.read_u32_le(desc)?;
+    if size == 124 {
+        let bytes = surface_desc2_bytes(record.width, record.height, record.pitch, record.pixels, record.primary);
+        ctx.cpu.write_mem(desc, &bytes)?;
+    } else {
+        let bytes = surface_desc_bytes(record.width, record.height, record.pitch, record.pixels);
+        ctx.cpu.write_mem(desc, &bytes)?;
+    }
     Ok(())
 }
 
@@ -884,6 +995,102 @@ mod tests {
         pixel_format_bytes, surface_desc_bytes, CLIPPER_METHODS, DDRAW_METHODS, PALETTE_METHODS,
         SURFACE_METHODS,
     };
+
+    #[test]
+    fn directdraw4_startup_keeps_ce_interfaces_and_surface_storage_distinct() {
+        use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        use super::*;
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x5000_0000, 0x100000, Prot::READ | Prot::WRITE).unwrap();
+        let exports = kernel.dynamic_exports.entry(FAKE_MODULE_HANDLE).or_default();
+        let mut address = 0x7000_1000u32;
+        for name in DDRAW_METHODS.iter().chain(DDRAW4_METHODS.iter())
+            .chain(SURFACE_METHODS.iter()).chain(SURFACE4_METHODS.iter()) {
+            if !exports.contains_key(*name) {
+                exports.insert((*name).into(), address);
+                address += 16;
+            }
+        }
+        let t = Thunk { thunk_va: 0x7000_0000, iat_va: 0x20000,
+            dll: "ddraw.dll".into(), binding: ImportBinding::Name("DirectDrawCreate".into()),
+            friendly_name: Some("DirectDrawCreate".into()) };
+        let call = |cpu: &mut StubCpu, kernel: &mut pocket_kernel::KernelState,
+            handler: crate::Handler, args: [u32; 4]| {
+            for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3].into_iter().zip(args) {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            assert_eq!(handler(&mut CallCtx { cpu, kernel, thunk: &t }).unwrap(),
+                DispatchOutcome::ReturnedR0(0));
+        };
+        call(&mut cpu, &mut kernel, direct_draw_create, [0, 0x1000, 0, 0]);
+        let ce = cpu.read_u32_le(0x1000).unwrap();
+        let ce_table = cpu.read_u32_le(ce).unwrap();
+        cpu.write_mem(0x1100, &IID_DDRAW4).unwrap();
+        call(&mut cpu, &mut kernel, ddraw_qi, [ce, 0x1100, 0x1004, 0]);
+        let dd4 = cpu.read_u32_le(0x1004).unwrap();
+        let dd4_table = cpu.read_u32_le(dd4).unwrap();
+        let cooperative = kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["ddraw_set_cooperative_level"];
+        assert_eq!(cpu.read_u32_le(ce_table + 17 * 4).unwrap(), cooperative);
+        assert_eq!(cpu.read_u32_le(dd4_table + 20 * 4).unwrap(), cooperative);
+        assert_eq!(cpu.read_u32_le(dd4_table + 6 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["ddraw4_create_surface"]);
+        // Replay SkyStriker's primary then 320x240 off-screen creation.
+        call(&mut cpu, &mut kernel, ddraw_set_cooperative_level, [dd4, 0xdead0001, 8, 0]);
+        let primary_desc = surface_desc2_bytes(320, 240, 640, 0, true);
+        cpu.write_mem(0x1200, &primary_desc).unwrap();
+        call(&mut cpu, &mut kernel, ddraw4_create_surface, [dd4, 0x1200, 0x1008, 0]);
+        let primary = cpu.read_u32_le(0x1008).unwrap();
+        let offscreen_desc = surface_desc2_bytes(320, 240, 640, 0, false);
+        cpu.write_mem(0x1200, &offscreen_desc).unwrap();
+        call(&mut cpu, &mut kernel, ddraw4_create_surface, [dd4, 0x1200, 0x100c, 0]);
+        let offscreen = cpu.read_u32_le(0x100c).unwrap();
+        cpu.write_mem(0x1100, &IID_SURFACE_CE).unwrap();
+        call(&mut cpu, &mut kernel, surface_qi, [offscreen, 0x1100, 0x1010, 0]);
+        let ce_surface = cpu.read_u32_le(0x1010).unwrap();
+        let (front, back, view) = {
+            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+            (surface_record(&mut ctx, primary).unwrap(), surface_record(&mut ctx, offscreen).unwrap(),
+                surface_record(&mut ctx, ce_surface).unwrap())
+        };
+        assert!(front.primary);
+        assert!(!back.primary);
+        assert_eq!(back, view, "QueryInterface must share the off-screen pixels");
+        assert_ne!(front.pixels, back.pixels);
+        assert_eq!((back.width, back.height, back.pitch), (320, 240, 640));
+        let ce_surface_table = cpu.read_u32_le(ce_surface).unwrap();
+        assert_eq!(cpu.read_u32_le(ce_surface_table + 19 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_lock"]);
+        // Lock must respect both descriptor layouts and their buffer sizes.
+        for (size, pointer_offset) in [(108u32, 32u32), (124, 36)] {
+            cpu.write_mem(0x1300, &[0xa5; 128]).unwrap();
+            cpu.write_mem(0x1300, &size.to_le_bytes()).unwrap();
+            call(&mut cpu, &mut kernel, surface_lock, [ce_surface, 0, 0x1300, 0]);
+            assert_eq!(cpu.read_u32_le(0x1300).unwrap(), size);
+            assert_eq!(cpu.read_u32_le(0x1300 + pointer_offset).unwrap(), back.pixels);
+            assert_eq!(cpu.read_u32_le(0x1300 + size).unwrap(), 0xa5a5a5a5);
+        }
+    }
+
+    #[test]
+    fn directdraw4_descriptor_and_retained_slots_match_the_older_abi() {
+        use super::*;
+        assert_eq!(slot(&DDRAW4_METHODS, "ddraw4_create_surface"), 6);
+        assert_eq!(slot(&DDRAW4_METHODS, "ddraw_set_cooperative_level"), 20);
+        assert_eq!(slot(&SURFACE4_METHODS, "surface_lock"), 25);
+        assert_eq!(slot(&SURFACE4_METHODS, "surface_unlock"), 32);
+        let bytes = surface_desc2_bytes(320, 240, 640, 0x78000000, false);
+        let word = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        assert_eq!(word(0), 124);
+        assert_eq!((word(8), word(12), word(16)), (240, 320, 640));
+        assert_eq!(word(36), 0x78000000);
+        assert_eq!(word(72), 32);
+        assert_eq!(word(84), 16);
+        assert_eq!(word(104), 0x400000);
+    }
 
     fn slot(table: &[&str], name: &str) -> usize {
         table.iter().position(|entry| *entry == name).unwrap()
