@@ -775,11 +775,8 @@ impl Dispatcher for NullDispatcher {
 
 /// A DLL the guest pulled in at runtime with `LoadLibraryW`.
 ///
-/// PocketHLE does not *execute* satellite modules: nothing resolves
-/// their exports (a resource-only DLL has none, and the titles that
-/// load one import no `GetProcAddress`), so we skip base relocations
-/// and the IAT entirely and only make the image's bytes readable so
-/// `FindResourceW` / `LoadBitmapW` / `LoadStringW` can reach them.
+/// Resource satellites remain passive; native runtime DLLs have relocated
+/// code, patched imports, and exports registered in `dynamic_exports`.
 #[derive(Debug, Clone)]
 pub struct LoadedModule {
     /// `HMODULE` handed back to the guest. Equal to [`Self::base`],
@@ -799,6 +796,15 @@ pub struct LoadedModule {
     /// unmap on zero — a game that frees and re-loads its artwork DLL
     /// would otherwise pay for a second slot.
     pub refcount: u32,
+}
+
+/// Pending DLL_PROCESS_ATTACH callback, returned through its LoadLibrary thunk.
+#[derive(Debug, Clone)]
+pub struct ModuleAttachFrame {
+    pub base: u32,
+    pub thunk: u32,
+    pub thread: usize,
+    pub frame: GuestCallFrame,
 }
 
 /// Mutable kernel state that persists across calls and that handlers
@@ -854,10 +860,12 @@ pub struct KernelState {
     pub image_size: u32,
     pub image_entry: u32,
     pub dynamic_exports: HashMap<u32, HashMap<String, u32>>,
+    pub runtime_thunks: HashMap<u32, Thunk>,
+    pub module_attach_frames: Vec<ModuleAttachFrame>,
     pub next_module_handle: u32,
     /// DLLs the guest brought in at runtime via `LoadLibraryW`, in load
-    /// order. Only resource-carrying satellite modules end up here; the
-    /// HLE'd system DLLs are answered with fixed fake handles instead.
+    /// order. Contains resource satellites and executable companion DLLs;
+    /// HLE system DLLs use fixed synthetic handles.
     pub modules: Vec<LoadedModule>,
     /// Base address the next `LoadLibraryW` will map at. Starts at
     /// [`MODULE_REGION_BASE`] and walks up by [`MODULE_REGION_STRIDE`].
@@ -2187,6 +2195,8 @@ impl Process {
                 image_size: img_size,
                 image_entry: img_entry,
                 dynamic_exports,
+                runtime_thunks: HashMap::new(),
+                module_attach_frames: Vec::new(),
                 next_module_handle: 0x1000_0001,
                 modules: Vec::new(),
                 next_module_base: MODULE_REGION_BASE,
@@ -2631,6 +2641,7 @@ pub fn run_main_loop_with_hook(
                     continue;
                 }
 
+                let runtime_thunk = process.state.runtime_thunks.get(&addr).cloned();
                 let outcome = match process.find_thunk_and_state(addr) {
                     Some((thunk, state)) => {
                         // Split borrow: `thunk` borrows
@@ -2647,6 +2658,9 @@ pub fn run_main_loop_with_hook(
                             log::info!("dispatcher requested halt at {}", thunk.label());
                         }
                         outcome
+                    }
+                    None if runtime_thunk.is_some() => {
+                        dispatcher.dispatch(cpu, runtime_thunk.as_ref().unwrap(), &mut process.state)?
                     }
                     None => {
                         // A non-thunk code hook fired. The expected

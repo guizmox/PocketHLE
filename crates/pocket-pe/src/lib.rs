@@ -263,6 +263,84 @@ pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
     })
 }
 
+/// Prepare a native runtime DLL at a new base. Reject unsupported relocation
+/// kinds and forwarded exports rather than exposing unusable guest addresses.
+pub fn prepare_runtime_module(image: &mut LoadedImage, bytes: &[u8], base: u32) -> Result<(), LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    let oh = pe.header.optional_header.ok_or_else(|| LoadError::NotPe("missing optional header".into()))?;
+    if let Some(dir) = oh.data_directories.get_export_table() {
+        let table = image_rva_bytes(image, dir.virtual_address, 40)?;
+        let ordinal_base = LittleEndian::read_u32(&table[16..20]);
+        let count = LittleEndian::read_u32(&table[20..24]);
+        let address_table = LittleEndian::read_u32(&table[28..32]);
+        let size = count.checked_mul(4).ok_or_else(|| LoadError::NotPe("export table overflow".into()))?;
+        let addresses = image_rva_bytes(image, address_table, size)?.to_vec();
+        for (index, entry) in addresses.chunks_exact(4).enumerate() {
+            let rva = LittleEndian::read_u32(entry);
+            if rva == 0 { continue; }
+            if rva >= dir.virtual_address && rva < dir.virtual_address.saturating_add(dir.size) {
+                return Err(LoadError::NotPe("forwarded runtime exports are not supported yet".into()));
+            }
+            image_rva_bytes(image, rva & !1, 1)?;
+            let ordinal = ordinal_base.checked_add(index as u32)
+                .ok_or_else(|| LoadError::NotPe("export ordinal overflow".into()))?;
+            image.exports.insert(format!("#{ordinal}"), rva);
+        }
+    }
+    let delta = base.wrapping_sub(image.image_base);
+    if delta != 0 {
+        let dir = oh.data_directories.get_base_relocation_table()
+            .filter(|d| d.size != 0)
+            .ok_or_else(|| LoadError::NotPe("runtime DLL has no base relocations".into()))?;
+        let relocations = image_rva_bytes(image, dir.virtual_address, dir.size)?.to_vec();
+        apply_runtime_relocations(image, &relocations, delta)?;
+    }
+    for import in &mut image.imports {
+        import.iat_va = base.wrapping_add(import.iat_va.wrapping_sub(image.image_base));
+    }
+    image.image_base = base;
+    Ok(())
+}
+
+fn image_rva_bytes(image: &LoadedImage, rva: u32, size: u32) -> Result<&[u8], LoadError> {
+    for section in &image.sections {
+        if let Some(offset) = rva.checked_sub(section.virtual_address) {
+            let end = (offset as usize).checked_add(size as usize)
+                .ok_or_else(|| LoadError::SectionOob("RVA overflow".into()))?;
+            if let Some(bytes) = section.data.get(offset as usize..end) { return Ok(bytes); }
+        }
+    }
+    Err(LoadError::SectionOob(format!("RVA 0x{rva:x}, size {size}")))
+}
+
+fn apply_runtime_relocations(image: &mut LoadedImage, data: &[u8], delta: u32) -> Result<(), LoadError> {
+    let mut cursor = 0usize;
+    while cursor < data.len() {
+        let header = data.get(cursor..cursor + 8).ok_or_else(|| LoadError::NotPe("truncated relocation block".into()))?;
+        let page = LittleEndian::read_u32(&header[..4]);
+        let size = LittleEndian::read_u32(&header[4..]) as usize;
+        if size < 8 || size % 2 != 0 || size > data.len() - cursor {
+            return Err(LoadError::NotPe("invalid relocation block size".into()));
+        }
+        for entry in data[cursor + 8..cursor + size].chunks_exact(2) {
+            let entry = LittleEndian::read_u16(entry);
+            let kind = entry >> 12;
+            if kind == 0 { continue; } // IMAGE_REL_BASED_ABSOLUTE padding
+            if kind != 3 { return Err(LoadError::NotPe(format!("unsupported runtime relocation {kind}"))); }
+            let rva = page.checked_add(u32::from(entry & 0xfff))
+                .ok_or_else(|| LoadError::NotPe("relocation RVA overflow".into()))?;
+            let value = LittleEndian::read_u32(image_rva_bytes(image, rva, 4)?).wrapping_add(delta);
+            let section = image.sections.iter_mut().find(|s| rva >= s.virtual_address
+                && (rva - s.virtual_address) as usize <= s.data.len().saturating_sub(4))
+                .ok_or_else(|| LoadError::SectionOob("relocation target".into()))?;
+            let offset = (rva - section.virtual_address) as usize;
+            LittleEndian::write_u32(&mut section.data[offset..offset + 4], value);
+        }
+        cursor += size;
+    }
+    Ok(())
+}
+
 fn clr_runtime_version(bytes: &[u8], pe: &PE<'_>) -> Option<String> {
     let optional_header = pe.header.optional_header?;
     let dir = optional_header.data_directories.get_clr_runtime_header()?;
@@ -501,6 +579,31 @@ pub fn imports_by_dll(image: &LoadedImage) -> BTreeMap<String, Vec<&ImportSymbol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_relocations_adjust_highlow_and_reject_invalid_blocks() {
+        let mut image = LoadedImage {
+            source_path: String::new(), machine: machine::ARM,
+            subsystem: subsystem::WINDOWS_CE_GUI, image_base: 0x100000,
+            size_of_image: 0x2000, entry_point: 0, imports: vec![],
+            exports: IndexMap::new(), resources: vec![], managed_runtime: None,
+            sections: vec![LoadedSection { name: ".data".into(), virtual_address: 0x1000,
+                virtual_size: 8, characteristics: 0, data: 0x101234u32.to_le_bytes().repeat(2) }],
+        };
+        let mut block = Vec::new();
+        block.extend_from_slice(&0x1000u32.to_le_bytes());
+        block.extend_from_slice(&12u32.to_le_bytes());
+        block.extend_from_slice(&0x3000u16.to_le_bytes());
+        block.extend_from_slice(&0u16.to_le_bytes());
+        apply_runtime_relocations(&mut image, &block, 0x2ff00000).unwrap();
+        assert_eq!(LittleEndian::read_u32(&image.sections[0].data[..4]), 0x30001234);
+        assert_eq!(LittleEndian::read_u32(&image.sections[0].data[4..]), 0x101234);
+        block[8..10].copy_from_slice(&0x7000u16.to_le_bytes());
+        assert!(apply_runtime_relocations(&mut image, &block, 1).is_err());
+        assert!(apply_runtime_relocations(&mut image, &block[..9], 1).is_err());
+        block[8..10].copy_from_slice(&0x3006u16.to_le_bytes());
+        assert!(apply_runtime_relocations(&mut image, &block, 1).is_err());
+    }
 
     #[test]
     fn packed_eof_patch_restores_only_the_comparison_and_is_idempotent() {

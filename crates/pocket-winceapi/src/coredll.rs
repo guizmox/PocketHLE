@@ -112,6 +112,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "#1", decompress_image_indirect);
     d.register_handler(dll, "_strupr", strupr);
     d.register_constant(dll, "FreeLibrary", 1, one_returning);
+    d.register_constant(dll, "DisableThreadLibraryCalls", 1, one_returning);
 
     // ---- CRT prologue helpers ----
     d.register_handler(dll, "__chkstk", chkstk);
@@ -249,6 +250,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "vsnprintf", vsnprintf);
     d.register_handler(dll, "_snprintf", snprintf);
     d.register_handler(dll, "sscanf", sscanf);
+    d.register_handler(dll, "fscanf", fscanf);
     d.register_handler(dll, "swscanf", swscanf);
     d.register_handler(dll, "_snwprintf", snwprintf);
     d.register_handler(dll, "vswprintf", vswprintf);
@@ -2210,7 +2212,7 @@ pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOu
         || ctx.kernel.wave_out.function_frame.is_some()
         || ctx.kernel.create_frame.is_some() || ctx.kernel.dialog_frame.is_some()
         || ctx.kernel.message_frame.is_some() || !ctx.kernel.vector_iter_stack.is_empty()
-        || !ctx.kernel.qsort_frames.is_empty() { return Ok(None); }
+        || !ctx.kernel.qsort_frames.is_empty() || !ctx.kernel.module_attach_frames.is_empty() { return Ok(None); }
     let due = ctx.kernel.threads.iter().any(|thread| thread.started && !thread.finished
         && thread.worker_saved && !thread.parked_in_pump
         && thread.sleep_until_ms != 0 && thread.sleep_until_ms <= now);
@@ -2826,6 +2828,7 @@ fn get_module_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 }
 
 fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(result) = finish_module_attach(ctx)? { return Ok(result); }
     let path_p = ctx.arg_u32(0)?;
     let path = read_wstr(ctx, path_p, 260).unwrap_or_default();
     let name = String::from_utf16_lossy(&path).to_ascii_lowercase();
@@ -2928,7 +2931,7 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     match load_resource_module(ctx, &name)? {
         Some(base) => {
             log::info!("LoadLibraryW({name:?}) -> 0x{base:08x}");
-            Ok(DispatchOutcome::ReturnedR0(base))
+            begin_module_attach(ctx, base)
         }
         None => {
             log::debug!("LoadLibraryW({name:?}) -> NULL");
@@ -2937,19 +2940,53 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     }
 }
 
-/// Map a satellite DLL found next to the game so its *resources* become
-/// reachable.
-///
-/// PocketHLE never executes guest code out of a runtime-loaded module:
-/// nothing resolves its exports, and the titles that call `LoadLibraryW`
-/// on a companion DLL (Solitaire + `pegcards.dll`, for instance) import
-/// no `GetProcAddress` — they only want `FindResourceW` / `LoadBitmapW` /
-/// `LoadStringW` to see the artwork inside. So we skip base relocations
-/// and the IAT and simply place the image's sections at a fresh 16 MiB
-/// slot in the module region, recording its resource directory.
-///
-/// Returns `None` (i.e. guest-visible NULL) when the file can't be found
-/// or parsed, or when the module region is exhausted.
+fn runtime_hle_dll(dll: &str) -> bool {
+    let name = dll.to_ascii_lowercase();
+    matches!(name.as_str(), "coredll.dll" | "aygshell.dll" | "commctrl.dll" | "gx.dll"
+        | "ddraw.dll" | "ole32.dll" | "sdlaunch.dll" | "hss.dll")
+        || gles_module_handle(&name).is_some()
+}
+
+fn begin_module_attach(ctx: &mut CallCtx<'_>, base: u32) -> Result<DispatchOutcome, KernelError> {
+    let entry = ctx.kernel.modules.iter().find(|module| module.handle == base)
+        .map(|module| module.image_entry).unwrap_or(0);
+    if entry == 0 { return Ok(DispatchOutcome::ReturnedR0(base)); }
+    let frame = GuestCallFrame {
+        args: [ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?, ctx.arg_u32(3)?],
+        lr: ctx.cpu.read_reg(ArmReg::Lr)?, sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+    };
+    ctx.kernel.module_attach_frames.push(pocket_kernel::ModuleAttachFrame {
+        base, thunk: ctx.thunk.thunk_va, thread: ctx.kernel.current_thread, frame,
+    });
+    ctx.cpu.write_reg(ArmReg::R0, base)?;
+    ctx.cpu.write_reg(ArmReg::R1, 1)?; // DLL_PROCESS_ATTACH
+    ctx.cpu.write_reg(ArmReg::R2, 0)?;
+    ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+    Ok(DispatchOutcome::JumpTo(entry))
+}
+
+fn finish_module_attach(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    let returning = ctx.kernel.module_attach_frames.last().is_some_and(|pending|
+        pending.thread == ctx.kernel.current_thread && pending.thunk == ctx.thunk.thunk_va
+        && pending.frame.sp == sp);
+    if !returning { return Ok(None); }
+    let pending = ctx.kernel.module_attach_frames.pop().unwrap();
+    let success = ctx.cpu.read_reg(ArmReg::R0)? != 0;
+    for (register, value) in [ArmReg::R1, ArmReg::R2, ArmReg::R3].into_iter()
+        .zip(pending.frame.args[1..].iter().copied()) { ctx.cpu.write_reg(register, value)?; }
+    ctx.cpu.write_reg(ArmReg::Lr, pending.frame.lr)?;
+    ctx.cpu.write_reg(ArmReg::Sp, pending.frame.sp)?;
+    if !success {
+        ctx.kernel.dynamic_exports.remove(&pending.base);
+        ctx.kernel.modules.retain(|module| module.handle != pending.base);
+        log::warn!("runtime DLL 0x{:08x} rejected DLL_PROCESS_ATTACH", pending.base);
+    }
+    Ok(Some(DispatchOutcome::ReturnedR0(if success { pending.base } else { 0 })))
+}
+
+/// Load a native DLL or a resource satellite from the guest filesystem.
+/// Native DLLs receive relocation, IAT binding and a PROCESS_ATTACH callback.
 fn load_resource_module(ctx: &mut CallCtx<'_>, request: &str) -> Result<Option<u32>, KernelError> {
     let Some(host_path) = ctx.kernel.find_module_file(request) else {
         log::debug!("LoadLibraryW({request:?}): no host file found");
@@ -3018,15 +3055,19 @@ fn load_mui_satellites(ctx: &mut CallCtx<'_>, host_path: &std::path::Path) {
     }
 }
 
-/// Map a resource-only image at a fresh module-region slot and record
-/// its resource directory. Returns `None` when the file can't be found
+/// Map a runtime image at a fresh module-region slot and record
+/// its resources and, for native DLLs, exports and imports. Returns `None` when the file can't be found
 /// or parsed, or when the module region is exhausted.
 fn map_resource_module(
     ctx: &mut CallCtx<'_>,
     host_path: &std::path::Path,
     request: &str,
 ) -> Result<Option<u32>, KernelError> {
-    let image = match pocket_pe::load_file(host_path) {
+    let bytes = match std::fs::read(host_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    let mut image = match pocket_pe::load_bytes(&bytes) {
         Ok(img) => img,
         Err(e) => {
             log::warn!(
@@ -3044,6 +3085,39 @@ fn map_resource_module(
         log::warn!("LoadLibraryW({request:?}): module region exhausted");
         return Ok(None);
     }
+    let executable = image.entry_point != 0 || !image.exports.is_empty() || !image.imports.is_empty();
+    if image.size_of_image > MODULE_REGION_STRIDE || image.sections.iter().any(|section|
+        section.virtual_address.checked_add(section.virtual_size.max(section.data.len() as u32))
+            .is_none_or(|end| end > image.size_of_image)) {
+        log::warn!("LoadLibraryW({request:?}): invalid image bounds");
+        return Ok(None);
+    }
+    let thunk_base = base + pocket_cpu::round_up_to_page(image.size_of_image);
+    let thunk_size = pocket_cpu::round_up_to_page((image.imports.len() as u32)
+        .saturating_mul(pocket_kernel::THUNK_STRIDE));
+    if image.size_of_image > MODULE_REGION_STRIDE
+        || thunk_base.checked_add(thunk_size).is_none_or(|end| end > base + MODULE_REGION_STRIDE) {
+        log::warn!("LoadLibraryW({request:?}): image exceeds module slot");
+        return Ok(None);
+    }
+    if executable {
+        if ctx.cpu.arch() != pocket_cpu::Arch::Arm || !matches!(image.machine,
+            pocket_pe::machine::ARM | pocket_pe::machine::THUMB | pocket_pe::machine::ARMNT) {
+            log::warn!("LoadLibraryW({request:?}): runtime machine is not supported");
+            return Ok(None);
+        }
+        if let Err(error) = pocket_pe::prepare_runtime_module(&mut image, &bytes, base) {
+            log::warn!("LoadLibraryW({request:?}): {error}");
+            return Ok(None);
+        }
+        // This initial loader supports native DLLs depending on HLE system
+        // libraries. Do not silently route an arbitrary external dependency
+        // to COREDLL or to a constant-return placeholder.
+        if let Some(import) = image.imports.iter().find(|import| !runtime_hle_dll(&import.dll)) {
+            log::warn!("LoadLibraryW({request:?}): unsupported native dependency {}", import.dll);
+            return Ok(None);
+        }
+    }
     for s in &image.sections {
         let mut prot = Prot::READ;
         if s.is_writable() {
@@ -3060,6 +3134,37 @@ fn map_resource_module(
             .map_region(base + s.virtual_address, aligned, prot)?;
         ctx.cpu.write_mem(base + s.virtual_address, &s.data)?;
     }
+    if executable {
+        if thunk_size != 0 { ctx.cpu.map_region(thunk_base, thunk_size, Prot::READ | Prot::EXEC)?; }
+        for (index, import) in image.imports.iter().enumerate() {
+            let address = thunk_base + index as u32 * pocket_kernel::THUNK_STRIDE;
+            let friendly_name = match &import.binding {
+                pocket_pe::ImportBinding::Name(name) => Some(name.clone()),
+                pocket_pe::ImportBinding::Ordinal(ordinal) => crate::resolve_ordinal(&import.dll, *ordinal),
+            };
+            let thunk = pocket_kernel::Thunk {
+                thunk_va: address, iat_va: import.iat_va, dll: import.dll.clone(),
+                binding: import.binding.clone(), friendly_name,
+            };
+            let native = thunk.friendly_name.as_deref().and_then(|name|
+                pocket_kernel::native_thunks::native_thunk_for(&import.dll, name));
+            if let Some(words) = native {
+                ctx.cpu.write_mem(address, &pocket_kernel::native_thunks::thunk_bytes(&words))?;
+                if let Some(offset) = thunk.friendly_name.as_deref().and_then(|name|
+                    pocket_kernel::native_thunks::hybrid_fallback_offset(&import.dll, name)) {
+                    ctx.cpu.add_code_hook(address + offset)?;
+                    ctx.kernel.runtime_thunks.insert(address + offset, thunk);
+                }
+            } else {
+                ctx.cpu.write_mem(address, &0xe12f_ff1eu32.to_le_bytes())?; // bx lr
+                ctx.cpu.add_code_hook(address)?;
+                ctx.kernel.runtime_thunks.insert(address, thunk);
+            }
+            ctx.cpu.write_mem(import.iat_va, &address.to_le_bytes())?;
+        }
+        let exports = image.exports.iter().map(|(name, rva)| (name.clone(), base + *rva)).collect();
+        ctx.kernel.dynamic_exports.insert(base, exports);
+    }
     ctx.kernel.next_module_base = base + MODULE_REGION_STRIDE;
     let name = module_file_name(request);
     log::info!(
@@ -3073,7 +3178,7 @@ fn map_resource_module(
         name,
         base,
         image_size: image.size_of_image,
-        image_entry: base.wrapping_add(image.entry_point),
+        image_entry: if executable && image.entry_point != 0 { image.entry_va() } else { 0 },
         resources: image.resources,
         refcount: 1,
     });
@@ -4557,6 +4662,23 @@ fn pulls_wide_arg(fmt_is_wide: bool, long: bool, short: bool) -> bool {
     }
 }
 
+/// Integer precision is a minimum digit count, independent of field width.
+/// An explicit precision disables the `0` width flag, and %.0d suppresses zero.
+fn apply_printf_precision(piece: &mut String, conv: char, precision: Option<usize>) {
+    let Some(precision) = precision else { return; };
+    if matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X') {
+        let negative = piece.starts_with('-');
+        let digits = if negative { &piece[1..] } else { piece.as_str() };
+        if precision == 0 && digits == "0" { piece.clear(); return; }
+        if digits.len() < precision {
+            let padding = "0".repeat(precision - digits.len());
+            *piece = format!("{}{}{}", if negative { "-" } else { "" }, padding, digits);
+        }
+    } else if matches!(conv, 's' | 'S') {
+        *piece = piece.chars().take(precision).collect();
+    }
+}
+
 fn render_printf(
     ctx: &mut CallCtx<'_>,
     fmt: &str,
@@ -4586,6 +4708,16 @@ fn render_printf(
                 }
                 _ => break,
             }
+        }
+        let mut precision = None;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut digits = 0usize;
+            while let Some(d) = chars.peek().copied().filter(|c| c.is_ascii_digit()) {
+                digits = digits.saturating_mul(10).saturating_add(d as usize - '0' as usize);
+                chars.next();
+            }
+            precision = Some(digits.min(0x10000));
         }
         let (long, short) = scan_length_mods(&mut chars);
         let conv = match chars.next() {
@@ -4679,14 +4811,18 @@ fn render_printf(
                 piece.push(other);
             }
         }
-        if width > piece.chars().count() {
-            let pad = width - piece.chars().count();
-            let ch = if zero_pad { '0' } else { ' ' };
-            for _ in 0..pad {
-                out.push(ch);
-            }
+        apply_printf_precision(&mut piece, conv, precision);
+        let pad = width.saturating_sub(piece.chars().count()).min(0x10000);
+        let numeric = matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X');
+        if zero_pad && numeric && precision.is_none() {
+            let sign = piece.starts_with('-');
+            if sign { out.push('-'); }
+            out.extend(std::iter::repeat_n('0', pad));
+            out.push_str(if sign { &piece[1..] } else { &piece });
+        } else {
+            out.extend(std::iter::repeat_n(' ', pad));
+            out.push_str(&piece);
         }
-        out.push_str(&piece);
     }
     Ok(out)
 }
@@ -4875,15 +5011,15 @@ fn snprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// input failure — the same `EOF`-vs-zero distinction real `sscanf`
 /// makes, which callers use to tell "nothing matched" from "the string
 /// ran out first".
-fn run_sscanf(
+fn run_scan_bytes(
     ctx: &mut CallCtx<'_>,
-    input: &str,
+    src: &[u8],
     fmt: &str,
     mut next_arg: impl FnMut(&mut CallCtx<'_>) -> Result<u32, KernelError>,
-) -> Result<i32, KernelError> {
-    let src = input.as_bytes();
+) -> Result<(i32, usize), KernelError> {
     let f = fmt.as_bytes();
     let mut si = 0usize;
+    let result = (|| -> Result<i32, KernelError> {
     let mut fi = 0usize;
     let mut assigned = 0i32;
 
@@ -5165,6 +5301,64 @@ fn run_sscanf(
     }
 
     Ok(assigned)
+    })();
+    result.map(|assigned| (assigned, si))
+}
+
+fn run_sscanf(
+    ctx: &mut CallCtx<'_>, input: &str, fmt: &str,
+    next_arg: impl FnMut(&mut CallCtx<'_>) -> Result<u32, KernelError>,
+) -> Result<i32, KernelError> {
+    run_scan_bytes(ctx, input.as_bytes(), fmt, next_arg).map(|(assigned, _)| assigned)
+}
+
+/// Share scanf conversions with sscanf, but retain the exact consumed stream
+/// position. Read-ahead must never discard the first unmatched byte or later
+/// records. Translate CRLF only for a text-mode FILE and map logical offsets
+/// back to physical bytes before seeking to the final position.
+fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    use pocket_kernel::vfs::SeekKind;
+    let handle = ctx.arg_u32(0)?;
+    let format = ctx.arg_u32(1)?;
+    if format == 0 || !ctx.kernel.vfs.is_open(handle) {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    let fmt = read_cstr_string(ctx, format, 0x4000)?;
+    let Some(start) = ctx.kernel.vfs.seek(handle, 0, SeekKind::Current) else {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    };
+    let text_mode = ctx.kernel.vfs.is_text_mode(handle);
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match ctx.kernel.vfs.read(handle, &mut chunk) {
+            Some(0) => break,
+            Some(n) => raw.extend_from_slice(&chunk[..n]),
+            None => {
+                ctx.kernel.vfs.seek(handle, start as i64, SeekKind::Begin);
+                return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+            }
+        }
+    }
+    let mut input = Vec::new();
+    let mut offsets = vec![0usize];
+    let mut i = 0;
+    while i < raw.len() {
+        if text_mode && raw[i] == b'\r' && raw.get(i + 1) == Some(&b'\n') {
+            input.push(b'\n'); i += 2;
+        } else { input.push(raw[i]); i += 1; }
+        offsets.push(i);
+    }
+    let mut arg = 2u8;
+    let result = run_scan_bytes(ctx, &input, &fmt, |ctx| {
+        let pointer = ctx.arg_u32(arg)?;
+        arg = arg.saturating_add(1);
+        Ok(pointer)
+    });
+    let used = result.as_ref().map(|(_, used)| offsets[*used]).unwrap_or(0);
+    ctx.kernel.vfs.seek(handle, start.saturating_add(used as u64) as i64, SeekKind::Begin);
+    let (assigned, _) = result?;
+    Ok(DispatchOutcome::ReturnedR0(assigned as u32))
 }
 
 /// `int sscanf(const char *src, const char *fmt, ...)`.
@@ -5518,6 +5712,16 @@ fn render_printf_va(
                 _ => break,
             }
         }
+        let mut precision = None;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut digits = 0usize;
+            while let Some(d) = chars.peek().copied().filter(|c| c.is_ascii_digit()) {
+                digits = digits.saturating_mul(10).saturating_add(d as usize - '0' as usize);
+                chars.next();
+            }
+            precision = Some(digits.min(0x10000));
+        }
         let (long, short) = scan_length_mods(&mut chars);
         let conv = match chars.next() {
             Some(c) => c,
@@ -5604,14 +5808,18 @@ fn render_printf_va(
                 piece.push(other);
             }
         }
-        if width > piece.chars().count() {
-            let pad = width - piece.chars().count();
-            let ch = if zero_pad { '0' } else { ' ' };
-            for _ in 0..pad {
-                out.push(ch);
-            }
+        apply_printf_precision(&mut piece, conv, precision);
+        let pad = width.saturating_sub(piece.chars().count()).min(0x10000);
+        let numeric = matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X');
+        if zero_pad && numeric && precision.is_none() {
+            let sign = piece.starts_with('-');
+            if sign { out.push('-'); }
+            out.extend(std::iter::repeat_n('0', pad));
+            out.push_str(if sign { &piece[1..] } else { &piece });
+        } else {
+            out.extend(std::iter::repeat_n(' ', pad));
+            out.push_str(&piece);
         }
-        out.push_str(&piece);
     }
     Ok(out)
 }
@@ -6184,6 +6392,43 @@ fn crt_fflush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ))
 }
 
+/// Read logical CRT bytes while keeping VFS/ReadFile byte-exact. Text-mode
+/// CRLF consumes two physical bytes for one LF; a lone CR is preserved.
+/// Limit raw read-ahead to the remaining output capacity, and seek back a
+/// non-LF lookahead so a later stdio call sees precisely the next byte.
+fn read_stdio_bytes(ctx: &mut CallCtx<'_>, h: u32, output: &mut [u8]) -> usize {
+    use pocket_kernel::vfs::SeekKind;
+    if !ctx.kernel.vfs.is_text_mode(h) {
+        return ctx.kernel.vfs.read(h, output).unwrap_or(0);
+    }
+    let mut written = 0;
+    let mut raw = [0u8; 4096];
+    while written < output.len() {
+        let capacity = raw.len().min(output.len() - written);
+        let count = ctx.kernel.vfs.read(h, &mut raw[..capacity]).unwrap_or(0);
+        if count == 0 { break; }
+        let mut index = 0;
+        while index < count {
+            let mut byte = raw[index];
+            index += 1;
+            if byte == b'\r' {
+                if index < count {
+                    if raw[index] == b'\n' { byte = b'\n'; index += 1; }
+                } else {
+                    let mut next = [0u8; 1];
+                    if ctx.kernel.vfs.read(h, &mut next).unwrap_or(0) != 0 {
+                        if next[0] == b'\n' { byte = b'\n'; }
+                        else { ctx.kernel.vfs.seek(h, -1, SeekKind::Current); }
+                    }
+                }
+            }
+            output[written] = byte;
+            written += 1;
+        }
+    }
+    written
+}
+
 fn crt_fread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let buf = ctx.arg_u32(0)?;
     let size = ctx.arg_u32(1)?;
@@ -6194,7 +6439,7 @@ fn crt_fread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let mut tmp = vec![0u8; total as usize];
-    let n = ctx.kernel.vfs.read(h, &mut tmp).unwrap_or(0);
+    let n = read_stdio_bytes(ctx, h, &mut tmp);
     if buf != 0 && n > 0 {
         ctx.cpu.write_mem(buf, &tmp[..n])?;
     }
@@ -6321,7 +6566,7 @@ fn crt_fgetc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     let mut buf = [0u8; 1];
-    let n = ctx.kernel.vfs.read(h, &mut buf).unwrap_or(0);
+    let n = read_stdio_bytes(ctx, h, &mut buf);
     Ok(DispatchOutcome::ReturnedR0(if n == 0 {
         u32::MAX
     } else {
@@ -14001,9 +14246,7 @@ fn get_proc_address_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 }
 
 /// `FARPROC GetProcAddressW(HMODULE hModule, LPCWSTR lpProcName)`
-/// — we don't have any DLLs the game can dynamically load against,
-/// so always report failure (NULL). The game then has to fall back
-/// to its statically-imported path.
+/// Resolves both HLE system exports and relocated native DLL exports.
 fn get_proc_address_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let module = ctx.arg_u32(0)?;
     let name_p = ctx.arg_u32(1)?;
@@ -14023,6 +14266,10 @@ fn get_proc_address_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 }
 
 fn resolve_dynamic_export(ctx: &CallCtx<'_>, module: u32, name: &str) -> u32 {
+    if ctx.kernel.modules.iter().any(|loaded| loaded.handle == module) {
+        return ctx.kernel.dynamic_exports.get(&module)
+            .and_then(|exports| exports.get(name)).copied().unwrap_or(0);
+    }
     if module == 0x1000_0001 && name.eq_ignore_ascii_case("?GXCloseInput@@YAHXZ") {
         return ctx
             .kernel
@@ -16076,6 +16323,111 @@ mod tests {
     use pocket_pe::ImportBinding;
 
     #[test]
+    fn stdio_text_reads_translate_crlf_across_boundaries_and_preserve_binary() {
+        use pocket_kernel::vfs::{Access, SeekKind};
+        let dir = tempfile::tempdir().unwrap();
+        let raw = b"A\r\nB\rC\r\nD\r";
+        std::fs::write(dir.path().join("records.dat"), raw).unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount("\\Data\\", dir.path());
+        let text = kernel.vfs.open("\\Data\\records.dat", Access::Read, false).unwrap();
+        let binary = kernel.vfs.open("\\Data\\records.dat", Access::Read, false).unwrap();
+        kernel.vfs.mark_text_mode(text);
+        let mut cpu = scanf_cpu();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
+        ctx.cpu.write_reg(ArmReg::R3, text).unwrap();
+        assert_eq!(crt_fread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(ctx.cpu.read_mem(0x1000, 1).unwrap(), b"A");
+        ctx.cpu.write_reg(ArmReg::R0, text).unwrap();
+        assert_eq!(crt_fgetc(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(10));
+        assert_eq!(ctx.kernel.vfs.seek(text, 0, SeekKind::Current), Some(3));
+        let mut output = [0u8; 16];
+        let count = read_stdio_bytes(&mut ctx, text, &mut output[..3]);
+        assert_eq!(&output[..count], b"B\rC");
+        assert_eq!(ctx.kernel.vfs.seek(text, 0, SeekKind::Current), Some(6));
+        let count = read_stdio_bytes(&mut ctx, text, &mut output);
+        assert_eq!(&output[..count], b"\nD\r");
+        assert_eq!(read_stdio_bytes(&mut ctx, text, &mut output), 0);
+        let count = read_stdio_bytes(&mut ctx, binary, &mut output);
+        assert_eq!(&output[..count], raw);
+        // A bulk read crosses the internal 4096-byte raw chunk boundary.
+        let mut boundary = vec![b'x'; 4095];
+        boundary.extend_from_slice(b"\r\nY\rZ");
+        std::fs::write(dir.path().join("boundary.dat"), &boundary).unwrap();
+        let handle = ctx.kernel.vfs.open("\\Data\\boundary.dat", Access::Read, false).unwrap();
+        ctx.kernel.vfs.mark_text_mode(handle);
+        let mut output = vec![0u8; boundary.len()];
+        let count = read_stdio_bytes(&mut ctx, handle, &mut output);
+        assert_eq!(count, boundary.len() - 1);
+        assert_eq!(&output[4095..count], b"\nY\rZ");
+    }
+
+    #[test]
+    fn printf_precision_consumes_arguments_and_pads_digits_in_both_paths() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        for (format, args, expected) in [
+            ("image_%.2d_%d", [3u32, 1], "image_03_1"),
+            ("[%08.3d]", [(-7i32) as u32, 0], "[    -007]"),
+            ("[%05d]", [(-7i32) as u32, 0], "[-0007]"),
+            ("[%.0d]_%d", [0, 9], "[]_9"),
+            ("%.4X", [10, 0], "000A"),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R2, args[0]).unwrap();
+            ctx.cpu.write_reg(ArmReg::R3, args[1]).unwrap();
+            ctx.cpu.write_mem(0x2000, &args.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()).unwrap();
+            for wide in [false, true] {
+                assert_eq!(render_printf(&mut ctx, format, wide, 2).unwrap(), expected);
+                assert_eq!(render_printf_va(&mut ctx, format, wide, 0x2000).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_module_attach_restores_caller_and_scopes_exports() {
+        for success in [false, true] {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            let thunk = dummy_thunk();
+            let base = 0x30000000;
+            kernel.modules.push(LoadedModule { handle: base, base, name: "audio.dll".into(),
+                image_size: 0x2000, image_entry: base + 0x1000,
+                resources: vec![], refcount: 1 });
+            kernel.dynamic_exports.insert(base, [("Start".into(), base + 0x1100),
+                ("#7".into(), base + 0x1100)].into_iter().collect());
+            cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            cpu.write_reg(ArmReg::R1, 23).unwrap();
+            cpu.write_reg(ArmReg::Lr, 0x12340).unwrap();
+            cpu.write_reg(ArmReg::Sp, 0x50001000).unwrap();
+            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+            assert_eq!(resolve_dynamic_export(&ctx, base, "Start"), base + 0x1100);
+            assert_eq!(resolve_dynamic_export(&ctx, base, "#7"), base + 0x1100);
+            assert_eq!(resolve_dynamic_export(&ctx, base, "start"), 0);
+            assert_eq!(resolve_dynamic_export(&ctx, base, "InitCommonControlsEx"), 0);
+            assert_eq!(begin_module_attach(&mut ctx, base).unwrap(), DispatchOutcome::JumpTo(base + 0x1000));
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), base);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 1);
+            // A nested invocation at a lower SP must not consume the callback.
+            ctx.cpu.write_reg(ArmReg::Sp, 0x50000ff0).unwrap();
+            assert_eq!(finish_module_attach(&mut ctx).unwrap(), None);
+            ctx.cpu.write_reg(ArmReg::Sp, 0x50001000).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, u32::from(success)).unwrap();
+            assert_eq!(finish_module_attach(&mut ctx).unwrap(), Some(DispatchOutcome::ReturnedR0(if success { base } else { 0 })));
+            assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x12340);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 23);
+            assert!(ctx.kernel.module_attach_frames.is_empty());
+            assert_eq!(ctx.kernel.modules.len(), usize::from(success));
+            assert_eq!(resolve_dynamic_export(&ctx, base, "Start") != 0, success);
+        }
+    }
+
+    #[test]
     fn masg_start_preserves_the_supplied_notification_event() {
         for manual_reset in [false, true] {
             let mut cpu = scanf_cpu();
@@ -16270,6 +16622,8 @@ mod tests {
             image_size: 0,
             image_entry: 0,
             dynamic_exports: std::collections::HashMap::new(),
+            runtime_thunks: std::collections::HashMap::new(),
+            module_attach_frames: Vec::new(),
             next_module_handle: 0x1000_0001,
             modules: Vec::new(),
             next_module_base: pocket_kernel::MODULE_REGION_BASE,
@@ -18035,6 +18389,47 @@ mod tests {
     }
 
     #[test]
+    fn fscanf_preserves_stream_position_across_records_and_text_newlines() {
+        use pocket_kernel::vfs::SeekKind;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("records.txt"), b"12,34,\r\nword tail").unwrap();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount("\\", dir.path());
+        let handle = kernel.vfs.open("\\records.txt", Access::Read, false).unwrap();
+        kernel.vfs.mark_text_mode(handle);
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        for (expected, position) in [(12u32, 3i64), (34, 6)] {
+            ctx.cpu.write_mem(0x1100, b"%d,\0").unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
+            ctx.cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
+            assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(ctx.cpu.read_mem(0x1200, 4).unwrap(), expected.to_le_bytes());
+            assert_eq!(ctx.kernel.vfs.seek(handle, 0, SeekKind::Current), Some(position as u64));
+        }
+        ctx.cpu.write_mem(0x1100, b"%s%n\0").unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+        ctx.cpu.write_reg(ArmReg::R3, 0x1300).unwrap();
+        assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(ctx.cpu.read_mem(0x1200, 5).unwrap(), b"word\0");
+        assert_eq!(ctx.cpu.read_mem(0x1300, 4).unwrap(), 5u32.to_le_bytes());
+        assert_eq!(ctx.kernel.vfs.seek(handle, 0, SeekKind::Current), Some(12));
+        // An unmatched literal must remain unread, and must report matching
+        // failure (0), whereas an attempted conversion at EOF reports -1.
+        ctx.cpu.write_mem(0x1100, b"!\0").unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+        assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.kernel.vfs.seek(handle, 0, SeekKind::Current), Some(12));
+        ctx.kernel.vfs.seek(handle, 0, SeekKind::End);
+        ctx.cpu.write_mem(0x1100, b"%d\0").unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+        assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+
+    #[test]
     fn sscanf_parses_several_integers_and_counts_them() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
@@ -19417,11 +19812,16 @@ mod tests {
         const OUT: u32 = 0x1e000;
         const RETURNED: u32 = 0x1e100;
         const SP: u32 = 0x1f000;
-        let bytes = include_bytes!("../../pocket-kernel/tests/fixtures/mas1-stream.mp3");
+        // Build a valid MPEG-1 Layer III silent stream in memory: 128 kbps,
+        // 44.1 kHz stereo, unpadded 417-byte frames, no bit reservoir.
+        // The zero side information represents empty/silent granules.
+        let mut frame = vec![0u8; 417];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
+        let bytes = frame.repeat(128);
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         cpu.map_region(DATA, 0x20000, Prot::READ | Prot::WRITE).unwrap();
-        cpu.write_mem(DATA, bytes).unwrap();
+        cpu.write_mem(DATA, &bytes).unwrap();
         let handle = kernel.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
         let tap = kernel.audio.tap();
         tap.drain_into(&mut []); // deterministic playback, no device/thread

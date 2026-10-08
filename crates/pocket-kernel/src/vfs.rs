@@ -1119,9 +1119,12 @@ mod tests {
 
     #[test]
     fn mas_chunked_mp3_decode_matches_contiguous_decode() {
-        // Generated 3-second sine, stereo 44.1 kHz / 128 kbps, no ID3/Xing.
-        // Crosses 32 KB and arbitrary partial-frame boundaries; no game asset.
-        let data = include_bytes!("../tests/fixtures/mas1-stream.mp3");
+        // Generate complete silent MPEG-1 Layer III frames in memory.
+        // Cross 32 KB and arbitrary split-frame boundaries without requiring
+        // a binary fixture or an encoder on the developer's machine.
+        let mut frame = vec![0u8; 417];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
+        let data = frame.repeat(128);
         fn decode(data: &[u8], chunk: usize) -> Vec<i16> {
             let mut v = Vfs::new();
             let h = v.open("MAS1:", Access::ReadWrite, false).unwrap();
@@ -1135,10 +1138,10 @@ mod tests {
             }
             samples
         }
-        let expected = decode(data, data.len());
+        let expected = decode(&data, data.len());
         assert!(expected.len() > 44100 * 2);
-        assert_eq!(decode(data, 32768), expected);
-        assert_eq!(decode(data, 701), expected);
+        assert_eq!(decode(&data, 32768), expected);
+        assert_eq!(decode(&data, 701), expected);
     }
 
     #[test]

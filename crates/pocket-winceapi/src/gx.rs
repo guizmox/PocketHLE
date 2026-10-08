@@ -356,6 +356,8 @@ pub(crate) mod tests {
             image_size: 0,
             image_entry: 0,
             dynamic_exports: std::collections::HashMap::new(),
+            runtime_thunks: std::collections::HashMap::new(),
+            module_attach_frames: Vec::new(),
             next_module_handle: 0x1000_0001,
             modules: Vec::new(),
             next_module_base: pocket_kernel::MODULE_REGION_BASE,
