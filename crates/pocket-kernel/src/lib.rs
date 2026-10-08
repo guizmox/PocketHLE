@@ -373,6 +373,15 @@ pub struct PendingWaveBuffer {
 }
 
 
+/// Guest memory behind a single-header waveOut loop. Interstellar Flames 2
+/// keeps its SFX mixer ring here and edits it after waveOutWrite returns.
+#[derive(Debug, Clone, Copy)]
+pub struct LiveWaveLoop {
+    pub hdr: u32,
+    pub data: u32,
+    pub bytes: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WaveOutDevice {
     pub callback_kind: WaveCallbackKind,
@@ -390,6 +399,7 @@ pub struct WaveOutState {
     pub handle: u32,
     /// Independently opened WinMM output handles.
     pub devices: HashMap<u32, WaveOutDevice>,
+    pub live_loops: HashMap<u32, LiveWaveLoop>,
     /// Monotonic allocator for synthetic HWAVEOUT values.
     pub next_handle: u32,
     pub callback_kind: WaveCallbackKind,
@@ -1054,6 +1064,8 @@ pub struct KernelState {
     pub semaphores: HashMap<u32, SemaphoreObject>,
     /// Index of the thread whose register context is currently active.
     pub current_thread: usize,
+    /// Next worker index to consider at a cooperative scheduling point.
+    pub worker_schedule_cursor: usize,
     /// Current state of the Pocket PC virtual keys.
     pub pressed_keys: [bool; 256],
     /// Virtual keys the host is holding down, oldest press first.
@@ -1318,6 +1330,8 @@ pub struct GuestThread {
     pub worker_regs: [u32; 17],
     pub worker_saved: bool,
     pub started: bool,
+    /// Monotonic millisecond deadline set by worker Sleep; zero is ready.
+    pub sleep_until_ms: u64,
     pub finished: bool,
     /// Set while the thread is parked on a *re-entering* blocking call
     /// (`park_worker_and_retry` / `park_worker_and_reevaluate`): the
@@ -1361,6 +1375,7 @@ impl GuestThread {
             worker_regs: [0; 17],
             worker_saved: false,
             started: false,
+            sleep_until_ms: 0,
             finished: false,
             parked_in_pump: false,
             parked_wait_handles: Vec::new(),
@@ -2162,6 +2177,7 @@ impl Process {
                 events: Default::default(),
                 semaphores: Default::default(),
                 current_thread: 0,
+                worker_schedule_cursor: 0,
                 pressed_keys: [false; 256],
                 held_keys: Vec::new(),
                 key_repeat_next_ms: None,

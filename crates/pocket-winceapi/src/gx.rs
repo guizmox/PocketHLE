@@ -395,6 +395,7 @@ pub(crate) mod tests {
             events: Default::default(),
             semaphores: Default::default(),
             current_thread: 0,
+            worker_schedule_cursor: 0,
             pressed_keys: [false; 256],
             held_keys: Vec::new(),
             key_repeat_next_ms: None,

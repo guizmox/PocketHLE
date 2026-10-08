@@ -17,8 +17,8 @@
 //! * Asynchronous I/O.
 //! * Memory-mapped files.
 
-use rmp3::{DecoderOwned, Frame};
-use std::collections::HashMap;
+use rmp3::{Frame, RawDecoder, MAX_SAMPLES_PER_FRAME};
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -68,8 +68,34 @@ pub struct OpenFile {
     pub text_mode: bool,
 }
 
-#[derive(Debug)]
+// MPEG Layer III frame size, used to retain a split frame until the next
+// compressed buffer arrives. Passing an incomplete tail to minimp3 lets its
+// garbage scan consume it and reset the reservoir, causing clicks/lost frames.
+fn mp3_frame_bytes(header: &[u8]) -> Option<usize> {
+    if header.len() < 4 || header[0] != 0xff || header[1] & 0xe0 != 0xe0 { return None; }
+    let version = (header[1] >> 3) & 3;
+    if version == 1 || (header[1] >> 1) & 3 != 1 { return None; }
+    let index = (header[2] >> 4) as usize;
+    let rate_index = ((header[2] >> 2) & 3) as usize;
+    if index == 0 || index == 15 || rate_index == 3 { return None; }
+    let rates = [44100usize, 48000, 32000];
+    let bitrate = if version == 3 {
+        [0usize,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0][index]
+    } else {
+        [0usize,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0][index]
+    };
+    let rate = rates[rate_index] / if version == 3 { 1 } else if version == 2 { 2 } else { 4 };
+    let coefficient = if version == 3 { 144000 } else { 72000 };
+    Some(coefficient * bitrate / rate + ((header[2] >> 1) & 1) as usize)
+}
+
 struct Mp3DecoderState {
+    decoder: RawDecoder,
+    callback_event: u32,
+    pending: VecDeque<(u64, u64)>, // cumulative PCM samples / compressed bytes
+    completed_samples: u64,
+    completed_bytes: u64,
+    played_bytes: u64,
     bytes_seen: u64,
     encoded: Vec<u8>,
     decoded_offset: usize,
@@ -79,6 +105,13 @@ struct Mp3DecoderState {
     started: bool,
     paused: bool,
     volume: u32,
+}
+
+impl std::fmt::Debug for Mp3DecoderState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mp3DecoderState").field("bytes_seen", &self.bytes_seen)
+            .field("pending", &self.pending).field("callback_event", &self.callback_event).finish_non_exhaustive()
+    }
 }
 
 /// A handle opened on a volume's `Vol:` pseudo-file instead of on a
@@ -588,6 +621,12 @@ impl Vfs {
             self.decoders.insert(
                 h,
                 Mp3DecoderState {
+                    decoder: RawDecoder::new(),
+                    callback_event: 0,
+                    pending: VecDeque::new(),
+                    completed_samples: 0,
+                    completed_bytes: 0,
+                    played_bytes: 0,
                     bytes_seen: 0,
                     encoded: Vec::new(),
                     decoded_offset: 0,
@@ -791,25 +830,39 @@ impl Vfs {
         let state = self.decoders.get_mut(&handle)?;
         state.bytes_seen = state.bytes_seen.saturating_add(data.len() as u64);
         state.encoded.extend_from_slice(data);
-        if state.paused {
-            return Some(state.bytes_seen);
-        }
-
-        let tail = state.encoded[state.decoded_offset..].to_vec();
-        let mut decoder = DecoderOwned::new(tail);
+        // Preserve the decoder reservoir/filter history and incomplete frame tail
+        // across 32 KB writes. Recreating DecoderOwned per chunk loses both.
+        let mut scratch = [0i16; MAX_SAMPLES_PER_FRAME];
         let mut decoded_any = false;
-        while let Some(frame) = decoder.next() {
-            if let Frame::Audio(audio) = frame {
-                if state.sample_rate == 0 {
-                    state.sample_rate = audio.sample_rate();
-                    state.channels = audio.channels();
-                }
-                state.pcm.extend_from_slice(audio.samples());
-                decoded_any = true;
+        loop {
+            let tail = &state.encoded[state.decoded_offset..];
+            if tail.len() < 4 { break; }
+            if tail.starts_with(b"ID3") {
+                if tail.len() < 10 { break; }
+                let size = tail[6..10].iter().fold(0usize, |n, &b| (n << 7) | (b & 0x7f) as usize);
+                let total = 10 + size + if tail[3] == 4 && tail[5] & 0x10 != 0 { 10 } else { 0 };
+                if tail.len() < total { break; }
+                state.decoded_offset += total;
+                continue;
             }
+            let Some(frame_bytes) = mp3_frame_bytes(tail) else {
+                state.decoded_offset += 1;
+                continue;
+            };
+            if tail.len() < frame_bytes { break; }
+            if let Some((frame, _)) = state.decoder.next(&tail[..frame_bytes], &mut scratch) {
+                if let Frame::Audio(audio) = frame {
+                    if state.sample_rate == 0 {
+                        state.sample_rate = audio.sample_rate();
+                        state.channels = audio.channels();
+                    }
+                    state.pcm.extend_from_slice(audio.samples());
+                    decoded_any = true;
+                }
+            }
+            state.decoded_offset += frame_bytes;
         }
-        state.decoded_offset = state.decoded_offset.saturating_add(decoder.position());
-        if state.decoded_offset > 1 << 20 {
+        if state.decoded_offset > 0 {
             state.encoded.drain(..state.decoded_offset);
             state.decoded_offset = 0;
         }
@@ -823,14 +876,69 @@ impl Vfs {
         Some(state.bytes_seen)
     }
 
-    pub fn stop_mp3_decoder(&mut self, handle: u32) {
-        if let Some(state) = self.decoders.get_mut(&handle) {
-            state.encoded.clear();
-            state.decoded_offset = 0;
-            state.started = false;
-            state.paused = false;
-            state.pcm.clear();
+    pub fn mp3_decoder_handles(&self) -> Vec<u32> { self.decoders.keys().copied().collect() }
+
+    pub fn mp3_callback_event(&self, handle: u32) -> u32 {
+        self.decoders.get(&handle).map(|v| v.callback_event).unwrap_or(0)
+    }
+
+    pub fn start_mp3_decoder(&mut self, handle: u32, callback_event: u32) {
+        self.stop_mp3_decoder(handle);
+        if let Some(v) = self.decoders.get_mut(&handle) {
+            v.callback_event = callback_event;
+            v.started = true;
         }
+    }
+
+    pub fn queue_mp3_buffer(&mut self, handle: u32, end_samples: u64) {
+        if let Some(v) = self.decoders.get_mut(&handle) {
+            v.pending.push_back((end_samples, v.bytes_seen));
+        }
+    }
+
+    /// Driver buffer swaps are driven by consumed PCM, not submission time.
+    pub fn service_mp3_decoder(&mut self, handle: u32, cursor: u64) -> Option<(u32, usize)> {
+        let v = self.decoders.get_mut(&handle)?;
+        if !v.started || v.paused { return None; }
+        let mut completed = 0;
+        while let Some(&(end_samples, end_bytes)) = v.pending.front() {
+            if cursor < end_samples { break; }
+            v.pending.pop_front();
+            v.completed_samples = end_samples;
+            v.completed_bytes = end_bytes;
+            completed += 1;
+        }
+        v.played_bytes = v.completed_bytes;
+        if let Some(&(end_samples, end_bytes)) = v.pending.front() {
+            let length = end_samples.saturating_sub(v.completed_samples);
+            if length > 0 {
+                v.played_bytes += (end_bytes - v.completed_bytes)
+                    .saturating_mul(cursor.saturating_sub(v.completed_samples).min(length)) / length;
+            }
+        }
+        if completed > 0 { Some((v.callback_event, completed)) } else { None }
+    }
+
+    pub fn stop_mp3_decoder(&mut self, handle: u32) {
+        if let Some(v) = self.decoders.get_mut(&handle) {
+            v.decoder = RawDecoder::new();
+            v.encoded.clear();
+            v.decoded_offset = 0;
+            v.bytes_seen = 0;
+            v.sample_rate = 0;
+            v.channels = 0;
+            v.started = false;
+            v.paused = false;
+            v.pcm.clear();
+            v.pending.clear();
+            v.completed_samples = 0;
+            v.completed_bytes = 0;
+            v.played_bytes = 0;
+        }
+    }
+
+    pub fn mp3_decoder_paused(&self, handle: u32) -> bool {
+        self.decoders.get(&handle).map(|v| v.paused).unwrap_or(false)
     }
 
     pub fn pause_mp3_decoder(&mut self, handle: u32, paused: bool) {
@@ -854,13 +962,15 @@ impl Vfs {
         } else if code == 0x001d_1010 {
             if state.paused {
                 5
+            } else if state.started && state.pending.is_empty() {
+                7 // MASG_DONE, per OEMINC.H
             } else if state.started {
                 4
             } else {
                 0
             }
         } else if code == 0x001d_1018 {
-            state.bytes_seen.min(u32::MAX as u64) as u32
+            state.played_bytes.min(u32::MAX as u64) as u32
         } else if code == 0x001d_1020 {
             state.volume
         } else {
@@ -896,6 +1006,58 @@ pub enum SeekKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mas_buffer_swaps_follow_playback_and_report_sdk_states() {
+        let mut v = Vfs::new();
+        let h = v.open("MAS1:", Access::ReadWrite, false).unwrap();
+        v.start_mp3_decoder(h, 123);
+        let _ = v.feed_mp3_decoder(h, 32768);
+        v.queue_mp3_buffer(h, 100);
+        let _ = v.feed_mp3_decoder(h, 32768);
+        v.queue_mp3_buffer(h, 200);
+        assert_eq!(v.service_mp3_decoder(h, 50), None);
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1018, 4), 16384u32.to_le_bytes());
+        assert_eq!(v.service_mp3_decoder(h, 100), Some((123, 1)));
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1010, 4), 4u32.to_le_bytes());
+        v.pause_mp3_decoder(h, true);
+        assert_eq!(v.service_mp3_decoder(h, 200), None);
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1010, 4), 5u32.to_le_bytes());
+        v.pause_mp3_decoder(h, false);
+        assert_eq!(v.service_mp3_decoder(h, 200), Some((123, 1)));
+        assert_eq!(v.service_mp3_decoder(h, 200), None);
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1010, 4), 7u32.to_le_bytes());
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1018, 4), 65536u32.to_le_bytes());
+        v.stop_mp3_decoder(h);
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1010, 4), 0u32.to_le_bytes());
+        v.start_mp3_decoder(h, 456);
+        assert_eq!(v.mp3_callback_event(h), 456);
+        assert_eq!(v.mp3_decoder_reply(h, 0x001d1018, 4), 0u32.to_le_bytes());
+    }
+
+    #[test]
+    fn mas_chunked_mp3_decode_matches_contiguous_decode() {
+        // Generated 3-second sine, stereo 44.1 kHz / 128 kbps, no ID3/Xing.
+        // Crosses 32 KB and arbitrary partial-frame boundaries; no game asset.
+        let data = include_bytes!("../tests/fixtures/mas1-stream.mp3");
+        fn decode(data: &[u8], chunk: usize) -> Vec<i16> {
+            let mut v = Vfs::new();
+            let h = v.open("MAS1:", Access::ReadWrite, false).unwrap();
+            let mut samples = Vec::new();
+            for bytes in data.chunks(chunk) {
+                let _ = v.feed_mp3_decoder_data(h, bytes);
+                if let Some((rate, channels, pcm)) = v.take_mp3_decoder_pcm(h) {
+                    assert_eq!((rate, channels), (44100, 2));
+                    samples.extend(pcm);
+                }
+            }
+            samples
+        }
+        let expected = decode(data, data.len());
+        assert!(expected.len() > 44100 * 2);
+        assert_eq!(decode(data, 32768), expected);
+        assert_eq!(decode(data, 701), expected);
+    }
 
     #[test]
     fn mount_resolves_guest_paths() {

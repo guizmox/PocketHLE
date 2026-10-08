@@ -86,7 +86,16 @@ impl Default for VoiceParams {
 /// Keep complete submissions: Battlestations submits its entire menu music at
 /// once, and a bounded global ring both loses its beginning and delays SFX.
 #[derive(Clone)]
+struct WaveLoop {
+    samples: Vec<i16>,
+    start: u64,
+    index: usize,
+    remaining: u32,
+}
+
+#[derive(Clone)]
 struct WaveStream {
+    loop_buffer: Option<WaveLoop>,
     samples: std::collections::VecDeque<i16>,
     format: GuestFormat,
     phase: u64,
@@ -99,7 +108,7 @@ struct WaveStream {
 
 impl WaveStream {
     fn new(format: GuestFormat) -> Self {
-        Self { samples: Default::default(), format, phase: 0, written: 0,
+        Self { loop_buffer: None, samples: Default::default(), format, phase: 0, written: 0,
             consumed: 0, paused: false, tick: Instant::now(), fraction: 0 }
     }
 
@@ -114,33 +123,68 @@ impl WaveStream {
                 .min(usize::MAX as u128) as usize);
         }
         self.tick = now;
-        if self.samples.is_empty() { self.fraction = 0; }
+        if self.samples.is_empty() && self.loop_buffer.is_none() { self.fraction = 0; }
+    }
+
+    fn buffered_samples(&self) -> usize {
+        self.samples.len() + self.loop_buffer.as_ref().map(|v| v.samples.len()).unwrap_or(0)
     }
 
     fn consume(&mut self, count: usize) {
-        let count = count.min(self.samples.len());
-        self.samples.drain(..count);
-        self.consumed += count as u64;
+        let mut count = count as u64;
+        while count > 0 {
+            if let Some(v) = self.loop_buffer.as_mut() {
+                if self.consumed >= v.start {
+                    let length = v.samples.len() as u64;
+                    let available = length * v.remaining as u64 - v.index as u64;
+                    let advance = count.min(available);
+                    let position = v.index as u64 + advance;
+                    v.remaining -= (position / length) as u32;
+                    v.index = (position % length) as usize;
+                    self.consumed = self.consumed.saturating_add(advance);
+                    count -= advance;
+                    if v.remaining == 0 { self.loop_buffer = None; }
+                    continue;
+                }
+            }
+            let before_loop = self.loop_buffer.as_ref().map(|v| v.start.saturating_sub(self.consumed)).unwrap_or(u64::MAX);
+            let advance = count.min(before_loop).min(self.samples.len() as u64) as usize;
+            if advance == 0 { break; }
+            self.samples.drain(..advance);
+            self.consumed = self.consumed.saturating_add(advance as u64);
+            count -= advance as u64;
+        }
     }
 
     fn frame(&mut self, rate: u32) -> (f32, f32) {
+        if self.paused { return (0.0, 0.0); }
         let channels = self.format.channels.max(1) as usize;
-        if self.paused || self.samples.len() < channels { return (0.0, 0.0); }
-        let left = self.samples[0] as f32 / 32768.0;
-        let right = if channels > 1 { self.samples[1] as f32 / 32768.0 } else { left };
+        let (left, right) = if let Some(v) = self.loop_buffer.as_ref().filter(|v| self.consumed >= v.start) {
+            let left = v.samples[v.index];
+            let right = if channels > 1 { v.samples[v.index + 1] } else { left };
+            (left, right)
+        } else {
+            if self.samples.len() < channels { return (0.0, 0.0); }
+            let left = self.samples[0];
+            let right = if channels > 1 { self.samples[1] } else { left };
+            (left, right)
+        };
         self.phase += ((self.format.sample_rate.max(1) as u64) << 16) / rate.max(1) as u64;
         let frames = self.phase >> 16;
         self.phase &= 0xffff;
         self.consume((frames as usize).saturating_mul(channels));
-        if self.samples.is_empty() { self.phase = 0; }
-        (left, right)
+        if self.samples.is_empty() && self.loop_buffer.is_none() { self.phase = 0; }
+        (left as f32 / 32768.0, right as f32 / 32768.0)
     }
+
 }
 
 /// Inner state shared between the emulator thread (which calls
 /// [`AudioEngine::push_samples`]) and the cpal output callback.
 struct Shared {
     wave_streams: std::collections::BTreeMap<u32, WaveStream>,
+    // MAS1 transport is independent: waveOutReset/Close cannot purge music.
+    mas_streams: std::collections::BTreeMap<u32, WaveStream>,
     ring: Vec<i16>,
     /// Number of samples currently in the ring.
     len: usize,
@@ -193,6 +237,7 @@ impl Shared {
     fn new() -> Self {
         Self {
             wave_streams: Default::default(),
+            mas_streams: Default::default(),
             ring: vec![0i16; RING_CAPACITY_SAMPLES],
             len: 0,
             read: 0,
@@ -279,6 +324,7 @@ impl Shared {
 
     fn clear(&mut self) {
         self.wave_streams.clear();
+        self.mas_streams.clear();
         self.len = 0;
         self.read = 0;
         self.write = 0;
@@ -358,7 +404,7 @@ impl Shared {
                     self.resampler_phase = 0;
                 }
 
-                for stream in self.wave_streams.values_mut() {
+                for stream in self.wave_streams.values_mut().chain(self.mas_streams.values_mut()) {
                     let (l, r) = stream.frame(output_rate);
                     left += l;
                     right += r;
@@ -542,6 +588,48 @@ impl AudioEngine {
         }
     }
 
+    /// Append decoded MAS1 buffers to one continuous per-device PCM queue.
+    /// START/WRITE must never replace the previous buffer (Interstellar Flames 2).
+    pub fn queue_mas_samples(&self, handle: u32, format: GuestFormat, samples: &[i16]) -> u64 {
+        let Ok(mut s) = self.shared.lock() else { return 0; };
+        if !s.mix_format_ready {
+            s.mix_format = format;
+            s.mix_format_ready = true;
+        }
+        s.guest_format_ready = true;
+        if let Some(capture) = s.capture.as_mut() { capture.write(samples, format); }
+        let active = s.device_active;
+        let stream = s.mas_streams.entry(handle).or_insert_with(|| WaveStream::new(format));
+        stream.advance_virtual(active);
+        stream.samples.extend(samples.iter().copied());
+        stream.written += samples.len() as u64;
+        stream.written
+    }
+
+    pub fn mas_written_samples(&self, handle: u32) -> u64 {
+        self.shared.lock().ok().and_then(|s| s.mas_streams.get(&handle).map(|v| v.written)).unwrap_or(0)
+    }
+
+    pub fn mas_playback_cursor(&self, handle: u32) -> u64 {
+        let Ok(mut s) = self.shared.lock() else { return 0; };
+        let active = s.device_active;
+        s.mas_streams.get_mut(&handle).map(|v| { v.advance_virtual(active); v.consumed }).unwrap_or(0)
+    }
+
+    pub fn stop_mas_stream(&self, handle: u32) {
+        if let Ok(mut s) = self.shared.lock() { s.mas_streams.remove(&handle); }
+    }
+
+    pub fn pause_mas_stream(&self, handle: u32, paused: bool) {
+        if let Ok(mut s) = self.shared.lock() {
+            let active = s.device_active;
+            if let Some(v) = s.mas_streams.get_mut(&handle) {
+                v.advance_virtual(active);
+                v.paused = paused;
+            }
+        }
+    }
+
     pub fn open_wave_stream(&self, handle: u32, format: GuestFormat) {
         self.set_guest_format(format);
         if let Ok(mut s) = self.shared.lock() {
@@ -574,6 +662,30 @@ impl AudioEngine {
             v.advance_virtual(active);
             v.consumed
         }).unwrap_or(0)
+    }
+
+    /// Queue one WAVEHDR with BEGINLOOP|ENDLOOP. No repeated PCM copies.
+    /// Emulator-side refreshes replace its data without resetting its position.
+    pub fn queue_wave_loop(&self, handle: u32, samples: Vec<i16>, repeats: u32) -> bool {
+        let Ok(mut s) = self.shared.lock() else { return false; };
+        let active = s.device_active;
+        let Some(v) = s.wave_streams.get_mut(&handle) else { return false; };
+        let channels = v.format.channels.max(1) as usize;
+        if samples.is_empty() || samples.len() % channels != 0 || v.loop_buffer.is_some() { return false; }
+        v.advance_virtual(active);
+        let repeats = repeats.max(1);
+        let start = v.written;
+        v.written = v.written.saturating_add((samples.len() as u64).saturating_mul(repeats as u64));
+        v.loop_buffer = Some(WaveLoop { samples, start, index: 0, remaining: repeats });
+        true
+    }
+
+    pub fn update_wave_loop(&self, handle: u32, samples: Vec<i16>) {
+        if let Ok(mut s) = self.shared.lock() {
+            if let Some(v) = s.wave_streams.get_mut(&handle).and_then(|v| v.loop_buffer.as_mut()) {
+                if samples.len() == v.samples.len() { v.samples = samples; }
+            }
+        }
     }
 
     pub fn reset_wave_stream(&self, handle: u32) {
@@ -725,8 +837,10 @@ impl AudioEngine {
             s.consumed = 0;
             s.virtual_cursor = 0;
             s.virtual_tick = None;
-            s.mix_format_ready = false;
-            s.guest_format_ready = false;
+            if s.mas_streams.is_empty() {
+                s.mix_format_ready = false;
+                s.guest_format_ready = false;
+            }
         }
     }
 
@@ -742,7 +856,7 @@ impl AudioEngine {
 
     /// Number of samples currently queued.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.samples.len()).sum::<usize>()).unwrap_or(0)
+        self.shared.lock().map(|s| s.len + s.wave_streams.values().chain(s.mas_streams.values()).map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
     }
 
     /// Total guest samples submitted since the stream was opened (or
@@ -900,7 +1014,7 @@ impl AudioTap {
             return 0;
         };
         s.device_active = true;
-        if !s.wave_streams.is_empty() {
+        if !s.wave_streams.is_empty() || !s.mas_streams.is_empty() {
             let format = s.mix_format;
             let mut output = vec![0.0; dst.len()];
             s.render_frames(&mut output, format.sample_rate, format.channels);
@@ -928,12 +1042,13 @@ impl AudioTap {
     /// mode before AudioTrack has actually started.
     pub fn peek_into(&self, dst: &mut [i16]) -> usize {
         let Ok(s) = self.shared.lock() else { return 0; };
-        if !s.wave_streams.is_empty() {
+        if !s.wave_streams.is_empty() || !s.mas_streams.is_empty() {
             let channels = s.mix_format.channels.max(1) as usize;
             let mut streams = s.wave_streams.clone();
+            let mut mas_streams = s.mas_streams.clone();
             for frame in dst.chunks_exact_mut(channels) {
                 let (mut left, mut right) = (0.0f32, 0.0f32);
-                for stream in streams.values_mut() {
+                for stream in streams.values_mut().chain(mas_streams.values_mut()) {
                     let (l, r) = stream.frame(s.mix_format.sample_rate);
                     left += l; right += r;
                 }
@@ -958,7 +1073,7 @@ impl AudioTap {
 
     /// How many samples are queued and ready to be drained.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.samples.len()).sum::<usize>()).unwrap_or(0)
+        self.shared.lock().map(|s| s.len + s.wave_streams.values().chain(s.mas_streams.values()).map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
     }
 }
 
@@ -1124,6 +1239,82 @@ fn fill_output_u16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave_loop_preserves_queue_order_and_finishes_finite_repeats() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        e.open_wave_stream(1, mono(44100));
+        e.push_wave_samples(1, &[10]);
+        assert!(e.queue_wave_loop(1, vec![20, 30], 2));
+        e.push_wave_samples(1, &[40]);
+        let mut out = [0; 6];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [10, 20, 30, 20, 30, 40]);
+        assert_eq!(e.wave_playback_cursor(1), 6);
+        assert_eq!(e.wave_written_samples(1), 6);
+        assert_eq!(e.buffered_samples(), 0);
+    }
+
+    #[test]
+    fn wave_loop_refresh_preserves_position_and_pause_then_reset() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        e.open_wave_stream(1, mono(44100));
+        assert!(e.queue_wave_loop(1, vec![0; 4], u32::MAX));
+        assert_eq!(e.buffered_samples(), 4); // never allocate 4 billion copies
+        let mut out = [0; 2];
+        tap.drain_into(&mut out);
+        e.update_wave_loop(1, vec![100, 200, 300, 400]);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [300, 400]);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [100, 200]);
+        assert_eq!(e.wave_playback_cursor(1), 6);
+        e.pause_wave_stream(1, true);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0, 0]);
+        assert_eq!(e.wave_playback_cursor(1), 6);
+        e.pause_wave_stream(1, false);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [300, 400]);
+        e.reset_wave_stream(1);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0, 0]);
+        assert_eq!(e.wave_playback_cursor(1), 0);
+        assert_eq!(e.buffered_samples(), 0);
+    }
+
+    #[test]
+    fn mas_appends_buffers_and_survives_wave_reset_close() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        let format = GuestFormat { sample_rate: 44100, channels: 1, bits_per_sample: 16 };
+        e.open_wave_stream(1, format);
+        assert_eq!(e.queue_mas_samples(2, format, &[1000, 2000]), 2);
+        assert_eq!(e.queue_mas_samples(2, format, &[3000, 4000]), 4);
+        e.push_wave_samples(1, &[100; 4]);
+        let mut out = [0; 1];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [1100]);
+        e.reset_wave_stream(1);
+        e.close_wave_stream(1);
+        e.flush_wave_out();
+        tap.drain_into(&mut out);
+        assert_eq!(out, [2000]);
+        e.pause_mas_stream(2, true);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0]);
+        assert_eq!(e.mas_playback_cursor(2), 2);
+        e.pause_mas_stream(2, false);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [3000]);
+        e.stop_mas_stream(2);
+        assert_eq!(e.buffered_samples(), 0);
+    }
 
     fn mono(rate: u32) -> GuestFormat {
         GuestFormat { sample_rate: rate, channels: 1, bits_per_sample: 16 }
