@@ -363,6 +363,8 @@ pub enum WaveCallbackKind {
 /// reported as finished yet.
 #[derive(Debug, Clone, Copy)]
 pub struct PendingWaveBuffer {
+    /// Fake HWAVEOUT this buffer belongs to.
+    pub handle: u32,
     /// Guest address of the `WAVEHDR`.
     pub hdr: u32,
     /// Playback cursor, in guest samples since the last
@@ -370,11 +372,26 @@ pub struct PendingWaveBuffer {
     pub end_cursor: u64,
 }
 
-/// Everything we track for the single `waveOut` device we emulate.
+
+#[derive(Debug, Clone, Copy)]
+pub struct WaveOutDevice {
+    pub callback_kind: WaveCallbackKind,
+    pub callback_target: u32,
+    pub instance: u32,
+    pub owner_thread: usize,
+    pub format: GuestFormat,
+    pub paused: bool,
+}
+
+/// State shared by all open `waveOut` handles.
 #[derive(Debug, Default)]
 pub struct WaveOutState {
-    /// Fake `HWAVEOUT` handed to the guest, or 0 while closed.
+    /// Legacy/current handle used while dispatching a callback.
     pub handle: u32,
+    /// Independently opened WinMM output handles.
+    pub devices: HashMap<u32, WaveOutDevice>,
+    /// Monotonic allocator for synthetic HWAVEOUT values.
+    pub next_handle: u32,
     pub callback_kind: WaveCallbackKind,
     /// Window handle, thread id, `waveOutProc` pointer or event
     /// handle, depending on `callback_kind`.
@@ -393,7 +410,7 @@ pub struct WaveOutState {
     pub paused: bool,
     /// `CALLBACK_FUNCTION` buffers waiting for their `waveOutProc`
     /// call. The message pump drains this by re-entering the guest.
-    pub function_done: VecDeque<u32>,
+    pub function_done: VecDeque<(u32, u32, u32, u32)>,
     /// Set while the guest is executing `waveOutProc`, so the pump
     /// knows to restore the interrupted call's registers when the
     /// callback returns.
@@ -1310,6 +1327,13 @@ pub struct GuestThread {
     /// thread blocked in `GetMessageW` must not hand the CPU to such a
     /// thread — see `resume_worker_reenter`.
     pub parked_in_pump: bool,
+    /// Waitable handles associated with a re-entering WaitFor* call.
+    /// Empty means a message-pump wait (`GetMessageW`). Keeping the
+    /// dependency here lets the cooperative scheduler distinguish a
+    /// genuinely wakeable waiter from one whose objects are still idle.
+    pub parked_wait_handles: Vec<u32>,
+    /// `true` for WaitForMultipleObjects(..., TRUE, ...).
+    pub parked_wait_all: bool,
 }
 #[allow(clippy::too_many_arguments)]
 impl GuestThread {
@@ -1339,6 +1363,8 @@ impl GuestThread {
             started: false,
             finished: false,
             parked_in_pump: false,
+            parked_wait_handles: Vec::new(),
+            parked_wait_all: false,
         }
     }
 }

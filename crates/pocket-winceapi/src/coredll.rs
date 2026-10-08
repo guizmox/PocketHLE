@@ -21,6 +21,7 @@
 //! and they get called many thousands of times before the game ever
 //! reaches `WinMain`.
 
+use std::collections::VecDeque;
 use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
@@ -370,6 +371,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "strtol", strtol_handler);
     d.register_handler(dll, "strtoul", strtol_handler);
     d.register_handler(dll, "isctype", isctype);
+    d.register_handler(dll, "iswctype", iswctype);
 
     // ---- Heap ----
     d.register_handler(dll, "LocalAlloc", local_alloc);
@@ -382,6 +384,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "HeapAlloc", heap_alloc);
     d.register_handler(dll, "HeapFree", heap_free);
     d.register_handler(dll, "HeapReAlloc", heap_realloc);
+    d.register_handler(dll, "HeapSize", heap_size);
     d.register_handler(dll, "GetProcessHeap", get_process_heap);
     d.register_handler(dll, "VirtualAlloc", virtual_alloc);
     d.register_constant(dll, "VirtualFree", 1, one_returning);
@@ -1952,6 +1955,8 @@ fn park_worker_at(
         // `resume_worker_reenter` treats that state as "not eligible" —
         // see the field's doc.
         thread.parked_in_pump = resume_at.is_some();
+        thread.parked_wait_handles.clear();
+        thread.parked_wait_all = false;
     }
     ctx.kernel.current_thread = 0;
     let Some(main_regs) = main_regs else {
@@ -1976,12 +1981,64 @@ fn resume_worker(
     if ctx.kernel.current_thread != 0 {
         return Ok(None);
     }
+    // A parked blocking call is runnable only when the thing it waits for can
+    // actually satisfy it.  The old scheduler merely *preferred* non-parked
+    // workers; once all workers were parked it immediately re-entered the first
+    // unsatisfied WaitForMultipleObjects forever.  Besides burning the CPU,
+    // that starved later workers.
+    let waitable_is_signalled = |handle: u32| {
+        ctx.kernel
+            .events
+            .get(&handle)
+            .map(|event| event.signalled)
+            .or_else(|| {
+                ctx.kernel
+                    .msg_queues
+                    .get(&handle)
+                    .map(|queue| !queue.messages.is_empty())
+            })
+            .or_else(|| {
+                ctx.kernel
+                    .semaphores
+                    .get(&handle)
+                    .map(|semaphore| semaphore.count > 0)
+            })
+            .or_else(|| {
+                ctx.kernel
+                    .threads
+                    .iter()
+                    .find(|thread| thread.handle == handle)
+                    .map(|thread| thread.finished)
+            })
+            .unwrap_or(false)
+    };
     let Some((thread_index, worker_regs)) = ctx
         .kernel
         .threads
         .iter()
         .enumerate()
-        .find(|(_, thread)| thread.worker_saved && thread.started && !thread.finished)
+        .filter(|(_, thread)| thread.worker_saved && thread.started && !thread.finished)
+        .filter(|(_, thread)| {
+            if !thread.parked_in_pump {
+                return true;
+            }
+            if thread.parked_wait_handles.is_empty() {
+                // The only re-entering park without handles is GetMessageW.
+                return !thread.messages.is_empty();
+            }
+            if thread.parked_wait_all {
+                thread
+                    .parked_wait_handles
+                    .iter()
+                    .all(|&handle| waitable_is_signalled(handle))
+            } else {
+                thread
+                    .parked_wait_handles
+                    .iter()
+                    .any(|&handle| waitable_is_signalled(handle))
+            }
+        })
+        .next()
         .map(|(index, thread)| (index, thread.worker_regs))
     else {
         return Ok(None);
@@ -1994,6 +2051,8 @@ fn resume_worker(
         thread.resume_pc = main_regs[15];
         thread.worker_saved = false;
         thread.parked_in_pump = false;
+        thread.parked_wait_handles.clear();
+        thread.parked_wait_all = false;
     }
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
@@ -2301,20 +2360,37 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                         channels,
                         bits_per_sample: 16,
                     };
-                    ctx.kernel.wave_out_format = format;
-                    ctx.kernel.audio.set_guest_format(format);
-                    ctx.kernel.audio.push_samples(&samples);
+                    // MAS1 is an independent hardware decoder on Gizmondo.  Do not
+                    // feed a complete MP3 through the bounded waveOut ring: a full
+                    // track is much larger than that ring and would discard its
+                    // beginning before playback even starts.  Keep the decoded track
+                    // as its own mixer voice instead, which also lets waveOut SFX mix
+                    // over the music without changing either stream's format.
+                    const MAS1_VOICE_GROUP: u32 = 0x4d41_5331; // "MAS1"
+                    ctx.kernel.audio.stop_voice_group(MAS1_VOICE_GROUP);
+                    ctx.kernel.audio.play_voice_with(
+                        &samples,
+                        format,
+                        pocket_kernel::audio::VoiceParams {
+                            looped: false,
+                            group: MAS1_VOICE_GROUP,
+                            volume: 1.0,
+                        },
+                    );
                     ctx.kernel.audio.start();
                 }
             } else if is_stop {
+                const MAS1_VOICE_GROUP: u32 = 0x4d41_5331;
                 ctx.kernel.vfs.stop_mp3_decoder(handle);
-                ctx.kernel.audio.flush();
+                ctx.kernel.audio.stop_voice_group(MAS1_VOICE_GROUP);
             } else if is_pause {
+                const MAS1_VOICE_GROUP: u32 = 0x4d41_5331;
                 ctx.kernel.vfs.pause_mp3_decoder(handle, true);
-                ctx.kernel.audio.set_paused(true);
+                ctx.kernel.audio.pause_voice_group(MAS1_VOICE_GROUP, true);
             } else if is_resume {
+                const MAS1_VOICE_GROUP: u32 = 0x4d41_5331;
                 ctx.kernel.vfs.pause_mp3_decoder(handle, false);
-                ctx.kernel.audio.set_paused(false);
+                ctx.kernel.audio.pause_voice_group(MAS1_VOICE_GROUP, false);
             } else if is_set_volume && in_len >= 4 {
                 let value = u32::from_le_bytes(
                     ctx.cpu.read_mem(input_buf, 4)?.try_into().unwrap_or([0; 4]),
@@ -3631,6 +3707,36 @@ fn isctype(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ch.is_ascii_hexdigit() {
         bits |= HEX;
     }
+    Ok(DispatchOutcome::ReturnedR0(bits & mask))
+}
+
+fn iswctype(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // WinCE/MS CRT wctype masks use the same bit layout as isctype.
+    // Keep this deliberately locale-neutral for now, but handle Latin-1
+    // letters as well as ASCII: Chicane calls this heavily while parsing
+    // its text/configuration data.
+    const UPPER: u32 = 0x0001;
+    const LOWER: u32 = 0x0002;
+    const DIGIT: u32 = 0x0004;
+    const SPACE: u32 = 0x0008;
+    const PUNCT: u32 = 0x0010;
+    const CONTROL: u32 = 0x0020;
+    const BLANK: u32 = 0x0040;
+    const HEX: u32 = 0x0080;
+    const ALPHA: u32 = 0x0100;
+
+    let c = ctx.arg_u32(0)?;
+    let mask = ctx.arg_u32(1)?;
+    let ch = char::from_u32(c).unwrap_or('\0');
+    let mut bits = 0u32;
+    if ch.is_uppercase() { bits |= UPPER | ALPHA; }
+    if ch.is_lowercase() { bits |= LOWER | ALPHA; }
+    if ch.is_numeric() { bits |= DIGIT; }
+    if ch.is_whitespace() { bits |= SPACE; }
+    if ch == ' ' || ch == '\t' { bits |= BLANK; }
+    if ch.is_control() { bits |= CONTROL; }
+    if ch.is_ascii_hexdigit() { bits |= HEX; }
+    if ch.is_ascii_punctuation() { bits |= PUNCT; }
     Ok(DispatchOutcome::ReturnedR0(bits & mask))
 }
 
@@ -6261,6 +6367,19 @@ fn heap_realloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     do_realloc(ctx, p, size)
 }
 
+fn heap_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // SIZE_T HeapSize(HANDLE hHeap, DWORD flags, LPCVOID lpMem)
+    // Win32 returns (SIZE_T)-1 on failure. PocketHLE has a single backing
+    // heap, so the heap handle/flags do not affect the lookup.
+    let p = ctx.arg_u32(2)?;
+    let size = if p == 0 {
+        u32::MAX
+    } else {
+        ctx.kernel.heap.msize(p).unwrap_or(u32::MAX)
+    };
+    Ok(DispatchOutcome::ReturnedR0(size))
+}
+
 fn get_process_heap(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(FAKE_PROCESS_HEAP))
 }
@@ -8111,7 +8230,10 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, 0, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
-        if let Some(outcome) = park_worker_and_retry(ctx)? {
+        // GetMessageW blocks with lpMsg still live. Re-entering the thunk
+        // must preserve r0-r3; otherwise r0 becomes NULL and the queued
+        // message is consumed into address 0 when the worker wakes.
+        if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
             return Ok(outcome);
         }
     }
@@ -8347,7 +8469,14 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     // `WAIT_TIMEOUT` handed it 258 and put it on its "SD card removed"
     // screen instead of its main menu.
     if timeout == INFINITE {
+        let waiter_index = ctx.kernel.current_thread.checked_sub(1);
         if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
+            if let Some(index) = waiter_index {
+                if let Some(thread) = ctx.kernel.threads.get_mut(index) {
+                    thread.parked_wait_handles = handles.clone();
+                    thread.parked_wait_all = wait_all;
+                }
+            }
             return Ok(outcome);
         }
         // The main thread is the one waiting, so hand the CPU to a parked
@@ -11248,6 +11377,22 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     let handle = ctx.arg_u32(0)?;
     let timeout = ctx.arg_u32(1)?;
 
+    // The real wave driver keeps running while a guest thread is blocked in
+    // WaitForSingleObject.  In this HLE, buffer retirement normally happens
+    // only when the guest crosses one of our API boundaries; without servicing
+    // waveOut here, a CALLBACK_NULL mixer can submit its first buffer, wait,
+    // and never observe WHDR_DONE even though the host has already consumed it.
+    //
+    // CALLBACK_FUNCTION is the one exception: delivering a waveOutProc requires
+    // a guest-call detour and this handler may be re-entered while a wait is
+    // being reevaluated.  Sleep/the message pump already own that detour path.
+    // The other notification modes only mutate guest-visible state or enqueue/
+    // signal an object, which is exactly what an asynchronous driver would do
+    // while the thread waits.
+    if ctx.kernel.wave_out.callback_kind != WaveCallbackKind::Function {
+        service_wave_out(ctx)?;
+    }
+
     // A point-to-point message queue is a waitable object on the
     // device: the reader blocks on the handle and only calls
     // `ReadMsgQueue` once the wait is satisfied. Whoever fills that
@@ -11259,7 +11404,14 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
         if !queue.messages.is_empty() {
             return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
         }
+        let waiter_index = ctx.kernel.current_thread.checked_sub(1);
         if let Some(outcome) = park_worker_and_retry(ctx)? {
+            if let Some(index) = waiter_index {
+                if let Some(thread) = ctx.kernel.threads.get_mut(index) {
+                    thread.parked_wait_handles = vec![handle];
+                    thread.parked_wait_all = false;
+                }
+            }
             return Ok(outcome);
         }
         if let Some(outcome) = resume_worker(ctx, WAIT_TIMEOUT)? {
@@ -11303,7 +11455,14 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     // buffers without ever yielding, so the main thread drew two frames
     // and then starved.
     if timeout == INFINITE {
+        let waiter_index = ctx.kernel.current_thread.checked_sub(1);
         if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
+            if let Some(index) = waiter_index {
+                if let Some(thread) = ctx.kernel.threads.get_mut(index) {
+                    thread.parked_wait_handles = vec![handle];
+                    thread.parked_wait_all = false;
+                }
+            }
             return Ok(outcome);
         }
         // The main thread is the one waiting, and nothing else can make
@@ -14079,6 +14238,7 @@ fn set_clipboard_data(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 // silent for the unsupported chunk.
 
 const FAKE_HWAVEOUT: u32 = 0xDEAD_4001;
+const FIRST_HWAVEOUT: u32 = 0xDEAD_4100;
 const MMSYSERR_NOERROR: u32 = 0;
 
 /// `WAVEHDR.dwFlags` bits we care about.
@@ -14086,9 +14246,9 @@ const WHDR_DONE: u32 = 0x1;
 const WHDR_INQUEUE: u32 = 0x4;
 /// `MM_WOM_DONE` — "a wave-out buffer finished playing", posted to a
 /// window or thread queue depending on how `waveOutOpen` was called.
+const MM_WOM_OPEN: u32 = 0x3BB;
+const MM_WOM_CLOSE: u32 = 0x3BC;
 const MM_WOM_DONE: u32 = 0x3BD;
-/// `WOM_DONE` — the `uMsg` a `CALLBACK_FUNCTION` `waveOutProc` gets.
-const WOM_DONE: u32 = 0x3BD;
 /// Guest stack we reserve to call `waveOutProc`: four bytes for
 /// `dwParam2`, which is the one argument AAPCS passes on the stack, and
 /// four more to keep SP 8-byte aligned.
@@ -14129,13 +14289,15 @@ fn wave_out_enter_callback(
         ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
         return Ok(None);
     }
-    if ctx.kernel.wave_out.callback_kind != WaveCallbackKind::Function {
-        return Ok(None);
-    }
-    let Some(hdr) = ctx.kernel.wave_out.function_done.pop_front() else {
+    let Some((callback_handle, message, param1, param2)) =
+        ctx.kernel.wave_out.function_done.pop_front()
+    else {
         return Ok(None);
     };
-    let proc_va = ctx.kernel.wave_out.callback_target;
+    let Some(device) = ctx.kernel.wave_out.devices.get(&callback_handle).copied() else {
+        return Ok(None);
+    };
+    let proc_va = device.callback_target;
     if proc_va == 0 {
         return Ok(None);
     }
@@ -14148,16 +14310,17 @@ fn wave_out_enter_callback(
     let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
     let new_sp = sp.wrapping_sub(WAVE_PROC_STACK_BYTES);
-    ctx.cpu.write_mem(new_sp, &0u32.to_le_bytes())?;
+    ctx.cpu.write_mem(new_sp, &param2.to_le_bytes())?;
     ctx.cpu.write_reg(ArmReg::Sp, new_sp)?;
-    ctx.cpu.write_reg(ArmReg::R0, ctx.kernel.wave_out.handle)?;
-    ctx.cpu.write_reg(ArmReg::R1, WOM_DONE)?;
-    ctx.cpu
-        .write_reg(ArmReg::R2, ctx.kernel.wave_out.instance)?;
-    ctx.cpu.write_reg(ArmReg::R3, hdr)?;
+    ctx.cpu.write_reg(ArmReg::R0, callback_handle)?;
+    ctx.cpu.write_reg(ArmReg::R1, message)?;
+    ctx.cpu.write_reg(ArmReg::R2, device.instance)?;
+    ctx.cpu.write_reg(ArmReg::R3, param1)?;
     ctx.cpu.write_reg(ArmReg::Lr, thunk_va)?;
     ctx.kernel.wave_out.function_frame = Some(pocket_kernel::GuestCallFrame { args, lr, sp });
-    log::trace!("waveOutProc(0x{proc_va:08x}) for hdr=0x{hdr:08x}");
+    log::trace!(
+        "waveOutProc(0x{proc_va:08x}) h=0x{callback_handle:08x} msg=0x{message:04x} param1=0x{param1:08x}"
+    );
     Ok(Some(DispatchOutcome::JumpTo(proc_va)))
 }
 
@@ -14209,6 +14372,41 @@ fn wave_out_set_volume(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
+fn wave_out_notify(
+    ctx: &mut CallCtx<'_>,
+    handle: u32,
+    message: u32,
+    param1: u32,
+    param2: u32,
+) {
+    let Some(device) = ctx.kernel.wave_out.devices.get(&handle).copied() else { return; };
+    match device.callback_kind {
+        WaveCallbackKind::Window => {
+            ctx.kernel.posted_messages.push_back((device.callback_target, message, handle, param1));
+        }
+        WaveCallbackKind::Thread => {
+            if let Some(thread) = ctx.kernel.threads.iter_mut()
+                .find(|thread| thread.id == device.callback_target && !thread.finished)
+            {
+                if thread.messages.len() < 256 {
+                    thread.messages.push_back((message, handle, param1));
+                }
+            } else if ctx.kernel.posted_messages.len() < 256 {
+                ctx.kernel.posted_messages.push_back((0, message, handle, param1));
+            }
+        }
+        WaveCallbackKind::Function => {
+            ctx.kernel.wave_out.function_done.push_back((handle, message, param1, param2));
+        }
+        WaveCallbackKind::Event => {
+            if let Some(event) = ctx.kernel.events.get_mut(&device.callback_target) {
+                event.signalled = true;
+            }
+        }
+        WaveCallbackKind::None => {}
+    }
+}
+
 /// `MMRESULT waveOutOpen(LPHWAVEOUT phwo, UINT uDeviceID,
 ///                       LPCWAVEFORMATEX pwfx, DWORD_PTR dwCallback,
 ///                       DWORD_PTR dwInstance, DWORD fdwOpen)`
@@ -14227,93 +14425,71 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let instance = ctx.arg_u32(4)?;
     let flags = ctx.arg_u32(5)?;
 
-    let requested_format = if pwfx != 0 {
-        // WAVEFORMATEX: 18 bytes — wFormatTag (2), nChannels (2),
-        // nSamplesPerSec (4), nAvgBytesPerSec (4), nBlockAlign (2),
-        // wBitsPerSample (2), cbSize (2).
+    let fmt = if pwfx != 0 {
         let hdr = ctx.cpu.read_mem(pwfx, 18)?;
         let format_tag = u16::from_le_bytes([hdr[0], hdr[1]]);
         let channels = u16::from_le_bytes([hdr[2], hdr[3]]);
         let sample_rate = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
         let bits = u16::from_le_bytes([hdr[14], hdr[15]]);
         let fmt = pocket_kernel::audio::GuestFormat {
-            sample_rate: sample_rate.max(1),
-            channels: channels.max(1),
-            bits_per_sample: bits.max(8),
+            sample_rate: sample_rate.max(1), channels: channels.max(1), bits_per_sample: bits.max(8),
         };
-        ctx.kernel.wave_out_format = fmt;
-        log::debug!(
-            "waveOutOpen tag={format_tag} {sample_rate} Hz / {channels} ch / {bits}-bit, flags=0x{flags:08x}"
-        );
-        Some(fmt)
+        log::debug!("waveOutOpen tag={format_tag} {sample_rate} Hz / {channels} ch / {bits}-bit, flags=0x{flags:08x}");
+        fmt
     } else {
-        None
+        ctx.kernel.wave_out_format
     };
 
-    // WAVE_FORMAT_QUERY = 0x1: don't actually open, just verify.
-    if flags & 0x1 == 0 {
-        let already_open = ctx.kernel.wave_out.handle != 0;
-        // The notification mode lives in the top half of `fdwOpen`.
-        // Games double-buffer audio and only submit the next chunk
-        // once they are told the previous one drained, so getting this
-        // right is the difference between two buffers of music and a
-        // continuous soundtrack.
-        let kind = match flags & 0x0007_0000 {
-            0x0001_0000 => WaveCallbackKind::Window,
-            0x0002_0000 => WaveCallbackKind::Thread,
-            0x0003_0000 => WaveCallbackKind::Function,
-            // CALLBACK_EVENT. `WaitForSingleObject` already returns
-            // WAIT_OBJECT_0 immediately here, so the guest never
-            // blocks and needs no extra signalling from us.
-            0x0005_0000 => WaveCallbackKind::Event,
-            _ => WaveCallbackKind::None,
-        };
-        log::debug!("waveOutOpen notification: {kind:?} target=0x{callback:08x}");
-        if !already_open {
-            ctx.kernel.wave_out = pocket_kernel::WaveOutState {
-                handle: FAKE_HWAVEOUT,
-                callback_kind: kind,
-                callback_target: callback,
-                instance,
-                owner_thread: ctx.kernel.current_thread,
-                ..Default::default()
-            };
-            ctx.kernel.audio.flush();
-        } else {
-            ctx.kernel.wave_out.handle = FAKE_HWAVEOUT;
-            ctx.kernel.wave_out.callback_kind = kind;
-            ctx.kernel.wave_out.callback_target = callback;
-            ctx.kernel.wave_out.instance = instance;
-            ctx.kernel.wave_out.owner_thread = ctx.kernel.current_thread;
-        }
-        ctx.kernel.audio.start();
-        if let Some(fmt) = requested_format {
-            ctx.kernel.audio.set_guest_format(fmt);
-        }
+    if flags & 0x1 != 0 {
+        return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR));
     }
-    if phwo != 0 {
-        ctx.cpu.write_mem(phwo, &FAKE_HWAVEOUT.to_le_bytes())?;
-    }
+    let kind = match flags & 0x0007_0000 {
+        0x0001_0000 => WaveCallbackKind::Window,
+        0x0002_0000 => WaveCallbackKind::Thread,
+        0x0003_0000 => WaveCallbackKind::Function,
+        0x0005_0000 => WaveCallbackKind::Event,
+        _ => WaveCallbackKind::None,
+    };
+    let handle = if ctx.kernel.wave_out.next_handle < FIRST_HWAVEOUT {
+        FIRST_HWAVEOUT
+    } else {
+        ctx.kernel.wave_out.next_handle
+    };
+    ctx.kernel.wave_out.next_handle = handle.wrapping_add(1).max(FIRST_HWAVEOUT);
+    ctx.kernel.wave_out.devices.insert(handle, pocket_kernel::WaveOutDevice {
+        callback_kind: kind, callback_target: callback, instance,
+        owner_thread: ctx.kernel.current_thread, format: fmt, paused: false,
+    });
+    ctx.kernel.wave_out.handle = handle;
+    ctx.kernel.wave_out.callback_kind = kind;
+    ctx.kernel.wave_out.callback_target = callback;
+    ctx.kernel.wave_out.instance = instance;
+    ctx.kernel.wave_out.owner_thread = ctx.kernel.current_thread;
+    ctx.kernel.wave_out_format = fmt;
+    ctx.kernel.audio.start();
+    ctx.kernel.audio.set_guest_format(fmt);
+    if phwo != 0 { ctx.cpu.write_mem(phwo, &handle.to_le_bytes())?; }
+    wave_out_notify(ctx, handle, MM_WOM_OPEN, 0, 0);
+    log::debug!("waveOutOpen -> 0x{handle:08x} ({:?}), open={}", kind, ctx.kernel.wave_out.devices.len());
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
 /// `MMRESULT waveOutClose(HWAVEOUT)` — stop the host stream and
 /// flush any remaining samples.
 fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
-    retire_all_wave_buffers(ctx)?;
-    ctx.kernel.wave_out = pocket_kernel::WaveOutState::default();
-    ctx.kernel.audio.stop();
+    let h = ctx.arg_u32(0)?;
+    retire_wave_buffers_for(ctx, h)?;
+    wave_out_notify(ctx, h, MM_WOM_CLOSE, 0, 0);
+    ctx.kernel.wave_out.devices.remove(&h);
+    if ctx.kernel.wave_out.devices.is_empty() { ctx.kernel.audio.flush_wave_out(); }
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
 /// `MMRESULT waveOutReset(HWAVEOUT)` — discard any queued samples.
 fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
-    // MSDN: `waveOutReset` marks every pending buffer as done and
-    // notifies the caller for each, exactly as if they had played.
-    retire_all_wave_buffers(ctx)?;
-    ctx.kernel.audio.flush();
+    let h = ctx.arg_u32(0)?;
+    // MSDN: reset only this HWAVEOUT and report its queued buffers done.
+    retire_wave_buffers_for(ctx, h)?;
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
@@ -14321,18 +14497,16 @@ fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// cursor. Buffers stay queued; nothing is reported as finished until
 /// `waveOutRestart`.
 fn wave_out_pause(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
-    ctx.kernel.wave_out.paused = true;
-    ctx.kernel.audio.set_paused(true);
+    let h = ctx.arg_u32(0)?;
+    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = true; }
     log::debug!("waveOutPause");
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
 /// `MMRESULT waveOutRestart(HWAVEOUT)` — resume after a pause.
 fn wave_out_restart(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
-    ctx.kernel.wave_out.paused = false;
-    ctx.kernel.audio.set_paused(false);
+    let h = ctx.arg_u32(0)?;
+    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = false; }
     log::debug!("waveOutRestart");
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
@@ -14345,14 +14519,14 @@ fn wave_out_restart(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 /// honour the requested unit we answer in bytes and say so in
 /// `wType`, which is what the API expects.
 fn wave_out_get_position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
+    let h = ctx.arg_u32(0)?;
     let pmmt = ctx.arg_u32(1)?;
     let size = ctx.arg_u32(2)?;
     if pmmt == 0 || size < 8 {
         return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR));
     }
     let want = u32::from_le_bytes(ctx.cpu.read_mem(pmmt, 4)?.try_into().unwrap_or([0; 4]));
-    let fmt = ctx.kernel.wave_out_format;
+    let fmt = ctx.kernel.wave_out.devices.get(&h).map(|d| d.format).unwrap_or(ctx.kernel.wave_out_format);
     let channels = u64::from(fmt.channels.max(1));
     let rate = u64::from(fmt.sample_rate.max(1));
     let played = ctx.kernel.audio.playback_cursor();
@@ -14409,7 +14583,7 @@ fn wave_out_unprepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
 /// `WHDR_DONE` (`0x1`) flag is set on return so the guest's send /
 /// retire logic doesn't deadlock.
 fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
+    let h = ctx.arg_u32(0)?;
     let p_hdr = ctx.arg_u32(1)?;
     let _cb = ctx.arg_u32(2)?;
     if p_hdr == 0 {
@@ -14427,7 +14601,7 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let mut flags = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
     if p_data != 0 && n_bytes > 0 {
         let bytes = ctx.cpu.read_mem(p_data, n_bytes)?;
-        let fmt = ctx.kernel.wave_out_format;
+        let fmt = ctx.kernel.wave_out.devices.get(&h).map(|d| d.format).unwrap_or(ctx.kernel.wave_out_format);
         match fmt.bits_per_sample {
             16 => {
                 let mut samples = Vec::with_capacity(bytes.len() / 2);
@@ -14458,6 +14632,7 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         .wave_out
         .pending
         .push_back(pocket_kernel::PendingWaveBuffer {
+            handle: h,
             hdr: p_hdr,
             end_cursor,
         });
@@ -14467,62 +14642,16 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 
 /// Mark `hdr` as played and tell the guest about it the way it asked
 /// at `waveOutOpen` time.
-fn retire_wave_buffer(ctx: &mut CallCtx<'_>, hdr: u32) -> Result<(), KernelError> {
-    log::debug!(
-        "retire hdr=0x{hdr:08x} kind={:?}",
-        ctx.kernel.wave_out.callback_kind
-    );
+fn retire_wave_buffer(ctx: &mut CallCtx<'_>, handle: u32, hdr: u32) -> Result<(), KernelError> {
+    let Some(device) = ctx.kernel.wave_out.devices.get(&handle).copied() else { return Ok(()); };
+    log::debug!("retire h=0x{handle:08x} hdr=0x{hdr:08x} kind={:?}", device.callback_kind);
     if hdr != 0 {
         let cur = ctx.cpu.read_mem(hdr + 16, 4)?;
         let flags = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
         let flags = (flags & !WHDR_INQUEUE) | WHDR_DONE;
         ctx.cpu.write_mem(hdr + 16, &flags.to_le_bytes())?;
     }
-    let target = ctx.kernel.wave_out.callback_target;
-    match ctx.kernel.wave_out.callback_kind {
-        WaveCallbackKind::Window => {
-            ctx.kernel
-                .posted_messages
-                .push_back((target, MM_WOM_DONE, FAKE_HWAVEOUT, hdr));
-        }
-        WaveCallbackKind::Thread => {
-            // CALLBACK_THREAD notifications belong to the thread ID
-            // passed to waveOutOpen, not to the window queue. Routing
-            // these to the worker queue is what lets a streaming mixer
-            // submit the next buffer instead of stopping after its
-            // initial pre-roll.
-            if let Some(thread) = ctx
-                .kernel
-                .threads
-                .iter_mut()
-                .find(|thread| thread.id == target && !thread.finished)
-            {
-                if thread.messages.len() < 256 {
-                    thread.messages.push_back((MM_WOM_DONE, FAKE_HWAVEOUT, hdr));
-                }
-            } else if ctx.kernel.posted_messages.len() < 256 {
-                ctx.kernel
-                    .posted_messages
-                    .push_back((0, MM_WOM_DONE, FAKE_HWAVEOUT, hdr));
-            }
-        }
-        WaveCallbackKind::Function => {
-            ctx.kernel.wave_out.function_done.push_back(hdr);
-        }
-        WaveCallbackKind::Event => {
-            // `CALLBACK_EVENT` means the driver sets this event every
-            // time a buffer drains, and that is the only back-pressure
-            // the guest's mixer thread has. Toy Golf's thread waits on
-            // it and refills whatever is done; leaving the event alone
-            // makes the wait fall through, so the thread refills as
-            // fast as the CPU allows, never yields, and the main thread
-            // never draws another frame.
-            if let Some(event) = ctx.kernel.events.get_mut(&target) {
-                event.signalled = true;
-            }
-        }
-        WaveCallbackKind::None => {}
-    }
+    wave_out_notify(ctx, handle, MM_WOM_DONE, hdr, 0);
     Ok(())
 }
 
@@ -14540,25 +14669,31 @@ fn service_wave_out(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
             ctx.kernel.wave_out.paused
         );
     }
-    if ctx.kernel.wave_out.pending.is_empty() || ctx.kernel.wave_out.paused {
-        return Ok(());
-    }
+    if ctx.kernel.wave_out.pending.is_empty() { return Ok(()); }
     let cursor = ctx.kernel.audio.playback_cursor();
     while let Some(front) = ctx.kernel.wave_out.pending.front().copied() {
-        if front.end_cursor > cursor {
-            break;
-        }
+        if front.end_cursor > cursor { break; }
+        if ctx.kernel.wave_out.devices.get(&front.handle).map(|d| d.paused).unwrap_or(false) { break; }
         ctx.kernel.wave_out.pending.pop_front();
-        retire_wave_buffer(ctx, front.hdr)?;
+        retire_wave_buffer(ctx, front.handle, front.hdr)?;
     }
     Ok(())
 }
 
 /// `waveOutReset` / `waveOutClose` semantics: everything still queued
 /// is reported as finished right away.
+fn retire_wave_buffers_for(ctx: &mut CallCtx<'_>, handle: u32) -> Result<(), KernelError> {
+    let mut keep = VecDeque::new();
+    while let Some(front) = ctx.kernel.wave_out.pending.pop_front() {
+        if front.handle == handle { retire_wave_buffer(ctx, handle, front.hdr)?; } else { keep.push_back(front); }
+    }
+    ctx.kernel.wave_out.pending = keep;
+    Ok(())
+}
+
 fn retire_all_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     while let Some(front) = ctx.kernel.wave_out.pending.pop_front() {
-        retire_wave_buffer(ctx, front.hdr)?;
+        retire_wave_buffer(ctx, front.handle, front.hdr)?;
     }
     Ok(())
 }
@@ -17477,6 +17612,10 @@ mod tests {
         );
         kernel.wave_out.callback_kind = WaveCallbackKind::Event;
         kernel.wave_out.callback_target = EVENT;
+        kernel.wave_out.devices.insert(FAKE_HWAVEOUT, pocket_kernel::WaveOutDevice {
+            callback_kind: WaveCallbackKind::Event, callback_target: EVENT, instance: 0,
+            owner_thread: 0, format: GuestFormat::default(), paused: false,
+        });
 
         let t = thunk_at(0x7000_0140);
         {
@@ -17485,7 +17624,7 @@ mod tests {
                 thunk: &t,
                 kernel: &mut kernel,
             };
-            retire_wave_buffer(&mut c, HDR).unwrap();
+            retire_wave_buffer(&mut c, FAKE_HWAVEOUT, HDR).unwrap();
         }
 
         assert!(
@@ -18304,12 +18443,17 @@ mod tests {
         kernel.wave_out.callback_kind = pocket_kernel::WaveCallbackKind::Function;
         kernel.wave_out.callback_target = PROC;
         kernel.wave_out.instance = INSTANCE;
+        kernel.wave_out.devices.insert(FAKE_HWAVEOUT, pocket_kernel::WaveOutDevice {
+            callback_kind: pocket_kernel::WaveCallbackKind::Function, callback_target: PROC,
+            instance: INSTANCE, owner_thread: 0, format: GuestFormat::default(), paused: false,
+        });
         // A buffer whose samples have already played: the host cursor
         // starts at zero, so this is due the moment anyone asks.
         kernel
             .wave_out
             .pending
             .push_back(pocket_kernel::PendingWaveBuffer {
+                handle: FAKE_HWAVEOUT,
                 hdr: HDR,
                 end_cursor: 0,
             });

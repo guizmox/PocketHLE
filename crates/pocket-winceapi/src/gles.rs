@@ -869,7 +869,7 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     let values: Vec<i32> = match pname {
         pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024],
         pocket_gles::GL_MAX_LIGHTS => vec![8],
-        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![1],
+        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as i32],
         pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH => vec![16],
         pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH => vec![16],
         pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16],
@@ -915,7 +915,11 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let values: Vec<f32> = match pname {
         pocket_gles::GL_MODELVIEW_MATRIX => with_ctx(|c| c.modelview.current().to_vec()),
         pocket_gles::GL_PROJECTION_MATRIX => with_ctx(|c| c.projection.current().to_vec()),
-        pocket_gles::GL_TEXTURE_MATRIX => with_ctx(|c| c.texture_matrix.current().to_vec()),
+        pocket_gles::GL_TEXTURE_MATRIX => with_ctx(|c| {
+            c.texture_matrix[c.active_texture as usize]
+                .current()
+                .to_vec()
+        }),
         pocket_gles::GL_CURRENT_COLOR => with_ctx(|c| c.current_color.to_vec()),
         pocket_gles::GL_DEPTH_RANGE => {
             let (n, f) = with_ctx(|c| c.state.depth_range);
@@ -925,7 +929,7 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         // GL converts. Only the few games actually ask for are listed.
         pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024.0],
         pocket_gles::GL_MAX_LIGHTS => vec![8.0],
-        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![1.0],
+        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as f32],
         pocket_gles::GL_VIEWPORT => {
             let vp = with_ctx(|c| c.state.viewport);
             vec![vp.0 as f32, vp.1 as f32, vp.2 as f32, vp.3 as f32]
@@ -975,9 +979,13 @@ fn intern_string(ctx: &mut CallCtx<'_>, text: &str) -> Result<u32, KernelError> 
     Ok(va)
 }
 
-/// `glReadPixels(x, y, width, height, format, type, pixels)`. The
-/// renderer's colour buffer is RGBA8888 top-row-first; GL wants
-/// bottom-row-first, so rows are emitted in reverse.
+/// `glReadPixels(x, y, width, height, format, type, pixels)`.
+///
+/// The software renderer stores RGBA8888 with the top row first, while
+/// OpenGL's origin is the lower-left.  Besides the ES baseline
+/// RGBA/UNSIGNED_BYTE path, Gizmondo titles use the device driver's native
+/// RGB/UNSIGNED_SHORT_5_6_5 readback path (notably Supernaturals when it
+/// captures the framebuffer into a 256x256 texture).
 fn gl_read_pixels(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let x = ctx.arg_u32(0)? as i32;
     let y = ctx.arg_u32(1)? as i32;
@@ -989,12 +997,18 @@ fn gl_read_pixels(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if out == 0 || w == 0 || h == 0 {
         return Ok(VOID);
     }
-    if format != pocket_gles::GL_RGBA || ty != GL_UNSIGNED_BYTE {
-        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
-        return Ok(VOID);
-    }
+
+    let bytes_per_pixel = match (format, ty) {
+        (pocket_gles::GL_RGBA, GL_UNSIGNED_BYTE) => 4usize,
+        (pocket_gles::GL_RGB, pocket_gles::GL_UNSIGNED_SHORT_5_6_5) => 2usize,
+        _ => {
+            with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+            return Ok(VOID);
+        }
+    };
+
     let buf = with_ctx(|c| {
-        let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * bytes_per_pixel];
         for row in 0..h {
             // GL row 0 is the bottom of the image.
             let src_y = c.target.height as i32 - 1 - (y + row as i32);
@@ -1007,8 +1021,21 @@ fn gl_read_pixels(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
                     continue;
                 }
                 let s = ((src_y as u32 * c.target.width + src_x as u32) * 4) as usize;
-                let d = ((row * w + col) * 4) as usize;
-                buf[d..d + 4].copy_from_slice(&c.target.color[s..s + 4]);
+                match (format, ty) {
+                    (pocket_gles::GL_RGBA, GL_UNSIGNED_BYTE) => {
+                        let d = ((row * w + col) * 4) as usize;
+                        buf[d..d + 4].copy_from_slice(&c.target.color[s..s + 4]);
+                    }
+                    (pocket_gles::GL_RGB, pocket_gles::GL_UNSIGNED_SHORT_5_6_5) => {
+                        let r = c.target.color[s] as u16;
+                        let g = c.target.color[s + 1] as u16;
+                        let b = c.target.color[s + 2] as u16;
+                        let rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                        let d = ((row * w + col) * 2) as usize;
+                        buf[d..d + 2].copy_from_slice(&rgb565.to_le_bytes());
+                    }
+                    _ => unreachable!(),
+                }
             }
         }
         buf
@@ -2086,7 +2113,7 @@ mod tests {
         let mut kernel = fresh_kernel();
         for (pname, want) in [
             (pocket_gles::GL_MAX_TEXTURE_SIZE, 1024u32),
-            (pocket_gles::GL_MAX_TEXTURE_UNITS, 1),
+            (pocket_gles::GL_MAX_TEXTURE_UNITS, pocket_gles::raster::MAX_TEXTURE_STAGES as u32),
             (pocket_gles::GL_DEPTH_BITS, 16),
             (
                 pocket_gles::GL_NUM_COMPRESSED_TEXTURE_FORMATS,

@@ -147,23 +147,46 @@ pub fn is_gizmondo_game(entry: &GameEntry, library_root: &Path) -> bool {
 }
 
 fn has_gizmondo_marker(root: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(root) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+    fn scan(dir: &Path, depth: usize) -> bool {
+        // Some Gizmondo CAB/ZIP repacks add one or more wrapper directories
+        // below `extracted`. Keep the marker test strict, but search a few
+        // levels down so layouts such as
+        // extracted\Battlestations_12092005\GZGA200038\GZGA200038
+        // are recognised as Gizmondo titles.
+        if depth > 4 {
+            return false;
+        }
+
+        let Ok(entries) = fs::read_dir(dir) else {
             return false;
         };
-        if file_type.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            return is_gizmondo_title_id(name) && path.join(name).is_file();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if is_gizmondo_title_id(name) && path.join(name).is_file() {
+                return true;
+            }
+
+            if scan(&path, depth + 1) {
+                return true;
+            }
         }
+
         false
-    })
+    }
+
+    scan(root, 0)
 }
 
 fn is_gizmondo_title_id(name: &str) -> bool {

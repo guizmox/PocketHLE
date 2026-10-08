@@ -204,7 +204,8 @@ pub struct Context {
     pub matrix_mode: MatrixMode,
     pub modelview: MatrixStack,
     pub projection: MatrixStack,
-    pub texture_matrix: MatrixStack,
+    /// GL ES keeps one texture matrix stack per server texture unit.
+    pub texture_matrix: [MatrixStack; MAX_TEXTURE_UNITS],
 
     // ---- per-vertex defaults, used when the array is disabled ----
     pub current_color: [f32; 4],
@@ -275,7 +276,7 @@ impl Context {
             matrix_mode: MatrixMode::Modelview,
             modelview: MatrixStack::new(16),
             projection: MatrixStack::new(16),
-            texture_matrix: MatrixStack::new(16),
+            texture_matrix: std::array::from_fn(|_| MatrixStack::new(16)),
             current_color: [1.0, 1.0, 1.0, 1.0],
             current_texcoord: [0.0, 0.0],
             current_normal: [0.0, 0.0, 1.0],
@@ -329,7 +330,7 @@ impl Context {
         match self.matrix_mode {
             MatrixMode::Modelview => &mut self.modelview,
             MatrixMode::Projection => &mut self.projection,
-            MatrixMode::Texture => &mut self.texture_matrix,
+            MatrixMode::Texture => &mut self.texture_matrix[self.active_texture as usize],
         }
     }
 
@@ -803,7 +804,26 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        if level != 0 {
+        // OES_compressed_paletted_texture overloads a negative `level`:
+        // -level is the number of additional mip levels packed after level 0.
+        // The palette is stored once, followed by the level-0 indices and
+        // then the smaller mip levels.  Our software rasterizer currently
+        // samples only level 0, so accept such uploads and decode their base
+        // image.  Positive levels remain ordinary mip uploads and are ignored.
+        let paletted = matches!(
+            format,
+            GL_PALETTE4_RGB8_OES
+                | GL_PALETTE4_RGBA8_OES
+                | GL_PALETTE4_R5_G6_B5_OES
+                | GL_PALETTE4_RGBA4_OES
+                | GL_PALETTE4_RGB5_A1_OES
+                | GL_PALETTE8_RGB8_OES
+                | GL_PALETTE8_RGBA8_OES
+                | GL_PALETTE8_R5_G6_B5_OES
+                | GL_PALETTE8_RGBA4_OES
+                | GL_PALETTE8_RGB5_A1_OES
+        );
+        if level > 0 || (level < 0 && !paletted) {
             return;
         }
         let unit = self.active_texture as usize;
@@ -1224,7 +1244,7 @@ impl Context {
                     .fetch(mem, unit.texcoord_array, index, false)
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
                 // The texture matrix applies to incoming coordinates.
-                let m = matrix::transform(self.texture_matrix.current(), [t[0], t[1], 0.0, 1.0]);
+                let m = matrix::transform(self.texture_matrix[stage.unit].current(), [t[0], t[1], 0.0, 1.0]);
                 [m[0], m[1]]
             } else {
                 unit.current_texcoord
@@ -1455,6 +1475,7 @@ impl Context {
             }
         }
         let sample = |unit: usize, s: f32, t: f32| texs[unit].map(|tx| tx.sample(s, t));
+
         for tri in tris {
             raster::draw_triangle(&mut self.target, &self.state, &sample, &stages, tri);
         }

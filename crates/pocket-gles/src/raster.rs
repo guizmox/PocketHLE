@@ -414,16 +414,20 @@ pub fn draw_triangle(
     stages: &[TextureStage],
     tri: [Vertex; 3],
 ) -> usize {
-    // Near/far clipping. A full Sutherland-Hodgman clip against all six
-    // planes would be more correct, but the near plane is the only one
-    // that can produce a divide-by-zero or a sign flip in the
-    // perspective divide, and X/Y are handled by the bounding-box
-    // intersection below. Clipping the near plane can turn a triangle
-    // into a quad, hence the fan.
-    let mut polygon: Vec<Vertex> = Vec::with_capacity(4);
-    clip_near(&tri, &mut polygon);
-    if polygon.len() < 3 {
-        return 0;
+    // OpenGL clips primitives in homogeneous clip space before the
+    // perspective divide and viewport transform.  Clipping only against
+    // the framebuffer bounds is not equivalent: with a sub-viewport,
+    // vertices outside +/-W can otherwise spill into pixels outside that
+    // viewport.  Clip against all six canonical planes.
+    let mut polygon: Vec<Vertex> = tri.to_vec();
+    let mut scratch: Vec<Vertex> = Vec::with_capacity(9);
+    for plane in 0..6 {
+        clip_plane(&polygon, &mut scratch, plane);
+        std::mem::swap(&mut polygon, &mut scratch);
+        scratch.clear();
+        if polygon.len() < 3 {
+            return 0;
+        }
     }
     let mut written = 0;
     for i in 1..polygon.len() - 1 {
@@ -438,23 +442,39 @@ pub fn draw_triangle(
     written
 }
 
-/// Clip a triangle against `z > -w`, the near plane in GL clip space.
-fn clip_near(tri: &[Vertex; 3], out: &mut Vec<Vertex>) {
-    const EPS: f32 = 0.0;
-    let dist = |v: &Vertex| v.pos[2] + v.pos[3];
-    for i in 0..3 {
-        let a = &tri[i];
-        let b = &tri[(i + 1) % 3];
+/// Sutherland-Hodgman clipping against one canonical OpenGL clip plane.
+/// Inside is: -w <= x,y,z <= w.
+fn clip_plane(input: &[Vertex], out: &mut Vec<Vertex>, plane: usize) {
+    if input.is_empty() {
+        return;
+    }
+    let dist = |v: &Vertex| -> f32 {
+        match plane {
+            0 => v.pos[0] + v.pos[3], // left   x >= -w
+            1 => v.pos[3] - v.pos[0], // right  x <=  w
+            2 => v.pos[1] + v.pos[3], // bottom y >= -w
+            3 => v.pos[3] - v.pos[1], // top    y <=  w
+            4 => v.pos[2] + v.pos[3], // near   z >= -w
+            5 => v.pos[3] - v.pos[2], // far    z <=  w
+            _ => unreachable!(),
+        }
+    };
+    for i in 0..input.len() {
+        let a = &input[i];
+        let b = &input[(i + 1) % input.len()];
         let da = dist(a);
         let db = dist(b);
-        if da >= EPS {
+        let a_in = da >= 0.0;
+        let b_in = db >= 0.0;
+        if a_in {
             out.push(*a);
         }
-        // Sign change means the edge crosses the plane; emit the
-        // intersection point.
-        if (da >= EPS) != (db >= EPS) {
-            let t = da / (da - db);
-            out.push(lerp_vertex(a, b, t));
+        if a_in != b_in {
+            let denom = da - db;
+            if denom != 0.0 && denom.is_finite() {
+                let t = da / denom;
+                out.push(lerp_vertex(a, b, t));
+            }
         }
     }
 }
@@ -685,7 +705,7 @@ fn raster_clipped(
                     target.color[ci + c] = to_byte(value);
                 }
             }
-            if state.depth_write {
+            if state.depth_test && state.depth_write {
                 target.depth[idx] = z;
             }
             written += 1;
@@ -1331,4 +1351,21 @@ mod tests {
         }
         assert_eq!(pixel(&t, 9, 15)[0], 255);
     }
+
+    #[test]
+    fn disabled_depth_test_never_updates_depth_buffer() {
+        let mut t = target_240x320();
+        t.depth.fill(0.25);
+        let s = PipelineState {
+            depth_test: false,
+            depth_write: true,
+            ..Default::default()
+        };
+        draw_triangle(&mut t, &s, &no_texture, &[], big_tri([1.0; 4]));
+        assert!(
+            t.depth.iter().all(|&d| d == 0.25),
+            "GL_DEPTH_TEST disabled must leave the depth buffer untouched"
+        );
+    }
+
 }

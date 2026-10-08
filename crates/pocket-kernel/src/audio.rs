@@ -71,6 +71,7 @@ struct AudioVoice {
     looped: bool,
     volume: f32,
     group: u32,
+    paused: bool,
 }
 
 /// How a voice submitted through [`AudioEngine::play_voice_with`]
@@ -261,6 +262,15 @@ impl Shared {
     }
 
     #[cfg(feature = "audio-cpal")]
+    fn pause_voice_group(&mut self, group: u32, paused: bool) {
+        for voice in &mut self.voices {
+            if voice.group == group {
+                voice.paused = paused;
+            }
+        }
+    }
+
+    #[cfg(feature = "audio-cpal")]
     fn add_voice(&mut self, samples: Vec<i16>, format: GuestFormat, params: VoiceParams) {
         if samples.is_empty() {
             return;
@@ -275,6 +285,7 @@ impl Shared {
             looped: params.looped,
             volume: params.volume,
             group: params.group,
+            paused: false,
         });
     }
 
@@ -311,6 +322,10 @@ impl Shared {
                 let mut index = 0;
                 while index < self.voices.len() {
                     let voice = &mut self.voices[index];
+                    if voice.paused {
+                        index += 1;
+                        continue;
+                    }
                     let voice_channels = voice.format.channels.max(1) as usize;
                     let frame_count = voice.samples.len() / voice_channels;
                     let source_frame = (voice.position_q16 >> 16) as usize;
@@ -561,6 +576,17 @@ impl AudioEngine {
         let _ = group;
     }
 
+    /// Pause or resume only one mixer voice group.  This is used by devices
+    /// such as Gizmondo MAS1 whose transport is independent of waveOut.
+    pub fn pause_voice_group(&self, group: u32, paused: bool) {
+        #[cfg(feature = "audio-cpal")]
+        if let Ok(mut s) = self.shared.lock() {
+            s.pause_voice_group(group, paused);
+        }
+        #[cfg(not(feature = "audio-cpal"))]
+        let _ = (group, paused);
+    }
+
     /// Convenience for unsigned 8-bit PCM (the format `PlaySound` and
     /// some old WAV resources use). Each byte is mapped to the
     /// signed 16-bit range linearly.
@@ -581,6 +607,23 @@ impl AudioEngine {
             s.mix_format_ready = false;
             s.guest_format_ready = false;
             s.resampler_phase = 0;
+        }
+    }
+
+    /// Flush only the WinMM/waveOut PCM stream. Independent mixer voices
+    /// (for example Gizmondo MAS1 playback) keep running.
+    pub fn flush_wave_out(&self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.len = 0;
+            s.read = 0;
+            s.write = 0;
+            s.resampler_phase = 0;
+            s.written = 0;
+            s.consumed = 0;
+            s.virtual_cursor = 0;
+            s.virtual_tick = None;
+            s.mix_format_ready = false;
+            s.guest_format_ready = false;
         }
     }
 

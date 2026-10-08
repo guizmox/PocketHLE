@@ -43,7 +43,11 @@ mod vk {
     pub const SHIFT: u16 = 0x10;
     pub const CTRL: u16 = 0x11;
     pub const ESCAPE: u16 = 0x1B;
+    pub const F1: u16 = 0x70;
+    pub const F2: u16 = 0x71;
     pub const F3: u16 = 0x72;
+    pub const F4: u16 = 0x73;
+    pub const F11: u16 = 0x7A;
 }
 
 /// One button on the emulated device.
@@ -63,13 +67,19 @@ pub enum GuestButton {
     ButtonC,
     Soft1,
     Soft2,
-    /// Gizmondo's turbo key (`VK_F3`).
+    /// Legacy PocketHLE turbo helper. Not a physical Gizmondo button.
     Turbo,
+    /// Gizmondo top-row ("piano") hardware buttons.
+    GizPiano1,
+    GizPiano2,
+    GizPiano3,
+    GizPiano4,
+    GizPiano5,
 }
 
 impl GuestButton {
     /// Every button, in the order the settings UI lists them.
-    pub const ALL: [GuestButton; 11] = [
+    pub const ALL: [GuestButton; 16] = [
         GuestButton::DpadUp,
         GuestButton::DpadDown,
         GuestButton::DpadLeft,
@@ -81,6 +91,11 @@ impl GuestButton {
         GuestButton::Soft1,
         GuestButton::Soft2,
         GuestButton::Turbo,
+        GuestButton::GizPiano1,
+        GuestButton::GizPiano2,
+        GuestButton::GizPiano3,
+        GuestButton::GizPiano4,
+        GuestButton::GizPiano5,
     ];
 
     /// The virtual-key code this button sends into the guest.
@@ -97,42 +112,60 @@ impl GuestButton {
             GuestButton::Soft1 => vk::TAB,
             GuestButton::Soft2 => vk::ESCAPE,
             GuestButton::Turbo => vk::F3,
+            GuestButton::GizPiano1 => vk::F1,
+            GuestButton::GizPiano2 => vk::F2,
+            GuestButton::GizPiano3 => vk::F3,
+            GuestButton::GizPiano4 => vk::F4,
+            // Official Gizmondo Keys SDK: Piano 5 is VK_F11, not VK_F5.
+            GuestButton::GizPiano5 => vk::F11,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            GuestButton::DpadUp => "D-pad up",
-            GuestButton::DpadDown => "D-pad down",
-            GuestButton::DpadLeft => "D-pad left",
-            GuestButton::DpadRight => "D-pad right",
-            GuestButton::Action => "Action / confirm",
-            GuestButton::ButtonA => "Button A",
-            GuestButton::ButtonB => "Button B",
-            GuestButton::ButtonC => "Button C",
-            GuestButton::Soft1 => "Soft key 1",
-            GuestButton::Soft2 => "Soft key 2",
+            GuestButton::DpadUp => "D-pad up / Gizmondo ↑",
+            GuestButton::DpadDown => "D-pad down / Gizmondo ↓",
+            GuestButton::DpadLeft => "D-pad left / Gizmondo ←",
+            GuestButton::DpadRight => "D-pad right / Gizmondo →",
+            GuestButton::Action => "Action / Gizmondo South (Play)",
+            GuestButton::ButtonA => "Button A / Gizmondo North (Stop)",
+            GuestButton::ButtonB => "Button B / Gizmondo East (Forward)",
+            GuestButton::ButtonC => "Button C / Gizmondo West (Rewind)",
+            GuestButton::Soft1 => "Soft key 1 / Gizmondo L",
+            GuestButton::Soft2 => "Soft key 2 / Gizmondo R",
             GuestButton::Turbo => "Turbo",
+            GuestButton::GizPiano1 => "Gizmondo Home (Piano 1)",
+            GuestButton::GizPiano2 => "Gizmondo Volume (Piano 2)",
+            GuestButton::GizPiano3 => "Gizmondo Brightness (Piano 3)",
+            GuestButton::GizPiano4 => "Gizmondo Alert (Piano 4)",
+            GuestButton::GizPiano5 => "Gizmondo Power (Piano 5)",
         }
     }
 
     /// Host keys bound to this button out of the box.
     ///
-    /// These reproduce the table the desktop launcher used to hard-code,
-    /// so a user who never opens the keybinding screen sees no change.
+    /// Defaults shared by PocketPC and the Gizmondo skin. The guest VKs stay
+    /// compatible with GAPI; only the host-side shortcuts are user preferences.
     pub fn default_keys(self) -> &'static [&'static str] {
         match self {
-            GuestButton::DpadUp => &["Up"],
-            GuestButton::DpadDown => &["Down"],
-            GuestButton::DpadLeft => &["Left"],
-            GuestButton::DpadRight => &["Right"],
-            GuestButton::Action => &["Enter"],
-            GuestButton::ButtonA => &["A"],
-            GuestButton::ButtonB => &["B", "Space"],
-            GuestButton::ButtonC => &["C"],
-            GuestButton::Soft1 => &["Tab", "1"],
-            GuestButton::Soft2 => &["Escape", "2"],
-            GuestButton::Turbo => &["S", "F3"],
+            // Defaults are chosen for the Gizmondo skin while retaining the
+            // same guest VKs used by PocketPC/GAPI titles.
+            GuestButton::DpadUp => &["Z"],
+            GuestButton::DpadDown => &["S"],
+            GuestButton::DpadLeft => &["Q"],
+            GuestButton::DpadRight => &["D"],
+            GuestButton::Action => &["Down"],
+            GuestButton::ButtonA => &["Up"],
+            GuestButton::ButtonB => &["Right"],
+            GuestButton::ButtonC => &["Left"],
+            GuestButton::Soft1 => &["1"],
+            GuestButton::Soft2 => &["2"],
+            GuestButton::Turbo => &["T"],
+            GuestButton::GizPiano1 => &["F1"],
+            GuestButton::GizPiano2 => &["F2"],
+            GuestButton::GizPiano3 => &["F3"],
+            GuestButton::GizPiano4 => &["F4"],
+            GuestButton::GizPiano5 => &["F5"],
         }
     }
 }
@@ -267,14 +300,15 @@ impl KeyBindings {
     pub fn fill_missing_buttons(&mut self) {
         for button in GuestButton::ALL {
             if !self.bindings.iter().any(|b| b.button == button) {
-                self.bindings.push(KeyBinding {
-                    button,
-                    keys: button
-                        .default_keys()
-                        .iter()
-                        .map(|k| (*k).to_string())
-                        .collect(),
-                });
+                // Use the normal binding path so a newly introduced default
+                // (notably Gizmondo Brightness = host F3) cannot leave the
+                // same host key attached to an older control such as Turbo.
+                let keys = button
+                    .default_keys()
+                    .iter()
+                    .map(|k| (*k).to_string())
+                    .collect();
+                self.set_keys(button, keys);
             }
         }
     }
@@ -311,10 +345,12 @@ mod tests {
     #[test]
     fn lookup_is_case_insensitive_and_maps_to_vk() {
         let bindings = KeyBindings::default();
-        assert_eq!(bindings.vk_for_key("up"), Some(0x26));
-        // egui parses both spellings of the arrows, so both must resolve.
-        assert_eq!(bindings.vk_for_key("ArrowUp"), Some(0x26));
-        assert_eq!(bindings.vk_for_key("Enter"), Some(0x0D));
+        assert_eq!(bindings.vk_for_key("z"), Some(0x26));
+        // The arrow keys are the Gizmondo face buttons in the default layout.
+        assert_eq!(bindings.vk_for_key("ArrowUp"), Some(0x11));
+        assert_eq!(bindings.vk_for_key("F3"), Some(0x72));
+        // Host F5 drives Piano 5, whose guest-side code is VK_F11.
+        assert_eq!(bindings.vk_for_key("F5"), Some(0x7A));
         assert_eq!(bindings.vk_for_key("F12"), None);
     }
 
