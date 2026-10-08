@@ -136,15 +136,10 @@ impl OpenVolume {
     /// do exactly that during startup, so a volume has to have a serial
     /// for one to boot at all.
     ///
-    /// A Gizmondo card states its own serial: alongside the game
-    /// directory it carries a four-byte marker file with the same name as
-    /// that directory (`\SD Card\GZGA200045\GZGA200045`), holding the
-    /// serial of the card the title was published on. Reporting that
-    /// value is what makes the card in the slot *be* the card the content
-    /// was written for, which is the situation the game is checking for.
-    /// Any other volume gets a serial derived from its own host path:
-    /// arbitrary, but stable across runs, which is all an unrelated guest
-    /// can reasonably expect of one.
+    /// Gizmondo's card marker is not a raw serial: the same-named file in
+    /// a GZGA directory stores `numeric_id - serial - 1`, modulo 2^32.
+    /// Decode it so all titles from one card report the same volume identity.
+    /// Other volumes keep a stable serial derived from their host path.
     pub fn serial(&self) -> u32 {
         if let Some(declared) = self.declared_serial() {
             return declared;
@@ -167,12 +162,19 @@ impl OpenVolume {
                 continue;
             }
             let name = entry.file_name();
+            let upper = name.to_string_lossy().to_ascii_uppercase();
+            let Some(digits) = upper.strip_prefix("GZGA") else { continue; };
+            if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(numeric_id) = digits.parse::<u32>() else { continue; };
             let marker = entry.path().join(&name);
             let Ok(bytes) = std::fs::read(&marker) else {
                 continue;
             };
             if let Ok(four) = <[u8; 4]>::try_from(bytes.as_slice()) {
-                let serial = u32::from_le_bytes(four);
+                let encoded = u32::from_le_bytes(four);
+                let serial = numeric_id.wrapping_sub(encoded).wrapping_sub(1);
                 log::debug!(
                     "volume {:?} declares serial {serial} in {marker:?}",
                     self.prefix
@@ -1340,22 +1342,37 @@ mod tests {
         assert!(v.volume(h).is_none());
     }
 
-    /// A Gizmondo card states its own serial in a four-byte marker file
-    /// named after the game directory that holds it. Reporting that
-    /// value is what makes the card in the slot be the card the title
-    /// was published on — Ball Busters checks and refuses to boot
-    /// otherwise.
     #[test]
-    fn volume_serial_comes_from_the_gizmondo_card_marker() {
+    fn volume_serial_decodes_gizmondo_markers_across_multiple_titles() {
         let dir = tempfile::tempdir().unwrap();
-        let game = dir.path().join("GZGA200045");
-        std::fs::create_dir(&game).unwrap();
-        std::fs::write(game.join("GZGA200045"), 200_045u32.to_le_bytes()).unwrap();
-
+        let serial = 0xb5f1_0053u32;
+        // The identifiers are synthetic; the encoding is the SDK format.
+        for id in [100_001u32, 100_002] {
+            let name = format!("GZGA{id:06}");
+            let game = dir.path().join(&name);
+            std::fs::create_dir(&game).unwrap();
+            let encoded = id.wrapping_sub(serial).wrapping_sub(1);
+            std::fs::write(game.join(&name), encoded.to_le_bytes()).unwrap();
+            let card = tempfile::tempdir().unwrap();
+            let copy = card.path().join(&name);
+            std::fs::create_dir(&copy).unwrap();
+            std::fs::write(copy.join(&name), encoded.to_le_bytes()).unwrap();
+            let mut single = Vfs::new();
+            single.mount_read_only("\\SD Card\\", card.path());
+            let handle = single.open("\\SD Card\\Vol:", Access::Read, false).unwrap();
+            assert_eq!(single.volume(handle).unwrap().serial(), serial);
+        }
+        // An unrelated four-byte same-named file is not volume metadata.
+        let unrelated = dir.path().join("Assets");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("Assets"), 42u32.to_le_bytes()).unwrap();
+        let malformed = dir.path().join("GZGAABCDEF");
+        std::fs::create_dir(&malformed).unwrap();
+        std::fs::write(malformed.join("GZGAABCDEF"), 42u32.to_le_bytes()).unwrap();
         let mut v = Vfs::new();
-        v.mount("\\SD Card\\", dir.path());
+        v.mount_read_only("\\SD Card\\", dir.path());
         let h = v.open("\\SD Card\\Vol:", Access::Read, false).unwrap();
-        assert_eq!(v.volume(h).unwrap().serial(), 200_045);
+        assert_eq!(v.volume(h).unwrap().serial(), serial);
     }
 
     /// A volume with no marker still needs a serial: zero reads as "no
