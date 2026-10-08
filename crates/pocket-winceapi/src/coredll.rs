@@ -2515,7 +2515,11 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 let value = u32::from_le_bytes(ctx.cpu.read_mem(input_buf, 4)?.try_into().unwrap_or([0; 4]));
                 ctx.kernel.vfs.set_mp3_decoder_volume(handle, value);
             }
-            if out_buf != 0 && out_len > 0 {
+            // The Micronas capability query accepts the call but only writes
+            // its DWORD when the output size is exactly four. In particular,
+            // a caller's one-byte default must remain untouched.
+            let writes_reply = code != MASG_HAS_MP3 || out_len == 4;
+            if out_buf != 0 && out_len > 0 && writes_reply {
                 let mut reply = ctx.kernel.vfs.mp3_decoder_reply(handle, code, out_len as usize);
                 if code == MASG_START && out_len >= 4 {
                     reply[..4].copy_from_slice(&ctx.kernel.vfs.mp3_callback_event(handle).to_le_bytes());
@@ -2523,7 +2527,7 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 ctx.cpu.write_mem(out_buf, &reply)?;
             }
             if returned_p != 0 {
-                let returned = if matches!(code, MASG_START | MASG_STATE | MASG_GET_POSITION | MASG_GET_VOLUME | MASG_HAS_MP3) {
+                let returned = if matches!(code, MASG_START | MASG_STATE | MASG_GET_POSITION | MASG_GET_VOLUME) {
                     out_len.min(4)
                 } else { 0 };
                 ctx.cpu.write_mem(returned_p, &returned.to_le_bytes())?;
@@ -19013,6 +19017,40 @@ mod tests {
         assert_ne!(flags & WHDR_DONE, 0);
         tap.drain_into(&mut out);
         assert_eq!(out, [10, 10]); // music remains mixed after SFX reset
+    }
+
+    #[test]
+    fn mas_capability_query_preserves_non_dword_output() {
+        const OUT: u32 = 0x1100;
+        const RETURNED: u32 = 0x1200;
+        const SP: u32 = 0x1800;
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let handle = kernel.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
+        let thunk = dummy_thunk();
+        for len in [0u32, 1, 2, 3, 4, 8] {
+            for initial in [0u8, 1, 0xa5] {
+                let original = [initial; 8];
+                cpu.write_mem(OUT, &original).unwrap();
+                cpu.write_mem(RETURNED, &u32::MAX.to_le_bytes()).unwrap();
+                cpu.write_reg(ArmReg::R0, handle).unwrap();
+                cpu.write_reg(ArmReg::R1, 0x001d1030).unwrap();
+                cpu.write_reg(ArmReg::R2, 0).unwrap();
+                cpu.write_reg(ArmReg::R3, 0).unwrap();
+                cpu.write_reg(ArmReg::Sp, SP).unwrap();
+                let base = SP + cpu.stack_arg_offset();
+                for (i, value) in [OUT, len, RETURNED, 0].iter().enumerate() {
+                    cpu.write_mem(base + i as u32 * 4, &value.to_le_bytes()).unwrap();
+                }
+                let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+                assert!(matches!(device_io_control(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1)));
+                let mut expected = original;
+                if len == 4 { expected[..4].copy_from_slice(&1u32.to_le_bytes()); }
+                assert_eq!(cpu.read_mem(OUT, 8).unwrap(), expected);
+                assert_eq!(cpu.read_mem(RETURNED, 4).unwrap(), 0u32.to_le_bytes());
+            }
+        }
     }
 
     #[test]
