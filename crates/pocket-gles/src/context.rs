@@ -780,7 +780,6 @@ impl Context {
             tex.is_complete(),
             &tex.rgba[..tex.rgba.len().min(4)],
         );
-        dump_texture(name, tex);
     }
 
     /// `glCompressedTexImage2D` for the ATC formats.
@@ -856,8 +855,6 @@ impl Context {
             data.len(),
             tex.is_complete(),
         );
-        dump_texture(name, tex);
-        dump_compressed(name, width, height, format, data);
     }
 
     /// `glTexSubImage2D`: patch a rectangle of the bound texture.
@@ -1480,51 +1477,6 @@ impl Context {
             raster::draw_triangle(&mut self.target, &self.state, &sample, &stages, tri);
         }
     }
-}
-
-/// Write a freshly uploaded texture out as a PPM plus a companion
-/// greyscale PPM of its alpha, when `POCKETHLE_DUMP_TEXTURES` names a
-/// directory.
-///
-/// Decoding a compressed format wrong shows up on screen as art that is
-/// merely *slightly* off — a fat glyph, a wrong-hued gradient — which is
-/// almost impossible to judge from a composited frame. Looking at the
-/// atlas on its own is the only reliable way to tell a bad decoder from
-/// bad texture coordinates.
-fn dump_texture(name: u32, tex: &Texture) {
-    let Ok(dir) = std::env::var("POCKETHLE_DUMP_TEXTURES") else {
-        return;
-    };
-    if !tex.is_complete() {
-        return;
-    }
-    let (w, h) = (tex.width as usize, tex.height as usize);
-    let header = format!("P6\n{w} {h}\n255\n");
-    let mut rgb = Vec::with_capacity(header.len() + w * h * 3);
-    let mut alpha = Vec::with_capacity(header.len() + w * h * 3);
-    rgb.extend_from_slice(header.as_bytes());
-    alpha.extend_from_slice(header.as_bytes());
-    for px in tex.rgba.chunks_exact(4).take(w * h) {
-        rgb.extend_from_slice(&px[..3]);
-        alpha.extend_from_slice(&[px[3]; 3]);
-    }
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(format!("{dir}/tex{name:04}-{w}x{h}.ppm"), &rgb);
-    let _ = std::fs::write(format!("{dir}/tex{name:04}-{w}x{h}-alpha.ppm"), &alpha);
-}
-
-/// Write the guest's undecoded compressed blocks alongside the decoded
-/// texture, so a suspect decode can be re-derived offline from the exact
-/// bytes the game supplied.
-fn dump_compressed(name: u32, width: u32, height: u32, format: u32, data: &[u8]) {
-    let Ok(dir) = std::env::var("POCKETHLE_DUMP_TEXTURES") else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(
-        format!("{dir}/tex{name:04}-{width}x{height}-fmt{format:04x}.raw"),
-        data,
-    );
 }
 
 #[cfg(test)]
