@@ -2186,24 +2186,30 @@ fn resume_ready_worker_after_sleep(ctx: &mut CallCtx<'_>) -> Result<Option<Dispa
     Ok(Some(DispatchOutcome::JumpTo(regs[15] & !1)))
 }
 
-/// Poll sleeping-worker deadlines at API boundaries. Re-enter the interrupted
-/// main call with all arguments intact, before any handler side effects.
-/// Never interrupt a held critical section or a shared callback trampoline.
+/// Poll runnable workers at API boundaries, preserving the interrupted main
+/// call and its arguments before handler side effects. Critical sections block
+/// contenders, not the scheduler; shared callback trampolines stay indivisible.
 pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     if ctx.kernel.current_thread != 0 { return Ok(None); }
     let now = monotonic_ms();
     if now < ctx.kernel.worker_preempt_after_ms { return Ok(None); }
     ctx.kernel.worker_preempt_after_ms = now.saturating_add(timer_poll_interval(ctx.kernel));
-    if ctx.kernel.critical_sections.values().any(|&(owner, depth)| owner == 0 && depth != 0)
-        || ctx.kernel.wave_out.function_frame.is_some()
+    if ctx.kernel.wave_out.function_frame.is_some()
         || ctx.kernel.create_frame.is_some() || ctx.kernel.dialog_frame.is_some()
-        || ctx.kernel.message_frame.is_some() || !ctx.kernel.vector_iter_stack.is_empty()
+        || !ctx.kernel.vector_iter_stack.is_empty()
         || !ctx.kernel.qsort_frames.is_empty() || !ctx.kernel.module_attach_frames.is_empty() { return Ok(None); }
+    // Host playback continues independently of the guest message pump.
+    // Publish completed headers/events before deciding which blocked worker
+    // is ready. This only queues notifications; it never enters guest callbacks.
+    retire_completed_wave_buffers(ctx)?;
+    // A satisfied wait may yield a worker with no Sleep deadline. It is
+    // still runnable: do not make its next turn depend on a message pump.
+    // park_worker and this poll retain the normal quantum so a Sleep(0)
+    // loop cannot immediately re-enter ahead of the interrupted main API.
     let due = ctx.kernel.threads.iter().enumerate().any(|(index, thread)|
         thread.started && !thread.finished && thread.worker_saved
         && thread.sleep_until_ms <= now
-        && ((!thread.parked_in_pump && thread.sleep_until_ms != 0)
-            || worker_wait_expired(ctx.kernel, index, thread, now)));
+        && worker_is_ready(ctx.kernel, index, thread, now));
     if !due { return Ok(None); }
     resume_worker_reenter(ctx)
 }
@@ -2353,6 +2359,10 @@ fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         .position(|thread| thread.handle == handle && !thread.finished);
     if let Some(index) = thread_index {
         ctx.kernel.threads[index].started = true;
+        if ctx.kernel.current_thread == 0 {
+            ctx.kernel.worker_preempt_after_ms = ctx.kernel.worker_preempt_after_ms
+                .max(monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel)));
+        }
         
         log::debug!("ResumeThread(0x{handle:08x}) -> 0");
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -7964,7 +7974,8 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     // entry the original MSG arguments have been replaced by the callback's
     // return registers, so restore the interrupted call instead of
     // dispatching the same message again.
-    if let Some(frame) = ctx.kernel.message_frame.take() {
+    let owner = ctx.kernel.current_thread;
+    if let Some(frame) = ctx.kernel.message_frames.remove(&owner) {
         use pocket_cpu::regs::ArmReg;
         for (index, value) in frame.args.iter().enumerate() {
             ctx.cpu.write_reg(
@@ -8029,7 +8040,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         lr: ctx.cpu.read_reg(ArmReg::Lr)?,
         sp: ctx.cpu.read_reg(ArmReg::Sp)?,
     };
-    ctx.kernel.message_frame = Some(frame);
+    ctx.kernel.message_frames.insert(owner, frame);
     ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
     ctx.cpu.write_reg(ArmReg::R1, message)?;
     ctx.cpu.write_reg(ArmReg::R2, wparam)?;
@@ -12068,9 +12079,9 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // The difference between the two is only *when* the thread becomes
     // eligible to run: a suspended one waits for `ResumeThread` to set
     // `started`, a normal one is eligible right away. `resume_worker`
-    // hands it the CPU at the creator's next blocking call -- `Sleep`,
-    // `WaitForSingleObject`, `WaitForMultipleObjects` or the message
-    // pump -- which is exactly where a cooperative scheduler can switch.
+    // hands it the CPU at an explicit scheduling point. API-boundary
+    // polling also admits its first dispatch after the creator's quantum,
+    // so a long nonblocking loading sequence cannot starve a new worker.
     let mut worker_regs = [0u32; 17];
     worker_regs[0] = parameter;
     worker_regs[13] = stack_top - 16;
@@ -12081,6 +12092,13 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     thread.worker_saved = true;
     thread.started = !suspended;
     ctx.kernel.threads.push(thread);
+    // Return to the creator first; let the normal scheduling quantum expire
+    // before an API-boundary first dispatch. Do not defer startup until the
+    // first message pump: audio buffers can finish during resource loading.
+    if !suspended && ctx.kernel.current_thread == 0 {
+        ctx.kernel.worker_preempt_after_ms = ctx.kernel.worker_preempt_after_ms
+            .max(monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel)));
+    }
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
@@ -14890,8 +14908,13 @@ fn wave_out_notify(
             ctx.kernel.wave_out.function_done.push_back((handle, message, param1, param2));
         }
         WaveCallbackKind::Event => {
-            if let Some(event) = ctx.kernel.events.get_mut(&device.callback_target) {
-                event.signalled = true;
+            // CE signals this event only when buffers are returned. OPEN and
+            // CLOSE are notifications for function/window/thread callbacks,
+            // not evidence that a queued header is available for reuse.
+            if message == MM_WOM_DONE {
+                if let Some(event) = ctx.kernel.events.get_mut(&device.callback_target) {
+                    event.signalled = true;
+                }
             }
         }
         WaveCallbackKind::None => {}
@@ -15202,6 +15225,12 @@ fn service_wave_out(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     crate::directshow::service(ctx)?;
     crate::wavein::service(ctx)?;
     refresh_wave_loops(ctx)?;
+    retire_completed_wave_buffers(ctx)
+}
+
+/// Publish host-consumed buffers without media decoding, live-loop copies or
+/// guest callback entry. Safe to poll at the existing scheduling boundaries.
+fn retire_completed_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     // A paused or long-running handle must not block completion on another.
     let mut keep = VecDeque::new();
     while let Some(buffer) = ctx.kernel.wave_out.pending.pop_front() {
@@ -16261,6 +16290,126 @@ mod tests {
     use pocket_pe::ImportBinding;
 
     #[test]
+    fn dispatch_message_frames_are_thread_local_and_allow_worker_handoff() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let message_thunk = thunk_at(0x70000100);
+        let inside_thunk = thunk_at(0x70000200);
+        kernel.wnd_proc = 0x10200;
+        write_synthetic_msg(&mut cpu, 0x1100, WM_PAINT, 7, 8).unwrap();
+        write_synthetic_msg(&mut cpu, 0x1200, WM_KEYDOWN, 9, 10).unwrap();
+        let mut worker = GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17]);
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.worker_regs[13] = 0x1900;
+        worker.worker_regs[14] = 0x10500;
+        worker.worker_regs[15] = worker.entry;
+        kernel.threads.push(worker);
+        cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x10400).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &message_thunk };
+        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10200));
+        let main_frame = ctx.kernel.message_frames[&0];
+        // Model an API invoked inside the main WndProc. Its callback frame
+        // survives the handoff and must not globally block the audio worker.
+        ctx.cpu.write_reg(ArmReg::Sp, 0x1700).unwrap();
+        ctx.thunk = &inside_thunk;
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10300)));
+        assert_eq!(ctx.kernel.current_thread, 1);
+        assert_eq!(ctx.kernel.message_frames[&0].sp, main_frame.sp);
+        // The worker can dispatch its own message without taking main's frame.
+        ctx.thunk = &message_thunk;
+        ctx.cpu.write_reg(ArmReg::R0, 0x1200).unwrap();
+        ctx.cpu.write_reg(ArmReg::Sp, 0x1900).unwrap();
+        ctx.cpu.write_reg(ArmReg::Lr, 0x10500).unwrap();
+        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10200));
+        assert_eq!(ctx.kernel.message_frames.len(), 2);
+        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1200);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1900);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10500);
+        assert!(!ctx.kernel.message_frames.contains_key(&1));
+        assert_eq!(ctx.kernel.message_frames[&0].args, main_frame.args);
+        // Returning to main restores its in-WndProc stack first, then its
+        // DispatchMessage return restores the original caller's stack/LR.
+        assert!(park_worker(&mut ctx, 0).unwrap().is_some());
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1700);
+        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1100);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1800);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10400);
+        assert!(ctx.kernel.message_frames.is_empty());
+    }
+
+    #[test]
+    fn scheduler_new_worker_starts_without_a_message_pump() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        worker.started = false;
+        worker.worker_saved = true;
+        worker.worker_regs[13] = 0x8800;
+        worker.worker_regs[14] = 0x10300;
+        worker.worker_regs[15] = worker.entry;
+        kernel.threads.push(worker);
+        cpu.write_reg(ArmReg::R0, 0x12345678).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        // CREATE_SUSPENDED remains ineligible.
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
+        ctx.kernel.threads[0].started = true;
+        // The creator's quantum remains protected, even for a new thread.
+        ctx.kernel.worker_preempt_after_ms = u64::MAX;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10200)));
+        assert!(!ctx.kernel.threads[0].worker_saved);
+        assert_eq!(ctx.kernel.threads[0].saved_regs[0], 0x12345678);
+        assert_eq!(ctx.kernel.threads[0].saved_regs[15], thunk.thunk_va);
+        // A yielded runnable worker resumes after the main quantum, even
+        // when it has no positive Sleep deadline or signalled parked wait.
+        park_worker(&mut ctx, 0).unwrap();
+        ctx.kernel.worker_preempt_after_ms = u64::MAX;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10300)));
+    }
+
+    #[test]
+    fn scheduler_signalled_wait_wakes_at_an_api_boundary() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let main_thunk = thunk_at(0x70000100);
+        let event = 0xdead7b20;
+        kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.parked_in_pump = true;
+        worker.parked_wait_handles = vec![event];
+        worker.worker_regs[0] = event;
+        worker.worker_regs[1] = u32::MAX;
+        worker.worker_regs[13] = 0x8800;
+        worker.worker_regs[14] = 0x10280;
+        worker.worker_regs[15] = 0x10300;
+        kernel.threads.push(worker);
+        kernel.worker_preempt_after_ms = 0;
+        assert!(wake_due_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap().is_none());
+        kernel.events.get_mut(&event).unwrap().signalled = true;
+        kernel.worker_preempt_after_ms = 0;
+        cpu.write_reg(ArmReg::R0, 0x12345678).unwrap();
+        assert_eq!(wake_due_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), Some(DispatchOutcome::JumpTo(0x10300)));
+        assert_eq!(kernel.current_thread, 1);
+        assert_eq!(kernel.threads[0].saved_regs[0], 0x12345678);
+        assert_eq!(kernel.threads[0].saved_regs[15], main_thunk.thunk_va);
+        // Readiness never consumes an auto-reset event: the resumed wait does.
+        assert!(kernel.events[&event].signalled);
+    }
+
+    #[test]
     fn timed_wait_main_keeps_deadline_and_waits_for_the_worker_acknowledgement() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
@@ -16739,7 +16888,7 @@ mod tests {
             create_stage: pocket_kernel::CreateStage::Idle,
             dialog_frame: None,
             status_bar: None,
-            message_frame: None,
+            message_frames: Default::default(),
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             gapi_keys_queried: false,
@@ -18825,55 +18974,53 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_deadline_handoff_honors_recursive_critical_sections() {
-        let mut cpu = StubCpu::new();
+    fn scheduler_critical_section_blocks_contenders_not_unrelated_workers() {
+        let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = thunk_at(0x70000100);
-        let mut worker = GuestThread::new(0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17]);
+        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
-        worker.worker_regs[15] = 0x10000;
-        worker.sleep_until_ms = 1;
+        worker.worker_regs[13] = 0x8800;
+        worker.worker_regs[14] = 0x10300;
+        worker.worker_regs[15] = worker.entry;
         kernel.threads.push(worker);
-        let _ = monotonic_ms();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
+        let key = 0x123400;
+        let other = 0x123500;
+        cpu.write_reg(ArmReg::R0, key).unwrap();
         cpu.write_reg(ArmReg::R1, 0x87654321).unwrap();
-        cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
         let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
         initialize_critical_section(&mut ctx).unwrap();
         enter_critical_section(&mut ctx).unwrap();
         enter_critical_section(&mut ctx).unwrap();
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
-        leave_critical_section(&mut ctx).unwrap();
         ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
-        leave_critical_section(&mut ctx).unwrap();
-        ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10000)));
-        assert_eq!(ctx.kernel.threads[0].sleep_until_ms, 0);
-        let main = ctx.kernel.threads[0].saved_regs;
-        assert_eq!(main[0], 0x123400);
-        assert_eq!(main[1], 0x87654321);
-        assert_eq!(main[15], thunk.thunk_va);
-        ctx.cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
-        park_worker(&mut ctx, 0).unwrap();
-        assert_eq!(read_guest_regs(ctx.cpu).unwrap(), main);
-        // A contended worker retries Enter rather than passing the lock.
-        enter_critical_section(&mut ctx).unwrap();
-        ctx.cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
-        resume_worker_reenter(&mut ctx).unwrap();
-        ctx.cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
-        assert!(matches!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::JumpTo(_)));
-        assert!(ctx.kernel.threads[0].parked_in_pump);
-        assert_eq!(ctx.kernel.threads[0].parked_wait_handles, [0x123400]);
-        ctx.cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
-        leave_critical_section(&mut ctx).unwrap();
-        ctx.cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
-        assert!(resume_worker(&mut ctx, 0).unwrap().is_some());
-        ctx.cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10200)));
+        assert_eq!(ctx.kernel.critical_sections[&key], (0, 2));
+        // The independent worker may own a different critical section.
+        ctx.cpu.write_reg(ArmReg::R0, other).unwrap();
         assert_eq!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(ctx.kernel.critical_sections[&0x123400], (1, 1));
+        assert_eq!(ctx.kernel.critical_sections[&other], (1, 1));
+        leave_critical_section(&mut ctx).unwrap();
+        // Attempting the actual main-owned lock must still park and retry.
+        ctx.cpu.write_reg(ArmReg::R0, key).unwrap();
+        assert!(matches!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::JumpTo(_)));
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.kernel.threads[0].parked_wait_handles, [key]);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[0], key);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[15], thunk.thunk_va);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), key);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0x87654321);
+        // One recursive release is insufficient to wake the contender.
+        leave_critical_section(&mut ctx).unwrap();
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
+        assert_eq!(ctx.kernel.critical_sections[&key], (0, 1));
+        leave_critical_section(&mut ctx).unwrap();
+        ctx.kernel.threads[0].sleep_until_ms = 0;
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(thunk.thunk_va)));
+        assert_eq!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.kernel.critical_sections[&key], (1, 1));
     }
 
     #[test]
@@ -19087,6 +19234,10 @@ mod tests {
                 thunk: &t,
                 kernel: &mut kernel,
             };
+            wave_out_notify(&mut c, FAKE_HWAVEOUT, MM_WOM_OPEN, 0, 0);
+            assert!(!c.kernel.events[&EVENT].signalled, "OPEN must not advertise a completed buffer");
+            wave_out_notify(&mut c, FAKE_HWAVEOUT, MM_WOM_CLOSE, 0, 0);
+            assert!(!c.kernel.events[&EVENT].signalled, "CLOSE must not advertise a completed buffer");
             retire_wave_buffer(&mut c, FAKE_HWAVEOUT, HDR).unwrap();
         }
 

@@ -1022,10 +1022,10 @@ pub struct KernelState {
     /// dialog HWND is only returned to the caller once the callback
     /// unwinds, otherwise the caller stores the callback's `BOOL`.
     pub dialog_frame: Option<GuestCallFrame>,
-    /// Registers of a `DispatchMessageW` call interrupted to run the
-    /// guest window procedure. The trap return restores the caller's
-    /// continuation after the WndProc returns through its stack frame.
-    pub message_frame: Option<GuestCallFrame>,
+    /// Per-thread DispatchMessageW continuations. A worker may run while
+    /// another thread is inside WndProc; its callback return must restore
+    /// only its own arguments/stack, never another thread's continuation.
+    pub message_frames: HashMap<usize, GuestCallFrame>,
     /// Bottom status bar created via commctrl's `CreateStatusWindowW`.
     ///
     /// Pocket PC apps get a real shell-drawn bar here; PocketHLE has no
@@ -2295,7 +2295,7 @@ impl Process {
                 create_frame: None,
                 create_stage: CreateStage::Idle,
                 dialog_frame: None,
-                message_frame: None,
+                message_frames: Default::default(),
                 status_bar: None,
                 controls: Default::default(),
                 modal: None,
@@ -2589,7 +2589,8 @@ pub fn run_main_loop_with_hook(
                     return Ok(());
                 }
                 if addr == KERNEL_TRAP_BASE {
-                    if let Some(frame) = process.state.message_frame.take() {
+                    let owner = process.state.current_thread;
+                    if let Some(frame) = process.state.message_frames.remove(&owner) {
                         for (index, value) in frame.args.iter().enumerate() {
                             cpu.write_reg(
                                 match index {
@@ -2736,7 +2737,8 @@ pub fn run_main_loop_with_hook(
                         if (KERNEL_TRAP_BASE..KERNEL_TRAP_BASE.saturating_add(KERNEL_TRAP_SIZE))
                             .contains(&addr)
                         {
-                            if let Some(frame) = process.state.message_frame.take() {
+                            let owner = process.state.current_thread;
+                            if let Some(frame) = process.state.message_frames.remove(&owner) {
                                 for (index, value) in frame.args.iter().enumerate() {
                                     cpu.write_reg(
                                         match index {
