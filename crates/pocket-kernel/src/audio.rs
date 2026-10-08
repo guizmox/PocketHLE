@@ -3,34 +3,16 @@
 //! The Pocket PC `waveOut*` API and `PlaySoundW` / `PlaySoundA` /
 //! `sndPlaySoundW` family are routed through this module so that
 //! games which previously had no sound can drive real PCM samples
-//! out of the host's default audio device. The mixing model is
-//! intentionally tiny — a single shared lock-protected ring buffer
-//! of interleaved `i16` samples that the cpal output callback drains
-//! at the host device's native sample rate. Two rate-adapter
-//! strategies cover most Pocket PC content:
+//! out of the host's default audio device. Each HWAVEOUT has an independent
+//! PCM queue, format, pause state and completion clock. Both cpal and the
+//! Android tap mix these queues concurrently using nearest-neighbour
+//! resampling. The legacy ring remains available for push_samples callers.
+//! Resetting a wave stream clears only that handle; already delivered host
+//! frames can only disappear after the host's short output buffer drains.
 //!
-//! * **Same-rate path** (the host opens the device at exactly the
-//!   guest's requested rate, e.g. 44.1 kHz / 22.05 kHz / 11.025 kHz):
-//!   samples are popped 1:1.
-//! * **Resampled path** (the host device only supports a different
-//!   rate): we use a nearest-neighbour resampler. This is good
-//!   enough for the Pocket PC sound effects and looped music
-//!   (typically 11.025 kHz mono, 22.05 kHz stereo) which already
-//!   contain noticeable quantisation noise.
-//!
-//! The engine never blocks the emulator: if the host audio thread is
-//! late and the ring buffer has overflowed, new samples are
-//! dropped. Conversely, if the ring is empty when cpal asks for
-//! more, we emit silence. This keeps the emulator's frame loop
-//! decoupled from the audio device's buffer churn.
-//!
-//! The cpal feature is optional. When the `audio-cpal` feature is
-//! disabled (e.g. on the Android JNI build, or in `--no-default-features`
-//! CI runs that have no audio devices), [`AudioEngine`] silently
-//! discards every PCM submission so the rest of the emulator works
-//! as before. The previous behaviour of `waveOut*` returning success
-//! without producing any sound is preserved bit-for-bit when the
-//! feature is off.
+//! The cpal feature is optional. Without it, host frontends can still pull
+//! mixed PCM through AudioTap (Android); headless completion uses a wall
+//! clock when no output device consumes samples.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
@@ -38,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Maximum number of i16 samples we keep buffered. At 44.1 kHz
-/// stereo this is just over a second — plenty to absorb scheduling
+/// stereo this is about twelve seconds — plenty to absorb scheduling
 /// jitter, but small enough that overflows produce dropped samples
 /// instead of unbounded memory growth.
 const RING_CAPACITY_SAMPLES: usize = 1 << 20; // 1048576
@@ -100,9 +82,65 @@ impl Default for VoiceParams {
     }
 }
 
+/// One HWAVEOUT owns its PCM, format, resampling phase and completion clock.
+/// Keep complete submissions: Battlestations submits its entire menu music at
+/// once, and a bounded global ring both loses its beginning and delays SFX.
+#[derive(Clone)]
+struct WaveStream {
+    samples: std::collections::VecDeque<i16>,
+    format: GuestFormat,
+    phase: u64,
+    written: u64,
+    consumed: u64,
+    paused: bool,
+    tick: Instant,
+    fraction: u128,
+}
+
+impl WaveStream {
+    fn new(format: GuestFormat) -> Self {
+        Self { samples: Default::default(), format, phase: 0, written: 0,
+            consumed: 0, paused: false, tick: Instant::now(), fraction: 0 }
+    }
+
+    fn advance_virtual(&mut self, active: bool) {
+        let now = Instant::now();
+        if !active && !self.paused && self.consumed < self.written {
+            let rate = self.format.sample_rate.max(1) as u128;
+            let elapsed = now.duration_since(self.tick).as_nanos() * rate + self.fraction;
+            let frames = elapsed / 1_000_000_000;
+            self.fraction = elapsed % 1_000_000_000;
+            self.consume((frames * self.format.channels.max(1) as u128)
+                .min(usize::MAX as u128) as usize);
+        }
+        self.tick = now;
+        if self.samples.is_empty() { self.fraction = 0; }
+    }
+
+    fn consume(&mut self, count: usize) {
+        let count = count.min(self.samples.len());
+        self.samples.drain(..count);
+        self.consumed += count as u64;
+    }
+
+    fn frame(&mut self, rate: u32) -> (f32, f32) {
+        let channels = self.format.channels.max(1) as usize;
+        if self.paused || self.samples.len() < channels { return (0.0, 0.0); }
+        let left = self.samples[0] as f32 / 32768.0;
+        let right = if channels > 1 { self.samples[1] as f32 / 32768.0 } else { left };
+        self.phase += ((self.format.sample_rate.max(1) as u64) << 16) / rate.max(1) as u64;
+        let frames = self.phase >> 16;
+        self.phase &= 0xffff;
+        self.consume((frames as usize).saturating_mul(channels));
+        if self.samples.is_empty() { self.phase = 0; }
+        (left, right)
+    }
+}
+
 /// Inner state shared between the emulator thread (which calls
 /// [`AudioEngine::push_samples`]) and the cpal output callback.
 struct Shared {
+    wave_streams: std::collections::BTreeMap<u32, WaveStream>,
     ring: Vec<i16>,
     /// Number of samples currently in the ring.
     len: usize,
@@ -154,6 +192,7 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
+            wave_streams: Default::default(),
             ring: vec![0i16; RING_CAPACITY_SAMPLES],
             len: 0,
             read: 0,
@@ -239,6 +278,7 @@ impl Shared {
     }
 
     fn clear(&mut self) {
+        self.wave_streams.clear();
         self.len = 0;
         self.read = 0;
         self.write = 0;
@@ -289,7 +329,6 @@ impl Shared {
         });
     }
 
-    #[cfg(feature = "audio-cpal")]
     fn render_frames(&mut self, output: &mut [f32], output_rate: u32, output_channels: u16) {
         let channels = output_channels.max(1) as usize;
         let frames = output.len() / channels;
@@ -319,6 +358,14 @@ impl Shared {
                     self.resampler_phase = 0;
                 }
 
+                for stream in self.wave_streams.values_mut() {
+                    let (l, r) = stream.frame(output_rate);
+                    left += l;
+                    right += r;
+                }
+
+                #[cfg(feature = "audio-cpal")]
+                {
                 let mut index = 0;
                 while index < self.voices.len() {
                     let voice = &mut self.voices[index];
@@ -352,6 +399,7 @@ impl Shared {
                             / output_rate.max(1) as u64,
                     );
                     index += 1;
+                }
                 }
             }
             left = left.clamp(-1.0, 1.0);
@@ -494,6 +542,60 @@ impl AudioEngine {
         }
     }
 
+    pub fn open_wave_stream(&self, handle: u32, format: GuestFormat) {
+        self.set_guest_format(format);
+        if let Ok(mut s) = self.shared.lock() {
+            s.wave_streams.insert(handle, WaveStream::new(format));
+        }
+    }
+
+    pub fn push_wave_samples(&self, handle: u32, samples: &[i16]) {
+        if let Ok(mut s) = self.shared.lock() {
+            if let Some(format) = s.wave_streams.get(&handle).map(|v| v.format) {
+                if let Some(capture) = s.capture.as_mut() { capture.write(samples, format); }
+            }
+            let active = s.device_active;
+            if let Some(stream) = s.wave_streams.get_mut(&handle) {
+                stream.advance_virtual(active);
+                stream.samples.extend(samples.iter().copied());
+                stream.written += samples.len() as u64;
+            }
+        }
+    }
+
+    pub fn wave_written_samples(&self, handle: u32) -> u64 {
+        self.shared.lock().ok().and_then(|s| s.wave_streams.get(&handle).map(|v| v.written)).unwrap_or(0)
+    }
+
+    pub fn wave_playback_cursor(&self, handle: u32) -> u64 {
+        let Ok(mut s) = self.shared.lock() else { return 0; };
+        let active = s.device_active;
+        s.wave_streams.get_mut(&handle).map(|v| {
+            v.advance_virtual(active);
+            v.consumed
+        }).unwrap_or(0)
+    }
+
+    pub fn reset_wave_stream(&self, handle: u32) {
+        if let Ok(mut s) = self.shared.lock() {
+            if let Some(v) = s.wave_streams.get_mut(&handle) { *v = WaveStream::new(v.format); }
+        }
+    }
+
+    pub fn close_wave_stream(&self, handle: u32) {
+        if let Ok(mut s) = self.shared.lock() { s.wave_streams.remove(&handle); }
+    }
+
+    pub fn pause_wave_stream(&self, handle: u32, paused: bool) {
+        if let Ok(mut s) = self.shared.lock() {
+            let active = s.device_active;
+            if let Some(v) = s.wave_streams.get_mut(&handle) {
+                v.advance_virtual(active);
+                v.paused = paused;
+            }
+        }
+    }
+
     /// Update the guest-side format. Called from `waveOutOpen` /
     /// `PlaySound` so the resampler knows what rate the i16 samples
     /// are coming in at.
@@ -614,6 +716,7 @@ impl AudioEngine {
     /// (for example Gizmondo MAS1 playback) keep running.
     pub fn flush_wave_out(&self) {
         if let Ok(mut s) = self.shared.lock() {
+            s.wave_streams.clear();
             s.len = 0;
             s.read = 0;
             s.write = 0;
@@ -639,7 +742,7 @@ impl AudioEngine {
 
     /// Number of samples currently queued.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len).unwrap_or(0)
+        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.samples.len()).sum::<usize>()).unwrap_or(0)
     }
 
     /// Total guest samples submitted since the stream was opened (or
@@ -797,6 +900,15 @@ impl AudioTap {
             return 0;
         };
         s.device_active = true;
+        if !s.wave_streams.is_empty() {
+            let format = s.mix_format;
+            let mut output = vec![0.0; dst.len()];
+            s.render_frames(&mut output, format.sample_rate, format.channels);
+            for (sample, mixed) in dst.iter_mut().zip(output) {
+                *sample = (mixed * 32768.0).clamp(-32768.0, 32767.0) as i16;
+            }
+            return dst.len();
+        }
         let mut n = 0;
         while n < dst.len() {
             match s.pop_one() {
@@ -815,9 +927,23 @@ impl AudioTap {
     /// guest format; probing must not switch the engine to device-clock
     /// mode before AudioTrack has actually started.
     pub fn peek_into(&self, dst: &mut [i16]) -> usize {
-        let Ok(s) = self.shared.lock() else {
-            return 0;
-        };
+        let Ok(s) = self.shared.lock() else { return 0; };
+        if !s.wave_streams.is_empty() {
+            let channels = s.mix_format.channels.max(1) as usize;
+            let mut streams = s.wave_streams.clone();
+            for frame in dst.chunks_exact_mut(channels) {
+                let (mut left, mut right) = (0.0f32, 0.0f32);
+                for stream in streams.values_mut() {
+                    let (l, r) = stream.frame(s.mix_format.sample_rate);
+                    left += l; right += r;
+                }
+                for (ch, sample) in frame.iter_mut().enumerate() {
+                    *sample = ((if ch == 0 { left } else { right }) * 32768.0)
+                        .clamp(-32768.0, 32767.0) as i16;
+                }
+            }
+            return dst.len() / channels * channels;
+        }
         let mut n = 0;
         let mut index = s.read;
         let mut remaining = s.len;
@@ -832,7 +958,7 @@ impl AudioTap {
 
     /// How many samples are queued and ready to be drained.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len).unwrap_or(0)
+        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.samples.len()).sum::<usize>()).unwrap_or(0)
     }
 }
 
@@ -998,6 +1124,92 @@ fn fill_output_u16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mono(rate: u32) -> GuestFormat {
+        GuestFormat { sample_rate: rate, channels: 1, bits_per_sample: 16 }
+    }
+
+    #[test]
+    fn wave_handles_mix_and_reset_only_the_requested_stream() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []); // deterministic device clock, no wall time
+        e.open_wave_stream(1, mono(44100));
+        e.open_wave_stream(2, mono(44100));
+        e.push_wave_samples(1, &[1000; 8]);
+        e.push_wave_samples(2, &[2000; 8]);
+        let mut out = [0; 2];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [3000; 2]);
+        assert_eq!(e.wave_playback_cursor(1), 2);
+        assert_eq!(e.wave_playback_cursor(2), 2);
+        e.reset_wave_stream(1);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [2000; 2]);
+        assert_eq!(e.wave_playback_cursor(1), 0);
+        assert_eq!(e.wave_written_samples(1), 0);
+        assert_eq!(e.wave_playback_cursor(2), 4);
+        e.push_wave_samples(1, &[4000; 2]);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [6000; 2]);
+        e.close_wave_stream(1);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [2000; 2]);
+    }
+
+    #[test]
+    fn wave_pause_and_formats_are_independent_on_android_tap() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        e.open_wave_stream(1, mono(44100));
+        e.open_wave_stream(2, mono(22050));
+        e.push_wave_samples(1, &[1000; 8]);
+        e.push_wave_samples(2, &[2000, 3000, 4000, 5000]);
+        e.pause_wave_stream(1, true);
+        let mut out = [0; 4];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [2000, 2000, 3000, 3000]);
+        assert_eq!(e.wave_playback_cursor(1), 0);
+        assert_eq!(e.wave_playback_cursor(2), 2);
+        assert_eq!(tap.guest_format(), mono(44100));
+        e.pause_wave_stream(1, false);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [5000, 5000, 6000, 6000]);
+        assert_eq!(e.wave_playback_cursor(1), 4);
+    }
+
+    #[test]
+    fn wave_keeps_entire_music_and_peek_does_not_consume_it() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        e.open_wave_stream(1, mono(44100));
+        e.push_wave_samples(1, &vec![1234; RING_CAPACITY_SAMPLES + 8]);
+        assert_eq!(e.buffered_samples(), RING_CAPACITY_SAMPLES + 8);
+        let mut out = [0; 4];
+        tap.peek_into(&mut out);
+        assert_eq!(out, [1234; 4]);
+        assert_eq!(e.wave_playback_cursor(1), 0);
+        tap.drain_into(&mut out);
+        assert_eq!(e.wave_playback_cursor(1), 4);
+    }
+
+    #[test]
+    fn wave_headless_clock_respects_pause_and_clamps_to_submission() {
+        let mut stream = WaveStream::new(mono(1000));
+        stream.samples.extend([42; 10]);
+        stream.written = 10;
+        stream.tick = Instant::now() - std::time::Duration::from_secs(1);
+        stream.paused = true;
+        stream.advance_virtual(false);
+        assert_eq!(stream.consumed, 0);
+        stream.paused = false;
+        stream.tick = Instant::now() - std::time::Duration::from_secs(1);
+        stream.advance_virtual(false);
+        assert_eq!(stream.consumed, 10);
+        assert!(stream.samples.is_empty());
+    }
 
     #[test]
     fn engine_starts_silently_with_no_feature() {

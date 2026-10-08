@@ -14481,7 +14481,7 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     ctx.kernel.wave_out.owner_thread = ctx.kernel.current_thread;
     ctx.kernel.wave_out_format = fmt;
     ctx.kernel.audio.start();
-    ctx.kernel.audio.set_guest_format(fmt);
+    ctx.kernel.audio.open_wave_stream(handle, fmt);
     if phwo != 0 { ctx.cpu.write_mem(phwo, &handle.to_le_bytes())?; }
     wave_out_notify(ctx, handle, MM_WOM_OPEN, 0, 0);
     log::debug!("waveOutOpen -> 0x{handle:08x} ({:?}), open={}", kind, ctx.kernel.wave_out.devices.len());
@@ -14492,7 +14492,12 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 /// flush any remaining samples.
 fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE CLOSE lr=0x{lr:08x} h=0x{h:08x}");
+    }
     retire_wave_buffers_for(ctx, h)?;
+    ctx.kernel.audio.close_wave_stream(h);
     wave_out_notify(ctx, h, MM_WOM_CLOSE, 0, 0);
     ctx.kernel.wave_out.devices.remove(&h);
     if ctx.kernel.wave_out.devices.is_empty() { ctx.kernel.audio.flush_wave_out(); }
@@ -14502,6 +14507,12 @@ fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `MMRESULT waveOutReset(HWAVEOUT)` — discard any queued samples.
 fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE RESET lr=0x{lr:08x} h=0x{h:08x}");
+    }
+    ctx.kernel.audio.reset_wave_stream(h);
+    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = false; }
     // MSDN: reset only this HWAVEOUT and report its queued buffers done.
     retire_wave_buffers_for(ctx, h)?;
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
@@ -14512,7 +14523,12 @@ fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `waveOutRestart`.
 fn wave_out_pause(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE PAUSE lr=0x{lr:08x} h=0x{h:08x}");
+    }
     if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = true; }
+    ctx.kernel.audio.pause_wave_stream(h, true);
     log::debug!("waveOutPause");
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
@@ -14520,7 +14536,12 @@ fn wave_out_pause(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `MMRESULT waveOutRestart(HWAVEOUT)` — resume after a pause.
 fn wave_out_restart(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE RESTART lr=0x{lr:08x} h=0x{h:08x}");
+    }
     if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = false; }
+    ctx.kernel.audio.pause_wave_stream(h, false);
     log::debug!("waveOutRestart");
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
@@ -14543,7 +14564,7 @@ fn wave_out_get_position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     let fmt = ctx.kernel.wave_out.devices.get(&h).map(|d| d.format).unwrap_or(ctx.kernel.wave_out_format);
     let channels = u64::from(fmt.channels.max(1));
     let rate = u64::from(fmt.sample_rate.max(1));
-    let played = ctx.kernel.audio.playback_cursor();
+    let played = ctx.kernel.audio.wave_playback_cursor(h);
     // TIME_MS = 1, TIME_SAMPLES = 2, TIME_BYTES = 4.
     let (ty, value) = match want {
         1 => (1u32, played.saturating_mul(1000) / (rate * channels)),
@@ -14564,6 +14585,10 @@ fn wave_out_get_position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 /// (`0x2`).
 fn wave_out_prepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let _h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE PREPARE lr=0x{lr:08x} h=0x{_h:08x}");
+    }
     let p_hdr = ctx.arg_u32(1)?;
     let _cb = ctx.arg_u32(2)?;
     if p_hdr != 0 {
@@ -14580,6 +14605,10 @@ fn wave_out_prepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
 /// clear WHDR_PREPARED.
 fn wave_out_unprepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let _h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE UNPREPARE lr=0x{lr:08x} h=0x{_h:08x}");
+    }
     let p_hdr = ctx.arg_u32(1)?;
     let _cb = ctx.arg_u32(2)?;
     if p_hdr != 0 {
@@ -14594,10 +14623,14 @@ fn wave_out_unprepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
 /// `MMRESULT waveOutWrite(HWAVEOUT, LPWAVEHDR, UINT cbwh)`. Reads
 /// the PCM payload from `lpData` / `dwBufferLength` and pushes it
 /// into [`AudioEngine`] in i16 samples. The header's
-/// `WHDR_DONE` (`0x1`) flag is set on return so the guest's send /
-/// retire logic doesn't deadlock.
+/// `WHDR_DONE` (`0x1`) flag is set when this handle finishes playback
+/// (or is reset), and its requested callback is delivered.
 fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
+    if std::env::var_os("POCKETHLE_BATTLESTATIONS_LIFECYCLE_TRACE").is_some() {
+        let lr = ctx.cpu.read_reg(ArmReg::Lr)?;
+        log::info!("BATTLESTATIONS_LIFE WRITE lr=0x{lr:08x} h=0x{h:08x}");
+    }
     let p_hdr = ctx.arg_u32(1)?;
     let _cb = ctx.arg_u32(2)?;
     if p_hdr == 0 {
@@ -14622,10 +14655,11 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
                 for chunk in bytes.chunks_exact(2) {
                     samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                 }
-                ctx.kernel.audio.push_samples(&samples);
+                ctx.kernel.audio.push_wave_samples(h, &samples);
             }
             8 => {
-                ctx.kernel.audio.push_samples_u8(&bytes);
+                let samples: Vec<i16> = bytes.iter().map(|&b| ((b as i16) - 128) << 8).collect();
+                ctx.kernel.audio.push_wave_samples(h, &samples);
             }
             other => {
                 log::debug!("waveOutWrite: unsupported bits_per_sample={other}, dropping");
@@ -14637,7 +14671,7 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     // see `service_wave_out`.
     flags = (flags & !WHDR_DONE) | WHDR_INQUEUE;
     ctx.cpu.write_mem(p_hdr + 16, &flags.to_le_bytes())?;
-    let end_cursor = ctx.kernel.audio.written_samples();
+    let end_cursor = ctx.kernel.audio.wave_written_samples(h);
     log::debug!(
         "waveOutWrite hdr=0x{p_hdr:08x} bytes={n_bytes} end_cursor={end_cursor} paused={}",
         ctx.kernel.wave_out.paused
@@ -14675,22 +14709,19 @@ fn retire_wave_buffer(ctx: &mut CallCtx<'_>, handle: u32, hdr: u32) -> Result<()
 /// places a game waiting on `MM_WOM_DONE` or a `waveOutProc` call can
 /// notice one.
 fn service_wave_out(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
-    if !ctx.kernel.wave_out.pending.is_empty() {
-        log::trace!(
-            "service_wave_out pending={} cursor={} paused={}",
-            ctx.kernel.wave_out.pending.len(),
-            ctx.kernel.audio.playback_cursor(),
-            ctx.kernel.wave_out.paused
-        );
+    // A paused or long-running handle must not block completion on another.
+    let mut keep = VecDeque::new();
+    while let Some(buffer) = ctx.kernel.wave_out.pending.pop_front() {
+        let paused = ctx.kernel.wave_out.devices.get(&buffer.handle)
+            .map(|d| d.paused).unwrap_or(false);
+        let cursor = ctx.kernel.audio.wave_playback_cursor(buffer.handle);
+        if !paused && buffer.end_cursor <= cursor {
+            retire_wave_buffer(ctx, buffer.handle, buffer.hdr)?;
+        } else {
+            keep.push_back(buffer);
+        }
     }
-    if ctx.kernel.wave_out.pending.is_empty() { return Ok(()); }
-    let cursor = ctx.kernel.audio.playback_cursor();
-    while let Some(front) = ctx.kernel.wave_out.pending.front().copied() {
-        if front.end_cursor > cursor { break; }
-        if ctx.kernel.wave_out.devices.get(&front.handle).map(|d| d.paused).unwrap_or(false) { break; }
-        ctx.kernel.wave_out.pending.pop_front();
-        retire_wave_buffer(ctx, front.handle, front.hdr)?;
-    }
+    ctx.kernel.wave_out.pending = keep;
     Ok(())
 }
 
