@@ -2477,15 +2477,25 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
             let input_buf = ctx.arg_u32(2)?;
             service_mas_audio(ctx.kernel);
             if code == MASG_START {
+                // MAS_IOControl reads the HANDLE supplied in the output
+                // buffer and MASG::Start retains it. It is an in/out parameter,
+                // not a request to allocate a replacement notification event.
+                let supplied_callback = if out_buf != 0 && out_len >= 4 {
+                    ctx.cpu.read_u32_le(out_buf)?
+                } else { 0 };
                 let old_callback = ctx.kernel.vfs.mp3_callback_event(handle);
-                let callback = if old_callback != 0 && ctx.kernel.events.contains_key(&old_callback) {
+                let callback = if supplied_callback != 0 && ctx.kernel.events.contains_key(&supplied_callback) {
+                    supplied_callback
+                } else if old_callback != 0 && ctx.kernel.events.contains_key(&old_callback) {
                     old_callback
                 } else {
                     let mut event_handle = 0xDEAD_E001u32;
                     while ctx.kernel.events.contains_key(&event_handle) { event_handle = event_handle.wrapping_add(1); }
                     event_handle
                 };
-                ctx.kernel.events.insert(callback, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+                // Preserve the caller's event kind/state. Only the legacy
+                // zero-handle compatibility path needs a new event object.
+                ctx.kernel.events.entry(callback).or_insert(pocket_kernel::EventObject { manual_reset: false, signalled: false });
                 ctx.kernel.audio.stop_mas_stream(handle);
                 ctx.kernel.vfs.start_mp3_decoder(handle, callback);
             }
@@ -8542,6 +8552,16 @@ fn msg_wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcom
     Ok(DispatchOutcome::ReturnedR0(n_count))
 }
 
+/// A satisfied wait is still a cooperative scheduling boundary. A worker
+/// looping on a permanently signalled event must not monopolise the CPU.
+/// Save the completed result and continue after the call when it next runs.
+fn complete_satisfied_wait(ctx: &mut CallCtx<'_>, result: u32) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = park_worker(ctx, result)? {
+        return Ok(outcome);
+    }
+    Ok(DispatchOutcome::ReturnedR0(result))
+}
+
 fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x102;
@@ -8606,7 +8626,7 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
                     }
                 }
             }
-            return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
+            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
         }
         let index = ready_index.expect("ready implies one signalled handle");
         if let Some(event) = ctx.kernel.events.get_mut(&handles[index]) {
@@ -8614,7 +8634,7 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
                 event.signalled = false;
             }
         }
-        return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0 + index as u32));
+        return complete_satisfied_wait(ctx, WAIT_OBJECT_0 + index as u32);
     }
 
     // Nothing is signalled. Only one guest thread runs at a time here,
@@ -8661,7 +8681,7 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
              else runnable; answering WAIT_OBJECT_0 for handle 0x{:08x}",
             handles[0]
         );
-        return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
+        return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
     }
     if let Some(outcome) = park_worker(ctx, WAIT_TIMEOUT)? {
         return Ok(outcome);
@@ -11565,7 +11585,7 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     // hangs on its loading screen.
     if let Some(queue) = ctx.kernel.msg_queues.get(&handle) {
         if !queue.messages.is_empty() {
-            return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
+            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
         }
         let waiter_index = ctx.kernel.current_thread.checked_sub(1);
         if let Some(outcome) = park_worker_and_retry(ctx)? {
@@ -11588,12 +11608,12 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
             if !ev.manual_reset {
                 ev.signalled = false;
             }
-            return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
+            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
         }
     } else if let Some(semaphore) = ctx.kernel.semaphores.get_mut(&handle) {
         if semaphore.count > 0 {
             semaphore.count -= 1;
-            return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
+            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
         }
     } else if !ctx
         .kernel
@@ -15849,6 +15869,87 @@ mod tests {
         Heap, KernelState, Thunk,
     };
     use pocket_pe::ImportBinding;
+
+    #[test]
+    fn masg_start_preserves_the_supplied_notification_event() {
+        for manual_reset in [false, true] {
+            let mut cpu = scanf_cpu();
+            let mut kernel = fresh_kernel();
+            let thunk = dummy_thunk();
+            let handle = kernel.vfs.open("MAS1:", pocket_kernel::vfs::Access::ReadWrite, false).unwrap();
+            let callback = 0xdeade020u32;
+            kernel.events.insert(callback, pocket_kernel::EventObject { manual_reset, signalled: false });
+            let count = kernel.events.len();
+            cpu.write_mem(0x3000, &callback.to_le_bytes()).unwrap();
+            cpu.write_reg(ArmReg::R0, handle).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x001d0ff0).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x2000).unwrap();
+            cpu.write_reg(ArmReg::R3, 4).unwrap();
+            for (offset, value) in [(0, 0x3000u32), (4, 4), (8, 0x4000), (12, 0)] {
+                cpu.write_mem(0x9000 + offset, &value.to_le_bytes()).unwrap();
+            }
+            assert_eq!(device_io_control(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(kernel.vfs.mp3_callback_event(handle), callback);
+            assert_eq!(cpu.read_u32_le(0x3000).unwrap(), callback);
+            assert_eq!(kernel.events.len(), count);
+            assert_eq!(kernel.events[&callback].manual_reset, manual_reset);
+            // The stream still references the same event on restart.
+            cpu.write_reg(ArmReg::R0, handle).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x001d0ff0).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x2000).unwrap();
+            cpu.write_reg(ArmReg::R3, 4).unwrap();
+            let _ = device_io_control(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+            assert_eq!(kernel.vfs.mp3_callback_event(handle), callback);
+            assert_eq!(kernel.events.len(), count);
+        }
+    }
+
+    #[test]
+    fn satisfied_wait_worker_yields_without_losing_result_or_event_semantics() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut main = [0; 17];
+        main[15] = 0x10100;
+        main[13] = 0x9000;
+        kernel.threads.push(GuestThread::new(0x10200, 0, 0x9000, 0x1000,
+            0x10300, 0x10100, 0xdead7c00, main));
+        kernel.threads[0].started = true;
+        kernel.current_thread = 1;
+        kernel.events.insert(0xdeade010, pocket_kernel::EventObject { manual_reset: true, signalled: true });
+        kernel.events.insert(0xdeade011, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        cpu.write_mem(0x2000, &0xdeade011u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x2004, &0xdeade010u32.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R0, 2).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        cpu.write_reg(ArmReg::R3, u32::MAX).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x10280).unwrap();
+        assert_eq!(wait_for_multiple_objects(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x10100));
+        assert_eq!(kernel.current_thread, 0);
+        assert_eq!(kernel.threads[0].worker_regs[0], 1);
+        assert_eq!(kernel.threads[0].worker_regs[15], 0x10280);
+        assert!(!kernel.threads[0].parked_in_pump);
+        assert!(kernel.events[&0xdeade010].signalled);
+        // The next eligible worker can run even though the first event stays set.
+        let mut audio = GuestThread::new(0x10400, 0, 0x9000, 0x1000,
+            0x10500, 0x10100, 0xdead7c01, main);
+        audio.started = true;
+        audio.worker_saved = true;
+        audio.worker_regs[15] = 0x10400;
+        kernel.threads.push(audio);
+        kernel.worker_schedule_cursor = 1;
+        assert_eq!(resume_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }, 0).unwrap(), Some(DispatchOutcome::JumpTo(0x10400)));
+        // Auto-reset events are consumed once, before the completed wait yields.
+        kernel.events.get_mut(&0xdeade011).unwrap().signalled = true;
+        cpu.write_reg(ArmReg::R0, 0xdeade011).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x10480).unwrap();
+        assert!(matches!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(_)));
+        assert!(!kernel.events[&0xdeade011].signalled);
+        assert_eq!(kernel.threads[1].worker_regs[0], 0);
+        assert_eq!(kernel.threads[1].worker_regs[15], 0x10480);
+    }
 
     #[test]
     fn post_quit_message_keeps_other_thread_cleanup_running() {

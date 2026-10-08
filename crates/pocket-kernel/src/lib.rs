@@ -1902,6 +1902,9 @@ impl Process {
                 } else {
                     native_name.and_then(|n| native_thunks::native_thunk_for(&imp.dll, n))
                 };
+            let fallback_offset = if native.is_some() {
+                native_name.and_then(|name| native_thunks::hybrid_fallback_offset(&imp.dll, name))
+            } else { None };
             // Build the thunk metadata up front so we can query the
             // dispatcher for a constant-return shortcut.
             let thunk = Thunk {
@@ -1927,6 +1930,11 @@ impl Process {
             if let Some(words) = native.or(constant) {
                 let bytes = native_thunks::thunk_bytes(&words);
                 cpu.write_mem(thunk_va, &bytes)?;
+                if let Some(offset) = fallback_offset {
+                    let fallback = thunk_va + offset;
+                    cpu.add_code_hook(fallback)?;
+                    thunk_by_va.insert(fallback, i);
+                }
             } else {
                 let mut buf = [0u8; THUNK_STRIDE as usize];
                 let stub = return_stub_bytes(cpu.arch());
@@ -1977,13 +1985,27 @@ impl Process {
             cpu.map_region(dynamic_base, dynamic_size, Prot::READ | Prot::EXEC)?;
             for (index, (dll, name)) in dynamic_exports_to_add.into_iter().enumerate() {
                 let thunk_va = dynamic_base + index as u32 * THUNK_STRIDE;
-                let mut buf = [0u8; THUNK_STRIDE as usize];
-                let stub = return_stub_bytes(cpu.arch());
-                for (chunk, bytes) in buf.chunks_exact_mut(8).zip(stub.chunks_exact(8)) {
-                    chunk.copy_from_slice(bytes);
+                // GetProcAddress must expose the same small-copy fast path
+                // as a static import; unrelated dynamic exports keep their
+                // existing dispatch behaviour.
+                let hybrid = if cpu.arch() == Arch::Arm {
+                    native_thunks::hybrid_fallback_offset(&dll, &name)
+                        .and_then(|offset| native_thunks::native_thunk_for(&dll, &name).map(|words| (offset, words)))
+                } else { None };
+                if let Some((offset, words)) = hybrid {
+                    cpu.write_mem(thunk_va, &native_thunks::thunk_bytes(&words))?;
+                    let fallback = thunk_va + offset;
+                    cpu.add_code_hook(fallback)?;
+                    thunk_by_va.insert(fallback, thunks.len());
+                } else {
+                    let mut buf = [0u8; THUNK_STRIDE as usize];
+                    let stub = return_stub_bytes(cpu.arch());
+                    for (chunk, bytes) in buf.chunks_exact_mut(8).zip(stub.chunks_exact(8)) {
+                        chunk.copy_from_slice(bytes);
+                    }
+                    cpu.write_mem(thunk_va, &buf)?;
+                    hooked_slots.push(thunk_va);
                 }
-                cpu.write_mem(thunk_va, &buf)?;
-                hooked_slots.push(thunk_va);
                 thunks.push(Thunk {
                     thunk_va,
                     iat_va: 0,
@@ -2465,7 +2487,9 @@ pub fn run_main_loop_with_hook(
             StopReason::InstructionLimit => {
                 pc = cpu.read_reg(ArmReg::Pc)?;
                 log::trace!("instruction slice exhausted; resuming at 0x{pc:08x}");
-                continue;
+                // Budget exhaustion is a normal slice boundary too. Do not
+                // bypass the throttled host input/presentation/stop hook.
+                // Native thunks and CPU-only loops may never dispatch an API.
             }
             StopReason::Hook(addr) => {
                 // The synthetic process-exit trampoline is reached
@@ -2951,6 +2975,47 @@ mod tests {
             resources: vec![],
             managed_runtime: None,
         }
+    }
+
+    #[test]
+    fn hybrid_byte_copy_hooks_only_the_host_fallback() {
+        let mut cpu = StubCpu::new();
+        let mut image = image_based_at(0x10000, 0x1000);
+        image.imports.push(pocket_pe::ImportSymbol { dll: "COREDLL.dll".into(),
+            binding: ImportBinding::Name("memcpy".into()), iat_va: 0x11080 });
+        let process = Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+        let entry = cpu.read_u32_le(0x11080).unwrap();
+        let fallback = entry + 28;
+        assert_eq!(process.thunk_by_va[&entry], process.thunk_by_va[&fallback]);
+        // StubCpu reports the first installed hook: it must be the tail,
+        // not the native entry or a range swallowing the fast path.
+        assert_eq!(cpu.run_until_hook(entry, 100).unwrap(), StopReason::Hook(fallback));
+        assert_eq!(cpu.read_u32_le(entry).unwrap(), 0xe3520001);
+    }
+
+    #[test]
+    fn instruction_limit_still_services_host_hook() {
+        let mut loader_cpu = StubCpu::new();
+        let mut process = Process::map_into(image_based_at(0x10000, 0x1000),
+            &mut loader_cpu, &|_, _| None, &NullDispatcher).unwrap();
+        // A hook-free stub exhausts its budget on every slice. The loader's
+        // stub has exit hooks, so use a fresh CPU for this specific path.
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x11000, 0x1000, Prot::READ | Prot::WRITE | Prot::EXEC).unwrap();
+        cpu.write_mem(0x11000, &0xeafffffeu32.to_le_bytes()).unwrap();
+        struct StopHook(usize);
+        impl FrameHook for StopHook {
+            fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
+                self.0 += 1;
+                state.pending_input.push_back(InputEvent::KeyDown { vk: 0x28 });
+                FrameAction::Stop
+            }
+        }
+        let mut hook = StopHook(0);
+        run_main_loop_with_hook(&mut cpu, &mut process, &mut NullDispatcher,
+            100, 2, Some(&mut hook)).unwrap();
+        assert_eq!(hook.0, 1);
+        assert_eq!(process.state.pending_input.front(), Some(&InputEvent::KeyDown { vk: 0x28 }));
     }
 
     /// Regression test for the slot-0 alias collision. A standard

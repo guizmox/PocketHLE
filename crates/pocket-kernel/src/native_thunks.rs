@@ -74,14 +74,29 @@ pub const TICK_PAGE_VA: u32 = 0x6FFF_F000;
 /// Offset within [`TICK_PAGE_VA`] of the live tick value (u32 LE).
 pub const TICK_VALUE_OFFSET: u32 = 0;
 
-// `memcpy` / `memset` are intentionally NOT hand-rolled here. We
-// tried it (a 32-byte byte-by-byte loop using `ldrb`/`strb`) and
-// the JIT'd loop ran *slower* than the dispatcher path on Derby,
-// because the dispatcher has access to host-vectorised
-// `memcpy` / `Vec::resize_with` and only pays an FFI round-trip
-// once per call — for several-hundred-byte BitBlt scanline copies
-// the host SIMD memcpy beats any 4-instr-per-byte ARM loop we can
-// fit in the 32-byte slot. Leaving these on the dispatcher path.
+// Bulk copies remain host-vectorised. A one-byte copy instead runs directly
+// in the guest: byte-at-a-time stream reads otherwise stop/restart the CPU
+// millions of times. The other sizes branch to a hooked tail in the same slot.
+const BYTE_COPY: [u32; 8] = [
+    0xE352_0001, // cmp r2, #1
+    0x1A00_0004, // bne slot+28 (host fallback)
+    0xE5D1_3000, // ldrb r3, [r1]
+    0xE5C0_3000, // strb r3, [r0]
+    BX_LR,
+    BX_LR,
+    BX_LR,
+    BX_LR, // hooked fallback, preserving all original arguments
+];
+
+/// Native/hooked hybrid tail; the loader must hook only this address, never
+/// the entire native slot. R0 stays the destination on both paths.
+pub fn hybrid_fallback_offset(dll: &str, name: &str) -> Option<u32> {
+    if dll.eq_ignore_ascii_case("coredll.dll") && matches!(name, "memcpy" | "memmove") {
+        Some(28)
+    } else {
+        None
+    }
+}
 
 /// Build a thunk that does `mov r0, #imm; bx lr`. Used to patch
 /// IAT entries whose dispatcher handler is a pure constant-return
@@ -226,6 +241,7 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
         return None;
     }
     Some(match name {
+        "memcpy" | "memmove" => BYTE_COPY,
         // ---- 32-bit hardware integer divide -----------------------------
         // sdiv ip, r1, r0 / mls r1, ip, r0, r1 / mov r0, ip / bx lr
         "__rt_sdiv" => pad(&[0xE71C_F011, 0xE061_109C, 0xE1A0_000C, BX_LR]),
@@ -268,13 +284,9 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
         // dispatcher round-trip even though the dispatcher itself
         // could call into the host's vectorised libc.
         //
-        // The bulk-memory exports (`memcpy` / `memset` / `memmove`)
-        // are intentionally NOT on this list: in Derby they're called
-        // with several-KiB buffers (DIB blits etc.), and the host's
-        // SIMD memcpy reached through the dispatcher is faster than
-        // any ARM-mode byte loop we could fit in 32 bytes — we
-        // measured a small regression when we tried it, so they're
-        // left on the dispatcher path.
+        // Bulk memcpy/memmove sizes take the hooked hybrid tail above;
+        // memset remains entirely host-dispatched. Large buffers retain
+        // their vectorised host implementation rather than an ARM byte loop.
         "strlen" => STRLEN,
         "wcslen" | "lstrlenW" => WCSLEN,
         "lstrlenA" => STRLEN,
