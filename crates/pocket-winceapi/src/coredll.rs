@@ -763,10 +763,10 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ResetEvent", reset_event);
     d.register_handler(dll, "EventModify", event_modify);
     d.register_handler(dll, "WaitForSingleObject", wait_for_single_object);
-    d.register_constant(dll, "InitializeCriticalSection", 0, zero_returning);
-    d.register_constant(dll, "DeleteCriticalSection", 0, zero_returning);
-    d.register_constant(dll, "EnterCriticalSection", 0, zero_returning);
-    d.register_constant(dll, "LeaveCriticalSection", 0, zero_returning);
+    d.register_handler(dll, "InitializeCriticalSection", initialize_critical_section);
+    d.register_handler(dll, "DeleteCriticalSection", delete_critical_section);
+    d.register_handler(dll, "EnterCriticalSection", enter_critical_section);
+    d.register_handler(dll, "LeaveCriticalSection", leave_critical_section);
     d.register_handler(dll, "GetCurrentThreadId", get_current_thread_id);
     d.register_handler(dll, "GetCurrentProcessId", get_current_thread_id);
     d.register_handler(dll, "GetCurrentProcess", get_current_process);
@@ -1968,6 +1968,7 @@ fn park_worker_at(
         return Ok(None);
     };
     write_guest_regs(ctx.cpu, &main_regs)?;
+    ctx.kernel.worker_preempt_after_ms = monotonic_ms().saturating_add(2);
     Ok(Some(DispatchOutcome::JumpTo(main_regs[15] & !1)))
 }
 
@@ -2016,6 +2017,7 @@ fn resume_worker(
                     .find(|thread| thread.handle == handle)
                     .map(|thread| thread.finished)
             })
+            .or_else(|| ctx.kernel.critical_sections.get(&handle).map(|(_, depth)| *depth == 0))
             .unwrap_or(false)
     };
     let now = monotonic_ms();
@@ -2057,6 +2059,8 @@ fn resume_worker(
         return Ok(None);
     };
     ctx.kernel.worker_schedule_cursor = (thread_index + 1) % ctx.kernel.threads.len();
+    ctx.kernel.worker_round_seen.clear();
+    ctx.kernel.worker_round_seen.push(thread_index);
     let mut main_regs = read_guest_regs(ctx.cpu)?;
     main_regs[0] = return_r0;
     main_regs[15] = ctx.cpu.read_reg(ArmReg::Lr)?;
@@ -2064,6 +2068,7 @@ fn resume_worker(
         thread.saved_regs = main_regs;
         thread.resume_pc = main_regs[15];
         thread.worker_saved = false;
+        thread.sleep_until_ms = 0;
         thread.parked_in_pump = false;
         thread.parked_wait_handles.clear();
         thread.parked_wait_all = false;
@@ -2132,6 +2137,8 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         return Ok(None);
     };
     ctx.kernel.worker_schedule_cursor = (thread_index + 1) % ctx.kernel.threads.len();
+    ctx.kernel.worker_round_seen.clear();
+    ctx.kernel.worker_round_seen.push(thread_index);
     let mut main_regs = read_guest_regs(ctx.cpu)?;
     // Re-enter the *same* blocking call when the worker yields back.
     // R0..R3 keep the original arguments (the MSG pointer most of all).
@@ -2140,6 +2147,7 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         thread.saved_regs = main_regs;
         thread.resume_pc = main_regs[15];
         thread.worker_saved = false;
+        thread.sleep_until_ms = 0;
         thread.parked_in_pump = false;
     }
     write_guest_regs(ctx.cpu, &worker_regs)?;
@@ -2151,6 +2159,103 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         worker_regs[15]
     );
     Ok(Some(DispatchOutcome::JumpTo(worker_regs[15] & !1)))
+}
+
+/// A worker's Sleep gives the remaining ready workers one turn before main
+/// resumes. Bound the round so Sleep(0) workers cannot starve the main thread.
+/// The CPU already holds the exact main continuation restored by park_worker;
+/// preserve it rather than rebuilding it from the worker's Sleep thunk/LR.
+fn resume_ready_worker_after_sleep(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
+    let now = monotonic_ms();
+    let count = ctx.kernel.threads.len().max(1);
+    let next = ctx.kernel.threads.iter().enumerate()
+        .filter(|(index, thread)| !ctx.kernel.worker_round_seen.contains(index)
+            && thread.worker_saved && thread.started && !thread.finished
+            && !thread.parked_in_pump && thread.sleep_until_ms <= now)
+        .min_by_key(|(index, _)| (index + count - ctx.kernel.worker_schedule_cursor % count) % count)
+        .map(|(index, thread)| (index, thread.worker_regs));
+    let Some((index, regs)) = next else { return Ok(None); };
+    let main_regs = read_guest_regs(ctx.cpu)?;
+    let thread = &mut ctx.kernel.threads[index];
+    thread.saved_regs = main_regs;
+    thread.resume_pc = main_regs[15];
+    thread.worker_saved = false;
+    thread.sleep_until_ms = 0;
+    ctx.kernel.worker_round_seen.push(index);
+    ctx.kernel.worker_schedule_cursor = (index + 1) % count;
+    write_guest_regs(ctx.cpu, &regs)?;
+    ctx.kernel.current_thread = index + 1;
+    Ok(Some(DispatchOutcome::JumpTo(regs[15] & !1)))
+}
+
+/// Poll sleeping-worker deadlines at API boundaries. Re-enter the interrupted
+/// main call with all arguments intact, before any handler side effects.
+/// Never interrupt a held critical section or a shared callback trampoline.
+pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
+    if ctx.kernel.current_thread != 0 { return Ok(None); }
+    let now = monotonic_ms();
+    if now < ctx.kernel.worker_preempt_after_ms { return Ok(None); }
+    ctx.kernel.worker_preempt_after_ms = now.saturating_add(2);
+    if ctx.kernel.critical_sections.values().any(|&(owner, depth)| owner == 0 && depth != 0)
+        || ctx.kernel.wave_out.function_frame.is_some()
+        || ctx.kernel.create_frame.is_some() || ctx.kernel.dialog_frame.is_some()
+        || ctx.kernel.message_frame.is_some() || !ctx.kernel.vector_iter_stack.is_empty()
+        || !ctx.kernel.qsort_frames.is_empty() { return Ok(None); }
+    let due = ctx.kernel.threads.iter().any(|thread| thread.started && !thread.finished
+        && thread.worker_saved && !thread.parked_in_pump
+        && thread.sleep_until_ms != 0 && thread.sleep_until_ms <= now);
+    if !due { return Ok(None); }
+    resume_worker_reenter(ctx)
+}
+
+fn initialize_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    ctx.kernel.critical_sections.insert(key, (usize::MAX, 0));
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+fn delete_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    ctx.kernel.critical_sections.remove(&key);
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+fn enter_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    let current = ctx.kernel.current_thread;
+    let lock = ctx.kernel.critical_sections.entry(key).or_insert((usize::MAX, 0));
+    if lock.1 == 0 || lock.0 == current {
+        lock.0 = current;
+        lock.1 = lock.1.saturating_add(1);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if let Some(index) = current.checked_sub(1) {
+        let result = park_worker_and_reevaluate(ctx)?;
+        ctx.kernel.threads[index].parked_wait_handles.push(key);
+        return Ok(result.unwrap_or(DispatchOutcome::ReturnedR0(0)));
+    }
+    if let Some(result) = resume_worker_reenter(ctx)? { return Ok(result); }
+    Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
+}
+fn leave_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    let mut released = false;
+    if let Some(lock) = ctx.kernel.critical_sections.get_mut(&key) {
+        if lock.0 == ctx.kernel.current_thread && lock.1 != 0 {
+            lock.1 -= 1;
+            if lock.1 == 0 { lock.0 = usize::MAX; released = true; }
+        }
+    }
+    if released {
+        for thread in &mut ctx.kernel.threads {
+            if thread.parked_in_pump && thread.parked_wait_handles.as_slice() == [key] {
+                // Keep the saved Enter thunk/arguments: eligibility does not
+                // grant ownership. The resumed caller must acquire it again.
+                thread.parked_in_pump = false;
+                thread.parked_wait_handles.clear();
+                thread.sleep_until_ms = 1;
+            }
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 /// `void Sleep(DWORD dwMilliseconds)`
@@ -2201,6 +2306,7 @@ fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
     }
     if let Some(outcome) = park_worker(ctx, 0)? {
+        if let Some(next) = resume_ready_worker_after_sleep(ctx)? { return Ok(next); }
         return Ok(outcome);
     }
     if let Some(outcome) = resume_worker(ctx, 0)? {
@@ -16116,6 +16222,9 @@ mod tests {
             semaphores: Default::default(),
             current_thread: 0,
             worker_schedule_cursor: 0,
+            worker_round_seen: Vec::new(),
+                worker_preempt_after_ms: 0,
+                critical_sections: std::collections::HashMap::new(),
             pressed_keys: [false; 256],
             held_keys: Vec::new(),
             key_repeat_next_ms: None,
@@ -18049,6 +18158,95 @@ mod tests {
         // Simulate expiry without waiting in the test.
         ctx.kernel.threads[0].sleep_until_ms = 0;
         assert_eq!(resume_worker(&mut ctx, 0).unwrap(), Some(DispatchOutcome::JumpTo(0x10040)));
+    }
+
+    #[test]
+    fn scheduler_deadline_handoff_honors_recursive_critical_sections() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        let mut worker = GuestThread::new(0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17]);
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.worker_regs[15] = 0x10000;
+        worker.sleep_until_ms = 1;
+        kernel.threads.push(worker);
+        let _ = monotonic_ms();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x87654321).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        initialize_critical_section(&mut ctx).unwrap();
+        enter_critical_section(&mut ctx).unwrap();
+        enter_critical_section(&mut ctx).unwrap();
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
+        leave_critical_section(&mut ctx).unwrap();
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
+        leave_critical_section(&mut ctx).unwrap();
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10000)));
+        assert_eq!(ctx.kernel.threads[0].sleep_until_ms, 0);
+        let main = ctx.kernel.threads[0].saved_regs;
+        assert_eq!(main[0], 0x123400);
+        assert_eq!(main[1], 0x87654321);
+        assert_eq!(main[15], thunk.thunk_va);
+        ctx.cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
+        park_worker(&mut ctx, 0).unwrap();
+        assert_eq!(read_guest_regs(ctx.cpu).unwrap(), main);
+        // A contended worker retries Enter rather than passing the lock.
+        enter_critical_section(&mut ctx).unwrap();
+        ctx.cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
+        resume_worker_reenter(&mut ctx).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
+        assert!(matches!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::JumpTo(_)));
+        assert!(ctx.kernel.threads[0].parked_in_pump);
+        assert_eq!(ctx.kernel.threads[0].parked_wait_handles, [0x123400]);
+        ctx.cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
+        leave_critical_section(&mut ctx).unwrap();
+        ctx.cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
+        assert!(resume_worker(&mut ctx, 0).unwrap().is_some());
+        ctx.cpu.write_reg(ArmReg::R0, 0x123400).unwrap();
+        assert_eq!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.kernel.critical_sections[&0x123400], (1, 1));
+    }
+
+    #[test]
+    fn scheduler_sleep_round_is_bounded_and_preserves_main_reentry() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        for index in 0..4u32 {
+            let entry = 0x10000 + index * 0x100;
+            let mut thread = GuestThread::new(entry, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00 + index, [0; 17]);
+            thread.started = true;
+            thread.worker_saved = true;
+            thread.worker_regs[15] = entry;
+            kernel.threads.push(thread);
+        }
+        kernel.threads[2].sleep_until_ms = u64::MAX;
+        kernel.threads[3].parked_in_pump = true;
+        cpu.write_reg(ArmReg::R0, 0xdead1234).unwrap();
+        cpu.write_reg(ArmReg::R4, 0x87654321).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        assert!(resume_worker_reenter(&mut ctx).unwrap().is_some());
+        let main = ctx.kernel.threads[0].saved_regs;
+        ctx.cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
+        assert!(park_worker(&mut ctx, 0).unwrap().is_some());
+        assert_eq!(resume_ready_worker_after_sleep(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10100)));
+        assert_eq!(ctx.kernel.threads[1].saved_regs, main);
+        ctx.cpu.write_reg(ArmReg::Lr, 0x10140).unwrap();
+        assert!(park_worker(&mut ctx, 0).unwrap().is_some());
+        // Both ready workers are now saved again, but neither gets a second
+        // turn until main runs. The sleeping and blocked workers remain parked.
+        assert_eq!(resume_ready_worker_after_sleep(&mut ctx).unwrap(), None);
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(read_guest_regs(ctx.cpu).unwrap(), main);
+        assert_eq!(main[15], thunk.thunk_va);
+        assert_eq!(main[0], 0xdead1234);
+        assert_eq!(main[4], 0x87654321);
     }
 
     #[test]

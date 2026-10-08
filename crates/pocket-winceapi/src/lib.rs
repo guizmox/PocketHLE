@@ -360,6 +360,9 @@ impl Dispatcher for WinCeDispatcher {
         thunk: &Thunk,
         kernel: &mut KernelState,
     ) -> Result<DispatchOutcome, KernelError> {
+        if let Some(outcome) = coredll::wake_due_worker(&mut CallCtx { cpu, thunk, kernel })? {
+            return Ok(outcome);
+        }
         let handler_opt = self.resolve_handler(thunk);
 
         // Capture args before the handler may mutate them. Skip the

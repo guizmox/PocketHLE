@@ -1088,6 +1088,11 @@ pub struct KernelState {
     pub current_thread: usize,
     /// Next worker index to consider at a cooperative scheduling point.
     pub worker_schedule_cursor: usize,
+    /// Workers already run since the main thread last yielded.
+    pub worker_round_seen: Vec<usize>,
+    pub worker_preempt_after_ms: u64,
+    /// Critical section address -> (owning guest thread index, recursion depth).
+    pub critical_sections: HashMap<u32, (usize, u32)>,
     /// Current state of the Pocket PC virtual keys.
     pub pressed_keys: [bool; 256],
     /// Virtual keys the host is holding down, oldest press first.
@@ -2234,6 +2239,9 @@ impl Process {
                 semaphores: Default::default(),
                 current_thread: 0,
                 worker_schedule_cursor: 0,
+                worker_round_seen: Vec::new(),
+                worker_preempt_after_ms: 0,
+                critical_sections: HashMap::new(),
                 pressed_keys: [false; 256],
                 held_keys: Vec::new(),
                 key_repeat_next_ms: None,
