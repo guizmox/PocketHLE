@@ -1101,8 +1101,9 @@ impl Library {
     /// to contain a nested `.cab`, we transparently recurse via
     /// [`Library::import_cab`] on the extracted CAB so the user gets
     /// the proper `app_name` / `provider` from the cabinet header
-    /// rather than a stem-derived placeholder. Otherwise the largest
-    /// ARM PE32 inside the archive is picked as the entry point.
+    /// rather than a stem-derived placeholder. A demo card with sibling
+    /// `autorun.exe` and `multiboot.hog` keeps its launcher and full tree;
+    /// otherwise the largest guest executable is picked as the entry point.
     pub fn import_zip(&mut self, zip_path: impl AsRef<Path>) -> Result<&GameEntry, LibraryError> {
         let zip_path = zip_path.as_ref();
         let source_name = zip_path
@@ -1149,6 +1150,8 @@ impl Library {
             return Err(LibraryError::NoExecutable);
         }
 
+        let demo_launcher = demo_card_launcher(&written);
+
         // ZIPs that are really just installer wrappers around a CAB —
         // recurse so we get the proper PocketPC display metadata
         // instead of a stem-derived placeholder.
@@ -1161,7 +1164,7 @@ impl Library {
             })
             .cloned()
             .collect();
-        if !nested_cabs.is_empty() {
+        if demo_launcher.is_none() && !nested_cabs.is_empty() {
             let main_cab = nested_cabs
                 .iter()
                 .find(|path| {
@@ -1212,21 +1215,31 @@ impl Library {
                 best = Some((path.clone(), meta.len()));
             }
         }
-        let (exe_abs, _) = best.ok_or(LibraryError::NoExecutable)?;
+        let is_demo_card = demo_launcher.is_some();
+        let exe_abs = if let Some(launcher) = demo_launcher {
+            log::info!("demo card launcher selected: {}", launcher.display());
+            launcher
+        } else {
+            best.ok_or(LibraryError::NoExecutable)?.0
+        };
         let executable = exe_abs
             .strip_prefix(&game_dir)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| exe_abs.clone());
 
-        let display_name = written
-            .iter()
-            .find_map(|path| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .filter(|stem| !stem.eq_ignore_ascii_case("autorun"))
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| pretty_id(&id));
+        let display_name = if is_demo_card {
+            "Demo Card".to_string()
+        } else {
+            written
+                .iter()
+                .find_map(|path| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .filter(|stem| !stem.eq_ignore_ascii_case("autorun"))
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| pretty_id(&id))
+        };
         let entry = GameEntry {
             id: id.clone(),
             display_name,
@@ -1914,6 +1927,32 @@ impl PeSniff {
     }
 }
 
+/// Demo-card archives contain a launcher next to multiboot.hog. Prefer
+/// the unique outermost pair, even when ZIP publishers add a wrapper folder.
+/// Match names case-insensitively, but require a supported executable and
+/// a sibling HOG; unrelated autorun programs retain the ordinary ZIP policy.
+fn demo_card_launcher(files: &[PathBuf]) -> Option<PathBuf> {
+    let mut candidates: Vec<&PathBuf> = files.iter().filter(|path| {
+        path.file_name().and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("autorun.exe"))
+            && is_guest_exe(path)
+            && files.iter().any(|hog| {
+                hog.parent() == path.parent()
+                    && hog.file_name().and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case("multiboot.hog"))
+                    && hog.is_file()
+            })
+    }).collect();
+    candidates.sort_by_key(|path| path.components().count());
+    let first = candidates.first()?;
+    if candidates.get(1).is_some_and(|second| {
+        second.components().count() == first.components().count()
+    }) {
+        return None;
+    }
+    Some((*first).clone())
+}
+
 /// Cheap PE header sniff: read the COFF machine and characteristics
 /// without parsing the whole image.
 ///
@@ -2493,6 +2532,69 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, &buf).unwrap();
+    }
+
+    #[test]
+    fn demo_card_zip_keeps_launcher_over_larger_games_and_nested_cabs() {
+        use std::io::Write;
+        for wrapper in ["", "Demo Card/"] {
+            let root = tmpdir("demo_card_zip");
+            fs::create_dir_all(&root).unwrap();
+            let launcher = root.join("fixture.exe");
+            write_pe_importing(&launcher, &[]);
+            let bytes = fs::read(&launcher).unwrap();
+            let mut larger = bytes.clone();
+            larger.resize(bytes.len() + 4096, 0);
+            let archive_path = root.join("Demo.zip");
+            let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+            for (name, data) in [
+                ("GZGA200024/autorun.exe", larger.as_slice()),
+                ("GZGA200024/helper.cab", b"not a cabinet".as_slice()),
+                ("MuLtIbOoT.HoG", b"WART3.00".as_slice()),
+                ("AuToRuN.ExE", bytes.as_slice()),
+            ] {
+                archive.start_file(format!("{wrapper}{name}"), zip::write::FileOptions::default()).unwrap();
+                archive.write_all(data).unwrap();
+            }
+            archive.finish().unwrap();
+            let library_root = root.join("library");
+            let mut library = Library::open(&library_root).unwrap();
+            let entry = library.import_zip(&archive_path).unwrap().clone();
+            assert_eq!(entry.executable, PathBuf::from(format!("extracted/{wrapper}AuToRuN.ExE")));
+            assert!(entry.executable_path(&library_root).is_file());
+            assert_eq!(entry.display_name, "Demo Card");
+            let reopened = Library::open(&library_root).unwrap();
+            assert_eq!(reopened.library.games[0].executable, entry.executable);
+            assert_eq!(reopened.library.games[0].display_name, "Demo Card");
+            let manifest: GameEntry = serde_json::from_slice(&fs::read(
+                library_root.join("games").join(&entry.id).join("game.json")
+            ).unwrap()).unwrap();
+            assert_eq!(manifest.executable, entry.executable);
+            assert_eq!(manifest.display_name, "Demo Card");
+            assert!(library_root.join("games").join(&entry.id)
+                .join(format!("extracted/{wrapper}GZGA200024/helper.cab")).is_file());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn demo_card_detection_requires_supported_sibling_pair() {
+        let root = tmpdir("demo_card_pair");
+        let launcher = root.join("autorun.exe");
+        write_stub_pe(&launcher, MACHINE_ARM, 0x0102);
+        let hog = root.join("multiboot.hog");
+        assert!(demo_card_launcher(&[launcher.clone()]).is_none());
+        fs::write(&hog, b"WART3.00").unwrap();
+        let other = root.join("Other/multiboot.hog");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, b"WART3.00").unwrap();
+        assert!(demo_card_launcher(&[launcher.clone(), other]).is_none());
+        assert_eq!(demo_card_launcher(&[launcher.clone(), hog.clone()]), Some(launcher.clone()));
+        write_stub_pe(&launcher, MACHINE_X86, 0x0102);
+        assert!(demo_card_launcher(&[launcher.clone(), hog.clone()]).is_none());
+        write_stub_pe(&launcher, MACHINE_ARM, IMAGE_FILE_DLL | 0x0102);
+        assert!(demo_card_launcher(&[launcher, hog]).is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     const MACHINE_ARM: u16 = 0x01c0;
