@@ -618,7 +618,10 @@ fn raster_clipped(
             let idx = py as usize * stride + px as usize;
 
             // Depth interpolates linearly in window space.
-            let z = w0 * sv[0].z + w1 * sv[1].z + w2 * sv[2].z;
+            // Anchor at one vertex: equal endpoint depths must remain
+            // exactly equal regardless of rounded barycentric weights.
+            // Coplanar UI layers otherwise fail LEQUAL at scattered pixels.
+            let z = sv[2].z + w0 * (sv[0].z - sv[2].z) + w1 * (sv[1].z - sv[2].z);
             if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
                 continue;
             }
@@ -668,7 +671,18 @@ fn raster_clipped(
                 }
             }
 
-            if state.alpha_test && !state.alpha_func.test(frag[3], state.alpha_ref) {
+            // ES 1.1 requires rounding fragment alpha and converting the
+            // reference to the same fixed-point precision before testing.
+            // Comparing raw interpolated floats rejects opaque fragments at
+            // GL_EQUAL/1 when perspective weights sum to 0.99999994.
+            // Alpha has eight bits in our RGBA8888 fragment pipeline, even
+            // when the presentation surface is RGB565 without stored alpha.
+            if state.alpha_test
+                && !state.alpha_func.test(
+                    f32::from(to_byte(frag[3])),
+                    f32::from(to_byte(state.alpha_ref)),
+                )
+            {
                 continue;
             }
 

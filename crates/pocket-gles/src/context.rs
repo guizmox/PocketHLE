@@ -1428,49 +1428,6 @@ impl Context {
             self.state.alpha_func,
             self.state.alpha_ref,
         );
-        // A draw that emits nothing looks identical to a draw that was
-        // never issued, so when the screen is blank the only way to tell
-        // "wrong transform" from "wrong colour" is to see the vertices.
-        // Trace level, not debug: one line per vertex would otherwise
-        // multiply an already-chatty `-vv` by the batch size.
-        if log::log_enabled!(log::Level::Trace) {
-            log::trace!(
-                "GLES draw state viewport={:?} depth_test={} func={:?} range={:?} write={} cull={:?} front={:?} color_mask={:?} scissor={:?} clear_depth={}",
-                self.state.viewport,
-                self.state.depth_test,
-                self.state.depth_func,
-                self.state.depth_range,
-                self.state.depth_write,
-                self.state.cull,
-                self.state.front_face,
-                self.state.color_mask,
-                self.state.scissor,
-                self.clear_depth,
-            );
-            for stage in &stages {
-                let unit = &self.texture_units[stage.unit];
-                log::trace!(
-                    "GLES stage {} texture={} complete={} mag={:?} env={:?} texcoord_array={} ptr=0x{:08x} stride={} type=0x{:04x}",
-                    stage.unit,
-                    unit.bound_texture,
-                    texs[stage.unit].is_some_and(Texture::is_complete),
-                    texs[stage.unit].map(|t| t.mag_filter),
-                    stage.env,
-                    unit.texcoord_array.enabled,
-                    unit.texcoord_array.pointer,
-                    unit.texcoord_array.stride,
-                    unit.texcoord_array.ty,
-                );
-            }
-            for v in &verts {
-                log::trace!(
-                    "GLES vertex clip=[{:.3} {:.3} {:.3} {:.3}] color=[{:.3} {:.3} {:.3} {:.3}] uv={:?}",
-                    v.pos[0], v.pos[1], v.pos[2], v.pos[3],
-                    v.color[0], v.color[1], v.color[2], v.color[3],
-                    v.texcoord,
-                );
-            }
-        }
         let sample = |unit: usize, s: f32, t: f32| texs[unit].map(|tx| tx.sample(s, t));
 
         for tri in tris {
