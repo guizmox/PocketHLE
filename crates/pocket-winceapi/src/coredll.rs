@@ -6958,9 +6958,7 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // then commits it would consume 58 MB and exhaust the heap on its
     // next request.
     if addr != 0 {
-        let base = ctx.kernel.heap.base();
-        let end = base.saturating_add(ctx.kernel.heap.size());
-        let fits = addr >= base && addr.checked_add(size).is_some_and(|a| a <= end);
+        let fits = ctx.kernel.heap.contains_range(addr, size);
         if fits {
             return Ok(DispatchOutcome::ReturnedR0(addr));
         }
@@ -11977,7 +11975,7 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     }
 
     let thread_index = ctx.kernel.threads.len();
-    let stack_top = 0x6200_0000u32.saturating_sub(thread_index as u32 * 0x0010_0000);
+    let mut stack_top = 0x6200_0000u32.saturating_sub(thread_index as u32 * 0x0010_0000);
     let exit_va = THREAD_EXIT_TRAMPOLINE_BASE.saturating_sub(thread_index as u32 * 0x100);
     let resume_pc = ctx.cpu.read_reg(ArmReg::Lr)?;
     let mut saved_regs = [0u32; 17];
@@ -12023,12 +12021,17 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // allocation and starves the main thread before it can present the
     // next frame.
     let stack_size = stack_size.clamp(pocket_kernel::DEFAULT_STACK_SIZE, 0x100000);
-    let stack_base = stack_top.saturating_sub(stack_size) & !0xfff;
-    ctx.cpu.map_region(
-        stack_base.saturating_sub(0x2000),
-        pocket_cpu::round_up_to_page(stack_size.saturating_add(0x3000)),
-        pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
-    )?;
+    let reservation = pocket_cpu::round_up_to_page(stack_size.saturating_add(0x3000));
+    if let Some(base) = ctx.kernel.heap.reserve_stack(reservation) {
+        // Already mapped in the private slot. Normal allocations cannot
+        // reuse this storage; keep the existing writable guard below SP.
+        ctx.cpu.write_mem(base, &vec![0u8; reservation as usize])?;
+        stack_top = base + 0x2000 + pocket_cpu::round_up_to_page(stack_size);
+    } else {
+        let stack_base = stack_top.saturating_sub(stack_size) & !0xfff;
+        ctx.cpu.map_region(stack_base.saturating_sub(0x2000), reservation,
+            pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)?;
+    }
     let mut thread = GuestThread::new(
         entry, parameter, stack_top, stack_size, exit_va, resume_pc, handle, saved_regs,
     );

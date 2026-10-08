@@ -1541,10 +1541,29 @@ impl Thunk {
 /// try to compete with `dlmalloc`. Each allocated block is preceded
 /// by an 8-byte header so `free()` can recover the size and link the
 /// block back into the free list.
+/// CE private allocations grow above the executable, in the active 32-MiB
+/// slot. Leave room for the existing writable stack guard and honor PE's
+/// reservation. Higher-based/non-CE images retain the previous flat layout.
+fn private_process_layout(image: &LoadedImage) -> Option<(u32, u32, u32)> {
+    if image.subsystem != pocket_pe::subsystem::WINDOWS_CE_GUI || image.image_base < 0x10000 { return None; }
+    let mut end = image.image_base.checked_add(image.size_of_image)?;
+    for section in &image.sections {
+        let section_end = image.image_base.checked_add(section.virtual_address)?
+            .checked_add(section.virtual_size.max(section.data.len() as u32))?;
+        end = end.max(section_end);
+    }
+    let stack_base = end.checked_add(0x2000)?.checked_add(0xffff)? & !0xffff;
+    let reserve = if image.stack_reserve == 0 { DEFAULT_STACK_SIZE } else { image.stack_reserve };
+    let stack_size = reserve.max(0x10000).checked_add(0xffff)? & !0xffff;
+    let heap_base = stack_base.checked_add(stack_size)?;
+    (heap_base <= 0x01ff_0000).then_some((stack_base, stack_size, heap_base))
+}
+
 #[derive(Debug)]
 pub struct Heap {
     base: u32,
     size: u32,
+    regions: Vec<(u32, u32)>,
     /// Sorted by start VA. Each entry is `(start, size)` of free space.
     free: Vec<(u32, u32)>,
     /// Out-of-band tracker of `(user_ptr -> requested_size)` for every
@@ -1563,14 +1582,45 @@ impl Heap {
         Self {
             base,
             size,
+            regions: vec![(base, size)],
             free: vec![(base, size)],
             live: HashMap::new(),
         }
     }
 
+    /// Add an independently mapped allocation arena, after existing regions.
+    pub fn add_region(&mut self, base: u32, size: u32) {
+        assert!(size > 0 && base.checked_add(size).is_some());
+        assert!(self.regions.iter().all(|&(start, len)| base >= start + len || base + size <= start));
+        self.regions.push((base, size));
+        let at = self.free.partition_point(|&(start, _)| start < base);
+        self.free.insert(at, (base, size));
+    }
+
+    /// Reserve page-aligned stack storage from the top of the private slot.
+    /// It is excluded from normal allocations and remains resident for the
+    /// process lifetime, matching the existing lifetime of worker stacks.
+    pub fn reserve_stack(&mut self, size: u32) -> Option<u32> {
+        for index in (0..self.free.len()).rev() {
+            let (start, len) = self.free[index];
+            let end = start.checked_add(len)? & !0xfff;
+            if end > 0x0200_0000 { continue; }
+            let Some(base) = end.checked_sub(size) else { continue; };
+            if base < start { continue; }
+            self.free[index].1 = base - start;
+            if self.free[index].1 == 0 { self.free.remove(index); }
+            return Some(base);
+        }
+        None
+    }
+
     pub fn base(&self) -> u32 {
         self.base
     }
+    pub fn contains_range(&self, address: u32, size: u32) -> bool {
+        self.regions.iter().any(|&(base, len)| address >= base && address.checked_add(size).is_some_and(|end| end <= base + len))
+    }
+
     pub fn size(&self) -> u32 {
         self.size
     }
@@ -1622,7 +1672,7 @@ impl Heap {
         }
         let block_start = user_ptr - HEAP_HEADER_BYTES;
         let block_size = Self::align_up(user_size.max(1)) + HEAP_HEADER_BYTES;
-        if block_start + block_size > self.base + self.size {
+        if !self.regions.iter().any(|&(base, size)| block_start >= base && block_start.checked_add(block_size).is_some_and(|end| end <= base + size)) {
             log::warn!("heap.free: chunk overflows heap; ignoring");
             return;
         }
@@ -2035,16 +2085,17 @@ impl Process {
         install_coalesced_code_hooks(cpu, &hooked_slots)?;
 
         // 3. Map a stack.
-        let stack_size = DEFAULT_STACK_SIZE;
-        let stack_top = DEFAULT_STACK_TOP;
+        let private_layout = private_process_layout(&image);
+        let (stack_base, stack_size, stack_top) = private_layout
+            .map(|layout| (layout.0, layout.1, layout.0 + layout.1))
+            .unwrap_or((DEFAULT_STACK_TOP - DEFAULT_STACK_SIZE, DEFAULT_STACK_SIZE, DEFAULT_STACK_TOP));
         let dynamic_exports = build_dynamic_exports(&thunks);
         // Keep one writable guard page below the nominal stack base.
         // ARM prologues may pre-decrement SP before the first store, and
         // Total Commander reaches exactly that boundary during startup.
-        let stack_base = stack_top - stack_size;
         cpu.map_region(
             stack_base - 0x2000,
-            stack_size + 0x3000,
+            stack_size + 0x2000,
             Prot::READ | Prot::WRITE,
         )?;
         cpu.write_reg(ArmReg::Sp, stack_top - 16)?;
@@ -2060,7 +2111,13 @@ impl Process {
 
         // 4. Map a heap.
         cpu.map_region(HEAP_BASE, HEAP_SIZE, Prot::READ | Prot::WRITE)?;
-        let mut heap = Heap::new(HEAP_BASE, HEAP_SIZE);
+        let mut heap = if let Some((_, _, heap_base)) = private_layout {
+            let heap_size = 0x0200_0000 - heap_base;
+            cpu.map_region(heap_base, heap_size, Prot::READ | Prot::WRITE)?;
+            let mut heap = Heap::new(heap_base, heap_size);
+            heap.add_region(HEAP_BASE, HEAP_SIZE);
+            heap
+        } else { Heap::new(HEAP_BASE, HEAP_SIZE) };
 
         // 4b. Publish the Windows CE process entry arguments.
         //
@@ -2807,6 +2864,40 @@ mod tests {
     /// meaning "out to the right margin". Solitaire uses exactly
     /// `[70, -1]`, so part 1 must start at 70 and run to the edge.
     #[test]
+    fn ce_memory_layout_uses_pe_reservation_and_private_slot_bounds() {
+        let mut image = image_based_at(0x10000, 0x509000);
+        image.subsystem = 9;
+        image.stack_reserve = 0x10000;
+        assert_eq!(private_process_layout(&image), Some((0x520000, 0x10000, 0x530000)));
+        image.stack_reserve = 0x30000;
+        assert_eq!(private_process_layout(&image), Some((0x520000, 0x30000, 0x550000)));
+        image.image_base = 0x30000000;
+        assert!(private_process_layout(&image).is_none());
+        image.image_base = 0x10000;
+        image.subsystem = 2;
+        assert!(private_process_layout(&image).is_none());
+    }
+
+    #[test]
+    fn ce_memory_layout_stack_and_overflow_arena_do_not_overlap_allocations() {
+        let mut heap = Heap::new(0x100000, 0x10000);
+        heap.add_region(HEAP_BASE, 0x10000);
+        let stack = heap.reserve_stack(0x4000).unwrap();
+        assert_eq!(stack, 0x10c000);
+        let low = heap.alloc(0xbff8).unwrap();
+        assert_eq!(low, 0x100008);
+        let high = heap.alloc(0x8000).unwrap();
+        assert!(high >= HEAP_BASE);
+        assert_eq!(heap.msize(high), Some(0x8000));
+        assert!(heap.contains_range(high, 0x8000));
+        assert!(!heap.contains_range(0x1fff0000, 0x1000));
+        heap.free(high);
+        heap.free(low);
+        assert_eq!(heap.free_bytes(), 0x1c000);
+        assert_eq!(heap.reserve_stack(0x4000), Some(0x108000));
+    }
+
+    #[test]
     fn status_bar_part_spans_follow_edges() {
         let mut bar = StatusBar::default();
         bar.set_parts(vec![70, -1]);
@@ -2995,6 +3086,7 @@ mod tests {
             machine: pocket_pe::machine::ARM,
             subsystem: pocket_pe::subsystem::WINDOWS_CE_GUI,
             image_base,
+            stack_reserve: 0x10000,
             size_of_image: text_size + 0x1000,
             entry_point: 0x1000,
             sections: vec![LoadedSection {
@@ -3089,6 +3181,7 @@ mod tests {
             machine: pocket_pe::machine::ARM,
             subsystem: pocket_pe::subsystem::WINDOWS_CE_GUI,
             image_base: 0x10000,
+            stack_reserve: 0x10000,
             size_of_image: 0x2000,
             entry_point: 0x1000,
             sections: vec![LoadedSection {

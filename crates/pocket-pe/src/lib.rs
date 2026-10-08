@@ -121,6 +121,8 @@ pub struct LoadedImage {
     pub subsystem: u16,
     pub image_base: u32,
     pub size_of_image: u32,
+    /// Primary-thread stack reservation from the PE optional header.
+    pub stack_reserve: u32,
     pub entry_point: u32,
     pub sections: Vec<LoadedSection>,
     /// Imports keyed by (dll lower-cased, binding) so callers can build
@@ -254,6 +256,7 @@ pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
         subsystem: subsys,
         image_base,
         size_of_image,
+        stack_reserve: oh.windows_fields.size_of_stack_reserve as u32,
         entry_point,
         sections,
         imports,
@@ -585,7 +588,7 @@ mod tests {
         let mut image = LoadedImage {
             source_path: String::new(), machine: machine::ARM,
             subsystem: subsystem::WINDOWS_CE_GUI, image_base: 0x100000,
-            size_of_image: 0x2000, entry_point: 0, imports: vec![],
+            stack_reserve: 0x10000, size_of_image: 0x2000, entry_point: 0, imports: vec![],
             exports: IndexMap::new(), resources: vec![], managed_runtime: None,
             sections: vec![LoadedSection { name: ".data".into(), virtual_address: 0x1000,
                 virtual_size: 8, characteristics: 0, data: 0x101234u32.to_le_bytes().repeat(2) }],
@@ -680,7 +683,7 @@ mod tests {
             machine: machine::ARM,
             subsystem: subsystem::WINDOWS_CE_GUI,
             image_base: 0x10000,
-            size_of_image: 0,
+            stack_reserve: 0x10000, size_of_image: 0,
             entry_point: 0,
             sections: vec![],
             imports: vec![],
