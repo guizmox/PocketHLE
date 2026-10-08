@@ -39,7 +39,45 @@ impl Runner {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> RunOutcome {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let exe = game.launch_path(&library_root);
+        let mut hook = RunHook::new(live_tx, input_rx);
+        let mut current = game;
+        let card_root = current.extracted_dir(&library_root);
+        let mut guest_path = None;
+        loop {
+            let (mut outcome, next) = self.run_process(&library_root, &current, &card_root,
+                guest_path.as_deref(), &mut hook);
+            let Some(next) = next else { return outcome; };
+            let game_dir = library_root.join(current.relative_dir());
+            let child = match next.executable.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    outcome.summary.push_str(&format!("\nChild path failed: {error}"));
+                    return outcome;
+                }
+            };
+            let allowed = card_root.canonicalize().ok().is_some_and(|root| child.starts_with(root));
+            let relative = game_dir.canonicalize().ok()
+                .and_then(|root| child.strip_prefix(root).ok().map(PathBuf::from));
+            if !allowed || relative.is_none() {
+                outcome.summary.push_str("\nChild executable is outside the imported card.");
+                return outcome;
+            }
+            current.executable = relative.unwrap();
+            guest_path = Some(next.guest_path);
+            hook.reset_process();
+        }
+    }
+
+    fn run_process(
+        &self,
+        library_root: &PathBuf,
+        game: &GameEntry,
+        card_root: &PathBuf,
+        guest_path: Option<&str>,
+        hook: &mut RunHook,
+    ) -> (RunOutcome, Option<pocket_core::kernel::ProcessLaunch>) {
+        let exe = if guest_path.is_some() { game.executable_path(library_root) }
+            else { game.launch_path(library_root) };
         let mut summary_lines = vec![format!("Game: {}", game.display_name)];
 
         let machine = pocket_core::pe::load_file(&exe)
@@ -92,10 +130,10 @@ impl Runner {
 
         if let Err(e) = emu.load_pe(&exe) {
             summary_lines.push(format!("load_pe failed: {e:#}"));
-            return RunOutcome {
+            return (RunOutcome {
                 summary: summary_lines.join("\n"),
                 framebuffer: None,
-            };
+            }, None);
         }
 
         // The screen has to be sized before the game runs: a GAPI title
@@ -165,8 +203,8 @@ impl Runner {
                 flash_disk.display()
             ));
 
-            emu.mount_read_only_dir("\\SD Card\\", &extracted);
-            emu.mount_read_only_dir("\\Storage Card\\", &extracted);
+            emu.mount_read_only_dir("\\SD Card\\", card_root);
+            emu.mount_read_only_dir("\\Storage Card\\", card_root);
             emu.mount_read_only_dir("\\SD Card\\Game\\", &extracted);
             emu.mount_read_only_dir("\\Storage Card\\Game\\", &extracted);
             summary_lines.push(format!(
@@ -216,12 +254,22 @@ impl Runner {
         // synthetic message pump in pocket-winceapi.
         emu.set_synthetic_message_budget(0);
 
+        if let Some(guest_exe) = guest_path {
+            emu.set_module_path(guest_exe);
+            if let Some((directory, _)) = guest_exe.rsplit_once('\\') {
+                emu.set_default_dir(&format!("{directory}\\"));
+            }
+            if let Some(parent) = exe.parent() {
+                emu.mount_read_only_dir("\\Application\\", parent);
+                emu.mount_read_only_dir("\\Program Files\\Game\\", parent);
+            }
+        }
+        if let Some(process) = emu.process_mut() {
+            process.state.process_launch_enabled = true;
+        }
         emu.start_audio();
-        let run_result = {
-            let mut hook = RunHook::new(live_tx, input_rx);
-            emu.run_with_hook(&mut hook)
-        };
-        match run_result {
+        let run_result = emu.run_with_hook(hook);
+        match &run_result {
             Ok(()) => summary_lines.push("Emulator exited cleanly.".to_string()),
             Err(e) => summary_lines.push(format!("Emulator stopped: {e:#}")),
         }
@@ -231,10 +279,13 @@ impl Runner {
             (!p.state.framebuffer.is_all_black())
                 .then(|| FrameSnapshot::from_framebuffer(&p.state.framebuffer))
         });
-        RunOutcome {
+        let next = if run_result.is_ok() && !hook.stopped_by_user {
+            emu.process_mut().and_then(|p| p.state.pending_process_launch.take())
+        } else { None };
+        (RunOutcome {
             summary: summary_lines.join("\n"),
             framebuffer,
-        }
+        }, next)
     }
 }
 
@@ -329,9 +380,16 @@ struct RunHook {
     /// for the entire run instead of growing one per delivered frame.
     scratch: Vec<u8>,
     saw_non_black: bool,
+    stopped_by_user: bool,
 }
 
 impl RunHook {
+    fn reset_process(&mut self) {
+        self.last_frame = 0;
+        self.last_emit_at = None;
+        self.saw_non_black = false;
+    }
+
     fn new(
         frame_tx: Option<Sender<FrameSnapshot>>,
         input_rx: Option<Receiver<InputCommand>>,
@@ -345,6 +403,7 @@ impl RunHook {
             last_emit_at: None,
             scratch: Vec::new(),
             saw_non_black: false,
+            stopped_by_user: false,
         }
     }
 }
@@ -370,6 +429,9 @@ impl FrameHook for RunHook {
                 }
             }
         }
+
+        self.stopped_by_user |= stop_requested || self.input_disconnected;
+        stop_requested |= self.input_disconnected;
 
         // Stream the latest framebuffer up to the GUI, but at most
         // once per `FRAME_PUSH_INTERVAL`. The hook is invoked after

@@ -806,6 +806,13 @@ pub struct LoadedModule {
 /// need to read or modify. Bundled into one struct so we can hand it
 /// out by `&mut` without conflicting with the immutable parts of
 /// [`Process`] (image bytes, thunk table) that the run loop uses.
+/// Foreground process handoff requested by a guest launcher.
+#[derive(Debug, Clone)]
+pub struct ProcessLaunch {
+    pub executable: PathBuf,
+    pub guest_path: String,
+}
+
 pub struct KernelState {
     pub heap: Heap,
     pub vfs: vfs::Vfs,
@@ -820,6 +827,10 @@ pub struct KernelState {
     /// nonsense like `\\Programdata.pak`. Frontends set this to the
     /// install path the CAB would have used on a device.
     pub module_path: String,
+    /// Only frontends with foreground handoff support may expose SD launch.
+    pub process_launch_enabled: bool,
+    pub pending_process_launch: Option<ProcessLaunch>,
+    pub command_line_cache: Option<u32>,
     /// Software-rendered display the GDI/GAPI handlers paint into.
     pub framebuffer: Framebuffer,
     /// Tracked GDI objects (DCs, bitmaps, brushes, pens, fonts).
@@ -1611,6 +1622,7 @@ impl Heap {
 }
 
 /// Fake `HMODULE` for the resident `ole32.dll` compatibility module.
+pub const SDLAUNCH_MODULE_HANDLE: u32 = 0x1000_0009;
 pub const OLE32_MODULE_HANDLE: u32 = 0x1000_0007;
 /// Fake `HMODULE` for `libGLES_CM.dll`, the Common profile.
 pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
@@ -1671,6 +1683,9 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
             if let ImportBinding::Ordinal(ord) = &thunk.binding {
                 table.insert(format!("#{ord}"), thunk.thunk_va);
             }
+        } else if thunk.dll.eq_ignore_ascii_case("sdlaunch.dll") {
+            exports.entry(SDLAUNCH_MODULE_HANDLE).or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("ole32.dll") {
             ole32.insert(name.clone(), thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("libgles_cm.dll")
@@ -1932,6 +1947,7 @@ impl Process {
             "libgles_cl.dll",
             "hss.dll",
             "ole32.dll",
+            "sdlaunch.dll",
         ] {
             dynamic_exports_to_add.extend(
                 dispatcher
@@ -2117,6 +2133,9 @@ impl Process {
                 heap,
                 vfs: vfs::Vfs::new(),
                 module_path: DEFAULT_MODULE_PATH.to_string(),
+                process_launch_enabled: false,
+                pending_process_launch: None,
+                command_line_cache: None,
                 framebuffer: Framebuffer::default(),
                 gdi: GdiState::new(),
                 resources,

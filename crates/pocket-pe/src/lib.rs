@@ -224,6 +224,17 @@ pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
         if data.len() < vs as usize {
             data.resize(vs as usize, 0);
         }
+        // Repair only the complete ARM packed-file EOF routine accidentally
+        // matched by the eight-byte SDP_Init patch in GizmondoCrackingTool.
+        // Work on the loaded copy; the user's executable remains unchanged.
+        if matches!(machine, machine::ARM | machine::THUMB | machine::ARMNT)
+            && s.characteristics & 0x2000_0000 != 0
+        {
+            let repaired = repair_patched_arm_packed_eof(&mut data, va);
+            if repaired != 0 {
+                log::info!("restored {repaired} packed-file EOF comparison(s) in section {name}");
+            }
+        }
         sections.push(LoadedSection {
             name,
             virtual_address: va,
@@ -452,6 +463,29 @@ fn collect_imports(bytes: &[u8], pe: &PE) -> Result<Vec<ImportSymbol>, LoadError
     Ok(out)
 }
 
+// This is intentionally a full routine signature, not the patch utility's
+// ambiguous CMP/MOV prefix. The length is masked into R2, the cursor is in R0,
+// and MOVLO selects not-at-EOF. SDP_Init's branch sequence must stay untouched.
+const PATCHED_ARM_PACKED_EOF: [u32; 9] = [
+    0xe1a0_3000, 0xe593_0000, 0xe590_100c, 0xe593_000c,
+    0xe3c1_2102, 0xe150_0000, 0xe3a0_0001, 0x33a0_0000, 0xe12f_ff1e,
+];
+
+fn repair_patched_arm_packed_eof(data: &mut [u8], section_rva: u32) -> usize {
+    let signature: Vec<u8> = PATCHED_ARM_PACKED_EOF.iter()
+        .flat_map(|word| word.to_le_bytes()).collect();
+    let first = ((4 - (section_rva & 3)) & 3) as usize;
+    let mut repaired = 0;
+    for offset in (first..data.len()).step_by(4) {
+        if data.get(offset..offset + signature.len()) == Some(signature.as_slice()) {
+            data[offset + 20..offset + 24].copy_from_slice(&0xe150_0002u32.to_le_bytes());
+            repaired += 1;
+        }
+    }
+    repaired
+}
+
+
 /// Group imports by DLL name (lower-cased) for nicer reporting.
 pub fn imports_by_dll(image: &LoadedImage) -> BTreeMap<String, Vec<&ImportSymbol>> {
     let mut by_dll: BTreeMap<String, Vec<&ImportSymbol>> = BTreeMap::new();
@@ -467,6 +501,39 @@ pub fn imports_by_dll(image: &LoadedImage) -> BTreeMap<String, Vec<&ImportSymbol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_eof_patch_restores_only_the_comparison_and_is_idempotent() {
+        let original: Vec<u8> = PATCHED_ARM_PACKED_EOF.iter()
+            .flat_map(|word| word.to_le_bytes()).collect();
+        let mut data = original.clone();
+        assert_eq!(repair_patched_arm_packed_eof(&mut data, 0x1000), 1);
+        let mut expected = original;
+        expected[20..24].copy_from_slice(&0xe150_0002u32.to_le_bytes());
+        assert_eq!(data, expected);
+        assert_eq!(repair_patched_arm_packed_eof(&mut data, 0x1000), 0);
+    }
+
+    #[test]
+    fn packed_eof_patch_requires_every_instruction_and_guest_alignment() {
+        let original: Vec<u8> = PATCHED_ARM_PACKED_EOF.iter()
+            .flat_map(|word| word.to_le_bytes()).collect();
+        for index in 0..original.len() {
+            let mut changed = original.clone();
+            changed[index] ^= 1;
+            let before = changed.clone();
+            assert_eq!(repair_patched_arm_packed_eof(&mut changed, 0x1000), 0);
+            assert_eq!(changed, before);
+        }
+        let mut unaligned = original.clone();
+        assert_eq!(repair_patched_arm_packed_eof(&mut unaligned, 0x1001), 0);
+        let mut aligned = vec![0; 3];
+        aligned.extend_from_slice(&original);
+        assert_eq!(repair_patched_arm_packed_eof(&mut aligned, 0x1001), 1);
+        let mut security_check = original;
+        security_check[28..32].copy_from_slice(&0x1a00_0000u32.to_le_bytes());
+        assert_eq!(repair_patched_arm_packed_eof(&mut security_check, 0x1000), 0);
+    }
 
     /// CeGCC / mingw32ce writes the bare module name into the import
     /// directory. Every consumer downstream keys on the name *with* the

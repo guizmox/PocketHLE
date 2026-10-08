@@ -485,6 +485,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "TranslateMessage", translate_message);
     d.register_handler(dll, "PostQuitMessage", post_quit_message);
     d.register_handler(dll, "CreateProcessW", create_process_w);
+    d.register_handler("sdlaunch.dll", "SDCreateProcess", sd_create_process);
     d.register_handler(dll, "PostMessageW", post_message_w);
     d.register_handler(dll, "PostThreadMessageW", post_thread_message_w);
     d.register_handler(dll, "CreateMsgQueue", create_msg_queue);
@@ -2263,6 +2264,48 @@ fn exit_process(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::Halt)
 }
 
+/// OS sdlaunch.dll forwards four arguments to CreateProcessW. PocketHLE
+/// supports a foreground handoff, not simultaneous parent/child processes.
+fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let application = ctx.arg_u32(0)?;
+    let command = ctx.arg_u32(1)?;
+    let flags = ctx.arg_u32(2)?;
+    let process_info = ctx.arg_u32(3)?;
+    if !ctx.kernel.process_launch_enabled || application == 0 || command == 0 || process_info == 0 {
+        log::warn!("SDCreateProcess: foreground handoff unavailable or invalid arguments");
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let name = String::from_utf16_lossy(&read_wstr(ctx, application, 1024)?);
+    let arguments = String::from_utf16_lossy(&read_wstr(ctx, command, 1024)?);
+    log::info!("SDCreateProcess(application={name:?}, command_line={arguments:?}, flags=0x{flags:x})");
+    if flags != 0 || !arguments.trim().is_empty() {
+        log::warn!("SDCreateProcess: flags and nonempty command lines are not supported by foreground handoff yet");
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let Some(path) = ctx.kernel.vfs.resolve(&name).filter(|path| path.is_file()) else {
+        log::warn!("SDCreateProcess: executable not found: {name:?}");
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let image = match pocket_pe::load_file(&path) {
+        Ok(image) if image.entry_point != 0 && matches!(image.machine,
+            pocket_pe::machine::ARM | pocket_pe::machine::THUMB | pocket_pe::machine::ARMNT
+            | pocket_pe::machine::MIPS_R3000 | pocket_pe::machine::MIPS_R4000) => image,
+        _ => {
+            log::warn!("SDCreateProcess: unsupported or protected executable: {}", path.display());
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+    };
+    drop(image);
+    // Validate the caller's output before committing a host request. The
+    // parent is terminated for handoff, so no pretend live handles escape.
+    ctx.cpu.write_mem(process_info, &[0; 16])?;
+    ctx.kernel.pending_process_launch = Some(pocket_kernel::ProcessLaunch {
+        executable: path, guest_path: name,
+    });
+    log::info!("SDCreateProcess: handing foreground execution to selected game");
+    Ok(DispatchOutcome::Halt)
+}
+
 fn create_process_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let application = ctx.arg_u32(0)?;
     let command_line = ctx.arg_u32(1)?;
@@ -2623,6 +2666,14 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let path_p = ctx.arg_u32(0)?;
     let path = read_wstr(ctx, path_p, 260).unwrap_or_default();
     let name = String::from_utf16_lossy(&path).to_ascii_lowercase();
+    if name.ends_with("sdlaunch.dll") || name == "sdlaunch" {
+        let handle = if ctx.kernel.process_launch_enabled
+            && ctx.kernel.dynamic_exports.contains_key(&pocket_kernel::SDLAUNCH_MODULE_HANDLE) {
+            pocket_kernel::SDLAUNCH_MODULE_HANDLE
+        } else { 0 };
+        log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE SD launch)");
+        return Ok(DispatchOutcome::ReturnedR0(handle));
+    }
     if name.ends_with("coredll.dll") || name == "coredll" {
         log::debug!("LoadLibraryW({name:?}) -> 0x{FAKE_MODULE_HANDLE:08x}");
         return Ok(DispatchOutcome::ReturnedR0(FAKE_MODULE_HANDLE));
@@ -2941,10 +2992,7 @@ fn get_module_file_name_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 fn get_command_line_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // We allocate a static guest-readable string the first time we're
     // called and return its VA on every subsequent call.
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static CACHED: AtomicU32 = AtomicU32::new(0);
-    let cached = CACHED.load(Ordering::Relaxed);
-    if cached != 0 {
+    if let Some(cached) = ctx.kernel.command_line_cache {
         return Ok(DispatchOutcome::ReturnedR0(cached));
     }
     let path = ctx.kernel.module_path.clone();
@@ -2954,7 +3002,7 @@ fn get_command_line_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         None => return Ok(DispatchOutcome::ReturnedR0(0)),
     };
     write_wide_str(ctx.cpu, va, bytes_needed / 2, &path)?;
-    CACHED.store(va, Ordering::Relaxed);
+    ctx.kernel.command_line_cache = Some(va);
     Ok(DispatchOutcome::ReturnedR0(va))
 }
 
@@ -15788,6 +15836,9 @@ mod tests {
             find_handles: std::collections::HashMap::new(),
             next_find_handle: 0,
             module_path: "\\Program Files\\Game\\Game.exe".to_string(),
+            process_launch_enabled: false,
+            pending_process_launch: None,
+            command_line_cache: None,
             pending_startup: std::collections::VecDeque::new(),
             framebuffer: Framebuffer::default(),
             gdi: GdiState::new(),
@@ -17462,6 +17513,66 @@ mod tests {
             DispatchOutcome::ReturnedR0(v) => v as i32,
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn sdlaunch_handoff_validates_executable_and_output_before_queueing() {
+        let root = std::env::temp_dir().join(format!("pockethle-sdlaunch-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Agaju")).unwrap();
+        let executable = root.join("Agaju/autorun.exe");
+        // Minimal ARM PE with one executable section, valid for load_file.
+        let mut pe = vec![0u8; 0x400];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x84..0x86].copy_from_slice(&0x01c0u16.to_le_bytes());
+        pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+        pe[0x94..0x96].copy_from_slice(&224u16.to_le_bytes());
+        pe[0x96..0x98].copy_from_slice(&0x0102u16.to_le_bytes());
+        let optional = &mut pe[0x98..0x178];
+        optional[0..2].copy_from_slice(&0x10bu16.to_le_bytes());
+        optional[16..20].copy_from_slice(&0x1000u32.to_le_bytes());
+        optional[28..32].copy_from_slice(&0x10000u32.to_le_bytes());
+        optional[32..36].copy_from_slice(&0x1000u32.to_le_bytes());
+        optional[36..40].copy_from_slice(&0x200u32.to_le_bytes());
+        optional[56..60].copy_from_slice(&0x2000u32.to_le_bytes());
+        optional[60..64].copy_from_slice(&0x200u32.to_le_bytes());
+        optional[68..70].copy_from_slice(&9u16.to_le_bytes());
+        optional[92..96].copy_from_slice(&16u32.to_le_bytes());
+        let section = &mut pe[0x178..0x1a0];
+        section[..5].copy_from_slice(b".text");
+        section[8..12].copy_from_slice(&4u32.to_le_bytes());
+        section[12..16].copy_from_slice(&0x1000u32.to_le_bytes());
+        section[16..20].copy_from_slice(&0x200u32.to_le_bytes());
+        section[20..24].copy_from_slice(&0x200u32.to_le_bytes());
+        section[36..40].copy_from_slice(&0x60000020u32.to_le_bytes());
+        pe[0x200..0x204].copy_from_slice(&[0x1e, 0xff, 0x2f, 0xe1]);
+        std::fs::write(&executable, pe).unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount_read_only("\\SD Card\\", &root);
+        let mut cpu = scanf_cpu();
+        write_wide_str(&mut cpu, 0x1000, 200, "\\SD Card\\Agaju\\autorun.exe").unwrap();
+        write_wide_str(&mut cpu, 0x1800, 20, "").unwrap();
+        let thunk = dummy_thunk();
+        let mut invoke = |kernel: &mut KernelState, flags: u32, output: u32| {
+            cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
+            cpu.write_reg(ArmReg::R2, flags).unwrap();
+            cpu.write_reg(ArmReg::R3, output).unwrap();
+            sd_create_process(&mut CallCtx { cpu: &mut cpu, kernel, thunk: &thunk })
+        };
+        assert_eq!(invoke(&mut kernel, 0, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(0));
+        kernel.process_launch_enabled = true;
+        assert_eq!(invoke(&mut kernel, 4, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(kernel.pending_process_launch.is_none());
+        assert!(invoke(&mut kernel, 0, 0xdead0000).is_err());
+        assert!(kernel.pending_process_launch.is_none());
+        assert_eq!(invoke(&mut kernel, 0, 0x2000).unwrap(), DispatchOutcome::Halt);
+        assert_eq!(kernel.pending_process_launch.take().unwrap().executable, executable.clone());
+        std::fs::remove_file(executable).unwrap();
+        assert_eq!(invoke(&mut kernel, 0, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(kernel.pending_process_launch.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn scanf_cpu() -> StubCpu {

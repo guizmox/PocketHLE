@@ -456,11 +456,13 @@ impl Vfs {
         }
         let mounts = self.matching_mounts(&normalised);
         let mut fallback = None;
+        let mut known_parent = false;
         // Exhaust exact paths before considering a fallback from any mount.
         for mount in &mounts {
             let Some(path) = self.host_path_for_mount(mount, &normalised) else { continue; };
             if fallback.is_none() { fallback = Some(path.clone()); }
             if path.exists() { return Some(path); }
+            known_parent |= path.parent().is_some_and(|parent| parent.is_dir());
         }
         let wanted: Vec<_> = normalised.split('/').filter(|part| !part.is_empty()).collect();
         let mut best = 0;
@@ -473,6 +475,13 @@ impl Vfs {
                     if !candidates.contains(&path) && candidates.len() < 2 { candidates.push(path); }
                 }
             }
+        }
+        // A known directory with a missing leaf must not borrow a file
+        // from another game's directory merely because its basename is unique.
+        // Keep suffix matches for wrapped install layouts (including Jump).
+        if known_parent && best == 1 {
+            log::debug!("vfs.resolve: missing file in existing directory {normalised:?}; refusing basename substitution");
+            return fallback;
         }
         if candidates.len() == 1 {
             let path = candidates.pop().unwrap();
@@ -1019,6 +1028,22 @@ pub enum SeekKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vfs_missing_file_does_not_borrow_from_another_existing_directory() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!("pockethle-vfs-missing-{}-{}",
+            std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir_all(root.join("Agaju")).unwrap();
+        std::fs::create_dir_all(root.join("GZGA200049")).unwrap();
+        let movie = root.join("GZGA200049/autorun.wmv");
+        std::fs::write(&movie, b"other game video").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\SD Card\\", &root);
+        assert!(v.open("\\SD Card\\Agaju\\AUTORUN.WMV", Access::Read, false).is_none());
+        assert_eq!(v.resolve("\\SD Card\\GZGA200049\\AUTORUN.WMV"), Some(movie.clone()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn vfs_path_fallback_preserves_directories_and_rejects_ambiguous_names() {
