@@ -55,6 +55,7 @@ pub struct PocketLauncher {
     library: Library,
     selected_game: Option<String>,
     rename_draft: Option<(String, String, bool)>,
+    pending_run: Option<GameEntry>,
     screen: Screen,
     runner: Runner,
     events_rx: Receiver<UiEvent>,
@@ -585,6 +586,7 @@ impl PocketLauncher {
             display_fullscreen: false,
             selected_game: None,
             rename_draft: None,
+            pending_run: None,
             screen: Screen::Library,
             runner: Runner::new(),
             events_rx: rx,
@@ -631,6 +633,12 @@ impl PocketLauncher {
                     self.running_game = None;
                 }
             }
+        }
+        // A second game may be selected while the first worker is still
+        // stopping. Wait for its completion event before replacing channels
+        // or accepting a final snapshot under the new game's identity.
+        if self.running_game.is_none() {
+            if let Some(game) = self.pending_run.take() { self.spawn_run(&game); }
         }
         // Drain any live preview frames the background runner may
         // have produced since the last UI tick.
@@ -771,6 +779,7 @@ impl PocketLauncher {
     }
 
     fn return_to_library(&mut self, ctx: &egui::Context) {
+        self.pending_run = None;
         self.release_all_keys();
         if let Some(tx) = self.input_tx.as_ref() { let _ = tx.send(InputCommand::Stop); }
         self.set_upscale_x2(ctx, false);
@@ -1828,6 +1837,13 @@ impl PocketLauncher {
     }
 
     fn spawn_run(&mut self, game: &GameEntry) {
+        if self.running_game.is_some() {
+            self.pending_run = Some(game.clone());
+            self.release_all_keys();
+            if let Some(tx) = self.input_tx.as_ref() { let _ = tx.send(InputCommand::Stop); }
+            self.status = format!("Stopping current game before starting {}...", game.display_name);
+            return;
+        }
         self.last_frame_texture = None;
         self.last_frame_snapshot = None;
         self.last_frame_status = None;

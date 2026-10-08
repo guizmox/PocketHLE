@@ -199,6 +199,7 @@ impl Default for WinCeDispatcher {
 
 impl WinCeDispatcher {
     pub fn new() -> Self {
+        gles::reset_for_session();
         let mut d = Self {
             by_name: HashMap::new(),
             by_name_constant: HashMap::new(),

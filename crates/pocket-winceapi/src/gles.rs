@@ -4,7 +4,8 @@
 //! in [`register`] by iterating the ordinal tables, mirroring what
 //! [`super::WinCeDispatcher::new`] does for `coredll.dll`.
 
-use once_cell::sync::Lazy;
+use std::cell::{Cell, RefCell};
+#[cfg(test)]
 use std::sync::Mutex;
 
 use pocket_gles::context::{Context, GuestMemory};
@@ -22,9 +23,23 @@ use pocket_kernel::{DispatchOutcome, KernelError};
 
 use crate::{CallCtx, WinCeDispatcher};
 
-// ---- global context --------------------------------------------------------
+// ---- execution-thread context ----------------------------------------------
+// All guest threads are scheduled by one host execution thread. Keep GL
+// resources local to it so a later game cannot inherit textures, guest
+// array pointers, matrices, depth buffers or pipeline state (nor another
+// concurrently running session's state).
+thread_local! {
+    static CTX: RefCell<Context> = RefCell::new(Context::new(240, 320));
+    static EGL_ERROR: Cell<u32> = const { Cell::new(EGL_SUCCESS) };
+}
 
-static CTX: Lazy<Mutex<Context>> = Lazy::new(|| Mutex::new(Context::new(240, 320)));
+/// Called once for a new dispatcher/session, including sequential CLI
+/// runs reusing the same host thread. Dropping the old Context frees all
+/// host-side GL resources; guest memory belongs to the new kernel/CPU.
+pub(crate) fn reset_for_session() {
+    with_ctx(|c| *c = Context::new(240, 320));
+    EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
+}
 
 /// Compressed formats we decode, reported through
 /// `GL_COMPRESSED_TEXTURE_FORMATS` and the extension string.
@@ -92,15 +107,9 @@ fn argx(ctx: &mut CallCtx<'_>, idx: u8) -> Result<f32, KernelError> {
 /// Every handler that returns nothing.
 const VOID: DispatchOutcome = DispatchOutcome::ReturnedR0(0);
 
-/// Run `f` against the global context. Poisoning cannot lose GL state
-/// we care about (a panicking handler leaves the context merely
-/// half-updated), so recover rather than propagate.
+/// Access the context owned by the current guest execution thread.
 fn with_ctx<R>(f: impl FnOnce(&mut Context) -> R) -> R {
-    let mut guard = match CTX.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    f(&mut guard)
+    CTX.with(|context| f(&mut context.borrow_mut()))
 }
 
 // ---- transform -------------------------------------------------------------
@@ -1099,17 +1108,11 @@ const SURFACE_HANDLE: u32 = 0x4547_0003;
 /// The single `EGLContext`.
 const CONTEXT_HANDLE: u32 = 0x4547_0004;
 
-/// Sticky EGL error, independent of the GL one.
-static EGL_ERROR: Mutex<u32> = Mutex::new(EGL_SUCCESS);
-
+/// Sticky EGL error, independent of the GL one and scoped to the run.
 fn set_egl_error(code: u32) {
-    let mut guard = match EGL_ERROR.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if *guard == EGL_SUCCESS {
-        *guard = code;
-    }
+    EGL_ERROR.with(|error| {
+        if error.get() == EGL_SUCCESS { error.set(code); }
+    });
 }
 
 fn egl_get_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -1283,14 +1286,7 @@ fn egl_get_current_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
 }
 
 fn egl_get_error(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let mut guard = match EGL_ERROR.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    Ok(DispatchOutcome::ReturnedR0(std::mem::replace(
-        &mut *guard,
-        EGL_SUCCESS,
-    )))
+    Ok(DispatchOutcome::ReturnedR0(EGL_ERROR.with(|error| error.replace(EGL_SUCCESS))))
 }
 
 fn egl_query_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -1622,16 +1618,11 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
     })
 }
 
-/// Reset the GL context to its initial state. Called between test
-/// cases, since the context is process-global.
+/// Test dimensions differ from the session's initial portrait panel.
 #[cfg(test)]
 fn reset_for_test(width: u32, height: u32) {
     with_ctx(|c| *c = Context::new(width, height));
-    let mut guard = match EGL_ERROR.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    *guard = EGL_SUCCESS;
+    EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
 }
 
 /// Entry points that are not in the ordinal tables but that games
@@ -1704,8 +1695,8 @@ mod tests {
     use pocket_kernel::{KernelState, Thunk};
     use pocket_pe::ImportBinding;
 
-    /// The tests share one process-global GL context, so they must not
-    /// run concurrently. A single mutex serializes them.
+    /// Retained for existing test fixtures; production GL state is local
+    /// to each host execution thread, not shared through this lock.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn guard() -> std::sync::MutexGuard<'static, ()> {
@@ -1713,6 +1704,68 @@ mod tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    #[test]
+    fn render_session_new_dispatcher_discards_previous_gl_state() {
+        let _lock = guard();
+        reset_for_test(320, 240);
+        with_ctx(|c| {
+            c.gen_textures(3);
+            c.gen_buffers(2);
+            c.vertex_array.pointer = 0x50ab1234;
+            c.vertex_array.enabled = true;
+            c.clear_color = [0.8, 0.2, 0.1, 1.0];
+            c.state.depth_test = true;
+            c.target.color.fill(0xff);
+            c.target.depth.fill(0.25);
+            c.set_error(pocket_gles::GL_INVALID_ENUM);
+        });
+        set_egl_error(EGL_BAD_DISPLAY);
+        // A fresh dispatcher is the actual production session boundary,
+        // even if a caller runs the next game on the same host thread.
+        let _dispatcher = WinCeDispatcher::new();
+        let defaults = Context::new(240, 320);
+        with_ctx(|c| {
+            assert!(c.textures.is_empty());
+            assert!(c.buffers.is_empty());
+            assert_eq!(c.vertex_array.pointer, 0);
+            assert!(!c.vertex_array.enabled);
+            assert_eq!(c.clear_color, defaults.clear_color);
+            assert_eq!(c.state.depth_test, defaults.state.depth_test);
+            assert_eq!((c.target.width, c.target.height), (240, 320));
+            assert_eq!(c.target.color, defaults.target.color);
+            assert_eq!(c.target.depth, defaults.target.depth);
+            assert_eq!(c.take_error(), pocket_gles::GL_NO_ERROR);
+            assert_eq!(c.gen_textures(1), vec![1]);
+            assert_eq!(c.gen_buffers(1), vec![1]);
+        });
+        assert_eq!(EGL_ERROR.with(Cell::get), EGL_SUCCESS);
+    }
+
+    #[test]
+    fn render_session_execution_threads_have_independent_gl_and_egl_state() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = [13u32, 19].into_iter().map(|width| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                reset_for_test(width, 7);
+                with_ctx(|c| {
+                    c.gen_textures(width as usize);
+                    c.vertex_array.pointer = width * 0x1000;
+                });
+                let error = if width == 13 { EGL_BAD_DISPLAY } else { EGL_SUCCESS };
+                if error != EGL_SUCCESS { set_egl_error(error); }
+                barrier.wait();
+                with_ctx(|c| {
+                    assert_eq!(c.target.width, width);
+                    assert_eq!(c.textures.len(), width as usize);
+                    assert_eq!(c.vertex_array.pointer, width * 0x1000);
+                });
+                assert_eq!(EGL_ERROR.with(Cell::get), error);
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
     }
 
     fn thunk() -> Thunk {
