@@ -1099,6 +1099,9 @@ pub struct KernelState {
     /// Workers already run since the main thread last yielded.
     pub worker_round_seen: Vec<usize>,
     pub worker_preempt_after_ms: u64,
+    /// Finite wait deadlines keyed by guest thread, API thunk and caller SP.
+    /// Re-entering a blocked call must not restart its timeout.
+    pub wait_deadlines: HashMap<(usize, u32, u32), u64>,
     pub guest_fpscr: HashMap<usize, u32>,
     pub timer_period_requests: std::collections::BTreeMap<u32, u32>,
     /// Critical section address -> (owning guest thread index, recursion depth).
@@ -1372,11 +1375,9 @@ pub struct GuestThread {
     pub finished: bool,
     /// Set while the thread is parked on a *re-entering* blocking call
     /// (`park_worker_and_retry` / `park_worker_and_reevaluate`): the
-    /// parked state will re-run the same API call, so resuming it from
-    /// another blocking call's scheduling point would just bounce
-    /// between two thunks without executing any guest code. A main
-    /// thread blocked in `GetMessageW` must not hand the CPU to such a
-    /// thread — see `resume_worker_reenter`.
+    /// parked state will re-run the same API call. It is eligible only
+    /// when its message queue/object is ready or its finite wait deadline
+    /// has expired — see `resume_worker_reenter`.
     pub parked_in_pump: bool,
     /// Waitable handles associated with a re-entering WaitFor* call.
     /// Empty means a message-pump wait (`GetMessageW`). Keeping the
@@ -2253,6 +2254,7 @@ impl Process {
                 worker_schedule_cursor: 0,
                 worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
+                wait_deadlines: HashMap::new(),
                 guest_fpscr: std::collections::HashMap::new(),
                 timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: HashMap::new(),

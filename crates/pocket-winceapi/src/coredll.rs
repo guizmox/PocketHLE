@@ -1981,6 +1981,37 @@ fn park_worker_at(
     Ok(Some(DispatchOutcome::JumpTo(main_regs[15] & !1)))
 }
 
+fn waitable_is_signalled(kernel: &KernelState, handle: u32) -> bool {
+    kernel.events.get(&handle).map(|event| event.signalled)
+        .or_else(|| kernel.msg_queues.get(&handle).map(|queue| !queue.messages.is_empty()))
+        .or_else(|| kernel.semaphores.get(&handle).map(|semaphore| semaphore.count > 0))
+        .or_else(|| kernel.threads.iter().find(|thread| thread.handle == handle)
+            .map(|thread| thread.finished))
+        .or_else(|| kernel.critical_sections.get(&handle).map(|(_, depth)| *depth == 0))
+        .unwrap_or(false)
+}
+
+fn worker_wait_expired(kernel: &KernelState, index: usize,
+    thread: &pocket_kernel::GuestThread, now: u64) -> bool {
+    kernel.wait_deadlines.get(&(index + 1, thread.worker_regs[15], thread.worker_regs[13]))
+        .is_some_and(|deadline| now >= *deadline)
+}
+
+fn worker_is_ready(kernel: &KernelState, index: usize,
+    thread: &pocket_kernel::GuestThread, now: u64) -> bool {
+    if !thread.parked_in_pump || worker_wait_expired(kernel, index, thread, now) {
+        return true;
+    }
+    if thread.parked_wait_handles.is_empty() {
+        return !thread.messages.is_empty();
+    }
+    if thread.parked_wait_all {
+        thread.parked_wait_handles.iter().all(|handle| waitable_is_signalled(kernel, *handle))
+    } else {
+        thread.parked_wait_handles.iter().any(|handle| waitable_is_signalled(kernel, *handle))
+    }
+}
+
 /// Hand the CPU to a worker thread that parked itself earlier.
 ///
 /// Snapshots the *current* (main) context first: `saved_regs` is what
@@ -2002,33 +2033,6 @@ fn resume_worker(
     // workers; once all workers were parked it immediately re-entered the first
     // unsatisfied WaitForMultipleObjects forever.  Besides burning the CPU,
     // that starved later workers.
-    let waitable_is_signalled = |handle: u32| {
-        ctx.kernel
-            .events
-            .get(&handle)
-            .map(|event| event.signalled)
-            .or_else(|| {
-                ctx.kernel
-                    .msg_queues
-                    .get(&handle)
-                    .map(|queue| !queue.messages.is_empty())
-            })
-            .or_else(|| {
-                ctx.kernel
-                    .semaphores
-                    .get(&handle)
-                    .map(|semaphore| semaphore.count > 0)
-            })
-            .or_else(|| {
-                ctx.kernel
-                    .threads
-                    .iter()
-                    .find(|thread| thread.handle == handle)
-                    .map(|thread| thread.finished)
-            })
-            .or_else(|| ctx.kernel.critical_sections.get(&handle).map(|(_, depth)| *depth == 0))
-            .unwrap_or(false)
-    };
     let now = monotonic_ms();
     let Some((thread_index, worker_regs)) = ctx
         .kernel
@@ -2037,26 +2041,7 @@ fn resume_worker(
         .enumerate()
         .filter(|(_, thread)| thread.sleep_until_ms <= now)
         .filter(|(_, thread)| thread.worker_saved && thread.started && !thread.finished)
-        .filter(|(_, thread)| {
-            if !thread.parked_in_pump {
-                return true;
-            }
-            if thread.parked_wait_handles.is_empty() {
-                // The only re-entering park without handles is GetMessageW.
-                return !thread.messages.is_empty();
-            }
-            if thread.parked_wait_all {
-                thread
-                    .parked_wait_handles
-                    .iter()
-                    .all(|&handle| waitable_is_signalled(handle))
-            } else {
-                thread
-                    .parked_wait_handles
-                    .iter()
-                    .any(|&handle| waitable_is_signalled(handle))
-            }
-        })
+        .filter(|(index, thread)| worker_is_ready(ctx.kernel, *index, thread, now))
         // Rotate among eligible workers: a frequently yielding first worker
         // must not starve a later mixer (Interstellar Flames 2).
         .min_by_key(|(index, _)| {
@@ -2120,10 +2105,9 @@ fn resume_worker(
 /// pump; without this handoff the worker never executes a single
 /// instruction and `frame_counter` stays 0 for the entire run.
 ///
-/// Workers parked by `park_worker_and_retry` / `park_worker_and_reevaluate`
-/// are skipped (`parked_in_pump`): handing them the CPU would re-enter
-/// their own thunk, find the same empty queue, and park again — an
-/// infinite thunk-to-thunk bounce that never executes guest code.
+/// A parked wait is eligible only when its object is ready or its finite
+/// deadline has expired; an empty message pump remains blocked. The same
+/// eligibility rules apply to all main-to-worker handoff paths.
 fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     if ctx.kernel.current_thread != 0 {
         return Ok(None);
@@ -2136,8 +2120,9 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         .enumerate()
         .filter(|(_, thread)| thread.sleep_until_ms <= now)
         .filter(|(_, thread)| {
-            thread.worker_saved && thread.started && !thread.finished && !thread.parked_in_pump
+            thread.worker_saved && thread.started && !thread.finished
         })
+        .filter(|(index, thread)| worker_is_ready(ctx.kernel, *index, thread, now))
         .min_by_key(|(index, _)| {
             let count = ctx.kernel.threads.len().max(1);
             (index + count - ctx.kernel.worker_schedule_cursor % count) % count
@@ -2182,7 +2167,8 @@ fn resume_ready_worker_after_sleep(ctx: &mut CallCtx<'_>) -> Result<Option<Dispa
     let next = ctx.kernel.threads.iter().enumerate()
         .filter(|(index, thread)| !ctx.kernel.worker_round_seen.contains(index)
             && thread.worker_saved && thread.started && !thread.finished
-            && !thread.parked_in_pump && thread.sleep_until_ms <= now)
+            && thread.sleep_until_ms <= now
+            && worker_is_ready(ctx.kernel, *index, thread, now))
         .min_by_key(|(index, _)| (index + count - ctx.kernel.worker_schedule_cursor % count) % count)
         .map(|(index, thread)| (index, thread.worker_regs));
     let Some((index, regs)) = next else { return Ok(None); };
@@ -2213,9 +2199,11 @@ pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOu
         || ctx.kernel.create_frame.is_some() || ctx.kernel.dialog_frame.is_some()
         || ctx.kernel.message_frame.is_some() || !ctx.kernel.vector_iter_stack.is_empty()
         || !ctx.kernel.qsort_frames.is_empty() || !ctx.kernel.module_attach_frames.is_empty() { return Ok(None); }
-    let due = ctx.kernel.threads.iter().any(|thread| thread.started && !thread.finished
-        && thread.worker_saved && !thread.parked_in_pump
-        && thread.sleep_until_ms != 0 && thread.sleep_until_ms <= now);
+    let due = ctx.kernel.threads.iter().enumerate().any(|(index, thread)|
+        thread.started && !thread.finished && thread.worker_saved
+        && thread.sleep_until_ms <= now
+        && ((!thread.parked_in_pump && thread.sleep_until_ms != 0)
+            || worker_wait_expired(ctx.kernel, index, thread, now)));
     if !due { return Ok(None); }
     resume_worker_reenter(ctx)
 }
@@ -8967,11 +8955,51 @@ fn complete_satisfied_wait(ctx: &mut CallCtx<'_>, result: u32) -> Result<Dispatc
     Ok(DispatchOutcome::ReturnedR0(result))
 }
 
+fn finish_wait(ctx: &mut CallCtx<'_>, result: u32) -> Result<DispatchOutcome, KernelError> {
+    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    ctx.kernel.wait_deadlines.remove(&key);
+    complete_satisfied_wait(ctx, result)
+}
+
+fn block_on_wait(ctx: &mut CallCtx<'_>, handles: &[u32], wait_all: bool,
+    timeout: u32) -> Result<DispatchOutcome, KernelError> {
+    // A zero timeout is a poll; a positive timeout belongs to the entire
+    // call, not to each cooperative handoff. Never return a guessed timeout
+    // just because the signalling thread yielded before it could signal.
+    const INFINITE: u32 = u32::MAX;
+    const WAIT_TIMEOUT: u32 = 0x102;
+    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    if timeout == 0 {
+        // This poll has completed; yielding a worker preserves fairness
+        // without parking it on an unsignalled object or inventing a delay.
+        return finish_wait(ctx, WAIT_TIMEOUT);
+    }
+    if timeout != INFINITE {
+        let now = monotonic_ms();
+        let deadline = *ctx.kernel.wait_deadlines.entry(key)
+            .or_insert_with(|| now.saturating_add(u64::from(timeout)));
+        if now >= deadline {
+            return finish_wait(ctx, WAIT_TIMEOUT);
+        }
+    }
+    if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
+        if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
+            ctx.kernel.threads[index].parked_wait_handles = handles.to_vec();
+            ctx.kernel.threads[index].parked_wait_all = wait_all;
+            return Ok(outcome);
+        }
+    }
+    if let Some(outcome) = resume_worker_reenter(ctx)? {
+        return Ok(outcome);
+    }
+    // Keep the main call open. The normal run-loop hook still services host
+    // stop/input while the event is unsignalled or its deadline is pending.
+    Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
+}
+
 fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_TIMEOUT: u32 = 0x102;
     const WAIT_FAILED: u32 = 0xffff_ffff;
-    const INFINITE: u32 = 0xffff_ffff;
 
     service_mas_audio(ctx.kernel);
     let count = ctx.arg_u32(0)?;
@@ -8991,34 +9019,13 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         return Ok(DispatchOutcome::ReturnedR0(WAIT_FAILED));
     }
 
-    let is_signalled = |kernel: &KernelState, handle: u32| {
-        kernel
-            .events
-            .get(&handle)
-            .map(|event| event.signalled)
-            .or_else(|| {
-                kernel
-                    .msg_queues
-                    .get(&handle)
-                    .map(|queue| !queue.messages.is_empty())
-            })
-            .or_else(|| {
-                kernel
-                    .threads
-                    .iter()
-                    .find(|thread| thread.handle == handle)
-                    .map(|thread| thread.finished)
-            })
-            .unwrap_or(false)
-    };
-
     let ready_index = handles
         .iter()
-        .position(|&handle| is_signalled(ctx.kernel, handle));
+        .position(|&handle| waitable_is_signalled(ctx.kernel, handle));
     let ready = if wait_all {
         handles
             .iter()
-            .all(|&handle| is_signalled(ctx.kernel, handle))
+            .all(|&handle| waitable_is_signalled(ctx.kernel, handle))
     } else {
         ready_index.is_some()
     };
@@ -9031,7 +9038,12 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
                     }
                 }
             }
-            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
+            for handle in &handles {
+                if let Some(semaphore) = ctx.kernel.semaphores.get_mut(handle) {
+                    semaphore.count -= 1;
+                }
+            }
+            return finish_wait(ctx, WAIT_OBJECT_0);
         }
         let index = ready_index.expect("ready implies one signalled handle");
         if let Some(event) = ctx.kernel.events.get_mut(&handles[index]) {
@@ -9039,62 +9051,13 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
                 event.signalled = false;
             }
         }
-        return complete_satisfied_wait(ctx, WAIT_OBJECT_0 + index as u32);
+        if let Some(semaphore) = ctx.kernel.semaphores.get_mut(&handles[index]) {
+            semaphore.count -= 1;
+        }
+        return finish_wait(ctx, WAIT_OBJECT_0 + index as u32);
     }
 
-    // Nothing is signalled. Only one guest thread runs at a time here,
-    // so whoever would signal one of these objects needs the CPU first:
-    // an unsatisfied wait is a scheduling point.
-    //
-    // An infinite wait re-runs the call when the worker is scheduled
-    // again instead of resuming with a value, the same way
-    // `wait_for_single_object` does -- `WAIT_TIMEOUT` cannot be the
-    // answer to a wait that has no timeout, and a guest that branches on
-    // the returned index believes it. Ball Busters' card monitor waits
-    // forever on `{re-check event, SDMMC_REMOVE_EVENT}` and reads any
-    // index but 0 as the card having been pulled, so parking it with
-    // `WAIT_TIMEOUT` handed it 258 and put it on its "SD card removed"
-    // screen instead of its main menu.
-    if timeout == INFINITE {
-        let waiter_index = ctx.kernel.current_thread.checked_sub(1);
-        if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
-            if let Some(index) = waiter_index {
-                if let Some(thread) = ctx.kernel.threads.get_mut(index) {
-                    thread.parked_wait_handles = handles.clone();
-                    thread.parked_wait_all = wait_all;
-                }
-            }
-            return Ok(outcome);
-        }
-        // The main thread is the one waiting, so hand the CPU to a parked
-        // worker: it is the only thing that can make any of these objects
-        // signalled. Ball Busters' card check runs entirely on the worker
-        // it just spawned and then waits for it here, so skipping the
-        // handoff left both of its card flags at their startup zeroes and
-        // put the game on the "SD card removed" screen even though the
-        // check itself now passes.
-        if let Some(outcome) = resume_worker(ctx, WAIT_OBJECT_0)? {
-            return Ok(outcome);
-        }
-        // Nothing else can run. Honouring the wait would deadlock the
-        // process, so keep the permissive answer -- but say so, because
-        // it is a lie the guest did not earn: a worker loop that reads
-        // index 0 as "quit" exits on it, and then whoever was waiting
-        // for that worker spins forever.
-        log::debug!(
-            "WaitForMultipleObjects({count} handles, INFINITE) unsatisfied with nothing \
-             else runnable; answering WAIT_OBJECT_0 for handle 0x{:08x}",
-            handles[0]
-        );
-        return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
-    }
-    if let Some(outcome) = park_worker(ctx, WAIT_TIMEOUT)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = resume_worker(ctx, WAIT_TIMEOUT)? {
-        return Ok(outcome);
-    }
-    Ok(DispatchOutcome::ReturnedR0(WAIT_TIMEOUT))
+    block_on_wait(ctx, &handles, wait_all, timeout)
 }
 
 fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -11946,20 +11909,16 @@ fn event_modify(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 /// `DWORD WaitForSingleObject(HANDLE, DWORD dwMilliseconds)`
 ///
-/// Returns `WAIT_OBJECT_0` for anything that really is signalled (a
-/// set event, a finished thread, an unknown handle waited on
-/// forever) and `WAIT_TIMEOUT` for a finite wait on something that
-/// isn't. Getting the timeout case right is what lets a guest worker
-/// thread keep looping instead of tearing itself down on its first
-/// iteration.
+/// Recognized objects complete when signalled or after a finite deadline.
+/// Both main and worker calls retain their arguments while blocked; zero
+/// milliseconds polls without blocking. Unknown object classes
+/// retain the existing compatibility answer.
 ///
 /// A wait that would block also doubles as a scheduling point: this
 /// HLE runs one guest thread at a time, so the caller is parked and
 /// the other side of the ping-pong gets the CPU.
 fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_TIMEOUT: u32 = 0x102;
-    const INFINITE: u32 = 0xFFFF_FFFF;
 
     service_mas_audio(ctx.kernel);
     let handle = ctx.arg_u32(0)?;
@@ -11981,90 +11940,26 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
         service_wave_out(ctx)?;
     }
 
-    // A point-to-point message queue is a waitable object on the
-    // device: the reader blocks on the handle and only calls
-    // `ReadMsgQueue` once the wait is satisfied. Whoever fills that
-    // queue is another guest thread, so an empty queue has to be a
-    // scheduling point -- answering `WAIT_OBJECT_0` here spins the
-    // reader forever and starves the writer, which is how Bejeweled
-    // hangs on its loading screen.
-    if let Some(queue) = ctx.kernel.msg_queues.get(&handle) {
-        if !queue.messages.is_empty() {
-            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
-        }
-        let waiter_index = ctx.kernel.current_thread.checked_sub(1);
-        if let Some(outcome) = park_worker_and_retry(ctx)? {
-            if let Some(index) = waiter_index {
-                if let Some(thread) = ctx.kernel.threads.get_mut(index) {
-                    thread.parked_wait_handles = vec![handle];
-                    thread.parked_wait_all = false;
-                }
-            }
-            return Ok(outcome);
-        }
-        if let Some(outcome) = resume_worker(ctx, WAIT_TIMEOUT)? {
-            return Ok(outcome);
-        }
-        return Ok(DispatchOutcome::ReturnedR0(WAIT_TIMEOUT));
+    let known = ctx.kernel.events.contains_key(&handle)
+        || ctx.kernel.msg_queues.contains_key(&handle)
+        || ctx.kernel.semaphores.contains_key(&handle)
+        || ctx.kernel.threads.iter().any(|thread| thread.handle == handle);
+    if !known {
+        // Preserve existing compatibility for object classes not modeled here.
+        let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+        ctx.kernel.wait_deadlines.remove(&key);
+        return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
     }
-
-    if let Some(ev) = ctx.kernel.events.get_mut(&handle) {
-        if ev.signalled {
-            if !ev.manual_reset {
-                ev.signalled = false;
-            }
-            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
+    if waitable_is_signalled(ctx.kernel, handle) {
+        if let Some(event) = ctx.kernel.events.get_mut(&handle) {
+            if !event.manual_reset { event.signalled = false; }
         }
-    } else if let Some(semaphore) = ctx.kernel.semaphores.get_mut(&handle) {
-        if semaphore.count > 0 {
+        if let Some(semaphore) = ctx.kernel.semaphores.get_mut(&handle) {
             semaphore.count -= 1;
-            return complete_satisfied_wait(ctx, WAIT_OBJECT_0);
         }
-    } else if !ctx
-        .kernel
-        .threads
-        .iter()
-        .any(|thread| thread.handle == handle && !thread.finished)
-    {
-        // Unknown handle (mutex, already-reaped thread): we don't model
-        // it, so keep the old permissive answer.
-        return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
+        return finish_wait(ctx, WAIT_OBJECT_0);
     }
-
-    // A live thread handle or an unsignalled event.
-    //
-    // For a worker, yield: this HLE runs one guest thread at a time, so
-    // whoever would signal the object needs the CPU before the wait can
-    // possibly be satisfied. An infinite wait re-runs the call when the
-    // worker is scheduled again rather than returning a value --
-    // `WAIT_TIMEOUT` is a lie for `INFINITE`, and `WAIT_OBJECT_0` is the
-    // lie that kept Toy Golf's mixer thread spinning: it waits forever
-    // on the buffer-done event and, told the wait succeeded, refilled
-    // buffers without ever yielding, so the main thread drew two frames
-    // and then starved.
-    if timeout == INFINITE {
-        let waiter_index = ctx.kernel.current_thread.checked_sub(1);
-        if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
-            if let Some(index) = waiter_index {
-                if let Some(thread) = ctx.kernel.threads.get_mut(index) {
-                    thread.parked_wait_handles = vec![handle];
-                    thread.parked_wait_all = false;
-                }
-            }
-            return Ok(outcome);
-        }
-        // The main thread is the one waiting, and nothing else can make
-        // the object signalled from here. Honouring the wait would
-        // deadlock the process, so keep the permissive answer.
-        return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
-    }
-    if let Some(outcome) = park_worker(ctx, WAIT_TIMEOUT)? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = resume_worker(ctx, WAIT_TIMEOUT)? {
-        return Ok(outcome);
-    }
-    Ok(DispatchOutcome::ReturnedR0(WAIT_TIMEOUT))
+    block_on_wait(ctx, &[handle], false, timeout)
 }
 
 /// `dwCreationFlags` bit that asks for a thread that does not run
@@ -16363,6 +16258,146 @@ mod tests {
     use pocket_pe::ImportBinding;
 
     #[test]
+    fn timed_wait_main_keeps_deadline_and_waits_for_the_worker_acknowledgement() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let main_thunk = thunk_at(0x70000100);
+        let worker_thunk = thunk_at(0x70000200);
+        let ready = 0xdeade010;
+        let request = 0xdeade011;
+        kernel.events.insert(ready, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        kernel.events.insert(request, pocket_kernel::EventObject { manual_reset: false, signalled: true });
+        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.parked_in_pump = true;
+        worker.parked_wait_handles = vec![request];
+        worker.worker_regs[0] = request;
+        worker.worker_regs[1] = u32::MAX;
+        worker.worker_regs[13] = 0x8800;
+        worker.worker_regs[14] = 0x10280;
+        worker.worker_regs[15] = worker_thunk.thunk_va;
+        kernel.threads.push(worker);
+        cpu.write_reg(ArmReg::R0, ready).unwrap();
+        cpu.write_reg(ArmReg::R1, 60000).unwrap();
+        cpu.write_reg(ArmReg::R7, 0x12345678).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x10180).unwrap();
+        let key = (0, main_thunk.thunk_va, 0x9000);
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), DispatchOutcome::JumpTo(worker_thunk.thunk_va));
+        let deadline = kernel.wait_deadlines[&key];
+        // Finishing the worker's request wait deliberately yields for fairness.
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &worker_thunk }).unwrap(), DispatchOutcome::JumpTo(main_thunk.thunk_va));
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), ready);
+        assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), 60000);
+        assert_eq!(cpu.read_reg(ArmReg::R7).unwrap(), 0x12345678);
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x10180);
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), DispatchOutcome::JumpTo(0x10280));
+        assert_eq!(kernel.wait_deadlines[&key], deadline);
+        // The acknowledgement only arrives on this second worker turn.
+        kernel.events.get_mut(&ready).unwrap().signalled = true;
+        cpu.write_reg(ArmReg::R0, request).unwrap();
+        cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &worker_thunk }).unwrap(), DispatchOutcome::JumpTo(main_thunk.thunk_va));
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(!kernel.events[&ready].signalled);
+        assert!(kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn timed_wait_worker_resumes_when_its_deadline_expires_without_a_signal() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000300);
+        let event = 0xdeade010;
+        kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: true, signalled: false });
+        let mut main = [0; 17];
+        main[13] = 0x8800;
+        main[15] = 0x10100;
+        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0x10100, 0xdead7c00, main);
+        worker.started = true;
+        kernel.threads.push(worker);
+        kernel.current_thread = 1;
+        cpu.write_reg(ArmReg::R0, event).unwrap();
+        cpu.write_reg(ArmReg::R1, 60000).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x10280).unwrap();
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x10100));
+        assert!(!worker_is_ready(&kernel, 0, &kernel.threads[0], monotonic_ms()));
+        let key = (1, thunk.thunk_va, 0x9000);
+        *kernel.wait_deadlines.get_mut(&key).unwrap() = 0;
+        assert!(worker_is_ready(&kernel, 0, &kernel.threads[0], monotonic_ms()));
+        kernel.worker_preempt_after_ms = 0;
+        assert_eq!(wake_due_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), Some(DispatchOutcome::JumpTo(thunk.thunk_va)));
+        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(kernel.threads[0].worker_regs[0], 0x102);
+        assert_eq!(kernel.threads[0].worker_regs[15], 0x10280);
+        assert!(!kernel.events[&event].signalled);
+        assert!(kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn timed_wait_poll_and_expiry_do_not_restart_the_timeout() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000400);
+        let event = 0xdeade010;
+        kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: true, signalled: false });
+        cpu.write_reg(ArmReg::R0, event).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x102));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        ctx.cpu.write_reg(ArmReg::R1, 60000).unwrap();
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        let key = (0, thunk.thunk_va, 0x9000);
+        let deadline = ctx.kernel.wait_deadlines[&key];
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(ctx.kernel.wait_deadlines[&key], deadline);
+        *ctx.kernel.wait_deadlines.get_mut(&key).unwrap() = 0;
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x102));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        ctx.cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn timed_wait_multiple_retains_its_index_and_wait_all_consumption() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000500);
+        let first = 0xdeade010;
+        let second = 0xdeade011;
+        for event in [first, second] {
+            kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        }
+        cpu.write_mem(0x2000, &first.to_le_bytes()).unwrap();
+        cpu.write_mem(0x2004, &second.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R0, 2).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        cpu.write_reg(ArmReg::R3, 60000).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        *ctx.kernel.wait_deadlines.get_mut(&(0, thunk.thunk_va, 0x9000)).unwrap() = 0;
+        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x102));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        ctx.kernel.events.get_mut(&second).unwrap().signalled = true;
+        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert!(!ctx.kernel.events[&second].signalled);
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
+        ctx.kernel.events.get_mut(&first).unwrap().signalled = true;
+        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert!(ctx.kernel.events[&first].signalled);
+        ctx.kernel.events.get_mut(&second).unwrap().signalled = true;
+        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(!ctx.kernel.events[&first].signalled);
+        assert!(!ctx.kernel.events[&second].signalled);
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
     fn stdio_text_reads_translate_crlf_across_boundaries_and_preserve_binary() {
         use pocket_kernel::vfs::{Access, SeekKind};
         let dir = tempfile::tempdir().unwrap();
@@ -16713,6 +16748,7 @@ mod tests {
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
+                wait_deadlines: std::collections::HashMap::new(),
                 guest_fpscr: std::collections::HashMap::new(),
                 timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: std::collections::HashMap::new(),
@@ -18495,7 +18531,7 @@ mod tests {
             let bits = expected.to_bits();
             assert_eq!(atof_handler(&mut ctx).unwrap(),
                 DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32), "{text:?}");
-            assert_eq!(ctx.cpu.read_mem(0x1100, bytes.len()).unwrap(), bytes);
+            assert_eq!(ctx.cpu.read_mem(0x1100, bytes.len() as u32).unwrap(), bytes);
         }
     }
 
@@ -19557,7 +19593,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let game = dir.path().join("GZGA200045");
         std::fs::create_dir(&game).unwrap();
-        std::fs::write(game.join("GZGA200045"), 200_045u32.to_le_bytes()).unwrap();
+        let declared_serial = 0xb5f10053u32;
+        let marker = 200_045u32.wrapping_sub(declared_serial).wrapping_sub(1);
+        std::fs::write(game.join("GZGA200045"), marker.to_le_bytes()).unwrap();
 
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -19628,7 +19666,7 @@ mod tests {
         assert!(!text(mfr_off).is_empty());
         assert_eq!(
             text(serial_off).parse::<u32>().unwrap(),
-            200_045,
+            declared_serial,
             "the serial has to be the decimal string the card declares"
         );
         assert_eq!(

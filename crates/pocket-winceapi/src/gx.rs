@@ -407,6 +407,7 @@ pub(crate) mod tests {
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
+                wait_deadlines: std::collections::HashMap::new(),
                 guest_fpscr: std::collections::HashMap::new(),
                 timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: std::collections::HashMap::new(),
