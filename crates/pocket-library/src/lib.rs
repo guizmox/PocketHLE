@@ -277,7 +277,7 @@ pub struct GameSettings {
     /// Which CPU backend the user prefers for this game.
     #[serde(default)]
     pub cpu_backend: CpuBackendPref,
-    /// Maximum number of host-resumed slices per run.
+    /// Maximum number of host-resumed slices per run; zero means unlimited.
     #[serde(default = "default_max_slices")]
     pub max_slices: u64,
     /// Instructions per slice budget passed to the CPU.
@@ -430,16 +430,11 @@ impl ScreenPref {
 }
 
 fn default_max_slices() -> u64 {
-    // Real PPC2003 games typically need a few hundred thousand
-    // slices to finish their CRT init / soft-float lookup tables /
-    // bitmap loading before the first WM_PAINT is delivered, and
-    // millions more to clear the splash and reach gameplay.
-    // 1024 was effectively a smoke test, not a game launcher: a
-    // freshly imported game timed out long before the title
-    // screen and looked frozen in the GUI. 50 million is enough
-    // to land on the JumpyBall main menu in roughly ten seconds
-    // on a modern x86 machine.
-    50_000_000
+    // Interactive play ends on Stop or guest exit, not an accumulated
+    // dispatch count. Jump polls its frame clock in a busy loop and can
+    // consume the old 50-million budget in under a minute of normal play.
+    // Explicit saved limits remain available for bounded diagnostic runs.
+    0
 }
 
 fn default_instructions_per_slice() -> u64 {

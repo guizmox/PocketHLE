@@ -3162,10 +3162,12 @@ fn soft_stou(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(r))
 }
 fn soft_stoi64(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(ret_i64(read_f64(ctx, 0)? as i64))
+    // The source is a single in R0; R1 is not an argument. Carmageddon
+    // calls this helper throughout its frame loop with unrelated data in R1.
+    Ok(ret_i64(read_f32(ctx, 0)? as i64))
 }
 fn soft_stou64(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let v = read_f64(ctx, 0)?;
+    let v = read_f32(ctx, 0)?;
     let r = if v < 0.0 || !v.is_finite() {
         0
     } else {
@@ -15741,6 +15743,39 @@ mod tests {
         Heap, KernelState, Thunk,
     };
     use pocket_pe::ImportBinding;
+
+    #[test]
+    fn soft_single_to_i64_ignores_r1_and_returns_both_words() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for (input, expected) in [(0.0_f32, 0_i64), (123.75, 123),
+            (-123.75, -123), (4294967296.0, 4294967296)] {
+            for unrelated_r1 in [0_u32, 0x7ff0_0000, 0xffff_ffff] {
+                cpu.write_reg(ArmReg::R0, input.to_bits()).unwrap();
+                cpu.write_reg(ArmReg::R1, unrelated_r1).unwrap();
+                let mut ctx = CallCtx { cpu: &mut cpu, thunk: &thunk, kernel: &mut kernel };
+                assert_eq!(soft_stoi64(&mut ctx).unwrap(), ret_i64(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn soft_single_to_u64_ignores_r1_and_returns_both_words() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for (input, expected) in [(0.0_f32, 0_u64), (123.75, 123),
+            (4294967296.0, 4294967296), (-1.0, 0), (f32::NAN, 0)] {
+            for unrelated_r1 in [0_u32, 0x7ff0_0000, 0xffff_ffff] {
+                cpu.write_reg(ArmReg::R0, input.to_bits()).unwrap();
+                cpu.write_reg(ArmReg::R1, unrelated_r1).unwrap();
+                let mut ctx = CallCtx { cpu: &mut cpu, thunk: &thunk, kernel: &mut kernel };
+                assert_eq!(soft_stou64(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0R1(expected as u32, (expected >> 32) as u32));
+            }
+        }
+    }
 
     fn fresh_kernel() -> KernelState {
         use pocket_kernel::audio::{AudioEngine, GuestFormat};

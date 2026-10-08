@@ -28,7 +28,7 @@ use crate:: {
 pub(crate) const CLASS: [u8;16] = [0xb3,0xeb,0x36,0xe4,0x4f,0x52,0xce,0x11,0x9f,0x53,0,0x20,0xaf,0x0b,0xa7,0x70];
 const UNKNOWN: [u8;16] = [0,0,0,0,0,0,0,0,0xc0,0,0,0,0,0,0,0x46];
 const TAIL: [u8;12] = [0xd4,0x0a,0xce,0x11,0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70];
-const KINDS: [(&str,u32,usize);7] = [("graph",0x56a868a9,18),("control",0x56a868b1,16),("event",0x56a868b6,16),("filter",0x56a86899,15),("window",0x56a868b4,46),("audio",0x56a868b3,11),("filtergraph",0x56a8689f,11)];
+const KINDS: [(&str,u32,usize);8] = [("graph",0x56a868a9,18),("control",0x56a868b1,16),("event",0x56a868b6,13),("eventex",0x56a868c0,16),("filter",0x56a86899,15),("window",0x56a868b4,46),("audio",0x56a868b3,11),("filtergraph",0x56a8689f,11)];
 fn kind(iid:&[u8])->Option<&'static str>  {
     if iid == UNKNOWN  {
         return Some("graph");
@@ -66,6 +66,7 @@ struct Movie  {
     notify:u32,
     notify_msg:u32,
     notify_param:u32,
+    notify_flags:u32,
     volume:i32,
 }
 impl Movie  {
@@ -90,6 +91,7 @@ impl Movie  {
             notify:0,
             notify_msg:0,
             notify_param:0,
+            notify_flags:0,
             volume:0
         }
     }
@@ -276,7 +278,7 @@ KernelError>  {
                 m.completed=true;
                 m.completion_code=3;
                 m.playing=false;
-                if m.notify!=0&&m.notify_msg!=0 {
+                if m.notify!=0&&m.notify_msg!=0&&m.notify_flags==0 {
                     ctx.kernel.posted_messages.push_back((m.notify,m.notify_msg,0,m.notify_param));
                 }
                 break;
@@ -312,7 +314,7 @@ KernelError>  {
         m.playing=false;
         m.start=None;
         log::info!("DirectShow playback completed ({})",m.frame_number);
-        if m.notify!=0&&m.notify_msg!=0  {
+        if m.notify!=0&&m.notify_msg!=0&&m.notify_flags==0  {
             ctx.kernel.posted_messages.push_back((m.notify,m.notify_msg,0,m.notify_param));
         }
     }
@@ -389,6 +391,9 @@ KernelError> {
         }
         return Ok(DispatchOutcome::ReturnedR0(refs));
     }
+    // IMediaEventEx inherits all IMediaEvent slots. Keep its own vtable and
+    // IID for QueryInterface, but share the graph's event queue and state.
+    let k=if k=="eventex" { "event" } else { k };
     let mut result=0;
     match (k,slot)  {
         ("graph",13)=> {
@@ -541,6 +546,18 @@ KernelError> {
             m.notify_param=ctx.arg_u32(3)?;
         }
         ,
+        ("event",14)=> {
+            let flags=ctx.arg_u32(1)?;
+            if flags>1 { result=0x80070057; } // Only AM_MEDIAEVENT_NONOTIFY.
+            else { m.notify_flags=flags; }
+        }
+        ,
+        ("event",15)=> {
+            let p=ctx.arg_u32(1)?;
+            if p==0 { result=0x80004003; }
+            else { ctx.cpu.write_mem(p,&m.notify_flags.to_le_bytes())?; }
+        }
+        ,
         ("audio",7)=>m.volume=(ctx.arg_u32(1)? as i32).clamp(-10000,0),
         ("audio",8)=> {
             let p=ctx.arg_u32(1)?;
@@ -628,6 +645,35 @@ pub(crate) fn reset() {
         cpu.write_mem(0x1100,&UNKNOWN).unwrap();
         assert_eq!(call(&mut cpu,&mut kernel,"ds_control_0",[child,0x1100,0x1200]),DispatchOutcome::ReturnedR0(0));
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(),object);
+        // Jump requests IMediaEventEx during startup and checks the HRESULT.
+        // Both event IIDs share IUnknown identity and inherited event state.
+        let mut eventex=iid;
+        eventex[..4].copy_from_slice(&0x56a868c0u32.to_le_bytes());
+        cpu.write_mem(0x1100,&eventex).unwrap();
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_graph_0",[object,0x1100,0x1200]),DispatchOutcome::ReturnedR0(0));
+        let extended=cpu.read_u32_le(0x1200).unwrap();
+        assert_ne!(extended,object);
+        let extended_table=cpu.read_u32_le(extended).unwrap();
+        assert_eq!(cpu.read_u32_le(extended_table+13*4).unwrap(),kernel.dynamic_exports[&pocket_kernel::OLE32_MODULE_HANDLE]["ds_eventex_13"]);
+        cpu.write_mem(0x1100,&UNKNOWN).unwrap();
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_0",[extended,0x1100,0x1200]),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(),object);
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_graph_2",[object,0,0]),DispatchOutcome::ReturnedR0(4));
+        let mut event=iid;
+        event[..4].copy_from_slice(&0x56a868b6u32.to_le_bytes());
+        cpu.write_mem(0x1100,&event).unwrap();
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_0",[extended,0x1100,0x1200]),DispatchOutcome::ReturnedR0(0));
+        let base_event=cpu.read_u32_le(0x1200).unwrap();
+        assert_ne!(base_event,extended);
+        cpu.write_reg(ArmReg::R3,0xab).unwrap();
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_13",[extended,0xdead0001,0x400]),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_14",[extended,1,0]),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_15",[extended,0x1200,0]),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(),1);
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_14",[extended,2,0]),DispatchOutcome::ReturnedR0(0x80070057));
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_15",[extended,0,0]),DispatchOutcome::ReturnedR0(0x80004003));
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_event_2",[base_event,0,0]),DispatchOutcome::ReturnedR0(4));
+        assert_eq!(call(&mut cpu,&mut kernel,"ds_eventex_2",[extended,0,0]),DispatchOutcome::ReturnedR0(3));
         // A real decoder EOF and expired frame presentation time produce
         // exactly one completion event, independently of decoder speed.
         let (tx,rx)=mpsc::sync_channel(3);
@@ -659,6 +705,7 @@ pub(crate) fn reset() {
         }
         assert_eq!(call(&mut cpu,&mut kernel,"ds_event_9",[object,0,0x1200]),DispatchOutcome::ReturnedR0(0));
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(),1);
+        assert!(kernel.posted_messages.is_empty()); // NONOTIFY does not suppress polling.
         cpu.write_reg(ArmReg::R3,0x1300).unwrap();
         assert_eq!(call(&mut cpu,&mut kernel,"ds_event_8",[object,0x1200,0x1240]),DispatchOutcome::ReturnedR0(0));
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(),1);
