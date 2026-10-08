@@ -2897,6 +2897,7 @@ dependencies = [
  "log",
  "pocket-core",
  "pocket-library",
+ "pocket-pe",
  "rfd",
  "serde",
  "serde_json",
@@ -2966,6 +2967,8 @@ name = "pocket-winceapi"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "cc",
+ "cpal",
  "image 0.24.9",
  "indexmap",
  "log",

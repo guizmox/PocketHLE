@@ -87,6 +87,7 @@ const PAINTSTRUCT_BYTES: u32 = 32;
 
 pub fn register(d: &mut WinCeDispatcher) {
     let dll = "coredll.dll";
+    crate::wavein::register(d);
 
     // ---- Process / module / library ----
     d.register_handler(dll, "GetTickCount", get_tick_count);
@@ -182,6 +183,9 @@ pub fn register(d: &mut WinCeDispatcher) {
     // return `0` — i.e. "the strings are equal" — which silently sent
     // games down the wrong branch (Sonic Unleashed picked the wrong
     // asset descriptor and then dereferenced a null object).
+    d.register_handler(dll, "_strlwr", strlwr);
+    d.register_handler(dll, "towupper", towupper);
+    d.register_handler(dll, "towlower", towlower);
     d.register_handler(dll, "_stricmp", stricmp);
     d.register_handler(dll, "_strcmpi", stricmp);
     d.register_handler(dll, "_strnicmp", strnicmp);
@@ -3525,6 +3529,37 @@ fn strcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     s.push(0);
     ctx.cpu.write_mem(dst, &s)?;
     Ok(DispatchOutcome::ReturnedR0(dst))
+}
+
+/// CRT `_strlwr`: modify the narrow string in place and return its original
+/// pointer. Use C-locale ASCII folding, consistent with our _stricmp;
+/// high bytes and bytes after the NUL terminator remain untouched.
+/// Colors normalizes resource lookup names with this function.
+fn strlwr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let original = ctx.arg_u32(0)?;
+    if original == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    let mut address = original;
+    loop {
+        let byte = ctx.cpu.read_u8(address)?;
+        if byte == 0 { break; }
+        let lower = byte.to_ascii_lowercase();
+        if lower != byte { ctx.cpu.write_mem(address, &[lower])?; }
+        address = address.wrapping_add(1);
+    }
+    Ok(DispatchOutcome::ReturnedR0(original))
+}
+
+// The default CRT C locale folds ASCII letters and preserves all other
+// wint_t values, including WEOF. Never return a stub zero for valid text.
+fn towupper(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let value=ctx.arg_u32(0)?;
+    let folded=if (0x61..=0x7a).contains(&value) { value-0x20 } else { value };
+    Ok(DispatchOutcome::ReturnedR0(folded))
+}
+fn towlower(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let value=ctx.arg_u32(0)?;
+    let folded=if (0x41..=0x5a).contains(&value) { value+0x20 } else { value };
+    Ok(DispatchOutcome::ReturnedR0(folded))
 }
 
 fn strncpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -14255,6 +14290,7 @@ fn set_clipboard_data(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 // reported as success so the game proceeds; the audio just stays
 // silent for the unsupported chunk.
 
+#[cfg(test)]
 const FAKE_HWAVEOUT: u32 = 0xDEAD_4001;
 const FIRST_HWAVEOUT: u32 = 0xDEAD_4100;
 const MMSYSERR_NOERROR: u32 = 0;
@@ -14316,7 +14352,7 @@ fn wave_out_enter_callback(
     else {
         return Ok(None);
     };
-    let Some(device) = ctx.kernel.wave_out.devices.get(&callback_handle).copied() else {
+    let Some(device) = ctx.kernel.wave_out.devices.get(&callback_handle).copied().or_else(|| crate::wavein::callback_device(callback_handle, message)) else {
         return Ok(None);
     };
     let proc_va = device.callback_target;
@@ -14730,6 +14766,8 @@ fn retire_wave_buffer(ctx: &mut CallCtx<'_>, handle: u32, hdr: u32) -> Result<()
 /// notice one.
 fn service_wave_out(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     service_mas_audio(ctx.kernel);
+    crate::directshow::service(ctx)?;
+    crate::wavein::service(ctx)?;
     refresh_wave_loops(ctx)?;
     // A paused or long-running handle must not block completion on another.
     let mut keep = VecDeque::new();
@@ -17557,6 +17595,38 @@ mod tests {
         let mut t = dummy_thunk();
         t.thunk_va = va;
         t
+    }
+
+    #[test]
+    fn wide_case_folding_preserves_non_ascii_and_eof() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        for (value, upper, lower) in [(0x61,0x41,0x61),(0x5a,0x5a,0x7a),(0,0,0),(0xe9,0xe9,0xe9),(0xffff,0xffff,0xffff),(u32::MAX,u32::MAX,u32::MAX)] {
+            ctx.cpu.write_reg(ArmReg::R0,value).unwrap();
+            assert_eq!(towupper(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(upper));
+            ctx.cpu.write_reg(ArmReg::R0,value).unwrap();
+            assert_eq!(towlower(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(lower));
+        }
+    }
+
+    #[test]
+    fn strlwr_mutates_resource_name_returns_original_pointer_and_stops_at_nul() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let input = b"UI\\Menu_01.TGA\xC9\0TAIL";
+        cpu.write_mem(0x1000, input).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        assert_eq!(strlwr(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x1000));
+        assert_eq!(ctx.cpu.read_mem(0x1000, input.len() as u32).unwrap(), b"ui\\menu_01.tga\xC9\0TAIL");
+        // Empty string at the final mapped byte: never read past its NUL.
+        ctx.cpu.write_mem(0x1fff, &[0]).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0x1fff).unwrap();
+        assert_eq!(strlwr(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x1fff));
     }
 
     #[test]

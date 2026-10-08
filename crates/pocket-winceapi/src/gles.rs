@@ -953,7 +953,7 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         pocket_gles::GL_RENDERER => "PocketHLE Software Rasterizer",
         pocket_gles::GL_VERSION => "OpenGL ES-CL 1.1",
         pocket_gles::GL_EXTENSIONS => {
-            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture"
+            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix"
         }
         _ => {
             with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
@@ -1343,6 +1343,7 @@ fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         c.target
             .to_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
     });
+    crate::directshow::service(ctx)?;
     ctx.kernel.framebuffer.mark_dirty();
     // A guest can open GAPI for its input side alone: COD2 calls
     // GXOpenDisplay/GXOpenInput/GXGetDefaultKeys to pick up the device
@@ -1385,6 +1386,68 @@ fn egl_no_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE))
 }
 
+/// Resolve only known callable GLES thunks, without modifying ordinal tables.
+fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    if pointer == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    let mut bytes = Vec::new();
+    for index in 0..256u32 {
+        let byte = ctx.cpu.read_u8(pointer + index)?;
+        if byte == 0 { break; }
+        bytes.push(byte);
+    }
+    let name = String::from_utf8_lossy(&bytes);
+    let address = [pocket_kernel::GLES_CM_MODULE_HANDLE, pocket_kernel::GLES_CL_MODULE_HANDLE].into_iter()
+        .find_map(|module| ctx.kernel.dynamic_exports.get(&module).and_then(|exports| exports.get(name.as_ref())).copied()).unwrap_or(0);
+    Ok(DispatchOutcome::ReturnedR0(address))
+}
+
+fn query_matrix_parts(values: &[f32]) -> ([i32; 16], [i32; 16], u32) {
+    let mut mantissa = [0; 16];
+    let mut exponent = [0; 16];
+    let mut status = 0;
+    for (index, &value) in values.iter().take(16).enumerate() {
+        if !value.is_finite() { status |= 1 << index; continue; }
+        if value == 0.0 { continue; }
+        let value = f64::from(value);
+        let power = value.abs().log2().floor() as i32 + 1;
+        mantissa[index] = (value * 2f64.powi(-power) * 65536.0).round() as i32;
+        exponent[index] = power;
+    }
+    (mantissa, exponent, status)
+}
+
+fn gl_query_matrix_x_oes(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let output = ctx.arg_u32(0)?;
+    let powers = ctx.arg_u32(1)?;
+    let values = with_ctx(|c| match c.matrix_mode {
+        pocket_gles::matrix::MatrixMode::Modelview => c.modelview.current().to_vec(),
+        pocket_gles::matrix::MatrixMode::Projection => c.projection.current().to_vec(),
+        pocket_gles::matrix::MatrixMode::Texture => c.texture_matrix[c.active_texture as usize].current().to_vec(),
+    });
+    let (mantissa, exponent, status) = query_matrix_parts(&values);
+    for index in 0..16 {
+        ctx.cpu.write_mem(output + index as u32 * 4, &mantissa[index].to_le_bytes())?;
+        ctx.cpu.write_mem(powers + index as u32 * 4, &exponent[index].to_le_bytes())?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(status))
+}
+
+#[cfg(test)]
+mod query_matrix_tests {
+    use super::*;
+    #[test]
+    fn query_matrix_reconstructs_finite_values_and_marks_invalid_components() {
+        let values = [1.0, -1.0, 0.0, 0.125, 123456.0, f32::from_bits(1), f32::INFINITY, f32::NAN];
+        let (mantissa, exponent, status) = query_matrix_parts(&values);
+        assert_eq!(status, (1 << 6) | (1 << 7));
+        for index in 0..6 {
+            let reconstructed = f64::from(mantissa[index]) / 65536.0 * 2f64.powi(exponent[index]);
+            assert!((reconstructed - f64::from(values[index])).abs() <= f64::from(values[index]).abs() / 32768.0);
+        }
+    }
+}
+
 // ---- registration ----------------------------------------------------------
 
 /// Both client libraries we emulate. The Common profile is a strict
@@ -1400,6 +1463,7 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
     Some(match name {
         // transform
         "glMatrixMode" => gl_matrix_mode,
+        "glQueryMatrixxOES" => gl_query_matrix_x_oes,
         "glLoadIdentity" => gl_load_identity,
         "glPushMatrix" => gl_push_matrix,
         "glPopMatrix" => gl_pop_matrix,
@@ -1551,7 +1615,8 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         | "eglCreatePixmapSurface"
         | "eglCreatePbufferFromClientBuffer" => egl_no_surface,
         "eglCopyBuffers" | "eglBindTexImage" | "eglReleaseTexImage" | "eglQueryContext"
-        | "eglQueryAPI" | "eglGetProcAddress" => egl_unsupported,
+        | "eglQueryAPI" => egl_unsupported,
+        "eglGetProcAddress" => egl_get_proc_address,
 
         _ => return None,
     })
@@ -1580,7 +1645,8 @@ fn reset_for_test(width: u32, height: u32) {
 /// not extensions — and a game that imports by name (Xtrakt does, with
 /// 73 named symbols) resolves them through the name path regardless of
 /// what the ordinal table says.
-const EXTRA_NAMED_EXPORTS: [&str; 12] = [
+const EXTRA_NAMED_EXPORTS: [&str; 13] = [
+    "glQueryMatrixxOES",
     "glGenBuffers",
     "glDeleteBuffers",
     "glBindBuffer",

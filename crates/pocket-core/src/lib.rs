@@ -86,6 +86,7 @@ impl Emulator {
     /// state is replaced.
     pub fn load_pe(&mut self, path: impl AsRef<Path>) -> Result<&Process> {
         let image = pe::load_file(path).context("loading PE")?;
+        pocket_winceapi::reset_media_backends();
         let process = Process::map_into(
             image,
             self.cpu.as_mut(),
@@ -377,4 +378,8 @@ mod tests {
         emu.set_screen_size(0, 320);
         assert_eq!(emu.requested_screen, None);
     }
+}
+
+impl Drop for Emulator {
+    fn drop(&mut self){pocket_winceapi::reset_media_backends();}
 }

@@ -17,9 +17,11 @@ path = "src/main.rs"
 # trace-only and cannot actually run a game; without `audio-cpal`
 # all `waveOut*` traffic is silently discarded. Disable with
 # `--no-default-features` for a fast cmake-less build (e.g. tests).
-default = ["unicorn", "audio-cpal"]
+default = ["unicorn", "audio-cpal", "video-static"]
 unicorn = ["pocket-core/unicorn"]
 audio-cpal = ["pocket-core/audio-cpal"]
+
+video-static = ["pocket-core/video-static"]
 
 [dependencies]
 anyhow.workspace = true

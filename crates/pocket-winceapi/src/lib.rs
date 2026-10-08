@@ -30,6 +30,10 @@ pub mod gles;
 pub mod gx;
 pub mod hss;
 pub mod ole32;
+mod directshow;
+#[cfg(feature = "video-static")]
+mod media_static;
+mod wavein;
 pub mod ordinals;
 
 use std::collections::HashMap;
@@ -581,3 +585,6 @@ mod tests {
         assert!(d.resolve_handler(&t).is_some());
     }
 }
+
+/// Release host media backends when a guest process is replaced or closed.
+pub fn reset_media_backends(){directshow::reset();wavein::reset();}
