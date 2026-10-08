@@ -945,6 +945,28 @@ impl AudioEngine {
         log::warn!("AudioEngine: built without the audio-cpal feature — running silently");
     }
 
+    /// Stop host output while preserving every queued sample and cursor.
+    pub fn suspend_output(&mut self) {
+        #[cfg(feature = "audio-cpal")]
+        {
+            self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+        }
+        #[cfg(not(feature = "audio-cpal"))]
+        { self.worker = None; }
+        self.init_attempted = false;
+    }
+
+    pub fn resume_output(&mut self) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.virtual_tick = None;
+            let now = Instant::now();
+            for stream in shared.wave_streams.values_mut() { stream.tick = now; }
+            for stream in shared.mas_streams.values_mut() { stream.tick = now; }
+        }
+        self.start();
+    }
+
     /// Stop the host stream and clear any pending samples. The
     /// engine can be re-`start`ed afterwards.
     pub fn stop(&mut self) {
@@ -1285,6 +1307,29 @@ mod tests {
         assert_eq!(out, [0, 0]);
         assert_eq!(e.wave_playback_cursor(1), 0);
         assert_eq!(e.buffered_samples(), 0);
+    }
+
+    #[cfg(not(feature = "audio-cpal"))]
+    #[test]
+    fn suspended_output_preserves_music_sfx_samples_and_cursors() {
+        let mut engine = AudioEngine::new();
+        let tap = engine.tap();
+        tap.drain_into(&mut []);
+        let format = GuestFormat { sample_rate: 44100, channels: 1, bits_per_sample: 16 };
+        engine.open_wave_stream(1, format);
+        engine.push_wave_samples(1, &[100, 100]);
+        engine.queue_mas_samples(2, format, &[1000, 2000]);
+        let mut output = [0; 1];
+        tap.drain_into(&mut output);
+        assert_eq!(output, [1100]);
+        engine.suspend_output();
+        assert_eq!(engine.wave_written_samples(1), 2);
+        assert_eq!(engine.mas_written_samples(2), 2);
+        assert_eq!(engine.wave_playback_cursor(1), 1);
+        assert_eq!(engine.mas_playback_cursor(2), 1);
+        engine.resume_output();
+        tap.drain_into(&mut output);
+        assert_eq!(output, [2100]);
     }
 
     #[test]

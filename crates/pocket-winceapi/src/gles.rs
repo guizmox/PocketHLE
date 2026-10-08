@@ -41,6 +41,22 @@ pub(crate) fn reset_for_session() {
     EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
 }
 
+pub(crate) struct SuspendedGles {
+    context: Context,
+    error: u32,
+}
+
+pub(crate) fn suspend() -> SuspendedGles {
+    let context = CTX.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Context::new(240, 320)));
+    let error = EGL_ERROR.with(|slot| slot.replace(EGL_SUCCESS));
+    SuspendedGles { context, error }
+}
+
+pub(crate) fn resume(saved: SuspendedGles) {
+    CTX.with(|slot| *slot.borrow_mut() = saved.context);
+    EGL_ERROR.with(|slot| slot.set(saved.error));
+}
+
 /// Compressed formats we decode, reported through
 /// `GL_COMPRESSED_TEXTURE_FORMATS` and the extension string.
 const COMPRESSED_FORMATS: [u32; 15] = [
@@ -1704,6 +1720,39 @@ mod tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    #[test]
+    fn suspended_session_restores_parent_gles_instead_of_reinitializing() {
+        let _lock = guard();
+        reset_for_test(320, 240);
+        with_ctx(|context| {
+            context.clear_color = [0.8, 0.2, 0.1, 1.0];
+            context.vertex_array.pointer = 0x50ab1234;
+            context.vertex_array.enabled = true;
+            context.target.color.fill(0x37);
+            context.target.depth.fill(0.25);
+            context.set_error(pocket_gles::GL_INVALID_ENUM);
+        });
+        set_egl_error(EGL_BAD_DISPLAY);
+        let saved = crate::suspend_session();
+        reset_for_session();
+        with_ctx(|context| {
+            context.clear_color = [0.0, 1.0, 0.0, 1.0];
+            context.vertex_array.pointer = 0x50000001;
+            context.target.color.fill(0xff);
+        });
+        set_egl_error(EGL_SUCCESS);
+        drop(saved);
+        with_ctx(|context| {
+            assert_eq!(context.clear_color, [0.8, 0.2, 0.1, 1.0]);
+            assert_eq!(context.vertex_array.pointer, 0x50ab1234);
+            assert!(context.vertex_array.enabled);
+            assert!(context.target.color.iter().all(|value| *value == 0x37));
+            assert!(context.target.depth.iter().all(|value| *value == 0.25));
+            assert_eq!(context.take_error(), pocket_gles::GL_INVALID_ENUM);
+        });
+        assert_eq!(EGL_ERROR.with(|error| error.get()), EGL_BAD_DISPLAY);
     }
 
     #[test]

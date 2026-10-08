@@ -489,6 +489,27 @@ KernelError> {
     }
     Ok(DispatchOutcome::ReturnedR0(result))
 }
+pub(crate) struct SuspendedInputs {
+    inputs: Inputs,
+    active: HashMap<u32, bool>,
+}
+pub(crate) fn suspend() -> SuspendedInputs {
+    let inputs = std::mem::replace(&mut *INPUTS.lock().unwrap(), Inputs {
+        next: 0xdead5100, devices: HashMap::new(), closed: HashMap::new(),
+    });
+    let active = inputs.devices.iter().map(|(handle, capture)| {
+        (*handle, capture.active.swap(false, std::sync::atomic::Ordering::SeqCst))
+    }).collect();
+    SuspendedInputs { inputs, active }
+}
+pub(crate) fn resume(saved: SuspendedInputs) {
+    for (handle, capture) in &saved.inputs.devices {
+        capture.active.store(saved.active.get(handle).copied().unwrap_or(false),
+            std::sync::atomic::Ordering::SeqCst);
+    }
+    *INPUTS.lock().unwrap() = saved.inputs;
+}
+
 pub(crate) fn reset() {
     let mut i=INPUTS.lock().unwrap();
     i.devices.clear();

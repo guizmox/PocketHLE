@@ -42,7 +42,6 @@ pub mod gdi;
 pub mod gz;
 pub mod msgbox;
 pub mod native_thunks;
-pub mod profile;
 pub mod registry;
 pub mod tracker;
 pub mod vfs;
@@ -811,6 +810,15 @@ pub struct LoadedModule {
 pub struct ProcessLaunch {
     pub executable: PathBuf,
     pub guest_path: String,
+    pub process_handle: u32,
+    pub thread_handle: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChildProcess {
+    pub process_handle_open: bool,
+    pub thread_handle: u32,
+    pub exit_code: Option<u32>,
 }
 
 pub struct KernelState {
@@ -831,6 +839,10 @@ pub struct KernelState {
     pub process_launch_enabled: bool,
     pub pending_process_launch: Option<ProcessLaunch>,
     pub command_line_cache: Option<u32>,
+    pub child_processes: HashMap<u32, ChildProcess>,
+    pub next_process_id: u32,
+    pub process_exit_code: Option<u32>,
+    pub random_seed: u32,
     /// Software-rendered display the GDI/GAPI handlers paint into.
     pub framebuffer: Framebuffer,
     /// Tracked GDI objects (DCs, bitmaps, brushes, pens, fonts).
@@ -1075,6 +1087,8 @@ pub struct KernelState {
     pub semaphores: HashMap<u32, SemaphoreObject>,
     /// Index of the thread whose register context is currently active.
     pub current_thread: usize,
+    /// ExitThread on the main thread leaves workers alive until they finish.
+    pub main_thread_exit_code: Option<u32>,
     /// Next worker index to consider at a cooperative scheduling point.
     pub worker_schedule_cursor: usize,
     /// Current state of the Pocket PC virtual keys.
@@ -1344,6 +1358,8 @@ pub struct GuestThread {
     /// Monotonic millisecond deadline set by worker Sleep; zero is ready.
     pub sleep_until_ms: u64,
     pub finished: bool,
+    pub exit_code: Option<u32>,
+    pub handle_open: bool,
     /// Set while the thread is parked on a *re-entering* blocking call
     /// (`park_worker_and_retry` / `park_worker_and_reevaluate`): the
     /// parked state will re-run the same API call, so resuming it from
@@ -1388,6 +1404,8 @@ impl GuestThread {
             started: false,
             sleep_until_ms: 0,
             finished: false,
+            exit_code: None,
+            handle_open: true,
             parked_in_pump: false,
             parked_wait_handles: Vec::new(),
             parked_wait_all: false,
@@ -2136,6 +2154,10 @@ impl Process {
                 process_launch_enabled: false,
                 pending_process_launch: None,
                 command_line_cache: None,
+                child_processes: HashMap::new(),
+                next_process_id: 1,
+                process_exit_code: None,
+                random_seed: 0x1234_abcd,
                 framebuffer: Framebuffer::default(),
                 gdi: GdiState::new(),
                 resources,
@@ -2196,6 +2218,7 @@ impl Process {
                 events: Default::default(),
                 semaphores: Default::default(),
                 current_thread: 0,
+                main_thread_exit_code: None,
                 worker_schedule_cursor: 0,
                 pressed_keys: [false; 256],
                 held_keys: Vec::new(),
@@ -2370,54 +2393,15 @@ pub fn run_main_loop_with_hook(
     max_slices: u64,
     mut frame_hook: Option<&mut dyn FrameHook>,
 ) -> Result<(), KernelError> {
-    let detected_thumb_mode = image_uses_thumb_entry(cpu, &process.image)?;
-    let override_mode = std::env::var("POCKETHLE_ENTRY_MODE").ok();
-    let thumb_mode = match override_mode.as_deref() {
-        Some("arm") => false,
-        Some("thumb") => true,
-        Some(other) => {
-            return Err(KernelError::Loader(format!(
-                "invalid POCKETHLE_ENTRY_MODE={other:?}; expected arm or thumb"
-            )))
-        }
-        None => detected_thumb_mode,
-    };
-    if (process.image.machine == machine::THUMB || process.image.machine == machine::ARMNT)
-        && thumb_mode != detected_thumb_mode
-    {
-        log::info!(
-            "POCKETHLE_ENTRY_MODE selected {} instead of automatic {} detection",
-            if thumb_mode { "Thumb" } else { "ARM" },
-            if detected_thumb_mode { "Thumb" } else { "ARM" }
-        );
-    }
-    let mut pc = match std::env::var("POCKETHLE_OVERRIDE_ENTRY") {
-        Ok(v) => {
-            let parsed = if let Some(stripped) = v.strip_prefix("0x") {
-                u32::from_str_radix(stripped, 16)
-            } else {
-                v.parse::<u32>()
-            }
-            .map_err(|_| KernelError::Loader("invalid POCKETHLE_OVERRIDE_ENTRY".into()))?;
-            log::info!("POCKETHLE_OVERRIDE_ENTRY=0x{parsed:08x}");
-            parsed
-        }
-        Err(_) => {
-            let entry = process.image.entry_va() & !1;
-            if thumb_mode {
-                entry | 1
-            } else {
-                entry
-            }
-        }
-    };
+    let thumb_mode = image_uses_thumb_entry(cpu, &process.image)?;
+    let entry = process.image.entry_va() & !1;
+    let mut pc = if thumb_mode { entry | 1 } else { entry };
     log::info!(
         "entering emulated main: entry=0x{:08x}, stack_top=0x{:08x}",
         pc,
         process.stack_top
     );
     let mut slice = 0u64;
-    let mut prof = crate::profile::Profiler::from_env();
     // Millisecond value already sitting in the tick page; see
     // [`native_thunks::refresh_tick_page`].
     let mut tick_written: Option<u32> = None;
@@ -2436,10 +2420,6 @@ pub fn run_main_loop_with_hook(
             break;
         }
         slice = slice.saturating_add(1);
-        prof.count_slice();
-        if prof.enabled() {
-            prof.note_frames(process.state.framebuffer.frame_counter);
-        }
         // PC=0 (or any address in the unmapped null page) means
         // the guest jumped through a null function pointer or popped
         // a poisoned LR off the stack. Without an explicit halt,
@@ -2447,6 +2427,7 @@ pub fn run_main_loop_with_hook(
         // and we'd spin forever. Surface it as a real crash with the
         // CPU dump.
         if pc == PROCESS_EXIT_TRAMPOLINE_VA {
+            process.state.process_exit_code = Some(cpu.read_reg(ArmReg::R0).unwrap_or(0));
             log::info!("process exit trampoline reached at 0x{pc:08x}; shutting down");
             return Ok(());
         }
@@ -2470,12 +2451,8 @@ pub fn run_main_loop_with_hook(
         // `tick_written` lets it skip the guest write when the
         // millisecond has not turned over yet, which is the common
         // case at ~280 slices per millisecond.
-        let t_tick = prof.mark();
         native_thunks::refresh_tick_page(cpu, &mut tick_written);
-        prof.add_tick(t_tick);
-        let t_cpu = prof.mark();
         let stop = cpu.run_until_hook(pc, instruction_budget_per_slice);
-        prof.add_cpu(t_cpu);
         let stop = match stop {
             Ok(s) => s,
             Err(e) => {
@@ -2507,6 +2484,7 @@ pub fn run_main_loop_with_hook(
                 // every Pocket PC game looks like it crashes
                 // (pc=0x00000000) at the very end of execution.
                 if addr == PROCESS_EXIT_TRAMPOLINE_VA {
+                    process.state.process_exit_code = Some(cpu.read_reg(ArmReg::R0).unwrap_or(0));
                     log::info!(
                             "process exit trampoline hit at 0x{addr:08x} (R0=0x{r0:08x}); shutting down",
                             r0 = cpu.read_reg(ArmReg::R0).unwrap_or(0),
@@ -2539,6 +2517,9 @@ pub fn run_main_loop_with_hook(
                     .iter()
                     .position(|thread| thread.exit_va == addr && !thread.finished)
                 {
+                    let exit_code = cpu.read_reg(ArmReg::R0)?;
+                    process.state.threads[thread_index].exit_code = Some(exit_code);
+                    process.state.threads[thread_index].finished = true;
                     let thread = process.state.threads[thread_index].clone();
                     if thread.worker_saved {
                         for (index, value) in thread.saved_regs.iter().enumerate() {
@@ -2627,13 +2608,7 @@ pub fn run_main_loop_with_hook(
                         // and no per-call heap allocation — that
                         // matters because this branch fires on every
                         // single emulated WinCE API call.
-                        let t_dispatch = prof.mark();
                         let dispatched = dispatcher.dispatch(cpu, thunk, state);
-                        if prof.enabled() {
-                            let va = thunk.thunk_va;
-                            let label = thunk.label();
-                            prof.add_dispatch(t_dispatch, va, || label);
-                        }
                         let outcome = dispatched?;
                         if matches!(outcome, DispatchOutcome::Halt)
                             && log::log_enabled!(log::Level::Info)
@@ -2746,24 +2721,16 @@ pub fn run_main_loop_with_hook(
                 }
                 _ => PRESENT_POLL_INTERVAL,
             };
-            let due = counter != last_presented_frame
+            let due = process.state.pending_process_launch.is_some() || counter != last_presented_frame
                 || last_present.is_none_or(|then| now.duration_since(then) >= poll_interval);
             if due {
                 last_present = Some(now);
-                let t_sync = prof.mark();
                 sync_guest_framebuffer(cpu, &mut process.state);
-                prof.add_fb_sync(t_sync);
-                let t_controls = prof.mark();
                 process.state.composite_controls();
-                prof.add_controls(t_controls);
-                let t_hook = prof.mark();
                 let action = hook.on_frame(&mut process.state);
-                prof.add_hook(t_hook);
                 last_presented_frame = process.state.framebuffer.frame_counter;
-                prof.note_present(last_presented_frame);
                 if action == FrameAction::Stop {
                     log::info!("frame hook requested stop");
-                    prof.note_frames(process.state.framebuffer.frame_counter);
                     return Ok(());
                 }
             }

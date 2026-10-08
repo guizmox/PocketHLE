@@ -589,3 +589,34 @@ mod tests {
 
 /// Release host media backends when a guest process is replaced or closed.
 pub fn reset_media_backends(){directshow::reset();wavein::reset();}
+
+/// Owns the host-only state of a suspended parent. Keep this guard alive
+/// while running the child on the same host thread; drop the child first.
+/// It intentionally cannot be sent to another execution thread.
+pub struct SuspendedSession {
+    gles: Option<gles::SuspendedGles>,
+    movies: Option<directshow::SuspendedMovies>,
+    inputs: Option<wavein::SuspendedInputs>,
+    tokenizer: u32,
+    same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+pub fn suspend_session() -> SuspendedSession {
+    SuspendedSession {
+        gles: Some(gles::suspend()),
+        movies: Some(directshow::suspend()),
+        inputs: Some(wavein::suspend()),
+        tokenizer: coredll::suspend_tokenizer(),
+        same_thread: std::marker::PhantomData,
+    }
+}
+
+impl Drop for SuspendedSession {
+    fn drop(&mut self) {
+        // Child resources have been dropped before the guard is released.
+        gles::resume(self.gles.take().unwrap());
+        directshow::resume(self.movies.take().unwrap());
+        wavein::resume(self.inputs.take().unwrap());
+        coredll::resume_tokenizer(self.tokenizer);
+    }
+}

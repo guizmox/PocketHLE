@@ -383,3 +383,9 @@ mod tests {
 impl Drop for Emulator {
     fn drop(&mut self){pocket_winceapi::reset_media_backends();}
 }
+
+/// Temporarily detach host GLES/media state without unloading the CPU or
+/// process. The caller must drop the child emulator before this guard.
+pub fn suspend_host_session() -> pocket_winceapi::SuspendedSession {
+    pocket_winceapi::suspend_session()
+}

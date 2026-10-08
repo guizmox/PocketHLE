@@ -574,10 +574,51 @@ KernelError> {
     }
     Ok(DispatchOutcome::ReturnedR0(result))
 }
+pub(crate) struct SuspendedMovies {
+    movies: HashMap<u32, Movie>,
+    at: Instant,
+}
+pub(crate) fn suspend() -> SuspendedMovies {
+    SuspendedMovies { movies: std::mem::take(&mut *MOVIES.lock().unwrap()), at: Instant::now() }
+}
+pub(crate) fn resume(mut saved: SuspendedMovies) {
+    let duration = saved.at.elapsed();
+    for movie in saved.movies.values_mut() {
+        if let Some(start) = movie.start.as_mut() { *start += duration; }
+        for start in movie.completion_waits.values_mut() { *start += duration; }
+    }
+    *MOVIES.lock().unwrap() = saved.movies;
+}
+
 pub(crate) fn reset() {
     MOVIES.lock().unwrap().clear();
 }
 #[cfg(test)] mod tests  {
+    #[test]
+    fn directshow_suspension_restores_graph_and_freezes_movie_clock() {
+        reset();
+        let mut movie = Movie::new();
+        movie.playing = true;
+        movie.start = Some(Instant::now() - Duration::from_secs(2));
+        MOVIES.lock().unwrap().insert(0x50001100, movie);
+        let mut saved = suspend();
+        assert!(MOVIES.lock().unwrap().is_empty());
+        // Simulate a long child lifetime without slowing the test.
+        saved.at -= Duration::from_secs(30);
+        for movie in saved.movies.values_mut() {
+            movie.start = movie.start.map(|start| start - Duration::from_secs(30));
+        }
+        MOVIES.lock().unwrap().insert(0x50001100, Movie::new());
+        reset(); // Child Emulator Drop must not erase the detached parent.
+        resume(saved);
+        let movies = MOVIES.lock().unwrap();
+        let parent = movies.get(&0x50001100).unwrap();
+        assert!(parent.playing);
+        assert!(elapsed(parent) >= Duration::from_secs(2));
+        assert!(elapsed(parent) < Duration::from_secs(3));
+        drop(movies);
+        reset();
+    }
     use super::*;
     use pocket_cpu:: {
         regs::ArmReg,

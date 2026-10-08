@@ -40,32 +40,8 @@ impl Runner {
     ) -> RunOutcome {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
-        let mut current = game;
-        let card_root = current.extracted_dir(&library_root);
-        let mut guest_path = None;
-        loop {
-            let (mut outcome, next) = self.run_process(&library_root, &current, &card_root,
-                guest_path.as_deref(), &mut hook);
-            let Some(next) = next else { return outcome; };
-            let game_dir = library_root.join(current.relative_dir());
-            let child = match next.executable.canonicalize() {
-                Ok(path) => path,
-                Err(error) => {
-                    outcome.summary.push_str(&format!("\nChild path failed: {error}"));
-                    return outcome;
-                }
-            };
-            let allowed = card_root.canonicalize().ok().is_some_and(|root| child.starts_with(root));
-            let relative = game_dir.canonicalize().ok()
-                .and_then(|root| child.strip_prefix(root).ok().map(PathBuf::from));
-            if !allowed || relative.is_none() {
-                outcome.summary.push_str("\nChild executable is outside the imported card.");
-                return outcome;
-            }
-            current.executable = relative.unwrap();
-            guest_path = Some(next.guest_path);
-            hook.reset_process();
-        }
+        let card_root = game.extracted_dir(&library_root);
+        self.run_process(&library_root, &game, &card_root, None, &mut hook).0
     }
 
     fn run_process(
@@ -75,7 +51,7 @@ impl Runner {
         card_root: &PathBuf,
         guest_path: Option<&str>,
         hook: &mut RunHook,
-    ) -> (RunOutcome, Option<pocket_core::kernel::ProcessLaunch>) {
+    ) -> (RunOutcome, u32) {
         let exe = if guest_path.is_some() { game.executable_path(library_root) }
             else { game.launch_path(library_root) };
         let mut summary_lines = vec![format!("Game: {}", game.display_name)];
@@ -133,7 +109,7 @@ impl Runner {
             return (RunOutcome {
                 summary: summary_lines.join("\n"),
                 framebuffer: None,
-            }, None);
+            }, 0xc0000135);
         }
 
         // The screen has to be sized before the game runs: a GAPI title
@@ -267,6 +243,10 @@ impl Runner {
         if let Some(process) = emu.process_mut() {
             process.state.process_launch_enabled = true;
         }
+        hook.launch_context = Some(LaunchContext {
+            runner: self.clone(), library_root: library_root.clone(),
+            game: game.clone(), card_root: card_root.clone(),
+        });
         emu.start_audio();
         let run_result = emu.run_with_hook(hook);
         match &run_result {
@@ -279,13 +259,13 @@ impl Runner {
             (!p.state.framebuffer.is_all_black())
                 .then(|| FrameSnapshot::from_framebuffer(&p.state.framebuffer))
         });
-        let next = if run_result.is_ok() && !hook.stopped_by_user {
-            emu.process_mut().and_then(|p| p.state.pending_process_launch.take())
-        } else { None };
+        let exit_code = if run_result.is_ok() {
+            emu.process().and_then(|p| p.state.process_exit_code).unwrap_or(0)
+        } else { 0xc0000005 };
         (RunOutcome {
             summary: summary_lines.join("\n"),
             framebuffer,
-        }, next)
+        }, exit_code)
     }
 }
 
@@ -361,6 +341,14 @@ pub enum InputCommand {
 ///    guest produces a new frame, so the GUI paints a live preview;
 ///  - drains pending [`InputCommand`]s from `input_rx` and forwards
 ///    them into the kernel's input queue / stop flag.
+#[derive(Clone)]
+struct LaunchContext {
+    runner: Runner,
+    library_root: PathBuf,
+    game: GameEntry,
+    card_root: PathBuf,
+}
+
 struct RunHook {
     frame_tx: Option<Sender<FrameSnapshot>>,
     input_rx: Option<Receiver<InputCommand>>,
@@ -381,9 +369,78 @@ struct RunHook {
     scratch: Vec<u8>,
     saw_non_black: bool,
     stopped_by_user: bool,
+    launch_context: Option<LaunchContext>,
 }
 
 impl RunHook {
+    fn run_pending_child(&mut self, state: &mut KernelState) {
+        let Some(request) = state.pending_process_launch.take() else { return; };
+        let context = self.launch_context.clone();
+        let relative = context.as_ref().and_then(|context| {
+            let child = request.executable.canonicalize().ok()?;
+            let root = context.card_root.canonicalize().ok()?;
+            if !child.starts_with(root) { return None; }
+            let game_dir = context.library_root.join(context.game.relative_dir()).canonicalize().ok()?;
+            child.strip_prefix(game_dir).ok().map(PathBuf::from)
+        });
+        let mut exit_code = 0xc0000135;
+        if let (Some(context), Some(relative)) = (context, relative) {
+            let mut child_game = context.game.clone();
+            child_game.executable = relative;
+            state.audio.suspend_output();
+            let saved = pocket_core::suspend_host_session();
+            let mut child_hook = RunHook::new(self.frame_tx.clone(), self.input_rx.take());
+            log::info!("parent suspended; entering child {}", request.guest_path);
+            let (outcome, code) = context.runner.run_process(&context.library_root,
+                &child_game, &context.card_root, Some(&request.guest_path), &mut child_hook);
+            exit_code = code;
+            self.input_rx = child_hook.input_rx.take();
+            self.input_disconnected = child_hook.input_disconnected;
+            self.stopped_by_user |= child_hook.stopped_by_user;
+            // run_process has dropped its child Emulator and its media first.
+            drop(saved);
+            state.audio.resume_output();
+            log::info!("child finished with code 0x{exit_code:08x}; resuming preserved parent");
+            if exit_code != 0 { log::warn!("child outcome: {}", outcome.summary); }
+            self.reset_process();
+            // Repaint the preserved parent frame even if its counter is static.
+            state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
+            state.pending_input.clear();
+            state.pressed_keys.fill(false);
+            state.held_keys.clear();
+            state.key_repeat_next_ms = None;
+        } else {
+            log::warn!("child launch refused: path outside card or missing runner context");
+        }
+        if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
+            child.exit_code = Some(exit_code);
+        }
+        for handle in [request.process_handle, request.thread_handle] {
+            if let Some(event) = state.events.get_mut(&handle) { event.signalled = true; }
+        }
+    }
+
+    fn drain_input(&mut self, pending: &mut std::collections::VecDeque<InputEvent>) -> bool {
+        let mut stop_requested = false;
+        if !self.input_disconnected {
+            if let Some(rx) = self.input_rx.as_ref() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(InputCommand::Input(ev)) => pending.push_back(ev),
+                        Ok(InputCommand::Stop) => stop_requested = true,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            self.input_disconnected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.stopped_by_user |= stop_requested || self.input_disconnected;
+        stop_requested || self.input_disconnected
+    }
+
     fn reset_process(&mut self) {
         self.last_frame = 0;
         self.last_emit_at = None;
@@ -404,34 +461,16 @@ impl RunHook {
             scratch: Vec::new(),
             saw_non_black: false,
             stopped_by_user: false,
+            launch_context: None,
         }
     }
 }
 
 impl FrameHook for RunHook {
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
-        // Forward any UI input the user has produced since the last
-        // slice into the kernel's pending input queue. Stop signals
-        // turn into a `FrameAction::Stop`.
-        let mut stop_requested = false;
-        if !self.input_disconnected {
-            if let Some(rx) = self.input_rx.as_ref() {
-                loop {
-                    match rx.try_recv() {
-                        Ok(InputCommand::Input(ev)) => state.pending_input.push_back(ev),
-                        Ok(InputCommand::Stop) => stop_requested = true,
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            self.input_disconnected = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        self.stopped_by_user |= stop_requested || self.input_disconnected;
-        stop_requested |= self.input_disconnected;
+        let mut stop_requested = self.drain_input(&mut state.pending_input);
+        if !stop_requested { self.run_pending_child(state); }
+        stop_requested |= self.stopped_by_user;
 
         // Stream the latest framebuffer up to the GUI, but at most
         // once per `FRAME_PUSH_INTERVAL`. The hook is invoked after
@@ -480,5 +519,28 @@ impl FrameHook for RunHook {
         } else {
             FrameAction::Continue
         }
+    }
+}
+
+#[cfg(test)]
+mod launcher_return_tests {
+    use super::*;
+
+    #[test]
+    fn launcher_return_library_stop_ends_the_whole_session() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut hook = RunHook::new(None, Some(rx));
+        tx.send(InputCommand::Stop).unwrap();
+        assert!(hook.drain_input(&mut std::collections::VecDeque::new()));
+        assert!(hook.stopped_by_user);
+    }
+
+    #[test]
+    fn launcher_return_ui_disconnect_ends_the_whole_session() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut hook = RunHook::new(None, Some(rx));
+        drop(tx);
+        assert!(hook.drain_input(&mut std::collections::VecDeque::new()));
+        assert!(hook.stopped_by_user);
     }
 }
