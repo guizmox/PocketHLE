@@ -815,6 +815,12 @@ pub fn register(d: &mut WinCeDispatcher) {
     // `coredll.dll` itself. Pocket PC games that link against
     // `MMTimer.dll` expect `timeGetTime` to behave like
     // `GetTickCount`.
+    d.register_handler(dll, "_controlfp", control_fp);
+    for timer_dll in [dll, "MMTimer.dll", "winmm.dll"] {
+        d.register_handler(timer_dll, "timeBeginPeriod", time_begin_period);
+        d.register_handler(timer_dll, "timeEndPeriod", time_end_period);
+        d.register_handler(timer_dll, "timeGetDevCaps", time_get_dev_caps);
+    }
     d.register_handler(dll, "timeGetTime", time_get_time);
     // WinMineCE imports `timeGetTime` from a third-party redist
     // (`MMTimer.dll`) instead. Same semantics — a millisecond clock.
@@ -1963,12 +1969,13 @@ fn park_worker_at(
         thread.parked_wait_handles.clear();
         thread.parked_wait_all = false;
     }
+    switch_guest_fp(ctx, 0)?;
     ctx.kernel.current_thread = 0;
     let Some(main_regs) = main_regs else {
         return Ok(None);
     };
     write_guest_regs(ctx.cpu, &main_regs)?;
-    ctx.kernel.worker_preempt_after_ms = monotonic_ms().saturating_add(2);
+    ctx.kernel.worker_preempt_after_ms = monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
     Ok(Some(DispatchOutcome::JumpTo(main_regs[15] & !1)))
 }
 
@@ -2073,6 +2080,7 @@ fn resume_worker(
         thread.parked_wait_handles.clear();
         thread.parked_wait_all = false;
     }
+    switch_guest_fp(ctx, thread_index + 1)?;
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
     
@@ -2150,6 +2158,7 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         thread.sleep_until_ms = 0;
         thread.parked_in_pump = false;
     }
+    switch_guest_fp(ctx, thread_index + 1)?;
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
     
@@ -2183,6 +2192,7 @@ fn resume_ready_worker_after_sleep(ctx: &mut CallCtx<'_>) -> Result<Option<Dispa
     thread.sleep_until_ms = 0;
     ctx.kernel.worker_round_seen.push(index);
     ctx.kernel.worker_schedule_cursor = (index + 1) % count;
+    switch_guest_fp(ctx, index + 1)?;
     write_guest_regs(ctx.cpu, &regs)?;
     ctx.kernel.current_thread = index + 1;
     Ok(Some(DispatchOutcome::JumpTo(regs[15] & !1)))
@@ -2195,7 +2205,7 @@ pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOu
     if ctx.kernel.current_thread != 0 { return Ok(None); }
     let now = monotonic_ms();
     if now < ctx.kernel.worker_preempt_after_ms { return Ok(None); }
-    ctx.kernel.worker_preempt_after_ms = now.saturating_add(2);
+    ctx.kernel.worker_preempt_after_ms = now.saturating_add(timer_poll_interval(ctx.kernel));
     if ctx.kernel.critical_sections.values().any(|&(owner, depth)| owner == 0 && depth != 0)
         || ctx.kernel.wave_out.function_frame.is_some()
         || ctx.kernel.create_frame.is_some() || ctx.kernel.dialog_frame.is_some()
@@ -15472,6 +15482,91 @@ fn get_window(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+// _controlfp uses CRT bit positions, not the ARM FPSCR encoding.
+const FP_EXCEPTION_MASK: u32 = 0x0008_001f;
+const FP_ROUND_MASK: u32 = 0x0000_0300;
+const FP_DENORMAL_MASK: u32 = 0x0300_0000;
+const TIMER_MIN_PERIOD: u32 = 1;
+const TIMER_MAX_PERIOD: u32 = 65535;
+const TIMERR_NOCANDO: u32 = 97;
+
+fn switch_guest_fp(ctx: &mut CallCtx<'_>, next: usize) -> Result<(), KernelError> {
+    let value = ctx.cpu.read_fpscr()?;
+    ctx.kernel.guest_fpscr.insert(ctx.kernel.current_thread, value);
+    let next_value = ctx.kernel.guest_fpscr.get(&next).copied().unwrap_or(0);
+    ctx.cpu.write_fpscr(next_value)?;
+    Ok(())
+}
+
+fn crt_fp_word(fpscr: u32) -> u32 {
+    let masks = [0x10, 0x08, 0x04, 0x02, 0x01, 0x80000];
+    let mut word = 0;
+    for (bit, mask) in [8, 9, 10, 11, 12, 15].into_iter().zip(masks) {
+        if fpscr & (1 << bit) == 0 { word |= mask; }
+    }
+    word |= match (fpscr >> 22) & 3 { 1 => 0x200, 2 => 0x100, 3 => 0x300, _ => 0 };
+    if fpscr & (1 << 24) != 0 { word |= 0x0100_0000; }
+    word
+}
+
+fn control_fp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let new = ctx.arg_u32(0)?;
+    let requested = ctx.arg_u32(1)?;
+    let mut fpscr = ctx.cpu.read_fpscr()?;
+    let old = crt_fp_word(fpscr);
+    // ARM has fixed IEEE precision/infinity behavior. _controlfp also
+    // leaves the denormal-operand exception mask unchanged (_control87 differs).
+    let mask = requested & ((FP_EXCEPTION_MASK & !0x80000) | FP_ROUND_MASK | FP_DENORMAL_MASK);
+    let value = (old & !mask) | (new & mask);
+    for (bit, crt_mask) in [0x10, 0x08, 0x04, 0x02, 0x01].into_iter().enumerate() {
+        if mask & crt_mask != 0 {
+            let arm_mask = 1 << (8 + bit);
+            if value & crt_mask == 0 { fpscr |= arm_mask; } else { fpscr &= !arm_mask; }
+        }
+    }
+    if mask & FP_ROUND_MASK != 0 {
+        let rounding = match value & FP_ROUND_MASK { 0x100 => 2, 0x200 => 1, 0x300 => 3, _ => 0 };
+        fpscr = (fpscr & !(3 << 22)) | (rounding << 22);
+    }
+    if mask & FP_DENORMAL_MASK != 0 {
+        if value & FP_DENORMAL_MASK == 0 { fpscr &= !(1 << 24); }
+        else { fpscr |= 1 << 24; }
+    }
+    ctx.cpu.write_fpscr(fpscr)?;
+    ctx.kernel.guest_fpscr.insert(ctx.kernel.current_thread, fpscr);
+    Ok(DispatchOutcome::ReturnedR0(crt_fp_word(fpscr)))
+}
+
+fn timer_poll_interval(kernel: &KernelState) -> u64 {
+    u64::from(kernel.timer_period_requests.keys().next().copied().unwrap_or(2).min(2))
+}
+fn time_begin_period(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let period = ctx.arg_u32(0)?;
+    if !(TIMER_MIN_PERIOD..=TIMER_MAX_PERIOD).contains(&period) {
+        return Ok(DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+    }
+    let count = ctx.kernel.timer_period_requests.entry(period).or_insert(0);
+    *count = count.saturating_add(1);
+    ctx.kernel.worker_preempt_after_ms = 0;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+fn time_end_period(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let period = ctx.arg_u32(0)?;
+    let Some(count) = ctx.kernel.timer_period_requests.get_mut(&period) else {
+        return Ok(DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+    };
+    *count -= 1;
+    if *count == 0 { ctx.kernel.timer_period_requests.remove(&period); }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+fn time_get_dev_caps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let output = ctx.arg_u32(0)?;
+    if output == 0 || ctx.arg_u32(1)? < 8 { return Ok(DispatchOutcome::ReturnedR0(TIMERR_NOCANDO)); }
+    ctx.cpu.write_mem(output, &TIMER_MIN_PERIOD.to_le_bytes())?;
+    ctx.cpu.write_mem(output + 4, &TIMER_MAX_PERIOD.to_le_bytes())?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
 // ---------- Time helpers -------------------------------------------
 
 /// `DWORD timeGetTime(void)` — millisecond tick count. Reuses the
@@ -16224,6 +16319,8 @@ mod tests {
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
+                guest_fpscr: std::collections::HashMap::new(),
+                timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: std::collections::HashMap::new(),
             pressed_keys: [false; 256],
             held_keys: Vec::new(),
@@ -18158,6 +18255,69 @@ mod tests {
         // Simulate expiry without waiting in the test.
         ctx.kernel.threads[0].sleep_until_ms = 0;
         assert_eq!(resume_worker(&mut ctx, 0).unwrap(), Some(DispatchOutcome::JumpTo(0x10040)));
+    }
+
+    #[test]
+    fn control_fp_rounding_masks_and_thread_isolation() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        ctx.cpu.write_fpscr(0x11).unwrap(); // preserve accumulated exception flags
+        for (crt, arm) in [(0x100u32, 2u32), (0x200, 1), (0x300, 3), (0, 0)] {
+            ctx.cpu.write_reg(ArmReg::R0, crt).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, FP_ROUND_MASK).unwrap();
+            assert_eq!(control_fp(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(FP_EXCEPTION_MASK | crt));
+            assert_eq!((ctx.cpu.read_fpscr().unwrap() >> 22) & 3, arm);
+            assert_eq!(ctx.cpu.read_fpscr().unwrap() & 0x1f, 0x11);
+        }
+        ctx.cpu.write_reg(ArmReg::R0, 0x300).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x300).unwrap();
+        control_fp(&mut ctx).unwrap();
+        switch_guest_fp(&mut ctx, 1).unwrap();
+        ctx.kernel.current_thread = 1;
+        assert_eq!(ctx.cpu.read_fpscr().unwrap(), 0);
+        ctx.cpu.write_reg(ArmReg::R0, 0x200).unwrap();
+        control_fp(&mut ctx).unwrap();
+        switch_guest_fp(&mut ctx, 0).unwrap();
+        ctx.kernel.current_thread = 0;
+        assert_eq!(crt_fp_word(ctx.cpu.read_fpscr().unwrap()) & FP_ROUND_MASK, 0x300);
+        // A query does not mutate state; DENORMAL exception cannot be unmasked
+        // by _controlfp, and ARM ignores x87 precision-control requests.
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(control_fp(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(FP_EXCEPTION_MASK | 0x300));
+        ctx.cpu.write_reg(ArmReg::R1, 0xb0000).unwrap();
+        control_fp(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_fpscr().unwrap() & (1 << 15), 0);
+    }
+
+    #[test]
+    fn timer_period_requests_are_balanced_and_report_capabilities() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        for period in [0u32, 65536, u32::MAX] {
+            ctx.cpu.write_reg(ArmReg::R0, period).unwrap();
+            assert_eq!(time_begin_period(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+        }
+        for period in [1u32, 1, 10] {
+            ctx.cpu.write_reg(ArmReg::R0, period).unwrap();
+            assert_eq!(time_begin_period(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        }
+        assert_eq!(timer_poll_interval(ctx.kernel), 1);
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        time_end_period(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.timer_period_requests[&1], 1);
+        time_end_period(&mut ctx).unwrap();
+        assert_eq!(timer_poll_interval(ctx.kernel), 2);
+        assert_eq!(time_end_period(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+        ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 8).unwrap();
+        assert_eq!(time_get_dev_caps(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.cpu.read_mem(0x1000, 8).unwrap(), [1u32.to_le_bytes(), 65535u32.to_le_bytes()].concat());
     }
 
     #[test]

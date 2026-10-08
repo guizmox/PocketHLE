@@ -405,6 +405,8 @@ pub(crate) mod tests {
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
+                guest_fpscr: std::collections::HashMap::new(),
+                timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: std::collections::HashMap::new(),
             pressed_keys: [false; 256],
             held_keys: Vec::new(),

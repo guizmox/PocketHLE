@@ -1091,6 +1091,8 @@ pub struct KernelState {
     /// Workers already run since the main thread last yielded.
     pub worker_round_seen: Vec<usize>,
     pub worker_preempt_after_ms: u64,
+    pub guest_fpscr: HashMap<usize, u32>,
+    pub timer_period_requests: std::collections::BTreeMap<u32, u32>,
     /// Critical section address -> (owning guest thread index, recursion depth).
     pub critical_sections: HashMap<u32, (usize, u32)>,
     /// Current state of the Pocket PC virtual keys.
@@ -2241,6 +2243,8 @@ impl Process {
                 worker_schedule_cursor: 0,
                 worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
+                guest_fpscr: std::collections::HashMap::new(),
+                timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: HashMap::new(),
                 pressed_keys: [false; 256],
                 held_keys: Vec::new(),
@@ -2569,6 +2573,9 @@ pub fn run_main_loop_with_hook(
                         }
                         cpu.write_reg(ArmReg::R0, thread.handle)?;
                         process.state.threads[thread_index].finished = true;
+                        let fpscr = cpu.read_fpscr()?;
+                        process.state.guest_fpscr.insert(process.state.current_thread, fpscr);
+                        cpu.write_fpscr(process.state.guest_fpscr.get(&0).copied().unwrap_or(0))?;
                         process.state.current_thread = 0;
                         pc = thread.resume_pc;
                     } else {
@@ -2597,6 +2604,9 @@ pub fn run_main_loop_with_hook(
                                 *value,
                             )?;
                         }
+                        let fpscr = cpu.read_fpscr()?;
+                        process.state.guest_fpscr.insert(process.state.current_thread, fpscr);
+                        cpu.write_fpscr(process.state.guest_fpscr.get(&0).copied().unwrap_or(0))?;
                         process.state.current_thread = 0;
                         pc = thread.resume_pc;
                     }

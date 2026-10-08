@@ -136,6 +136,10 @@ pub enum StopReason {
 pub trait Cpu {
     fn arch(&self) -> Arch;
 
+    /// ARM floating-point control/status register (independent of GPRs).
+    fn read_fpscr(&mut self) -> Result<u32, CpuError> { Ok(0) }
+    fn write_fpscr(&mut self, _value: u32) -> Result<(), CpuError> { Ok(()) }
+
     fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError>;
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError>;
     fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, CpuError>;

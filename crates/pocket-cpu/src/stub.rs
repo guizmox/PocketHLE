@@ -22,6 +22,7 @@ const PAGE_SIZE: u32 = 0x1000;
 pub struct StubCpu {
     pages: BTreeMap<u32, Page>,
     regs: [u32; 17],
+    fpscr: u32,
     hooks: Vec<u32>,
     /// Inclusive stop-on-execute ranges from [`Cpu::add_code_hook_range`].
     /// The stub never interprets instructions, so these are only
@@ -38,6 +39,8 @@ impl StubCpu {
 }
 
 impl Cpu for StubCpu {
+    fn read_fpscr(&mut self) -> Result<u32, CpuError> { Ok(self.fpscr) }
+    fn write_fpscr(&mut self, value: u32) -> Result<(), CpuError> { self.fpscr = value; Ok(()) }
     fn arch(&self) -> Arch {
         Arch::Arm
     }

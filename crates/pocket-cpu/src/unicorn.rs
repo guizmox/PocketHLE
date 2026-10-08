@@ -342,6 +342,17 @@ impl Cpu for UnicornCpu {
             .map_err(|e| CpuError::Backend(format!("reg_read: {e:?}")))
     }
 
+    fn read_fpscr(&mut self) -> Result<u32, CpuError> {
+        if self.arch != Arch::Arm { return Ok(0); }
+        self.uc.reg_read(RegisterARM::FPSCR).map(|v| v as u32)
+            .map_err(|e| CpuError::Backend(format!("FPSCR read: {e:?}")))
+    }
+    fn write_fpscr(&mut self, value: u32) -> Result<(), CpuError> {
+        if self.arch != Arch::Arm { return Ok(()); }
+        self.uc.reg_write(RegisterARM::FPSCR, u64::from(value))
+            .map_err(|e| CpuError::Backend(format!("FPSCR write: {e:?}")))
+    }
+
     fn write_reg(&mut self, reg: ArmReg, value: u32) -> Result<(), CpuError> {
         if self.arch == Arch::Mips && reg == ArmReg::Cpsr {
             self.mips_status = value;
