@@ -770,6 +770,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "EnterCriticalSection", enter_critical_section);
     d.register_handler(dll, "LeaveCriticalSection", leave_critical_section);
     d.register_handler(dll, "GetCurrentThreadId", get_current_thread_id);
+    d.register_handler(dll, "GetExitCodeThread", get_exit_code_thread);
+    d.register_handler(dll, "ExitThread", exit_thread);
     d.register_handler(dll, "GetCurrentProcessId", get_current_thread_id);
     d.register_handler(dll, "GetCurrentProcess", get_current_process);
     d.register_handler(dll, "GetCurrentThread", get_current_thread);
@@ -777,7 +779,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "WaitForMultipleObjects", wait_for_multiple_objects);
     d.register_constant(dll, "SetThreadPriority", 1, one_returning);
     d.register_constant(dll, "GetThreadPriority", 0, zero_returning);
-    d.register_constant(dll, "TerminateThread", 1, one_returning);
+    d.register_handler(dll, "TerminateThread", terminate_thread);
 
     // ---- Thread-local storage ----
     d.register_handler(dll, "TlsAlloc", tls_alloc);
@@ -2579,7 +2581,10 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         // defines these as FILE_DEVICE_SOUND IOCTLs (0x1d), not as disk
         // controls. Decode the submitted chunks into the same PCM engine
         // used by waveOut so every frontend can play the card's music.
-        if ctx.kernel.vfs.is_mp3_decoder(handle) {
+        if let Some(thread) = ctx.kernel.threads.iter_mut().find(|t| t.handle == handle) {
+        thread.handle_closed = true;
+    }
+    if ctx.kernel.vfs.is_mp3_decoder(handle) {
             const MASG_START: u32 = 0x001d_0ff0;
             const MASG_WRITE: u32 = 0x001d_0ff4;
             const MASG_STOP: u32 = 0x001d_0ff8;
@@ -12102,6 +12107,68 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
+/// Nonblocking CE thread status query; suspended threads are still active.
+fn get_exit_code_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    if output == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    let code = if handle == FAKE_CURRENT_THREAD_HANDLE {
+        if ctx.kernel.current_thread == 0 {
+            Some(ctx.kernel.process_exit_code.unwrap_or(259))
+        } else {
+            ctx.kernel.threads.get(ctx.kernel.current_thread - 1)
+                .map(|t| t.exit_code.unwrap_or(259))
+        }
+    } else if let Some(thread) = ctx.kernel.threads.iter()
+        .find(|t| t.handle == handle && !t.handle_closed) {
+        Some(thread.exit_code.unwrap_or(259))
+    } else {
+        ctx.kernel.child_processes.values().find(|child| child.thread_handle == handle)
+            .filter(|_| ctx.kernel.events.contains_key(&handle))
+            .map(|child| child.exit_code.unwrap_or(259))
+    };
+    let Some(code) = code else { return Ok(DispatchOutcome::ReturnedR0(0)); };
+    ctx.cpu.write_mem(output, &code.to_le_bytes())?;
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn exit_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let code = ctx.arg_u32(0)?;
+    if ctx.kernel.current_thread == 0 {
+        return exit_process(ctx);
+    }
+    let exit_va = ctx.kernel.threads[ctx.kernel.current_thread - 1].exit_va;
+    ctx.cpu.write_reg(ArmReg::R0, code)?;
+    // The common return trampoline captures R0 before restoring main registers.
+    Ok(DispatchOutcome::JumpTo(exit_va))
+}
+
+fn terminate_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let code = ctx.arg_u32(1)?;
+    let index = if handle == FAKE_CURRENT_THREAD_HANDLE {
+        ctx.kernel.current_thread.checked_sub(1)
+    } else {
+        ctx.kernel.threads.iter().position(|t| t.handle == handle && !t.handle_closed)
+    };
+    if handle == FAKE_CURRENT_THREAD_HANDLE && ctx.kernel.current_thread == 0 {
+        ctx.cpu.write_reg(ArmReg::R0, code)?;
+        return exit_process(ctx);
+    }
+    let Some(index) = index else { return Ok(DispatchOutcome::ReturnedR0(0)); };
+    if ctx.kernel.current_thread == index + 1 {
+        ctx.cpu.write_reg(ArmReg::R0, code)?;
+        return Ok(DispatchOutcome::JumpTo(ctx.kernel.threads[index].exit_va));
+    }
+    let thread = &mut ctx.kernel.threads[index];
+    if !thread.finished {
+        thread.exit_code = Some(code);
+        thread.finished = true;
+        ctx.kernel.message_frames.remove(&(index + 1));
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 fn get_current_thread_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(current_thread_id(ctx)))
 }
@@ -18604,6 +18671,40 @@ mod tests {
         assert!(!kernel.events.contains_key(&handle));
         assert!(kernel.events.contains_key(&thread_handle));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn get_exit_code_thread_tracks_lifecycle_and_handles() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut thread = GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, [0; 17]);
+        thread.started = false;
+        kernel.threads.push(thread);
+        cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
+        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 259);
+        cpu.write_reg(ArmReg::R1, 42).unwrap();
+        assert_eq!(terminate_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert!(kernel.threads[0].finished);
+        cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
+        get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 42);
+        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 42);
+        cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
+        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 259);
+        kernel.current_thread = 1;
+        // Pseudo-handle remains valid independently of the closed real handle.
+        get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 42);
+        cpu.write_reg(ArmReg::R0, 17).unwrap();
+        kernel.threads[0].finished = false;
+        assert_eq!(exit_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x8000));
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 17);
     }
 
     fn scanf_cpu() -> StubCpu {

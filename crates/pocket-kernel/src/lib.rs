@@ -1373,6 +1373,10 @@ pub struct GuestThread {
     /// Monotonic millisecond deadline set by worker Sleep; zero is ready.
     pub sleep_until_ms: u64,
     pub finished: bool,
+    /// Termination status, retained after the thread stops.
+    pub exit_code: Option<u32>,
+    /// Closing a handle does not terminate its thread.
+    pub handle_closed: bool,
     /// Set while the thread is parked on a *re-entering* blocking call
     /// (`park_worker_and_retry` / `park_worker_and_reevaluate`): the
     /// parked state will re-run the same API call. It is eligible only
@@ -1415,6 +1419,8 @@ impl GuestThread {
             started: false,
             sleep_until_ms: 0,
             finished: false,
+            exit_code: None,
+            handle_closed: false,
             parked_in_pump: false,
             parked_wait_handles: Vec::new(),
             parked_wait_all: false,
@@ -2615,6 +2621,10 @@ pub fn run_main_loop_with_hook(
                     .iter()
                     .position(|thread| thread.exit_va == addr && !thread.finished)
                 {
+                    let exit_code = cpu.read_reg(ArmReg::R0)?;
+                    process.state.threads[thread_index].exit_code = Some(exit_code);
+                    process.state.threads[thread_index].finished = true;
+                    process.state.message_frames.remove(&(thread_index + 1));
                     let thread = process.state.threads[thread_index].clone();
                     if thread.worker_saved {
                         for (index, value) in thread.saved_regs.iter().enumerate() {
