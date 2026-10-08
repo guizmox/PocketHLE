@@ -103,19 +103,9 @@ impl Runner {
         // HUD out around it. `set_screen_size` requires `load_pe` to have
         // created the process first, so this call must come after the
         // load succeeds.
-        // Gizmondo hardware has a native 320x240 landscape LCD. Detect the
-        // platform before the title starts so GAPI sees the real geometry.
-        let is_gizmondo = is_gizmondo_game(&game, &library_root);
-        let (screen_w, screen_h) = if is_gizmondo {
-            (320, 240)
-        } else {
-            game.settings.screen.size()
-        };
+        let (screen_w, screen_h) = game.settings.screen.size();
         emu.set_screen_size(screen_w, screen_h);
-        summary_lines.push(format!(
-            "Screen: {screen_w}x{screen_h}{}",
-            if is_gizmondo { " (Gizmondo)" } else { "" }
-        ));
+        summary_lines.push(format!("Screen: {screen_w}x{screen_h}"));
 
         for value in &game.registry {
             let registry_value = if let Some(text) = value.string.as_deref() {
@@ -152,19 +142,8 @@ impl Runner {
         emu.mount_read_only_dir("\\Program Files\\", &extracted);
         emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
         emu.mount_read_only_dir("\\expresso\\", &extracted);
+        let is_gizmondo = is_gizmondo_game(&game, &library_root);
         if is_gizmondo {
-            // A real Gizmondo has two distinct storage areas: the game lives on
-            // the removable SD card while persistent save data lives on the
-            // internal `\Flash Disk`.  Keep the latter writable and shared by
-            // Gizmondo titles so WinCE paths such as
-            // `\Flash Disk\MyGames\Midway\Midway96.sav` work unchanged.
-            let flash_disk = library_root.join("flash");
-            emu.mount_save_dir("\\Flash Disk\\", &flash_disk);
-            summary_lines.push(format!(
-                "Mounted Gizmondo Flash Disk at {}",
-                flash_disk.display()
-            ));
-
             emu.mount_read_only_dir("\\SD Card\\", &extracted);
             emu.mount_read_only_dir("\\Storage Card\\", &extracted);
             emu.mount_read_only_dir("\\SD Card\\Game\\", &extracted);

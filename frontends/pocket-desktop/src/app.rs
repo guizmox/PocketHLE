@@ -8,8 +8,8 @@ use egui_extras::image::load_image_bytes;
 
 use pocket_core::kernel::{InputEvent, FB_HEIGHT, FB_WIDTH};
 use pocket_library::{
-    CpuBackendPref, GameEntry, GameSettings, GuestButton, LauncherConfig, Library, RotationPref,
-    ScreenPref,
+    is_gizmondo_game, CpuBackendPref, GameEntry, GameSettings, GuestButton, LauncherConfig, Library,
+    RotationPref, ScreenPref,
 };
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
@@ -28,11 +28,11 @@ use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
 /// Top-level egui app.
 pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, egui::TextureHandle>,
+    analysis_cache: std::collections::HashMap<String, GameAnalysis>,
+    gizmondo_skin: Option<egui::TextureHandle>,
     library: Library,
     selected_game: Option<String>,
     screen: Screen,
-    game_only_fullscreen: bool,
-    fullscreen_before_game_only: Option<bool>,
     runner: Runner,
     events_rx: Receiver<UiEvent>,
     events_tx: Sender<UiEvent>,
@@ -57,6 +57,8 @@ pub struct PocketLauncher {
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
     last_frame_texture: Option<egui::TextureHandle>,
+    /// Latest unscaled guest framebuffer, retained for pixel-perfect PNG screenshots.
+    last_frame_snapshot: Option<FrameSnapshot>,
     last_frame_status: Option<String>,
     frame_stats: FrameStats,
     /// How far the presented frame is turned. Initialised from the
@@ -67,6 +69,8 @@ pub struct PocketLauncher {
     /// Id of the game currently on the Run screen, so a rotation
     /// change made there knows which `game.json` to write.
     running_game_id: Option<String>,
+    /// True while the current title is a Gizmondo game.
+    running_is_gizmondo: bool,
     /// Guest button waiting for the user to press the host key that
     /// should drive it, while the keybinding editor is in "press a
     /// key" mode.
@@ -110,14 +114,270 @@ fn rotation_uv(rotation: RotationPref) -> [Pos2; 4] {
     }
 }
 
-fn fullscreen_frame_rect(bounds: Rect, size: Vec2, rotation: RotationPref) -> Rect {
-    let frame_size = if rotation.is_quarter_turn() {
-        Vec2::new(size.y, size.x)
-    } else {
-        size
+
+#[derive(Default, Clone)]
+struct GameAnalysis {
+    platform: String,
+    title_id: Option<String>,
+    identity: Vec<(String, String)>,
+    executable: Vec<(String, String)>,
+    graphics: Vec<(String, String)>,
+    hardware: Vec<(String, String)>,
+    game_data: Vec<(String, String)>,
+    languages: Vec<(String, String)>,
+    evidence: Vec<String>,
+}
+
+fn detail_section(ui: &mut egui::Ui, title: &str, rows: &[(String, String)]) {
+    if rows.is_empty() { return; }
+    ui.separator();
+    ui.label(RichText::new(title).strong().size(12.0).color(Color32::from_gray(150)));
+    egui::Grid::new(format!("detail-{title}")).num_columns(2).spacing(Vec2::new(12.0, 4.0)).show(ui, |ui| {
+        for (label, value) in rows {
+            ui.label(RichText::new(label).color(Color32::from_gray(165)));
+            if value == "✓ Detected" || value == "✓ Resource detected" {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 13.0), egui::Sense::hover());
+                    let stroke = egui::Stroke::new(1.7_f32, Color32::from_rgb(55, 145, 215));
+                    let a = Pos2::new(rect.left() + 2.0, rect.center().y);
+                    let b = Pos2::new(rect.left() + 5.0, rect.bottom() - 3.0);
+                    let c = Pos2::new(rect.right() - 1.5, rect.top() + 2.5);
+                    ui.painter().line_segment([a, b], stroke);
+                    ui.painter().line_segment([b, c], stroke);
+                    ui.label(value.trim_start_matches('✓').trim());
+                });
+            } else {
+                ui.label(value);
+            }
+            ui.end_row();
+        }
+    });
+    ui.add_space(5.0);
+}
+
+fn draw_gizmondo_sd(ui: &egui::Ui, area: Rect, title: &str, title_id: Option<&str>) {
+    let p=ui.painter();
+    let h=(area.height()-8.0).min(118.0);
+    let w=h*0.72;
+    let r=Rect::from_center_size(area.center(), Vec2::new(w,h));
+    let blue=Color32::from_rgb(24,65,151);
+    let edge=Color32::from_rgb(14,42,105);
+
+    // Front-facing SD silhouette. The clipped top-right corner is the only
+    // decorative geometry; the game label itself stays deliberately plain.
+    let cut=13.0;
+    let pts=vec![
+        r.left_top(), Pos2::new(r.right()-cut,r.top()), r.right_top()+Vec2::new(0.0,cut),
+        r.right_bottom(), r.left_bottom(),
+    ];
+    p.add(egui::Shape::convex_polygon(pts,blue,egui::Stroke::new(1.5_f32,edge)));
+
+    // Label fills the complete recessed rectangle: white from its very top
+    // down to the black Gizmondo band. No invented cover artwork/background.
+    let label=Rect::from_min_max(Pos2::new(r.left()+8.0,r.top()+16.0),Pos2::new(r.right()-8.0,r.bottom()-9.0));
+    p.rect_filled(label,5.0,Color32::WHITE);
+    p.rect_stroke(label,5.0,egui::Stroke::new(1.0_f32,Color32::from_gray(175)));
+    let band_h=22.0;
+    let band=Rect::from_min_max(Pos2::new(label.left(),label.bottom()-band_h),label.right_bottom());
+    p.rect_filled(band,0.0,Color32::from_rgb(18,18,20));
+    p.text(band.center(),egui::Align2::CENTER_CENTER,"GIZMONDO",egui::FontId::proportional(12.0),Color32::WHITE);
+
+    let id=title_id.unwrap_or("");
+    let content=Rect::from_min_max(label.left_top(),Pos2::new(label.right(),band.top()));
+    let shown=if title.trim().is_empty() { id } else { title };
+    let title_y=content.top()+content.height()*0.38;
+    // Keep the title strictly inside the white label. Multi-word titles use two
+    // lines; single long words/IDs are scaled down instead of overflowing.
+    let words:Vec<_>=shown.split_whitespace().collect();
+    let (l1,l2)=if words.len()>1 {
+        let mid=(words.len()+1)/2; (words[..mid].join(" "),words[mid..].join(" "))
+    } else {(shown.to_string(),String::new())};
+    let longest = l1.chars().count().max(l2.chars().count());
+    let title_font = match longest {
+        0..=8 => 14.0,
+        9..=10 => 11.0,
+        11..=13 => 9.5,
+        14..=16 => 8.5,
+        _ => 7.5,
     };
-    let scale = (bounds.width() / frame_size.x).min(bounds.height() / frame_size.y);
-    Rect::from_center_size(bounds.center(), frame_size * scale)
+    p.text(Pos2::new(content.center().x,title_y),egui::Align2::CENTER_CENTER,l1,egui::FontId::proportional(title_font),Color32::BLACK);
+    if !l2.is_empty() { p.text(Pos2::new(content.center().x,title_y+16.0),egui::Align2::CENTER_CENTER,l2,egui::FontId::proportional(title_font),Color32::BLACK); }
+    if !id.is_empty() { p.text(Pos2::new(content.center().x,content.bottom()-11.0),egui::Align2::CENTER_CENTER,id,egui::FontId::monospace(9.5),Color32::from_gray(45)); }
+}
+
+fn detect_gizmondo_title_id(root: &std::path::Path) -> Option<String> {
+    fn scan(dir: &std::path::Path, depth: usize) -> Option<String> {
+        if depth > 5 { return None; }
+        for e in std::fs::read_dir(dir).ok()?.flatten() {
+            let p=e.path();
+            if !p.is_dir() { continue; }
+            if let Some(n)=p.file_name().and_then(|n| n.to_str()) {
+                let b=n.as_bytes();
+                if b.len()==10 && b[..2].eq_ignore_ascii_case(b"GZ") && b[2..4].iter().all(|c| c.is_ascii_alphabetic()) && b[4..].iter().all(|c| c.is_ascii_digit()) && p.join(n).is_file() { return Some(n.to_ascii_uppercase()); }
+            }
+            if let Some(v)=scan(&p, depth+1) { return Some(v); }
+        }
+        None
+    }
+    scan(root,0)
+}
+
+fn pe_timestamp(bytes: &[u8]) -> Option<u32> {
+    if bytes.len()<0x40 || &bytes[..2] != b"MZ" { return None; }
+    let o=u32::from_le_bytes(bytes[0x3c..0x40].try_into().ok()?) as usize;
+    if o+12>bytes.len() || &bytes[o..o+4] != b"PE\0\0" { return None; }
+    Some(u32::from_le_bytes(bytes[o+8..o+12].try_into().ok()?))
+}
+
+fn civil_from_days(z: i64) -> (i64,u32,u32) {
+    let z=z+719468; let era=if z>=0 {z} else {z-146096}/146097; let doe=z-era*146097;
+    let yoe=(doe-doe/1460+doe/36524-doe/146096)/365; let mut y=yoe+era*400;
+    let doy=doe-(365*yoe+yoe/4-yoe/100); let mp=(5*doy+2)/153; let d=doy-(153*mp+2)/5+1;
+    let m=mp+if mp<10 {3} else {-9}; y += if m<=2 {1} else {0}; (y,m as u32,d as u32)
+}
+fn format_unix_utc(ts:u32)->String { let s=ts as i64; let days=s/86400; let rem=s%86400; let (y,m,d)=civil_from_days(days); format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",rem/3600,(rem%3600)/60,rem%60) }
+
+fn binary_strings(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    for &b in bytes {
+        if b.is_ascii_graphic() || b == b' ' || b == b'\\' {
+            cur.push(b);
+        } else {
+            if cur.len() >= 4 { out.push(String::from_utf8_lossy(&cur).into_owned()); }
+            cur.clear();
+        }
+    }
+    if cur.len() >= 4 { out.push(String::from_utf8_lossy(&cur).into_owned()); }
+
+    // VERSIONINFO and many WinCE resources are UTF-16LE. Scan both alignments;
+    // keeping only printable runs makes this useful for ordinary resource text too.
+    for alignment in 0..=1 {
+        let mut chars = Vec::new();
+        let mut i = alignment;
+        while i + 1 < bytes.len() {
+            let u = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+            if (0x20..=0x7e).contains(&u) || (0xa0..=0x024f).contains(&u) {
+                chars.push(char::from_u32(u as u32).unwrap_or('?'));
+            } else {
+                if chars.len() >= 4 { out.push(chars.iter().collect()); }
+                chars.clear();
+            }
+            i += 2;
+        }
+        if chars.len() >= 4 { out.push(chars.iter().collect()); }
+    }
+    out
+}
+
+fn version_value(strings: &[String], key: &str) -> Option<String> {
+    for (i, s) in strings.iter().enumerate() {
+        if s.eq_ignore_ascii_case(key) {
+            for v in strings.iter().skip(i + 1).take(5) {
+                let v = v.trim_matches(char::from(0)).trim();
+                if !v.is_empty() && !v.eq_ignore_ascii_case(key) && !v.starts_with("VarFileInfo") && !v.starts_with("StringFileInfo") {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_title_id_in_strings(strings: &[String]) -> Option<String> {
+    for s in strings {
+        let b = s.as_bytes();
+        for w in b.windows(10) {
+            if w[..2].eq_ignore_ascii_case(b"GZ") && w[2..4].iter().all(|c| c.is_ascii_alphabetic()) && w[4..].iter().all(|c| c.is_ascii_digit()) {
+                return Some(String::from_utf8_lossy(w).to_ascii_uppercase());
+            }
+        }
+    }
+    None
+}
+
+fn first_matching_string(strings: &[String], pred: impl Fn(&str) -> bool) -> Option<String> {
+    strings.iter().find(|s| pred(&s.to_ascii_lowercase())).map(|s| s.trim().to_string())
+}
+
+fn analyze_game(game:&GameEntry, root:&std::path::Path)->GameAnalysis {
+    let mut a=GameAnalysis::default();
+    let giz=is_gizmondo_game(game,root);
+    a.platform=if giz {"Gizmondo".into()} else {"Pocket PC / Windows CE".into()};
+    let path=game.executable_path(root);
+    let bytes=std::fs::read(&path).unwrap_or_default();
+    let strings=binary_strings(&bytes);
+    let text=strings.join(" ").to_ascii_lowercase();
+    a.title_id=detect_gizmondo_title_id(&game.extracted_dir(root)).or_else(|| find_title_id_in_strings(&strings));
+
+    // PE VERSIONINFO. Keep file/product versions separate and avoid using
+    // FileDescription/InternalName as the library title: prototype builds often
+    // carry stale SDK/template metadata (Battlestations famously contains Keys).
+    for (key,label) in [("CompanyName","Developer / company"),("LegalCopyright","Copyright")] {
+        if let Some(v)=version_value(&strings,key) { a.identity.push((label.into(),v.clone())); a.evidence.push(format!("VERSIONINFO {key}: {v}")); }
+    }
+    for (key,label) in [("FileVersion","File version"),("ProductVersion","Product version")] {
+        if let Some(v)=version_value(&strings,key) { a.identity.push((label.into(),v.clone())); a.evidence.push(format!("VERSIONINFO {key}: {v}")); }
+    }
+
+    a.executable.push(("File".into(), path.file_name().unwrap_or_default().to_string_lossy().into_owned()));
+    if let Ok(img)=pocket_pe::load_file(&path) {
+        a.executable.push(("Architecture".into(), img.machine_name().into()));
+        a.executable.push(("Format".into(), "PE32 / Windows CE".into()));
+        let dlls:std::collections::BTreeSet<_>=img.imports.iter().map(|i| i.dll.to_ascii_lowercase()).collect();
+        if dlls.iter().any(|d| d.contains("gles")) {
+            a.graphics.push(("Renderer".into(),"OpenGL ES / EGL".into()));
+            a.evidence.push("Import: libGLES_CM.dll (OpenGL ES / EGL)".into());
+        }
+        if dlls.iter().any(|d| d.contains("fmod")) || text.contains("fmodce.dll") {
+            a.game_data.push(("Audio middleware".into(),"FMOD CE".into()));
+            a.evidence.push("Audio: fmodce.dll / FMOD symbols".into());
+        }
+        a.evidence.push(format!("PE imports: {} entries analysed", img.imports.len()));
+    }
+    if let Some(ts)=pe_timestamp(&bytes).filter(|v| *v>315532800 && *v<4102444800) {
+        a.executable.push(("PE build timestamp".into(),format_unix_utc(ts)));
+    }
+    if let Some(p)=game.provider.as_ref().filter(|s|!s.trim().is_empty()) { a.executable.push(("Provider".into(),p.clone())); }
+    if giz { a.graphics.push(("Native display".into(),"320 × 240 • Landscape".into())); }
+    if text.contains("eglcreatewindowsurface") || text.contains("eglinitialize") {
+        if !a.graphics.iter().any(|(k,_)|k=="Renderer") { a.graphics.push(("Renderer".into(),"OpenGL ES / EGL".into())); }
+        for api in ["eglInitialize","eglCreateWindowSurface","eglSwapBuffers","glDrawElements","glCompressedTexImage2D"] {
+            if text.contains(&api.to_ascii_lowercase()) { a.evidence.push(format!("Graphics symbol: {api}")); }
+        }
+    }
+    if text.contains("vib1:") || text.contains("vibrator") {
+        a.hardware.push(("Vibration".into(),"✓ Detected".into()));
+        a.evidence.push(if text.contains("vib1:") {"Hardware string: VIB1:".into()} else {"Hardware string: vibrator".into()});
+    }
+    if text.contains("controlpanel\\backlight") || text.contains("backlightchangeevent") {
+        a.hardware.push(("Backlight".into(),"✓ Detected".into()));
+        a.evidence.push("Backlight API/resource detected".into());
+    }
+    if text.contains("lowbatery_msg") || text.contains("criticalbatery_msg") || text.contains("lowbattery") {
+        a.hardware.push(("Battery events".into(),"✓ Detected".into()));
+        a.evidence.push("Battery notification strings detected".into());
+    }
+    if giz { a.hardware.insert(0,("Controls".into(),"Gizmondo front panel".into())); }
+
+    if let Some(save)=first_matching_string(&strings, |s| s.contains("\\flash disk\\mygames")) {
+        a.game_data.push(("Save support".into(),"✓ Detected".into()));
+        a.game_data.push(("Save path".into(),save.clone()));
+        a.evidence.push(format!("Save path: {save}"));
+    } else if text.contains(".sav") || text.contains("defaultprofile.dat") {
+        a.game_data.push(("Save support".into(),"✓ Detected".into()));
+    }
+    if let Some(cfg)=first_matching_string(&strings, |s| s.ends_with(".cfg") || s.contains(".cfg ")) {
+        a.game_data.push(("Configuration".into(),"✓ Detected".into())); a.evidence.push(format!("Config resource: {cfg}"));
+    }
+    for (needle,label) in [("\\maps\\","Maps"),("\\textures\\","Textures"),("\\sound\\","Audio resources")] {
+        if text.contains(needle) { a.game_data.push((label.into(),"✓ Detected".into())); }
+    }
+    for (needles,label) in [(["choisissez une langue","french.tga"],"French"),(["wählen sie eine sprache","german.tga"],"German"),(["selezioni una lingua","italian.tga"],"Italian"),(["select a language","english.tga"],"English"),(["spanish.tga","español"],"Spanish")] {
+        if needles.iter().any(|n| text.contains(n)) { a.languages.push((label.into(),"✓ Resource detected".into())); a.evidence.push(format!("Language resource: {label}")); }
+    }
+    if let Some(id)=&a.title_id { a.evidence.push(format!("Gizmondo Title ID: {id}")); }
+    a
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,10 +543,10 @@ impl PocketLauncher {
         Self {
             library,
             icon_cache: std::collections::HashMap::new(),
+            analysis_cache: std::collections::HashMap::new(),
+            gizmondo_skin: None,
             selected_game: None,
             screen: Screen::Library,
-            game_only_fullscreen: false,
-            fullscreen_before_game_only: None,
             runner: Runner::new(),
             events_rx: rx,
             events_tx: tx,
@@ -299,10 +559,12 @@ impl PocketLauncher {
             config_draft: None,
             game_settings_draft: None,
             last_frame_texture: None,
+            last_frame_snapshot: None,
             last_frame_status: None,
             frame_stats: FrameStats::default(),
             game_rotation: RotationPref::None,
             running_game_id: None,
+            running_is_gizmondo: false,
             binding_capture: None,
         }
     }
@@ -319,9 +581,6 @@ impl PocketLauncher {
                 }
                 UiEvent::RunFinished(outcome) => {
                     self.last_frame_status = Some(outcome.summary.clone());
-                    if self.game_only_fullscreen {
-                        self.set_game_only_fullscreen(ctx, false);
-                    }
                     if let Some(frame) = outcome.framebuffer {
                         self.upload_frame_texture(ctx, &frame);
                     }
@@ -348,6 +607,9 @@ impl PocketLauncher {
     }
 
     fn upload_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
+        // Keep the raw guest pixels as well as the GPU texture. Screenshots must
+        // capture the framebuffer itself, not the scaled launcher presentation.
+        self.last_frame_snapshot = Some(frame.clone());
         let size = [frame.width as usize, frame.height as usize];
         let img = egui::ColorImage::from_rgba_unmultiplied(size, &frame.rgba);
         if let Some(tex) = self.last_frame_texture.as_mut() {
@@ -359,9 +621,43 @@ impl PocketLauncher {
         self.frame_stats.record_frame();
     }
 
+    fn save_framebuffer_screenshot(&self) -> Result<std::path::PathBuf, String> {
+        let frame = self
+            .last_frame_snapshot
+            .as_ref()
+            .ok_or_else(|| "no framebuffer available yet".to_string())?;
+
+        let dir = self.library.root().join("screenshots");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+
+        let game = self.running_game.as_deref().unwrap_or("PocketHLE");
+        let safe_name: String = game
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("system clock error: {e}"))?
+            .as_millis();
+        let path = dir.join(format!("{safe_name}_{millis}.png"));
+
+        image::save_buffer_with_format(
+            &path,
+            &frame.rgba,
+            frame.width,
+            frame.height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+
+        Ok(path)
+    }
+
     fn reload_library(&mut self) {
         match Library::open(self.library.root()) {
-            Ok(lib) => self.library = lib,
+            Ok(lib) => { self.library = lib; self.analysis_cache.clear(); },
             Err(e) => self.status = format!("Could not reload library: {e}"),
         }
     }
@@ -388,6 +684,21 @@ impl PocketLauncher {
                 self.config_draft = Some(self.library.config().clone());
                 self.screen = Screen::Settings;
             }
+            let can_screenshot = self.running_game.is_some() && self.last_frame_snapshot.is_some();
+            if ui
+                .add_enabled(can_screenshot, egui::Button::new("Screenshot"))
+                .on_hover_text("Save the native guest framebuffer as a PNG")
+                .clicked()
+            {
+                match self.save_framebuffer_screenshot() {
+                    Ok(path) => {
+                        self.status = format!("Screenshot saved: {}", path.display());
+                    }
+                    Err(err) => {
+                        self.status = format!("Screenshot failed: {err}");
+                    }
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Import .CAB / .ZIP / .RAR...").clicked() {
                     self.spawn_import_dialog();
@@ -402,142 +713,144 @@ impl PocketLauncher {
         if games.is_empty() {
             ui.add_space(80.0);
             ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("No games yet")
-                        .heading()
-                        .color(Color32::from_gray(160)),
-                );
+                ui.label(RichText::new("No games yet").heading().color(Color32::from_gray(160)));
                 ui.add_space(8.0);
                 ui.label("Click \"Import .CAB / .ZIP / .RAR...\" to add a Pocket PC game.");
                 ui.add_space(20.0);
-                if ui.button("Import .CAB / .ZIP / .RAR...").clicked() {
-                    self.spawn_import_dialog();
-                }
+                if ui.button("Import .CAB / .ZIP / .RAR...").clicked() { self.spawn_import_dialog(); }
             });
             return;
         }
-        ScrollArea::vertical().show(ui, |ui| {
-            let gap = 16.0;
-            let card_size = Vec2::splat(224.0);
-            let columns = ((ui.available_width() + gap) / (card_size.x + gap))
-                .floor()
-                .max(1.0) as usize;
-            egui::Grid::new("library_grid")
-                .num_columns(columns)
-                .min_col_width(card_size.x)
-                .max_col_width(card_size.x)
-                .min_row_height(card_size.y)
-                .spacing(Vec2::splat(gap))
-                .show(ui, |ui| {
-                    for (index, game) in games.iter().enumerate() {
-                        self.ui_game_card(ui, game, card_size);
-                        if (index + 1) % columns == 0 {
-                            ui.end_row();
-                        }
+
+        if self.selected_game.as_ref().is_none_or(|id| !games.iter().any(|g| &g.id == id)) {
+            self.selected_game = games.first().map(|g| g.id.clone());
+        }
+        let selected = self.selected_game.clone();
+
+        ui.horizontal_top(|ui| {
+            let details_width = (ui.available_width() * 0.40).clamp(330.0, 470.0);
+            let cards_width = (ui.available_width() - details_width - 16.0).max(240.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(cards_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.heading("Library");
+                    ui.add_space(8.0);
+                    ScrollArea::vertical().show(ui, |ui| {
+                        let gap = 12.0;
+                        let card_size = Vec2::new(190.0, 210.0);
+                        let columns = ((ui.available_width() + gap) / (card_size.x + gap)).floor().max(1.0) as usize;
+                        egui::Grid::new("library_grid")
+                            .num_columns(columns)
+                            .min_col_width(card_size.x).max_col_width(card_size.x)
+                            .min_row_height(card_size.y).spacing(Vec2::splat(gap))
+                            .show(ui, |ui| {
+                                for (index, game) in games.iter().enumerate() {
+                                    self.ui_game_card(ui, game, card_size, selected.as_deref() == Some(&game.id));
+                                    if (index + 1) % columns == 0 { ui.end_row(); }
+                                }
+                                if !games.len().is_multiple_of(columns) { ui.end_row(); }
+                            });
+                    });
+                },
+            );
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                Vec2::new(details_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    if let Some(game) = selected.as_ref().and_then(|id| games.iter().find(|g| &g.id == id)) {
+                        self.ui_game_details(ui, game);
                     }
-                    if !games.len().is_multiple_of(columns) {
-                        ui.end_row();
-                    }
-                });
+                },
+            );
         });
     }
 
-    fn ui_game_card(&mut self, ui: &mut egui::Ui, game: &GameEntry, size: Vec2) {
+    fn ui_game_card(&mut self, ui: &mut egui::Ui, game: &GameEntry, size: Vec2, selected: bool) {
         let (card_rect, card_response) = ui.allocate_exact_size(size, Sense::click());
-        let frame = egui::Frame::none()
-            .fill(Color32::from_rgb(35, 38, 46))
-            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(82, 86, 96)))
-            .rounding(16.0)
-            .inner_margin(0.0);
-        ui.painter().add(frame.paint(card_rect));
+        let stroke = if selected { egui::Stroke::new(2.0_f32, Color32::from_rgb(95, 170, 225)) }
+                     else { egui::Stroke::new(1.0_f32, Color32::from_rgb(82, 86, 96)) };
+        ui.painter().rect(card_rect, 14.0, Color32::from_rgb(35, 38, 46), stroke);
 
-        let menu_rect = Rect::from_min_size(
-            Pos2::new(card_rect.right() - 40.0, card_rect.top() + 4.0),
-            Vec2::splat(32.0),
-        );
+        let menu_rect = Rect::from_min_size(Pos2::new(card_rect.right()-36.0, card_rect.top()+3.0), Vec2::splat(30.0));
         let mut menu_ui = ui.child_ui(menu_rect, egui::Layout::right_to_left(egui::Align::Center));
-        let menu_response = menu_ui.menu_button(RichText::new("⋮").size(24.0), |ui| {
+        let menu_response = menu_ui.menu_button(RichText::new("⋮").size(22.0), |ui| {
             if ui.button("Settings").clicked() {
                 self.selected_game = Some(game.id.clone());
                 self.game_settings_draft = Some((game.id.clone(), game.settings.clone()));
-                self.screen = Screen::GameSettings;
-                ui.close_menu();
+                self.screen = Screen::GameSettings; ui.close_menu();
             }
             if ui.button("Remove").clicked() {
-                if let Err(e) = self.library.remove(&game.id) {
-                    self.status = format!("Remove failed: {e}");
-                } else {
-                    self.status = format!("Removed {}", game.display_name);
-                }
+                if let Err(e) = self.library.remove(&game.id) { self.status = format!("Remove failed: {e}"); }
+                else { self.status = format!("Removed {}", game.display_name); }
                 ui.close_menu();
             }
         });
 
-        let icon_rect = Rect::from_min_size(
-            Pos2::new(card_rect.left(), card_rect.top() + 4.0),
-            Vec2::new(size.x, 142.0),
-        );
-        let icon_size = (size.x - 24.0).clamp(56.0, 112.0);
-        let mut icon_ui = ui.child_ui(
-            icon_rect,
-            egui::Layout::centered_and_justified(egui::Direction::TopDown),
-        );
-        let mut drew_icon = false;
-        if let Some(path) = game.icon_path(self.library.root()) {
-            if let Ok(bytes) = std::fs::read(path) {
-                if let Ok(image) = load_image_bytes(&bytes) {
-                    let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
-                        icon_ui.ctx().load_texture(
-                            format!("icon-{}", game.id),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        )
-                    });
-                    icon_ui.add(
-                        egui::Image::from_texture(&*texture)
-                            .fit_to_exact_size(Vec2::splat(icon_size)),
-                    );
-                    drew_icon = true;
+        let icon_rect = Rect::from_min_size(Pos2::new(card_rect.left(), card_rect.top()+4.0), Vec2::new(size.x, 126.0));
+        let giz = is_gizmondo_game(game, self.library.root());
+        if giz {
+            let title_id = detect_gizmondo_title_id(&game.extracted_dir(self.library.root()));
+            draw_gizmondo_sd(ui, icon_rect, &game.display_name, title_id.as_deref());
+        } else {
+            let mut icon_ui = ui.child_ui(icon_rect, egui::Layout::centered_and_justified(egui::Direction::TopDown));
+            let mut drew_icon = false;
+            if let Some(path) = game.icon_path(self.library.root()) {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(image) = load_image_bytes(&bytes) {
+                        let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| icon_ui.ctx().load_texture(format!("icon-{}", game.id), image, egui::TextureOptions::LINEAR));
+                        icon_ui.add(egui::Image::from_texture(&*texture).fit_to_exact_size(Vec2::splat(94.0)));
+                        drew_icon = true;
+                    }
                 }
             }
-        }
-        if !drew_icon {
-            icon_ui.label(RichText::new("📱").size(64.0));
+            if !drew_icon { icon_ui.label(RichText::new("📱").size(58.0)); }
         }
 
-        let label_rect = Rect::from_min_size(
-            Pos2::new(card_rect.left(), card_rect.bottom() - 76.0),
-            Vec2::new(size.x, 76.0),
-        );
-        ui.painter()
-            .rect_filled(label_rect, 0.0, Color32::from_rgb(28, 29, 32));
-        let text_rect = Rect::from_min_size(
-            Pos2::new(label_rect.left() + 12.0, label_rect.top() + 8.0),
-            Vec2::new(size.x - 24.0, 58.0),
-        );
-        let mut text_ui = ui.child_ui(text_rect, egui::Layout::top_down(egui::Align::Min));
-        text_ui.set_width(size.x - 24.0);
-        text_ui.set_height(58.0);
-        let publisher = game
-            .provider
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Unknown");
-        text_ui.add(
-            egui::Label::new(RichText::new(&game.display_name).strong().size(17.0)).truncate(true),
-        );
-        text_ui.add(
-            egui::Label::new(
-                RichText::new(format!("Backend: {publisher}"))
-                    .size(13.0)
-                    .color(Color32::from_gray(180)),
-            )
-            .truncate(true),
-        );
-
-        if card_response.clicked() && !menu_response.response.clicked() {
-            self.spawn_run(game);
+        let label_rect = Rect::from_min_size(Pos2::new(card_rect.left(), card_rect.bottom()-78.0), Vec2::new(size.x, 78.0));
+        ui.painter().rect_filled(label_rect, 0.0, Color32::from_rgb(28,29,32));
+        let mut text_ui = ui.child_ui(label_rect.shrink2(Vec2::new(10.0,7.0)), egui::Layout::top_down(egui::Align::Min));
+        text_ui.add(egui::Label::new(RichText::new(&game.display_name).strong().size(16.0)).truncate(true));
+        text_ui.label(RichText::new(if giz { "GIZMONDO • 320×240" } else { "POCKET PC / WINCE" }).size(12.0).color(Color32::from_gray(185)));
+        if let Some(id) = detect_gizmondo_title_id(&game.extracted_dir(self.library.root())) {
+            text_ui.label(RichText::new(id).monospace().size(11.0).color(Color32::from_gray(145)));
         }
+
+        if card_response.clicked() && !menu_response.response.clicked() { self.selected_game = Some(game.id.clone()); }
+        if card_response.double_clicked() { self.spawn_run(game); }
+    }
+
+    fn ui_game_details(&mut self, ui: &mut egui::Ui, game: &GameEntry) {
+        let root = self.library.root().to_path_buf();
+        let analysis = self.analysis_cache.entry(game.id.clone()).or_insert_with(|| analyze_game(game, &root)).clone();
+        ScrollArea::vertical().id_source("game_details").show(ui, |ui| {
+            ui.heading(RichText::new(&game.display_name).size(24.0));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&analysis.platform).strong());
+                if let Some(id) = &analysis.title_id { ui.label(RichText::new(id).monospace()); }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add_sized([110.0, 34.0], egui::Button::new(RichText::new("▶  PLAY").strong())).clicked() { self.spawn_run(game); }
+                if ui.button("Game settings").clicked() {
+                    self.game_settings_draft = Some((game.id.clone(), game.settings.clone()));
+                    self.screen = Screen::GameSettings;
+                }
+            });
+            ui.add_space(12.0);
+            detail_section(ui, "IDENTITY", &analysis.identity);
+            detail_section(ui, "EXECUTABLE", &analysis.executable);
+            detail_section(ui, "DISPLAY & GRAPHICS", &analysis.graphics);
+            if !analysis.hardware.is_empty() { detail_section(ui, "HARDWARE", &analysis.hardware); }
+            if !analysis.game_data.is_empty() { detail_section(ui, "GAME DATA", &analysis.game_data); }
+            if !analysis.languages.is_empty() { detail_section(ui, "LANGUAGES", &analysis.languages); }
+            if !analysis.evidence.is_empty() {
+                egui::CollapsingHeader::new("Technical details / detection evidence").show(ui, |ui| {
+                    for line in &analysis.evidence { ui.label(RichText::new(line).monospace().size(11.0)); }
+                });
+            }
+        });
     }
 
     fn ui_settings(&mut self, ui: &mut egui::Ui) {
@@ -631,8 +944,9 @@ impl PocketLauncher {
         ui.label(RichText::new("Keyboard").strong());
         ui.label(
             RichText::new(
-                "Host keys for the Windows Mobile buttons. A key only ever drives one \
-                 button, so binding it somewhere new takes it away from where it was.",
+                "Host keys for PocketPC and Gizmondo controls. Existing PocketPC buttons are reused \
+                 for their Gizmondo equivalents; only the five Gizmondo piano buttons are extra. \
+                 A key only ever drives one button, so rebinding it moves it from the old control.",
             )
             .small()
             .color(Color32::from_gray(160)),
@@ -872,13 +1186,6 @@ impl PocketLauncher {
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
             }
-            if ui
-                .button("Game-only fullscreen")
-                .on_hover_text("Show only the centered game. Press F11 to return.")
-                .clicked()
-            {
-                self.set_game_only_fullscreen(ui.ctx(), true);
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Back to library").clicked() {
                     // Best-effort — if the runner thread already
@@ -892,15 +1199,128 @@ impl PocketLauncher {
             });
         });
         ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
-            self.ui_run_screen(ui);
-            ui.add_space(12.0);
-            self.ui_virtual_pad(ui);
-        });
+        if self.running_is_gizmondo {
+            self.ui_gizmondo(ui);
+        } else {
+            ui.horizontal_top(|ui| {
+                self.ui_run_screen(ui);
+                ui.add_space(12.0);
+                self.ui_virtual_pad(ui);
+            });
+        }
         ui.add_space(8.0);
         if let Some(s) = self.last_frame_status.as_ref() {
             ui.label(RichText::new(s).small().color(Color32::from_gray(170)));
         }
+    }
+
+    /// Gizmondo-specific Run view. The guest framebuffer is drawn into the
+    /// console LCD and every physical control is a real held button. Keyboard
+    /// shortcuts intentionally describe the *host* keyboard; the VK sent to
+    /// Windows CE follows the official Gizmondo Keys SDK sample.
+    fn ui_gizmondo(&mut self, ui: &mut egui::Ui) {
+        if self.gizmondo_skin.is_none() {
+            if let Ok(image) = load_image_bytes(include_bytes!("../assets/gizmondo.png")) {
+                self.gizmondo_skin = Some(ui.ctx().load_texture(
+                    "gizmondo-skin",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+
+        // The supplied skin is 1648x928. Keep that ratio so all hitboxes and
+        // the LCD remain locked to the photographed controls while resizing.
+        let avail = ui.available_size();
+        let aspect = 1648.0 / 928.0;
+        let w = avail.x.min(avail.y * aspect).min(1200.0).max(480.0);
+        let h = w / aspect;
+        let (body, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+        let rr = |x: f32, y: f32, rw: f32, rh: f32| Rect::from_min_size(
+            Pos2::new(body.left() + x * w, body.top() + y * h),
+            Vec2::new(rw * w, rh * h),
+        );
+
+        if let Some(skin) = self.gizmondo_skin.as_ref() {
+            ui.painter().image(
+                skin.id(), body,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            ui.painter().rect_filled(body, 24.0, Color32::from_rgb(24, 25, 27));
+        }
+
+        // Replace the static picture in the skin with the emulator's live
+        // 320x240 framebuffer. These coordinates are measured from the skin.
+        let screen = rr(0.3016, 0.2252, 0.3920, 0.5280);
+        if let Some(tex) = self.last_frame_texture.clone() {
+            let uv = rotation_uv(self.game_rotation);
+            let mut mesh = Mesh::with_texture(tex.id());
+            let idx = mesh.vertices.len() as u32;
+            for (pos, uv) in [(screen.left_top(), uv[0]), (screen.right_top(), uv[1]),
+                              (screen.left_bottom(), uv[2]), (screen.right_bottom(), uv[3])] {
+                mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: Color32::WHITE });
+            }
+            mesh.indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3]);
+            ui.painter().add(egui::Shape::mesh(mesh));
+            self.handle_pointer(ui.ctx(), &screen, tex.size_vec2());
+        } else {
+            ui.painter().rect_filled(screen, 0.0, Color32::BLACK);
+            ui.painter().text(screen.center(), egui::Align2::CENTER_CENTER, "Starting…",
+                              egui::FontId::proportional(18.0), Color32::from_gray(180));
+        }
+
+        // Five top "piano" buttons. Their host keys come from Settings;
+        // Piano 5 still sends guest VK_F11, as required by the official SDK.
+        for (rect, symbol, label, button) in [
+            (rr(0.347, 0.020, 0.039, 0.102), "⌂", "Home / Piano 1", GuestButton::GizPiano1),
+            (rr(0.410, 0.018, 0.039, 0.104), "♪", "Volume / Piano 2", GuestButton::GizPiano2),
+            (rr(0.475, 0.015, 0.039, 0.108), "☀", "Brightness / Piano 3", GuestButton::GizPiano3),
+            (rr(0.540, 0.017, 0.039, 0.106), "!", "Alert / Piano 4", GuestButton::GizPiano4),
+            (rr(0.606, 0.020, 0.039, 0.102), "⏻", "Power / Piano 5", GuestButton::GizPiano5),
+        ] { self.giz_button(ui, rect, symbol, label, button); }
+
+        self.giz_button(ui, rr(0.105, 0.010, 0.105, 0.145), "L", "Left shoulder", GuestButton::Soft1);
+        self.giz_button(ui, rr(0.790, 0.010, 0.105, 0.145), "R", "Right shoulder", GuestButton::Soft2);
+
+        self.giz_button(ui, rr(0.113, 0.335, 0.061, 0.105), "▲", "D-pad up", GuestButton::DpadUp);
+        self.giz_button(ui, rr(0.075, 0.420, 0.061, 0.105), "◀", "D-pad left", GuestButton::DpadLeft);
+        self.giz_button(ui, rr(0.151, 0.420, 0.061, 0.105), "▶", "D-pad right", GuestButton::DpadRight);
+        self.giz_button(ui, rr(0.113, 0.505, 0.061, 0.105), "▼", "D-pad down", GuestButton::DpadDown);
+
+        self.giz_button(ui, rr(0.827, 0.285, 0.060, 0.105), "■", "North / Stop", GuestButton::ButtonA);
+        self.giz_button(ui, rr(0.775, 0.385, 0.060, 0.105), "◀◀", "West / Rewind", GuestButton::ButtonC);
+        self.giz_button(ui, rr(0.875, 0.385, 0.060, 0.105), "▶▶", "East / Forward", GuestButton::ButtonB);
+        self.giz_button(ui, rr(0.827, 0.500, 0.060, 0.105), "▶", "South / Play", GuestButton::Action);
+    }
+
+    fn giz_button(&mut self, ui: &mut egui::Ui, rect: Rect, symbol: &str, label: &str, button: GuestButton) {
+        let vk = button.vk();
+        let host = self.library.config().keybindings.keys_for(button).join(", ");
+        let was_pressed = self.held.is_held_by(InputSource::Pointer, vk);
+        let now_pressed = pointer_held_in(ui.ctx(), &rect);
+        if now_pressed && !was_pressed && self.held.press(InputSource::Pointer, vk) {
+            self.send_input(InputEvent::KeyDown { vk });
+        } else if was_pressed && !now_pressed && self.held.release(InputSource::Pointer, vk) {
+            self.send_input(InputEvent::KeyUp { vk });
+        }
+
+        // The skin already contains the physical button. On press we only
+        // repaint its dark legend in white, which gives the requested
+        // illuminated-button feedback without covering the artwork.
+        if self.held.is_held(vk) {
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, symbol,
+                              egui::FontId::proportional((rect.height() * 0.38).max(12.0)),
+                              Color32::WHITE);
+        }
+        let id = ui.make_persistent_id(("giz_button", vk));
+        ui.interact(rect, id, Sense::click_and_drag())
+            .on_hover_text(if host.is_empty() {
+                format!("{label} — keyboard: unbound")
+            } else {
+                format!("{label} — keyboard: {host}")
+            });
     }
 
     /// Render the live framebuffer (or placeholder) and forward any
@@ -918,8 +1338,10 @@ impl PocketLauncher {
             return;
         };
         let size = tex.size_vec2();
-        // Keep the normal Run-screen preview at 2x unless it would
-        // exceed the space shared with the virtual control pad.
+        // Display at 2x for readability, the same way the CLI's
+        // minifb DisplayHook scales — but never larger than the space
+        // egui actually gave us. A 480x800 WVGA game at a fixed 2x is
+        // 960x1600 and would run off the bottom of a 1080p window.
         let available = ui.available_size();
         let rotated_size = if self.game_rotation.is_quarter_turn() {
             Vec2::new(size.y, size.x)
@@ -932,32 +1354,6 @@ impl PocketLauncher {
             .max(0.1);
         let display_size = rotated_size * scale;
         let (rect, _response) = ui.allocate_exact_size(display_size, Sense::click_and_drag());
-        let painter = ui.painter();
-        let ctx = ui.ctx().clone();
-        self.paint_game_texture(painter, &ctx, &tex, rect, size, true);
-    }
-
-    fn ui_game_only(&mut self, ctx: &egui::Context) {
-        let bounds = ctx.screen_rect();
-        let painter = ctx.layer_painter(egui::LayerId::background());
-        painter.rect_filled(bounds, 0.0, Color32::BLACK);
-        let Some(tex) = self.last_frame_texture.clone() else {
-            return;
-        };
-        let size = tex.size_vec2();
-        let rect = fullscreen_frame_rect(bounds, size, self.game_rotation);
-        self.paint_game_texture(&painter, ctx, &tex, rect, size, false);
-    }
-
-    fn paint_game_texture(
-        &mut self,
-        painter: &egui::Painter,
-        ctx: &egui::Context,
-        tex: &egui::TextureHandle,
-        rect: Rect,
-        size: Vec2,
-        show_fps: bool,
-    ) {
         let uv = rotation_uv(self.game_rotation);
         let mut mesh = Mesh::with_texture(tex.id());
         let idx = mesh.vertices.len() as u32;
@@ -975,12 +1371,17 @@ impl PocketLauncher {
         }
         mesh.indices
             .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3]);
-        painter.add(egui::Shape::mesh(mesh));
-        if show_fps && self.library.config().show_fps {
+        ui.painter().add(egui::Shape::mesh(mesh));
+        // The j2me-loader-style FPS overlay is opt-in: gated on the
+        // launcher's `show_fps` config flag so users who find a
+        // permanent debug HUD distracting can switch it off in
+        // Settings.
+        if self.library.config().show_fps {
             let overlay_rect =
                 Rect::from_min_size(rect.min + Vec2::new(6.0, 6.0), Vec2::new(390.0, 24.0));
-            painter.rect_filled(overlay_rect, 4.0, Color32::from_black_alpha(190));
-            painter.text(
+            ui.painter()
+                .rect_filled(overlay_rect, 4.0, Color32::from_black_alpha(190));
+            ui.painter().text(
                 overlay_rect.min + Vec2::new(6.0, 4.0),
                 egui::Align2::LEFT_TOP,
                 self.frame_stats.overlay_text(),
@@ -988,7 +1389,7 @@ impl PocketLauncher {
                 Color32::LIGHT_GREEN,
             );
         }
-        self.handle_pointer(ctx, &rect, size);
+        self.handle_pointer(ui.ctx(), &rect, size);
     }
 
     /// `size` is the guest framebuffer's own dimensions in pixels — the
@@ -1141,21 +1542,6 @@ impl PocketLauncher {
         }
     }
 
-    fn set_game_only_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
-        if self.game_only_fullscreen == enabled {
-            return;
-        }
-        self.game_only_fullscreen = enabled;
-        if enabled {
-            let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-            self.fullscreen_before_game_only = Some(fullscreen);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-        } else {
-            let fullscreen = self.fullscreen_before_game_only.take().unwrap_or(false);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
-        }
-    }
-
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
         if self.screen != Screen::Run {
             return;
@@ -1172,18 +1558,14 @@ impl PocketLauncher {
                 continue;
             };
             if key == egui::Key::F11 && pressed && !repeat {
-                if self.game_only_fullscreen {
-                    self.set_game_only_fullscreen(ctx, false);
-                } else {
-                    let fullscreen =
-                        ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
-                }
+                let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
                 continue;
             }
-            let Some(vk) = self.library.config().keybindings.vk_for_key(key.name()) else {
-                continue;
-            };
+            // Both PocketPC and Gizmondo use the same configurable host-key map.
+            // The skin is only presentation; Settings are the single source of truth.
+            let vk = self.library.config().keybindings.vk_for_key(key.name());
+            let Some(vk) = vk else { continue; };
             if pressed {
                 if !repeat && self.held.press(InputSource::Keyboard, vk) {
                     self.send_input(InputEvent::KeyDown { vk });
@@ -1260,6 +1642,7 @@ impl PocketLauncher {
 
     fn spawn_run(&mut self, game: &GameEntry) {
         self.last_frame_texture = None;
+        self.last_frame_snapshot = None;
         self.last_frame_status = None;
         self.frame_stats.reset();
         // Start turned the way this game was saved: a portrait-rendered
@@ -1269,6 +1652,7 @@ impl PocketLauncher {
         self.screen = Screen::Run;
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
+        self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
         let (frame_tx, frame_rx) = mpsc::channel();
         let (input_tx, input_rx) = mpsc::channel();
         self.frame_rx = Some(frame_rx);
@@ -1340,29 +1724,25 @@ impl eframe::App for PocketLauncher {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);
-        if self.game_only_fullscreen && self.screen == Screen::Run {
-            self.ui_game_only(ctx);
-        } else {
-            egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
-            egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&self.status).small());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                .small()
-                                .color(Color32::from_gray(140)),
-                        );
-                    });
+        egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&self.status).small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .color(Color32::from_gray(140)),
+                    );
                 });
             });
-            egui::CentralPanel::default().show(ctx, |ui| match self.screen {
-                Screen::Library => self.ui_library(ui),
-                Screen::Settings => self.ui_settings(ui),
-                Screen::GameSettings => self.ui_game_settings(ui),
-                Screen::Run => self.ui_run(ui),
-            });
-        }
+        });
+        egui::CentralPanel::default().show(ctx, |ui| match self.screen {
+            Screen::Library => self.ui_library(ui),
+            Screen::Settings => self.ui_settings(ui),
+            Screen::GameSettings => self.ui_game_settings(ui),
+            Screen::Run => self.ui_run(ui),
+        });
         // While a game is running we want to drain the live frame
         // channel as fast as the runner produces frames; the original
         // 250 ms cadence capped the launcher at 4 fps, which is most
@@ -1463,38 +1843,37 @@ mod tests {
         assert_eq!(GuestButton::Action.vk(), gapi::VK_RETURN);
     }
 
-    /// The keyboard used to be a hard-coded `match` on `egui::Key`.
-    /// Users who never open the keybinding editor must keep exactly the
-    /// keys they had, so the defaults reproduce that table key for key.
+    /// The default desktop layout mirrors the Gizmondo skin while reusing the
+    /// existing PocketPC/GAPI buttons wherever the guest VK is identical.
     #[test]
-    fn default_bindings_reproduce_the_old_hard_coded_keyboard() {
+    fn default_bindings_match_the_gizmondo_layout() {
         let bindings = KeyBindings::default();
         for (key, expected) in [
-            (egui::Key::ArrowUp, GuestButton::DpadUp),
-            (egui::Key::ArrowDown, GuestButton::DpadDown),
-            (egui::Key::ArrowLeft, GuestButton::DpadLeft),
-            (egui::Key::ArrowRight, GuestButton::DpadRight),
-            (egui::Key::Enter, GuestButton::Action),
-            (egui::Key::A, GuestButton::ButtonA),
-            (egui::Key::B, GuestButton::ButtonB),
-            (egui::Key::Space, GuestButton::ButtonB),
-            (egui::Key::C, GuestButton::ButtonC),
-            (egui::Key::Tab, GuestButton::Soft1),
+            (egui::Key::Z, GuestButton::DpadUp),
+            (egui::Key::S, GuestButton::DpadDown),
+            (egui::Key::Q, GuestButton::DpadLeft),
+            (egui::Key::D, GuestButton::DpadRight),
+            (egui::Key::ArrowDown, GuestButton::Action),
+            (egui::Key::ArrowUp, GuestButton::ButtonA),
+            (egui::Key::ArrowRight, GuestButton::ButtonB),
+            (egui::Key::ArrowLeft, GuestButton::ButtonC),
             (egui::Key::Num1, GuestButton::Soft1),
-            (egui::Key::Escape, GuestButton::Soft2),
             (egui::Key::Num2, GuestButton::Soft2),
-            (egui::Key::S, GuestButton::Turbo),
-            (egui::Key::F3, GuestButton::Turbo),
+            (egui::Key::T, GuestButton::Turbo),
+            (egui::Key::F1, GuestButton::GizPiano1),
+            (egui::Key::F2, GuestButton::GizPiano2),
+            (egui::Key::F3, GuestButton::GizPiano3),
+            (egui::Key::F4, GuestButton::GizPiano4),
+            (egui::Key::F5, GuestButton::GizPiano5),
         ] {
             assert_eq!(
                 bindings.vk_for_key(key.name()),
                 Some(expected.vk()),
-                "{} should still drive {:?}",
+                "{} should drive {:?}",
                 key.name(),
                 expected
             );
         }
-        // A key that was never bound must stay unbound.
         assert_eq!(bindings.vk_for_key(egui::Key::F12.name()), None);
     }
 
@@ -1512,17 +1891,5 @@ mod tests {
         let (x, y) =
             rotated_pointer_to_game(Vec2::new(0.0, 0.0), display, game, RotationPref::None);
         assert_eq!((x, y), (0, 0));
-    }
-
-    #[test]
-    fn game_only_fullscreen_centers_and_fits_the_rotated_game_frame() {
-        let bounds = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(1920.0, 1080.0));
-        let portrait = fullscreen_frame_rect(bounds, Vec2::new(240.0, 320.0), RotationPref::None);
-        let landscape = fullscreen_frame_rect(bounds, Vec2::new(240.0, 320.0), RotationPref::Cw90);
-
-        assert_eq!(portrait.center(), bounds.center());
-        assert_eq!(portrait.size(), Vec2::new(810.0, 1080.0));
-        assert_eq!(landscape.center(), bounds.center());
-        assert_eq!(landscape.size(), Vec2::new(1440.0, 1080.0));
     }
 }
