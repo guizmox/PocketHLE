@@ -1067,8 +1067,8 @@ impl PocketLauncher {
                     });
                 ui.end_row();
 
-                ui.label("Max slices");
-                ui.add(egui::DragValue::new(&mut draft.max_slices).clamp_range(1..=u64::MAX));
+                ui.label("Max slices (0 = unlimited)");
+                ui.add(egui::DragValue::new(&mut draft.max_slices).clamp_range(0..=u64::MAX));
                 ui.end_row();
 
                 ui.label("Instructions / slice");
