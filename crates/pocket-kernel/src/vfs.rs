@@ -18,6 +18,7 @@
 //! * Memory-mapped files.
 
 use rmp3::{Frame, RawDecoder, MAX_SAMPLES_PER_FRAME};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -193,6 +194,9 @@ struct Mount {
     display_prefix: String,
     host_dir: PathBuf,
     read_only: bool,
+    /// Read-only mounts are a session snapshot for recursive fallback.
+    /// Exact lookups remain live; writable mounts never use this index.
+    fallback_files: RefCell<Option<Vec<PathBuf>>>,
 }
 
 /// The Gizmondo registration service device exposed as `REG1:`.
@@ -324,6 +328,7 @@ impl Vfs {
             display_prefix: display,
             host_dir: host_dir.into(),
             read_only,
+            fallback_files: RefCell::new(None),
         });
     }
 
@@ -417,29 +422,48 @@ impl Vfs {
     /// alone is safe only if unique; wrappers around extracted archives must
     /// not turn Fonts/font.cmf into Frontend/Font/font.cmf (Jump uses two
     /// incompatible font formats under those names).
-    fn find_path_recursive(root: &Path, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
+    fn collect_fallback_files(root: &Path) -> Vec<PathBuf> {
         let mut pending = vec![(root.to_path_buf(), 0usize)];
-        let mut best = 0;
-        let mut found = Vec::new();
+        let mut files = Vec::new();
         while let Some((dir, depth)) = pending.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
-                    let Ok(relative) = path.strip_prefix(root) else { continue; };
-                    let score = relative.components().rev().zip(wanted.iter().rev())
-                        .take_while(|(component, expected)| component.as_os_str()
-                            .to_string_lossy().eq_ignore_ascii_case(expected)).count();
-                    if score > best { best = score; found.clear(); }
-                    if score != 0 && score == best && found.len() < 2 {
-                        found.push(path);
-                    }
+                    files.push(path);
                 } else if depth < 16 && path.is_dir() {
                     pending.push((path, depth + 1));
                 }
             }
         }
+        files
+    }
+
+    fn rank_fallback_files(root: &Path, wanted: &[&str], files: &[PathBuf]) -> (usize, Vec<PathBuf>) {
+        let mut best = 0;
+        let mut found = Vec::new();
+        for path in files {
+            let Ok(relative) = path.strip_prefix(root) else { continue; };
+            let score = relative.components().rev().zip(wanted.iter().rev())
+                .take_while(|(component, expected)| component.as_os_str()
+                    .to_string_lossy().eq_ignore_ascii_case(expected)).count();
+            if score > best { best = score; found.clear(); }
+            if score != 0 && score == best && found.len() < 2 {
+                found.push(path.clone());
+            }
+        }
         (best, found)
+    }
+
+    fn find_path_recursive(mount: &Mount, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
+        if mount.read_only {
+            let mut files = mount.fallback_files.borrow_mut();
+            let files = files.get_or_insert_with(|| Self::collect_fallback_files(&mount.host_dir));
+            Self::rank_fallback_files(&mount.host_dir, wanted, files)
+        } else {
+            let files = Self::collect_fallback_files(&mount.host_dir);
+            Self::rank_fallback_files(&mount.host_dir, wanted, &files)
+        }
     }
 
     /// Translate a guest path to a host path. Existing files fall back
@@ -463,12 +487,18 @@ impl Vfs {
             if fallback.is_none() { fallback = Some(path.clone()); }
             if path.exists() { return Some(path); }
             known_parent |= path.parent().is_some_and(|parent| parent.is_dir());
+            // A missing intermediate component does not make the requested
+            // existing directory disappear (e.g. app/app/asset). Keep the
+            // basename-only fallback from crossing into a sibling directory.
+            known_parent |= path.ancestors().skip(1)
+                .take_while(|parent| *parent != mount.host_dir.as_path())
+                .any(|parent| parent.is_dir());
         }
         let wanted: Vec<_> = normalised.split('/').filter(|part| !part.is_empty()).collect();
         let mut best = 0;
         let mut candidates = Vec::new();
         for mount in mounts {
-            let (score, found) = Self::find_path_recursive(&mount.host_dir, &wanted);
+            let (score, found) = Self::find_path_recursive(mount, &wanted);
             if score > best { best = score; candidates.clear(); }
             if score != 0 && score == best {
                 for path in found {
@@ -476,11 +506,11 @@ impl Vfs {
                 }
             }
         }
-        // A known directory with a missing leaf must not borrow a file
+        // A known directory prefix with a missing leaf must not borrow a file
         // from another game's directory merely because its basename is unique.
         // Keep suffix matches for wrapped install layouts (including Jump).
         if known_parent && best == 1 {
-            log::debug!("vfs.resolve: missing file in existing directory {normalised:?}; refusing basename substitution");
+            log::debug!("vfs.resolve: missing file below an existing directory {normalised:?}; refusing basename substitution");
             return fallback;
         }
         if candidates.len() == 1 {
@@ -1034,14 +1064,47 @@ mod tests {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!("pockethle-vfs-missing-{}-{}",
             std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        std::fs::create_dir_all(root.join("Agaju")).unwrap();
-        std::fs::create_dir_all(root.join("GZGA200049")).unwrap();
-        let movie = root.join("GZGA200049/autorun.wmv");
+        std::fs::create_dir_all(root.join("First")).unwrap();
+        std::fs::create_dir_all(root.join("Second")).unwrap();
+        let movie = root.join("Second/asset.bin");
         std::fs::write(&movie, b"other game video").unwrap();
         let mut v = Vfs::new();
         v.mount_read_only("\\SD Card\\", &root);
-        assert!(v.open("\\SD Card\\Agaju\\AUTORUN.WMV", Access::Read, false).is_none());
-        assert_eq!(v.resolve("\\SD Card\\GZGA200049\\AUTORUN.WMV"), Some(movie.clone()));
+        assert!(v.open("\\SD Card\\First\\ASSET.BIN", Access::Read, false).is_none());
+        assert!(v.open("\\SD Card\\First\\First\\ASSET.BIN", Access::Read, false).is_none());
+        assert!(v.open("\\SD Card\\First\\missing\\ASSET.BIN", Access::Read, false).is_none());
+        assert_eq!(v.resolve("\\SD Card\\Second\\ASSET.BIN"), Some(movie.clone()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vfs_read_only_fallback_index_keeps_exact_lookup_priority_and_writable_mounts_live() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!("pockethle-vfs-index-{}-{}",
+            std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir_all(root.join("wrapper/Assets")).unwrap();
+        let asset = root.join("wrapper/Assets/item.bin");
+        std::fs::write(&asset, b"asset").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Card\\", &root);
+        for _ in 0..2 {
+            assert_eq!(v.resolve("\\Card\\Assets\\ITEM.BIN"), Some(asset.clone()));
+        }
+        assert!(v.mounts[0].fallback_files.borrow().is_some());
+        // Exact paths on newly mounted overlays still beat a warm index.
+        let overlay = root.join("overlay");
+        std::fs::create_dir_all(&overlay).unwrap();
+        let exact = overlay.join("item.bin");
+        std::fs::write(&exact, b"override").unwrap();
+        v.mount_save_dir("\\Card\\Assets\\", &overlay);
+        assert_eq!(v.resolve("\\Card\\Assets\\item.bin"), Some(exact));
+        let mut writable = Vfs::new();
+        writable.mount("\\Card\\", &root);
+        assert!(!writable.resolve("\\Card\\unknown\\new.bin").unwrap().exists());
+        let added = root.join("wrapper/Assets/new.bin");
+        std::fs::write(&added, b"new").unwrap();
+        assert_eq!(writable.resolve("\\Card\\unknown\\new.bin"), Some(added));
+        assert!(writable.mounts[0].fallback_files.borrow().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

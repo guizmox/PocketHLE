@@ -3940,19 +3940,59 @@ fn strnicmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(cmp_to_int(a.cmp(&b)) as u32))
 }
 
-/// `int atoi(const char *s)` / `long atol(const char *s)`. C semantics:
-/// skip leading whitespace, optional sign, then as many digits as
-/// parse; anything else yields `0` rather than an error.
+/// Windows CE atof consumes a decimal prefix, not the whole input string.
+/// The legacy CRT also accepts D/d as an exponent marker.
+fn parse_atof_prefix(text: &str) -> f64 {
+    let bytes = text.as_bytes();
+    let mut end = 0;
+    while bytes.get(end).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        end += 1;
+    }
+    let start = end;
+    if matches!(bytes.get(end), Some(b'+') | Some(b'-')) {
+        end += 1;
+    }
+    let mut digits = 0;
+    while bytes.get(end).is_some_and(|byte| byte.is_ascii_digit()) {
+        end += 1;
+        digits += 1;
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(|byte| byte.is_ascii_digit()) {
+            end += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return 0.0;
+    }
+    if matches!(bytes.get(end), Some(b'e') | Some(b'E') | Some(b'd') | Some(b'D')) {
+        let exponent = end;
+        end += 1;
+        if matches!(bytes.get(end), Some(b'+') | Some(b'-')) {
+            end += 1;
+        }
+        let exponent_digits = end;
+        while bytes.get(end).is_some_and(|byte| byte.is_ascii_digit()) {
+            end += 1;
+        }
+        if end == exponent_digits {
+            end = exponent;
+        }
+    }
+    text[start..end].replace(['d', 'D'], "e").parse::<f64>().unwrap_or(0.0)
+}
+
 fn atof_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     let text = read_cstr_string(ctx, p, 0x1000)?;
-    let value = text.trim().parse::<f64>().unwrap_or(0.0);
-    let bits = value.to_bits();
-    ctx.cpu.write_reg(ArmReg::R0, bits as u32)?;
-    ctx.cpu.write_reg(ArmReg::R1, (bits >> 32) as u32)?;
-    Ok(DispatchOutcome::ReturnedR0(bits as u32))
+    Ok(ret_f64(parse_atof_prefix(&text)))
 }
 
+/// `int atoi(const char *s)` / `long atol(const char *s)`. C semantics:
+/// skip leading whitespace, optional sign, then as many digits as
+/// parse; anything else yields `0` rather than an error.
 fn atoi_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     let text = read_cstr_string(ctx, p, 0x1000)?;
@@ -18427,6 +18467,36 @@ mod tests {
         ctx.cpu.write_mem(0x1100, b"%d\0").unwrap();
         ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
         assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+
+    #[test]
+    fn atof_reads_numeric_prefix_and_returns_both_double_words() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        for (text, expected) in [
+            ("11\r\nframerate 30", 11.0f64),
+            ("  -2.75 texture", -2.75),
+            ("\t+.5e+2 next", 50.0),
+            ("7.25D-2;", 0.0725),
+            ("12e+ unfinished", 12.0),
+            (". nope", 0.0),
+            ("not a number", 0.0),
+            ("", 0.0),
+            ("-0 trailing", -0.0),
+            ("1e309 trailing", f64::INFINITY),
+        ] {
+            let mut bytes = text.as_bytes().to_vec();
+            bytes.push(0);
+            ctx.cpu.write_mem(0x1100, &bytes).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 0xdead_beef).unwrap();
+            let bits = expected.to_bits();
+            assert_eq!(atof_handler(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32), "{text:?}");
+            assert_eq!(ctx.cpu.read_mem(0x1100, bytes.len()).unwrap(), bytes);
+        }
     }
 
     #[test]
