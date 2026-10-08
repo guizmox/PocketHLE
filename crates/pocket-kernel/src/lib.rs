@@ -816,7 +816,6 @@ pub struct ProcessLaunch {
 
 #[derive(Debug, Clone)]
 pub struct ChildProcess {
-    pub process_handle_open: bool,
     pub thread_handle: u32,
     pub exit_code: Option<u32>,
 }
@@ -1087,8 +1086,6 @@ pub struct KernelState {
     pub semaphores: HashMap<u32, SemaphoreObject>,
     /// Index of the thread whose register context is currently active.
     pub current_thread: usize,
-    /// ExitThread on the main thread leaves workers alive until they finish.
-    pub main_thread_exit_code: Option<u32>,
     /// Next worker index to consider at a cooperative scheduling point.
     pub worker_schedule_cursor: usize,
     /// Current state of the Pocket PC virtual keys.
@@ -1358,8 +1355,6 @@ pub struct GuestThread {
     /// Monotonic millisecond deadline set by worker Sleep; zero is ready.
     pub sleep_until_ms: u64,
     pub finished: bool,
-    pub exit_code: Option<u32>,
-    pub handle_open: bool,
     /// Set while the thread is parked on a *re-entering* blocking call
     /// (`park_worker_and_retry` / `park_worker_and_reevaluate`): the
     /// parked state will re-run the same API call, so resuming it from
@@ -1404,8 +1399,6 @@ impl GuestThread {
             started: false,
             sleep_until_ms: 0,
             finished: false,
-            exit_code: None,
-            handle_open: true,
             parked_in_pump: false,
             parked_wait_handles: Vec::new(),
             parked_wait_all: false,
@@ -2218,7 +2211,6 @@ impl Process {
                 events: Default::default(),
                 semaphores: Default::default(),
                 current_thread: 0,
-                main_thread_exit_code: None,
                 worker_schedule_cursor: 0,
                 pressed_keys: [false; 256],
                 held_keys: Vec::new(),
@@ -2517,9 +2509,6 @@ pub fn run_main_loop_with_hook(
                     .iter()
                     .position(|thread| thread.exit_va == addr && !thread.finished)
                 {
-                    let exit_code = cpu.read_reg(ArmReg::R0)?;
-                    process.state.threads[thread_index].exit_code = Some(exit_code);
-                    process.state.threads[thread_index].finished = true;
                     let thread = process.state.threads[thread_index].clone();
                     if thread.worker_saved {
                         for (index, value) in thread.saved_regs.iter().enumerate() {

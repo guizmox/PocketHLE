@@ -772,8 +772,6 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetCurrentProcess", get_current_process);
     d.register_handler(dll, "GetCurrentThread", get_current_thread);
     d.register_handler(dll, "CreateThread", create_thread);
-    d.register_handler(dll, "GetExitCodeThread", get_exit_code_thread);
-    d.register_handler(dll, "ExitThread", exit_thread);
     d.register_handler(dll, "WaitForMultipleObjects", wait_for_multiple_objects);
     d.register_constant(dll, "SetThreadPriority", 1, one_returning);
     d.register_constant(dll, "GetThreadPriority", 0, zero_returning);
@@ -2261,56 +2259,6 @@ fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(0xffff_ffff))
 }
 
-/// Return the thread's recorded DWORD, or STILL_ACTIVE while it is alive.
-fn get_exit_code_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let handle = ctx.arg_u32(0)?;
-    let output = ctx.arg_u32(1)?;
-    let code = if handle == FAKE_CURRENT_THREAD_HANDLE {
-        if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
-            ctx.kernel.threads.get(index).map(|thread| thread.exit_code.unwrap_or(259))
-        } else {
-            Some(ctx.kernel.main_thread_exit_code.unwrap_or(259))
-        }
-    } else if let Some(thread) = ctx.kernel.threads.iter().find(|thread| thread.handle == handle && thread.handle_open) {
-        Some(thread.exit_code.unwrap_or(259))
-    } else {
-        ctx.kernel.child_processes.values().find(|child| child.thread_handle == handle)
-            .filter(|_| ctx.kernel.events.contains_key(&handle))
-            .map(|child| child.exit_code.unwrap_or(259))
-    };
-    let Some(code) = code.filter(|_| output != 0) else {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    };
-    if ctx.cpu.write_mem(output, &code.to_le_bytes()).is_err() {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    Ok(DispatchOutcome::ReturnedR0(1))
-}
-
-/// A worker exits through the same trampoline as returning from ThreadProc.
-/// Main-thread exit never returns to its caller and lets workers finish first.
-fn exit_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let code = ctx.arg_u32(0)?;
-    if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
-        if let Some(thread) = ctx.kernel.threads.get(index) {
-            return Ok(DispatchOutcome::JumpTo(thread.exit_va));
-        }
-    }
-    let code = *ctx.kernel.main_thread_exit_code.get_or_insert(code);
-    if ctx.kernel.threads.iter().all(|thread| thread.finished) {
-        ctx.kernel.process_exit_code = Some(code);
-        return Ok(DispatchOutcome::Halt);
-    }
-    // resume_worker normally returns the main thread to LR. Here LR points
-    // back to ExitThread, so only workers can execute guest application code.
-    ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
-    if let Some(outcome) = resume_worker(ctx, code)? {
-        return Ok(outcome);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
-}
-
 fn exit_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.process_exit_code = Some(ctx.arg_u32(0)?);
     log::info!("ExitProcess called by guest");
@@ -2363,7 +2311,7 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     ctx.cpu.write_mem(process_info, &info)?;
     ctx.kernel.next_process_id = id + 1;
     ctx.kernel.child_processes.insert(process_handle, pocket_kernel::ChildProcess {
-        process_handle_open: true, thread_handle, exit_code: None,
+        thread_handle, exit_code: None,
     });
     for handle in [process_handle, thread_handle] {
         ctx.kernel.events.insert(handle, pocket_kernel::EventObject {
@@ -2384,7 +2332,7 @@ fn get_exit_code_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     let code = if handle == pocket_kernel::FAKE_CURRENT_PROCESS_HANDLE {
         Some(ctx.kernel.process_exit_code.unwrap_or(259))
     } else {
-        ctx.kernel.child_processes.get(&handle).filter(|child| child.process_handle_open).map(|child| child.exit_code.unwrap_or(259))
+        ctx.kernel.child_processes.get(&handle).map(|child| child.exit_code.unwrap_or(259))
     };
     let Some(code) = code else { return Ok(DispatchOutcome::ReturnedR0(0)); };
     ctx.cpu.write_mem(output, &code.to_le_bytes())?;
@@ -5781,21 +5729,14 @@ fn flush_file_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 fn close_handle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if let Some(thread) = ctx.kernel.threads.iter_mut().find(|thread| thread.handle == handle) {
-        thread.handle_open = false;
-    }
     if ctx.kernel.vfs.is_mp3_decoder(handle) { ctx.kernel.audio.stop_mas_stream(handle); }
-    if let Some(child) = ctx.kernel.child_processes.get_mut(&handle) {
-        child.process_handle_open = false;
+    if let Some(child) = ctx.kernel.child_processes.remove(&handle) {
         ctx.kernel.events.remove(&handle);
+        // The independently owned thread handle remains valid until closed.
+        let _ = child;
     } else if (0xd1000000..0xd2000000).contains(&handle) {
         ctx.kernel.events.remove(&handle);
     }
-    // Keep the exit DWORD until both independently owned handles close.
-    let events = &ctx.kernel.events;
-    ctx.kernel.child_processes.retain(|_, child| {
-        child.process_handle_open || events.contains_key(&child.thread_handle)
-    });
     let _ = ctx.kernel.vfs.close(handle);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -15910,67 +15851,6 @@ mod tests {
     use pocket_pe::ImportBinding;
 
     #[test]
-    fn thread_exit_api_reports_active_finished_closed_and_invalid_handles() {
-        let mut cpu = scanf_cpu();
-        let mut kernel = fresh_kernel();
-        kernel.threads.push(pocket_kernel::GuestThread::new(
-            0x10000, 0, 0x9000, 0x1000, 0x20000, 0x10000, 0xdead1000, [0; 17],
-        ));
-        let thunk = dummy_thunk();
-        cpu.write_reg(ArmReg::R0, 0xdead1000).unwrap();
-        cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 259);
-        kernel.current_thread = 1;
-        cpu.write_reg(ArmReg::R0, 17).unwrap();
-        assert_eq!(exit_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x20000));
-        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 17);
-        // The kernel trampoline records R0 before restoring the main context.
-        kernel.threads[0].exit_code = Some(17);
-        kernel.threads[0].finished = true;
-        kernel.current_thread = 0;
-        cpu.write_reg(ArmReg::R0, 0xdead1000).unwrap();
-        get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
-        assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 17);
-        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
-        cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
-        cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
-        cpu.write_reg(ArmReg::R0, 23).unwrap();
-        assert_eq!(exit_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::Halt);
-        assert_eq!(kernel.process_exit_code, Some(23));
-    }
-
-    #[test]
-    fn thread_exit_api_keeps_main_exit_pending_and_child_thread_code_after_process_close() {
-        let mut cpu = scanf_cpu();
-        let mut kernel = fresh_kernel();
-        let thunk = dummy_thunk();
-        kernel.threads.push(pocket_kernel::GuestThread::new(
-            0x10000, 0, 0x9000, 0x1000, 0x20000, 0x10000, 0xdead1000, [0; 17],
-        ));
-        cpu.write_reg(ArmReg::R0, 31).unwrap();
-        assert_eq!(exit_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
-        assert_eq!(kernel.main_thread_exit_code, Some(31));
-        assert_eq!(kernel.process_exit_code, None);
-        let process = 0xd1000002;
-        let thread = 0xd1000003;
-        kernel.child_processes.insert(process, pocket_kernel::ChildProcess {
-            process_handle_open: true, thread_handle: thread, exit_code: Some(41),
-        });
-        kernel.events.insert(thread, pocket_kernel::EventObject { manual_reset: true, signalled: true });
-        cpu.write_reg(ArmReg::R0, process).unwrap();
-        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
-        cpu.write_reg(ArmReg::R0, thread).unwrap();
-        cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 41);
-        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
-        assert!(!kernel.child_processes.contains_key(&process));
-    }
-
-    #[test]
     fn post_quit_message_keeps_other_thread_cleanup_running() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
@@ -16130,7 +16010,6 @@ mod tests {
             events: Default::default(),
             semaphores: Default::default(),
             current_thread: 0,
-            main_thread_exit_code: None,
             worker_schedule_cursor: 0,
             pressed_keys: [false; 256],
             held_keys: Vec::new(),
@@ -17828,7 +17707,7 @@ mod tests {
         close_handle(&mut CallCtx {
             cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
         }).unwrap();
-        assert!(!kernel.child_processes[&handle].process_handle_open);
+        assert!(!kernel.child_processes.contains_key(&handle));
         assert!(!kernel.events.contains_key(&handle));
         assert!(kernel.events.contains_key(&thread_handle));
         std::fs::remove_dir_all(root).unwrap();
