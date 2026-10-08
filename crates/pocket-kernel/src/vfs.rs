@@ -413,25 +413,33 @@ impl Vfs {
         Some(p)
     }
 
-    fn find_basename_recursive(root: &Path, wanted: &str) -> Option<PathBuf> {
+    /// Rank fallback files by matching trailing path components. A basename
+    /// alone is safe only if unique; wrappers around extracted archives must
+    /// not turn Fonts/font.cmf into Frontend/Font/font.cmf (Jump uses two
+    /// incompatible font formats under those names).
+    fn find_path_recursive(root: &Path, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
         let mut pending = vec![(root.to_path_buf(), 0usize)];
+        let mut best = 0;
+        let mut found = Vec::new();
         while let Some((dir, depth)) = pending.pop() {
-            let entries = std::fs::read_dir(&dir).ok()?;
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
             for entry in entries.flatten() {
                 let path = entry.path();
-                let name = entry.file_name();
-                if name.to_string_lossy().eq_ignore_ascii_case(wanted) {
-                    if path.is_file() {
-                        return Some(path);
+                if path.is_file() {
+                    let Ok(relative) = path.strip_prefix(root) else { continue; };
+                    let score = relative.components().rev().zip(wanted.iter().rev())
+                        .take_while(|(component, expected)| component.as_os_str()
+                            .to_string_lossy().eq_ignore_ascii_case(expected)).count();
+                    if score > best { best = score; found.clear(); }
+                    if score != 0 && score == best && found.len() < 2 {
+                        found.push(path);
                     }
-                    continue;
-                }
-                if depth < 16 && path.is_dir() {
+                } else if depth < 16 && path.is_dir() {
                     pending.push((path, depth + 1));
                 }
             }
         }
-        None
+        (best, found)
     }
 
     /// Translate a guest path to a host path. Existing files fall back
@@ -448,26 +456,31 @@ impl Vfs {
         }
         let mounts = self.matching_mounts(&normalised);
         let mut fallback = None;
-        let basename = Path::new(&normalised)
-            .file_name()
-            .map(|name| name.to_string_lossy());
+        // Exhaust exact paths before considering a fallback from any mount.
+        for mount in &mounts {
+            let Some(path) = self.host_path_for_mount(mount, &normalised) else { continue; };
+            if fallback.is_none() { fallback = Some(path.clone()); }
+            if path.exists() { return Some(path); }
+        }
+        let wanted: Vec<_> = normalised.split('/').filter(|part| !part.is_empty()).collect();
+        let mut best = 0;
+        let mut candidates = Vec::new();
         for mount in mounts {
-            let path = self.host_path_for_mount(mount, &normalised)?;
-            if fallback.is_none() {
-                fallback = Some(path.clone());
-            }
-            if path.exists() {
-                return Some(path);
-            }
-            let root = mount.prefix.trim_end_matches('/');
-            if normalised != root {
-                if let Some(name) = basename.as_deref() {
-                    if let Some(found) = Self::find_basename_recursive(&mount.host_dir, name) {
-                        log::debug!("vfs.resolve: basename fallback {normalised:?} -> {found:?}");
-                        return Some(found);
-                    }
+            let (score, found) = Self::find_path_recursive(&mount.host_dir, &wanted);
+            if score > best { best = score; candidates.clear(); }
+            if score != 0 && score == best {
+                for path in found {
+                    if !candidates.contains(&path) && candidates.len() < 2 { candidates.push(path); }
                 }
             }
+        }
+        if candidates.len() == 1 {
+            let path = candidates.pop().unwrap();
+            log::debug!("vfs.resolve: path fallback {normalised:?} -> {path:?} ({best} matching components)");
+            return Some(path);
+        }
+        if candidates.len() > 1 {
+            log::warn!("vfs.resolve: ambiguous fallback for {normalised:?}; refusing to substitute another asset");
         }
         fallback
     }
@@ -1006,6 +1019,50 @@ pub enum SeekKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vfs_path_fallback_preserves_directories_and_rejects_ambiguous_names() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!("pockethle-vfs-suffix-{}-{}",
+            std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let correct = root.join("wrapper/Data/Fonts/font.cmf");
+        let other = root.join("wrapper/Data/Frontend/Font/font.cmf");
+        for (path, bytes) in [(&correct, b"game font".as_slice()), (&other, b"frontend font".as_slice())] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let mut v = Vfs::new();
+        v.mount_read_only("\\SD Card\\", &root);
+        let requested = "\\SD Card\\GZGA200035\\Data\\Fonts\\font.cmf";
+        assert_eq!(v.resolve(requested), Some(correct.clone()));
+        let handle = v.open(requested, Access::Read, false).unwrap();
+        let mut bytes = [0; 9];
+        assert_eq!(v.read(handle, &mut bytes), Some(9));
+        assert_eq!(&bytes, b"game font");
+        assert!(v.open("\\SD Card\\missing\\font.cmf", Access::Read, false).is_none());
+        // An exact path on a broader mount beats a basename fallback on
+        // an overlay mounted more specifically.
+        let exact = root.join("real/font.cmf");
+        std::fs::create_dir_all(exact.parent().unwrap()).unwrap();
+        std::fs::write(&exact, b"exact").unwrap();
+        v.mount_read_only("\\SD Card\\real\\", root.join("wrapper/Data/Frontend/Font"));
+        assert_eq!(v.resolve("\\SD Card\\real\\font.cmf"), Some(other));
+        // A missing leaf on that specific overlay must not preempt the
+        // existing, complete path on the broader card mount.
+        let only = root.join("real/unique.bin");
+        std::fs::write(&only, b"exact unique").unwrap();
+        std::fs::write(root.join("wrapper/Data/Frontend/Font/unique.bin"), b"overlay exact").unwrap();
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let nested = empty.join("wrong/unique.bin");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, b"wrong basename").unwrap();
+        let mut v2 = Vfs::new();
+        v2.mount_read_only("\\SD Card\\", &root);
+        v2.mount_read_only("\\SD Card\\real\\", &empty);
+        assert_eq!(v2.resolve("\\SD Card\\real\\unique.bin"), Some(only));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn mas_buffer_swaps_follow_playback_and_report_sdk_states() {
