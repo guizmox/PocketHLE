@@ -1,1 +1,3 @@
-frontends/pocket-desktop/src/runner.rs
+crates/pocket-pe/src/lib.rs
+crates/pocket-winceapi/src/coredll.rs
+docs/AGENTS.md

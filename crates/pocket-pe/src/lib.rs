@@ -232,6 +232,10 @@ pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
         if matches!(machine, machine::ARM | machine::THUMB | machine::ARMNT)
             && s.characteristics & 0x2000_0000 != 0
         {
+            let camera_repaired = repair_arm_camera_preview(&mut data, va);
+            if camera_repaired != 0 {
+                log::info!("enabled continuous camera preview in the matched Catapult ARM routine");
+            }
             let repaired = repair_patched_arm_packed_eof(&mut data, va);
             if repaired != 0 {
                 log::info!("restored {repaired} packed-file EOF comparison(s) in section {name}");
@@ -567,6 +571,41 @@ fn repair_patched_arm_packed_eof(data: &mut [u8], section_rva: u32) -> usize {
 }
 
 
+// Catapult's recognized ARM routine invalidates a new preview when tracking
+// returns zero markers. Keep the acquired-frame flag for the render path,
+// while the tracking count, transforms and retry timing remain guest-owned.
+// Match the entire routine suffix, never a filename or short opcode pair;
+// patch only the loaded copy, leaving the executable on disk untouched.
+const ARM_CAMERA_PREVIEW_GATE: [u32; 48] = [
+    0xe3500000, 0x0a0000df, 0xe3a04c23, 0xe3a00001,
+    0xe3844010, 0xe7cb0004, 0xe28b0c22, 0xe59020fc,
+    0xe28b1c23, 0xe1a00002, 0xe5922000, 0xe5923008,
+    0xe1a0e00f, 0xe12fff13, 0xe28b3c22, 0xe59310fc,
+    0xe1a00001, 0xe5911000, 0xe5912010, 0xe1a0e00f,
+    0xe12fff12, 0xe3500000, 0x1a000018, 0xe3a00000,
+    0xe7cb0004, 0xe28b1c22, 0xe59f4324, 0xe28b0c22,
+    0xe59000f0, 0xe3a02002, 0xe59110f4, 0xe3a03000,
+    0xe5944000, 0xe1a0e00f, 0xe12fff14, 0xe28b3c22,
+    0xe59340e8, 0xe28b2c22, 0xe59230ec, 0xe0542000,
+    0xe0c33001, 0xe28b0c22, 0xe28b1c22, 0xe58020e8,
+    0xe58130ec, 0xe28dd094, 0xe8bd4ff0, 0xe12fff1e,
+];
+
+fn repair_arm_camera_preview(data: &mut [u8], section_rva: u32) -> usize {
+    let signature: Vec<u8> = ARM_CAMERA_PREVIEW_GATE.iter()
+        .flat_map(|word| word.to_le_bytes()).collect();
+    let first = ((4 - (section_rva & 3)) & 3) as usize;
+    let mut repaired = 0;
+    for offset in (first..data.len()).step_by(4) {
+        if data.get(offset..offset + signature.len()) == Some(signature.as_slice()) {
+            // STRB r0,[r11,r4], with r0 == 0 on the zero-marker path.
+            data[offset + 96..offset + 100].copy_from_slice(&0xe1a0_0000u32.to_le_bytes());
+            repaired += 1;
+        }
+    }
+    repaired
+}
+
 /// Group imports by DLL name (lower-cased) for nicer reporting.
 pub fn imports_by_dll(image: &LoadedImage) -> BTreeMap<String, Vec<&ImportSymbol>> {
     let mut by_dll: BTreeMap<String, Vec<&ImportSymbol>> = BTreeMap::new();
@@ -582,6 +621,27 @@ pub fn imports_by_dll(image: &LoadedImage) -> BTreeMap<String, Vec<&ImportSymbol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_preview_repair_keeps_the_frame_when_tracking_finds_no_marker() {
+        let original: Vec<u8> = ARM_CAMERA_PREVIEW_GATE.iter()
+            .flat_map(|word| word.to_le_bytes()).collect();
+        let mut loaded = original.clone();
+        assert_eq!(repair_arm_camera_preview(&mut loaded, 0x1000), 1);
+        let mut expected = original.clone();
+        expected[96..100].copy_from_slice(&0xe1a0_0000u32.to_le_bytes());
+        assert_eq!(loaded, expected); // Only the preview flag store changes.
+        assert_eq!(repair_arm_camera_preview(&mut loaded, 0x1000), 0);
+        for index in 0..ARM_CAMERA_PREVIEW_GATE.len() {
+            let mut unrelated = original.clone();
+            unrelated[index * 4] ^= 1;
+            let before = unrelated.clone();
+            assert_eq!(repair_arm_camera_preview(&mut unrelated, 0x1000), 0);
+            assert_eq!(unrelated, before);
+        }
+        assert_eq!(repair_arm_camera_preview(&mut original[..original.len()-1].to_vec(), 0x1000), 0);
+        assert_eq!(repair_arm_camera_preview(&mut original.clone(), 0x1001), 0);
+    }
 
     #[test]
     fn runtime_relocations_adjust_highlow_and_reject_invalid_blocks() {

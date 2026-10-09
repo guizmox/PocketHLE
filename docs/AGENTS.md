@@ -1720,3 +1720,26 @@ Rust type-checked. Android logging alone was omitted in a temporary Linux
 validation harness; production logging was retained. No physical webcam/mobile
 camera test or Android APK build was possible here. CAM1 support does not
 implement PocketPC/DirectShow camera interfaces or undocumented sensor controls.
+
+
+## 39. Catapult continuous camera preview and mixer cleanup
+
+Catapult's supplied ARM image reads CAM1 successfully but clears its
+acquired-frame flag when the tracker returns zero markers. Its render path
+therefore uploads a camera texture only after a detection. A controlled
+white/marker/white input reproduced this: zero updates outside the marker
+interval, 33 uploads within it. This is a game-code compatibility repair,
+not a camera-driver, scheduler or GLES cadence change. pocket-pe recognizes
+the entire 48-instruction routine suffix in ARM executable sections and
+replaces only the flag-clearing STRB with an ARM NOP in the loaded copy.
+On-disk files, marker counts and tracking transforms remain unchanged.
+Unknown image versions do not receive the repair. Never match by game name,
+absolute VA, or a short opcode pair; keep negative-signature/idempotence tests.
+Temporary camera/texture probes belong only to the local validation runner
+and must not be distributed.
+
+Chicane's cleanup calls coredll mixerClose(NULL). No mixerOpen handles are
+currently issued: mixerClose rejects every supplied handle with
+MMSYSERR_INVALHANDLE (5), preserving GetLastError and never closing a wave
+or VFS handle. This implements cleanup validation, not the full WinMM mixer
+family; mixerOpen/line/control APIs remain outside this patch.
