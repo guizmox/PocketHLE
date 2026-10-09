@@ -28,6 +28,49 @@ fn busy(state: &mut Shared, key: &str) -> bool {
     state.leases.get(key).is_some_and(|v|!v.is_empty())
 }
 impl Vfs {
+    /// Copy through guest file contracts, including sharing and volume quota.
+    pub fn copy_file(&mut self, from: &str, to: &str, fail_if_exists: bool) -> Result<(), u32> {
+        let source = self.open_file(from, 1, 1, 3, false, 0)?.handle;
+        let result = (|| {
+            let size = self.size(source).ok_or(30u32)?;
+            let dest_key = self.file_key(to, true)?;
+            let source_key = if let Some(file) = self.handles.get(&source) {
+                file.lock().map_err(|_| 30u32)?.host_path.canonicalize()
+                    .map_err(|e| io_error(&e))?.to_string_lossy().to_ascii_lowercase()
+            } else { self.file_key(from, false)? };
+            if source_key == dest_key { return Err(87); }
+            if fail_if_exists && self.attributes(to).is_ok() { return Err(80); }
+            if !self.is_ram_path(to) {
+                let (host, mount) = self.exact_path(to, true)?;
+                if let Some((root, total)) = Self::quota(mount) {
+                    let old = host.metadata().map(|m| m.len()).unwrap_or(0);
+                    if size.saturating_sub(old) > total.saturating_sub(used(&root)?) { return Err(112); }
+                }
+            }
+            let attrs = self.attributes(from)? & 0x27;
+            let dest = self.open_file(to, 2, 0, if fail_if_exists { 1 } else { 2 }, false, 0)?.handle;
+            let copied = (|| {
+                let mut buffer = [0u8; 16384];
+                loop {
+                    let count = self.read(source, &mut buffer).ok_or(30u32)?;
+                    if count == 0 { break; }
+                    let mut written = 0;
+                    while written < count {
+                        let n = self.write(dest, &buffer[written..count]).ok_or(112u32)?;
+                        if n == 0 { return Err(29); }
+                        written += n;
+                    }
+                }
+                self.flush(dest).map_err(|e| io_error(&e))
+            })();
+            self.close(dest);
+            if copied.is_err() && fail_if_exists { let _ = self.delete(to); }
+            copied?;
+            self.set_attributes(to, attrs)
+        })();
+        self.close(source);
+        result
+    }
     pub fn shared_context(&self) -> VfsShared { self.shared.clone() }
     pub fn attach_shared_context(&mut self, shared: VfsShared) { self.shared=shared; }
     fn exact_path(&self,path:&str,write:bool) -> Result<(PathBuf,&Mount),u32> {
@@ -214,6 +257,48 @@ impl Vfs {
 mod tests {
     use super::*;
     fn mounted(dir:&Path)->Vfs{let mut v=Vfs::new();v.mount_save_dir("\\Flash Disk\\",dir);v}
+    #[test]
+    fn copy_preserves_data_and_enforces_same_file_sharing_and_existing_destination() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("source"), vec![0x5a; 40000]).unwrap();
+        let mut v = mounted(d.path());
+        let from = "\\Flash Disk\\source";
+        let to = "\\Flash Disk\\copy";
+        v.copy_file(from, to, true).unwrap();
+        assert_eq!(std::fs::read(d.path().join("copy")).unwrap(), vec![0x5a; 40000]);
+        assert_eq!(v.copy_file(from, to, true), Err(80));
+        assert_eq!(v.copy_file(from, from, false), Err(87));
+        let h = v.open_file(to, 1, 1, 3, false, 0).unwrap().handle;
+        assert_eq!(v.copy_file(from, to, false), Err(32));
+        v.close(h);
+        std::fs::write(d.path().join("source"), b"short").unwrap();
+        v.copy_file(from, to, false).unwrap();
+        assert_eq!(std::fs::read(d.path().join("copy")).unwrap(), b"short");
+        assert!(v.open_handles().is_empty());
+    }
+
+    #[test]
+    fn copy_between_ram_and_flash_and_quota_failure_preserves_old_destination() {
+        let d = tempfile::tempdir().unwrap();
+        let mut v = mounted(d.path());
+        v.attach_ram(Some(crate::memory_division::MemoryDivision::default()));
+        v.create_directory("/copytest").unwrap();
+        let h = v.open_file("/copytest/source", 3, 3, 1, false, 0).unwrap().handle;
+        assert_eq!(v.write(h, b"ram data"), Some(8));
+        v.close(h);
+        v.copy_file("/copytest/source", "\\Flash Disk\\save", true).unwrap();
+        v.copy_file("\\Flash Disk\\save", "/copytest/back", true).unwrap();
+        let h = v.open_file("/copytest/back", 1, 3, 3, false, 0).unwrap().handle;
+        let mut b = [0; 8];
+        assert_eq!(v.read(h, &mut b), Some(8));
+        assert_eq!(&b, b"ram data");
+        v.close(h);
+        let large = std::fs::File::create(d.path().join("large")).unwrap();
+        large.set_len(32 * 1024 * 1024).unwrap();
+        assert_eq!(v.copy_file("\\Flash Disk\\large", "\\Flash Disk\\save", false), Err(112));
+        assert_eq!(std::fs::read(d.path().join("save")).unwrap(), b"ram data");
+        assert!(v.open_handles().is_empty());
+    }
     #[test] fn creation_dispositions_preserve_or_truncate_on_host_and_ram() {
         let d=tempfile::tempdir().unwrap();
         for ram in [false,true] {

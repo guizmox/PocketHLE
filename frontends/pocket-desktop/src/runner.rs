@@ -146,6 +146,14 @@ impl Runner {
             summary_lines.push("Insufficient device RAM to load process".to_string());
             return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 0xc0000017);
         }
+        let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
+        if let Some(process) = emu.process_mut() {
+            if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
+                if let Some(startup) = startup.as_mut() { startup.error = 29; }
+                summary_lines.push(format!("Cannot load device registry: {e}"));
+                return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 29);
+            }
+        }
         let (screen_w, screen_h) = if is_gizmondo {
             (320, 240)
         } else {
@@ -165,7 +173,10 @@ impl Runner {
             } else {
                 continue;
             };
-            emu.set_registry_value(&value.key, &value.name, registry_value);
+            let saved = emu.process().and_then(|p| p.state.registry.value(&value.key, &value.name));
+            if saved.is_none() || value.name.eq_ignore_ascii_case("InstallDir") {
+                emu.set_registry_value(&value.key, &value.name, registry_value);
+            }
         }
         if !game
             .registry
@@ -294,6 +305,13 @@ impl Runner {
             Err(e) => summary_lines.push(format!("Emulator stopped: {e:#}")),
         }
         emu.stop_audio();
+
+        if let Some(process) = emu.process() {
+            if let Err(e) = process.state.registry.flush() {
+                summary_lines.push(format!("Cannot save device registry: {e}"));
+                log::error!("Cannot save device registry: {e}");
+            }
+        }
 
         let framebuffer = emu.process().and_then(|p| {
             (!p.state.framebuffer.is_all_black())

@@ -1,7 +1,14 @@
-crates/pocket-kernel/src/audio.rs
+crates/pocket-kernel/Cargo.toml
 crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/registry.rs
+crates/pocket-kernel/src/vfs_contract.rs
 crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/lib.rs
 crates/pocket-winceapi/src/gx.rs
+crates/pocket-winceapi/src/lib.rs
+crates/pocket-winceapi/src/ordinals.rs
 crates/pocket-winceapi/src/ws2.rs
+crates/pocket-winceapi/data/ws2-ordinals.json
+crates/pocket-winceapi/data/btd-ordinals.json
+frontends/pocket-desktop/src/runner.rs
+frontends/pocket-android-jni/src/runner.rs
 docs/AGENTS.md

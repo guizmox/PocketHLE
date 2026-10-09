@@ -237,12 +237,13 @@ impl WinCeDispatcher {
         gx::register(&mut d);
         hss::register(&mut d);
         ole32::register(&mut d);
-        for ordinal in 0..=4095u16 {
-            if let Some(name) = ordinals::lookup("coredll.dll", ordinal) {
-                let source = ("coredll.dll".to_string(), name);
+        for dll in ["coredll.dll", "ws2.dll"] {
+          for ordinal in 0..=4095u16 {
+            if let Some(name) = ordinals::lookup(dll, ordinal) {
+                let source = (dll.to_string(), name);
                 if let Some(handler) = d.by_name.get(&source).copied() {
                     for alias in [format!("ord:{ordinal}"), format!("#{ordinal}")] {
-                        let key = ("coredll.dll".to_string(), alias);
+                        let key = (dll.to_string(), alias);
                         d.by_name.insert(key.clone(), handler);
                         if let Some(value) = d.by_name_constant.get(&source).copied() {
                             d.by_name_constant.insert(key, value);
@@ -250,6 +251,7 @@ impl WinCeDispatcher {
                     }
                 }
             }
+          }
         }
         d
     }

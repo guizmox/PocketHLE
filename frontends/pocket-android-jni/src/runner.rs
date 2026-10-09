@@ -310,6 +310,18 @@ fn run_game_to_completion(
         return summary_lines.join("\n");
     }
 
+    let is_gizmondo = is_gizmondo_game(entry, library_root);
+    if !emu.set_memory_division(is_gizmondo.then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default)) {
+        summary_lines.push("Insufficient device RAM to load process".to_string());
+        return summary_lines.join("\n");
+    }
+    let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
+    if let Some(process) = emu.process_mut() {
+        if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
+            summary_lines.push(format!("Cannot load device registry: {e}"));
+            return summary_lines.join("\n");
+        }
+    }
     for value in &entry.registry {
         let registry_value = if let Some(text) = value.string.as_deref() {
             pocket_core::kernel::registry::RegistryValue::Sz(text.to_string())
@@ -318,7 +330,10 @@ fn run_game_to_completion(
         } else {
             continue;
         };
-        emu.set_registry_value(&value.key, &value.name, registry_value);
+        let saved = emu.process().and_then(|p| p.state.registry.value(&value.key, &value.name));
+        if saved.is_none() || value.name.eq_ignore_ascii_case("InstallDir") {
+            emu.set_registry_value(&value.key, &value.name, registry_value);
+        }
     }
 
     // The tap has to be published before the guest runs: the Kotlin
@@ -334,11 +349,6 @@ fn run_game_to_completion(
     emu.mount_read_only_dir("\\Application\\", &extracted);
     emu.mount_read_only_dir("\\Program Files\\", &extracted);
     emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
-    let is_gizmondo = is_gizmondo_game(entry, library_root);
-    if !emu.set_memory_division(is_gizmondo.then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default)) {
-        summary_lines.push("Insufficient device RAM to load process".to_string());
-        return summary_lines.join("\n");
-    }
     if is_gizmondo {
         emu.mount_read_only_dir("\\SD Card\\", &extracted);
         emu.mount_read_only_dir("\\Storage Card\\", &extracted);
@@ -386,6 +396,12 @@ fn run_game_to_completion(
         Err(e) => summary_lines.push(format!("Emulator stopped: {e:#}")),
     }
     emu.stop_audio();
+    if let Some(process) = emu.process() {
+        if let Err(e) = process.state.registry.flush() {
+            summary_lines.push(format!("Cannot save device registry: {e}"));
+            log::error!("Cannot save device registry: {e}");
+        }
+    }
 
     // Push one last framebuffer so the UI ends up showing whatever
     // the guest left on screen even if it stopped between frames.

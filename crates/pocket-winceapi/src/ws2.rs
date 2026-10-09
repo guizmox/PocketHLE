@@ -51,6 +51,20 @@ mod tests {
     use pocket_pe::ImportBinding;
 
     #[test]
+    fn gizmondo_rom_ordinals_resolve_the_offline_handlers() {
+        assert_eq!(crate::ordinals::lookup("WS2.dll", 35).as_deref(), Some("WSAStartup"));
+        assert_eq!(crate::ordinals::lookup("ws2.dll", 71).as_deref(), Some("recv"));
+        assert_eq!(crate::ordinals::lookup("btd.dll", 31).as_deref(), Some("COM_Open"));
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let mut dispatcher = WinCeDispatcher::new();
+        let thunk = Thunk { thunk_va: 0, iat_va: 0, dll: "WS2.dll".into(),
+            binding: ImportBinding::Ordinal(35), friendly_name: None };
+        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(WSASYSNOTREADY));
+    }
+
+    #[test]
     fn offline_recv_and_thread_errors_are_dispatched_without_touching_buffers() {
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();

@@ -316,7 +316,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "SetFileAttributesW", set_file_attributes_w);
     d.register_handler(dll, "CreateDirectoryW", create_directory_w);
     d.register_handler(dll, "RemoveDirectoryW", remove_directory_w);
-    d.register_constant(dll, "CopyFileW", 1, one_returning);
+    d.register_handler(dll, "CopyFileW", copy_file_w);
     d.register_handler(dll, "MoveFileW", move_file_w);
     d.register_handler(dll, "SetEndOfFile", set_end_of_file);
     d.register_constant(dll, "GetFileInformationByHandle", 0, zero_returning);
@@ -590,7 +590,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "EndDialog", end_dialog);
     d.register_handler(dll, "MessageBoxW", message_box_w);
     d.register_handler(dll, "SetTimer", set_timer);
-    d.register_constant(dll, "KillTimer", 1, one_returning);
+    d.register_handler(dll, "KillTimer", kill_timer);
     d.register_handler(dll, "RegisterHotKey", register_hot_key);
     d.register_handler(dll, "UnregisterHotKey", unregister_hot_key);
 
@@ -1090,15 +1090,18 @@ pub fn register(d: &mut WinCeDispatcher) {
 
     /// `RegFlushKey(hKey)`
     ///
-    /// Writes a key's pending changes through to the device's registry
-    /// file. Our registry lives in memory and every write is already
-    /// visible, so there is nothing to flush: report `ERROR_SUCCESS`.
-    /// Bejeweled 2 flushes its save key after every game and treats a
-    /// failure as "storage is gone".
+    /// Flush the shared device registry; return an LSTATUS, not LastError.
     fn reg_flush_key(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         let key = ctx.arg_u32(0)?;
-        log::debug!("RegFlushKey(key=0x{key:08x}) -> ERROR_SUCCESS");
-        Ok(DispatchOutcome::ReturnedR0(0))
+        if ctx.kernel.registry.path_for(key).is_none() {
+            return Ok(DispatchOutcome::ReturnedR0(6));
+        }
+        let status = match ctx.kernel.registry.flush() {
+            Ok(()) => 0,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => 5,
+            Err(_) => 29,
+        };
+        Ok(DispatchOutcome::ReturnedR0(status))
     }
 
     // ---- libm (soft-float, double-precision) ----    // ---- libm (soft-float, double-precision) ----
@@ -6956,6 +6959,13 @@ fn move_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     vfs_api_bool(ctx,result)
 }
 
+fn copy_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let fail_if_exists = ctx.arg_u32(2)? != 0;
+    let result = vfs_api_path(ctx, 0).and_then(|from|
+        vfs_api_path(ctx, 1).and_then(|to| ctx.kernel.vfs.copy_file(&from, &to, fail_if_exists)));
+    vfs_api_bool(ctx, result)
+}
+
 fn remove_directory_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.remove_directory(&p));vfs_api_bool(ctx,result)
 }
@@ -8917,7 +8927,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         .copied()
         .unwrap_or(ctx.kernel.wnd_proc))
         & !1;
-    if wnd_proc == 0 || lp_msg == 0 {
+    if lp_msg == 0 {
         // No registered WndProc / no message → behave like the old
         // stub: return 0, control resumes from LR.
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -8930,6 +8940,12 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let message = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let wparam = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
     let lparam = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let timer_callback = message == WM_TIMER && lparam != 0;
+    let wnd_proc = if timer_callback { lparam & !1 } else { wnd_proc };
+    if wnd_proc == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    let callback_arg = if timer_callback {
+        ctx.cpu.read_u32_le(lp_msg.saturating_add(16)).unwrap_or(monotonic_ms() as u32)
+    } else { lparam };
     if message == WM_QUIT {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -8952,7 +8968,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
     ctx.cpu.write_reg(ArmReg::R1, message)?;
     ctx.cpu.write_reg(ArmReg::R2, wparam)?;
-    ctx.cpu.write_reg(ArmReg::R3, lparam)?;
+    ctx.cpu.write_reg(ArmReg::R3, callback_arg)?;
     ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
     Ok(DispatchOutcome::JumpTo(wnd_proc))
 }
@@ -8986,6 +9002,7 @@ fn write_synthetic_msg_for_hwnd(
     msg[4..8].copy_from_slice(&message.to_le_bytes());
     msg[8..12].copy_from_slice(&wparam.to_le_bytes());
     msg[12..16].copy_from_slice(&lparam.to_le_bytes());
+    msg[16..20].copy_from_slice(&(monotonic_ms() as u32).to_le_bytes());
     cpu.write_mem(lp_msg, &msg)?;
     Ok(())
 }
@@ -9340,18 +9357,14 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
 /// never synthesise user input here. Doing so would mean the game
 /// "presses buttons by itself" between real presses, which is exactly
 /// the user-visible bug we want to avoid.
-fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32) {
+fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     let now = monotonic_ms();
-    let timer_due = ctx.kernel.synthetic_timer_id != 0 && now >= ctx.kernel.synthetic_timer_next_ms;
+    let timer_next = ctx.kernel.timers.iter().filter(|(key, _)| key.0 == ctx.kernel.current_thread)
+        .map(|(_, timer)| timer.1).min();
+    let timer_due = timer_next.is_some_and(|next| now >= next);
     let paint_due = now >= ctx.kernel.synthetic_paint_next_ms;
     if !timer_due && !paint_due {
-        let next = if ctx.kernel.synthetic_timer_id != 0 {
-            ctx.kernel
-                .synthetic_timer_next_ms
-                .min(ctx.kernel.synthetic_paint_next_ms)
-        } else {
-            ctx.kernel.synthetic_paint_next_ms
-        };
+        let next = timer_next.unwrap_or(u64::MAX).min(ctx.kernel.synthetic_paint_next_ms);
         let wait_ms = next.saturating_sub(now);
         if wait_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(wait_ms.min(16)));
@@ -9363,7 +9376,7 @@ fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32) {
     // Nothing was due even after the wait (clock granularity) — fall
     // back to a paint so a blocking `GetMessageW` never stalls.
     ctx.kernel.synthetic_paint_next_ms = monotonic_ms().saturating_add(SYNTHETIC_PAINT_INTERVAL_MS);
-    (WM_PAINT, 0, 0)
+    (FAKE_HWND, WM_PAINT, 0, 0)
 }
 
 /// How long a key must be held before the guest starts seeing repeats,
@@ -9487,21 +9500,26 @@ fn advance_deadline(previous: u64, interval: u64, now: u64) -> u64 {
 /// starves `RenderFrame()` forever, so the game pumps messages at full
 /// speed and never draws a single pixel (Asphalt 2 3D behaved exactly
 /// this way — 240 dispatched messages, `frame_counter=0`).
-fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32)> {
+fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     let now = monotonic_ms();
-    if ctx.kernel.synthetic_timer_id != 0 && now >= ctx.kernel.synthetic_timer_next_ms {
-        let interval = ctx.kernel.synthetic_timer_interval_ms.max(1) as u64;
-        ctx.kernel.synthetic_timer_next_ms =
-            advance_deadline(ctx.kernel.synthetic_timer_next_ms, interval, now);
-        return Some((WM_TIMER, ctx.kernel.synthetic_timer_id, 0));
-    }
+    if let Some(timer) = timer_message_if_due(ctx, true) { return Some(timer); }
     if now >= ctx.kernel.synthetic_paint_next_ms {
         ctx.kernel.synthetic_paint_next_ms = advance_deadline(
-            ctx.kernel.synthetic_paint_next_ms,
-            SYNTHETIC_PAINT_INTERVAL_MS,
-            now,
-        );
-        return Some((WM_PAINT, 0, 0));
+            ctx.kernel.synthetic_paint_next_ms, SYNTHETIC_PAINT_INTERVAL_MS, now);
+        return Some((FAKE_HWND, WM_PAINT, 0, 0));
+    }
+    None
+}
+
+fn timer_message_if_due(ctx: &mut CallCtx<'_>, remove: bool) -> Option<(u32, u32, u32, u32)> {
+    let now = monotonic_ms();
+    let due = ctx.kernel.timers.iter()
+        .filter(|(key, timer)| key.0 == ctx.kernel.current_thread && now >= timer.1)
+        .min_by_key(|(key, timer)| (timer.1, **key)).map(|(key, _)| *key);
+    if let Some(key) = due {
+        let timer = ctx.kernel.timers.get_mut(&key).unwrap();
+        if remove { timer.1 = advance_deadline(timer.1, timer.0.max(1) as u64, now); }
+        return Some((key.1, WM_TIMER, key.2, timer.2));
     }
     None
 }
@@ -9539,8 +9557,7 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     if let Some((msg, wp, lp)) = key_repeat_if_due(ctx) {
         return (FAKE_HWND, msg, wp, lp);
     }
-    let (msg, wp, lp) = synthetic_message_for(ctx);
-    (FAKE_HWND, msg, wp, lp)
+    synthetic_message_for(ctx)
 }
 
 /// Pop one queued host input event, rewriting its virtual key for GAPI
@@ -9621,8 +9638,7 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     if let Some((msg, wp, lp)) = key_repeat_if_due(ctx) {
         return Some((FAKE_HWND, msg, wp, lp));
     }
-    let (msg, wp, lp) = synthetic_message_if_due(ctx)?;
-    Some((FAKE_HWND, msg, wp, lp))
+    synthetic_message_if_due(ctx)
 }
 
 /// How many more times a guest may ask for a message after it has been
@@ -9698,6 +9714,8 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // forever and the main thread — the one that actually renders —
     // would never get the CPU back.
     if let Some(thread_index) = ctx.kernel.current_thread.checked_sub(1) {
+        let wait_key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+        ctx.kernel.wait_deadlines.remove(&wait_key);
         let queued = ctx
             .kernel
             .threads
@@ -9710,6 +9728,15 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         // GetMessageW blocks with lpMsg still live. Re-entering the thunk
         // must preserve r0-r3; otherwise r0 becomes NULL and the queued
         // message is consumed into address 0 when the worker wakes.
+        if let Some((hwnd, msg, wp, lp)) = timer_message_if_due(ctx, true) {
+            write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
+        if let Some(next) = ctx.kernel.timers.iter().filter(|(key, _)| key.0 == ctx.kernel.current_thread)
+            .map(|(_, timer)| timer.1).min() {
+            ctx.kernel.wait_deadlines.insert(wait_key, next);
+            if let Some(thread) = ctx.kernel.threads.get_mut(thread_index) { thread.sleep_until_ms = next; }
+        }
         if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
             return Ok(outcome);
         }
@@ -9782,6 +9809,10 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         });
         if let Some((msg, wp, lp)) = queued {
             write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, 0, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
+        if let Some((hwnd, msg, wp, lp)) = timer_message_if_due(ctx, remove_mode & 1 != 0) {
+            write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
         if let Some(outcome) = park_worker(ctx, 0)? {
@@ -11816,6 +11847,7 @@ fn output_debug_string_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 /// which is where its `PostQuitMessage` lives.
 fn destroy_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
+    ctx.kernel.timers.retain(|key, _| key.1 != hwnd);
     if Controls::is_child_hwnd(hwnd) {
         ctx.kernel.controls.destroy(hwnd);
         return Ok(DispatchOutcome::ReturnedR0(1));
@@ -12724,13 +12756,28 @@ fn unregister_hot_key(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 }
 
 fn set_timer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
     let id = ctx.arg_u32(1)?;
     let interval = ctx.arg_u32(2)?.max(1);
-    let final_id = if id == 0 { FAKE_TIMER_BASE } else { id };
-    ctx.kernel.synthetic_timer_id = final_id;
-    ctx.kernel.synthetic_timer_interval_ms = interval;
-    ctx.kernel.synthetic_timer_next_ms = monotonic_ms().saturating_add(interval as u64);
+    let callback = ctx.arg_u32(3)?;
+    let owner = ctx.kernel.current_thread;
+    let final_id = if id == 0 {
+        let mut candidate = FAKE_TIMER_BASE;
+        while ctx.kernel.timers.contains_key(&(owner, hwnd, candidate)) {
+            candidate = candidate.wrapping_add(1).max(1);
+        }
+        candidate
+    } else { id };
+    ctx.kernel.timers.insert((owner, hwnd, final_id),
+        (interval, monotonic_ms().saturating_add(interval as u64), callback));
     Ok(DispatchOutcome::ReturnedR0(final_id))
+}
+
+fn kill_timer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let id = ctx.arg_u32(1)?;
+    let removed = ctx.kernel.timers.remove(&(ctx.kernel.current_thread, hwnd, id)).is_some();
+    Ok(DispatchOutcome::ReturnedR0(removed as u32))
 }
 
 /// `HANDLE CreateEventW(LPSECURITY_ATTRIBUTES, BOOL bManualReset,
@@ -18623,9 +18670,7 @@ mod tests {
             window_userdata: std::collections::HashMap::new(),
             window_classes: std::collections::HashMap::new(),
             window_user_data: 0,
-            synthetic_timer_id: 0,
-            synthetic_timer_interval_ms: 16,
-            synthetic_timer_next_ms: 0,
+            timers: Default::default(),
             synthetic_paint_next_ms: 0,
             synthetic_create_sent: false,
             synthetic_size_sent: false,
@@ -23131,6 +23176,76 @@ mod tests {
         let mut cpu = StubCpu::new();
         cpu.map_region(pocket_kernel::USER_KDATA_PAGE_BASE, 4096, Prot::READ | Prot::WRITE).unwrap();
         cpu
+    }
+
+    #[test]
+    fn copy_and_registry_flush_failures_are_real_guest_return_values() {
+        use pocket_kernel::Dispatcher;
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let mut dispatcher = crate::WinCeDispatcher::new();
+        let mut thunk = dummy_thunk();
+        thunk.dll = "coredll.dll".into();
+        thunk.binding = ImportBinding::Name("CopyFileW".into());
+        thunk.friendly_name = Some("CopyFileW".into());
+        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(kernel.thread_last_errors.get(&0), Some(&87));
+        thunk.binding = ImportBinding::Name("RegFlushKey".into());
+        thunk.friendly_name = Some("RegFlushKey".into());
+        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(), DispatchOutcome::ReturnedR0(6));
+        assert_eq!(kernel.thread_last_errors.get(&0), Some(&87));
+        cpu.write_reg(ArmReg::R0, 0x80000001).unwrap();
+        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(), DispatchOutcome::ReturnedR0(0));
+    }
+
+    #[test]
+    fn timers_keep_windows_and_threads_separate_and_coalesce_overdue_ticks() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for (hwnd, id) in [(FAKE_HWND, 12), (0, 12), (FAKE_HWND, 13)] {
+            assert_eq!(tls_test_call(&mut cpu, &mut kernel, set_timer, &[hwnd, id, 100, 0]), id);
+        }
+        kernel.current_thread = 1;
+        tls_test_call(&mut cpu, &mut kernel, set_timer, &[0, 12, 100, 0]);
+        assert_eq!(kernel.timers.len(), 4);
+        kernel.current_thread = 0;
+        assert_eq!(tls_test_call(&mut cpu, &mut kernel, kill_timer, &[0, 12]), 1);
+        assert_eq!(tls_test_call(&mut cpu, &mut kernel, kill_timer, &[0, 12]), 0);
+        assert!(kernel.timers.contains_key(&(1, 0, 12)));
+        for timer in kernel.timers.values_mut() { timer.1 = 0; }
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        assert!(timer_message_if_due(&mut ctx, false).is_some());
+        assert!(timer_message_if_due(&mut ctx, false).is_some());
+        assert!(timer_message_if_due(&mut ctx, true).is_some());
+        assert!(timer_message_if_due(&mut ctx, true).is_some());
+        assert!(timer_message_if_due(&mut ctx, true).is_none());
+        ctx.kernel.current_thread = 1;
+        assert_eq!(timer_message_if_due(&mut ctx, true), Some((0, WM_TIMER, 12, 0)));
+    }
+
+    #[test]
+    fn timer_callback_dispatch_receives_timestamp_and_restores_call_frame() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 4096, Prot::READ | Prot::WRITE).unwrap();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        write_synthetic_msg_for_hwnd(&mut cpu, 0x1000, 0, WM_TIMER, 77, 0x4000).unwrap();
+        cpu.write_mem(0x1010, &1234u32.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x9000).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x4000));
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_TIMER);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 77);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 1234);
+        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1000);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x9000);
+        assert!(ctx.kernel.message_frames.is_empty());
     }
 
     #[test]

@@ -1060,14 +1060,9 @@ pub struct KernelState {
     pub window_classes: HashMap<u32, String>,
     /// Per-window user data used by WndProc implementations (GWL_USERDATA).
     pub window_user_data: u32,
-    /// `nIDEvent` of the timer the guest most recently registered via
-    /// `SetTimer`, or `0` if none. The synthetic message pump uses
-    /// this to inject `WM_TIMER` messages with a wParam the guest
-    /// will recognise.
-    pub synthetic_timer_id: u32,
-    /// Timer interval and host-clock deadline used by the synthetic message pump.
-    pub synthetic_timer_interval_ms: u32,
-    pub synthetic_timer_next_ms: u64,
+    /// Timers keyed by (owning thread, window, ID); values are
+    /// (interval in ms, host deadline, optional guest TIMERPROC).
+    pub timers: HashMap<(usize, u32, u32), (u32, u64, u32)>,
     /// Host-clock deadline for the next synthetic paint message.
     pub synthetic_paint_next_ms: u64,
     /// `true` once the synthetic message pump has delivered
@@ -2757,9 +2752,7 @@ impl Process {
                 window_userdata: HashMap::new(),
                 window_classes: HashMap::new(),
                 window_user_data: 0,
-                synthetic_timer_id: 0,
-                synthetic_timer_interval_ms: 16,
-                synthetic_timer_next_ms: 0,
+                timers: HashMap::new(),
                 synthetic_paint_next_ms: 0,
                 synthetic_create_sent: false,
                 synthetic_size_sent: false,

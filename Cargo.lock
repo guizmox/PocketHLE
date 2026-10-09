@@ -2947,6 +2947,8 @@ dependencies = [
  "pocket-cpu",
  "pocket-pe",
  "rmp3",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
 ]

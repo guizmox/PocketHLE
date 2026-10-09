@@ -1512,3 +1512,38 @@ and cached GetSystemPowerStatusEx2 use. Bluetooth.cpp initializes Winsock 2.2
 for device discovery, but exchanges data via RFCOMM virtual COM/ReadFile.
 This archive does not include the platform winsock2.h or ws2 export library;
 do not invent ordinal mappings from desktop Winsock.
+
+## 34. General API completion and Gizmondo ROM exports (2026-10-09)
+
+CopyFileW is a dispatched operation, never a baked TRUE thunk. Vfs::copy_file
+opens the source with read sharing, checks actual host identity before truncating
+the destination, copies through VFS read/write, and observes RAM charging,
+read-only mounts, file leases and the 32 MiB Flash quota. Host quota preflight
+preserves an old destination on capacity failure. Other I/O failures during an
+overwrite can leave a partial destination; no transactional overwrite is promised.
+
+Registry values can be attached to a versioned JSON snapshot. Desktop and Android
+runners select registry-gizmondo.json or registry-pocketpc.json below their root.
+Load after attaching device RAM, before applying installer defaults; saved values
+win except InstallDir, which must follow the current installation. Child processes
+reuse the already attached shared store. Persist values and key display names,
+never process handles or RAM-charge objects. RegFlushKey validates HKEY and returns
+LSTATUS directly. Normal/error run termination also flushes. Temporary writes are
+synced then renamed on the same volume; corrupt input blocks launch and is kept.
+Concurrent emulator instances writing one registry snapshot are not coordinated.
+
+SetTimer stores independent timers keyed by (thread, HWND, ID); replacement resets
+only that timer's deadline. KillTimer really removes its timer; DestroyWindow removes
+associated timers. Preserve the existing 1 ms lower interval limit for CE games.
+Coalesce overdue intervals rather than generating bursts. WM_TIMER lParam carries
+TIMERPROC, and DispatchMessage calls it with (HWND, WM_TIMER, ID, MSG.time), restoring
+the existing call frame on callback return. Workers see only their own explicit
+timers; they still never receive synthetic window paint traffic. A blocking worker
+GetMessage uses the timer deadline to become eligible for the scheduler again.
+
+ws2-ordinals.json (79 exports) and btd-ordinals.json (83 exports) come from the
+supplied Gizmondo ws2.dll and btd.dll export directories. Aliases for implemented
+Winsock handlers use those ROM ordinals. These tables do not implement the APIs:
+Winsock remains the explicit offline boundary described above. Native Windows/
+Android Bluetooth, device discovery, RFCOMM virtual COM and the BTD driver context
+APIs are not delivered in this general-API patch.

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Value types we model — the subset Pocket PC titles actually use.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RegistryValue {
     /// `REG_SZ` (stored as UTF-8, handed to the guest as UTF-16).
     Sz(String),
@@ -65,6 +65,15 @@ pub(crate) struct RegistryStore {
     keys: HashMap<String, HashMap<String, RegistryValue>>,
     display: HashMap<String, String>,
     charge: Option<crate::memory_division::StoreCharge>,
+    persistence: Option<std::path::PathBuf>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistrySnapshot {
+    version: u32,
+    keys: HashMap<String, HashMap<String, RegistryValue>>,
+    display: HashMap<String, String>,
 }
 #[derive(Debug, Default)]
 pub struct Registry {
@@ -107,6 +116,64 @@ pub fn canonical_key(path: &str) -> String {
 }
 
 impl Registry {
+    /// Load only device values. Process handles and RAM charges never go on disk.
+    /// A corrupt snapshot is an error, so a later flush cannot overwrite it.
+    pub fn configure_persistence(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::{Error, ErrorKind, Read};
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = &store.persistence {
+            return if existing == path { Ok(()) } else { Err(Error::new(ErrorKind::InvalidInput, "registry already attached to another device")) };
+        }
+        let snapshot = match std::fs::File::open(path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+                if bytes.len() > 64 * 1024 * 1024 { return Err(Error::new(ErrorKind::InvalidData, "registry snapshot too large")); }
+                let snapshot: RegistrySnapshot = serde_json::from_slice(&bytes)
+                    .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+                if snapshot.version != 1 || snapshot.keys.keys().any(|k| canonical_key(k).to_ascii_lowercase() != *k)
+                    || snapshot.keys.values().any(|v| v.keys().any(|k| k.to_ascii_lowercase() != *k)) {
+                    return Err(Error::new(ErrorKind::InvalidData, "invalid registry snapshot version or key"));
+                }
+                Some(snapshot)
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(snapshot) = snapshot {
+            let mut keys = store.keys.clone();
+            for (key, values) in snapshot.keys { keys.insert(key, values); }
+            if store.charge.as_mut().is_some_and(|charge| !charge.resize(Self::stored_pages(&keys))) {
+                return Err(Error::other("insufficient device RAM for registry"));
+            }
+            store.keys = keys;
+            store.display.extend(snapshot.display);
+        }
+        store.persistence = Some(path.to_owned());
+        Ok(())
+    }
+
+    /// Publish a complete snapshot using a temporary file on the same volume.
+    /// Keep the previous snapshot intact if writing or renaming fails.
+    pub fn flush(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(path) = &store.persistence else { return Ok(()); };
+        let snapshot = RegistrySnapshot { version: 1, keys: store.keys.clone(), display: store.display.clone() };
+        let bytes = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
+        let temp = path.with_extension(format!("tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let result = (|| {
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp, path)
+        })();
+        if result.is_err() { let _ = std::fs::remove_file(&temp); }
+        result
+    }
+
     pub fn new() -> Self {
         Self {
             store: Arc::new(Mutex::new(RegistryStore::default())),
@@ -216,7 +283,7 @@ impl Registry {
     pub fn attach_ram(&mut self, ram: Option<&crate::memory_division::MemoryDivision>) -> bool {
         let Some(ram) = ram else {
             let current = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            let store = RegistryStore { keys: current.keys.clone(), display: current.display.clone(), charge: None };
+            let store = RegistryStore { keys: current.keys.clone(), display: current.display.clone(), charge: None, persistence: current.persistence.clone() };
             drop(current);
             self.store = Arc::new(Mutex::new(store));
             return true;
@@ -339,6 +406,48 @@ mod tests {
         assert_eq!(registry.value("HKCU\\Test", "shared"), Some(RegistryValue::Dword(42)));
         drop(registry);
         assert_eq!(ram.snapshot().store_used, 1); // object store outlives a process
+    }
+
+    #[test]
+    fn persistence_round_trip_shared_child_and_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let ram = crate::memory_division::MemoryDivision::default();
+        let mut parent = Registry::new();
+        assert!(parent.attach_ram(Some(&ram)));
+        parent.configure_persistence(&path).unwrap();
+        assert!(parent.set_value("HKCU\\Save", "text", RegistryValue::Sz("été".into())));
+        assert!(parent.set_value("HKCU\\Save", "number", RegistryValue::Dword(123)));
+        let handle = parent.open("HKCU\\Save").unwrap();
+        let mut child = Registry::new();
+        assert!(child.attach_ram(Some(&ram)));
+        child.configure_persistence(&path).unwrap();
+        assert!(child.set_value("HKCU\\Save", "blob", RegistryValue::Binary(vec![0, 255, 8])));
+        child.flush().unwrap();
+        let mut loaded = Registry::new();
+        loaded.configure_persistence(&path).unwrap();
+        assert_eq!(loaded.value("HKCU\\Save", "text"), Some(RegistryValue::Sz("été".into())));
+        assert_eq!(loaded.value("HKCU\\Save", "number"), Some(RegistryValue::Dword(123)));
+        assert_eq!(loaded.value("HKCU\\Save", "blob"), Some(RegistryValue::Binary(vec![0, 255, 8])));
+        assert!(loaded.path_for(handle).is_none());
+        assert!(loaded.delete_value("HKCU\\Save", "blob"));
+        loaded.flush().unwrap();
+        let mut reloaded = Registry::new();
+        reloaded.configure_persistence(&path).unwrap();
+        assert_eq!(reloaded.value("HKCU\\Save", "blob"), None);
+    }
+
+    #[test]
+    fn corrupt_persistence_is_rejected_without_changing_live_values_or_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, b"broken").unwrap();
+        let mut reg = Registry::new();
+        reg.set_value("HKCU\\Live", "value", RegistryValue::Dword(42));
+        assert!(reg.configure_persistence(&path).is_err());
+        assert_eq!(reg.value("HKCU\\Live", "value"), Some(RegistryValue::Dword(42)));
+        reg.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken");
     }
 
     #[test]
