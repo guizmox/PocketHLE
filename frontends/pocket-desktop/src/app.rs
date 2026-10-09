@@ -96,6 +96,13 @@ pub struct PocketLauncher {
     /// Which guest buttons are held right now, and by which input
     /// source, so we can fire the matching `WM_KEYUP` on release.
     held: HeldButtons,
+    gamepad_rx: crate::gamepad::Monitor,
+    gamepad_devices: Vec<(usize, String)>,
+    gamepad_selected: Option<usize>,
+    gamepad_error: Option<String>,
+    gamepad_held: std::collections::HashMap<(usize, String), u16>,
+    gamepad_capture: Option<GuestButton>,
+    gamepad_pressed: Vec<String>,
     /// `Some` while a stylus drag is in progress — carries the last
     /// reported game-space coordinates so we don't spam the guest
     /// with redundant events.
@@ -457,6 +464,7 @@ enum Screen {
 enum InputSource {
     Keyboard,
     Pointer,
+    Gamepad,
 }
 
 /// Which guest buttons are down, tracked per input source.
@@ -475,6 +483,7 @@ enum InputSource {
 struct HeldButtons {
     keyboard: std::collections::HashSet<u16>,
     pointer: std::collections::HashSet<u16>,
+    gamepad: std::collections::HashSet<u16>,
 }
 
 impl HeldButtons {
@@ -482,6 +491,7 @@ impl HeldButtons {
         match source {
             InputSource::Keyboard => &mut self.keyboard,
             InputSource::Pointer => &mut self.pointer,
+            InputSource::Gamepad => &mut self.gamepad,
         }
     }
 
@@ -504,13 +514,14 @@ impl HeldButtons {
     }
 
     fn is_held(&self, vk: u16) -> bool {
-        self.keyboard.contains(&vk) || self.pointer.contains(&vk)
+        self.keyboard.contains(&vk) || self.pointer.contains(&vk) || self.gamepad.contains(&vk)
     }
 
     fn is_held_by(&self, source: InputSource, vk: u16) -> bool {
         match source {
             InputSource::Keyboard => self.keyboard.contains(&vk),
             InputSource::Pointer => self.pointer.contains(&vk),
+            InputSource::Gamepad => self.gamepad.contains(&vk),
         }
     }
 
@@ -519,7 +530,7 @@ impl HeldButtons {
     fn drain_all(&mut self) -> Vec<u16> {
         self.keyboard
             .drain()
-            .chain(self.pointer.drain())
+            .chain(self.pointer.drain()).chain(self.gamepad.drain())
             // A VK held on both at once must only be released once.
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -629,6 +640,9 @@ impl PocketLauncher {
             frame_rx: None,
             input_tx: None,
             held: HeldButtons::default(),
+            gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone()),
+            gamepad_devices: Vec::new(), gamepad_selected: None, gamepad_error: None,
+            gamepad_held: Default::default(), gamepad_capture: None, gamepad_pressed: Vec::new(),
             pointer_down_at: None,
             running_game: None,
             status: "Welcome to PocketHLE.".to_string(),
@@ -1173,6 +1187,7 @@ impl PocketLauncher {
         });
         });
         if save_clicked {
+            self.release_all_keys(); self.gamepad_capture=None; self.binding_capture=None;
             self.runner.set_missing_api_logging(draft.log_unimplemented_apis);
             *self.library.config_mut() = draft;
             if let Err(e) = self.library.save() {
@@ -1182,6 +1197,7 @@ impl PocketLauncher {
             }
             self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else if cancel_clicked {
+            self.gamepad_capture=None; self.binding_capture=None;
             self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else {
             self.config_draft = Some(draft);
@@ -1197,7 +1213,7 @@ impl PocketLauncher {
     /// are what [`Self::handle_physical_keyboard`] reads on every key
     /// event, which is what makes a rebind survive a restart.
     fn ui_keybindings(&mut self, ui: &mut egui::Ui, draft: &mut LauncherConfig) {
-        ui.label(RichText::new("Keyboard").strong());
+        ui.label(RichText::new("Keyboard & controller").strong());
         ui.label(
             RichText::new(
                 "Host keys for PocketPC and Gizmondo controls. Existing PocketPC buttons are reused \
@@ -1208,6 +1224,29 @@ impl PocketLauncher {
             .color(Color32::from_gray(160)),
         );
         ui.add_space(6.0);
+
+        ui.label("Connect your controller by USB or pair it in the operating system's Bluetooth settings.");
+        if let Some(error) = &self.gamepad_error { ui.colored_label(Color32::LIGHT_RED, format!("Controller input unavailable: {error}")); }
+        if self.gamepad_devices.is_empty() { ui.label("No controller detected."); }
+        else {
+            let old = self.gamepad_selected;
+            egui::ComboBox::from_id_source("selected_controller")
+                .selected_text(self.gamepad_devices.iter().find(|(id,_)| Some(*id)==old)
+                    .map(|(_, name)| name.as_str()).unwrap_or("Controller"))
+                .show_ui(ui, |ui| { for (id, name) in &self.gamepad_devices {
+                    ui.selectable_value(&mut self.gamepad_selected, Some(*id), name);
+                }});
+            if old != self.gamepad_selected {
+                let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
+                for key in keys { self.release_gamepad_control(&key); }
+            }
+        }
+        if let Some(button) = self.gamepad_capture {
+            if let Some(control) = self.gamepad_pressed.first() {
+                draft.gamepad_bindings.insert(control.clone(), button);
+                self.gamepad_capture = None;
+            }
+        }
 
         // Copied out so the closures below can mutate the capture state
         // without holding a second borrow of `self`.
@@ -1237,7 +1276,7 @@ impl PocketLauncher {
         }
 
         egui::Grid::new("keybindings_grid")
-            .num_columns(3)
+            .num_columns(4)
             .spacing(Vec2::new(12.0, 6.0))
             .show(ui, |ui| {
                 for button in GuestButton::ALL {
@@ -1270,13 +1309,32 @@ impl PocketLauncher {
                             }
                         });
                     } else if ui.button("Add key").clicked() {
+                        self.gamepad_capture=None;
                         capture = Some(button);
                     }
+                    ui.vertical(|ui| {
+                        let controls: Vec<_> = draft.gamepad_bindings.iter().filter(|(_, mapped)| **mapped==button)
+                            .map(|(control, _)| control.clone()).collect();
+                        for control in controls { ui.horizontal(|ui| {
+                            ui.label(crate::gamepad::label(&control));
+                            if ui.small_button("✕").clicked() { draft.gamepad_bindings.remove(&control); }
+                        }); }
+                        if self.gamepad_capture == Some(button) {
+                            ui.label("Press a controller button / move a stick…");
+                            if ui.small_button("Cancel controller").clicked() { self.gamepad_capture=None; }
+                        } else if ui.button("Add controller input").clicked() {
+                            self.gamepad_capture=Some(button); capture=None;
+                        }
+                    });
                     ui.end_row();
                 }
             });
 
         ui.add_space(6.0);
+        if ui.button("Reset controller to defaults").clicked() {
+            draft.gamepad_bindings=pocket_library::keybindings::default_gamepad_bindings();
+            self.gamepad_capture=None;
+        }
         if ui.button("Reset keys to defaults").clicked() {
             reset_clicked = true;
         }
@@ -1408,6 +1466,7 @@ impl PocketLauncher {
             }
             self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else if cancel_clicked {
+            self.gamepad_capture=None; self.binding_capture=None;
             self.screen = if self.running_game.is_some() { Screen::Run } else { Screen::Library };
         } else {
             self.game_settings_draft = Some((id, draft));
@@ -1727,12 +1786,55 @@ impl PocketLauncher {
     }
 
     fn release_all_keys(&mut self) {
+        self.gamepad_held.clear();
         for vk in self.held.drain_all() {
             self.send_input(InputEvent::KeyUp { vk });
         }
     }
 
+    fn handle_gamepads(&mut self, ctx: &egui::Context) {
+        self.gamepad_pressed.clear();
+        while let Ok(event) = self.gamepad_rx.rx.try_recv() {
+            match event {
+                crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
+                crate::gamepad::Event::Devices(devices) => {
+                    self.gamepad_devices = devices;
+                    if !self.gamepad_devices.iter().any(|(id, _)| Some(*id) == self.gamepad_selected) {
+                        self.gamepad_selected = self.gamepad_devices.first().map(|(id, _)| *id);
+                    }
+                    let gone: Vec<_> = self.gamepad_held.keys().filter(|(id, _)|
+                        !self.gamepad_devices.iter().any(|(connected, _)| connected == id)).cloned().collect();
+                    for key in gone { self.release_gamepad_control(&key); }
+                }
+                crate::gamepad::Event::Input { device, control, down } => {
+                    let key = (device, control.clone());
+                    if !down { self.release_gamepad_control(&key); continue; }
+                    if Some(device) != self.gamepad_selected || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) { continue; }
+                    self.gamepad_pressed.push(control.clone());
+                    if self.screen != Screen::Run { continue; }
+                    let Some(button) = self.library.config().gamepad_bindings.get(&control) else { continue; };
+                    let vk = button.vk();
+                    let vk = if self.running_is_gizmondo { vk } else {
+                        rotate_direction_vk(vk, (4-rotation_turns(self.game_rotation))%4)
+                    };
+                    self.gamepad_held.insert(key, vk);
+                    if self.held.press(InputSource::Gamepad, vk) { self.send_input(InputEvent::KeyDown { vk }); }
+                }
+            }
+        }
+    }
+
+    fn release_gamepad_control(&mut self, key: &(usize, String)) {
+        if let Some(vk) = self.gamepad_held.remove(key) {
+            if !self.gamepad_held.values().any(|other| *other == vk)
+                && self.held.release(InputSource::Gamepad, vk) {
+                self.send_input(InputEvent::KeyUp { vk });
+            }
+        }
+    }
+
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) { return; }
         let events = ctx.input(|input| input.events.clone());
         for event in events {
             let egui::Event::Key {
@@ -1935,6 +2037,8 @@ impl eframe::App for PocketLauncher {
         }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) { self.release_all_keys(); }
+        self.handle_gamepads(ctx);
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);
         if let Some(result)=self.screenshot.lock().unwrap_or_else(|e|e.into_inner()).completed.take() {
@@ -2123,6 +2227,21 @@ mod tests {
     /// codes. A `gx.dll` title only reacts to the keys
     /// `GXGetDefaultKeys` named, so a drift between the two tables would
     /// silently stop the D-pad working.
+    #[test]
+    fn controller_keyboard_pointer_overlap_and_disconnect_release() {
+        let mut held=HeldButtons::default(); let vk=GuestButton::Action.vk();
+        assert!(held.press(InputSource::Gamepad, vk));
+        assert!(!held.press(InputSource::Keyboard, vk));
+        assert!(!held.release(InputSource::Gamepad, vk));
+        assert!(held.is_held(vk));
+        assert!(!held.press(InputSource::Pointer, vk));
+        assert!(!held.release(InputSource::Keyboard, vk));
+        assert!(held.release(InputSource::Pointer, vk));
+        assert!(held.press(InputSource::Gamepad, vk));
+        assert_eq!(held.drain_all(), vec![vk]);
+        assert!(!held.release(InputSource::Gamepad, vk));
+    }
+
     #[test]
     fn guest_button_vks_match_the_gapi_table() {
         assert_eq!(GuestButton::DpadUp.vk(), gapi::VK_UP);

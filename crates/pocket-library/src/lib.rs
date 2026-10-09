@@ -508,6 +508,9 @@ pub struct LauncherConfig {
     /// the D-pad to match their keyboard once, not once per title.
     #[serde(default)]
     pub keybindings: KeyBindings,
+    /// Physical controller inputs, independent of keyboard bindings.
+    #[serde(default = "keybindings::default_gamepad_bindings")]
+    pub gamepad_bindings: std::collections::BTreeMap<String, GuestButton>,
     /// Show the `Backend: … / Running…` status line under the game.
     ///
     /// It is a debug read-out, and on a phone in landscape it eats a
@@ -563,6 +566,7 @@ impl Default for LauncherConfig {
             fullscreen_mode: default_fullscreen_mode(),
             orientation: default_orientation(),
             keybindings: KeyBindings::default(),
+            gamepad_bindings: keybindings::default_gamepad_bindings(),
             show_backend_log: default_show_backend_log(),
             controls_opacity: default_controls_opacity(),
         }

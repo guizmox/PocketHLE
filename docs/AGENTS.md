@@ -1606,3 +1606,27 @@ deregister/re-register, query sizing and separate error domains. Native Windows
 and JNI Rust modules have been type-checked; no physical-radio test or full
 Android APK build was possible in this environment. Hardware validation remains
 required before treating multiplayer compatibility as established.
+
+
+## 36. Desktop physical controllers
+
+The desktop frontend uses gilrs 0.11.2 with its default Windows Gaming Input
+backend, rather than requiring an XInput wrapper for non-Xbox controllers.
+A worker collects transitions every 4 ms and wakes egui; it ignores repeats,
+uses stick hysteresis (press 0.60 / release 0.35), and stops when the GUI drops
+its monitor. No controller polling or timing changes enter the guest kernel.
+Keyboard, pointer and controller holds remain independent. Multiple physical
+controls driving one guest VK are aggregated; release/disconnect cannot cancel
+another source. Focus loss, settings and run lifecycle release guest keys.
+Directions use the existing PocketPC inverse rotation.
+
+LauncherConfig.gamepad_bindings is an independent persistent map of physical
+control names to GuestButton. Missing legacy fields receive defaults; explicitly
+empty maps stay empty. Capturing a control moves it to the selected command.
+Keyboard bindings are preserved. Settings shows connected devices, selects the
+first automatically, allows choosing another and resetting/removing bindings.
+Face labels identify positions and Switch/Xbox lettering. D-pad and left stick
+are mapped by default; right stick and additional buttons can be captured.
+Connection is managed by the host OS. This does not depend on the emulated
+Gizmondo Bluetooth setting. Actual Switch Pro hardware validation remains a
+user-side check; software tests and native Linux desktop checks pass.

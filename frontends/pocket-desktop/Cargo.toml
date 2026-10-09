@@ -46,3 +46,5 @@ pocket-library = { path = "../../crates/pocket-library" }
 pocket-pe = { path = "../../crates/pocket-pe" }
 
 xbrz-rs = "=0.1.0"
+
+gilrs = "=0.11.2"

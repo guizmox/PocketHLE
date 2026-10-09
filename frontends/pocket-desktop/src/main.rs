@@ -11,6 +11,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod gamepad;
 mod runner;
 mod fullscreen_layout;
 mod reconstruction;
