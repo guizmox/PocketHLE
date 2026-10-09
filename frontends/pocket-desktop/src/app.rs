@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, RichText, ScrollArea, Sense, Vec2};
 use egui_extras::image::load_image_bytes;
 
-use pocket_core::kernel::{InputEvent, FB_HEIGHT, FB_WIDTH};
+use pocket_core::kernel::InputEvent;
 use pocket_library::{
     is_gizmondo_game, CpuBackendPref, GameEntry, GameSettings, GuestButton, LauncherConfig, Library,
     RotationPref, ScreenPref,
@@ -445,7 +445,7 @@ enum InputSource {
 /// Which guest buttons are down, tracked per input source.
 ///
 /// Both sources used to share a single `HashSet<u16>`, and that quietly
-/// broke holding a key: [`PocketLauncher::vbutton`] runs every frame and
+/// broke holding a key: the virtual controls runs every frame and
 /// released whatever it found in the set whenever the pointer was not on
 /// its own rect, so a keyboard arrow the user was still holding was
 /// cancelled with a `WM_KEYUP` in the very next frame. JumpyBall steers
@@ -518,23 +518,19 @@ pub enum UiEvent {
 
 #[derive(Debug, Clone)]
 struct FrameStats {
-    displayed_frames: u64,
     fps: f32,
     window_started_at: Option<Instant>,
     window_frames: u32,
     last_frame_at: Option<Instant>,
-    last_frame_ms: Option<f32>,
 }
 
 impl Default for FrameStats {
     fn default() -> Self {
         Self {
-            displayed_frames: 0,
             fps: 0.0,
             window_started_at: None,
             window_frames: 0,
             last_frame_at: None,
-            last_frame_ms: None,
         }
     }
 }
@@ -546,11 +542,7 @@ impl FrameStats {
 
     fn record_frame(&mut self) {
         let now = Instant::now();
-        if let Some(previous) = self.last_frame_at {
-            self.last_frame_ms = Some(now.duration_since(previous).as_secs_f32() * 1000.0);
-        }
         self.last_frame_at = Some(now);
-        self.displayed_frames = self.displayed_frames.saturating_add(1);
         self.window_frames = self.window_frames.saturating_add(1);
 
         let started_at = match self.window_started_at {
@@ -568,16 +560,9 @@ impl FrameStats {
         }
     }
 
-    fn overlay_text(&self) -> String {
-        let last_ms = self.last_frame_ms.unwrap_or(0.0);
-        let since_ms = self
-            .last_frame_at
-            .map(|t| t.elapsed().as_secs_f32() * 1000.0)
-            .unwrap_or(0.0);
-        format!(
-            "FPS {:.1}  Frames {}  Last {:.0}ms  Since {:.0}ms",
-            self.fps, self.displayed_frames, last_ms, since_ms
-        )
+    fn current_fps(&self)->f32 {
+        if self.last_frame_at.map(|t|t.elapsed()>Duration::from_secs(1)).unwrap_or(true) {0.0}
+        else {self.fps}
     }
 }
 
@@ -682,6 +667,10 @@ impl PocketLauncher {
     }
 
     fn upload_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
+        if !self.running_is_gizmondo && self.last_frame_snapshot.as_ref()
+            .map(|old|(old.width,old.height))!=Some((frame.width,frame.height)) {
+            self.console_fit_pending=true;
+        }
         // Keep native pixels for input coordinates and rebuilding filtered images.
         self.last_frame_snapshot = Some(frame.clone());
         self.refresh_frame_texture(ctx, frame);
@@ -698,7 +687,7 @@ impl PocketLauncher {
 
     fn refresh_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let smooth_scale = self.running_is_gizmondo && (self.upscale_x2 || fullscreen);
+        let smooth_scale = self.upscale_x2 || fullscreen;
         if let Some(renderer) = self.reconstruction.as_ref() {
             renderer.lock().unwrap_or_else(|e|e.into_inner()).queue(frame, self.upscale_filter.gpu_filter());
         }
@@ -721,7 +710,7 @@ impl PocketLauncher {
     fn set_upscale_x2(&mut self, ctx: &egui::Context, enabled: bool) {
         if self.upscale_x2 == enabled { return; }
         self.release_all_keys();
-        self.pointer_down_at = None;
+        if let Some((x,y))=self.pointer_down_at.take() {self.send_input(InputEvent::PointerUp{x,y});}
         self.upscale_x2 = enabled;
         self.console_fit_pending = true;
         if enabled {
@@ -821,7 +810,7 @@ impl PocketLauncher {
             self.screen = Screen::Run; ui.close_menu();
         }
         ui.separator();
-        ui.add_enabled_ui(self.running_is_gizmondo && self.last_frame_snapshot.is_some(), |ui| {
+        ui.add_enabled_ui(self.last_frame_snapshot.is_some(), |ui| {
             let mut enabled = self.upscale_x2;
             if ui.checkbox(&mut enabled, "Upscale ×2").changed() {
                 self.set_upscale_x2(ui.ctx(), enabled);
@@ -845,6 +834,7 @@ impl PocketLauncher {
                 if rotation != self.game_rotation {
                     self.release_all_keys();
                     self.game_rotation = rotation; self.persist_rotation(rotation);
+                    if !self.running_is_gizmondo {self.console_fit_pending=true;}
                 }
             });
         });
@@ -1110,7 +1100,7 @@ impl PocketLauncher {
                 ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
                 ui.end_row();
 
-                ui.label("Show FPS overlay");
+                ui.label("Show FPS in status bar");
                 ui.checkbox(&mut draft.show_fps, "");
                 ui.end_row();
 
@@ -1389,8 +1379,13 @@ impl PocketLauncher {
         if let Some(inner) = inner {
             self.library_window_size.get_or_insert(inner);
             let scale = if self.upscale_x2 { 2.0 } else { 1.0 };
-            let width = (320.0 / 0.3920) * scale;
-            let body = Vec2::new(width, width * 928.0 / 1648.0);
+            let body=if self.running_is_gizmondo {
+                let width=(320.0/0.3920)*scale;Vec2::new(width,width*928.0/1648.0)
+            } else {
+                let Some(frame)=self.last_frame_snapshot.as_ref() else {return;};
+                crate::pocketpc_layout::PocketPcLayout::new([frame.width,frame.height],
+                    self.game_rotation,scale/ui.ctx().pixels_per_point(),Pos2::ZERO).size()
+            };
             // Keep only the measured top/status bars around the console.
             // Measuring avoids fixed guesses about title bars or display DPI.
             let chrome = inner - ui.available_size();
@@ -1479,18 +1474,37 @@ impl PocketLauncher {
             } else { ScrollArea::both().show(ui, |ui| self.ui_gizmondo(ui)); }
             return;
         }
-        if let Some(name) = self.running_game.as_ref() {
-            ui.label(RichText::new(name).small().color(Color32::from_gray(170)));
-        }
-        ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
-            self.ui_run_screen(ui);
-            ui.add_space(12.0);
-            self.ui_virtual_pad(ui);
-        });
-        ui.add_space(8.0);
-        if let Some(s) = self.last_frame_status.as_ref() {
-            ui.label(RichText::new(s).small().color(Color32::from_gray(170)));
+        self.fit_console_window(ui);
+        ScrollArea::both().show(ui,|ui|self.ui_pocketpc(ui));
+    }
+
+    fn ui_pocketpc(&mut self,ui:&mut egui::Ui) {
+        let Some(frame)=self.last_frame_snapshot.as_ref() else {
+            ui.label("Starting PocketPC…");return;
+        };
+        let native=[frame.width,frame.height];
+        let guest_size=Vec2::new(frame.width as f32,frame.height as f32);
+        let scale=if self.upscale_x2 {2.0} else {1.0}/ui.ctx().pixels_per_point();
+        let mut layout=crate::pocketpc_layout::PocketPcLayout::new(native,self.game_rotation,scale,Pos2::ZERO);
+        // Center the housing in extra window space without fractional LCD scaling.
+        let space=((ui.available_width()-layout.size().x)*0.5).max(0.0);
+        let (canvas,_)=ui.allocate_exact_size(Vec2::new(layout.size().x+space*2.0,layout.size().y),Sense::hover());
+        let dpi=ui.ctx().pixels_per_point();
+        let origin=canvas.min+Vec2::new(space,0.0);
+        layout.origin=Pos2::new((origin.x*dpi).round()/dpi,(origin.y*dpi).round()/dpi);
+        layout.draw_shell(ui.painter());
+        let lcd=layout.screen();self.paint_guest_frame(ui,lcd);
+        self.handle_pointer(ui.ctx(),&lcd,guest_size);
+        for (rect,label,button) in layout.controls() {
+            let vk=button.vk();
+            let now=pointer_held_in(ui.ctx(),&rect.intersect(ui.clip_rect()));
+            let was=self.held.is_held_by(InputSource::Pointer,vk);
+            if now&&!was&&self.held.press(InputSource::Pointer,vk) {self.send_input(InputEvent::KeyDown{vk});}
+            else if was&&!now&&self.held.release(InputSource::Pointer,vk) {self.send_input(InputEvent::KeyUp{vk});}
+            layout.draw_button(ui.painter(),rect,label,self.held.is_held(vk));
+            let keys=self.library.config().keybindings.keys_for(button).join(", ");
+            ui.interact(rect,ui.make_persistent_id(("ppc_button",vk)),Sense::click_and_drag())
+                .on_hover_text(format!("{} — keyboard: {}",button.label(),if keys.is_empty(){"unbound"}else{&keys}));
         }
     }
 
@@ -1609,68 +1623,6 @@ impl PocketLauncher {
             });
     }
 
-    /// Render the live framebuffer (or placeholder) and forward any
-    /// pointer presses on it as `WM_LBUTTONDOWN` / `WM_LBUTTONUP`
-    /// events, with stylus coordinates in whatever resolution the game
-    /// is actually running at.
-    fn ui_run_screen(&mut self, ui: &mut egui::Ui) {
-        let Some(tex) = self.last_frame_texture.clone() else {
-            ui.allocate_ui(
-                Vec2::new(FB_WIDTH as f32 * 2.0, FB_HEIGHT as f32 * 2.0),
-                |ui| {
-                    ui.label("(no framebuffer captured yet — try Run again)");
-                },
-            );
-            return;
-        };
-        let size = tex.size_vec2();
-        // Display at 2x for readability, the same way the CLI's
-        // minifb DisplayHook scales — but never larger than the space
-        // egui actually gave us. A 480x800 WVGA game at a fixed 2x is
-        // 960x1600 and would run off the bottom of a 1080p window.
-        let available = ui.available_size();
-        let rotated_size = if self.game_rotation.is_quarter_turn() {
-            Vec2::new(size.y, size.x)
-        } else {
-            size
-        };
-        let scale = 2.0_f32
-            .min(available.x / rotated_size.x)
-            .min(available.y / rotated_size.y)
-            .max(0.1);
-        let display_size = rotated_size * scale;
-        let (rect, _response) = ui.allocate_exact_size(display_size, Sense::click_and_drag());
-        self.paint_guest_frame(ui,rect);
-        // The j2me-loader-style FPS overlay is opt-in: gated on the
-        // launcher's `show_fps` config flag so users who find a
-        // permanent debug HUD distracting can switch it off in
-        // Settings.
-        if self.library.config().show_fps {
-            let overlay_rect =
-                Rect::from_min_size(rect.min + Vec2::new(6.0, 6.0), Vec2::new(390.0, 24.0));
-            ui.painter()
-                .rect_filled(overlay_rect, 4.0, Color32::from_black_alpha(190));
-            ui.painter().text(
-                overlay_rect.min + Vec2::new(6.0, 4.0),
-                egui::Align2::LEFT_TOP,
-                self.frame_stats.overlay_text(),
-                egui::FontId::monospace(13.0),
-                Color32::LIGHT_GREEN,
-            );
-        }
-        let guest_size = self.last_frame_snapshot.as_ref()
-            .map(|f|Vec2::new(f.width as f32,f.height as f32)).unwrap_or(size);
-        self.handle_pointer(ui.ctx(), &rect, guest_size);
-    }
-
-    /// `size` is the guest framebuffer's own dimensions in pixels — the
-    /// coordinate space the game expects to receive stylus events in.
-    ///
-    /// Press state comes from [`pointer_held_in`] rather than from
-    /// egui's click/drag bookkeeping so that a stylus held on the same
-    /// spot stays down indefinitely — a tap-and-hold is how a Pocket PC
-    /// game is told "keep going", and egui's click timeout would have
-    /// let go for the user.
     fn handle_pointer(&mut self, ctx: &egui::Context, rect: &Rect, size: Vec2) {
         let held = pointer_held_in(ctx, rect);
         let pos = ctx.input(|input| input.pointer.latest_pos());
@@ -1708,86 +1660,6 @@ impl PocketLauncher {
         }
     }
 
-    /// j2me-loader-inspired virtual gamepad: a D-pad on the left and
-    /// three action buttons (A / B / Start) plus two soft keys on
-    /// the right. Each button drives a `WM_KEYDOWN`/`WM_KEYUP` pair
-    /// while held.
-    fn ui_virtual_pad(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Controls").strong());
-            ui.add_space(4.0);
-            // ----- D-pad: 3x3 grid with cardinal arrows -----
-            egui::Grid::new("vpad_dpad")
-                .spacing(Vec2::new(2.0, 2.0))
-                .show(ui, |ui| {
-                    ui.label("");
-                    self.vbutton(ui, "▲", GuestButton::DpadUp, 44.0);
-                    ui.label("");
-                    ui.end_row();
-                    self.vbutton(ui, "◀", GuestButton::DpadLeft, 44.0);
-                    ui.label("");
-                    self.vbutton(ui, "▶", GuestButton::DpadRight, 44.0);
-                    ui.end_row();
-                    ui.label("");
-                    self.vbutton(ui, "▼", GuestButton::DpadDown, 44.0);
-                    ui.label("");
-                    ui.end_row();
-                });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "Action", GuestButton::Action, 52.0);
-                self.vbutton(ui, "A", GuestButton::ButtonA, 52.0);
-                self.vbutton(ui, "B", GuestButton::ButtonB, 52.0);
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "C", GuestButton::ButtonC, 52.0);
-                self.vbutton(ui, "1", GuestButton::Soft1, 52.0);
-                self.vbutton(ui, "2", GuestButton::Soft2, 52.0);
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "Turbo", GuestButton::Turbo, 60.0);
-            });
-        });
-    }
-
-    /// Render one virtual button. Pressed-while-pointer-is-down
-    /// generates `WM_KEYDOWN` once; releasing fires `WM_KEYUP`.
-    ///
-    /// The held state comes from [`pointer_held_in`] rather than from
-    /// the `Response`, because egui stops calling a still-held press a
-    /// click after 0.8 s — see that function.
-    fn vbutton(&mut self, ui: &mut egui::Ui, label: &str, guest: GuestButton, size: f32) {
-        let vk = guest.vk();
-        let was_pressed = self.held.is_held_by(InputSource::Pointer, vk);
-        let mut button = egui::Button::new(RichText::new(label).size(16.0).strong())
-            .min_size(Vec2::new(size, size));
-        if self.held.is_held(vk) {
-            button = button.fill(Color32::from_rgb(80, 130, 255));
-        }
-        let keys = self.library.config().keybindings.keys_for(guest).join(", ");
-        let response = ui.add_sized(Vec2::new(size, size), button);
-        // Naming the keyboard shortcut on the button is how a user
-        // discovers what their own bindings ended up as.
-        let response = if keys.is_empty() {
-            response.on_hover_text(format!("{} (no key bound)", guest.label()))
-        } else {
-            response.on_hover_text(format!("{} — {keys}", guest.label()))
-        };
-        let now_pressed = pointer_held_in(ui.ctx(), &response.rect);
-        // Only the edges matter, and `HeldButtons` has the last word on
-        // whether the guest hears about them: the keyboard may be
-        // holding this same button.
-        if now_pressed && !was_pressed && self.held.press(InputSource::Pointer, vk) {
-            self.send_input(InputEvent::KeyDown { vk });
-        } else if was_pressed && !now_pressed && self.held.release(InputSource::Pointer, vk) {
-            self.send_input(InputEvent::KeyUp { vk });
-        }
-    }
-
-    /// Write a rotation picked on the Run screen back to the game's
-    /// `game.json`, so the choice survives the run it was made in.
     fn persist_rotation(&mut self, rotation: RotationPref) {
         let Some(id) = self.running_game_id.clone() else {
             return;
@@ -1940,7 +1812,7 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
-        self.console_fit_pending = self.running_is_gizmondo;
+        self.console_fit_pending = true;
         let (frame_tx, frame_rx) = mpsc::channel();
         let (input_tx, input_rx) = mpsc::channel();
         self.frame_rx = Some(frame_rx);
@@ -2034,7 +1906,7 @@ impl eframe::App for PocketLauncher {
                 if let Some(size) = self.fullscreen_window_size.take() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                     self.console_fit_pending = false;
-                } else { self.console_fit_pending = self.running_is_gizmondo; }
+                } else { self.console_fit_pending = true; }
             }
             if let Some(frame) = self.last_frame_snapshot.clone() { self.refresh_frame_texture(ctx, &frame); }
         }
@@ -2043,9 +1915,17 @@ impl eframe::App for PocketLauncher {
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(self.status.lines().next().unwrap_or("")).small())
+                let show_fps=self.library.config().show_fps && self.screen==Screen::Run;
+                let reserve=if show_fps {130.0} else {45.0};
+                ui.add_sized(Vec2::new((ui.available_width()-reserve).max(0.0),ui.text_style_height(&egui::TextStyle::Small)),
+                    egui::Label::new(RichText::new(self.status.lines().next().unwrap_or("")).small()).truncate(true))
                     .on_hover_text(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if show_fps {
+                        ui.label(RichText::new(format!("{:.1} IPS",self.frame_stats.current_fps())).small()
+                            .color(Color32::from_rgb(116,205,176)))
+                            .on_hover_text("Images du jeu par seconde. Le débit peut diminuer dans les menus statiques.");
+                    }
                     ui.label(
                         RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                             .small()
@@ -2058,7 +1938,7 @@ impl eframe::App for PocketLauncher {
         let central = egui::CentralPanel::default();
         let central = if console_only {
             central.frame(egui::Frame::none().fill(Color32::BLACK))
-        } else if self.screen == Screen::Run && self.running_is_gizmondo {
+        } else if self.screen == Screen::Run {
             central.frame(egui::Frame::none())
         } else { central };
         central.show(ctx, |ui| {
@@ -2095,7 +1975,7 @@ mod tests {
     use pocket_library::KeyBindings;
 
     /// Drawing the on-screen pad must not cancel a key the user is
-    /// holding on the keyboard. `vbutton` runs every frame and releases
+    /// holding on the keyboard. the virtual controls run every frame and releases
     /// its button as soon as the pointer is not on it, which — while
     /// both sources shared one set — sent a `WM_KEYUP` for a keyboard
     /// arrow that was still down, so JumpyBall's ball stopped steering

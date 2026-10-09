@@ -16,6 +16,7 @@ mod fullscreen_layout;
 mod reconstruction;
 mod smaa;
 mod screenshot;
+mod pocketpc_layout;
 
 use anyhow::{Context, Result};
 

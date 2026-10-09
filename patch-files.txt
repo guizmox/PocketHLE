@@ -1,4 +1,4 @@
 frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\main.rs
-frontends\pocket-desktop\src\screenshot.rs
+frontends\pocket-desktop\src\pocketpc_layout.rs
 docs\AGENTS.md

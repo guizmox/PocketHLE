@@ -1367,3 +1367,34 @@ including DPI and clip boundaries, then decode the saved PNG to verify its RGB
 content and asynchronous completion. Keep that headless GL executable outside
 the delivered patch. Interactive F10/window/fullscreen checks remain required
 on Windows. No temporary instrumentation belongs in delivery.
+
+## 30. PocketPC housing and shared display controls
+
+PocketPC window mode uses the code-native PDA housing in pocketpc_layout.rs,
+not a separate framebuffer with a pad beside it. A canonical portrait shell
+contains the LCD, speaker, LED and eleven held controls. Apply one quarter-turn
+transform to shell, LCD, legends and hitboxes; infer its natural orientation
+from the native framebuffer and compose it with the saved user rotation. Do
+not also rotate the guest pixels for the inferred landscape orientation: the
+framebuffer is already landscape. Guest UV and pointer transforms use only
+the user's selected rotation. All legacy guest button VK mappings are retained.
+
+Enable the same Upscale x2 and Filter menu for either device with a framebuffer.
+PocketPC LCD dimensions come from last_frame_snapshot, never the CPU-upscaled
+texture. Window scale is physical x1/x2 divided by pixels_per_point, with an
+aligned physical origin; do not shrink by a fractional factor to fit. Use
+scrolling for oversized windows. Fit the shell after an actual resolution or
+rotation change. Fullscreen bypasses both housings and uses the maximal fitting
+integer factor of the rotated native resolution, preserving portrait/landscape
+aspect rather than imposing Gizmondo's 4:3. Capture only the painted LCD.
+
+The existing show_fps option is shared by both devices and displays IPS in the
+bottom status bar during windowed gameplay. Reserve space so long status text
+cannot push it out of view. Hide it with the rest of the interface in fullscreen.
+The counter measures received game frames, not GUI repaints; static menus may
+show fewer frames. Do not add timing/total-frame diagnostic text to delivery.
+
+Validate QVGA/WVGA portrait and landscape, all four rotations, x2 at non-default
+DPI, control containment/non-overlap, stylus inverse rotation and source-aware
+held keys. Render the actual egui housing for visual review. Windows interaction
+and live game layout/orientation changes still need an emulator check.
