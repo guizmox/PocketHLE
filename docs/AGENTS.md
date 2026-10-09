@@ -1266,3 +1266,26 @@ Validate edge timing, static-image presentation pacing, retry argument
 preservation, worker wakeup and locked-scanline suppression, plus actual ARM
 FIFA/Classic startup and the existing ARM RAM/VFS integrations. The Windows
 GUI tap/hold behavior and audio require the user's emulator test.
+
+## 26. Frontend input polling is independent of pixel readback
+
+FrameHook also drains frontend input and stop requests. Never gate all hook
+calls on frame_counter changes or PRESENT_POLL_BACKOFF. A static DirectDraw
+menu then holds an already released key for up to 250 ms, triggering Classic
+Compendium's own frame-based repeat. FIFA's GetAsyncKeyState edge detection
+can collapse a release/repress that arrives in that same delayed input batch.
+
+Poll the frontend at FRONTEND_POLL_INTERVAL (4 ms), or immediately when a
+frame or child launch requires it. Keep expensive pixel readback on its own
+4 ms / 250 ms leased cadence and leave GUI snapshot throttling intact. Static
+images must not bump frame_counter just to obtain input. Preserve ordered
+keydown/keyup events, the existing key-state semantics and 60 Hz DirectDraw
+presentation timing. Do not introduce a 30 FPS title override or button debounce
+to hide this scheduling defect.
+
+The static-image regression queues two press/release sequences under an
+active direct-presentation lease. It must complete before the 250 ms readback
+interval; it fails with the old hook gating. Actual ARM Classic with one 100 ms
+Down press moves Chess to Checkers at 60 Hz after this fix. FIFA's interactive
+rapid-tap result still requires the user's Windows GUI verification. No private
+timing diagnostics or experimental cadence settings belong in delivery.
