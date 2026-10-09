@@ -476,11 +476,13 @@ mod tests {
     }
 
     #[test]
-    fn constant_for_returns_zero_for_known_zero_stub() {
+    fn constant_for_get_last_error_is_stateful() {
         let d = WinCeDispatcher::new();
-        // `GetLastError` is registered as zero_returning in coredll.
+        // `GetLastError` is stateful and must cross the dispatcher.
         let t = fake_thunk("coredll.dll", "GetLastError");
-        assert_eq!(d.constant_for(&t), Some(0));
+        assert_eq!(d.constant_for(&t), None);
+        let setter = fake_thunk("coredll.dll", "SetLastError");
+        assert_eq!(d.constant_for(&setter), None);
     }
 
     #[test]

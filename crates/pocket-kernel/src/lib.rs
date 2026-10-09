@@ -85,6 +85,14 @@ pub const DEFAULT_STACK_TOP: u32 = 0x6000_0000;
 /// page filled with `bx lr` so any such jump returns harmlessly.
 pub const KERNEL_TRAP_BASE: u32 = 0xF000_0000;
 pub const KERNEL_TRAP_SIZE: u32 = 0x0001_0000;
+// CE implicit-call ABI: FIRST_METHOD - ((api_set << 8) | method) * 4.
+const CE_FIRST_METHOD: u32 = 0xF001_0000;
+const CE_PROCESS_API_SET: u32 = 2;
+const CE_PROCESS_TERMINATE_METHOD: u32 = 2;
+pub const CE_TERMINATE_PROCESS_TRAP: u32 = CE_FIRST_METHOD
+    - ((CE_PROCESS_API_SET << 8) | CE_PROCESS_TERMINATE_METHOD) * 4;
+pub const CE_CURRENT_PROCESS_HANDLE: u32 = 64 + CE_PROCESS_API_SET;
+
 /// Synthetic "process exit" trampoline. We install this address as
 /// the initial value of `LR` before the guest enters its entry
 /// point, so that when the entry point eventually returns (via a
@@ -823,6 +831,8 @@ pub struct ProcessLaunch {
 #[derive(Debug, Clone)]
 pub struct ChildProcess {
     pub thread_handle: u32,
+    pub process_handle_closed: bool,
+    pub thread_handle_closed: bool,
     pub exit_code: Option<u32>,
 }
 
@@ -1094,6 +1104,8 @@ pub struct KernelState {
     pub semaphores: HashMap<u32, SemaphoreObject>,
     /// Index of the thread whose register context is currently active.
     pub current_thread: usize,
+    /// Last-error values are isolated by guest thread, including main (0).
+    pub thread_last_errors: HashMap<usize, u32>,
     /// Next worker index to consider at a cooperative scheduling point.
     pub worker_schedule_cursor: usize,
     /// Workers already run since the main thread last yielded.
@@ -1225,6 +1237,18 @@ pub struct KernelState {
 }
 
 impl KernelState {
+    /// Record process termination without changing the suspended parent process.
+    pub fn record_process_exit(&mut self, code: u32) {
+        self.process_exit_code = Some(code);
+        for thread in &mut self.threads {
+            if !thread.finished {
+                thread.finished = true;
+                thread.exit_code = Some(code);
+            }
+        }
+        self.message_frames.clear();
+    }
+
     /// Paint the built-in child controls on top of whatever the guest
     /// last drew, so the frame the host is about to show has them.
     ///
@@ -1370,6 +1394,7 @@ pub struct GuestThread {
     pub worker_regs: [u32; 17],
     pub worker_saved: bool,
     pub started: bool,
+    pub suspend_count: u32,
     /// Monotonic millisecond deadline set by worker Sleep; zero is ready.
     pub sleep_until_ms: u64,
     pub finished: bool,
@@ -1417,6 +1442,7 @@ impl GuestThread {
             worker_regs: [0; 17],
             worker_saved: false,
             started: false,
+            suspend_count: 0,
             sleep_until_ms: 0,
             finished: false,
             exit_code: None,
@@ -2167,19 +2193,11 @@ impl Process {
             trap_page.extend_from_slice(&trap_stub);
         }
         cpu.write_mem(KERNEL_TRAP_BASE, &trap_page)?;
-        // Install code hooks on the well-known WinCE kernel-trap
-        // entry points reached via the MS CRT __doexit path. The run
-        // loop treats hits there as a soft `bx lr` return: real
-        // games periodically jump through `0xF000_F7F8` / `_F7FC`
-        // for syscalls (Sleep, EventModify, etc.) and we have no way
-        // to dispatch those individually under HLE — but the trap
-        // page is filled with `bx lr`, so a soft return mirrors the
-        // "naked syscall returns straight back" behaviour. The
-        // separate `pc < 0x1000` guard in `run_main_loop_with_hook`
-        // still catches the actual `ExitProcess` case where the CRT
-        // popped a poisoned LR == 0.
-        for &exit_va in &[0xF000_F7F8u32, 0xF000_F7FCu32, 0xF000_FFFCu32] {
-            cpu.add_code_hook(exit_va)?;
+        // The CE CRT can invoke process termination directly instead of an IAT
+        // import. This implicit process API call is decoded before callbacks.
+        // Keep compatibility soft returns for the other existing trap hooks.
+        for &trap_va in &[CE_TERMINATE_PROCESS_TRAP, 0xF000_F7FC, 0xF000_FFFC] {
+            cpu.add_code_hook(trap_va)?;
         }
         // Install the dedicated process-exit trampoline. The page is
         // already filled with `bx lr`; the run loop checks for hits
@@ -2314,6 +2332,7 @@ impl Process {
                 events: Default::default(),
                 semaphores: Default::default(),
                 current_thread: 0,
+                thread_last_errors: HashMap::new(),
                 worker_schedule_cursor: 0,
                 worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
@@ -2528,7 +2547,7 @@ pub fn run_main_loop_with_hook(
         // and we'd spin forever. Surface it as a real crash with the
         // CPU dump.
         if pc == PROCESS_EXIT_TRAMPOLINE_VA {
-            process.state.process_exit_code = Some(cpu.read_reg(ArmReg::R0).unwrap_or(0));
+            process.state.record_process_exit(cpu.read_reg(ArmReg::R0).unwrap_or(0));
             log::info!("process exit trampoline reached at 0x{pc:08x}; shutting down");
             return Ok(());
         }
@@ -2579,6 +2598,21 @@ pub fn run_main_loop_with_hook(
                 // Native thunks and CPU-only loops may never dispatch an API.
             }
             StopReason::Hook(addr) => {
+                if addr == CE_TERMINATE_PROCESS_TRAP {
+                    let handle = cpu.read_reg(ArmReg::R0)?;
+                    if handle == CE_CURRENT_PROCESS_HANDLE || handle == FAKE_CURRENT_PROCESS_HANDLE {
+                        let code = cpu.read_reg(ArmReg::R1)?;
+                        process.state.record_process_exit(code);
+                        log::info!("WinCE implicit TerminateProcess -> exit code 0x{code:08x}");
+                        return Ok(());
+                    }
+                    // This API is not a WndProc-return trampoline. Even failure
+                    // must leave an in-flight message continuation untouched.
+                    process.state.thread_last_errors.insert(process.state.current_thread, 6);
+                    cpu.write_reg(ArmReg::R0, 0)?;
+                    pc = cpu.read_reg(ArmReg::Lr)?;
+                    continue;
+                }
                 // The synthetic process-exit trampoline is reached
                 // when the guest entry point's top-level frame
                 // returns and pops the seeded `LR` value into `PC`.
@@ -2587,7 +2621,7 @@ pub fn run_main_loop_with_hook(
                 // every Pocket PC game looks like it crashes
                 // (pc=0x00000000) at the very end of execution.
                 if addr == PROCESS_EXIT_TRAMPOLINE_VA {
-                    process.state.process_exit_code = Some(cpu.read_reg(ArmReg::R0).unwrap_or(0));
+                    process.state.record_process_exit(cpu.read_reg(ArmReg::R0).unwrap_or(0));
                     log::info!(
                             "process exit trampoline hit at 0x{addr:08x} (R0=0x{r0:08x}); shutting down",
                             r0 = cpu.read_reg(ArmReg::R0).unwrap_or(0),
@@ -3113,6 +3147,48 @@ mod tests {
             resources: vec![],
             managed_runtime: None,
         }
+    }
+
+    #[test]
+    fn ce_implicit_process_termination_precedes_message_return() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(image_based_at(0x10000, 0x1000),
+            &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+        process.state.message_frames.insert(0, GuestCallFrame {
+            args: [0x1234, 2, 0, 0], sp: 0x2222, lr: 0x3333,
+        });
+        let worker = GuestThread::new(0x11000, 0, 0x50000, 0x1000,
+            0xf000fe00, 0x11000, 0xdead7c00, [0; 17]);
+        process.state.threads.push(worker);
+        cpu.write_reg(ArmReg::R0, CE_CURRENT_PROCESS_HANDLE).unwrap();
+        cpu.write_reg(ArmReg::R1, 17).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x4444).unwrap();
+        run_main_loop(&mut cpu, &mut process, &mut NullDispatcher, 100, 1).unwrap();
+        assert_eq!(process.state.process_exit_code, Some(17));
+        assert!(process.state.threads[0].finished);
+        assert_eq!(process.state.threads[0].exit_code, Some(17));
+        assert!(process.state.message_frames.is_empty());
+        // Actual syscall arguments were not replaced by the WndProc frame.
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), CE_CURRENT_PROCESS_HANDLE);
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x4444);
+    }
+
+    #[test]
+    fn ce_implicit_process_termination_failure_preserves_message_frame() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(image_based_at(0x10000, 0x1000),
+            &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+        process.state.message_frames.insert(0, GuestCallFrame {
+            args: [0x1234, 2, 0, 0], sp: 0x2222, lr: 0x3333,
+        });
+        cpu.write_reg(ArmReg::R0, 0xdeadbeef).unwrap();
+        cpu.write_reg(ArmReg::R1, 17).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x11000).unwrap();
+        run_main_loop(&mut cpu, &mut process, &mut NullDispatcher, 100, 1).unwrap();
+        assert_eq!(process.state.process_exit_code, None);
+        assert_eq!(process.state.message_frames[&0].args[0], 0x1234);
+        assert_eq!(process.state.thread_last_errors[&0], 6);
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 0);
     }
 
     #[test]

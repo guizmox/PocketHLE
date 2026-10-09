@@ -95,9 +95,9 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "SuspendThread", suspend_thread);
     d.register_handler(dll, "ResumeThread", resume_thread);
     d.register_handler(dll, "ExitProcess", exit_process);
-    d.register_handler(dll, "TerminateProcess", exit_process);
-    d.register_constant(dll, "GetLastError", 0, zero_returning);
-    d.register_constant(dll, "SetLastError", 0, zero_returning);
+    d.register_handler(dll, "TerminateProcess", terminate_process);
+    d.register_handler(dll, "GetLastError", get_last_error);
+    d.register_handler(dll, "SetLastError", set_last_error);
     d.register_handler(dll, "GetCommandLineW", get_command_line_w);
     d.register_handler(dll, "GetModuleHandleW", get_module_handle_w);
     d.register_handler(dll, "GetModuleFileNameW", get_module_file_name_w);
@@ -1983,11 +1983,18 @@ fn park_worker_at(
     Ok(Some(DispatchOutcome::JumpTo(main_regs[15] & !1)))
 }
 
+fn thread_handle_is_closed(kernel: &KernelState, handle: u32) -> bool {
+    kernel.threads.iter().any(|t| t.handle == handle && t.handle_closed)
+        || kernel.child_processes.iter().any(|(&h, c)|
+            (h == handle && c.process_handle_closed)
+            || (c.thread_handle == handle && c.thread_handle_closed))
+}
+
 fn waitable_is_signalled(kernel: &KernelState, handle: u32) -> bool {
     kernel.events.get(&handle).map(|event| event.signalled)
         .or_else(|| kernel.msg_queues.get(&handle).map(|queue| !queue.messages.is_empty()))
         .or_else(|| kernel.semaphores.get(&handle).map(|semaphore| semaphore.count > 0))
-        .or_else(|| kernel.threads.iter().find(|thread| thread.handle == handle)
+        .or_else(|| kernel.threads.iter().find(|thread| thread.handle == handle && !thread.handle_closed)
             .map(|thread| thread.finished))
         .or_else(|| kernel.critical_sections.get(&handle).map(|(_, depth)| *depth == 0))
         .unwrap_or(false)
@@ -2323,63 +2330,102 @@ fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
-/// `SuspendThread(HANDLE)` is used by Avalanche's cooperative worker
-/// control loop to pause a helper before it changes display state.
-///
-/// PocketHLE already serializes guest threads at API boundaries, so the
-/// operation is represented by marking the synthetic thread as not ready;
-/// the current worker yields immediately and the main thread continues.
+const ERROR_INVALID_HANDLE: u32 = 6;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_NOT_SUPPORTED: u32 = 50;
+const MAXIMUM_SUSPEND_COUNT: u32 = 127;
+
+fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
+    ctx.kernel.thread_last_errors.insert(ctx.kernel.current_thread, error);
+}
+
+fn get_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(*ctx.kernel.thread_last_errors
+        .get(&ctx.kernel.current_thread).unwrap_or(&0)))
+}
+
+fn set_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let error = ctx.arg_u32(0)?;
+    set_thread_error(ctx, error);
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn worker_handle_index(ctx: &CallCtx<'_>, handle: u32) -> Option<usize> {
+    if handle == FAKE_CURRENT_THREAD_HANDLE {
+        ctx.kernel.current_thread.checked_sub(1)
+    } else {
+        ctx.kernel.threads.iter().position(|t| t.handle == handle && !t.handle_closed)
+    }
+}
+
+/// Suspension is counted; only suspending the current worker parks the caller.
 fn suspend_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if handle == FAKE_CURRENT_THREAD_HANDLE {
-        if let Some(outcome) = park_worker(ctx, 0)? {
-            return Ok(outcome);
-        }
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    let Some(index) = worker_handle_index(ctx, handle) else {
+        set_thread_error(ctx, if handle == FAKE_CURRENT_THREAD_HANDLE {
+            ERROR_NOT_SUPPORTED // Main suspension requires the future scheduler redesign.
+        } else { ERROR_INVALID_HANDLE });
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    };
+    let thread = &mut ctx.kernel.threads[index];
+    if thread.finished {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
-    if let Some(index) = ctx
-        .kernel
-        .threads
-        .iter()
-        .position(|thread| thread.handle == handle && !thread.finished)
-    {
-        ctx.kernel.threads[index].started = false;
-        if let Some(outcome) = park_worker(ctx, 0)? {
-            return Ok(outcome);
-        }
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    let previous = thread.suspend_count;
+    if previous == MAXIMUM_SUSPEND_COUNT {
+        set_thread_error(ctx, 156); // ERROR_SIGNAL_REFUSED: count limit reached.
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
-    Ok(DispatchOutcome::ReturnedR0(0xffff_ffff))
+    thread.suspend_count += 1;
+    thread.started = false;
+    if ctx.kernel.current_thread == index + 1 {
+        if let Some(outcome) = park_worker(ctx, previous)? { return Ok(outcome); }
+    }
+    Ok(DispatchOutcome::ReturnedR0(previous))
 }
 
 fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    let thread_index = ctx
-        .kernel
-        .threads
-        .iter()
-        .position(|thread| thread.handle == handle && !thread.finished);
-    if let Some(index) = thread_index {
-        ctx.kernel.threads[index].started = true;
-        if ctx.kernel.current_thread == 0 {
-            ctx.kernel.worker_preempt_after_ms = ctx.kernel.worker_preempt_after_ms
-                .max(monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel)));
-        }
-        
-        log::debug!("ResumeThread(0x{handle:08x}) -> 0");
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    let Some(index) = worker_handle_index(ctx, handle) else {
+        // Retain the existing simulated CreateProcessW primary-thread path.
+        if handle == 0xDEAD_E102 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+        set_thread_error(ctx, if handle == FAKE_CURRENT_THREAD_HANDLE {
+            ERROR_NOT_SUPPORTED
+        } else { ERROR_INVALID_HANDLE });
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    };
+    let thread = &mut ctx.kernel.threads[index];
+    if thread.finished {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
-    if handle == 0xDEAD_E102 {
-        log::debug!("ResumeThread(simulated child 0x{handle:08x}) -> 0");
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    let previous = thread.suspend_count;
+    thread.suspend_count = previous.saturating_sub(1);
+    thread.started = thread.suspend_count == 0;
+    if thread.started && ctx.kernel.current_thread == 0 {
+        ctx.kernel.worker_preempt_after_ms = ctx.kernel.worker_preempt_after_ms
+            .max(monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel)));
     }
-    log::debug!("ResumeThread(0x{handle:08x}) -> -1");
-    Ok(DispatchOutcome::ReturnedR0(0xffff_ffff))
+    Ok(DispatchOutcome::ReturnedR0(previous))
 }
 
 fn exit_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    ctx.kernel.process_exit_code = Some(ctx.arg_u32(0)?);
+    let code = ctx.arg_u32(0)?;
+    ctx.kernel.record_process_exit(code);
     log::info!("ExitProcess called by guest");
+    Ok(DispatchOutcome::Halt)
+}
+
+/// TerminateProcess has two arguments; ExitProcess has one.
+fn terminate_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let code = ctx.arg_u32(1)?;
+    if handle != FAKE_CURRENT_PROCESS_HANDLE && handle != pocket_kernel::CE_CURRENT_PROCESS_HANDLE {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    ctx.kernel.record_process_exit(code);
     Ok(DispatchOutcome::Halt)
 }
 
@@ -2429,7 +2475,7 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     ctx.cpu.write_mem(process_info, &info)?;
     ctx.kernel.next_process_id = id + 1;
     ctx.kernel.child_processes.insert(process_handle, pocket_kernel::ChildProcess {
-        thread_handle, exit_code: None,
+        thread_handle, exit_code: None, process_handle_closed: false, thread_handle_closed: false,
     });
     for handle in [process_handle, thread_handle] {
         ctx.kernel.events.insert(handle, pocket_kernel::EventObject {
@@ -2446,14 +2492,24 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn get_exit_code_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let output = ctx.arg_u32(1)?;
-    if output == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
-    let code = if handle == pocket_kernel::FAKE_CURRENT_PROCESS_HANDLE {
+    if output == 0 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let code = if handle == pocket_kernel::FAKE_CURRENT_PROCESS_HANDLE || handle == pocket_kernel::CE_CURRENT_PROCESS_HANDLE {
         Some(ctx.kernel.process_exit_code.unwrap_or(259))
     } else {
-        ctx.kernel.child_processes.get(&handle).map(|child| child.exit_code.unwrap_or(259))
+        ctx.kernel.child_processes.get(&handle).filter(|child| !child.process_handle_closed)
+            .map(|child| child.exit_code.unwrap_or(259))
     };
-    let Some(code) = code else { return Ok(DispatchOutcome::ReturnedR0(0)); };
-    ctx.cpu.write_mem(output, &code.to_le_bytes())?;
+    let Some(code) = code else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if ctx.cpu.write_mem(output, &code.to_le_bytes()).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -2581,10 +2637,7 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         // defines these as FILE_DEVICE_SOUND IOCTLs (0x1d), not as disk
         // controls. Decode the submitted chunks into the same PCM engine
         // used by waveOut so every frontend can play the card's music.
-        if let Some(thread) = ctx.kernel.threads.iter_mut().find(|t| t.handle == handle) {
-        thread.handle_closed = true;
-    }
-    if ctx.kernel.vfs.is_mp3_decoder(handle) {
+        if ctx.kernel.vfs.is_mp3_decoder(handle) {
             const MASG_START: u32 = 0x001d_0ff0;
             const MASG_WRITE: u32 = 0x001d_0ff4;
             const MASG_STOP: u32 = 0x001d_0ff8;
@@ -2707,10 +2760,8 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
             if returned_p != 0 {
                 ctx.cpu.write_mem(returned_p, &0u32.to_le_bytes())?;
             }
-            // A real driver would also `SetLastError`
-            // `ERROR_INSUFFICIENT_BUFFER` here. There is no last-error
-            // state in this HLE — `GetLastError` is a constant-zero thunk
-            // — and the size in `dwSize` is what a caller retries from.
+            // The required size remains in dwSize for the caller's retry.
+            set_thread_error(ctx, 122); // ERROR_INSUFFICIENT_BUFFER
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
         log::debug!(
@@ -6110,14 +6161,38 @@ fn flush_file_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 fn close_handle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if ctx.kernel.vfs.is_mp3_decoder(handle) { ctx.kernel.audio.stop_mas_stream(handle); }
-    if let Some(child) = ctx.kernel.child_processes.remove(&handle) {
-        ctx.kernel.events.remove(&handle);
-        // The independently owned thread handle remains valid until closed.
-        let _ = child;
-    } else if (0xd1000000..0xd2000000).contains(&handle) {
-        ctx.kernel.events.remove(&handle);
+    if let Some(thread) = ctx.kernel.threads.iter_mut().find(|t| t.handle == handle) {
+        if thread.handle_closed {
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        thread.handle_closed = true;
+        return Ok(DispatchOutcome::ReturnedR0(1));
     }
+    if let Some(child) = ctx.kernel.child_processes.get_mut(&handle) {
+        if child.process_handle_closed {
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        child.process_handle_closed = true;
+        ctx.kernel.events.remove(&handle);
+        // Retain the object while its independently owned primary-thread handle exists.
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    if let Some(child) = ctx.kernel.child_processes.values_mut().find(|c| c.thread_handle == handle) {
+        if child.thread_handle_closed {
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        child.thread_handle_closed = true;
+        ctx.kernel.events.remove(&handle);
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    if handle == FAKE_CURRENT_THREAD_HANDLE || handle == FAKE_CURRENT_PROCESS_HANDLE {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if ctx.kernel.vfs.is_mp3_decoder(handle) { ctx.kernel.audio.stop_mas_stream(handle); }
     let _ = ctx.kernel.vfs.close(handle);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -9033,6 +9108,11 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         return Ok(DispatchOutcome::ReturnedR0(WAIT_FAILED));
     }
 
+    if handles.iter().any(|&handle| thread_handle_is_closed(ctx.kernel, handle)) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(WAIT_FAILED));
+    }
+
     let ready_index = handles
         .iter()
         .position(|&handle| waitable_is_signalled(ctx.kernel, handle));
@@ -11938,6 +12018,11 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     let handle = ctx.arg_u32(0)?;
     let timeout = ctx.arg_u32(1)?;
 
+    if thread_handle_is_closed(ctx.kernel, handle) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+
     // The real wave driver keeps running while a guest thread is blocked in
     // WaitForSingleObject.  In this HLE, buffer retirement normally happens
     // only when the guest crosses one of our API boundaries; without servicing
@@ -12096,6 +12181,7 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     thread.worker_regs = worker_regs;
     thread.worker_saved = true;
     thread.started = !suspended;
+    thread.suspend_count = u32::from(suspended);
     ctx.kernel.threads.push(thread);
     // Return to the creator first; let the normal scheduling quantum expire
     // before an API-boundary first dispatch. Do not defer startup until the
@@ -12111,7 +12197,10 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 fn get_exit_code_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let output = ctx.arg_u32(1)?;
-    if output == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    if output == 0 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let code = if handle == FAKE_CURRENT_THREAD_HANDLE {
         if ctx.kernel.current_thread == 0 {
             Some(ctx.kernel.process_exit_code.unwrap_or(259))
@@ -12123,12 +12212,17 @@ fn get_exit_code_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
         .find(|t| t.handle == handle && !t.handle_closed) {
         Some(thread.exit_code.unwrap_or(259))
     } else {
-        ctx.kernel.child_processes.values().find(|child| child.thread_handle == handle)
-            .filter(|_| ctx.kernel.events.contains_key(&handle))
+        ctx.kernel.child_processes.values().find(|child| child.thread_handle == handle && !child.thread_handle_closed)
             .map(|child| child.exit_code.unwrap_or(259))
     };
-    let Some(code) = code else { return Ok(DispatchOutcome::ReturnedR0(0)); };
-    ctx.cpu.write_mem(output, &code.to_le_bytes())?;
+    let Some(code) = code else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if ctx.cpu.write_mem(output, &code.to_le_bytes()).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -12155,7 +12249,10 @@ fn terminate_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         ctx.cpu.write_reg(ArmReg::R0, code)?;
         return exit_process(ctx);
     }
-    let Some(index) = index else { return Ok(DispatchOutcome::ReturnedR0(0)); };
+    let Some(index) = index else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
     if ctx.kernel.current_thread == index + 1 {
         ctx.cpu.write_reg(ArmReg::R0, code)?;
         return Ok(DispatchOutcome::JumpTo(ctx.kernel.threads[index].exit_va));
@@ -16964,6 +17061,7 @@ mod tests {
             events: Default::default(),
             semaphores: Default::default(),
             current_thread: 0,
+            thread_last_errors: Default::default(),
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
@@ -18667,10 +18765,108 @@ mod tests {
         close_handle(&mut CallCtx {
             cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
         }).unwrap();
-        assert!(!kernel.child_processes.contains_key(&handle));
+        assert!(kernel.child_processes[&handle].process_handle_closed);
         assert!(!kernel.events.contains_key(&handle));
         assert!(kernel.events.contains_key(&thread_handle));
+        cpu.write_reg(ArmReg::R0, thread_handle).unwrap();
+        assert_eq!(get_exit_code_thread(&mut CallCtx {
+            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
+        }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(cpu.read_u32_le(0x2100).unwrap(), 7);
+        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        assert!(!kernel.events.contains_key(&thread_handle));
+        assert_eq!(get_exit_code_thread(&mut CallCtx {
+            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
+        }).unwrap(), DispatchOutcome::ReturnedR0(0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn thread_api_terminate_process_uses_second_argument() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, pocket_kernel::CE_CURRENT_PROCESS_HANDLE).unwrap();
+        cpu.write_reg(ArmReg::R1, 23).unwrap();
+        assert_eq!(terminate_process(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel,
+            thunk: &thunk }).unwrap(), DispatchOutcome::Halt);
+        assert_eq!(kernel.process_exit_code, Some(23));
+    }
+
+    #[test]
+    fn thread_api_suspend_count_and_error_isolation() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut worker = GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, [0; 17]);
+        worker.started = true;
+        kernel.threads.push(worker);
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        ctx.cpu.write_reg(ArmReg::R0, 123).unwrap();
+        set_last_error(&mut ctx).unwrap();
+        ctx.kernel.current_thread = 1;
+        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        ctx.cpu.write_reg(ArmReg::R0, 456).unwrap();
+        set_last_error(&mut ctx).unwrap();
+        ctx.kernel.current_thread = 0;
+        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(123));
+        ctx.cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
+        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(ctx.kernel.threads[0].suspend_count, 2);
+        assert!(!ctx.kernel.threads[0].started);
+        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(2));
+        assert!(!ctx.kernel.threads[0].started);
+        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert!(ctx.kernel.threads[0].started);
+        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(123));
+        ctx.kernel.threads[0].suspend_count = MAXIMUM_SUSPEND_COUNT;
+        ctx.kernel.threads[0].started = false;
+        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(ctx.kernel.threads[0].suspend_count, MAXIMUM_SUSPEND_COUNT);
+        close_handle(&mut ctx).unwrap();
+        assert!(!ctx.kernel.threads[0].finished); // Closing is not termination.
+        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_HANDLE));
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        ctx.kernel.current_thread = 1;
+        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(456));
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(get_exit_code_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+    }
+
+    #[test]
+    fn thread_api_self_suspend_saves_previous_count_and_wait_signals_on_exit() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut saved = [0u32; 17];
+        saved[13] = 0x8800;
+        saved[15] = 0x9100;
+        let mut worker = GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, saved);
+        worker.started = true;
+        worker.worker_saved = true;
+        kernel.threads.push(worker);
+        kernel.current_thread = 1;
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        ctx.cpu.write_reg(ArmReg::Lr, 0x9200).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
+        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x9100));
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[0], 0);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[15], 0x9200);
+        assert!(!waitable_is_signalled(ctx.kernel, 0xdead7c00));
+        ctx.cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
+        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        ctx.cpu.write_reg(ArmReg::R1, 23).unwrap();
+        terminate_thread(&mut ctx).unwrap();
+        assert!(waitable_is_signalled(ctx.kernel, 0xdead7c00));
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
     }
 
     #[test]
@@ -19287,6 +19483,7 @@ mod tests {
         create_thread(&mut c).unwrap();
 
         let thread = kernel.threads.last().unwrap();
+        assert_eq!(thread.suspend_count, 1);
         assert!(thread.worker_saved);
         assert_eq!(thread.worker_regs[15], ENTRY);
         assert!(
