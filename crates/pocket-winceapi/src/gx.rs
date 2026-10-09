@@ -347,6 +347,8 @@ pub(crate) mod tests {
             child_processes: std::collections::HashMap::new(),
             next_process_id: 1,
             process_exit_code: None,
+            main_thread: pocket_kernel::MainThreadState::default(),
+            thread_aliases: std::collections::HashMap::new(),
             random_seed: 0x1234_abcd,
             pending_startup: std::collections::VecDeque::new(),
             framebuffer: Framebuffer::default(),

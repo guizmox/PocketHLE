@@ -306,6 +306,16 @@ impl WinCeDispatcher {
 }
 
 impl Dispatcher for WinCeDispatcher {
+    fn schedule_idle(&mut self, cpu: &mut dyn Cpu, kernel: &mut KernelState)
+        -> Result<DispatchOutcome, KernelError> {
+        let thunk = Thunk {
+            thunk_va: pocket_kernel::THREAD_SCHEDULER_IDLE_VA, iat_va: 0,
+            dll: "coredll.dll".into(), binding: ImportBinding::Name("scheduler".into()),
+            friendly_name: None,
+        };
+        coredll::schedule_idle(&mut CallCtx { cpu, kernel, thunk: &thunk })
+    }
+
     fn constant_for(&self, thunk: &Thunk) -> Option<u32> {
         // Look up the explicit constants registry populated by
         // `register_constant`. We deliberately do *not* compare

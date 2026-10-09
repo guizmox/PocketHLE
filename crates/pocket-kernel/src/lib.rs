@@ -104,6 +104,8 @@ pub const CE_CURRENT_PROCESS_HANDLE: u32 = 64 + CE_PROCESS_API_SET;
 /// finishes running its `mainCRTStartup` even though it ran
 /// hundreds of thousands of API calls successfully on the way out.
 pub const PROCESS_EXIT_TRAMPOLINE_VA: u32 = 0xF000_FF00;
+/// Host scheduler continuation; never executed as guest ARM code.
+pub const THREAD_SCHEDULER_IDLE_VA: u32 = 0xF000_0004;
 /// First synthetic return address for a guest thread created by CreateThread.
 pub const THREAD_EXIT_TRAMPOLINE_BASE: u32 = 0xF000_FE00;
 
@@ -738,6 +740,11 @@ pub enum DispatchOutcome {
 /// Trait an API layer registers with the kernel. Called every time
 /// emulated code reaches a thunk address.
 pub trait Dispatcher {
+    fn schedule_idle(&mut self, _cpu: &mut dyn Cpu, _kernel: &mut KernelState)
+        -> Result<DispatchOutcome, KernelError> {
+        Ok(DispatchOutcome::JumpTo(THREAD_SCHEDULER_IDLE_VA))
+    }
+
     fn dispatch(
         &mut self,
         cpu: &mut dyn Cpu,
@@ -857,6 +864,9 @@ pub struct KernelState {
     pub child_processes: HashMap<u32, ChildProcess>,
     pub next_process_id: u32,
     pub process_exit_code: Option<u32>,
+    pub main_thread: MainThreadState,
+    /// Closed aliases remain as tombstones to reject stale handles.
+    pub thread_aliases: HashMap<u32, Option<usize>>,
     pub random_seed: u32,
     /// Software-rendered display the GDI/GAPI handlers paint into.
     pub framebuffer: Framebuffer,
@@ -1236,10 +1246,20 @@ pub struct KernelState {
     pub sub_menus: HashMap<(u32, u32), u32>,
 }
 
+/// Main thread state is independent of the process and of worker return frames.
+#[derive(Default)]
+pub struct MainThreadState {
+    pub exit_code: Option<u32>,
+    pub suspend_count: u32,
+    pub last_exit_code: Option<u32>,
+    pub saved_regs: Option<[u32; 17]>,
+}
+
 impl KernelState {
     /// Record process termination without changing the suspended parent process.
     pub fn record_process_exit(&mut self, code: u32) {
         self.process_exit_code = Some(code);
+        self.main_thread.exit_code.get_or_insert(code);
         for thread in &mut self.threads {
             if !thread.finished {
                 thread.finished = true;
@@ -2269,6 +2289,8 @@ impl Process {
                 child_processes: HashMap::new(),
                 next_process_id: 1,
                 process_exit_code: None,
+                main_thread: MainThreadState::default(),
+                thread_aliases: HashMap::new(),
                 random_seed: 0x1234_abcd,
                 framebuffer: Framebuffer::default(),
                 gdi: GdiState::new(),
@@ -2572,7 +2594,11 @@ pub fn run_main_loop_with_hook(
         // millisecond has not turned over yet, which is the common
         // case at ~280 slices per millisecond.
         native_thunks::refresh_tick_page(cpu, &mut tick_written);
-        let stop = cpu.run_until_hook(pc, instruction_budget_per_slice);
+        let stop = if pc == THREAD_SCHEDULER_IDLE_VA {
+            Ok(StopReason::Hook(pc))
+        } else {
+            cpu.run_until_hook(pc, instruction_budget_per_slice)
+        };
         let stop = match stop {
             Ok(s) => s,
             Err(e) => {
@@ -2656,9 +2682,20 @@ pub fn run_main_loop_with_hook(
                     .position(|thread| thread.exit_va == addr && !thread.finished)
                 {
                     let exit_code = cpu.read_reg(ArmReg::R0)?;
+                    process.state.main_thread.last_exit_code = Some(exit_code);
                     process.state.threads[thread_index].exit_code = Some(exit_code);
                     process.state.threads[thread_index].finished = true;
                     process.state.message_frames.remove(&(thread_index + 1));
+                    if process.state.main_thread.exit_code.is_some()
+                        || process.state.main_thread.suspend_count != 0
+                        || process.state.main_thread.saved_regs.is_some() {
+                        let fpscr = cpu.read_fpscr()?;
+                        process.state.guest_fpscr.insert(thread_index + 1, fpscr);
+                        process.state.current_thread = 0;
+                        cpu.write_fpscr(process.state.guest_fpscr.get(&0).copied().unwrap_or(0))?;
+                        pc = THREAD_SCHEDULER_IDLE_VA;
+                        continue;
+                    }
                     let thread = process.state.threads[thread_index].clone();
                     if thread.worker_saved {
                         for (index, value) in thread.saved_regs.iter().enumerate() {
@@ -2746,7 +2783,9 @@ pub fn run_main_loop_with_hook(
                 }
 
                 let runtime_thunk = process.state.runtime_thunks.get(&addr).cloned();
-                let outcome = match process.find_thunk_and_state(addr) {
+                let outcome = if addr == THREAD_SCHEDULER_IDLE_VA {
+                    dispatcher.schedule_idle(cpu, &mut process.state)?
+                } else { match process.find_thunk_and_state(addr) {
                     Some((thunk, state)) => {
                         // Split borrow: `thunk` borrows
                         // `process.thunks` immutably and `state`
@@ -2821,7 +2860,7 @@ pub fn run_main_loop_with_hook(
                         );
                         return Ok(());
                     }
-                };
+                }};
                 match outcome {
                     DispatchOutcome::Halt => {
                         return Ok(());
