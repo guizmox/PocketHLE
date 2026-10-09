@@ -1,5 +1,34 @@
 # PocketHLE — architecture reference for coding agents
 
+## WinINet HTTP/HTTPS host bridge
+
+The nine WinINet imports used by Colors are implemented in `wininet.rs`.
+`KernelState.internet` owns process-local sessions, connections and requests;
+closing a parent recursively cancels its requests. These are InternetCloseHandle
+objects, not VFS CloseHandle objects. Dynamic wininet.dll exports have their own
+module handle. Guest blocking calls retry through scheduler deadlines, retaining
+one pending upload per (thread, thunk, SP). A retry MUST NOT duplicate the POST.
+QueryInfoW lengths are bytes; successful strings exclude the final UTF-16 NUL.
+HTTP error status is still a successful transport response. Empty pending data
+is not EOF. Response buffers are capped at 64 KiB; uploads at 8 MiB, request
+handles at 64/process. Unsupported FTP, guest async callbacks, SYSTEMTIME queries
+and certificate-bypass flags report real errors, never fake success.
+
+Windows uses async WinHTTP with per-session cookies. Only the worker closes
+request handles after an initiating API call returns. Callback context owns body,
+read buffer and parent native handles until HANDLE_CLOSING (last callback), even
+when canceled mid-request. Closing a transfer wakes bounded-stream backpressure;
+callback waits observe cancellation within 100 ms. Native timeouts are 30 seconds.
+Android uses HttpURLConnection workers, bounded ring buffers and per-session
+CookieManager. JNI transfers retain their session until request close; closing
+wakes a blocked producer and schedules native disconnect without blocking the
+emulator thread. INTERNET permission and legacy cleartext HTTP are required;
+HTTPS retains platform certificate/hostname verification. No trust-all callback.
+Original game servers are separate external dependencies; implementing the ABI
+does not guarantee that historical services still exist. NETTEST ARM checks all
+nine dynamic exports and real-host HTTP/HTTPS. The local validation transport
+checks ARM ABI + loopback streaming/POST, and does not validate native TLS.
+
 ## GPS1 host location bridge
 
 `gps::Service` belongs to the shared VFS device context, not to a single CPU.

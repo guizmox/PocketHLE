@@ -38,6 +38,7 @@ mod ws2;
 mod bluetooth;
 mod camera;
 mod gps;
+mod wininet;
 pub mod ordinals;
 
 use std::collections::HashMap;
@@ -232,6 +233,7 @@ impl WinCeDispatcher {
         };
         coredll::register(&mut d);
         bluetooth::register(&mut d);
+        wininet::register(&mut d);
         ws2::register(&mut d);
         ddraw::register(&mut d);
         aygshell::register(&mut d);

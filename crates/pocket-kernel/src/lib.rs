@@ -37,6 +37,7 @@ pub mod audio;
 pub mod bluetooth;
 pub mod camera;
 pub mod gps;
+pub mod internet;
 pub mod controls;
 pub mod font;
 pub mod framebuffer;
@@ -895,6 +896,7 @@ pub struct KernelState {
     pub heap: Heap,
     pub memory_division: Option<memory_division::MemoryDivision>,
     pub vfs: vfs::Vfs,
+    pub internet:internet::State,
     /// Guest path reported by `GetModuleFileName{A,W}`.
     ///
     /// Real Pocket PC games routinely derive their asset paths from
@@ -2161,6 +2163,7 @@ impl Heap {
 /// Fake `HMODULE` for the resident `ole32.dll` compatibility module.
 pub const SDLAUNCH_MODULE_HANDLE: u32 = 0x1000_0009;
 pub const OLE32_MODULE_HANDLE: u32 = 0x1000_0007;
+pub const WININET_MODULE_HANDLE:u32=0x1000_000b;
 pub const WS2_MODULE_HANDLE: u32 = 0x1000_000a;
 /// Fake `HMODULE` for `libGLES_CM.dll`, the Common profile.
 pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
@@ -2224,6 +2227,8 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
         } else if thunk.dll.eq_ignore_ascii_case("sdlaunch.dll") {
             exports.entry(SDLAUNCH_MODULE_HANDLE).or_insert_with(HashMap::new)
                 .insert(name, thunk.thunk_va);
+        } else if thunk.dll.eq_ignore_ascii_case("wininet.dll") {
+            exports.entry(WININET_MODULE_HANDLE).or_insert_with(HashMap::new).insert(name,thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("ws2.dll") {
             let table = exports.entry(WS2_MODULE_HANDLE).or_insert_with(HashMap::new);
             table.insert(name, thunk.thunk_va);
@@ -2504,6 +2509,7 @@ impl Process {
             "ole32.dll",
             "sdlaunch.dll",
             "ws2.dll",
+            "wininet.dll",
         ] {
             dynamic_exports_to_add.extend(
                 dispatcher
@@ -2708,6 +2714,7 @@ impl Process {
             state: KernelState {
                 heap,
                 vfs: vfs::Vfs::new(),
+                internet:internet::State::default(),
                 module_path: DEFAULT_MODULE_PATH.to_string(),
                 process_launch_enabled: false,
                 pending_process_launch: None,
@@ -3993,5 +4000,6 @@ impl Drop for KernelState {
             if let Some((object, last)) = self.object_handles.close(handle) { self.clean_object(object, last); }
         }
         self.vfs.close_all();
+        self.internet.close_all();
     }
 }

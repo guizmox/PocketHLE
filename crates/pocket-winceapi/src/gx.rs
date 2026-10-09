@@ -337,6 +337,7 @@ pub(crate) mod tests {
         KernelState {
             heap: Heap::new(0x5000_0000, 0x10000),
             vfs: Vfs::new(),
+            internet: pocket_kernel::internet::State::default(),
             registry: pocket_kernel::registry::Registry::new(),
             find_handles: std::collections::HashMap::new(),
             next_find_handle: 0,

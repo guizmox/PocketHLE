@@ -3353,6 +3353,8 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
         0x1000_0001
     } else if name == "commctrl.dll" || name == "commctrl" {
         0x1000_0002
+    } else if name == "wininet.dll" || name == "wininet" {
+        pocket_kernel::WININET_MODULE_HANDLE
     } else if name == "ws2.dll" || name == "ws2" {
         pocket_kernel::WS2_MODULE_HANDLE
     } else if let Some(h) = gles_module_handle(&name) {
@@ -3477,6 +3479,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         if handle == 0 { set_thread_error(ctx, 126); }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
+    if name.ends_with("wininet.dll") || name == "wininet" {
+        return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::WININET_MODULE_HANDLE));
+    }
     if name.ends_with("ws2.dll") || name == "ws2" {
         return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::WS2_MODULE_HANDLE));
     }
@@ -3542,7 +3547,7 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 fn runtime_hle_dll(dll: &str) -> bool {
     let name = dll.to_ascii_lowercase();
     matches!(name.as_str(), "coredll.dll" | "aygshell.dll" | "commctrl.dll" | "gx.dll"
-        | "ddraw.dll" | "ole32.dll" | "sdlaunch.dll" | "hss.dll" | "ws2.dll")
+        | "ddraw.dll" | "ole32.dll" | "sdlaunch.dll" | "hss.dll" | "ws2.dll" | "wininet.dll")
         || gles_module_handle(&name).is_some()
 }
 
@@ -18653,6 +18658,7 @@ mod tests {
         KernelState {
             heap: Heap::new(0x5000_0000, 0x10000),
             vfs: Vfs::new(),
+            internet: pocket_kernel::internet::State::default(),
             registry: pocket_kernel::registry::Registry::new(),
             find_handles: std::collections::HashMap::new(),
             next_find_handle: 0,
