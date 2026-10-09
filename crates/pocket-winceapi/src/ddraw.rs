@@ -226,6 +226,7 @@ pub fn register(d: &mut WinCeDispatcher) {
             | "ddraw_get_device_identifier"
             | "ddraw_set_display_mode" => ddraw_ok,
             "ddraw_get_display_mode" => ddraw_get_display_mode,
+            "ddraw_wait_for_vertical_blank" => ddraw_wait_for_vertical_blank,
             "ddraw_get_vertical_blank_status" => ddraw_get_vertical_blank_status,
             "ddraw_get_scan_line" => ddraw_get_scan_line,
             "ddraw_enum_surfaces" => ddraw_enum_surfaces,
@@ -626,16 +627,52 @@ fn palette_ok(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+/// Keep the same deadline when the scheduler re-enters this thunk.
+fn wait_display(ctx: &mut CallCtx<'_>, blank: Option<bool>) -> Result<Option<DispatchOutcome>, KernelError> {
+    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Sp)?);
+    let now = std::time::Instant::now();
+    let clock = &mut ctx.kernel.framebuffer.directdraw;
+    let deadline = if let Some(deadline) = clock.pending.get(&key) { *deadline } else {
+        let deadline = match blank {
+            Some(end) => clock.blank_deadline(now, end),
+            None => if clock.recent_blank.get(&ctx.kernel.current_thread)
+                .is_some_and(|last| now.saturating_duration_since(*last) < pocket_kernel::framebuffer::DirectDrawTiming::PERIOD) {
+                now
+            } else { clock.present_deadline(now) },
+        };
+        clock.pending.insert(key, deadline);
+        deadline
+    };
+    if let Some(outcome) = crate::coredll::wait_display_until(ctx, deadline)? { return Ok(Some(outcome)); }
+    ctx.kernel.framebuffer.directdraw.pending.remove(&key);
+    if blank.is_none() { ctx.kernel.framebuffer.directdraw.recent_blank.remove(&ctx.kernel.current_thread); }
+    Ok(None)
+}
+
+fn ddraw_wait_for_vertical_blank(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let flags = ctx.arg_u32(1)?;
+    if flags != 1 && flags != 4 { return Ok(DispatchOutcome::ReturnedR0(0x8007_0057)); }
+    if let Some(outcome) = wait_display(ctx, Some(flags == 4))? { return Ok(outcome); }
+    ctx.kernel.framebuffer.directdraw.recent_blank.insert(ctx.kernel.current_thread, std::time::Instant::now());
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
 fn ddraw_get_vertical_blank_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(1)?;
     if out != 0 {
-        ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
+        let blank = u32::from(ctx.kernel.framebuffer.directdraw.in_blank(std::time::Instant::now()));
+        ctx.cpu.write_mem(out, &blank.to_le_bytes())?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 fn ddraw_get_scan_line(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _ = ctx.arg_u32(1)?;
+    let out = ctx.arg_u32(1)?;
+    let clock = &ctx.kernel.framebuffer.directdraw;
+    let phase = clock.epoch.elapsed().as_nanos() % pocket_kernel::framebuffer::DirectDrawTiming::PERIOD.as_nanos();
+    let line = (phase * u128::from(ctx.kernel.framebuffer.height)
+        / pocket_kernel::framebuffer::DirectDrawTiming::PERIOD.as_nanos()) as u32;
+    if out != 0 { ctx.cpu.write_mem(out, &line.to_le_bytes())?; }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -915,6 +952,14 @@ fn surface_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             write_record_desc(ctx, desc, record)?;
         }
     }
+    if record.primary {
+        ctx.kernel.framebuffer.directdraw.primary_locks.insert(record.pixels);
+        // Full-frame writers use Unlock as their presentation boundary.
+        // Readback and partial locks must not throttle every read or sprite.
+        if ctx.arg_u32(1)? == 0 && ctx.arg_u32(3)? & 0x10 == 0 {
+            ctx.kernel.framebuffer.directdraw.paced_primary_locks.insert(record.pixels);
+        }
+    }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -949,13 +994,23 @@ fn publish_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     if pixels != ctx.kernel.framebuffer.pixels {
         ctx.kernel.framebuffer.pixels.copy_from_slice(&pixels);
         ctx.kernel.framebuffer.mark_dirty();
+        ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
+        ctx.kernel.direct_fb_frames = ctx.kernel.direct_fb_frames.saturating_add(1);
     }
     Ok(())
 }
 
 fn surface_unlock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if this_surface(ctx)?.is_none_or(|record| record.primary) {
+        let paced = ctx.kernel.framebuffer.directdraw.paced_primary_locks.contains(&SYNTHETIC_FRAMEBUFFER_BASE);
+        if paced {
+            if let Some(outcome) = wait_display(ctx, None)? { return Ok(outcome); }
+        }
         publish_framebuffer(ctx)?;
+        let clock = &mut ctx.kernel.framebuffer.directdraw;
+        clock.primary_locks.remove(&SYNTHETIC_FRAMEBUFFER_BASE);
+        clock.paced_primary_locks.remove(&SYNTHETIC_FRAMEBUFFER_BASE);
+        if paced { clock.last_present = Some(std::time::Instant::now()); }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -1058,12 +1113,12 @@ fn copy_rect(
     Ok(())
 }
 
-/// A game that double-buffers presents with `Flip` rather than by
-/// unlocking, and every surface we hand out aliases the one synthetic
-/// framebuffer, so the flip is already done — it just has to be
-/// published. Without this a flipping title draws into the mapping and
-/// never announces a frame.
+/// Copy an explicit back buffer and publish on the modeled display cadence.
+/// DDFLIP_NOVSYNC allows a caller to opt out of the presentation wait.
 fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(2)? & 8 == 0 {
+        if let Some(outcome) = wait_display(ctx, None)? { return Ok(outcome); }
+    }
     if let (Some(dest), Some(src)) = (this_surface(ctx)?, {
         let other = ctx.arg_u32(1)?;
         surface_record(ctx, other)
@@ -1072,6 +1127,7 @@ fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         copy_rect(ctx, src, (0, 0, src.width, src.height), dest, area)?;
     }
     publish_framebuffer(ctx)?;
+    ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -1111,6 +1167,96 @@ mod tests {
         pixel_format_bytes, surface_desc_bytes, CLIPPER_METHODS, DDRAW_METHODS, PALETTE_METHODS,
         SURFACE_METHODS,
     };
+
+    #[test]
+    fn vertical_blank_retries_preserve_arguments_and_really_wait() {
+        use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        use super::*;
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let thunk = Thunk { thunk_va: 0x70001000, iat_va: 0,
+            dll: "ddraw.dll".into(), binding: ImportBinding::Name("ddraw_wait_for_vertical_blank".into()), friendly_name: None };
+        cpu.write_reg(ArmReg::R0, FAKE_DDRAW).unwrap();
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let started = std::time::Instant::now();
+        for _ in 0..4 {
+            loop {
+                match ddraw_wait_for_vertical_blank(&mut ctx).unwrap() {
+                    DispatchOutcome::JumpTo(pc) => {
+                        assert_eq!(pc, thunk.thunk_va);
+                        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), FAKE_DDRAW);
+                        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 1);
+                        assert_eq!(ctx.kernel.framebuffer.directdraw.pending.len(), 1);
+                    }
+                    DispatchOutcome::ReturnedR0(0) => break,
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+            assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
+        }
+        assert!(started.elapsed() >= pocket_kernel::framebuffer::DirectDrawTiming::PERIOD * 3);
+        // A completed explicit wait pays for the following presentation once.
+        ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+        assert_eq!(wait_display(&mut ctx, None).unwrap(), None);
+        assert!(ctx.kernel.framebuffer.directdraw.recent_blank.is_empty());
+        assert!(wait_display(&mut ctx, None).unwrap().is_some());
+        ctx.cpu.write_reg(ArmReg::R1, 2).unwrap();
+        assert_eq!(ddraw_wait_for_vertical_blank(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x80070057));
+    }
+
+    #[test]
+    fn primary_unlock_defers_publication_until_the_display_deadline() {
+        use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        use super::*;
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let thunk = Thunk { thunk_va: 0x70002000, iat_va: 0,
+            dll: "ddraw.dll".into(), binding: ImportBinding::Name("surface_unlock".into()), friendly_name: None };
+        cpu.write_reg(ArmReg::R0, FAKE_SURFACE).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        surface_lock(&mut ctx).unwrap();
+        ctx.cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &[0xff,0xff]).unwrap();
+        ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+        let before = ctx.kernel.framebuffer.frame_counter;
+        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
+        assert!(!ctx.kernel.framebuffer.directdraw.primary_locks.is_empty());
+        let key = (0,thunk.thunk_va,0);
+        ctx.kernel.framebuffer.directdraw.pending.insert(key,std::time::Instant::now());
+        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        assert!(ctx.kernel.framebuffer.directdraw.primary_locks.is_empty());
+        // Static menu presents remain paced; pixel equality is not a clock.
+        surface_lock(&mut ctx).unwrap();
+        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        // Readback locks are not full-frame presentations.
+        ctx.kernel.framebuffer.directdraw.pending.clear();
+        ctx.kernel.framebuffer.directdraw.primary_locks.clear();
+        ctx.kernel.framebuffer.directdraw.paced_primary_locks.clear();
+        ctx.cpu.write_reg(ArmReg::R3,0x10).unwrap();
+        surface_lock(&mut ctx).unwrap();
+        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        ctx.cpu.write_reg(ArmReg::R3,0).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..4 {
+            surface_lock(&mut ctx).unwrap();
+            loop {
+                match surface_unlock(&mut ctx).unwrap() {
+                    DispatchOutcome::JumpTo(pc) => assert_eq!(pc,thunk.thunk_va),
+                    DispatchOutcome::ReturnedR0(0) => break,
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
+        assert!(started.elapsed() >= pocket_kernel::framebuffer::DirectDrawTiming::PERIOD * 3);
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+    }
 
     #[test]
     fn offscreen_allocation_failure_returns_error_without_aliasing_panel() {
@@ -1235,10 +1381,12 @@ mod tests {
             kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_unlock"]);
         assert_eq!(cpu.read_u32_le(0x1324).unwrap(),front.pixels);
         assert_eq!(cpu.read_u32_le(0x1368).unwrap(),0x200);
+        assert!(kernel.framebuffer.directdraw.primary_locks.contains(&front.pixels));
         cpu.write_mem(front.pixels,&0xffffu16.to_le_bytes()).unwrap();
         let before=kernel.framebuffer.frame_counter;
         call(&mut cpu,&mut kernel,surface_unlock,[legacy,0,0,0]);
         assert_eq!(kernel.framebuffer.frame_counter,before+1);
+        assert!(kernel.framebuffer.directdraw.primary_locks.is_empty());
         assert_eq!(&kernel.framebuffer.pixels[..2],&0xffffu16.to_le_bytes());
 
         // DXPAK callers may leave the Lock output uninitialized, including

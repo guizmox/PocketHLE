@@ -1933,6 +1933,29 @@ fn park_worker_and_reevaluate(
     park_worker_at(ctx, None, Some(thunk_va))
 }
 
+/// Cooperatively retry a display wait without losing the guest call arguments.
+pub(crate) fn wait_display_until(
+    ctx: &mut CallCtx<'_>, deadline: std::time::Instant,
+) -> Result<Option<DispatchOutcome>, KernelError> {
+    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    let now = std::time::Instant::now();
+    if now >= deadline {
+        ctx.kernel.wait_deadlines.remove(&key);
+        return Ok(None);
+    }
+    let remaining_ms = (deadline - now).as_millis() as u64 + 1;
+    if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
+        let wake = monotonic_ms().saturating_add(remaining_ms);
+        ctx.kernel.wait_deadlines.insert(key, wake);
+        ctx.kernel.threads[index].sleep_until_ms = wake;
+        return park_worker_and_reevaluate(ctx);
+    }
+    if let Some(outcome) = resume_worker_reenter(ctx)? { return Ok(Some(outcome)); }
+    // Bound host blocking so input, audio and the run-loop hook keep progressing.
+    std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(1)));
+    Ok(Some(DispatchOutcome::JumpTo(ctx.thunk.thunk_va)))
+}
+
 /// Park the worker thread that is currently running and give the CPU
 /// back to the main thread.
 ///
@@ -4389,6 +4412,7 @@ fn sync_direct_framebuffer_write(
     dst: u32,
     len: usize,
 ) -> Result<(), KernelError> {
+    if !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty() { return Ok(()); }
     let base = SYNTHETIC_FRAMEBUFFER_BASE;
     let end = base.saturating_add(ctx.kernel.framebuffer.byte_size());
     let write_end = dst.saturating_add(len as u32);
@@ -9049,6 +9073,7 @@ fn controls_take_input(
 }
 
 fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
+    if vk >= 256 { return 0; }
     let aliases = |code: usize| -> [usize; 2] {
         match code {
             0xC1..=0xC4 => [code, code + 0x10],
@@ -9074,16 +9099,16 @@ fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
         .find_map(|event| match event {
             pocket_kernel::InputEvent::KeyDown { vk: pending } => {
                 let keys = aliases(*pending as usize);
-                Some(keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0])
+                (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0]).then_some(true)
             }
             pocket_kernel::InputEvent::KeyUp { vk: pending } => {
                 let keys = aliases(*pending as usize);
-                Some(!(keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0]))
+                (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0]).then_some(false)
             }
             _ => None,
         })
-        .unwrap_or(false);
-    if pressed_now || pending_state {
+        .unwrap_or(pressed_now);
+    if pending_state {
         0x8000
     } else {
         0
@@ -9370,7 +9395,9 @@ fn key_repeat_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32)> {
     // would rather than halving both.
     if ctx.kernel.key_repeat_cursor >= ctx.kernel.held_keys.len() {
         ctx.kernel.key_repeat_cursor = 0;
-        ctx.kernel.key_repeat_next_ms = Some(advance_deadline(due_at, KEY_REPEAT_INTERVAL_MS, now));
+        // Keyboard repeats do not catch up like animation timers: a slow
+        // slice must not turn one held press into several menu moves at once.
+        ctx.kernel.key_repeat_next_ms = Some(now.saturating_add(KEY_REPEAT_INTERVAL_MS));
     }
     Some((WM_KEYDOWN, vk as u32, 0x4000_0001))
 }
@@ -21307,6 +21334,57 @@ mod tests {
     }
 
     #[test]
+    fn directdraw_locked_scanlines_do_not_publish_partial_frames() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let base = SYNTHETIC_FRAMEBUFFER_BASE;
+        cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE).unwrap();
+        let before = kernel.framebuffer.frame_counter;
+        kernel.framebuffer.directdraw.primary_locks.insert(base);
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        for row in 0..3 {
+            let dst = base + row * ctx.kernel.framebuffer.stride_bytes();
+            ctx.cpu.write_mem(dst, &[0xff,0xff]).unwrap();
+            sync_direct_framebuffer_write(&mut ctx,dst,2).unwrap();
+            assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
+            assert_eq!(ctx.kernel.direct_fb_frames, 0);
+        }
+        ctx.kernel.framebuffer.directdraw.primary_locks.clear();
+        sync_direct_framebuffer_write(&mut ctx,base,2).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        assert_eq!(ctx.kernel.direct_fb_frames, 1);
+    }
+
+    #[test]
+    fn display_wait_parks_workers_and_wakes_without_losing_call_arguments() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut thread = GuestThread::new(0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0;17]);
+        thread.started = true;
+        kernel.threads.push(thread);
+        kernel.current_thread = 1;
+        cpu.write_reg(ArmReg::R0,0xdeaddd01).unwrap();
+        cpu.write_reg(ArmReg::R1,1).unwrap();
+        cpu.write_reg(ArmReg::Sp,0x20500).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        let deadline = std::time::Instant::now()+std::time::Duration::from_secs(60);
+        assert!(wait_display_until(&mut ctx,deadline).unwrap().is_some());
+        assert_eq!(ctx.kernel.current_thread,0);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[0],0xdeaddd01);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[1],1);
+        assert!(resume_worker_reenter(&mut ctx).unwrap().is_none());
+        ctx.kernel.threads[0].sleep_until_ms = 0;
+        ctx.kernel.wait_deadlines.insert((1,t.thunk_va,0x20500),0);
+        assert_eq!(resume_worker_reenter(&mut ctx).unwrap(),Some(DispatchOutcome::JumpTo(t.thunk_va)));
+        assert_eq!(ctx.kernel.current_thread,1);
+        assert_eq!(wait_display_until(&mut ctx,std::time::Instant::now()).unwrap(),None);
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(),0xdeaddd01);
+    }
+
+    #[test]
     fn scheduler_honours_worker_sleep_without_blocking_ready_workers() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -22781,6 +22859,38 @@ mod tests {
             None,
             "a released key must never repeat again"
         );
+    }
+
+    #[test]
+    fn pending_key_releases_override_old_state_and_ignore_other_keys() {
+        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();let t=dummy_thunk();
+        let mut c=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&t};
+        c.kernel.pressed_keys[0x25]=true;
+        assert_eq!(key_state_value(&mut c,0x25),0x8000);
+        c.kernel.pending_input.push_back(InputEvent::KeyUp{vk:0x25});
+        assert_eq!(key_state_value(&mut c,0x25),0,"release wins before message delivery");
+        assert_eq!(key_state_value(&mut c,0x27),0,"release must not press an unrelated key");
+        c.kernel.pending_input.push_back(InputEvent::KeyDown{vk:0x25});
+        c.kernel.pending_input.push_back(InputEvent::KeyDown{vk:0x27});
+        assert_eq!(key_state_value(&mut c,0x25),0x8000,"another press must not hide this press");
+        c.kernel.pending_input.push_back(InputEvent::KeyUp{vk:0x27});
+        assert_eq!(key_state_value(&mut c,0x25),0x8000);
+        assert_eq!(key_state_value(&mut c,0x27),0);
+        c.kernel.pending_input.push_back(InputEvent::KeyDown{vk:0xc1});
+        assert_eq!(key_state_value(&mut c,0xd1),0x8000);
+        c.kernel.pending_input.push_back(InputEvent::KeyUp{vk:0xd1});
+        assert_eq!(key_state_value(&mut c,0xc1),0);
+        assert_eq!(key_state_value(&mut c,u32::MAX),0);
+    }
+
+    #[test]
+    fn delayed_keyboard_repeat_does_not_deliver_a_catchup_burst() {
+        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();let t=dummy_thunk();
+        let mut c=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&t};
+        c.kernel.held_keys.push(0x25);
+        let now=monotonic_ms();c.kernel.key_repeat_next_ms=Some(now.saturating_sub(80));
+        assert!(key_repeat_if_due(&mut c).is_some());
+        assert!(c.kernel.key_repeat_next_ms.unwrap()>=now.saturating_add(KEY_REPEAT_INTERVAL_MS));
     }
 
     #[test]

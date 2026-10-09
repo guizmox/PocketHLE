@@ -1,3 +1,6 @@
+crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\ddraw.rs
+crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\framebuffer.rs
 crates\pocket-cpu\src\unicorn.rs
 docs\AGENTS.md

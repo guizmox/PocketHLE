@@ -23,6 +23,44 @@ pub const FB_BPP: u32 = 16;
 /// Total framebuffer size in bytes.
 pub const FB_BYTES: u32 = FB_WIDTH * FB_HEIGHT * (FB_BPP / 8);
 
+/// Modeled LCD clock shared by DirectDraw waits and primary presentations.
+#[derive(Debug, Clone)]
+pub struct DirectDrawTiming {
+    pub epoch: std::time::Instant,
+    pub last_present: Option<std::time::Instant>,
+    pub pending: std::collections::HashMap<(usize, u32, u32), std::time::Instant>,
+    pub recent_blank: std::collections::HashMap<usize, std::time::Instant>,
+    pub paced_primary_locks: std::collections::HashSet<u32>,
+    pub primary_locks: std::collections::HashSet<u32>,
+}
+impl Default for DirectDrawTiming {
+    fn default() -> Self {
+        Self { epoch: std::time::Instant::now(), last_present: None,
+            pending: Default::default(), recent_blank: Default::default(), paced_primary_locks: Default::default(), primary_locks: Default::default() }
+    }
+}
+impl DirectDrawTiming {
+    // This is the emulated display policy, not a measured hardware frequency.
+    pub const PERIOD: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
+    pub const BLANK: std::time::Duration = std::time::Duration::from_millis(1);
+    pub fn blank_deadline(&self, now: std::time::Instant, end: bool) -> std::time::Instant {
+        let elapsed = now.saturating_duration_since(self.epoch).as_nanos();
+        let period = Self::PERIOD.as_nanos();
+        let cycle = elapsed / period;
+        let offset = if end { Self::BLANK.as_nanos() } else { 0 };
+        let target = cycle * period + offset;
+        let target = if target > elapsed { target } else { target + period };
+        self.epoch + std::time::Duration::from_nanos(target as u64)
+    }
+    pub fn present_deadline(&self, now: std::time::Instant) -> std::time::Instant {
+        self.last_present.map_or(now, |last| (last + Self::PERIOD).max(now))
+    }
+    pub fn in_blank(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.epoch).as_nanos() % Self::PERIOD.as_nanos()
+            < Self::BLANK.as_nanos()
+    }
+}
+
 /// A simple RGB565 framebuffer.
 #[derive(Debug, Clone)]
 pub struct Framebuffer {
@@ -35,6 +73,7 @@ pub struct Framebuffer {
     /// Incremented every time the framebuffer is mutated. Hosts use
     /// it to decide whether they need to re-upload the surface.
     pub frame_counter: u64,
+    pub directdraw: DirectDrawTiming,
 }
 
 impl Default for Framebuffer {
@@ -51,6 +90,7 @@ impl Framebuffer {
             bpp: FB_BPP,
             pixels: vec![0u8; (width * height * 2) as usize],
             frame_counter: 0,
+            directdraw: DirectDrawTiming::default(),
         }
     }
 
@@ -363,5 +403,35 @@ mod tests {
         let ppm = fb.snapshot_ppm();
         assert!(ppm.starts_with(b"P6\n2 2\n255\n"));
         assert_eq!(ppm.len(), 11 + 12);
+    }
+}
+
+#[cfg(test)]
+mod display_timing_tests {
+    use super::DirectDrawTiming;
+    #[test]
+    fn blank_waits_cross_an_edge_and_end_waits_cross_the_blank_interval() {
+        let clock = DirectDrawTiming::default();
+        let period = DirectDrawTiming::PERIOD;
+        assert_eq!(clock.blank_deadline(clock.epoch, false), clock.epoch + period);
+        let during = clock.epoch + std::time::Duration::from_micros(500);
+        assert!(clock.in_blank(during));
+        assert_eq!(clock.blank_deadline(during, true), clock.epoch + DirectDrawTiming::BLANK);
+        assert_eq!(clock.blank_deadline(during, false), clock.epoch + period);
+        let active = clock.epoch + std::time::Duration::from_millis(2);
+        assert!(!clock.in_blank(active));
+        assert_eq!(clock.blank_deadline(active, true), clock.epoch + period + DirectDrawTiming::BLANK);
+    }
+    #[test]
+    fn primary_presentations_do_not_catch_up_or_depend_on_pixel_changes() {
+        let mut clock = DirectDrawTiming::default();
+        let start = clock.epoch;
+        assert_eq!(clock.present_deadline(start), start);
+        clock.last_present = Some(start);
+        assert_eq!(clock.present_deadline(start), start + DirectDrawTiming::PERIOD);
+        let late = start + std::time::Duration::from_secs(2);
+        assert_eq!(clock.present_deadline(late), late);
+        clock.last_present = Some(late);
+        assert_eq!(clock.present_deadline(late), late + DirectDrawTiming::PERIOD);
     }
 }

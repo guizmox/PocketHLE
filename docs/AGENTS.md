@@ -1223,3 +1223,46 @@ surface in r3 plus bounded x/y and BltFast flags selects the retained view.
 Implement the source rectangle to destination-coordinate copy and publish the
 primary surface; drawing only into off-screen memory is not a successful boot.
 The ARM game must visibly reach language selection and advance through input.
+
+## 24. Key release ordering and repeat cadence
+
+Polling key state must consider the newest pending event for the queried key
+only (including the existing C1/D1 aliases). A pending release overrides an
+older pressed state; unrelated releases never press other keys, and unrelated
+presses never hide the queried key. Preserve held keys and diagonal input.
+
+Keyboard repeat deadlines advance from now after each held-key round, rather
+than catching up missed intervals like animation timers. A late host slice must
+not deliver a burst of menu moves. Keep the 400 ms initial delay and the 33 ms
+hold cadence. Do not change WM_TIMER/WM_PAINT scheduling for this fix.
+Regressions cover release-before-message delivery, unrelated input, aliases,
+held-key round-robin and delayed repeat without catch-up. No temporary tracing.
+
+## 25. DirectDraw display timing and complete primary frames
+
+WaitForVerticalBlank must not be a success-only stub. Model a 60 Hz display
+clock using host monotonic time; BEGIN waits for the next blank edge and END
+waits for its end. Preserve deadlines and arguments across thunk retries.
+A waiting main thread yields to ready workers; a waiting worker parks with a
+scheduler deadline and resumes the same call. Do not block the API gate for
+an entire refresh interval. Do not advance missed presentation deadlines in
+catch-up bursts after slow slices or parent resumption.
+
+Pace full-primary write Lock/Unlock presentations, even when pixels are
+unchanged, and synchronized Flip. Explicit vertical waits pay for the next
+presentation once; avoid imposing a second wait. Partial/read-only locks and
+off-screen sprite composition are not display presentations. Preserve
+DDFLIP_NOVSYNC. The 60 Hz value is the modeled display policy, not a measured
+Gizmondo panel specification.
+
+While a primary surface is locked, memcpy scanlines and run-loop readback
+must not publish partial images or inflate FPS. Publish the completed image
+at Unlock, keep frame_counter tied to actual pixel changes, and preserve the
+unlocked GAPI/direct-write path. COM views share the lock through their pixel
+storage. Keep input ordering and repeat fixes: their regressions reproduce
+independent defects. No title-name hacks or temporary production tracing.
+
+Validate edge timing, static-image presentation pacing, retry argument
+preservation, worker wakeup and locked-scanline suppression, plus actual ARM
+FIFA/Classic startup and the existing ARM RAM/VFS integrations. The Windows
+GUI tap/hold behavior and audio require the user's emulator test.
