@@ -488,6 +488,12 @@ pub struct LauncherConfig {
     /// Allow GPS1 to subscribe to the host location service.
     #[serde(default)]
     pub gps_enabled: bool,
+    /// Optional replacement origin for Colors Turf War; empty keeps original routing.
+    #[serde(default)]
+    pub colors_server_url: String,
+    /// Optional explicit device ID for separate multiplayer test installations.
+    #[serde(default)]
+    pub colors_terminal_id: String,
     /// Desktop smoothing filter, remembered across sessions.
     #[serde(default = "default_upscale_filter")]
     pub upscale_filter: String,
@@ -567,6 +573,8 @@ impl Default for LauncherConfig {
             bluetooth_enabled: false,
             camera_enabled: false,
             gps_enabled: false,
+            colors_server_url: String::new(),
+            colors_terminal_id: String::new(),
             upscale_filter: default_upscale_filter(),
             last_import_dir: None,
             show_fps: default_show_fps(),
@@ -2244,6 +2252,19 @@ fn guess_screen(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn colors_configuration_preserves_old_defaults_and_roundtrips_player_settings() {
+        let old: LauncherConfig = serde_json::from_str("{}").unwrap();
+        assert!(old.colors_server_url.is_empty());
+        assert!(old.colors_terminal_id.is_empty());
+        let mut updated = old;
+        updated.colors_server_url = "https://colors.example.org".into();
+        updated.colors_terminal_id = "Player-A".into();
+        let decoded: LauncherConfig = serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
+        assert_eq!(decoded.colors_server_url, updated.colors_server_url);
+        assert_eq!(decoded.colors_terminal_id, updated.colors_terminal_id);
+    }
 
     fn tmpdir(name: &str) -> PathBuf {
         // Tests run in parallel and `now_unix_seconds` has one-second

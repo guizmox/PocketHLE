@@ -1827,3 +1827,37 @@ so physical Agaju validation remains user-side. The CAMTEST BMP now declares
 positive height to agree with the driver's bytes; older CAMTEST builds may
 save a vertically inverted BMP even though their API checks pass. Tests check
 all four preview corners and preserve left/right and capture orientation.
+
+
+## 41. Colors multiplayer endpoint, identity and 64-bit time
+
+Colors uses the historical host us.mygiz.gizmondo.com and POST route
+/applications/games/colors/open/command.do. LauncherConfig carries
+colors_server_url and colors_terminal_id, both empty by default; preserve
+serde defaults and the matching Android Kotlin JSON keys. Desktop and Android
+apply configuration only for Gizmondo after registry persistence is attached.
+The URL is an HTTP(S) origin, without a path, credentials or query.
+
+Route only that host AND route when WinINet starts the backend request. Keep
+the guest RequestSpec unchanged, clone the outgoing spec, update port/secure
+flag, and drop stale Host headers. Other services are not redirected.
+KernelState owns the route; do not introduce a process-global endpoint.
+
+HKLM\GTShell\TerminalID is the player identity. Empty launcher ID preserves
+an existing value; first launch generates and immediately flushes one to the
+installation registry. Explicit ASCII alphanumeric, '-', '_', '.' ID overrides
+it persistently. Separate players require distinct libraries/registries or IDs.
+Seed the original GNS host only if absent. Never regenerate identity every boot.
+
+Register coredll.dll/_atoi64 (ordinal 1418 is resolved by the existing ordinal
+map). Parse the signed decimal prefix and return the full i64 register pair
+R0 low / R1 high. Timestamps exceed 32 bits; reusing atoi truncates them.
+Overflow is deterministic saturation; this is not a claim about undefined
+legacy CRT overflow. Keep unrelated CRT handlers unchanged.
+
+Regression tests exercise configuration serialization, identity persistence,
+route scoping, TLS/port metadata, signed 64-bit values, real WinINet POST
+submission, fragmented reads and cleanup. Original Colors ARM component tests
+live in the separate server project and require the user's executable. Windows
+desktop and Android packaging and a full interactive Turf War session are not
+validated by a Linux CLI boot or component-parser success.

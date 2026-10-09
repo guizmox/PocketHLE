@@ -72,6 +72,28 @@ class SettingsActivity : AppCompatActivity() {
                     writeConfig(); true
                 }
             })
+            preferenceScreen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
+                key = "colors_server_url"
+                title = "Colors multiplayer server"
+                summary = "Example: http://192.168.1.10:8080 (next launch)"
+                isPersistent = false
+                text = current.colorsServerUrl
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(colorsServerUrl = value.toString().trim())
+                    writeConfig(); true
+                }
+            })
+            preferenceScreen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
+                key = "colors_terminal_id"
+                title = "Colors player ID (optional)"
+                summary = "Leave empty to keep this installation's identity"
+                isPersistent = false
+                text = current.colorsTerminalId
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(colorsTerminalId = value.toString().trim())
+                    writeConfig(); true
+                }
+            })
             findPreference<ListPreference>("default_cpu_backend")?.apply {
                 value = current.defaultCpuBackend
                 setOnPreferenceChangeListener { _, newValue ->

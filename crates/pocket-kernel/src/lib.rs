@@ -38,6 +38,7 @@ pub mod bluetooth;
 pub mod camera;
 pub mod gps;
 pub mod internet;
+pub mod colors;
 pub mod controls;
 pub mod font;
 pub mod framebuffer;

@@ -26,10 +26,10 @@ pub struct Connection {pub parent:u32,pub server:String,pub port:u16,pub user:St
 pub struct Request {pub parent:u32,pub client:Arc<dyn Client>,pub spec:RequestSpec,pub transfer:Option<Box<dyn Transfer>>,pub sending:Option<(usize,u32,u32)>}
 pub enum Handle {Session(Session),Connection(Connection),Request(Request)}
 impl Handle {fn parent(&self)->Option<u32>{match self{Self::Session(_)=>None,Self::Connection(v)=>Some(v.parent),Self::Request(v)=>Some(v.parent)}}}
-pub struct State {pub handles:HashMap<u32,Handle>,next:u32,backend:Option<Arc<dyn Backend>>}
+pub struct State {pub handles:HashMap<u32,Handle>,next:u32,backend:Option<Arc<dyn Backend>>,colors_endpoint:Option<ColorsEndpoint>}
 impl Default for State {fn default()->Self{Self::new(host())}}
 impl State {
-    fn new(backend:Option<Arc<dyn Backend>>)->Self{Self{handles:HashMap::new(),next:0xb7300000,backend}}
+    fn new(backend:Option<Arc<dyn Backend>>)->Self{Self{handles:HashMap::new(),next:0xb7300000,backend,colors_endpoint:None}}
     pub fn with_backend(backend:Arc<dyn Backend>)->Self{Self::new(Some(backend))}
     pub fn open(&mut self,spec:SessionSpec)->Result<u32>{let client=self.backend.as_ref().ok_or(12004u32)?.open(&spec)?;self.insert(Handle::Session(Session{spec,client}))}
     pub fn insert(&mut self,h:Handle)->Result<u32>{
@@ -43,8 +43,54 @@ impl State {
         for child in children{self.close(child);}self.handles.remove(&id);true
     }
     pub fn request(&mut self,id:u32)->Result<&mut Request>{match self.handles.get_mut(&id){Some(Handle::Request(r))=>Ok(r),Some(_)=>Err(12018),None=>Err(6)}}
+    pub fn set_colors_endpoint(&mut self, value:&str)->Result<()> {
+        self.colors_endpoint = if value.trim().is_empty() { None } else { Some(ColorsEndpoint::parse(value)?) };
+        Ok(())
+    }
+    pub fn route_colors_request(&self, mut spec:RequestSpec)->RequestSpec {
+        // Only the historical Colors endpoint is rerouted. Other games, host
+        // requests and URLs returned by unrelated services retain their origin.
+        if spec.server.eq_ignore_ascii_case("us.mygiz.gizmondo.com")
+            && spec.path == "/applications/games/colors/open/command.do" {
+            if let Some(endpoint) = &self.colors_endpoint {
+                spec.server = endpoint.server.clone();
+                spec.port = endpoint.port;
+                spec.secure = endpoint.secure;
+                if spec.secure { spec.flags |= 0x00800000; } else { spec.flags &= !0x00800000; }
+                // A guest-supplied Host must not target the historical virtual host.
+                spec.headers.retain(|(name,_)| !name.eq_ignore_ascii_case("Host"));
+            }
+        }
+        spec
+    }
     pub fn close_all(&mut self){self.handles.clear();}
 }
+
+#[derive(Clone,Debug)]
+struct ColorsEndpoint {server:String,port:u16,secure:bool}
+impl ColorsEndpoint {
+    fn parse(value:&str)->Result<Self> {
+        let value=value.trim().trim_end_matches('/');
+        let (scheme,authority)=value.split_once("://").ok_or(87u32)?;
+        let secure=match scheme {"http"=>false,"https"=>true,_=>return Err(87)};
+        if authority.is_empty() || authority.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace()
+            || b"/?#@\\".contains(&b)) {return Err(87);}
+        let (server,port)=if let Some(rest)=authority.strip_prefix('[') {
+            let (address,suffix)=rest.split_once(']').ok_or(87u32)?;
+            address.parse::<std::net::Ipv6Addr>().map_err(|_|87u32)?;
+            let port=if suffix.is_empty(){None}else{Some(suffix.strip_prefix(':').ok_or(87u32)?)};
+            (address,port)
+        } else {
+            let (address,port)=match authority.split_once(':'){Some((a,p))=>(a,Some(p)),None=>(authority,None)};
+            if address.is_empty() || address.len()>253 || !address.bytes().all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)) {return Err(87);}
+            (address,port)
+        };
+        let port=match port {Some(p)=>p.parse::<u16>().map_err(|_|87u32)?,None=>if secure{443}else{80}};
+        if port==0{return Err(87);}
+        Ok(Self{server:server.into(),port,secure})
+    }
+}
+
 impl Drop for State{fn drop(&mut self){self.close_all();}}
 
 /// A native worker may publish one response head and at most 64KiB of unread
@@ -78,6 +124,23 @@ impl Drop for ChannelTransfer {fn drop(&mut self){self.channel.cancel();if let S
 
 #[cfg(test)] mod tests {
  use super::*;
+ #[test] fn colors_route_is_scoped_and_preserves_request_body_metadata() {
+  let mut state=State::new(None);
+  let spec=RequestSpec{server:"us.mygiz.gizmondo.com".into(),port:80,secure:false,method:"POST".into(),
+   path:"/applications/games/colors/open/command.do".into(),version:"HTTP/1.0".into(),user:String::new(),password:String::new(),
+   headers:vec![("Host".into(),"us.mygiz.gizmondo.com".into()),("Content-Type".into(),"application/x-www-form-urlencoded".into())],flags:0};
+  assert_eq!(state.route_colors_request(spec.clone()).server,spec.server);
+  state.set_colors_endpoint("https://192.168.1.10:8443/").unwrap();
+  let routed=state.route_colors_request(spec.clone());
+  assert_eq!((routed.server.as_str(),routed.port,routed.secure),("192.168.1.10",8443,true));
+  assert_eq!(routed.flags&0x00800000,0x00800000); assert_eq!(routed.method,"POST"); assert_eq!(routed.path,spec.path);
+  assert_eq!(routed.headers.len(),1);
+  let mut other=spec.clone();other.path="/another-game".into();assert_eq!(state.route_colors_request(other).server,spec.server);
+  let mut other=spec.clone();other.server="example.com".into();assert_eq!(state.route_colors_request(other).server,"example.com");
+  state.set_colors_endpoint("http://[::1]:8080").unwrap();assert_eq!(state.route_colors_request(spec.clone()).server,"::1");
+  for bad in ["ftp://host", "http://host/path", "http://user@host", "http://host:0", "http://host:99999", "http://host?a=b", "http://host\nmalicious"] {assert!(state.set_colors_endpoint(bad).is_err(),"{bad}");}
+  state.set_colors_endpoint("").unwrap();assert_eq!(state.route_colors_request(spec.clone()).server,spec.server);
+ }
  fn head()->ResponseHead{ResponseHead{status:404,version:"HTTP/1.1".into(),reason:"Not Found".into(),headers:vec![]}}
  #[test] fn fragmented_stream_distinguishes_pending_eof_and_late_error(){
   let c=Channel::default();let mut t=c.transfer(||{});assert!(t.head().unwrap().is_none());assert_eq!(t.read(&mut[0;4]),Ok(None));

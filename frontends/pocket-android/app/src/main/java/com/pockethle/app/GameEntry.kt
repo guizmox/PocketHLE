@@ -104,6 +104,8 @@ data class LauncherConfig(
     val bluetoothEnabled: Boolean = false,
     val cameraEnabled: Boolean = false,
     val gpsEnabled: Boolean = false,
+    val colorsServerUrl: String = "",
+    val colorsTerminalId: String = "",
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
     /**
@@ -132,6 +134,8 @@ data class LauncherConfig(
         put("bluetooth_enabled", bluetoothEnabled)
         put("camera_enabled", cameraEnabled)
         put("gps_enabled", gpsEnabled)
+        put("colors_server_url", colorsServerUrl)
+        put("colors_terminal_id", colorsTerminalId)
         put("controls_opacity", controlsOpacity.toDouble())
         if (keybindingsJson != null) {
             runCatching { put("keybindings", JSONArray(keybindingsJson)) }
@@ -166,6 +170,8 @@ data class LauncherConfig(
             bluetoothEnabled = obj.optBoolean("bluetooth_enabled", false),
             cameraEnabled = obj.optBoolean("camera_enabled", false),
             gpsEnabled = obj.optBoolean("gps_enabled", false),
+            colorsServerUrl = obj.optString("colors_server_url", ""),
+            colorsTerminalId = obj.optString("colors_terminal_id", ""),
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),
             keybindingsJson = obj.optJSONArray("keybindings")?.toString(),

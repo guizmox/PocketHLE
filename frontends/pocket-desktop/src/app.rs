@@ -1125,6 +1125,12 @@ impl PocketLauncher {
         ui.heading("Emulator options");
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the Windows location service; availability and accuracy depend on the PC.");
+        ui.label("Colors multiplayer server (next launch)");
+        ui.text_edit_singleline(&mut draft.colors_server_url)
+            .on_hover_text("Example: http://192.168.1.10:8080. Leave empty for the original server.");
+        ui.label("Colors player ID (optional)");
+        ui.text_edit_singleline(&mut draft.colors_terminal_id)
+            .on_hover_text("Leave empty to keep this installation's persistent device identity.");
         ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
         ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
             .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");

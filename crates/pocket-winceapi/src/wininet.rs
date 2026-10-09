@@ -93,7 +93,10 @@ fn send(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError>{
         if let Some(t)=request.transfer.as_mut(){match t.available(){Ok((0,true))=>{},Ok(_)=>return fail(ctx,12019),Err(_)=>{}}}
         let text=match headers(ctx,hp,hn){Ok(v)=>v,Err(e)=>return fail(ctx,e)};let bytes=if length==0{Vec::new()}else{ctx.cpu.read_mem(body,length)?};
         let r=ctx.kernel.internet.request(h).unwrap();let mut spec=r.spec.clone();if let Err(e)=change_headers(&mut spec.headers,&text,0x20000000){return fail(ctx,e);}
-        match r.client.start(spec,bytes){Ok(t)=>{r.transfer=Some(t);r.sending=Some(key)},Err(e)=>return fail(ctx,e)}
+        let client=r.client.clone();
+        let spec=ctx.kernel.internet.route_colors_request(spec);
+        let r=ctx.kernel.internet.request(h).unwrap();
+        match client.start(spec,bytes){Ok(t)=>{r.transfer=Some(t);r.sending=Some(key)},Err(e)=>return fail(ctx,e)}
     }
     let r=ctx.kernel.internet.request(h).unwrap();let head=r.transfer.as_mut().unwrap().head();
     match head{Ok(Some(_))=>{r.sending=None;done(ctx,1)},Ok(None)=>crate::bluetooth::retry(ctx),Err(e)=>{r.sending=None;fail(ctx,e)}}
@@ -145,11 +148,12 @@ fn close(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError>{let h=ctx.ar
  fn value(v:DispatchOutcome)->u32{let DispatchOutcome::ReturnedR0(v)=v else{panic!("pending")};v}
  #[test] fn colors_post_utf16_queries_binary_fragmented_reads_and_parent_cleanup(){
   let(mut cpu,mut k,mut d)=setup();let channel=net::Channel::default();let sent=Arc::new(Mutex::new(vec![]));k.internet=net::State::with_backend(Arc::new(Host{channel:channel.clone(),sent:sent.clone()}));
-  for(p,s)in[(0x1000,"test"),(0x1040,"127.0.0.1"),(0x1080,"POST"),(0x10c0,"/submit"),(0x1100,"Content-Type: application/x-www-form-urlencoded\r\n")]{cpu.write_mem(p,&s.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();}
+  k.internet.set_colors_endpoint("http://127.0.0.1:8080").unwrap();
+  for(p,s)in[(0x1000,"test"),(0x1040,"us.mygiz.gizmondo.com"),(0x1080,"POST"),(0x1600,"/applications/games/colors/open/command.do"),(0x1100,"Content-Type: application/x-www-form-urlencoded\r\n")]{cpu.write_mem(p,&s.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();}
   macro_rules! api{($name:expr,$args:expr)=>{call(&mut cpu,&mut k,&mut d,"wininet.dll",$name,$args)}}
   let session=value(api!("InternetOpenW",&[0x1000,1,0,0,0]));assert_ne!(session,0);
   let connection=value(api!("InternetConnectW",&[session,0x1040,80,0,0,3,0,0]));
-  let request=value(api!("HttpOpenRequestW",&[connection,0x1080,0x10c0,0,0,0,0x04000000,0]));
+  let request=value(api!("HttpOpenRequestW",&[connection,0x1080,0x1600,0,0,0,0x04000000,0]));
   assert_eq!(value(api!("HttpAddRequestHeadersW",&[request,0x1100,u32::MAX,0x20000000])),1);
   cpu.write_mem(0x1200,b"a=1").unwrap();assert_eq!(api!("HttpSendRequestW",&[request,0,u32::MAX,0x1200,3]),DispatchOutcome::JumpTo(0x70000000));
   assert_eq!(api!("HttpSendRequestW",&[request,0,u32::MAX,0x1200,3]),DispatchOutcome::JumpTo(0x70000000));assert_eq!(sent.lock().unwrap().len(),1);
@@ -166,7 +170,7 @@ fn close(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError>{let h=ctx.ar
   assert_eq!(value(api!("InternetReadFile",&[request,0x1400,8,0x1300])),1);assert_eq!(cpu.read_u32_le(0x1300).unwrap(),2);
   assert_eq!(value(api!("InternetReadFile",&[request,0x1400,8,0x1300])),1);assert_eq!(cpu.read_u32_le(0x1300).unwrap(),0);
   assert_eq!(value(api!("InternetCloseHandle",&[session])),1);assert!(channel.cancelled());assert!(k.internet.handles.is_empty());assert_eq!(value(api!("InternetCloseHandle",&[request])),0);
-  let sent=sent.lock().unwrap();assert_eq!(sent[0].1,b"a=1");assert_eq!(sent[0].0.headers[0].0,"Content-Type");assert!(k.wait_deadlines.is_empty());
+  let sent=sent.lock().unwrap();assert_eq!(sent[0].1,b"a=1");assert_eq!(sent[0].0.server,"127.0.0.1");assert_eq!(sent[0].0.port,8080);assert_eq!(sent[0].0.path,"/applications/games/colors/open/command.do");assert_eq!(sent[0].0.headers[0].0,"Content-Type");assert!(k.wait_deadlines.is_empty());
  }
  #[test] fn header_changes_are_atomic_and_case_insensitive(){let mut h=vec![("Accept".into(),"text/plain".into())];assert_eq!(change_headers(&mut h,"accept: x",0x10000000),Err(12155));assert_eq!(h[0].1,"text/plain");assert_eq!(change_headers(&mut h,"Accept: x\r\nbroken",0x80000000),Err(87));assert_eq!(h[0].1,"text/plain");change_headers(&mut h,"accept: x",0x40000000).unwrap();assert_eq!(h[0].1,"text/plain, x");}
 }

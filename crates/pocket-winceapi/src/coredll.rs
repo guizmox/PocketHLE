@@ -195,6 +195,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "_strncmpi", strnicmp);
     d.register_handler(dll, "atoi", atoi_handler);
     d.register_handler(dll, "atol", atoi_handler);
+    d.register_handler(dll, "_atoi64", atoi64_handler);
     d.register_handler(dll, "atof", atof_handler);
     d.register_handler(dll, "_itoa", itoa_handler);
     d.register_handler(dll, "_itow", itow_handler);
@@ -4809,6 +4810,44 @@ fn atoi_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     let value = digits.parse::<i64>().unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(value as i32 as u32))
+}
+
+/// Colors parses millisecond timestamps through WinCE ordinal 1418, `_atoi64`.
+/// ARM returns the low/high halves in R0/R1; a 32-bit result corrupts dates.
+fn atoi64_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let p = ctx.arg_u32(0)?;
+    let text = read_cstr_string(ctx, p, 0x1000)?;
+    let mut bytes = text.bytes().skip_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 11 | 12)).peekable();
+    let negative = bytes.peek() == Some(&b'-');
+    if matches!(bytes.peek(), Some(b'+') | Some(b'-')) { bytes.next(); }
+    let limit = if negative { 1u64 << 63 } else { i64::MAX as u64 };
+    let mut value = 0u64;
+    for byte in bytes {
+        if !byte.is_ascii_digit() { break; }
+        value = value.saturating_mul(10).saturating_add((byte - b'0') as u64).min(limit);
+    }
+    // WinCE leaves overflow undefined; clamp deterministically without wrapping.
+    let bits = if negative { 0u64.wrapping_sub(value) } else { value };
+    Ok(DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32))
+}
+
+#[cfg(test)]
+mod colors_time_tests {
+    use super::*;
+    use crate::bluetooth::tests::{setup, call};
+    use pocket_cpu::Cpu;
+    #[test]
+    fn atoi64_returns_full_arm_register_pair_and_decimal_prefix() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (text, expected) in [("1791583200123trailing", 1791583200123i64),
+            (" \t-4294967297", -4294967297), ("+9223372036854775807", i64::MAX),
+            ("-9223372036854775808", i64::MIN), ("+x", 0), ("", 0)] {
+            cpu.write_mem(0x1100, format!("{text}\0").as_bytes()).unwrap();
+            let bits = expected as u64;
+            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "_atoi64", &[0x1100]),
+                DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32));
+        }
+    }
 }
 
 /// MSVC `_isctype(int c, int mask)`: returns the subset of `mask` the
