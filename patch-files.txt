@@ -1,3 +1,14 @@
-crates\pocket-winceapi\src\coredll.rs
-crates\pocket-kernel\src\lib.rs
+crates\pocket-winceapi\src\lib.rs
+crates\pocket-core\src\lib.rs
+crates\pocket-library\src\lib.rs
+crates\pocket-library\src\keybindings.rs
+frontends\pocket-desktop\src\main.rs
 frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\runner.rs
+frontends\pocket-desktop\src\unimplemented_log.rs
+docs\AGENTS.md
+tools\vfstest\src\vfstest.c
+tools\vfstest\README.md
+tools\vfstest\dist\GZVT999998\AUTORUN.EXE
+tools\vfstest\dist\GZVT999998\vfsworker.exe
+tools\vfstest\dist\PocketHLE-VFSTEST.zip

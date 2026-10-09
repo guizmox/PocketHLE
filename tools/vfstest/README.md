@@ -1,6 +1,6 @@
-# VFSTEST v1 — diagnostic ARM du lot VFS
+# VFSTEST v2 — diagnostic ARM du lot VFS
 
-Importer `PocketHLE-VFSTEST-v1.zip` dans PocketHLE, puis lancer le test deux fois.
+Importer `PocketHLE-VFSTEST-v2.zip` dans PocketHLE, puis lancer le test deux fois.
 À chaque lancement, attendre **SUCCES**, puis fermer la boîte avec Entrée.
 Le même programme teste les fichiers, les volumes et les échanges entre processus.
 
@@ -54,3 +54,9 @@ Contrats WinCE de référence :
 - https://learn.microsoft.com/en-us/previous-versions/ms961237(v=msdn.10)
 - https://learn.microsoft.com/en-us/previous-versions/windows/embedded/ms891933(v=msdn.10)
 - https://learn.microsoft.com/en-us/previous-versions/ms890887(v=msdn.10)
+
+La v2 conserve les 103 contrôles et la comparaison stricte quota.nand_not_ram.
+Elle initialise les deux buffers GlobalMemoryStatus avant la mesure et ajoute
+INFO quota.ram_before / ram_after / total_before / total_after au rapport.
+Cette ligne permet de distinguer une variation de pages de RAM d'une charge
+de NAND ; aucun échec n'est transformé en succès par une tolérance.

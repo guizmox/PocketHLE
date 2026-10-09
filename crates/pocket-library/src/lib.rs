@@ -477,6 +477,9 @@ pub struct LauncherConfig {
     /// Default verbosity level (0..=3).
     #[serde(default)]
     pub verbosity: u8,
+    /// Append missing API reports beside the main launcher log.
+    #[serde(default = "default_log_unimplemented_apis")]
+    pub log_unimplemented_apis: bool,
     /// Last folder the user picked a `.cab` from. Used to remember
     /// the file dialog start directory.
     #[serde(default)]
@@ -517,6 +520,8 @@ pub struct LauncherConfig {
     pub controls_opacity: f32,
 }
 
+fn default_log_unimplemented_apis()->bool {true}
+
 fn default_show_fps() -> bool {
     true
 }
@@ -543,6 +548,7 @@ impl Default for LauncherConfig {
             schema_version: 1,
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,
+            log_unimplemented_apis: default_log_unimplemented_apis(),
             last_import_dir: None,
             show_fps: default_show_fps(),
             fullscreen: false,
@@ -2388,6 +2394,16 @@ mod tests {
         lib.save().unwrap();
         let lib3 = Library::open(&root).unwrap();
         assert_eq!(lib3.config().orientation, "landscape");
+    }
+
+    #[test]
+    fn missing_api_logging_defaults_on_for_old_configs_and_persists_off() {
+        let root=tmpdir("missing_api_log");let mut lib=Library::open(&root).unwrap();
+        assert!(lib.config().log_unimplemented_apis);
+        fs::write(root.join("config.json"),br#"{"schema_version":1}"#).unwrap();
+        lib=Library::open(&root).unwrap();assert!(lib.config().log_unimplemented_apis);
+        lib.config_mut().log_unimplemented_apis=false;lib.save().unwrap();
+        assert!(!Library::open(&root).unwrap().config().log_unimplemented_apis);
     }
 
     #[test]

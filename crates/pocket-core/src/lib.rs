@@ -82,6 +82,11 @@ impl Emulator {
         self.dispatcher.set_trace_sink(sink);
     }
 
+    /// Report only missing API handlers, without enabling the all-call trace.
+    pub fn set_unimplemented_api_sink(&mut self,sink:Box<dyn pocket_winceapi::UnimplementedApiSink>) {
+        self.dispatcher.set_unimplemented_api_sink(sink);
+    }
+
     /// Load and map a PE file into the emulator. Existing process
     /// state is replaced.
     pub fn load_pe(&mut self, path: impl AsRef<Path>) -> Result<&Process> {

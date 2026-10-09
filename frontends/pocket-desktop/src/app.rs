@@ -578,6 +578,8 @@ impl PocketLauncher {
         visuals.override_text_color = Some(Color32::from_rgb(230, 232, 237));
         cc.egui_ctx.set_visuals(visuals);
         let (tx, rx) = mpsc::channel();
+        let runner=Runner::new();
+        runner.set_missing_api_logging(library.config().log_unimplemented_apis);
         Self {
             library,
             icon_cache: std::collections::HashMap::new(),
@@ -601,7 +603,7 @@ impl PocketLauncher {
             rename_draft: None,
             pending_run: None,
             screen: Screen::Library,
-            runner: Runner::new(),
+            runner,
             events_rx: rx,
             events_tx: tx,
             frame_rx: None,
@@ -1070,6 +1072,7 @@ impl PocketLauncher {
         };
         let mut save_clicked = false;
         let mut cancel_clicked = false;
+        ScrollArea::vertical().id_source("emulator_options_scroll").auto_shrink([false,false]).show(ui,|ui| {
         ui.heading("Emulator options");
         ui.add_space(8.0);
         let library_root = self.library.root().display().to_string();
@@ -1100,6 +1103,11 @@ impl PocketLauncher {
                 ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
                 ui.end_row();
 
+                ui.label("Log unimplemented APIs");
+                ui.checkbox(&mut draft.log_unimplemented_apis,"")
+                    .on_hover_text("Write game, process and missing API details to pockethle-unimplemented-apis.log next to the main log. Changes apply after Save, including a running game.");
+                ui.end_row();
+
                 ui.label("Show FPS in status bar");
                 ui.checkbox(&mut draft.show_fps, "");
                 ui.end_row();
@@ -1127,7 +1135,9 @@ impl PocketLauncher {
                 cancel_clicked = true;
             }
         });
+        });
         if save_clicked {
+            self.runner.set_missing_api_logging(draft.log_unimplemented_apis);
             *self.library.config_mut() = draft;
             if let Err(e) = self.library.save() {
                 self.status = format!("Could not save settings: {e}");

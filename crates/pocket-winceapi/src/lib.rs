@@ -164,6 +164,23 @@ impl<'a> CallCtx<'a> {
 /// Function pointer for a host-side handler.
 pub type Handler = fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>;
 
+/// A missing-dispatch event; arguments are captured before the return convention changes them.
+pub struct UnimplementedApiCall<'a> {
+    pub dll: &'a str,
+    pub api: std::borrow::Cow<'a,str>,
+    pub thunk_va: u32,
+    pub args: [u32;4],
+    pub caller: u32,
+    pub process_id: u32,
+    pub thread_id: usize,
+    pub halts: bool,
+}
+/// Optional targeted reporting, independent of the verbose all-API trace.
+pub trait UnimplementedApiSink: Send {
+    fn enabled(&self)->bool;
+    fn record(&mut self,call:UnimplementedApiCall<'_>);
+}
+
 /// Top-level dispatcher that owns per-DLL handler tables.
 pub struct WinCeDispatcher {
     /// Key is `(dll_lowercased, friendly_name)`.
@@ -189,6 +206,7 @@ pub struct WinCeDispatcher {
     pub halt_on_unimplemented: bool,
     /// Optional JSON-lines sink. One record per dispatched call.
     trace_sink: Option<Box<dyn Write + Send>>,
+    unimplemented_sink: Option<Box<dyn UnimplementedApiSink>>,
 }
 
 impl Default for WinCeDispatcher {
@@ -206,6 +224,7 @@ impl WinCeDispatcher {
             by_thunk_va: HashMap::new(),
             halt_on_unimplemented: false,
             trace_sink: None,
+            unimplemented_sink: None,
         };
         coredll::register(&mut d);
         ddraw::register(&mut d);
@@ -278,6 +297,10 @@ impl WinCeDispatcher {
     /// game's functions is this?" rather than just "what did it call?".
     pub fn set_trace_sink(&mut self, sink: Box<dyn Write + Send>) {
         self.trace_sink = Some(sink);
+    }
+
+    pub fn set_unimplemented_api_sink(&mut self,sink:Box<dyn UnimplementedApiSink>) {
+        self.unimplemented_sink=Some(sink);
     }
 
     /// Resolve `thunk` to a handler, populating [`Self::by_thunk_va`]
@@ -381,11 +404,13 @@ impl Dispatcher for WinCeDispatcher {
             return Ok(outcome);
         }
         let handler_opt = self.resolve_handler(thunk);
+        let report_missing=handler_opt.is_none() && self.unimplemented_sink.as_ref()
+            .map(|sink|sink.enabled()).unwrap_or(false);
 
         // Capture args before the handler may mutate them. Skip the
         // four register reads entirely when nothing is going to log
         // them — these reads aren't free in the unicorn backend.
-        let args = if self.trace_sink.is_some() {
+        let args = if self.trace_sink.is_some() || report_missing {
             [
                 cpu.read_reg(ArmReg::R0).unwrap_or(0),
                 cpu.read_reg(ArmReg::R1).unwrap_or(0),
@@ -402,7 +427,7 @@ impl Dispatcher for WinCeDispatcher {
         // most — *which* of the game's own functions is running. The
         // low bit is the Thumb flag rather than part of the address,
         // so clear it to get something that lines up with a disassembly.
-        let caller = if self.trace_sink.is_some() {
+        let caller = if self.trace_sink.is_some() || report_missing {
             cpu.read_reg(ArmReg::Lr).unwrap_or(0) & !1
         } else {
             0
@@ -433,6 +458,14 @@ impl Dispatcher for WinCeDispatcher {
                 Ok(DispatchOutcome::Unimplemented)
             }
         };
+
+        if report_missing {
+            if let Some(sink)=self.unimplemented_sink.as_mut() {
+                sink.record(UnimplementedApiCall{dll:&thunk.dll,api:import_name(thunk),
+                    thunk_va:thunk.thunk_va,args,caller,process_id:kernel.object_handles.process_id(),
+                    thread_id:kernel.current_thread,halts:self.halt_on_unimplemented});
+            }
+        }
 
         if let Some(sink) = self.trace_sink.as_mut() {
             // Trace path is cold-ish (only on `--trace`), so it's
@@ -490,6 +523,33 @@ mod tests {
             binding: ImportBinding::Name(name.into()),
             friendly_name: Some(name.into()),
         }
+    }
+
+    #[test]
+    fn targeted_missing_api_report_preserves_args_and_halt_and_skips_implemented_calls() {
+        use std::sync::{Arc,Mutex};
+        use pocket_cpu::{stub::StubCpu,Cpu,regs::ArmReg};
+        use pocket_kernel::{Dispatcher,DispatchOutcome};
+        struct Sink(Arc<Mutex<Vec<([u32;4],u32,bool,String)>>>);
+        impl super::UnimplementedApiSink for Sink {
+            fn enabled(&self)->bool {true}
+            fn record(&mut self,c:super::UnimplementedApiCall<'_>) {
+                self.0.lock().unwrap().push((c.args,c.caller,c.halts,c.api.into_owned()));
+            }
+        }
+        let records=Arc::new(Mutex::new(Vec::new()));let mut d=WinCeDispatcher::new();
+        d.set_unimplemented_api_sink(Box::new(Sink(records.clone())));
+        let mut cpu=StubCpu::new();let mut kernel=crate::gx::tests::fresh_kernel();
+        for (reg,value) in [(ArmReg::R0,11),(ArmReg::R1,22),(ArmReg::R2,33),(ArmReg::R3,44),(ArmReg::Lr,0x1235)] {
+            cpu.write_reg(reg,value).unwrap();
+        }
+        let missing=fake_thunk("missing.dll","MissingTestAPI");
+        assert!(matches!(d.dispatch(&mut cpu,&missing,&mut kernel).unwrap(),DispatchOutcome::Unimplemented));
+        d.halt_on_unimplemented=true;
+        assert!(matches!(d.dispatch(&mut cpu,&missing,&mut kernel).unwrap(),DispatchOutcome::Halt));
+        d.dispatch(&mut cpu,&fake_thunk("coredll.dll","GetLastError"),&mut kernel).unwrap();
+        let entries=records.lock().unwrap();assert_eq!(entries.len(),2);
+        assert_eq!(entries[0],([11,22,33,44],0x1234,false,"MissingTestAPI".into()));assert!(entries[1].2);
     }
 
     #[test]

@@ -17,6 +17,7 @@ mod reconstruction;
 mod smaa;
 mod screenshot;
 mod pocketpc_layout;
+mod unimplemented_log;
 
 use anyhow::{Context, Result};
 

@@ -22,14 +22,22 @@ use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry};
 /// drown in. ~60 fps is plenty for a 320×240 LCD preview.
 const FRAME_PUSH_INTERVAL: Duration = Duration::from_millis(16);
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Runner {
     inner: Arc<Mutex<()>>,
+    missing_api_logging: Arc<AtomicBool>,
 }
 
+impl Default for Runner {
+    fn default()->Self {Self{inner:Default::default(),missing_api_logging:Arc::new(AtomicBool::new(true))}}
+}
 impl Runner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_missing_api_logging(&self,enabled:bool) {
+        self.missing_api_logging.store(enabled,Ordering::Relaxed);
     }
 
     pub fn run_game(
@@ -105,6 +113,10 @@ impl Runner {
         summary_lines.push(format!("Executable: {}", exe.display()));
 
         emu.set_halt_on_unimplemented(game.settings.halt_on_unimplemented);
+        emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
+            library_root.join("pockethle-unimplemented-apis.log"),game.display_name.clone(),
+            guest_path.map(str::to_owned).unwrap_or_else(||exe.display().to_string()),
+            Arc::clone(&self.missing_api_logging))));
         emu.max_slices = game.settings.max_slices;
         emu.instruction_budget_per_slice = game.settings.instructions_per_slice;
 

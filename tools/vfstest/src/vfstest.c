@@ -41,7 +41,7 @@ static U32 done(Info*i,U32 expected){U32 code=0,ok=WaitForSingleObject(i->proces
 __attribute__((section(".text.entry"))) U32 entry(void){
  U32 h,j,n=0,alias=0,ready,release,f,free0[2],free1[2],total[2],dummy[2],found[150],count=0;char b[16];Info info;Mem before,after;void *protected_out;
  {extern char __image_start[],__image_end[];const volatile unsigned char*p=(const volatile unsigned char*)__image_start;volatile unsigned char sink=0;while(p<(const volatile unsigned char*)__image_end){sink^=*p;p+=4096;}(void)sink;}
- line("PocketHLE native ARM VFS test v1\r\n");
+ line("PocketHLE native ARM VFS test v2\r\n");
  DeleteFileW(L"\\Flash Disk\\VFSTEST.TXT");
  if(GetFileAttributesW(ROOT)!=BAD){line("FAIL fixture.directory_already_exists; no existing files touched\r\n");failures++;goto finish;}
  check("directories.create",CreateDirectoryW(ROOT,0));SetLastError(123);check("directories.existing_error",!CreateDirectoryW(ROOT,0)&&GetLastError()==183);
@@ -121,11 +121,11 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  check("volumes.flash_32mib",GetDiskFreeSpaceExW(L"\\Flash Disk\\",free0,total,dummy)&&total[0]==32*1024*1024&&total[1]==0&&free0[1]==0);
  SetLastError(123);check("volumes.missing_directory_error",!GetDiskFreeSpaceExW(ROOT L"\\absent",free1,total,dummy)&&GetLastError()==3);
  check("volumes.sd_separate",GetDiskFreeSpaceExW(L"\\SD Card\\GZVT999998\\",free1,total,dummy)&&total[0]>=64*1024*1024&&free1[0]<total[0]);
- GetDiskFreeSpaceExW(L"\\Flash Disk\\",free0,total,dummy);before.length=sizeof(before);GlobalMemoryStatus(&before);
+ GetDiskFreeSpaceExW(L"\\Flash Disk\\",free0,total,dummy);before.length=sizeof(before);after.length=sizeof(after);GlobalMemoryStatus(&before);GlobalMemoryStatus(&after);GlobalMemoryStatus(&before);
  h=open_file(FILE,R|W,3,1);SetFilePointer(h,free0[0]+1,0,0);SetLastError(123);check("quota.overflow_refused",!SetEndOfFile(h)&&GetLastError()==112&&GetFileSize(h,0)==0);
  SetFilePointer(h,free0[0],0,0);check("quota.fill_available",SetEndOfFile(h));check("quota.full_reports_zero",GetDiskFreeSpaceExW(L"\\Flash Disk\\",free1,total,dummy)&&free1[0]==0);
  SetLastError(123);check("quota.write_refused_no_growth",!WriteFile(h,"X",1,&n,0)&&GetLastError()==112&&GetFileSize(h,0)==free0[0]);
- after.length=sizeof(after);GlobalMemoryStatus(&after);check("quota.nand_not_ram",before.avail==after.avail);
+ after.length=sizeof(after);GlobalMemoryStatus(&after);line("INFO quota.ram_before=");hex(before.avail);line(" ram_after=");hex(after.avail);line(" total_before=");hex(before.total);line(" total_after=");hex(after.total);line("\r\n");check("quota.nand_not_ram",before.avail==after.avail);
  SetFilePointer(h,0,0,0);check("quota.truncate_refunds",SetEndOfFile(h)&&GetDiskFreeSpaceExW(L"\\Flash Disk\\",free1,total,dummy)&&free1[0]==free0[0]);CloseHandle(h);
  check("cleanup.file",DeleteFileW(FILE));check("cleanup.directory",RemoveDirectoryW(ROOT));
 finish:

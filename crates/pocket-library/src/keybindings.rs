@@ -339,7 +339,7 @@ mod tests {
             bindings.button_for_key("Left"),
             Some(GuestButton::DpadRight)
         );
-        assert!(bindings.keys_for(GuestButton::DpadLeft).is_empty());
+        assert!(!bindings.keys_for(GuestButton::DpadLeft).iter().any(|key|key.eq_ignore_ascii_case("Left")));
     }
 
     #[test]

@@ -1398,3 +1398,35 @@ Validate QVGA/WVGA portrait and landscape, all four rotations, x2 at non-default
 DPI, control containment/non-overlap, stylus inverse rotation and source-aware
 held keys. Render the actual egui housing for visual review. Windows interaction
 and live game layout/orientation changes still need an emulator check.
+
+## 31. Targeted missing-API reporting and scrollable options
+
+Emulator options exposes log_unimplemented_apis, default true for both new
+and pre-existing configs. Saving applies the AtomicBool shared by Runner clones
+immediately, including suspended parents and running children. Append records
+to pockethle-unimplemented-apis.log beside pockethle-gui.log in the library root.
+Use launch/end records and missing-handler events with game, actual process
+path, DLL/API, timestamp, first four argument registers, caller, thunk, PID/TID
+and halt/return-zero action. Resolve friendly ordinal names when available.
+
+This is independent of the verbose all-API trace and its log-level filter.
+Capture registers only for actual missing calls when reporting is enabled;
+implemented hot paths must not gain four extra register reads. Do not classify
+intentionally registered constant stubs, ignored DLLs or handler errors as missing
+handlers. De-duplicate identical API/call-site events per process to avoid log
+flooding, compare metadata when thunk slots are reused, and count repeat calls
+in the process end record. Flush new events so a crash leaves useful evidence.
+No file creation or writes while disabled. An I/O error disables that process's
+sink and warns once in the normal log; it must not alter guest return behavior.
+
+Wrap the complete Emulator options editor, including keyboard bindings and
+Save/Cancel, in a vertical ScrollArea so the mouse wheel can reach lower options.
+Config tests cover default-on and persistence-off; reporter/dispatcher tests
+cover live toggling, deduplication, reused imports, arguments and halt semantics.
+
+VFSTEST v2 initializes both GlobalMemoryStatus output buffers before its NAND
+quota baseline and reports exact before/after RAM values. Keep the strict
+quota.nand_not_ram equality and all 103 checks; do not add a tolerance that
+conceals genuine NAND/RAM accounting defects. Windows v1's isolated quota
+failure was not reproduced in native ARM or the actual frontend runner here.
+The v2 report is needed to identify the direction and size of that variation.
