@@ -21,6 +21,7 @@ use rmp3::{Frame, RawDecoder, MAX_SAMPLES_PER_FRAME};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
+use std::sync::{Arc, Mutex};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -91,6 +92,7 @@ fn mp3_frame_bytes(header: &[u8]) -> Option<usize> {
 }
 
 struct Mp3DecoderState {
+    stream_key: u32,
     decoder: RawDecoder,
     callback_event: u32,
     pending: VecDeque<(u64, u64)>, // cumulative PCM samples / compressed bytes
@@ -204,12 +206,62 @@ struct Mount {
 /// The Gizmondo registration service device exposed as `REG1:`.
 const REGISTRATION_SERVICE_DEVICE: &str = "reg1:";
 
+/// RAM-backed root files, shared by all processes on one emulated device.
+#[derive(Debug, Default)]
+pub(crate) struct RamStore {
+    files: HashMap<String, Arc<Mutex<RamFile>>>,
+    dirs: HashMap<String, crate::memory_division::StoreCharge>,
+}
+#[derive(Debug)]
+struct RamFile {
+    data: Vec<u8>,
+    charge: crate::memory_division::StoreCharge,
+    name_bytes: u64,
+}
+impl RamFile {
+    fn set_len(&mut self, len: usize) -> bool {
+        let Some(bytes) = (len as u64).checked_add(self.name_bytes) else { return false; };
+        let pages = crate::memory_division::pages(bytes);
+        if !self.charge.resize(pages) { return false; }
+        if len > self.data.len() && self.data.try_reserve(len - self.data.len()).is_err() {
+            self.charge.resize(crate::memory_division::pages(self.data.len() as u64 + self.name_bytes));
+            return false;
+        }
+        self.data.resize(len, 0);
+        true
+    }
+}
+#[derive(Debug)]
+struct OpenRamFile {
+    file: Arc<Mutex<RamFile>>,
+    position: u64,
+    access: Access,
+    text_mode: bool,
+}
+
+static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xd3000000);
+
+/// Cloneable open description for transfer between process namespaces.
+#[derive(Clone)]
+pub struct VfsObject(VfsObjectInner, Option<(u32, crate::audio::MasPlayback)>);
+#[derive(Clone)]
+enum VfsObjectInner {
+    File(Arc<Mutex<OpenFile>>), Ram(Arc<Mutex<OpenRamFile>>),
+    Volume(OpenVolume), Registration, Decoder(Arc<Mutex<Mp3DecoderState>>),
+}
+impl VfsObject {
+    pub fn with_mas(mut self, key: u32, playback: crate::audio::MasPlayback) -> Self { self.1 = Some((key, playback)); self }
+    pub fn mas(&self) -> Option<(u32, crate::audio::MasPlayback)> { self.1.clone() }
+}
+
 /// Mount-point + open-handle table.
 pub struct Vfs {
     mounts: Vec<Mount>,
-    handles: HashMap<u32, OpenFile>,
+    ram: Option<crate::memory_division::MemoryDivision>,
+    ram_handles: HashMap<u32, Arc<Mutex<OpenRamFile>>>,
+    handles: HashMap<u32, Arc<Mutex<OpenFile>>>,
     /// Handles opened on the `MAS1:` MP3 decoder.
-    decoders: HashMap<u32, Mp3DecoderState>,
+    decoders: HashMap<u32, Arc<Mutex<Mp3DecoderState>>>,
     /// Handles opened on a `Vol:` pseudo-file. Kept apart from
     /// `handles` because they have no backing [`File`] — a volume
     /// handle only ever reaches `DeviceIoControl` and `CloseHandle`.
@@ -238,6 +290,8 @@ impl Vfs {
     pub fn new() -> Self {
         Self {
             mounts: Vec::new(),
+            ram: None,
+            ram_handles: HashMap::new(),
             handles: HashMap::new(),
             volumes: HashMap::new(),
             decoders: HashMap::new(),
@@ -245,6 +299,79 @@ impl Vfs {
             registration: std::collections::HashSet::new(),
             default_dir: "\\".to_string(),
         }
+    }
+
+    pub fn attach_ram(&mut self, ram: Option<crate::memory_division::MemoryDivision>) {
+        self.ram = ram;
+    }
+    /// External mounts, including read-only card/ROM overlays, always win.
+    pub fn is_ram_path(&self, path: &str) -> bool {
+        self.ram.is_some() && self.matching_mounts(path).is_empty()
+    }
+    pub fn ram_file_size(&self, path: &str) -> Option<u64> {
+        if !self.is_ram_path(path) { return None; }
+        let ram = self.ram.as_ref()?;
+        let store = ram.files.lock().ok()?;
+        let file = store.files.get(&self.normalise_guest_path(path))?.lock().ok()?;
+        Some(file.data.len() as u64)
+    }
+    fn ram_key(&self, path: &str) -> Option<String> {
+        let path = self.normalise_guest_path(path);
+        if path.split('/').any(|part| part == ".." || part == "." || part.contains(':')) { return None; }
+        Some(path.trim_end_matches('/').to_string())
+    }
+    fn open_ram(&mut self, path: &str, access: Access, create: bool) -> Option<u32> {
+        let key = self.ram_key(path)?;
+        if key.is_empty() { return None; }
+        let ram = self.ram.as_ref()?;
+        let mut store = ram.files.lock().ok()?;
+        if store.dirs.contains_key(&key) { return None; }
+        let file = if let Some(file) = store.files.get(&key) {
+            if create && access == Access::Write && !file.lock().ok()?.set_len(0) { return None; }
+            file.clone()
+        } else {
+            if !create || access == Access::Read { return None; }
+            let parent = key.rsplit_once('/')?.0;
+            if !parent.is_empty() && !store.dirs.contains_key(parent) { return None; }
+            // Charge the encoded pathname and data, not a made-up disk size.
+            let name_bytes = (key.encode_utf16().count() as u64 + 1) * 2;
+            let charge = ram.store_charge(crate::memory_division::pages(name_bytes))?;
+            let file = Arc::new(Mutex::new(RamFile { data: Vec::new(), charge, name_bytes }));
+            store.files.insert(key, file.clone());
+            file
+        };
+        drop(store);
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        self.ram_handles.insert(handle, Arc::new(Mutex::new(OpenRamFile {
+            file, position: 0, access, text_mode: false,
+        })));
+        Some(handle)
+    }
+    pub fn write_failure_error(&self, handle: u32) -> u32 {
+        if let Some(open) = self.ram_handles.get(&handle) {
+            if open.lock().is_ok_and(|open| open.access == Access::Read) { return 5; }
+            return 112; // RAM object store full
+        }
+        if let Some(open) = self.handles.get(&handle) {
+            if open.lock().is_ok_and(|open| open.access == Access::Read) { return 5; }
+        }
+        29 // host backing write failed
+    }
+    /// SetEndOfFile acts on the shared open description, including duplicates.
+    pub fn set_end_of_file(&mut self, handle: u32) -> bool {
+        if let Some(open) = self.ram_handles.get(&handle) {
+            let Ok(open) = open.lock() else { return false; };
+            if open.access == Access::Read { return false; }
+            let Ok(len) = usize::try_from(open.position) else { return false; };
+            let Ok(mut file) = open.file.lock() else { return false; };
+            return file.set_len(len);
+        }
+        let Some(open) = self.handles.get(&handle) else { return false; };
+        let Ok(mut open) = open.lock() else { return false; };
+        if open.access == Access::Read { return false; }
+        let Ok(position) = open.file.stream_position() else { return false; };
+        open.file.set_len(position).is_ok()
     }
 
     /// Set the directory bare / `.`-relative guest paths resolve
@@ -536,6 +663,28 @@ impl Vfs {
     pub fn list_dir(&self, guest_dir: &str) -> Option<Vec<(String, u64, bool)>> {
         let normalised = self.normalise_guest_path(guest_dir);
         let mut merged = std::collections::BTreeMap::new();
+        let mut ram_directory = false;
+        if self.is_ram_path(guest_dir) {
+            if let Some(ram) = &self.ram {
+                if let Ok(store) = ram.files.lock() {
+                    let key = normalised.trim_end_matches('/');
+                    ram_directory = key.is_empty() || store.dirs.contains_key(key);
+                    let prefix = format!("{key}/");
+                    for (path, file) in &store.files {
+                        if let Some(name) = path.strip_prefix(&prefix).filter(|name| !name.contains('/')) {
+                            if let Ok(file) = file.lock() {
+                                merged.insert(name.to_string(), (name.to_string(), file.data.len() as u64, false));
+                            }
+                        }
+                    }
+                    for path in store.dirs.keys() {
+                        if let Some(name) = path.strip_prefix(&prefix).filter(|name| !name.contains('/')) {
+                            merged.insert(name.to_string(), (name.to_string(), 0, true));
+                        }
+                    }
+                }
+            }
+        }
         for mount in self.matching_mounts(&normalised) {
             let Some(host) = self.host_path_for_mount(mount, &normalised) else {
                 continue;
@@ -579,11 +728,24 @@ impl Vfs {
                 .entry(child.to_string())
                 .or_insert((display.to_string(), 0, true));
         }
-        (!merged.is_empty()).then(|| merged.into_values().collect())
+        (ram_directory || !merged.is_empty()).then(|| merged.into_values().collect())
     }
 
     /// Create a guest directory through the writable mount that owns it.
     pub fn create_dir(&self, guest_path: &str) -> bool {
+        if self.is_ram_path(guest_path) {
+            let Some(key) = self.ram_key(guest_path) else { return false; };
+            let ram = self.ram.as_ref().unwrap();
+            let Ok(mut store) = ram.files.lock() else { return false; };
+            if key.is_empty() { return true; }
+            if store.files.contains_key(&key) { return false; }
+            if store.dirs.contains_key(&key) { return true; }
+            let parent = key.rsplit_once('/').map(|p| p.0).unwrap_or("");
+            if !parent.is_empty() && !store.dirs.contains_key(parent) { return false; }
+            let Some(charge) = ram.store_charge(crate::memory_division::pages((key.encode_utf16().count() as u64 + 1) * 2)) else { return false; };
+            store.dirs.insert(key, charge);
+            return true;
+        }
         let normalised = self.normalise_guest_path(guest_path);
         let Some(mount) = self
             .matching_mounts(&normalised)
@@ -600,6 +762,12 @@ impl Vfs {
 
     /// Remove a guest file from the writable mount that owns it.
     pub fn delete_file(&self, guest_path: &str) -> bool {
+        if self.is_ram_path(guest_path) {
+            let Some(key) = self.ram_key(guest_path) else { return false; };
+            let ram = self.ram.as_ref().unwrap();
+            let Ok(mut store) = ram.files.lock() else { return false; };
+            return store.files.remove(&key).is_some();
+        }
         let normalised = self.normalise_guest_path(guest_path);
         let Some(mount) = self
             .matching_mounts(&normalised)
@@ -614,8 +782,39 @@ impl Vfs {
         std::fs::remove_file(path).is_ok()
     }
 
+    pub fn remove_ram_dir(&self, guest_path: &str) -> bool {
+        if !self.is_ram_path(guest_path) { return false; }
+        let Some(key) = self.ram_key(guest_path) else { return false; };
+        if key.is_empty() { return false; }
+        let Some(ram) = &self.ram else { return false; };
+        let Ok(mut store) = ram.files.lock() else { return false; };
+        let prefix = format!("{key}/");
+        if store.files.keys().any(|p| p.starts_with(&prefix)) || store.dirs.keys().any(|p| p.starts_with(&prefix)) { return false; }
+        store.dirs.remove(&key).is_some()
+    }
+
     /// Rename a guest file within the writable mount that owns it.
     pub fn move_file(&self, from: &str, to: &str) -> bool {
+        if self.is_ram_path(from) {
+            if !self.is_ram_path(to) { return false; }
+            let (Some(from), Some(to)) = (self.ram_key(from), self.ram_key(to)) else { return false; };
+            let ram = self.ram.as_ref().unwrap();
+            let Ok(mut store) = ram.files.lock() else { return false; };
+            if store.files.contains_key(&to) || store.dirs.contains_key(&to) { return false; }
+            let parent = to.rsplit_once('/').map(|p| p.0).unwrap_or("");
+            if !parent.is_empty() && !store.dirs.contains_key(parent) { return false; }
+            let Some(file) = store.files.get(&from).cloned() else { return false; };
+            {
+                let Ok(mut file) = file.lock() else { return false; };
+                let name_bytes = (to.encode_utf16().count() as u64 + 1) * 2;
+                let pages = crate::memory_division::pages(file.data.len() as u64 + name_bytes);
+                if !file.charge.resize(pages) { return false; }
+                file.name_bytes = name_bytes;
+            }
+            store.files.remove(&from);
+            store.files.insert(to, file);
+            return true;
+        }
         let from_normalised = self.normalise_guest_path(from);
         let to_normalised = self.normalise_guest_path(to);
         let Some(mount) = self
@@ -674,7 +873,8 @@ impl Vfs {
             log::debug!("vfs.open({guest_path:?}) -> MP3 decoder handle 0x{h:08x}");
             self.decoders.insert(
                 h,
-                Mp3DecoderState {
+                Arc::new(Mutex::new(Mp3DecoderState {
+                    stream_key: NEXT_MAS_STREAM.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     decoder: RawDecoder::new(),
                     callback_event: 0,
                     pending: VecDeque::new(),
@@ -690,7 +890,8 @@ impl Vfs {
                     started: false,
                     paused: false,
                     volume: 0xFFFF_FFFF,
-                },
+                })),
+
             );
             return Some(h);
         }
@@ -719,6 +920,7 @@ impl Vfs {
             self.volumes.insert(h, volume);
             return Some(h);
         }
+        if self.is_ram_path(guest_path) { return self.open_ram(guest_path, access, create); }
         let host_path = if matches!(access, Access::Read) {
             self.resolve(guest_path)?
         } else {
@@ -768,40 +970,82 @@ impl Vfs {
         self.next_handle += 1;
         self.handles.insert(
             h,
-            OpenFile {
+            Arc::new(Mutex::new(OpenFile {
                 host_path,
                 access,
                 file,
                 text_mode: false,
-            },
+            })),
         );
         Some(h)
     }
 
     pub fn read(&mut self, handle: u32, buf: &mut [u8]) -> Option<usize> {
+        if let Some(open) = self.ram_handles.get(&handle) {
+            let mut open = open.lock().ok()?;
+            if open.access == Access::Write { return None; }
+            let n = {
+                let file = open.file.lock().ok()?;
+                let start = usize::try_from(open.position).ok()?.min(file.data.len());
+                let n = buf.len().min(file.data.len() - start);
+                buf[..n].copy_from_slice(&file.data[start..start + n]);
+                n
+            };
+            open.position += n as u64;
+            return Some(n);
+        }
         if self.registration.contains(&handle) {
             buf.fill(0);
             return Some(0);
         }
-        let of = self.handles.get_mut(&handle)?;
+        let mut of = self.handles.get(&handle)?.lock().ok()?;
         of.file.read(buf).ok()
     }
 
     pub fn write(&mut self, handle: u32, buf: &[u8]) -> Option<usize> {
+        if let Some(open) = self.ram_handles.get(&handle) {
+            let mut open = open.lock().ok()?;
+            if open.access == Access::Read { return None; }
+            if buf.is_empty() { return Some(0); }
+            let start = usize::try_from(open.position).ok()?;
+            let end = start.checked_add(buf.len())?;
+            {
+                let mut file = open.file.lock().ok()?;
+                if end > file.data.len() && !file.set_len(end) { return None; }
+                file.data[start..end].copy_from_slice(buf);
+            }
+            open.position = end as u64;
+            return Some(buf.len());
+        }
         if self.registration.contains(&handle) {
             return Some(buf.len());
         }
-        let of = self.handles.get_mut(&handle)?;
+        let mut of = self.handles.get(&handle)?.lock().ok()?;
         of.file.write(buf).ok()
     }
 
     pub fn size(&mut self, handle: u32) -> Option<u64> {
-        let of = self.handles.get_mut(&handle)?;
+        if let Some(open) = self.ram_handles.get(&handle) {
+            return Some(open.lock().ok()?.file.lock().ok()?.data.len() as u64);
+        }
+        let of = self.handles.get(&handle)?.lock().ok()?;
         of.file.metadata().ok().map(|m| m.len())
     }
 
     pub fn seek(&mut self, handle: u32, offset: i64, whence: SeekKind) -> Option<u64> {
-        let of = self.handles.get_mut(&handle)?;
+        if let Some(open) = self.ram_handles.get(&handle) {
+            let mut open = open.lock().ok()?;
+            let base = match whence {
+                SeekKind::Begin => 0,
+                SeekKind::Current => open.position as i128,
+                SeekKind::End => open.file.lock().ok()?.data.len() as i128,
+            };
+            let position = base + offset as i128;
+            if !(0..=u64::MAX as i128).contains(&position) { return None; }
+            open.position = position as u64;
+            return Some(open.position);
+        }
+        let mut of = self.handles.get(&handle)?.lock().ok()?;
         let from = match whence {
             SeekKind::Begin => SeekFrom::Start(offset.max(0) as u64),
             SeekKind::Current => SeekFrom::Current(offset),
@@ -811,15 +1055,46 @@ impl Vfs {
     }
 
     pub fn flush(&mut self, handle: u32) -> std::io::Result<()> {
-        self.handles
-            .get_mut(&handle)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid handle"))?
-            .file
-            .flush()
+        if self.ram_handles.contains_key(&handle) { return Ok(()); }
+        let file = self.handles.get(&handle).ok_or_else(||
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid handle"))?;
+        file.lock().map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "file lock poisoned"))?.file.flush()
+    }
+
+    /// An opaque shared open description, retaining seek/access/device state.
+    pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
+        if let Some(file) = self.ram_handles.get(&handle) { return Some(VfsObject(VfsObjectInner::Ram(file.clone()), None)); }
+        if let Some(file) = self.handles.get(&handle) { return Some(VfsObject(VfsObjectInner::File(file.clone()), None)); }
+        if let Some(volume) = self.volumes.get(&handle) { return Some(VfsObject(VfsObjectInner::Volume(volume.clone()), None)); }
+        if let Some(decoder) = self.decoders.get(&handle) { return Some(VfsObject(VfsObjectInner::Decoder(decoder.clone()), None)); }
+        self.registration.contains(&handle).then_some(VfsObject(VfsObjectInner::Registration, None))
+    }
+    pub fn import_handle(&mut self, handle: u32, object: VfsObject) -> bool {
+        if self.is_handle(handle) { return false; }
+        match object.0 {
+            VfsObjectInner::Ram(file) => { self.ram_handles.insert(handle, file); }
+            VfsObjectInner::File(file) => { self.handles.insert(handle, file); }
+            VfsObjectInner::Volume(volume) => { self.volumes.insert(handle, volume); }
+            VfsObjectInner::Decoder(decoder) => { self.decoders.insert(handle, decoder); }
+            VfsObjectInner::Registration => { self.registration.insert(handle); }
+        }
+        true
+    }
+    pub fn is_handle(&self, handle: u32) -> bool {
+        self.is_open(handle) || self.volumes.contains_key(&handle)
+            || self.decoders.contains_key(&handle) || self.registration.contains(&handle)
+    }
+    pub fn open_handles(&self) -> Vec<u32> {
+        self.handles.keys().chain(self.ram_handles.keys()).chain(self.volumes.keys())
+            .chain(self.decoders.keys()).chain(self.registration.iter()).copied().collect()
+    }
+    pub fn duplicate_file(&mut self, source: u32, target: u32) -> bool {
+        let Some(object) = self.export_handle(source) else { return false; };
+        self.import_handle(target, object)
     }
 
     pub fn close(&mut self, handle: u32) -> bool {
-        self.handles.remove(&handle).is_some()
+        self.ram_handles.remove(&handle).is_some() || self.handles.remove(&handle).is_some()
             || self.volumes.remove(&handle).is_some()
             || self.decoders.remove(&handle).is_some()
             || self.registration.remove(&handle)
@@ -834,9 +1109,10 @@ impl Vfs {
     /// into `ExitProcess`, and nothing reads a handle after that.
     pub fn close_all(&mut self) -> usize {
         for of in self.handles.values_mut() {
-            let _ = of.file.flush();
+            if let Ok(mut file) = of.lock() { let _ = file.file.flush(); }
         }
-        let n = self.handles.len();
+        let n = self.handles.len() + self.ram_handles.len();
+        self.ram_handles.clear();
         self.handles.clear();
         self.volumes.clear();
         self.decoders.clear();
@@ -848,19 +1124,23 @@ impl Vfs {
     /// readers use this to apply CRLF -> LF translation the way the real
     /// CRT does; see `crt_fgetws` in `pocket-winceapi`.
     pub fn mark_text_mode(&mut self, handle: u32) {
-        if let Some(of) = self.handles.get_mut(&handle) {
-            of.text_mode = true;
+        if let Some(of) = self.ram_handles.get(&handle) {
+            if let Ok(mut file) = of.lock() { file.text_mode = true; }
+        }
+        if let Some(of) = self.handles.get(&handle) {
+            if let Ok(mut file) = of.lock() { file.text_mode = true; }
         }
     }
 
     /// Whether a handle was opened by `fopen`/`_wfopen` in text mode
     /// (no `b` in the mode string). Non-stdio handles are binary.
     pub fn is_text_mode(&self, handle: u32) -> bool {
-        self.handles.get(&handle).is_some_and(|of| of.text_mode)
+        self.ram_handles.get(&handle).is_some_and(|of| of.lock().is_ok_and(|file| file.text_mode)) ||
+        self.handles.get(&handle).is_some_and(|of| of.lock().is_ok_and(|file| file.text_mode))
     }
 
     pub fn is_open(&self, handle: u32) -> bool {
-        self.handles.contains_key(&handle)
+        self.ram_handles.contains_key(&handle) || self.handles.contains_key(&handle)
     }
 
     /// Whether `handle` came from opening the Gizmondo registration service.
@@ -881,7 +1161,9 @@ impl Vfs {
     }
 
     pub fn feed_mp3_decoder_data(&mut self, handle: u32, data: &[u8]) -> Option<u64> {
-        let state = self.decoders.get_mut(&handle)?;
+        let decoder = self.decoders.get(&handle)?;
+        let mut guard = decoder.lock().ok()?;
+        let state = &mut *guard;
         state.bytes_seen = state.bytes_seen.saturating_add(data.len() as u64);
         state.encoded.extend_from_slice(data);
         // Preserve the decoder reservoir/filter history and incomplete frame tail
@@ -917,7 +1199,8 @@ impl Vfs {
             state.decoded_offset += frame_bytes;
         }
         if state.decoded_offset > 0 {
-            state.encoded.drain(..state.decoded_offset);
+            let consumed = state.decoded_offset;
+            state.encoded.drain(..consumed);
             state.decoded_offset = 0;
         }
         state.started |= decoded_any;
@@ -925,34 +1208,50 @@ impl Vfs {
     }
 
     pub fn feed_mp3_decoder(&mut self, handle: u32, len: u64) -> Option<u64> {
-        let state = self.decoders.get_mut(&handle)?;
+        let decoder = self.decoders.get(&handle)?;
+        let mut guard = decoder.lock().ok()?;
+        let state = &mut *guard;
         state.bytes_seen = state.bytes_seen.saturating_add(len);
         Some(state.bytes_seen)
     }
 
-    pub fn mp3_decoder_handles(&self) -> Vec<u32> { self.decoders.keys().copied().collect() }
+    pub fn mp3_decoder_handles(&self) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        self.decoders.iter().filter_map(|(&handle, state)|
+            seen.insert(state.lock().unwrap().stream_key).then_some(handle)).collect()
+    }
+    pub fn mp3_stream_key(&self, handle: u32) -> u32 {
+        self.decoders.get(&handle).map(|v| v.lock().unwrap().stream_key).unwrap_or(handle)
+    }
 
     pub fn mp3_callback_event(&self, handle: u32) -> u32 {
-        self.decoders.get(&handle).map(|v| v.callback_event).unwrap_or(0)
+        self.decoders.get(&handle).map(|v| v.lock().unwrap().callback_event).unwrap_or(0)
     }
 
     pub fn start_mp3_decoder(&mut self, handle: u32, callback_event: u32) {
         self.stop_mp3_decoder(handle);
-        if let Some(v) = self.decoders.get_mut(&handle) {
+        if let Some(decoder) = self.decoders.get(&handle) {
+            let mut guard = decoder.lock().unwrap();
+            let v = &mut *guard;
             v.callback_event = callback_event;
             v.started = true;
         }
     }
 
     pub fn queue_mp3_buffer(&mut self, handle: u32, end_samples: u64) {
-        if let Some(v) = self.decoders.get_mut(&handle) {
-            v.pending.push_back((end_samples, v.bytes_seen));
+        if let Some(decoder) = self.decoders.get(&handle) {
+            let mut guard = decoder.lock().unwrap();
+            let v = &mut *guard;
+            let bytes_seen = v.bytes_seen;
+            v.pending.push_back((end_samples, bytes_seen));
         }
     }
 
     /// Driver buffer swaps are driven by consumed PCM, not submission time.
     pub fn service_mp3_decoder(&mut self, handle: u32, cursor: u64) -> Option<(u32, usize)> {
-        let v = self.decoders.get_mut(&handle)?;
+        let decoder = self.decoders.get(&handle)?;
+        let mut guard = decoder.lock().ok()?;
+        let v = &mut *guard;
         if !v.started || v.paused { return None; }
         let mut completed = 0;
         while let Some(&(end_samples, end_bytes)) = v.pending.front() {
@@ -974,7 +1273,9 @@ impl Vfs {
     }
 
     pub fn stop_mp3_decoder(&mut self, handle: u32) {
-        if let Some(v) = self.decoders.get_mut(&handle) {
+        if let Some(decoder) = self.decoders.get(&handle) {
+            let mut guard = decoder.lock().unwrap();
+            let v = &mut *guard;
             v.decoder = RawDecoder::new();
             v.encoded.clear();
             v.decoded_offset = 0;
@@ -992,25 +1293,30 @@ impl Vfs {
     }
 
     pub fn mp3_decoder_paused(&self, handle: u32) -> bool {
-        self.decoders.get(&handle).map(|v| v.paused).unwrap_or(false)
+        self.decoders.get(&handle).map(|v| v.lock().unwrap().paused).unwrap_or(false)
     }
 
     pub fn pause_mp3_decoder(&mut self, handle: u32, paused: bool) {
-        if let Some(state) = self.decoders.get_mut(&handle) {
+        if let Some(decoder) = self.decoders.get(&handle) {
+            let mut guard = decoder.lock().unwrap();
+            let state = &mut *guard;
             state.paused = paused;
         }
     }
 
     pub fn set_mp3_decoder_volume(&mut self, handle: u32, volume: u32) {
-        if let Some(state) = self.decoders.get_mut(&handle) {
+        if let Some(decoder) = self.decoders.get(&handle) {
+            let mut guard = decoder.lock().unwrap();
+            let state = &mut *guard;
             state.volume = volume;
         }
     }
 
     pub fn mp3_decoder_reply(&self, handle: u32, code: u32, len: usize) -> Vec<u8> {
-        let Some(state) = self.decoders.get(&handle) else {
+        let Some(decoder) = self.decoders.get(&handle) else {
             return vec![0; len];
         };
+        let state = decoder.lock().unwrap();
         let value = if code == 0x001d_1030 {
             1
         } else if code == 0x001d_1010 {
@@ -1038,7 +1344,9 @@ impl Vfs {
     }
 
     pub fn take_mp3_decoder_pcm(&mut self, handle: u32) -> Option<(u32, u16, Vec<i16>)> {
-        let state = self.decoders.get_mut(&handle)?;
+        let decoder = self.decoders.get(&handle)?;
+        let mut guard = decoder.lock().ok()?;
+        let state = &mut *guard;
         if state.pcm.is_empty() || state.sample_rate == 0 || state.channels == 0 {
             return None;
         }
@@ -1060,6 +1368,56 @@ pub enum SeekKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_division_ram_files_share_capacity_and_preserve_failed_writes() {
+        let ram = crate::memory_division::MemoryDivision::new(64 * 4096, 8).unwrap();
+        let mut parent = Vfs::new();
+        parent.attach_ram(Some(ram.clone()));
+        assert!(parent.create_dir("/temp"));
+        let h = parent.open("/temp/test", Access::ReadWrite, true).unwrap();
+        assert_eq!(parent.write(h, b"hello"), Some(5));
+        assert!(parent.duplicate_file(h, 0xd2000000));
+        assert_eq!(parent.seek(0xd2000000, 0, SeekKind::Begin), Some(0));
+        let mut child = Vfs::new();
+        child.attach_ram(Some(ram.clone()));
+        let read = child.open("/temp/test", Access::Read, false).unwrap();
+        let mut bytes = [0; 5];
+        assert_eq!(child.read(read, &mut bytes), Some(5));
+        assert_eq!(&bytes, b"hello");
+        let used = ram.snapshot().store_used;
+        assert_eq!(parent.write(h, &vec![7; 8 * 4096]), None);
+        assert_eq!(ram.snapshot().store_used, used);
+        assert_eq!(parent.size(h), Some(5));
+        ram.resize(12).unwrap();
+        assert_eq!(parent.write(h, &vec![7; 8 * 4096]), Some(8 * 4096));
+        assert_eq!(child.size(read), Some(8 * 4096));
+        assert!(parent.delete_file("/temp/test"));
+        assert!(parent.ram_file_size("/temp/test").is_none());
+        assert!(ram.resize(8).is_err()); // open descriptions keep data alive
+        assert!(parent.close(h));
+        assert!(parent.close(0xd2000000));
+        assert!(child.close(read));
+        ram.resize(8).unwrap();
+        assert!(parent.remove_ram_dir("/temp"));
+        assert_eq!(ram.snapshot().store_used, 0);
+    }
+
+    #[test]
+    fn memory_division_flash_and_card_are_not_ram_store() {
+        let ram = crate::memory_division::MemoryDivision::default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut vfs = Vfs::new();
+        vfs.attach_ram(Some(ram.clone()));
+        vfs.mount_save_dir("/Flash Disk", dir.path());
+        vfs.mount_read_only("/SD Card", dir.path());
+        let h = vfs.open("/Flash Disk/save", Access::Write, true).unwrap();
+        assert_eq!(vfs.write(h, &vec![0; 4096]), Some(4096));
+        assert_eq!(ram.snapshot().store_used, 0);
+        assert!(vfs.open("/SD Card/missing", Access::Write, true).is_none());
+        assert!(vfs.open("/../escape", Access::Write, true).is_none());
+        assert!(vfs.open("/missing/parent/file", Access::Write, true).is_none());
+    }
 
     #[test]
     fn vfs_missing_file_does_not_borrow_from_another_existing_directory() {
@@ -1207,6 +1565,32 @@ mod tests {
         assert!(expected.len() > 44100 * 2);
         assert_eq!(decode(&data, 32768), expected);
         assert_eq!(decode(&data, 701), expected);
+    }
+
+    #[test]
+    fn vfs_duplicate_file_shares_position_and_survives_independent_close() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stream.bin"), b"abcdef").unwrap();
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", dir.path());
+        let original = v.open("\\Data\\stream.bin", Access::ReadWrite, false).unwrap();
+        let alias = 0xd2000000;
+        assert!(v.duplicate_file(original, alias));
+        let mut bytes = [0u8; 2];
+        assert_eq!(v.read(original, &mut bytes), Some(2));
+        assert_eq!(&bytes, b"ab");
+        assert_eq!(v.read(alias, &mut bytes), Some(2));
+        assert_eq!(&bytes, b"cd");
+        v.mark_text_mode(original);
+        assert!(v.is_text_mode(alias));
+        assert!(v.close(original));
+        assert!(!v.is_open(original));
+        assert_eq!(v.read(alias, &mut bytes), Some(2));
+        assert_eq!(&bytes, b"ef");
+        assert_eq!(v.seek(alias, 0, SeekKind::Begin), Some(0));
+        assert_eq!(v.write(alias, b"XY"), Some(2));
+        assert!(v.close(alias));
+        assert_eq!(std::fs::read(dir.path().join("stream.bin")).unwrap(), b"XYcdef");
     }
 
     #[test]

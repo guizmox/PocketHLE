@@ -290,6 +290,8 @@ fn alloc_object_with(
         .alloc(4 + private.len() as u32 * 4)
         .unwrap_or(0);
     if table == 0 || object == 0 {
+        if table != 0 { ctx.kernel.heap.free(table); }
+        if object != 0 { ctx.kernel.heap.free(object); }
         return Ok(0);
     }
     write_vtable(ctx, table, vtable)?;
@@ -436,13 +438,14 @@ fn create_surface_described(
 ) -> Result<DispatchOutcome, KernelError> {
     ensure_framebuffer(ctx)?;
     let object = alloc_object_with(ctx, &SURFACE_METHODS, FAKE_SURFACE, &record.private_words())?;
+    if object == 0 && !record.primary { ctx.kernel.heap.free(record.pixels); }
     if out != 0 {
         ctx.cpu.write_mem(out, &object.to_le_bytes())?;
     }
     Ok(DispatchOutcome::ReturnedR0(if object != 0 {
         0
     } else {
-        0x8000_4005
+        0x8007_000e
     }))
 }
 
@@ -455,15 +458,15 @@ fn create_surface_described(
 /// clears the back buffer with a `DDBLT_COLORFILL` every frame and only
 /// then draws, so with one shared buffer the clear wiped the picture and
 /// the present put nothing back, and the frame counter stopped at 1.
-fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> SurfaceRecord {
+fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> Result<SurfaceRecord, u32> {
     let panel = panel_record(ctx);
     if desc == 0 {
-        return panel;
+        return Ok(panel);
     }
     let word = |ctx: &mut CallCtx<'_>, offset: u32| ctx.cpu.read_u32_le(desc + offset).unwrap_or(0);
     let size = word(ctx, 0);
     if !matches!(size, DDSURFACEDESC_SIZE | 124) {
-        return panel;
+        return Ok(panel);
     }
     let flags = word(ctx, 4);
     let caps = if flags & 0x0000_0001 != 0 {
@@ -473,7 +476,7 @@ fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> SurfaceRecord {
     };
     if caps & 0x0000_0040 != 0 {
         // DDSCAPS_PRIMARYSURFACE
-        return panel;
+        return Ok(panel);
     }
     let width = if flags & 0x0000_0004 != 0 {
         word(ctx, 12)
@@ -486,27 +489,33 @@ fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> SurfaceRecord {
         panel.height
     };
     if width == 0 || height == 0 {
-        return panel;
+        return Ok(panel);
     }
-    let pitch = width * 2;
-    match ctx.kernel.heap.alloc(pitch * height) {
-        Some(pixels) if pixels != 0 => SurfaceRecord {
+    let pitch = width.checked_mul(2).ok_or(0x8007_0057u32)?;
+    let bytes = pitch.checked_mul(height).ok_or(0x8007_0057u32)?;
+    match ctx.kernel.heap.alloc(bytes) {
+        Some(pixels) if pixels != 0 => Ok(SurfaceRecord {
             pixels,
             width,
             height,
             pitch,
             primary: false,
-        },
-        // Out of heap: aliasing the panel is worse than a private
-        // buffer but better than a surface with nowhere to draw.
-        _ => panel,
+        }),
+        _ => Err(0x8007_000e), // E_OUTOFMEMORY: never alias an off-screen buffer.
+
     }
 }
 
 fn ddraw_create_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let desc = ctx.arg_u32(1)?;
     let out = ctx.arg_u32(2)?;
-    let record = surface_from_desc(ctx, desc);
+    let record = match surface_from_desc(ctx, desc) {
+        Ok(record) => record,
+        Err(error) => {
+            if out != 0 { ctx.cpu.write_mem(out, &0u32.to_le_bytes())?; }
+            return Ok(DispatchOutcome::ReturnedR0(error));
+        }
+    };
     let outcome = create_surface_described(ctx, out, record)?;
     // A game that asked for a specific off-screen size expects the
     // descriptor it passed in to come back filled with the pitch and the
@@ -524,12 +533,19 @@ fn ddraw4_create_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     let desc = ctx.arg_u32(1)?;
     let out = ctx.arg_u32(2)?;
     ensure_framebuffer(ctx)?;
-    let record = surface_from_desc(ctx, desc);
+    let record = match surface_from_desc(ctx, desc) {
+        Ok(record) => record,
+        Err(error) => {
+            if out != 0 { ctx.cpu.write_mem(out, &0u32.to_le_bytes())?; }
+            return Ok(DispatchOutcome::ReturnedR0(error));
+        }
+    };
     let object = alloc_object_with(ctx, &SURFACE4_METHODS, FAKE_SURFACE, &record.private_words())?;
     if out != 0 {
         ctx.cpu.write_mem(out, &object.to_le_bytes())?;
     }
-    Ok(DispatchOutcome::ReturnedR0(if object == 0 { 0x8000_000e } else { 0 }))
+    if object == 0 && !record.primary { ctx.kernel.heap.free(record.pixels); }
+    Ok(DispatchOutcome::ReturnedR0(if object == 0 { 0x8007_000e } else { 0 }))
 }
 
 /// Slot 8 is `FlipToGDISurface`, which takes no arguments at all.
@@ -997,6 +1013,34 @@ mod tests {
     };
 
     #[test]
+    fn offscreen_allocation_failure_returns_error_without_aliasing_panel() {
+        use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        use super::*;
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.write_mem(0x1000, &124u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1004, &6u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1008, &240u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x100c, &320u32.to_le_bytes()).unwrap();
+        let thunk = Thunk { thunk_va: 0, iat_va: 0, dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("CreateSurface".into()), friendly_name: None };
+        for handler in [ddraw_create_surface as crate::Handler, ddraw4_create_surface] {
+            cpu.write_mem(0x1100, &0x12345678u32.to_le_bytes()).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x1100).unwrap();
+            assert_eq!(handler(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(),
+                DispatchOutcome::ReturnedR0(0x8007_000e));
+            assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0);
+        }
+        cpu.write_mem(0x100c, &u32::MAX.to_le_bytes()).unwrap();
+        assert_eq!(ddraw_create_surface(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(),
+            DispatchOutcome::ReturnedR0(0x8007_0057));
+    }
+
+    #[test]
     fn directdraw4_startup_keeps_ce_interfaces_and_surface_storage_distinct() {
         use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
         use pocket_kernel::Thunk;
@@ -1006,6 +1050,7 @@ mod tests {
         let mut kernel = crate::gx::tests::fresh_kernel();
         cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
         cpu.map_region(0x5000_0000, 0x100000, Prot::READ | Prot::WRITE).unwrap();
+        kernel.heap = pocket_kernel::Heap::new(0x5000_0000, 0x100000);
         let exports = kernel.dynamic_exports.entry(FAKE_MODULE_HANDLE).or_default();
         let mut address = 0x7000_1000u32;
         for name in DDRAW_METHODS.iter().chain(DDRAW4_METHODS.iter())

@@ -235,16 +235,11 @@ A handler returns a `DispatchOutcome` (`:521`):
 | `JumpTo(va)` | Resume the guest at `va` instead of `LR`. Used to block modally by re-entering the same thunk — see `message_box_w`. |
 | `Halt(reason)` | Stop the run loop. `ExitProcess`, `TerminateProcess`. |
 
-**`resolve_handler` memoizes by `thunk_va`, including negative results**
-(`crates/pocket-winceapi/src/lib.rs:280`). Two consequences:
-
-* Registering a handler after the first call to a thunk has no effect on
-  that thunk.
-* In tests, every `Thunk` you build must get a **distinct** `thunk_va`.
-  The `fake_thunk` helper (`:459`) leaves it at 0, so a loop that reuses
-  it answers every lookup from the first entry's cache — this has already
-  produced one confusing test failure.
-
+**`resolve_handler` memoizes by `thunk_va` and import identity, including negative results**
+(`crates/pocket-winceapi/src/lib.rs:280`). Runtime DLL slots may be reused after `FreeLibrary`: the cached DLL,
+binding and friendly name must still match before a cached handler is used.
+Changed import metadata at the same address replaces the cache entry. Handler
+registration explicitly clears the cache.
 Unresolved lookups fall back to `ignored_dll` → `ignored_dll_stub`.
 `IGNORED_DLLS` (`:83`) currently holds only the `fmodce` prefix, with a
 `FSOUND_GetVersion` → `0x4070_0000` override so version checks pass.
@@ -527,8 +522,8 @@ lets the host present frames while the box is up.
 
 ## 10. Threads and the cooperative scheduler
 
-One guest thread runs at a time. There is no host thread per guest
-thread; the scheduler is cooperative and the only scheduling points are
+Within each process, one guest thread runs at a time. There is no host
+thread per guest thread; the scheduler is cooperative and the only scheduling points are
 `Sleep`, `WaitForSingleObject`, `WaitForMultipleObjects`, `GetMessageW`
 and `PeekMessageW`. A guest that spins without calling one of those
 starves every other thread by construction.**A blocking primary-thread `GetMessageW` is itself a scheduling
@@ -894,3 +889,271 @@ Inferring the root only from directories that contain a file yields
 `None`; materialization then falls back to basenames and resource
 `FindFirstFileW` searches fail. Keep this behavior pinned by
 `nested_install_subdirectories_share_their_true_root` in `pocket-cab`.
+
+
+## 15. Image and thread memory lifetimes
+
+The ARM EXE loader reserves CPU image pages, completes aliases and IAT
+fixups, then discards the section payloads in Process.image. That object
+retains section metadata; resources move to KernelState.resources. The CPU
+keeps backing bytes only for pages not yet committed; see §19. MIPS and
+CPU wrappers without deferred-page support retain the eager fallback.
+
+Runtime modules retain their exact section and thunk mappings in
+`LoadedModule.resident_regions`. `FreeLibrary` decrements the load count;
+the last reference calls `DllMain(base, DLL_PROCESS_DETACH, NULL)` before
+unmapping and refunding resident RAM. A rejected PROCESS_ATTACH and partial
+mapping failures also release their mappings. Module slots are reused, so
+CPU hooks, execution/permission history, translated code and dispatcher
+cache identities must not survive as stale state for another image.
+Resource satellites carry an owner reference and are released with their
+parent unless explicitly retained elsewhere. HLE system modules are pinned
+for the process lifetime. Native dependencies are recursively bound and
+retained through graph reachability, as described in §18.
+
+Thread stack lifetime is separate from handle lifetime. Natural return,
+`ExitThread` and `TerminateThread` release the stack; handles and exit codes
+remain available to waits, duplicates and `GetExitCodeThread`. Private
+stacks return to the already mapped heap arena and refund their resident
+page charge. External stacks are unmapped and their address slots reused;
+the main stack is unmapped when its thread exits even if workers continue.
+Creation failures roll back their reservation. Keep the compatibility guard
+pages and preserve the rule that CreateThread returns to its creator.
+
+## 16. Guest RAM diagnostic and failure contracts
+
+`tools/ramtest` contains a freestanding ARM diagnostic, generated PE fixtures
+and an importable Gizmondo ZIP. Its title marker selects the existing profile;
+never add a game-name branch for the diagnostic. `pocket-core/tests/ram_guest.rs`
+runs the actual shipped image with Unicorn and verifies its report and teardown.
+Rebuild fixtures with `build.py` whenever the guest C or imports change.
+
+LocalFree failure returns its input handle; HeapFree failure returns zero.
+Size queries and realloc failures must set the calling thread's error and
+preserve the original allocation. A failed realloc copy releases the new
+reservation before propagating a CPU error. Reallocated tails follow the
+existing zero-filled heap policy. This still uses one backing process heap;
+independent HeapCreate arenas and movable local handles are not implemented.
+LoadLibrary errors distinguish absent modules, invalid images, exhausted RAM
+and rejected attach. Missing exports and invalid module handles set errors.
+
+Off-screen DirectDraw allocation failure must return E_OUTOFMEMORY and a null
+output, never substitute the panel mapping. Check dimension multiplication
+before allocation. Failed object allocation rolls back partial heap blocks and
+the new pixel buffer. Test fixtures must give the allocator the same arena
+capacity as the mapped CPU heap. Sleep already switches directly to a ready
+worker; scheduler tests must preserve that behavior.
+
+Cross-process handle tests cover closure of the original and intermediate
+aliases, parent teardown, retained shared state, final reference cleanup and
+rejected use of closed aliases. They do not imply general concurrent process
+execution or remote thread control, which remain outside the current model.
+
+The guest diagnostic writes its report to `\Flash Disk\RAMTEST.TXT`, not
+beside its executable on the read-only SD card. The Unicorn integration test
+must use a read-only SD mount and writable Flash Disk, as the desktop runner does.
+
+
+## 17. Native DLL thread and normal process notifications
+
+`dll_lifecycle` retains registers, SP, FPSCR and the calling thread's error
+while native DllMain runs through the dedicated return hook at 0xF0000008.
+Do not use the descending worker-exit trampoline slots for callback returns.
+Worker attach is delivered on its first execution before its entry point,
+not from CreateThread. No retroactive attach is sent when LoadLibrary runs
+on an existing thread. Attach visits executable DLLs in load order; clean
+thread detach visits them in reverse order, on the exiting thread, before
+its stack is reclaimed. Passive resource satellites receive no callbacks.
+Callback return values for thread notifications and process detach are ignored.
+
+ExitProcess and top-level EXE return deliver PROCESS_DETACH with a non-null
+reserved argument. Explicit FreeLibrary keeps reserved NULL. All native DLLs
+stay mapped until the entire process-detach sequence returns, then mappings,
+thunks and RAM charges are released, regardless of remaining load references.
+The calling stack survives until then too. Main ExitThread while workers remain
+receives THREAD_DETACH; the last worker triggers process detach on its own
+stack rather than attempting callbacks on the already released main stack.
+Process exit does not send per-thread detach to the other live threads.
+
+Forced TerminateThread suppresses its thread detach; TerminateProcess and the
+CE implicit termination trap keep their forced teardown path without guest DLL
+callbacks. Host Stop and slice-budget exhaustion are not normal process exit.
+A callback sequence excludes scheduling other workers, and API-boundary
+preemption does not interrupt it. A yielded worker callback retains its frame
+until its owner resumes. Synchronizing across threads, recursively loading DLLs
+or calling FreeLibrary from DllMain remains outside the documented safe usage
+of the CE entry point; do not advertise those as supported loader behavior.
+
+The shipped diagnostic checks callback reason/order, thread identity,
+reserved arguments, FALSE return handling, saved error state, natural worker
+return, ExitThread, termination of a suspended worker, and process cleanup.
+Unicorn fixtures additionally cover explicit ExitProcess and the main-exits-first
+case. RAMTEST.TXT covers 128 checks; DLLTEST.TXT receives its final PASS during
+process detach, after the user dismisses the final message box.
+
+
+## 18. Runtime native dependency graphs
+
+LoadLibrary maps the complete native dependency graph before entering any
+PROCESS_ATTACH callback. HLE imports retain their existing hooks; native
+imports bind directly to relocated guest exports, by name or ordinal. Resolve
+new dependencies beside the importing DLL first (case-insensitive filename),
+then through the existing module search. Publish exports before traversing
+imports so cycles bind without allocating duplicate copies. Native forwarder
+exports remain rejected by prepare_runtime_module; static EXE import loading
+is not added by this runtime loader. Image page commitment follows §19.
+
+LoadedModule.dependencies stores unique native import edges. Its refcount
+counts explicit LoadLibrary references, not imported edges. A dependency first
+loaded by an import starts with zero explicit references. A cached explicit
+LoadLibrary adds one, even when the module originally came from an import.
+FreeLibrary collects modules unreachable from remaining explicit roots;
+cycles are therefore reclaimed together without leaking reference counts.
+Resource satellites retain their existing owner-reference contract.
+
+New modules are ordered dependency-first (DFS postorder, with each cycle
+visited once). PROCESS_ATTACH follows that order; normal detach reverses it.
+Keep every collected mapping and initialized dependency resident until all
+callbacks finish, then unmap and refund the whole unreachable group.
+The attached flag excludes partially initialized modules from thread/process
+notifications. On failed attach, only completed new attaches receive detach,
+in reverse order, before releasing the entire new graph. Already resident
+initialized dependencies survive a failed importer load.
+
+Missing dependency returns error 126, missing export 127, rejected attach
+1114. Mapping/binding failures roll back all images created by that load,
+exports, hooks, resident RAM and the module-slot allocator; existing modules
+are preserved. Do not turn unresolved native imports into successful HLE
+stubs. DllMain recursive LoadLibrary/FreeLibrary usage remains outside the
+supported CE entry-point contract described in §17.
+
+The shipped ARM diagnostic checks direct imports, ordinal imports, shared
+and explicitly retained dependencies, missing dependencies/exports, rejected
+attach and circular imports. DEPTEST.TXT records and verifies the complete
+attach/detach sequence and ends with DEPTEST_RESULT PASS. All three executable
+exit variants verify this in addition to RAMTEST.TXT and DLLTEST.TXT.
+
+
+## 19. Demand commitment of ARM image pages
+
+Cpu::map_image_region reserves page-aligned image ranges and defers backend
+storage. A cold page contains only its initialized backing bytes (or no bytes
+for zero-fill) and its original protection. First guest fetch/read/write or
+an HLE host read/write commits that page, restores initialized data and zeros
+the rest, then discards the backing copy. Subsequent writes remain in the
+resident backend page; never restore old backing over dirty data. The PE is
+still parsed and relocated at load time; this is deferred physical commitment,
+not a new disk-streaming reader or an eviction mechanism.
+
+Unicorn's virtual TLB fill materializes cold pages before supplying a physical
+translation. The architectural-TLB fallback uses its existing invalid-memory
+hook. Do not install per-instruction or valid read/write hooks: those disable
+normal fast paths. Host helpers must page in too; Unicorn's host memory calls
+can reenter TLB hooks, so never hold an ImagePages/GuestMap RefCell borrow
+across mem_write or mem_unmap. StubCpu follows the same host-access semantics.
+The legacy low slot alias remains eager and MIPS keeps its existing loader.
+
+ImageMemory is a shared per-process physical-page counter attached to the
+same MemoryDivision as heaps/stacks. Heap::program_pages includes it. Reserve
+ranges do not consume program RAM. Each successful page-in acquires one page;
+allocation or initialization failure releases the charge and leaves the page
+retryable. Profile switches include resident image pages and roll back on
+insufficient capacity; rebinding the same device must not double-charge.
+
+Runtime DLL mapping records complete virtual ranges for cleanup, but only
+thunks and image pages actually accessed are charged. Bind imports and
+preflight required entry pages before starting attach callbacks. Image
+page-in OOM during that transaction returns LoadLibrary NULL/error 8 and
+releases all new reservations/exports/charges/slots. Guest-access page-in
+OOM stops with an explicit CPU fault rather than silently overcommitting RAM.
+Do not eagerly materialize a whole image merely to query exports or unload it.
+
+Unmap validates the entire image range, removes resident backend pages and
+cold backing, refunds only resident charges, and clears hooks/TLB/code caches
+before address reuse. Pages cannot reappear after unload; a reload restores
+original initializers and zero-fill instead of the previous dirty data.
+
+The RAMTEST v5 image warms its own code/data before baseline measurements so
+unrelated first-use pages cannot change an allocation/refund comparison.
+pageprobe.dll separately tests cold code, initialized data, zero-fill, repeated
+accesses, untouched tails, dirty-data persistence and unload/reload. The three
+Unicorn process-exit variants still run all DLL lifecycle/dependency tests.
+
+
+## 20. TLS context and API errors
+
+TLS slot allocation is per process (64-bit bitmap); slot values are per thread.
+The KData lpvTls pointer still addresses the active guest array at 0xFFFFCB00.
+KernelState.tls_owner identifies that array's owner. On a context switch, save
+its contents and restore the target thread's snapshot (or zeros on first entry)
+before executing any guest code or DllMain. Read the actual guest window rather
+than reconstructing values from TlsSetValue calls: CE CRTs write it inline.
+The central run-loop boundary covers all scheduler transitions, including a
+worker-to-worker handoff. TLS handlers also synchronize for direct API dispatch.
+The fast path for the same owner performs no CPU memory access.
+
+TlsAlloc and TlsFree clear the selected slot in the active window and every
+saved thread, avoiding stale values after reuse. Publish the bitmap change
+only after the guest write succeeds. Exhaustion returns TLS_OUT_OF_INDEXES
+and error 8. Invalid Get/Set/Free indices and Free on an unallocated slot fail
+with error 87. CE Get/Set deliberately validate only the range 0..63, not the
+allocation bitmap. Successful TlsGetValue clears the calling thread's error
+(also when returning NULL); successful Alloc/Set/Free preserve it.
+
+Keep TLS available through normal thread/process detach notifications. Drop
+the saved array only after the thread is finished; never re-save a finished
+outgoing owner. Process teardown clears snapshots and the slot bitmap after
+normal detach. Values are opaque pointers: cleanup never frees pointees.
+Host snapshots do not introduce a second guest mapping or physical RAM charge.
+Each process owns its own KData window, bitmap and snapshots; switching back
+to a preserved launcher retains its TLS state with the rest of its CPU/state.
+
+WaitForMultipleObjects validates count and the handle-array pointer before
+reading it. Parameter failures return WAIT_FAILED/error 87; null, invalid-value
+and closed handles return WAIT_FAILED/error 6. Failure must not consume a
+signalled event or semaphore. Preserve typed image-page OOM instead of treating
+it as an invalid pointer. Existing compatibility for unmodeled wait-object
+classes is unchanged; this audit covers TLS and the RAM/thread/handle error
+contracts, not a claim that every emulated WinCE API is fully conformant.
+
+The ARM v6 diagnostic runs 128 checks, including actual main/two-worker TLS
+switches, inline access, zero initialization/reuse, LastError, exhaustion,
+invalid waits and TLS availability/modification in native DllMain attach and
+detach. All three process-exit variants verify reports and empty TLS snapshots
+at teardown. No production instrumentation or game-name special case is added.
+
+
+## 21. Independent processes and remote thread controls
+
+Generic CreateProcessW launches a CPU/kernel on its own host thread. A shared
+handle domain assigns unique process/thread IDs and provides a gate around
+API dispatch and teardown. Do not hold this gate during guest CPU execution,
+frame hooks or startup acknowledgement: recursive SDCreateProcess and remote
+startup would deadlock. SDCreateProcess retains the preserved-parent foreground
+handoff, independent of the generic CreateProcessW behavior.
+
+Creation is transactional: resolve/validate the image, construct the child,
+attach shared handles and physical RAM, initialize WinMain/GetCommandLineW,
+acknowledge readiness, write PROCESS_INFORMATION, then release the startup gate.
+An invalid output pointer must never execute the child; initialization/OOM
+failure returns an API error and refunds resources. Dead callers cancel held
+children. CE fInheritHandles must be FALSE; duplication remains explicit.
+Supported creation flags are 0 and CREATE_SUSPENDED; other flags fail with
+ERROR_NOT_SUPPORTED instead of pretending to implement debugging.
+
+Remote SuspendThread/ResumeThread update authoritative counts in the domain
+and queue requests for the owning CPU. Apply requests at slice boundaries and
+before dispatching an already reached API hook. Save the exact continuation
+before parking; never execute the stale hook after changing its owner/PC.
+Remote termination does not execute guest detach callbacks. Preserve primary
+thread exit status while workers keep the process alive; final worker/process
+exit signals the appropriate object and releases stacks/TLS/abandoned mutexes.
+A child may outlive its parent: drop the parent's emulator before joining
+children, while shared handles/RAM remain alive through child references.
+
+The desktop session shares stop/input but only its foreground process submits
+frames. All process jobs must finish before completing the session. API state
+is per process; thread-local multimedia stays on the owning host thread.
+ARM v7 verifies all 132 RAM checks plus the separate process/orphan reports in
+three exit variants; the real desktop runner executes the same process probes.
+No temporary instrumentation or game-specific exception is introduced.

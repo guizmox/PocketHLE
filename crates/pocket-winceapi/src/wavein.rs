@@ -88,7 +88,8 @@ fn notify(ctx:&mut CallCtx<'_>,h:u32,meta:WaveOutDevice,msg:u32,hdr:u32) {
     match meta.callback_kind {
         WaveCallbackKind::Function=>ctx.kernel.wave_out.function_done.push_back((h,msg,hdr,0)),
         WaveCallbackKind::Event=> {
-            if let Some(e)=ctx.kernel.events.get_mut(&meta.callback_target) {
+            let key = crate::coredll::event_key(ctx.kernel, meta.callback_target);
+            if let Some(mut e)=ctx.kernel.events.get_mut(&key) {
                 e.signalled=true;
             }
         }

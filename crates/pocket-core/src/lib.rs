@@ -138,6 +138,22 @@ impl Emulator {
         .context("main emulator loop")
     }
 
+    /// Configure CE WinMain's UTF-16 argument and GetCommandLine before execution.
+    pub fn set_startup_command_line(&mut self, command: &str) -> Result<()> {
+        let process = self.process.as_mut().context("no PE loaded")?;
+        let bytes: Vec<u8> = command.encode_utf16().chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes).collect();
+        let old = self.cpu.read_reg(pocket_cpu::regs::ArmReg::R2)?;
+        let address = process.state.heap.alloc(bytes.len() as u32).context("command line out of memory")?;
+        if let Err(error) = self.cpu.write_mem(address,&bytes).and_then(|_| self.cpu.write_reg(pocket_cpu::regs::ArmReg::R2,address)) {
+            process.state.heap.free(address); return Err(error.into());
+        }
+        process.state.heap.free(old);
+        process.state.command_line = Some(command.to_string());
+        process.state.command_line_cache = Some(address);
+        Ok(())
+    }
+
     pub fn process(&self) -> Option<&Process> {
         self.process.as_ref()
     }
@@ -319,6 +335,12 @@ impl Emulator {
         if self.process.is_some() {
             self.apply_screen_size(width, height);
         }
+    }
+
+    /// Configure the CE RAM partition after loading the process. A missing
+    /// profile stays unsupported rather than borrowing another device's RAM.
+    pub fn set_memory_division(&mut self, division: Option<pocket_kernel::memory_division::MemoryDivision>) -> bool {
+        self.process.as_mut().is_some_and(|process| process.state.configure_memory_division(division))
     }
 
     /// Screen geometry the guest will see, once [`Self::load_pe`] has

@@ -18,6 +18,7 @@
 //!   guest holding a pointer into host memory.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Value types we model — the subset Pocket PC titles actually use.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,12 +61,15 @@ impl RegistryValue {
 const HANDLE_BASE: u32 = 0xDEAD_9100;
 
 #[derive(Debug, Default)]
-pub struct Registry {
-    /// Key path (lowercased) -> value name (lowercased) -> value.
+pub(crate) struct RegistryStore {
     keys: HashMap<String, HashMap<String, RegistryValue>>,
-    /// Key path (lowercased) -> the path as first written, for logs.
     display: HashMap<String, String>,
-    /// Open handle -> key path (lowercased).
+    charge: Option<crate::memory_division::StoreCharge>,
+}
+#[derive(Debug, Default)]
+pub struct Registry {
+    store: Arc<Mutex<RegistryStore>>,
+    /// Handles belong to a process; the values belong to the device.
     handles: HashMap<u32, String>,
     next_handle: u32,
 }
@@ -105,8 +109,7 @@ pub fn canonical_key(path: &str) -> String {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            keys: HashMap::new(),
-            display: HashMap::new(),
+            store: Arc::new(Mutex::new(RegistryStore::default())),
             handles: HashMap::new(),
             next_handle: HANDLE_BASE,
         }
@@ -196,36 +199,88 @@ impl Registry {
     }
 
     pub fn contains_key(&self, path: &str) -> bool {
-        self.keys
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).keys
             .contains_key(&canonical_key(path).to_ascii_lowercase())
     }
 
-    pub fn create_key(&mut self, path: &str) {
+    fn stored_pages(keys: &HashMap<String, HashMap<String, RegistryValue>>) -> u32 {
+        let mut bytes = 0u64;
+        for (key, values) in keys {
+            bytes += (key.encode_utf16().count() as u64 + 1) * 2;
+            for (name, value) in values {
+                bytes += (name.encode_utf16().count() as u64 + 1) * 2 + 4 + value.to_bytes().len() as u64;
+            }
+        }
+        crate::memory_division::pages(bytes)
+    }
+    pub fn attach_ram(&mut self, ram: Option<&crate::memory_division::MemoryDivision>) -> bool {
+        let Some(ram) = ram else {
+            let current = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let store = RegistryStore { keys: current.keys.clone(), display: current.display.clone(), charge: None };
+            drop(current);
+            self.store = Arc::new(Mutex::new(store));
+            return true;
+        };
+        if Arc::ptr_eq(&self.store, &ram.registry) { return true; }
+        let current = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut target = ram.registry.lock().unwrap_or_else(|e| e.into_inner());
+        let mut keys = target.keys.clone();
+        // A child's boot defaults must not overwrite the launcher's live
+        // registry. Explicit frontend settings are written after attachment.
+        for (key, values) in &current.keys {
+            let dest = keys.entry(key.clone()).or_default();
+            for (name, value) in values { dest.entry(name.clone()).or_insert_with(|| value.clone()); }
+        }
+        let pages = Self::stored_pages(&keys);
+        if let Some(charge) = &mut target.charge {
+            if !charge.resize(pages) { return false; }
+        } else {
+            let Some(charge) = ram.store_charge(pages) else { return false; };
+            target.charge = Some(charge);
+        }
+        target.keys = keys;
+        for (key, name) in &current.display { target.display.entry(key.clone()).or_insert_with(|| name.clone()); }
+        drop(target);
+        drop(current);
+        self.store = ram.registry.clone();
+        true
+    }
+    pub fn create_key(&mut self, path: &str) -> bool {
         let canonical = canonical_key(path);
         let lower = canonical.to_ascii_lowercase();
-        self.display.entry(lower.clone()).or_insert(canonical);
-        self.keys.entry(lower).or_default();
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        if store.keys.contains_key(&lower) { return true; }
+        let mut keys = store.keys.clone();
+        keys.insert(lower.clone(), HashMap::new());
+        if store.charge.as_mut().is_some_and(|charge| !charge.resize(Self::stored_pages(&keys))) { return false; }
+        store.display.entry(lower).or_insert(canonical);
+        store.keys = keys;
+        true
     }
-
-    pub fn set_value(&mut self, path: &str, name: &str, value: RegistryValue) {
-        self.create_key(path);
-        let lower = canonical_key(path).to_ascii_lowercase();
-        if let Some(values) = self.keys.get_mut(&lower) {
-            values.insert(name.to_ascii_lowercase(), value);
-        }
+    pub fn set_value(&mut self, path: &str, name: &str, value: RegistryValue) -> bool {
+        let canonical = canonical_key(path);
+        let lower = canonical.to_ascii_lowercase();
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut keys = store.keys.clone();
+        keys.entry(lower.clone()).or_default().insert(name.to_ascii_lowercase(), value);
+        if store.charge.as_mut().is_some_and(|charge| !charge.resize(Self::stored_pages(&keys))) { return false; }
+        store.display.entry(lower).or_insert(canonical);
+        store.keys = keys;
+        true
     }
-
-    pub fn value(&self, path: &str, name: &str) -> Option<&RegistryValue> {
-        self.keys
-            .get(&canonical_key(path).to_ascii_lowercase())?
-            .get(&name.to_ascii_lowercase())
+    pub fn value(&self, path: &str, name: &str) -> Option<RegistryValue> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner()).keys
+            .get(&canonical_key(path).to_ascii_lowercase())?.get(&name.to_ascii_lowercase()).cloned()
     }
-
     pub fn delete_value(&mut self, path: &str, name: &str) -> bool {
-        self.keys
-            .get_mut(&canonical_key(path).to_ascii_lowercase())
-            .and_then(|values| values.remove(&name.to_ascii_lowercase()))
-            .is_some()
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let removed = store.keys.get_mut(&canonical_key(path).to_ascii_lowercase())
+            .and_then(|values| values.remove(&name.to_ascii_lowercase())).is_some();
+        if removed {
+            let pages = Self::stored_pages(&store.keys);
+            if let Some(charge) = &mut store.charge { charge.resize(pages); }
+        }
+        removed
     }
 
     /// Hand out a handle for an existing key. Returns `None` when the
@@ -234,7 +289,7 @@ impl Registry {
     pub fn open(&mut self, path: &str) -> Option<u32> {
         let canonical = canonical_key(path);
         let lower = canonical.to_ascii_lowercase();
-        if !self.keys.contains_key(&lower) {
+        if !self.store.lock().unwrap_or_else(|e| e.into_inner()).keys.contains_key(&lower) {
             return None;
         }
         let handle = self.next_handle;
@@ -245,8 +300,8 @@ impl Registry {
 
     /// Create the key if needed, then hand out a handle for it.
     pub fn create_and_open(&mut self, path: &str) -> u32 {
-        self.create_key(path);
-        self.open(path).unwrap_or(HANDLE_BASE)
+        if !self.create_key(path) { return 0; }
+        self.open(path).unwrap_or(0)
     }
 
     pub fn path_for(&self, handle: u32) -> Option<String> {
@@ -264,6 +319,27 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_division_registry_changes_obey_store_capacity() {
+        let ram = crate::memory_division::MemoryDivision::new(64 * 4096, 8).unwrap();
+        let mut registry = Registry::new();
+        assert!(registry.attach_ram(Some(&ram)));
+        assert!(registry.set_value("HKCU\\Test", "value", RegistryValue::Binary(vec![9; 4096])));
+        let used = ram.snapshot().store_used;
+        assert!(!registry.set_value("HKCU\\Test", "value", RegistryValue::Binary(vec![7; 8 * 4096])));
+        assert_eq!(ram.snapshot().store_used, used);
+        assert_eq!(registry.value("HKCU\\Test", "value"), Some(RegistryValue::Binary(vec![9; 4096])));
+        assert!(registry.delete_value("HKCU\\Test", "value"));
+        assert!(ram.snapshot().store_used < used);
+        let mut child = Registry::new();
+        assert!(child.attach_ram(Some(&ram)));
+        assert_eq!(ram.snapshot().store_used, 1);
+        assert!(child.set_value("HKCU\\Test", "shared", RegistryValue::Dword(42)));
+        assert_eq!(registry.value("HKCU\\Test", "shared"), Some(RegistryValue::Dword(42)));
+        drop(registry);
+        assert_eq!(ram.snapshot().store_used, 1); // object store outlives a process
+    }
 
     #[test]
     fn canonicalises_paths_and_roots() {
@@ -287,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             reg.value(r"hklm\software\apps\astraware bejeweled", "savedir"),
-            Some(&RegistryValue::Sz(
+            Some(RegistryValue::Sz(
                 r"\My Documents\My Saved Games\Bejeweled".to_string()
             ))
         );

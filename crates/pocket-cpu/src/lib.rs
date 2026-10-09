@@ -17,6 +17,7 @@
 use thiserror::Error;
 
 pub mod stub;
+pub mod image_pages;
 #[cfg(feature = "unicorn")]
 pub mod unicorn;
 
@@ -113,6 +114,8 @@ pub enum CpuError {
     Unsupported(&'static str),
     #[error("invalid memory access at va=0x{va:08x} size={size}")]
     BadMemory { va: u32, size: u32 },
+    #[error("image page-in: out of program RAM at va=0x{va:08x}")]
+    ImageOutOfMemory { va: u32 },
     #[error("execution stopped at va=0x{0:08x}")]
     Stopped(u32),
     #[error("backend error: {0}")]
@@ -141,6 +144,28 @@ pub trait Cpu {
     fn write_fpscr(&mut self, _value: u32) -> Result<(), CpuError> { Ok(()) }
 
     fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError>;
+    fn supports_image_paging(&self) -> bool { false }
+
+    /// Reserve an image without committing its pages. Return true if the
+    /// backend accounts page-ins through budget, false for an eager fallback.
+    fn map_image_region(&mut self, va: u32, size: u32, prot: Prot, bytes: Vec<u8>,
+        _budget: std::sync::Arc<dyn image_pages::ImagePageBudget>) -> Result<bool, CpuError> {
+        self.map_region(va, size, prot)?;
+        if let Err(error) = self.write_mem(va, &bytes) {
+            let _ = self.unmap_region(va, size);
+            return Err(error);
+        }
+        Ok(false)
+    }
+    /// Remove a mapped range, freeing the backend's page storage.
+    fn unmap_region(&mut self, _va: u32, _size: u32) -> Result<(), CpuError> {
+        Err(CpuError::Unsupported("unmap memory"))
+    }
+    /// Protect already mapped pages. Host read/write helpers deliberately
+    /// remain usable by the loader; permissions govern guest execution.
+    fn protect_region(&mut self, _va: u32, _size: u32, _prot: Prot) -> Result<(), CpuError> {
+        Err(CpuError::Unsupported("page protection"))
+    }
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError>;
     fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, CpuError>;
 

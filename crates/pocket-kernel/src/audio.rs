@@ -179,12 +179,19 @@ impl WaveStream {
 
 }
 
+/// PCM transport shared by aliases of one MAS device, including other processes.
+#[derive(Clone, Default)]
+pub struct MasPlayback(Arc<Mutex<Option<WaveStream>>>);
+impl MasPlayback {
+    fn buffered_samples(&self) -> usize { self.0.lock().unwrap().as_ref().map_or(0, |v| v.buffered_samples()) }
+}
+
 /// Inner state shared between the emulator thread (which calls
 /// [`AudioEngine::push_samples`]) and the cpal output callback.
 struct Shared {
     wave_streams: std::collections::BTreeMap<u32, WaveStream>,
     // MAS1 transport is independent: waveOutReset/Close cannot purge music.
-    mas_streams: std::collections::BTreeMap<u32, WaveStream>,
+    mas_streams: std::collections::BTreeMap<u32, MasPlayback>,
     ring: Vec<i16>,
     /// Number of samples currently in the ring.
     len: usize,
@@ -404,10 +411,15 @@ impl Shared {
                     self.resampler_phase = 0;
                 }
 
-                for stream in self.wave_streams.values_mut().chain(self.mas_streams.values_mut()) {
+                for stream in self.wave_streams.values_mut() {
                     let (l, r) = stream.frame(output_rate);
                     left += l;
                     right += r;
+                }
+                for transport in self.mas_streams.values() {
+                    if let Some(stream) = transport.0.lock().unwrap().as_mut() {
+                        let (l, r) = stream.frame(output_rate); left += l; right += r;
+                    }
                 }
 
                 #[cfg(feature = "audio-cpal")]
@@ -599,7 +611,9 @@ impl AudioEngine {
         s.guest_format_ready = true;
         if let Some(capture) = s.capture.as_mut() { capture.write(samples, format); }
         let active = s.device_active;
-        let stream = s.mas_streams.entry(handle).or_insert_with(|| WaveStream::new(format));
+        let transport = s.mas_streams.entry(handle).or_default();
+        let mut buffer = transport.0.lock().unwrap();
+        let stream = buffer.get_or_insert_with(|| WaveStream::new(format));
         stream.advance_virtual(active);
         stream.samples.extend(samples.iter().copied());
         stream.written += samples.len() as u64;
@@ -607,27 +621,48 @@ impl AudioEngine {
     }
 
     pub fn mas_written_samples(&self, handle: u32) -> u64 {
-        self.shared.lock().ok().and_then(|s| s.mas_streams.get(&handle).map(|v| v.written)).unwrap_or(0)
+        self.shared.lock().ok().and_then(|s| s.mas_streams.get(&handle).map(|v| v.0.lock().unwrap().as_ref().map_or(0, |v| v.written))).unwrap_or(0)
     }
 
     pub fn mas_playback_cursor(&self, handle: u32) -> u64 {
-        let Ok(mut s) = self.shared.lock() else { return 0; };
+        let Ok(s) = self.shared.lock() else { return 0; };
         let active = s.device_active;
-        s.mas_streams.get_mut(&handle).map(|v| { v.advance_virtual(active); v.consumed }).unwrap_or(0)
+        s.mas_streams.get(&handle).map(|transport| {
+            let mut buffer = transport.0.lock().unwrap();
+            buffer.as_mut().map_or(0, |v| { v.advance_virtual(active); v.consumed })
+        }).unwrap_or(0)
     }
 
     pub fn stop_mas_stream(&self, handle: u32) {
-        if let Ok(mut s) = self.shared.lock() { s.mas_streams.remove(&handle); }
+        if let Ok(s) = self.shared.lock() {
+            if let Some(transport) = s.mas_streams.get(&handle) { *transport.0.lock().unwrap() = None; }
+        }
     }
 
     pub fn pause_mas_stream(&self, handle: u32, paused: bool) {
-        if let Ok(mut s) = self.shared.lock() {
+        if let Ok(s) = self.shared.lock() {
             let active = s.device_active;
-            if let Some(v) = s.mas_streams.get_mut(&handle) {
-                v.advance_virtual(active);
-                v.paused = paused;
+            if let Some(transport) = s.mas_streams.get(&handle) {
+                if let Some(v) = transport.0.lock().unwrap().as_mut() { v.advance_virtual(active); v.paused = paused; }
             }
         }
+    }
+
+    pub fn export_mas_stream(&self, key: u32) -> MasPlayback {
+        self.shared.lock().unwrap().mas_streams.entry(key).or_default().clone()
+    }
+    pub fn import_mas_stream(&self, key: u32, transport: MasPlayback) {
+        let format = transport.0.lock().unwrap().as_ref().map(|v| v.format);
+        let mut shared = self.shared.lock().unwrap();
+        if let Some(format) = format {
+            if !shared.mix_format_ready { shared.mix_format = format; shared.mix_format_ready = true; }
+            shared.guest_format_ready = true;
+        }
+        shared.mas_streams.insert(key, transport);
+    }
+    /// Drop this session's output reference without resetting another owner's PCM.
+    pub fn detach_mas_stream(&self, key: u32) {
+        if let Ok(mut shared) = self.shared.lock() { shared.mas_streams.remove(&key); }
     }
 
     pub fn open_wave_stream(&self, handle: u32, format: GuestFormat) {
@@ -856,7 +891,7 @@ impl AudioEngine {
 
     /// Number of samples currently queued.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len + s.wave_streams.values().chain(s.mas_streams.values()).map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
+        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.buffered_samples()).sum::<usize>() + s.mas_streams.values().map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
     }
 
     /// Total guest samples submitted since the stream was opened (or
@@ -962,7 +997,7 @@ impl AudioEngine {
             shared.virtual_tick = None;
             let now = Instant::now();
             for stream in shared.wave_streams.values_mut() { stream.tick = now; }
-            for stream in shared.mas_streams.values_mut() { stream.tick = now; }
+            for transport in shared.mas_streams.values() { if let Some(stream) = transport.0.lock().unwrap().as_mut() { stream.tick = now; } }
         }
         self.start();
     }
@@ -1067,7 +1102,8 @@ impl AudioTap {
         if !s.wave_streams.is_empty() || !s.mas_streams.is_empty() {
             let channels = s.mix_format.channels.max(1) as usize;
             let mut streams = s.wave_streams.clone();
-            let mut mas_streams = s.mas_streams.clone();
+            let mut mas_streams: std::collections::BTreeMap<u32, WaveStream> = s.mas_streams.iter()
+                .filter_map(|(&key, transport)| transport.0.lock().unwrap().clone().map(|stream| (key, stream))).collect();
             for frame in dst.chunks_exact_mut(channels) {
                 let (mut left, mut right) = (0.0f32, 0.0f32);
                 for stream in streams.values_mut().chain(mas_streams.values_mut()) {
@@ -1095,7 +1131,7 @@ impl AudioTap {
 
     /// How many samples are queued and ready to be drained.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len + s.wave_streams.values().chain(s.mas_streams.values()).map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
+        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.buffered_samples()).sum::<usize>() + s.mas_streams.values().map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
     }
 }
 

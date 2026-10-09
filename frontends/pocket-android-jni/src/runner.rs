@@ -335,6 +335,10 @@ fn run_game_to_completion(
     emu.mount_read_only_dir("\\Program Files\\", &extracted);
     emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
     let is_gizmondo = is_gizmondo_game(entry, library_root);
+    if !emu.set_memory_division(is_gizmondo.then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default)) {
+        summary_lines.push("Insufficient device RAM to load process".to_string());
+        return summary_lines.join("\n");
+    }
     if is_gizmondo {
         emu.mount_read_only_dir("\\SD Card\\", &extracted);
         emu.mount_read_only_dir("\\Storage Card\\", &extracted);

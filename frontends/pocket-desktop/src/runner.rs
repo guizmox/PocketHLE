@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use pocket_core::kernel::{FrameAction, FrameHook, InputEvent, KernelState};
@@ -41,7 +42,7 @@ impl Runner {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
         let card_root = game.extracted_dir(&library_root);
-        self.run_process(&library_root, &game, &card_root, None, &mut hook).0
+        self.run_process(&library_root, &game, &card_root, None, None, None, None, &mut hook).0
     }
 
     fn run_process(
@@ -50,6 +51,9 @@ impl Runner {
         game: &GameEntry,
         card_root: &PathBuf,
         guest_path: Option<&str>,
+        inherited_ram: Option<pocket_core::kernel::memory_division::MemoryDivision>,
+        handle_context: Option<pocket_core::kernel::ProcessHandleContext>,
+        mut startup: Option<ProcessStartup>,
         hook: &mut RunHook,
     ) -> (RunOutcome, u32) {
         let exe = if guest_path.is_some() { game.executable_path(library_root) }
@@ -120,6 +124,15 @@ impl Runner {
         // Gizmondo hardware has a native 320x240 landscape LCD. Detect the
         // platform before the title starts so GAPI sees the real geometry.
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
+        if let Some(context) = handle_context {
+            if let Some(process) = emu.process_mut() { process.state.attach_handle_context(context); }
+        }
+        let ram = inherited_ram.or_else(|| is_gizmondo.then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default));
+        if !emu.set_memory_division(ram) {
+            if let Some(startup) = startup.as_mut() { startup.error = 8; }
+            summary_lines.push("Insufficient device RAM to load process".to_string());
+            return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 0xc0000017);
+        }
         let (screen_w, screen_h) = if is_gizmondo {
             (320, 240)
         } else {
@@ -247,6 +260,20 @@ impl Runner {
             runner: self.clone(), library_root: library_root.clone(),
             game: game.clone(), card_root: card_root.clone(),
         });
+        hook.pid = emu.process().unwrap().state.object_handles.process_id();
+        if let Some(startup) = startup.as_mut() {
+            if let Err(error) = emu.set_startup_command_line(&startup.command_line) {
+                startup.error = 8;
+                summary_lines.push(format!("command line failed: {error:#}"));
+                return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None },0xc0000017);
+            }
+            if let Some(ack) = startup.ack.take() { let _ = ack.send(Ok(())); }
+            // The parent commits PROCESS_INFORMATION before releasing startup.
+            while !startup.table.start_allowed() && !hook.stop_all.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if hook.stop_all.load(Ordering::Acquire) { emu.process_mut().unwrap().state.should_stop = true; }
+        }
         emu.start_audio();
         let run_result = emu.run_with_hook(hook);
         match &run_result {
@@ -262,6 +289,8 @@ impl Runner {
         let exit_code = if run_result.is_ok() {
             emu.process().and_then(|p| p.state.process_exit_code).unwrap_or(0)
         } else { 0xc0000005 };
+        drop(emu); // Refund the parent's private RAM while its children remain alive.
+        hook.finish_children();
         (RunOutcome {
             summary: summary_lines.join("\n"),
             framebuffer,
@@ -349,9 +378,27 @@ struct LaunchContext {
     card_root: PathBuf,
 }
 
+struct ProcessStartup {
+    ack: Option<Sender<Result<(),u32>>>,
+    table: pocket_core::kernel::handles::HandleTable,
+    command_line: String,
+    error: u32,
+}
+impl Drop for ProcessStartup {
+    fn drop(&mut self) { if let Some(ack) = self.ack.take() { let _ = ack.send(Err(self.error)); } }
+}
+struct ChildJob {
+    table: pocket_core::kernel::handles::HandleTable,
+    thread: std::thread::JoinHandle<(RunOutcome,u32)>,
+}
+
 struct RunHook {
     frame_tx: Option<Sender<FrameSnapshot>>,
-    input_rx: Option<Receiver<InputCommand>>,
+    input_rx: Option<Arc<Mutex<Receiver<InputCommand>>>>,
+    stop_all: Arc<AtomicBool>,
+    foreground: Arc<AtomicU32>,
+    pid: u32,
+    children: Vec<ChildJob>,
     last_frame: u64,
     frame_send_failed: bool,
     input_disconnected: bool,
@@ -378,23 +425,67 @@ impl RunHook {
         let context = self.launch_context.clone();
         let relative = context.as_ref().and_then(|context| {
             let child = request.executable.canonicalize().ok()?;
+            // CreateProcess uses a path already resolved through the guest VFS.
+            // SDCreateProcess keeps its validated foreground card restriction.
+            if request.concurrent { return Some(child); }
             let root = context.card_root.canonicalize().ok()?;
             if !child.starts_with(root) { return None; }
             let game_dir = context.library_root.join(context.game.relative_dir()).canonicalize().ok()?;
             child.strip_prefix(game_dir).ok().map(PathBuf::from)
         });
+        if request.concurrent {
+            let result = if let (Some(context),Some(relative)) = (context,relative) {
+                let mut child_game = context.game.clone(); child_game.executable = relative;
+                let handle_context = state.child_handle_context(request.process_handle).unwrap();
+                let table = handle_context.table.clone();
+                let child_table = table.clone(); let parent_pid = self.pid;
+                let foreground = self.foreground.clone(); let mut child_hook = self.child_hook();
+                let ram = state.memory_division.clone(); let command_line = request.command_line.clone();
+                let guest_path = request.guest_path.clone();
+                let (ready_tx,ready_rx) = std::sync::mpsc::channel();
+                let startup = ProcessStartup { ack: Some(ready_tx), table: child_table.clone(), command_line, error: 193 };
+                let spawned = std::thread::Builder::new().name(format!("pockethle-process-{}",table.process_id())).spawn(move || {
+                    let result = context.runner.run_process(&context.library_root,&child_game,&context.card_root,
+                        Some(&guest_path),ram,Some(handle_context),Some(startup),&mut child_hook);
+                    child_table.set_exit(None,result.1);
+                    if child_table.exit_code(child_table.process_id(),Some(0)).is_none() { child_table.set_exit(Some(0),result.1); }
+                    child_table.mark_inactive();
+                    let next = child_table.focus_after_exit(parent_pid);
+                    let _ = foreground.compare_exchange(child_table.process_id(),next,Ordering::AcqRel,Ordering::Acquire);
+                    result
+                });
+                match spawned {
+                    Ok(thread) => {
+                        self.children.push(ChildJob { table: table.clone(),thread });
+                        match ready_rx.recv_timeout(Duration::from_secs(30)) {
+                            Ok(Ok(())) => { self.foreground.store(table.process_id(),Ordering::Release); Ok(request.process_handle) }
+                            Ok(Err(error)) => Err(error),
+                            Err(_) => { table.terminate_remote_process(table.process_id(),0xc0000001);table.allow_start();Err(1460) }
+                        }
+                    }
+                    Err(_) => { table.set_exit(None,0xc0000017);table.mark_inactive();Err(8) }
+                }
+            } else {
+                if let Some(table) = state.object_handles.child(request.process_handle) { table.mark_inactive(); }
+                Err(5)
+            };
+            state.process_launch_results.insert(request.call_key,result);
+            return;
+        }
         let mut exit_code = 0xc0000135;
         if let (Some(context), Some(relative)) = (context, relative) {
             let mut child_game = context.game.clone();
             child_game.executable = relative;
             state.audio.suspend_output();
             let saved = pocket_core::suspend_host_session();
-            let mut child_hook = RunHook::new(self.frame_tx.clone(), self.input_rx.take());
+            let mut child_hook = self.child_hook();
+            let child_pid = state.object_handles.child_id(request.process_handle).unwrap();
+            self.foreground.store(child_pid,Ordering::Release);
             log::info!("parent suspended; entering child {}", request.guest_path);
             let (outcome, code) = context.runner.run_process(&context.library_root,
-                &child_game, &context.card_root, Some(&request.guest_path), &mut child_hook);
+                &child_game, &context.card_root, Some(&request.guest_path), state.memory_division.clone(), state.child_handle_context(request.process_handle), None, &mut child_hook);
             exit_code = code;
-            self.input_rx = child_hook.input_rx.take();
+            self.foreground.store(self.pid,Ordering::Release);
             self.input_disconnected = child_hook.input_disconnected;
             self.stopped_by_user |= child_hook.stopped_by_user;
             // run_process has dropped its child Emulator and its media first.
@@ -412,18 +503,23 @@ impl RunHook {
         } else {
             log::warn!("child launch refused: path outside card or missing runner context");
         }
+        if let Some(table) = state.object_handles.child(request.process_handle) {
+            table.set_exit(None, exit_code); table.set_exit(Some(0), exit_code); table.mark_inactive();
+        }
+        state.sync_transferred_handles();
         if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
             child.exit_code = Some(exit_code);
         }
         for handle in [request.process_handle, request.thread_handle] {
-            if let Some(event) = state.events.get_mut(&handle) { event.signalled = true; }
+            if let Some(mut event) = state.events.get_mut(&handle) { event.signalled = true; }
         }
     }
 
     fn drain_input(&mut self, pending: &mut std::collections::VecDeque<InputEvent>) -> bool {
-        let mut stop_requested = false;
+        let mut stop_requested = self.stop_all.load(Ordering::Acquire);
         if !self.input_disconnected {
             if let Some(rx) = self.input_rx.as_ref() {
+                let rx = rx.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
                     match rx.try_recv() {
                         Ok(InputCommand::Input(ev)) => pending.push_back(ev),
@@ -438,7 +534,33 @@ impl RunHook {
             }
         }
         self.stopped_by_user |= stop_requested || self.input_disconnected;
+        if self.stopped_by_user { self.stop_all.store(true,Ordering::Release); }
         stop_requested || self.input_disconnected
+    }
+
+    fn child_hook(&self) -> Self {
+        let mut hook = Self::new(self.frame_tx.clone(),None);
+        hook.input_rx = self.input_rx.clone(); hook.stop_all = self.stop_all.clone();
+        hook.foreground = self.foreground.clone(); hook
+    }
+    fn finish_children(&mut self) {
+        for job in self.children.drain(..) {
+            if !job.table.start_allowed() {
+                job.table.terminate_remote_process(job.table.process_id(),0xc0000001); job.table.allow_start();
+            }
+            if let Err(_) = job.thread.join() { self.stop_all.store(true,Ordering::Release); }
+        }
+    }
+    fn reap_children(&mut self) {
+        let mut index = 0;
+        while index < self.children.len() {
+            if self.children[index].thread.is_finished() {
+                let job = self.children.swap_remove(index);
+                if job.thread.join().is_err() {
+                    job.table.set_exit(None,0xc0000005); job.table.set_exit(Some(0),0xc0000005);job.table.mark_inactive();
+                }
+            } else { index += 1; }
+        }
     }
 
     fn reset_process(&mut self) {
@@ -453,7 +575,11 @@ impl RunHook {
     ) -> Self {
         Self {
             frame_tx,
-            input_rx,
+            input_rx: input_rx.map(|rx| Arc::new(Mutex::new(rx))),
+            stop_all: Arc::new(AtomicBool::new(false)),
+            foreground: Arc::new(AtomicU32::new(1)),
+            pid: 1,
+            children: Vec::new(),
             last_frame: 0,
             frame_send_failed: false,
             input_disconnected: false,
@@ -468,7 +594,10 @@ impl RunHook {
 
 impl FrameHook for RunHook {
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
-        let mut stop_requested = self.drain_input(&mut state.pending_input);
+        self.reap_children();
+        let active = self.foreground.load(Ordering::Acquire) == self.pid;
+        let mut stop_requested = if active { self.drain_input(&mut state.pending_input) }
+            else { self.stop_all.load(Ordering::Acquire) };
         if !stop_requested { self.run_pending_child(state); }
         stop_requested |= self.stopped_by_user;
 
@@ -478,7 +607,7 @@ impl FrameHook for RunHook {
         // game tick that does ~2k `BitBlt`s would generate ~2k
         // 300 KiB snapshots — the work that turned a logical 60 fps
         // game into a sub-1 fps preview in the desktop launcher.
-        if !self.frame_send_failed {
+        if !self.frame_send_failed && self.foreground.load(Ordering::Acquire) == self.pid {
             if let Some(tx) = self.frame_tx.as_ref() {
                 let counter = state.framebuffer.frame_counter;
                 if counter != self.last_frame {
@@ -543,4 +672,44 @@ mod launcher_return_tests {
         assert!(hook.drain_input(&mut std::collections::VecDeque::new()));
         assert!(hook.stopped_by_user);
     }
+    #[cfg(feature = "unicorn")]
+    #[test]
+    fn desktop_runner_executes_parallel_children_and_surviving_orphan() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("pockethle-runner-proc-{}-{nonce}",std::process::id()));
+        let card = root.join("games/probe/extracted");let dir = card.join("GZRT999999");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name,bytes) in [
+            ("proctest.exe",include_bytes!("../../../tools/ramtest/dist/GZRT999999/proctest.exe").as_slice()),
+            ("procworker.exe",include_bytes!("../../../tools/ramtest/dist/GZRT999999/procworker.exe").as_slice()),
+            ("badproc.exe",include_bytes!("../../../tools/ramtest/dist/GZRT999999/badproc.exe").as_slice())] {
+            std::fs::write(dir.join(name),bytes).unwrap();
+        }
+        std::fs::write(dir.join("GZRT999999"),999999u32.to_le_bytes()).unwrap();
+        let mut settings=pocket_library::GameSettings::default();
+        settings.cpu_backend=CpuBackendPref::Unicorn;settings.max_slices=3_000_000;settings.halt_on_unimplemented=true;
+        let game=GameEntry { id:"probe".into(),display_name:"Process diagnostic".into(),provider:None,
+            executable:PathBuf::from("extracted/GZRT999999/proctest.exe"),source_cab:"diagnostic.zip".into(),
+            install_dir:None,install_dirs:vec![],save_prefix:None,registry:vec![],imported_at:0,settings,icon:None,companions:vec![] };
+        let mut hook=RunHook::new(None,None);
+        let (outcome,code)=Runner::new().run_process(&root,&game,&card,None,None,None,None,&mut hook);
+        assert_eq!(code,77,"{}",outcome.summary);
+        for (name,expected) in [("PROCTEST.TXT","PROCTEST_RESULT PASS"),("ORPHANTEST.TXT","ORPHANTEST_RESULT PASS")] {
+            let path=std::fs::read_dir(root.join("flash")).unwrap().map(|e|e.unwrap().path())
+                .find(|p|p.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case(name)).unwrap();
+            let report=std::fs::read_to_string(path).unwrap();println!("{report}");
+            assert!(report.contains(expected)&&!report.contains("FAIL"),"{report}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn child_stop_cancels_background_parent_and_other_children() {
+        let (tx,rx)=std::sync::mpsc::channel();let parent=RunHook::new(None,Some(rx));
+        let mut child=parent.child_hook();let sibling=parent.child_hook();
+        tx.send(InputCommand::Stop).unwrap();
+        assert!(child.drain_input(&mut std::collections::VecDeque::new()));
+        assert!(parent.stop_all.load(Ordering::Acquire));assert!(sibling.stop_all.load(Ordering::Acquire));
+    }
+
 }

@@ -178,12 +178,12 @@ pub struct WinCeDispatcher {
     /// for that thunk. The hot path (which can fire ~10k times a
     /// second during a JumpyBall frame) used to recompute the
     /// lowercased DLL string and a `(String, String)` key on every
-    /// call; now it just hashes a `u32`.
+    /// call; now it hashes the address and compares cached import metadata.
     ///
     /// `None` means the name was looked up but no handler was
     /// registered — we cache the negative result too so we don't pay
     /// the string-allocation cost on every unimplemented call either.
-    by_thunk_va: HashMap<u32, Option<Handler>>,
+    by_thunk_va: HashMap<u32, (Thunk, Option<Handler>)>,
     /// If `true`, an unimplemented call halts the emulator instead of
     /// returning 0. Useful for the Linux CLI tracing run.
     pub halt_on_unimplemented: bool,
@@ -282,10 +282,14 @@ impl WinCeDispatcher {
 
     /// Resolve `thunk` to a handler, populating [`Self::by_thunk_va`]
     /// on the first call. Subsequent calls for the same `thunk_va`
-    /// hit the cache and pay only one `u32` hash.
+    /// hit the cache without allocating; changed imports at reused addresses
+    /// replace their cache entry.
     fn resolve_handler(&mut self, thunk: &Thunk) -> Option<Handler> {
-        if let Some(cached) = self.by_thunk_va.get(&thunk.thunk_va) {
-            return *cached;
+        if let Some((source, cached)) = self.by_thunk_va.get(&thunk.thunk_va) {
+            // Module slots are reusable: a new DLL may bind another API at
+            // the same address. Compare metadata without allocating on hits.
+            if source.dll == thunk.dll && source.binding == thunk.binding
+                && source.friendly_name == thunk.friendly_name { return *cached; }
         }
         let dll_key = thunk.dll.to_ascii_lowercase();
         // The HashMap key is `(String, String)`, so we still have to
@@ -300,7 +304,7 @@ impl WinCeDispatcher {
             // wholesale and still have one or two entry points we
             // decided to emulate properly.
             .or_else(|| ignored_dll(&thunk.dll).map(|_| ignored_dll_stub as Handler));
-        self.by_thunk_va.insert(thunk.thunk_va, resolved);
+        self.by_thunk_va.insert(thunk.thunk_va, (thunk.clone(), resolved));
         resolved
     }
 }
@@ -313,6 +317,7 @@ impl Dispatcher for WinCeDispatcher {
             dll: "coredll.dll".into(), binding: ImportBinding::Name("scheduler".into()),
             friendly_name: None,
         };
+        kernel.sync_transferred_handles();
         coredll::schedule_idle(&mut CallCtx { cpu, kernel, thunk: &thunk })
     }
 
@@ -370,6 +375,8 @@ impl Dispatcher for WinCeDispatcher {
         thunk: &Thunk,
         kernel: &mut KernelState,
     ) -> Result<DispatchOutcome, KernelError> {
+        kernel.reclaim_finished_stacks(cpu)?;
+        kernel.sync_transferred_handles();
         if let Some(outcome) = coredll::wake_due_worker(&mut CallCtx { cpu, thunk, kernel })? {
             return Ok(outcome);
         }
@@ -496,10 +503,23 @@ mod tests {
     }
 
     #[test]
+    fn reused_runtime_thunk_resolves_the_new_import() {
+        let mut d = WinCeDispatcher::new();
+        let mut old = fake_thunk("coredll.dll", "MissingExport");
+        old.thunk_va = pocket_kernel::MODULE_REGION_BASE + 0x2000;
+        assert!(d.resolve_handler(&old).is_none());
+        let mut replacement = fake_thunk("coredll.dll", "FreeLibrary");
+        replacement.thunk_va = old.thunk_va;
+        assert!(d.resolve_handler(&replacement).is_some());
+        assert_eq!(d.constant_for(&replacement), None);
+        assert!(d.resolve_handler(&old).is_none());
+    }
+
+    #[test]
     fn constant_for_returns_one_for_known_one_stub() {
         let d = WinCeDispatcher::new();
-        // `FreeLibrary` is registered as one_returning in coredll.
-        let t = fake_thunk("coredll.dll", "FreeLibrary");
+        // Pinned system-library thread notifications need no guest callback.
+        let t = fake_thunk("coredll.dll", "DisableThreadLibraryCalls");
         assert_eq!(d.constant_for(&t), Some(1));
     }
 
