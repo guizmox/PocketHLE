@@ -2412,7 +2412,7 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const MAXIMUM_SUSPEND_COUNT: u32 = 127;
 
-fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
+pub(crate) fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
     ctx.kernel.thread_last_errors.insert(ctx.kernel.current_thread, error);
 }
 
@@ -3346,6 +3346,8 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
         0x1000_0001
     } else if name == "commctrl.dll" || name == "commctrl" {
         0x1000_0002
+    } else if name == "ws2.dll" || name == "ws2" {
+        pocket_kernel::WS2_MODULE_HANDLE
     } else if let Some(h) = gles_module_handle(&name) {
         h
     } else {
@@ -3468,6 +3470,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         if handle == 0 { set_thread_error(ctx, 126); }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
+    if name.ends_with("ws2.dll") || name == "ws2" {
+        return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::WS2_MODULE_HANDLE));
+    }
     if name.ends_with("ole32.dll") || name == "ole32" {
         let handle = if ctx
             .kernel
@@ -3530,7 +3535,7 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 fn runtime_hle_dll(dll: &str) -> bool {
     let name = dll.to_ascii_lowercase();
     matches!(name.as_str(), "coredll.dll" | "aygshell.dll" | "commctrl.dll" | "gx.dll"
-        | "ddraw.dll" | "ole32.dll" | "sdlaunch.dll" | "hss.dll")
+        | "ddraw.dll" | "ole32.dll" | "sdlaunch.dll" | "hss.dll" | "ws2.dll")
         || gles_module_handle(&name).is_some()
 }
 
@@ -6802,6 +6807,8 @@ fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 /// `BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* read,
 ///                LPOVERLAPPED ov)`
 fn read_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let bt_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() { return crate::bluetooth::read_file(ctx); }
     let handle = ctx.arg_u32(0)?;
     let buf_p = ctx.arg_u32(1)?;
     let count = ctx.arg_u32(2)?;
@@ -6846,6 +6853,8 @@ fn set_end_of_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let bt_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() { return crate::bluetooth::write_file(ctx); }
     let handle = ctx.arg_u32(0)?;
     let buf_p = ctx.arg_u32(1)?;
     let count = ctx.arg_u32(2)?;
@@ -8804,6 +8813,7 @@ fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let wparam = ctx.arg_u32(2)?;
     let lparam = ctx.arg_u32(3)?;
     // The status bar is a control we implement ourselves — its messages
+    if crate::bluetooth::shell_message(ctx, hwnd, message, wparam) { return Ok(DispatchOutcome::ReturnedR0(0)); }
     // must never trampoline into the application's WndProc.
     if hwnd == FAKE_STATUSBAR_HWND {
         if let Some(r) = status_bar_message(ctx, message, wparam, lparam)? {

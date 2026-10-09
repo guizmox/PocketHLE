@@ -34,6 +34,7 @@ use pocket_cpu::{
 use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry};
 
 pub mod audio;
+pub mod bluetooth;
 pub mod controls;
 pub mod font;
 pub mod framebuffer;
@@ -2156,6 +2157,7 @@ impl Heap {
 /// Fake `HMODULE` for the resident `ole32.dll` compatibility module.
 pub const SDLAUNCH_MODULE_HANDLE: u32 = 0x1000_0009;
 pub const OLE32_MODULE_HANDLE: u32 = 0x1000_0007;
+pub const WS2_MODULE_HANDLE: u32 = 0x1000_000a;
 /// Fake `HMODULE` for `libGLES_CM.dll`, the Common profile.
 pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
 /// Fake `HMODULE` for `libGLES_CL.dll`, the Common-Lite profile.
@@ -2218,6 +2220,10 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
         } else if thunk.dll.eq_ignore_ascii_case("sdlaunch.dll") {
             exports.entry(SDLAUNCH_MODULE_HANDLE).or_insert_with(HashMap::new)
                 .insert(name, thunk.thunk_va);
+        } else if thunk.dll.eq_ignore_ascii_case("ws2.dll") {
+            let table = exports.entry(WS2_MODULE_HANDLE).or_insert_with(HashMap::new);
+            table.insert(name, thunk.thunk_va);
+            if let ImportBinding::Ordinal(ord) = &thunk.binding { table.insert(format!("#{ord}"), thunk.thunk_va); }
         } else if thunk.dll.eq_ignore_ascii_case("ole32.dll") {
             ole32.insert(name.clone(), thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("libgles_cm.dll")
@@ -2493,6 +2499,7 @@ impl Process {
             "hss.dll",
             "ole32.dll",
             "sdlaunch.dll",
+            "ws2.dll",
         ] {
             dynamic_exports_to_add.extend(
                 dispatcher

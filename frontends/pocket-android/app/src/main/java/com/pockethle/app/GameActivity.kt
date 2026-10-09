@@ -24,6 +24,9 @@ import java.nio.ByteOrder
 import org.json.JSONObject
 import android.content.pm.ActivityInfo
 import android.view.KeyEvent
+import android.content.pm.PackageManager
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 
 /**
  * Hosts the emulator output for one game.
@@ -39,6 +42,10 @@ import android.view.KeyEvent
  * loading spinner once the real Unicorn backend was wired up.
  */
 class GameActivity : AppCompatActivity() {
+    private var bluetoothStart: (() -> Unit)? = null
+    private val bluetoothPermissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val start = bluetoothStart; bluetoothStart = null; start?.invoke()
+    }
 
     private lateinit var surface: GLSurfaceView
     private lateinit var progress: ProgressBar
@@ -195,6 +202,15 @@ class GameActivity : AppCompatActivity() {
         val rootDir = LibraryPaths.root(this)
         rotationDegrees = readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
+        BluetoothHost.initialize(this)
+        if (config.bluetoothEnabled && BluetoothHost.permissions().any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
+            bluetoothStart = { startSession(rootDir, id) }
+            bluetoothPermissionRequest.launch(BluetoothHost.permissions())
+        } else startSession(rootDir, id)
+    }
+
+    private fun startSession(rootDir: String, id: String) {
+        if (isFinishing || isDestroyed) return
         val handle = NativeBridge.nativeStartGame(rootDir, id)
         if (handle == 0L) {
             progress.visibility = View.GONE

@@ -254,6 +254,7 @@ static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomic
 pub struct VfsObject(VfsObjectInner, Option<(u32, crate::audio::MasPlayback)>);
 #[derive(Clone)]
 enum VfsObjectInner {
+    Bluetooth(Arc<BluetoothOpen>),
     File(Arc<Mutex<OpenFile>>), Ram(Arc<Mutex<OpenRamFile>>),
     Volume(OpenVolume), Registration, Decoder(Arc<Mutex<Mp3DecoderState>>),
 }
@@ -263,7 +264,12 @@ impl VfsObject {
 }
 
 /// Mount-point + open-handle table.
+pub struct BluetoothOpen { pub port: Arc<crate::bluetooth::Port>, pub access: u32, _lease: Arc<contracts::Lease> }
+
+/// Mount-point + open-handle table.
 pub struct Vfs {
+    pub bluetooth: crate::bluetooth::State,
+    bluetooth_handles: HashMap<u32, Arc<BluetoothOpen>>,
     mounts: Vec<Mount>,
     shared: VfsShared,
     ram: Option<crate::memory_division::MemoryDivision>,
@@ -297,7 +303,9 @@ impl Default for Vfs {
 
 impl Vfs {
     pub fn new() -> Self {
-        Self {
+        let mut vfs = Self {
+            bluetooth: Default::default(),
+            bluetooth_handles: HashMap::new(),
             mounts: Vec::new(),
             shared: VfsShared::default(),
             ram: None,
@@ -308,7 +316,9 @@ impl Vfs {
             next_handle: HANDLE_BASE,
             registration: std::collections::HashSet::new(),
             default_dir: "\\".to_string(),
-        }
+        };
+        vfs.bluetooth.service = vfs.bluetooth_service();
+        vfs
     }
 
     pub fn attach_ram(&mut self, ram: Option<crate::memory_division::MemoryDivision>) {
@@ -1078,6 +1088,7 @@ impl Vfs {
 
     /// An opaque shared open description, retaining seek/access/device state.
     pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
+        if let Some(port) = self.bluetooth_handles.get(&handle) { return Some(VfsObject(VfsObjectInner::Bluetooth(port.clone()), None)); }
         if let Some(file) = self.ram_handles.get(&handle) { return Some(VfsObject(VfsObjectInner::Ram(file.clone()), None)); }
         if let Some(file) = self.handles.get(&handle) { return Some(VfsObject(VfsObjectInner::File(file.clone()), None)); }
         if let Some(volume) = self.volumes.get(&handle) { return Some(VfsObject(VfsObjectInner::Volume(volume.clone()), None)); }
@@ -1087,6 +1098,7 @@ impl Vfs {
     pub fn import_handle(&mut self, handle: u32, object: VfsObject) -> bool {
         if self.is_handle(handle) { return false; }
         match object.0 {
+            VfsObjectInner::Bluetooth(port) => { self.bluetooth_handles.insert(handle, port); }
             VfsObjectInner::Ram(file) => { self.ram_handles.insert(handle, file); }
             VfsObjectInner::File(file) => { self.handles.insert(handle, file); }
             VfsObjectInner::Volume(volume) => { self.volumes.insert(handle, volume); }
@@ -1096,11 +1108,15 @@ impl Vfs {
         true
     }
     pub fn is_handle(&self, handle: u32) -> bool {
-        self.is_open(handle) || self.volumes.contains_key(&handle)
+        self.bluetooth_handles.contains_key(&handle) || self.is_open(handle) || self.volumes.contains_key(&handle)
             || self.decoders.contains_key(&handle) || self.registration.contains(&handle)
     }
+    pub fn bluetooth_open(&self, handle: u32) -> Option<Arc<BluetoothOpen>> { self.bluetooth_handles.get(&handle).cloned() }
+    pub fn set_bluetooth_service(&mut self, service: crate::bluetooth::Service) {
+        self.set_shared_bluetooth_service(service.clone()); self.bluetooth.service = service;
+    }
     pub fn open_handles(&self) -> Vec<u32> {
-        self.handles.keys().chain(self.ram_handles.keys()).chain(self.volumes.keys())
+        self.handles.keys().chain(self.bluetooth_handles.keys()).chain(self.ram_handles.keys()).chain(self.volumes.keys())
             .chain(self.decoders.keys()).chain(self.registration.iter()).copied().collect()
     }
     pub fn duplicate_file(&mut self, source: u32, target: u32) -> bool {
@@ -1109,7 +1125,7 @@ impl Vfs {
     }
 
     pub fn close(&mut self, handle: u32) -> bool {
-        self.ram_handles.remove(&handle).is_some() || self.handles.remove(&handle).is_some()
+        self.bluetooth_handles.remove(&handle).is_some() || self.ram_handles.remove(&handle).is_some() || self.handles.remove(&handle).is_some()
             || self.volumes.remove(&handle).is_some()
             || self.decoders.remove(&handle).is_some()
             || self.registration.remove(&handle)
@@ -1132,6 +1148,9 @@ impl Vfs {
         self.volumes.clear();
         self.decoders.clear();
         self.registration.clear();
+        self.bluetooth_handles.clear();
+        self.bluetooth.lookups.clear();
+        self.bluetooth.writes.clear();
         n
     }
 

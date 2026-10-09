@@ -37,6 +37,18 @@ class SettingsActivity : AppCompatActivity() {
             rootDir = LibraryPaths.root(requireContext())
             current = readConfig() ?: LauncherConfig.default()
             setPreferencesFromResource(R.xml.preferences_global, rootKey)
+            preferenceScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "bluetooth_enabled"
+                title = "Bluetooth hardware (Classic / RFCOMM)"
+                summary = "Use the device radio for Gizmondo Bluetooth games"
+                isPersistent = false
+                isChecked = current.bluetoothEnabled
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(bluetoothEnabled = value as Boolean)
+                    writeConfig()
+                    true
+                }
+            })
             findPreference<ListPreference>("default_cpu_backend")?.apply {
                 value = current.defaultCpuBackend
                 setOnPreferenceChangeListener { _, newValue ->

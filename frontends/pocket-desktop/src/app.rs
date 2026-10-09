@@ -1109,6 +1109,7 @@ impl PocketLauncher {
         let mut cancel_clicked = false;
         ScrollArea::vertical().id_source("emulator_options_scroll").auto_shrink([false,false]).show(ui,|ui| {
         ui.heading("Emulator options");
+        ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
         ui.add_space(8.0);
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")

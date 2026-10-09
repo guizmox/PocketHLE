@@ -1547,3 +1547,62 @@ Winsock handlers use those ROM ordinals. These tables do not implement the APIs:
 Winsock remains the explicit offline boundary described above. Native Windows/
 Android Bluetooth, device discovery, RFCOMM virtual COM and the BTD driver context
 APIs are not delivered in this general-API patch.
+
+## 35. Bluetooth Classic SDK path and native transports (2026-10-09)
+
+The offline boundary in section 33 is superseded only when a Bluetooth backend
+exists. WSAStartup negotiates supported CE versions and validates/writes the 400
+byte ARM WSADATA before incrementing a per-process reference count. No-backend
+startup still returns 10091; recv without startup still fails with 10093. A direct
+socket recv is not implemented and returns 10038 after startup, never a fake EOF.
+The Windows host Winsock stack is initialized lazily, independently of guest refs.
+
+The supported game path is the supplied SDK Bluetooth.cpp: BT_MSG broadcast,
+WSAStartup, gethostname, WSALookupServiceBegin/Next/End, RegisterDevice("COM",
+index,"btd.dll",PORTEMUPortParams), CreateFile(COMn:), SetCommMask(EV_RXCHAR),
+WaitCommEvent, ReadFile/WriteFile, DeregisterDevice. Discovery runs on a host thread;
+pending guest I/O cooperatively retries with its call arguments intact and a
+scheduler deadline. Completed retries remove their deadline. Query output uses
+32-bit guest pointers and packed 30-byte SOCKADDR_BTH; short buffers report the
+required size without advancing the result index. Winsock errors remain separate
+from WinCE LastError. WS2 also has a resident module handle for dynamic imports.
+
+Bluetooth stream descriptions are VFS Device objects with access and share leases,
+so duplicated handles retain the real stream across process namespaces. Service
+registration generations have distinct lease keys: the SDK deregisters ports
+without closing its old handles, and these cancelled handles must not prevent a
+new COM4 registration. Deregistration/BT_MSG off closes host resources and makes
+old pending operations fail with 995. No bytes available means pending, not EOF.
+Synchronous COM writes retain their byte snapshot and offset across retries;
+native partial writes/backpressure must not truncate a packet or resend its prefix.
+
+Windows uses Bluetooth inquiry and nonblocking AF_BTH RFCOMM Winsock connections.
+Servers bind a dynamically allocated channel and publish an SDP service; closing
+the registration removes the SDP record and sockets. Android uses secure
+BluetoothSocket, bounded RX/TX queues, and separate connect/read/write threads;
+close cancels accept/connect and blocked queues. Its JNI class is captured from
+the caller before spawning the emulator, avoiding FindClass/class-loader failures.
+
+bluetooth_enabled defaults false. Emulator options exposes it on desktop and the
+Android settings screen exposes the equivalent switch. BT_MSG controls only the
+emulated service while this setting permits hardware access; it does not forcibly
+turn the OS radio on/off. Android requests scan/connect (or legacy location)
+permissions before starting an opted-in game. Denied permissions/radio off remain
+real errors. Two PocketHLE hosts agree on a stable service UUID per guest channel;
+an explicit SDK service GUID is honored. Real Gizmondo interoperability with its
+fixed physical RFCOMM channel is not verified or guaranteed by this mapping.
+
+Scope limits: general IP sockets and direct guest Winsock RFCOMM socket APIs are
+not implemented; neither are raw BTD HCI/L2CAP/SDP driver exports, service/filter
+lookup queries, overlapped COM I/O, non-default MTU/quota requests, or UART modem/
+DCB control. EV_RXCHAR and mask reset are supported. Legacy REMOTE_DCB/KEEP_DCD
+flags are accepted for SDK compatibility; they do not expose modem/DCB behavior.
+
+pockethle-bt-test is an optional standalone native-radio diagnostic, never run by
+the GUI automatically. scan/server/client modes use the same transport and test
+a real two-way ping/pong on guest channel 2. Software tests cover the full SDK
+contract, invalid buffers, pending reads, mask cancellation, sharing/duplication,
+deregister/re-register, query sizing and separate error domains. Native Windows
+and JNI Rust modules have been type-checked; no physical-radio test or full
+Android APK build was possible in this environment. Hardware validation remains
+required before treating multiplayer compatibility as established.

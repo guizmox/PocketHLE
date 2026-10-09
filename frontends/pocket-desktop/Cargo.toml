@@ -1,5 +1,6 @@
 [package]
 name = "pocket-desktop"
+default-run = "pockethle-gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

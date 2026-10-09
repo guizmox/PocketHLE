@@ -316,7 +316,9 @@ fn run_game_to_completion(
         return summary_lines.join("\n");
     }
     let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
+    let bluetooth_enabled = pocket_library::Library::open(library_root).map(|l| l.config().bluetooth_enabled).unwrap_or(false);
     if let Some(process) = emu.process_mut() {
+        process.state.vfs.bluetooth.service.set_allowed(bluetooth_enabled);
         if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
             summary_lines.push(format!("Cannot load device registry: {e}"));
             return summary_lines.join("\n");

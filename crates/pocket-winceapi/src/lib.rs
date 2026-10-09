@@ -35,6 +35,7 @@ mod directshow;
 mod media_static;
 mod wavein;
 mod ws2;
+mod bluetooth;
 pub mod ordinals;
 
 use std::collections::HashMap;
@@ -228,6 +229,7 @@ impl WinCeDispatcher {
             unimplemented_sink: None,
         };
         coredll::register(&mut d);
+        bluetooth::register(&mut d);
         ws2::register(&mut d);
         ddraw::register(&mut d);
         aygshell::register(&mut d);
@@ -375,7 +377,7 @@ impl Dispatcher for WinCeDispatcher {
             .filter(|(registered_dll, _)| registered_dll == &dll_key)
             .map(|(_, name)| name.clone())
             .collect();
-        if dll_key == "coredll.dll" || pocket_gles::ordinals::is_gles_dll(&dll_key) {
+        if dll_key == "coredll.dll" || dll_key == "ws2.dll" || pocket_gles::ordinals::is_gles_dll(&dll_key) {
             for ordinal in 0..=4095u16 {
                 if ordinals::lookup(&dll_key, ordinal).is_some() {
                     names.push(format!("ord:{ordinal}"));

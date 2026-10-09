@@ -26,6 +26,7 @@
 
 mod managed_game;
 mod runner;
+mod bluetooth;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -583,6 +584,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     id: JString<'local>,
 ) -> jlong {
     init_logger();
+    if let Err(e) = bluetooth::install(&mut env, &_class) {
+        log::error!("Cannot initialize Android Bluetooth bridge: {e}");
+        return 0;
+    }
     let root = match jstring_to_path(&mut env, library_root) {
         Some(p) => p,
         None => {

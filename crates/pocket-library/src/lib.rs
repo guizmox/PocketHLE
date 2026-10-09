@@ -480,6 +480,8 @@ pub struct LauncherConfig {
     /// Append missing API reports beside the main launcher log.
     #[serde(default = "default_log_unimplemented_apis")]
     pub log_unimplemented_apis: bool,
+    #[serde(default)]
+    pub bluetooth_enabled: bool,
     /// Desktop smoothing filter, remembered across sessions.
     #[serde(default = "default_upscale_filter")]
     pub upscale_filter: String,
@@ -553,6 +555,7 @@ impl Default for LauncherConfig {
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,
             log_unimplemented_apis: default_log_unimplemented_apis(),
+            bluetooth_enabled: false,
             upscale_filter: default_upscale_filter(),
             last_import_dir: None,
             show_fps: default_show_fps(),
