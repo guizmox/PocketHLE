@@ -1,4 +1,7 @@
 crates/pocket-kernel/src/audio.rs
-crates/pocket-library/src/lib.rs
-frontends/pocket-desktop/src/app.rs
+crates/pocket-kernel/src/lib.rs
+crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/lib.rs
+crates/pocket-winceapi/src/gx.rs
+crates/pocket-winceapi/src/ws2.rs
 docs/AGENTS.md

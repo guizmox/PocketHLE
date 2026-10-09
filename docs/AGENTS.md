@@ -1481,3 +1481,34 @@ arrow and the matching host arrow key must agree. Action buttons retain their
 bindings; Gizmondo keys retain their existing behavior. Release held input on
 rotation or PPC framebuffer geometry changes. Preserve geometry-based checks
 for all four rotations with portrait and landscape native framebuffers.
+
+
+## 33. Wave loop break, CE power status and offline Winsock
+
+waveOutBreakLoop finishes the current iteration of the existing single-WAVEHDR
+loop without resetting PCM, pause state or live refresh. Shorten the loop end
+and all following pending cursors for that HWAVEOUT only. Do not publish DONE
+until playback reaches the shortened endpoint. Invalid handles return
+MMSYSERR_INVALHANDLE; a valid device without an active loop succeeds. Preserve
+Stuntcar's queued auto-reset event completions and CPAL driver-default buffering.
+
+GetSystemPowerStatusEx writes the 24-byte CE ARM structure, returning BOOL.
+Ex2 writes 56 bytes including ABI padding, returning 56; buffers larger than
+56 keep their extra bytes intact. Reject NULL, undersized, overflowing, unmapped
+and read-only outputs with zero and thread GetLastError=87 before writing.
+Status models a stable virtual mains supply/full main battery/no backup, with
+unknown lifetimes and optional telemetry. fUpdate does not change virtual state.
+
+ws2.dll implements an explicit offline boundary, not network/Bluetooth play.
+WSAStartup fails directly with WSASYSNOTREADY (10091), without writing WSADATA.
+recv and WSACleanup fail with SOCKET_ERROR and WSANOTINITIALISED (10093).
+WSAGetLastError and WSASetLastError use separate per-thread Winsock storage;
+reads preserve the value and do not modify GetLastError. Never report recv=0
+for unavailable networking: zero means graceful peer EOF. Unknown networking
+APIs still enter the missing-API report; do not hide them behind DLL-wide stubs.
+
+SDK(3).zip developer guide sections 2.9 and 2.14 confirms CE Bluetooth APIs
+and cached GetSystemPowerStatusEx2 use. Bluetooth.cpp initializes Winsock 2.2
+for device discovery, but exchanges data via RFCOMM virtual COM/ReadFile.
+This archive does not include the platform winsock2.h or ws2 export library;
+do not invent ordinal mappings from desktop Winsock.

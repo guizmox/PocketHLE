@@ -538,6 +538,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "waveOutClose", wave_out_close);
     d.register_handler(dll, "waveOutWrite", wave_out_write);
     d.register_handler(dll, "waveOutReset", wave_out_reset);
+    d.register_handler(dll, "waveOutBreakLoop", wave_out_break_loop);
     d.register_handler(dll, "waveOutPause", wave_out_pause);
     d.register_handler(dll, "waveOutRestart", wave_out_restart);
     d.register_handler(dll, "waveOutPrepareHeader", wave_out_prepare_header);
@@ -766,7 +767,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "ImmReleaseContext", 1, one_returning);
     d.register_constant(dll, "ImmSetCompositionWindow", 1, one_returning);
     d.register_constant(dll, "SystemParametersInfoW", 1, one_returning);
-    d.register_constant(dll, "GetSystemPowerStatusEx", 1, one_returning);
+    d.register_handler(dll, "GetSystemPowerStatusEx", get_system_power_status_ex);
+    d.register_handler(dll, "GetSystemPowerStatusEx2", get_system_power_status_ex2);
     d.register_handler(dll, "CreateEventW", create_event_w);
     d.register_handler(dll, "CreateEventA", create_event_w);
     d.register_handler(dll, "OpenEventW", open_event_w);
@@ -2409,6 +2411,50 @@ const MAXIMUM_SUSPEND_COUNT: u32 = 127;
 
 fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
     ctx.kernel.thread_last_errors.insert(ctx.kernel.current_thread, error);
+}
+
+/// Stable virtual power source: mains connected, full main battery, no backup.
+/// CE ARM layout is 24 bytes for EX and 56 bytes (including padding) for EX2.
+fn virtual_power_status() -> [u8; 56] {
+    let mut bytes = [0; 56];
+    bytes[0] = 1; // AC_LINE_ONLINE
+    bytes[1] = 1; // BATTERY_FLAG_HIGH
+    bytes[2] = 100;
+    bytes[13] = 128; // BATTERY_FLAG_NO_BATTERY
+    bytes[14] = 255; // BATTERY_PERCENTAGE_UNKNOWN
+    for offset in [4, 8, 16, 20] {
+        bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    }
+    // Optional telemetry and chemistry are unknown; reserved bytes stay zero.
+    bytes
+}
+
+fn write_power_status(ctx: &mut CallCtx<'_>, pointer: u32, size: usize) -> bool {
+    if pointer == 0 || ctx.cpu.check_guest_access(pointer, size as u32, Prot::WRITE).is_err()
+        || ctx.cpu.write_mem(pointer, &virtual_power_status()[..size]).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return false;
+    }
+    true
+}
+
+fn get_system_power_status_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    let _update = ctx.arg_u32(1)?; // Cached and refreshed virtual status are identical.
+    let success = write_power_status(ctx, pointer, 24);
+    Ok(DispatchOutcome::ReturnedR0(u32::from(success)))
+}
+
+fn get_system_power_status_ex2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    let length = ctx.arg_u32(1)?;
+    let _update = ctx.arg_u32(2)?;
+    if length < 56 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let success = write_power_status(ctx, pointer, 56);
+    Ok(DispatchOutcome::ReturnedR0(if success { 56 } else { 0 }))
 }
 
 fn get_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -16155,6 +16201,24 @@ fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
+/// Finish the current repetition without discarding queued audio or reporting
+/// its WAVEHDR complete before the playback cursor actually reaches its end.
+fn wave_out_break_loop(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    if !ctx.kernel.wave_out.devices.contains_key(&handle) {
+        return Ok(DispatchOutcome::ReturnedR0(5)); // MMSYSERR_INVALHANDLE
+    }
+    if let Some((old_end, new_end)) = ctx.kernel.audio.break_wave_loop(handle) {
+        let removed = old_end - new_end;
+        for pending in &mut ctx.kernel.wave_out.pending {
+            if pending.handle == handle && pending.end_cursor >= old_end {
+                pending.end_cursor -= removed;
+            }
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
+}
+
 /// `MMRESULT waveOutReset(HWAVEOUT)` — discard any queued samples.
 fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
@@ -18417,6 +18481,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn power_status_writes_ce_layout_and_rejects_invalid_outputs() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x3000, 0x1000, Prot::READ).unwrap();
+        for update in [0, 1] {
+            for (extended, length, returned, written) in [(false, 0, 1, 24), (true, 56, 56, 56), (true, 64, 56, 56)] {
+                cpu.write_mem(0x1100, &[0xa5; 64]).unwrap();
+                cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+                cpu.write_reg(ArmReg::R1, if extended { length } else { update }).unwrap();
+                cpu.write_reg(ArmReg::R2, update).unwrap();
+                let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+                let result = if extended { get_system_power_status_ex2(&mut ctx) } else { get_system_power_status_ex(&mut ctx) };
+                assert_eq!(result.unwrap(), DispatchOutcome::ReturnedR0(returned));
+                let bytes = cpu.read_mem(0x1100, 64).unwrap();
+                assert_eq!(&bytes[..3], &[1, 1, 100]);
+                assert_eq!(&bytes[4..12], &[255; 8]);
+                assert_eq!(&bytes[13..15], &[128, 255]);
+                assert!(bytes[written..].iter().all(|byte| *byte == 0xa5));
+            }
+        }
+        for (pointer, length) in [(0, 56), (0x1100, 55), (0x1ff0, 56), (0x3000, 56), (u32::MAX - 8, 56)] {
+            cpu.write_mem(0x1100, &[0xa5; 64]).unwrap();
+            cpu.write_reg(ArmReg::R0, pointer).unwrap();
+            cpu.write_reg(ArmReg::R1, length).unwrap();
+            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+            assert_eq!(get_system_power_status_ex2(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+            assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(87));
+            assert_eq!(cpu.read_mem(0x1100, 64).unwrap(), vec![0xa5; 64]);
+        }
+    }
+
+    #[test]
+    fn wave_break_loop_shortens_pending_cursors_without_early_completion() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let handle = 0xdead4100;
+        let format = pocket_kernel::audio::GuestFormat { sample_rate: 44100, channels: 1, bits_per_sample: 16 };
+        kernel.wave_out.devices.insert(handle, pocket_kernel::WaveOutDevice {
+            format, callback_kind: WaveCallbackKind::None, callback_target: 0,
+            instance: 0, owner_thread: 0, paused: false,
+        });
+        let tap = kernel.audio.tap();
+        tap.drain_into(&mut []);
+        kernel.audio.open_wave_stream(handle, format);
+        assert!(kernel.audio.queue_wave_loop(handle, vec![10, 20, 30], 4));
+        kernel.audio.push_wave_samples(handle, &[40]);
+        for (index, (h, end)) in [(handle, 12), (handle, 13), (123, 12)].into_iter().enumerate() {
+            let hdr = 0x1100 + index as u32 * 32;
+            cpu.write_mem(hdr + 16, &WHDR_INQUEUE.to_le_bytes()).unwrap();
+            kernel.wave_out.pending.push_back(pocket_kernel::PendingWaveBuffer { handle: h, hdr, end_cursor: end });
+        }
+        tap.drain_into(&mut [0; 4]);
+        cpu.write_reg(ArmReg::R0, handle).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        assert_eq!(wave_out_break_loop(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.kernel.wave_out.pending.iter().map(|v| v.end_cursor).collect::<Vec<_>>(), vec![6, 7, 12]);
+        retire_completed_wave_buffers(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.wave_out.pending.len(), 3);
+        assert_eq!(ctx.cpu.read_mem(0x1110, 4).unwrap(), WHDR_INQUEUE.to_le_bytes());
+        ctx.cpu.write_reg(ArmReg::R0, 123).unwrap();
+        assert_eq!(wave_out_break_loop(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(5));
+        let mut output = [0; 2];
+        tap.drain_into(&mut output);
+        assert_eq!(output, [20, 30]);
+        retire_completed_wave_buffers(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_mem(0x1110, 4).unwrap(), WHDR_DONE.to_le_bytes());
+        assert_eq!(ctx.cpu.read_mem(0x1130, 4).unwrap(), WHDR_INQUEUE.to_le_bytes());
+        let mut suffix = [0];
+        tap.drain_into(&mut suffix);
+        assert_eq!(suffix, [40]);
+        retire_completed_wave_buffers(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_mem(0x1130, 4).unwrap(), WHDR_DONE.to_le_bytes());
+        assert_eq!(ctx.kernel.wave_out.pending.len(), 1); // other handle unaffected
+    }
+
     fn fresh_kernel() -> KernelState {
         use pocket_kernel::audio::{AudioEngine, GuestFormat};
         use pocket_kernel::{Framebuffer, GdiState};
@@ -18500,6 +18644,7 @@ mod tests {
             mutexes: Default::default(),
             current_thread: 0,
             thread_last_errors: Default::default(),
+            winsock_last_errors: Default::default(),
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,

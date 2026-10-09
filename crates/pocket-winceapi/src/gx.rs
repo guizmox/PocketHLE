@@ -413,6 +413,7 @@ pub(crate) mod tests {
             mutexes: Default::default(),
             current_thread: 0,
             thread_last_errors: Default::default(),
+            winsock_last_errors: Default::default(),
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,

@@ -34,6 +34,7 @@ mod directshow;
 #[cfg(feature = "video-static")]
 mod media_static;
 mod wavein;
+mod ws2;
 pub mod ordinals;
 
 use std::collections::HashMap;
@@ -227,6 +228,7 @@ impl WinCeDispatcher {
             unimplemented_sink: None,
         };
         coredll::register(&mut d);
+        ws2::register(&mut d);
         ddraw::register(&mut d);
         aygshell::register(&mut d);
         commctrl::register(&mut d);

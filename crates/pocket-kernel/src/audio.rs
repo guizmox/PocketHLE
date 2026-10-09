@@ -715,6 +715,23 @@ impl AudioEngine {
         true
     }
 
+    /// Finish the current loop iteration, preserving its playback position and
+    /// the PCM queued afterwards. Returns the old and shortened loop endpoints.
+    pub fn break_wave_loop(&self, handle: u32) -> Option<(u64, u64)> {
+        let mut shared = self.shared.lock().ok()?;
+        let active = shared.device_active;
+        let stream = shared.wave_streams.get_mut(&handle)?;
+        stream.advance_virtual(active);
+        let wave_loop = stream.loop_buffer.as_mut()?;
+        let length = wave_loop.samples.len() as u64;
+        let base = stream.consumed.max(wave_loop.start);
+        let old_end = base + length * wave_loop.remaining as u64 - wave_loop.index as u64;
+        let new_end = base + length - wave_loop.index as u64;
+        wave_loop.remaining = 1;
+        stream.written -= old_end - new_end;
+        Some((old_end, new_end))
+    }
+
     pub fn update_wave_loop(&self, handle: u32, samples: Vec<i16>) {
         if let Ok(mut s) = self.shared.lock() {
             if let Some(v) = s.wave_streams.get_mut(&handle).and_then(|v| v.loop_buffer.as_mut()) {
@@ -1295,6 +1312,42 @@ fn fill_output_u16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn break_loop_finishes_current_iteration_and_preserves_suffix() {
+        for prefix in [false, true] {
+            let engine = AudioEngine::new();
+            let tap = engine.tap();
+            tap.drain_into(&mut []);
+            engine.open_wave_stream(1, mono(44100));
+            if prefix { engine.push_wave_samples(1, &[10]); }
+            assert!(engine.queue_wave_loop(1, vec![20, 30, 40], 4));
+            engine.push_wave_samples(1, &[50]);
+            let old_end = if prefix { 13 } else { 12 };
+            if !prefix {
+                let mut consumed = [0; 4];
+                tap.drain_into(&mut consumed);
+                assert_eq!(consumed, [20, 30, 40, 20]);
+            }
+            engine.pause_wave_stream(1, true);
+            let new_end = if prefix { 4 } else { 6 };
+            assert_eq!(engine.break_wave_loop(1), Some((old_end, new_end)));
+            assert_eq!(engine.break_wave_loop(1), Some((new_end, new_end)));
+            assert_eq!(engine.wave_written_samples(1), new_end + 1);
+            engine.pause_wave_stream(1, false);
+            if prefix {
+                let mut output = [0; 5];
+                tap.drain_into(&mut output);
+                assert_eq!(output, [10, 20, 30, 40, 50]);
+            } else {
+                let mut output = [0; 3];
+                tap.drain_into(&mut output);
+                assert_eq!(output, [30, 40, 50]);
+            }
+            assert_eq!(engine.break_wave_loop(1), None);
+            assert_eq!(engine.break_wave_loop(99), None);
+        }
+    }
 
     #[test]
     fn wave_loop_preserves_queue_order_and_finishes_finite_repeats() {
