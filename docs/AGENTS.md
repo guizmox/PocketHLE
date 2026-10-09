@@ -1289,3 +1289,81 @@ interval; it fails with the old hook gating. Actual ARM Classic with one 100 ms
 Down press moves Chess to Checkers at 60 Hz after this fix. FIFA's interactive
 rapid-tap result still requires the user's Windows GUI verification. No private
 timing diagnostics or experimental cadence settings belong in delivery.
+
+## 27. Console-only fullscreen and native GPU reconstruction
+
+F11 toggles borderless fullscreen, F10 captures a game screenshot, and Escape
+leaves fullscreen during a game. These shortcuts are consumed by the launcher;
+virtual Gizmondo piano buttons retain their guest key codes. Release held input
+when switching fullscreen and restore the preceding window size on exit.
+
+Fullscreen gameplay shows only the screen on a black background, without skin,
+toolbar, status or FPS overlay. Gizmondo uses 320x240 at the largest fitting
+integer factor in physical pixels, centered with black bars. Compute the factor
+after applying pixels_per_point so Windows DPI never creates fractional scaling.
+PocketPC retains its native dimensions and selected rotation.
+
+The default GPU filter is original edge-adaptive Catmull-Rom reconstruction
+with local color bounds to limit ringing; it is not xBRZ. Native-sized textures
+are uploaded only when snapshots change, and the GPU shades the displayed
+rectangle. Fullscreen also offers nearest, bilinear, bicubic and Lanczos modes.
+Do not allocate a fullscreen-sized CPU buffer each frame. Keep the ordinary
+egui texture as fallback if shader creation fails. Screenshots capture the painted game rectangle after filtering and rotation
+(see section 29), excluding the fullscreen bars and interface.
+
+Validate integer layout across monitor sizes and DPI, compile the actual
+eframe/glow frontend, and compile/render the delivered shaders in an OpenGL
+context. Real Windows transitions, display-driver performance and screenshots
+need an interactive emulator check. Ship no validation harness or diagnostics.
+
+## 28. Optional SMAA and xBRZ filters
+
+Every filter label includes its visual behavior and cost. Preserve the original
+reconstruction default and the user's choice across window/fullscreen switches.
+SMAA uses the reference three-pass 1x algorithm, area/search lookup textures,
+and native-resolution intermediates. Apply it before display reconstruction
+(sharp variant) or bilinear display scaling (soft variant). This is spatial SMAA,
+not temporal SMAA T2x; no motion vectors or history are available. Cache output
+until a snapshot or preset changes. Clear edge/weight buffers each evaluation
+and restore the caller's framebuffer, viewport, scissor, blend and clear color.
+A failed SMAA setup must leave reconstruction available.
+
+xBRZ is xbrz-rs 0.1.0, an actual CPU implementation of xBRZ 1.8. Preprocess
+only fresh snapshots at fixed x3 to bound CPU and memory costs independently
+of monitor size, then bilinearly sample the result into the original integer
+fullscreen rectangle. Never replace last_frame_snapshot with the enlarged
+image: touch coordinates, aspect ratio and native geometry use the original
+image. Screenshots read the displayed output without changing that snapshot. Switching away from xBRZ must re-upload native dimensions.
+Keep the dependency version pinned and its GPL-3.0-only notice and license
+in frontends/pocket-desktop/licenses. Preserve SMAA's permission notices.
+
+Validate the actual renderer with an OpenGL context: all modes, mode switches,
+cached repaints, output orientation, smoothing, GL errors and state restoration.
+Check diagonal blending and constant-color preservation in the reference SMAA
+passes, and native-frame immutability in xBRZ preprocessing. Do not ship the
+headless EGL validation executable or temporary Cargo/profile modifications.
+
+## 29. Capture the displayed game pixels
+
+F10 and the screenshot toolbar button queue a readback of the game rectangle
+in the next paint callback, immediately after its draw, for both the custom GPU
+renderer and ordinary egui textured meshes. Never recreate the image with a CPU
+filter for a screenshot: that differs from SMAA, xBRZ and the GPU reconstruction.
+Read physical pixels using PaintCallbackInfo so viewport rounding, Windows DPI,
+fullscreen scaling and rotation match what was painted. Intersect the game
+rectangle with its clip and the screen bounds; a clipped window captures only
+the visible game area, without adjacent skin/UI or fullscreen bars.
+
+Read from the current draw framebuffer and restore the previous read framebuffer,
+pixel-pack buffer and pack settings. Flip bottom-up OpenGL rows to top-down PNG
+rows and make alpha opaque while preserving displayed RGB. Encode/save the PNG
+on a background worker, report completion/errors to the app and wake repaint.
+Allow one outstanding screenshot; cancel an unpainted request when the game
+ends or its screen becomes unavailable. Files stay in the library screenshots
+directory. No capture readback happens during normal rendering.
+
+Tests compare screenshots with actual GPU output for all eight filter modes,
+including DPI and clip boundaries, then decode the saved PNG to verify its RGB
+content and asynchronous completion. Keep that headless GL executable outside
+the delivered patch. Interactive F10/window/fullscreen checks remain required
+on Windows. No temporary instrumentation belongs in delivery.

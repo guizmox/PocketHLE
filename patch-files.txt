@@ -1,6 +1,4 @@
-crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\ddraw.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-kernel\src\framebuffer.rs
-crates\pocket-cpu\src\unicorn.rs
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\main.rs
+frontends\pocket-desktop\src\screenshot.rs
 docs\AGENTS.md

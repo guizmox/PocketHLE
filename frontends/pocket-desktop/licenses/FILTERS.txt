@@ -1,0 +1,15 @@
+SMAA reference implementation and lookup textures
+Copyright 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia,
+Fernando Navarro and Diego Gutierrez.
+Upstream: https://github.com/iryoku/smaa
+Permission notice: ../src/shaders/smaa/LICENSE.txt and SMAA.glsl.
+The lookup binaries are exact bytes from AreaTex.h and SearchTex.h.
+
+xBRZ 1.8 Rust port, xbrz-rs 0.1.0
+Authors: Thomas Bell and Zenju.
+Upstream: https://github.com/bell345/xbrz-rs
+Dependency license: GPL-3.0-only; full text in xbrz-rs-GPL-3.0.txt.
+This dependency is linked into the desktop executable. Its license is
+separate from the license of PocketHLE's original source files.
+
+SMAA integration and existing reconstruction shaders are PocketHLE code.

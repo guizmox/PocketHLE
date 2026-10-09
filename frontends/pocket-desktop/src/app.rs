@@ -15,17 +15,34 @@ use pocket_library::{
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum UpscaleFilter { Bicubic, Lanczos, Bilinear, Nearest }
+enum UpscaleFilter { Reconstruction, Smaa, SmaaSoft, Xbrz, Bicubic, Lanczos, Bilinear, Nearest }
 impl UpscaleFilter {
-    const ALL: [Self; 4] = [Self::Bicubic, Self::Lanczos, Self::Bilinear, Self::Nearest];
+    const ALL: [Self; 8] = [Self::Reconstruction, Self::Smaa, Self::SmaaSoft, Self::Xbrz,
+        Self::Bicubic, Self::Lanczos, Self::Bilinear, Self::Nearest];
     fn label(self) -> &'static str {
-        match self { Self::Bicubic => "Bicubic", Self::Lanczos => "Lanczos — sharp",
-            Self::Bilinear => "Bilinear — soft", Self::Nearest => "Nearest — crisp pixels" }
+        match self {
+            Self::Reconstruction => "GPU reconstruction (sharp contours; GPU)",
+            Self::Smaa => "SMAA + reconstruction (anti-aliasing; GPU)",
+            Self::SmaaSoft => "SMAA + bilinear (very soft; GPU)",
+            Self::Xbrz => "xBRZ ×3 (smooth 2D; CPU intensive)",
+            Self::Bicubic => "Bicubic (balanced; moderate cost)",
+            Self::Lanczos => "Lanczos (sharp; intensive)",
+            Self::Bilinear => "Bilinear (soft; fast)",
+            Self::Nearest => "Nearest (crisp pixels; fastest)",
+        }
+    }
+    fn gpu_filter(self) -> i32 {
+        match self { Self::Nearest => 0, Self::Bilinear => 1, Self::Bicubic => 2,
+            Self::Reconstruction => 3, Self::Lanczos => 4, Self::Smaa => 5,
+            Self::Xbrz => 6, Self::SmaaSoft => 7 }
+    }
+    fn needs_gpu(self) -> bool {
+        matches!(self, Self::Reconstruction | Self::Smaa | Self::SmaaSoft | Self::Xbrz)
     }
     fn image_filter(self) -> image::imageops::FilterType {
-        match self { Self::Bicubic => image::imageops::FilterType::CatmullRom,
+        match self { Self::Reconstruction | Self::Smaa | Self::Xbrz | Self::Bicubic => image::imageops::FilterType::CatmullRom,
             Self::Lanczos => image::imageops::FilterType::Lanczos3,
-            Self::Bilinear => image::imageops::FilterType::Triangle,
+            Self::Bilinear | Self::SmaaSoft => image::imageops::FilterType::Triangle,
             Self::Nearest => image::imageops::FilterType::Nearest }
     }
 }
@@ -52,6 +69,9 @@ pub struct PocketLauncher {
     console_fit_pending: bool,
     library_window_size: Option<Vec2>,
     display_fullscreen: bool,
+    fullscreen_window_size: Option<Vec2>,
+    reconstruction: Option<std::sync::Arc<std::sync::Mutex<crate::reconstruction::Reconstruction>>>,
+    screenshot: crate::screenshot::SharedScreenshot,
     library: Library,
     selected_game: Option<String>,
     rename_draft: Option<(String, String, bool)>,
@@ -579,11 +599,19 @@ impl PocketLauncher {
             analysis_cache: std::collections::HashMap::new(),
             gizmondo_skin: None,
             upscale_x2: false,
-            upscale_filter: UpscaleFilter::Bicubic,
+            upscale_filter: UpscaleFilter::Reconstruction,
             upscale_window_size: None,
             console_fit_pending: false,
             library_window_size: None,
             display_fullscreen: false,
+            fullscreen_window_size: None,
+            reconstruction: cc.gl.as_ref().and_then(|gl| {
+                match crate::reconstruction::Reconstruction::new(gl) {
+                    Ok(renderer) => Some(std::sync::Arc::new(std::sync::Mutex::new(renderer))),
+                    Err(error) => { log::warn!("GPU reconstruction unavailable: {error}"); None }
+                }
+            }),
+            screenshot: Default::default(),
             selected_game: None,
             rename_draft: None,
             pending_run: None,
@@ -671,7 +699,12 @@ impl PocketLauncher {
     fn refresh_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let smooth_scale = self.running_is_gizmondo && (self.upscale_x2 || fullscreen);
-        let factor = if smooth_scale { 2 } else { 1 };
+        if let Some(renderer) = self.reconstruction.as_ref() {
+            renderer.lock().unwrap_or_else(|e|e.into_inner()).queue(frame, self.upscale_filter.gpu_filter());
+        }
+        let gpu_scale = self.reconstruction.is_some() &&
+            (fullscreen || self.upscale_filter.needs_gpu());
+        let factor = if smooth_scale && !gpu_scale { 2 } else { 1 };
         let source = match self.filtered_frame_image(frame, factor) {
             Ok(source) => source,
             Err(error) => { log::warn!("{error}"); return; }
@@ -702,12 +735,7 @@ impl PocketLauncher {
         }
     }
 
-    fn save_framebuffer_screenshot(&self) -> Result<std::path::PathBuf, String> {
-        let frame = self
-            .last_frame_snapshot
-            .as_ref()
-            .ok_or_else(|| "no framebuffer available yet".to_string())?;
-
+    fn screenshot_path(&self) -> Result<std::path::PathBuf, String> {
         let dir = self.library.root().join("screenshots");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
@@ -723,21 +751,19 @@ impl PocketLauncher {
             .as_millis();
         let path = dir.join(format!("{safe_name}_{millis}.png"));
 
-        let factor = if self.running_is_gizmondo && self.upscale_x2 { 2 } else { 1 };
-        let pixels = self.filtered_frame_image(frame, factor)?;
-        image::save_buffer_with_format(
-            &path, pixels.as_raw(), pixels.width(), pixels.height(),
-            image::ColorType::Rgba8, image::ImageFormat::Png,
-        )
-        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
-
         Ok(path)
     }
 
     fn capture_screenshot(&mut self) {
-        match self.save_framebuffer_screenshot() {
-            Ok(path) => self.status = format!("Screenshot saved: {}", path.display()),
-            Err(error) => self.status = format!("Screenshot failed: {error}"),
+        if self.screen!=Screen::Run || self.last_frame_snapshot.is_none() {
+            self.status="Screenshot failed: return to a visible game first.".into();return;
+        }
+        let mut capture=self.screenshot.lock().unwrap_or_else(|e|e.into_inner());
+        if capture.busy {self.status="Screenshot is already in progress.".into();return;}
+        match self.screenshot_path() {
+            Ok(path)=>{capture.pending=Some(path);capture.busy=true;
+                self.status="Capturing filtered game screen…".into();}
+            Err(e)=>self.status=format!("Screenshot failed: {e}"),
         }
     }
 
@@ -766,10 +792,10 @@ impl PocketLauncher {
                 }
             });
             ui.menu_button("Settings", |ui| self.ui_settings_menu(ui));
-            let can_screenshot = self.last_frame_snapshot.is_some();
+            let can_screenshot = self.screen==Screen::Run && self.last_frame_snapshot.is_some();
             if ui
-                .add_enabled(can_screenshot, egui::Button::new("Screenshot (F11)"))
-                .on_hover_text("Save a PNG at native size, or 640×480 with Upscale ×2")
+                .add_enabled(can_screenshot, egui::Button::new("Screenshot (F10)"))
+                .on_hover_text("Save the displayed game pixels, including filtering and rotation, without UI or black bars")
                 .clicked()
             {
                 self.capture_screenshot();
@@ -837,9 +863,9 @@ impl PocketLauncher {
             self.config_draft = Some(self.library.config().clone());
             self.screen = Screen::Settings; ui.close_menu();
         }
-        if ui.button("Fullscreen").clicked() {
+        if ui.button("Fullscreen (F11)").clicked() {
             let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+            self.set_fullscreen(ui.ctx(), !fullscreen);
             ui.close_menu();
         }
 
@@ -1090,8 +1116,7 @@ impl PocketLauncher {
 
                 ui.label("Borderless fullscreen");
                 if ui.checkbox(&mut draft.fullscreen, "").changed() {
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(draft.fullscreen));
+                    self.set_fullscreen(ui.ctx(), draft.fullscreen);
                 }
                 ui.end_row();
 
@@ -1376,6 +1401,76 @@ impl PocketLauncher {
         }
     }
 
+    fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
+        self.release_all_keys();
+        if let Some((x,y)) = self.pointer_down_at.take() { self.send_input(InputEvent::PointerUp{x,y}); }
+        if enabled {
+            self.fullscreen_window_size = ctx.input(|i|i.viewport().inner_rect.map(|r|r.size()));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
+    }
+
+    fn paint_guest_frame(&self, ui: &egui::Ui, rect: Rect) {
+        if !rect.intersect(ui.clip_rect()).is_positive() {
+            let mut capture=self.screenshot.lock().unwrap_or_else(|e|e.into_inner());
+            if capture.pending.take().is_some() {capture.busy=false;
+                capture.completed=Some(Err("game screen is not visible".into()));}
+            return;
+        }
+        let fullscreen = ui.ctx().input(|i|i.viewport().fullscreen.unwrap_or(false));
+        let use_gpu = fullscreen || self.upscale_filter.needs_gpu();
+        let uv = rotation_uv(self.game_rotation);
+        if use_gpu {
+            if let Some(renderer) = self.reconstruction.as_ref() {
+                let renderer = std::sync::Arc::clone(renderer);
+                let filter = self.upscale_filter.gpu_filter();
+                let capture=std::sync::Arc::clone(&self.screenshot);
+                let ctx=ui.ctx().clone();
+                let transform = [uv[0].x,uv[0].y,uv[1].x-uv[0].x,uv[1].y-uv[0].y,
+                    uv[2].x-uv[0].x,uv[2].y-uv[0].y];
+                ui.painter().add(egui::PaintCallback { rect,
+                    callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(move |info,painter| {
+                        renderer.lock().unwrap_or_else(|e|e.into_inner()).paint(painter.gl(),transform,filter);
+                        crate::screenshot::capture(painter.gl(),info,&capture,&ctx);
+                    })) });
+                return;
+            }
+        }
+        if let Some(tex) = self.last_frame_texture.as_ref() {
+            let mut mesh = Mesh::with_texture(tex.id());
+            for (pos,uv) in [(rect.left_top(),uv[0]),(rect.right_top(),uv[1]),
+                (rect.left_bottom(),uv[2]),(rect.right_bottom(),uv[3])] {
+                mesh.vertices.push(egui::epaint::Vertex{pos,uv,color:Color32::WHITE});
+            }
+            mesh.indices.extend_from_slice(&[0,1,2,2,1,3]);
+            ui.painter().add(egui::Shape::mesh(mesh));
+            if self.screenshot.lock().unwrap_or_else(|e|e.into_inner()).pending.is_some() {
+                let capture=std::sync::Arc::clone(&self.screenshot);let ctx=ui.ctx().clone();
+                ui.painter().add(egui::PaintCallback{rect,callback:std::sync::Arc::new(
+                    eframe::egui_glow::CallbackFn::new(move |info,painter| {
+                        crate::screenshot::capture(painter.gl(),info,&capture,&ctx);
+                    }))});
+            }
+        }
+    }
+
+    fn ui_fullscreen_game(&mut self, ui: &mut egui::Ui) {
+        let Some(frame) = self.last_frame_snapshot.as_ref() else { return; };
+        let guest_size = Vec2::new(frame.width as f32,frame.height as f32);
+        let native = if self.running_is_gizmondo { [320,240] }
+            else if self.game_rotation.is_quarter_turn() { [frame.height,frame.width] }
+            else { [frame.width,frame.height] };
+        let available = ui.available_rect_before_wrap();
+        let dpi = ui.ctx().pixels_per_point();
+        let fit = crate::fullscreen_layout::integer_fit(
+            [(available.width()*dpi).floor() as u32,(available.height()*dpi).floor() as u32],native);
+        let rect = Rect::from_min_size(
+            available.min + Vec2::new(fit.left as f32,fit.top as f32)/dpi,
+            Vec2::new(fit.width as f32,fit.height as f32)/dpi);
+        self.paint_guest_frame(ui,rect);
+        self.handle_pointer(ui.ctx(),&rect,guest_size);
+    }
+
     fn ui_run(&mut self, ui: &mut egui::Ui) {
         if self.running_is_gizmondo {
             self.fit_console_window(ui);
@@ -1450,16 +1545,8 @@ impl PocketLauncher {
         // bands outside the exact 4:3 game rectangle. Otherwise its old
         // picture shows through above/below the live framebuffer at ×2.
         ui.painter().rect_filled(lcd.expand(1.0 / ui.ctx().pixels_per_point()), 0.0, Color32::BLACK);
-        if let Some(tex) = self.last_frame_texture.clone() {
-            let uv = rotation_uv(self.game_rotation);
-            let mut mesh = Mesh::with_texture(tex.id());
-            let idx = mesh.vertices.len() as u32;
-            for (pos, uv) in [(screen.left_top(), uv[0]), (screen.right_top(), uv[1]),
-                              (screen.left_bottom(), uv[2]), (screen.right_bottom(), uv[3])] {
-                mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: Color32::WHITE });
-            }
-            mesh.indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3]);
-            ui.painter().add(egui::Shape::mesh(mesh));
+        if self.last_frame_texture.is_some() {
+            self.paint_guest_frame(ui,screen);
             let guest_size = self.last_frame_snapshot.as_ref()
                 .map(|frame| Vec2::new(frame.width as f32, frame.height as f32))
                 .unwrap_or(Vec2::new(320.0, 240.0));
@@ -1553,24 +1640,7 @@ impl PocketLauncher {
             .max(0.1);
         let display_size = rotated_size * scale;
         let (rect, _response) = ui.allocate_exact_size(display_size, Sense::click_and_drag());
-        let uv = rotation_uv(self.game_rotation);
-        let mut mesh = Mesh::with_texture(tex.id());
-        let idx = mesh.vertices.len() as u32;
-        for (pos, uv) in [
-            (rect.left_top(), uv[0]),
-            (rect.right_top(), uv[1]),
-            (rect.left_bottom(), uv[2]),
-            (rect.right_bottom(), uv[3]),
-        ] {
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos,
-                uv,
-                color: Color32::WHITE,
-            });
-        }
-        mesh.indices
-            .extend_from_slice(&[idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3]);
-        ui.painter().add(egui::Shape::mesh(mesh));
+        self.paint_guest_frame(ui,rect);
         // The j2me-loader-style FPS overlay is opt-in: gated on the
         // launcher's `show_fps` config flag so users who find a
         // permanent debug HUD distracting can switch it off in
@@ -1588,7 +1658,9 @@ impl PocketLauncher {
                 Color32::LIGHT_GREEN,
             );
         }
-        self.handle_pointer(ui.ctx(), &rect, size);
+        let guest_size = self.last_frame_snapshot.as_ref()
+            .map(|f|Vec2::new(f.width as f32,f.height as f32)).unwrap_or(size);
+        self.handle_pointer(ui.ctx(), &rect, guest_size);
     }
 
     /// `size` is the guest framebuffer's own dimensions in pixels — the
@@ -1753,8 +1825,20 @@ impl PocketLauncher {
             else {
                 continue;
             };
-            if key == egui::Key::F11 {
+            if key == egui::Key::F10 {
                 if pressed && !repeat && self.last_frame_snapshot.is_some() { self.capture_screenshot(); }
+                continue;
+            }
+            if key == egui::Key::F11 {
+                if pressed && !repeat {
+                    let fullscreen = ctx.input(|i|i.viewport().fullscreen.unwrap_or(false));
+                    self.set_fullscreen(ctx,!fullscreen);
+                }
+                continue;
+            }
+            if key == egui::Key::Escape && self.screen == Screen::Run
+                && ctx.input(|i|i.viewport().fullscreen.unwrap_or(false)) {
+                if pressed && !repeat { self.set_fullscreen(ctx,false); }
                 continue;
             }
             if self.screen != Screen::Run { continue; }
@@ -1925,15 +2009,37 @@ fn rotated_pointer_to_game(
 }
 
 impl eframe::App for PocketLauncher {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let (Some(gl),Some(renderer)) = (gl,self.reconstruction.take()) {
+            renderer.lock().unwrap_or_else(|e|e.into_inner()).destroy(gl);
+        }
+    }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);
+        if let Some(result)=self.screenshot.lock().unwrap_or_else(|e|e.into_inner()).completed.take() {
+            self.status=match result {Ok(path)=>format!("Screenshot saved: {}",path.display()),
+                Err(e)=>format!("Screenshot failed: {e}")};
+        }
+        // A game can finish or leave the Run screen before the paint callback.
+        if self.screen!=Screen::Run || self.last_frame_snapshot.is_none() {
+            let mut capture=self.screenshot.lock().unwrap_or_else(|e|e.into_inner());
+            if capture.pending.take().is_some() {capture.busy=false;
+                self.status="Screenshot cancelled: game screen is unavailable.".into();}
+        }
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen != self.display_fullscreen {
             self.display_fullscreen = fullscreen;
-            if !fullscreen { self.console_fit_pending = self.running_is_gizmondo; }
+            if !fullscreen {
+                if let Some(size) = self.fullscreen_window_size.take() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    self.console_fit_pending = false;
+                } else { self.console_fit_pending = self.running_is_gizmondo; }
+            }
             if let Some(frame) = self.last_frame_snapshot.clone() { self.refresh_frame_texture(ctx, &frame); }
         }
+        let console_only = fullscreen && self.screen == Screen::Run;
+        if !console_only {
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.ui_top_bar(ui));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1948,17 +2054,23 @@ impl eframe::App for PocketLauncher {
                 });
             });
         });
+        }
         let central = egui::CentralPanel::default();
-        let central = if self.screen == Screen::Run && self.running_is_gizmondo {
+        let central = if console_only {
+            central.frame(egui::Frame::none().fill(Color32::BLACK))
+        } else if self.screen == Screen::Run && self.running_is_gizmondo {
             central.frame(egui::Frame::none())
         } else { central };
-        central.show(ctx, |ui| match self.screen {
+        central.show(ctx, |ui| {
+            if console_only { self.ui_fullscreen_game(ui); return; }
+            match self.screen {
             Screen::Library => self.ui_library(ui),
             Screen::Settings => self.ui_settings(ui),
             Screen::GameSettings => self.ui_game_settings(ui),
             Screen::Run => self.ui_run(ui),
+            }
         });
-        self.ui_rename_game(ctx);
+        if !console_only { self.ui_rename_game(ctx); }
         // While a game is running we want to drain the live frame
         // channel as fast as the runner produces frames; the original
         // 250 ms cadence capped the launcher at 4 fps, which is most

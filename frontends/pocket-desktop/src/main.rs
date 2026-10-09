@@ -12,6 +12,10 @@
 
 mod app;
 mod runner;
+mod fullscreen_layout;
+mod reconstruction;
+mod smaa;
+mod screenshot;
 
 use anyhow::{Context, Result};
 
