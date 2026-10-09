@@ -47,4 +47,4 @@ pocket-pe = { path = "../../crates/pocket-pe" }
 
 xbrz-rs = "=0.1.0"
 
-gilrs = "=0.11.2"
+sdl2 = { version = "=0.38.0", features = ["bundled", "static-link"] }

@@ -1151,6 +1151,9 @@ impl Vfs {
         self.bluetooth_handles.clear();
         self.bluetooth.lookups.clear();
         self.bluetooth.writes.clear();
+        self.bluetooth.sockets.clear();
+        self.bluetooth.socket_deadlines.clear();
+        self.bluetooth.startups=0;
         n
     }
 

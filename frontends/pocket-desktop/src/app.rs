@@ -102,7 +102,7 @@ pub struct PocketLauncher {
     gamepad_error: Option<String>,
     gamepad_held: std::collections::HashMap<(usize, String), u16>,
     gamepad_capture: Option<GuestButton>,
-    gamepad_pressed: Vec<String>,
+    gamepad_last_input: Option<String>,
     /// `Some` while a stylus drag is in progress — carries the last
     /// reported game-space coordinates so we don't spam the guest
     /// with redundant events.
@@ -642,7 +642,7 @@ impl PocketLauncher {
             held: HeldButtons::default(),
             gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone()),
             gamepad_devices: Vec::new(), gamepad_selected: None, gamepad_error: None,
-            gamepad_held: Default::default(), gamepad_capture: None, gamepad_pressed: Vec::new(),
+            gamepad_held: Default::default(), gamepad_capture: None, gamepad_last_input: None,
             pointer_down_at: None,
             running_game: None,
             status: "Welcome to PocketHLE.".to_string(),
@@ -1241,12 +1241,7 @@ impl PocketLauncher {
                 for key in keys { self.release_gamepad_control(&key); }
             }
         }
-        if let Some(button) = self.gamepad_capture {
-            if let Some(control) = self.gamepad_pressed.first() {
-                draft.gamepad_bindings.insert(control.clone(), button);
-                self.gamepad_capture = None;
-            }
-        }
+        ui.label(format!("Last controller input: {}",self.gamepad_last_input.as_deref().unwrap_or("waiting for a button / stick…")));
 
         // Copied out so the closures below can mutate the capture state
         // without holding a second borrow of `self`.
@@ -1793,7 +1788,6 @@ impl PocketLauncher {
     }
 
     fn handle_gamepads(&mut self, ctx: &egui::Context) {
-        self.gamepad_pressed.clear();
         while let Ok(event) = self.gamepad_rx.rx.try_recv() {
             match event {
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
@@ -1810,7 +1804,13 @@ impl PocketLauncher {
                     let key = (device, control.clone());
                     if !down { self.release_gamepad_control(&key); continue; }
                     if Some(device) != self.gamepad_selected || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) { continue; }
-                    self.gamepad_pressed.push(control.clone());
+                    self.gamepad_last_input=Some(crate::gamepad::label(&control));
+                    if self.screen==Screen::Settings {
+                        if let (Some(button),Some(draft))=(self.gamepad_capture,self.config_draft.as_mut()) {
+                            draft.gamepad_bindings.insert(control.clone(),button);
+                            self.gamepad_capture=None;
+                        }
+                    }
                     if self.screen != Screen::Run { continue; }
                     let Some(button) = self.library.config().gamepad_bindings.get(&control) else { continue; };
                     let vk = button.vk();

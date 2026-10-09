@@ -1234,7 +1234,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "__report_gsfailure", report_gsfailure);
     d.register_constant(dll, "CacheSync", 1, one_returning);
     d.register_constant(dll, "ord:1825", 0, zero_returning);
-    d.register_constant(dll, "?set_new_handler@@YAP6AXXZP6AXXZ@Z", 0, zero_returning);
+    d.register_handler(dll, "?set_new_handler@@YAP6AXXZP6AXXZ@Z", cpp_set_new_handler);
+    d.register_handler(dll, "?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z", crt_set_new_handler);
+    d.register_handler(dll, "?_query_new_handler@@YAP6AHI@ZXZ", crt_query_new_handler);
+    d.register_handler(dll, "_set_new_handler", crt_set_new_handler);
+    d.register_handler(dll, "_query_new_handler", crt_query_new_handler);
 
     // ---- Clipboard (no-op) ----
     d.register_handler(dll, "OpenClipboard", open_clipboard);
@@ -18700,6 +18704,7 @@ mod tests {
             current_thread: 0,
             thread_last_errors: Default::default(),
             winsock_last_errors: Default::default(),
+                crt_new_handler:0, cpp_new_handler:0,
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
@@ -23378,4 +23383,16 @@ mod tests {
 
 fn set_file_attributes_w(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError>{
     let flags=ctx.arg_u32(1)?;let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.set_attributes(&p,flags));vfs_api_bool(ctx,result)
+}
+
+fn crt_set_new_handler(ctx:&mut CallCtx<'_>) -> Result<DispatchOutcome,KernelError> {
+    let next=ctx.arg_u32(0)?; let previous=std::mem::replace(&mut ctx.kernel.crt_new_handler,next);
+    Ok(DispatchOutcome::ReturnedR0(previous))
+}
+fn cpp_set_new_handler(ctx:&mut CallCtx<'_>) -> Result<DispatchOutcome,KernelError> {
+    let next=ctx.arg_u32(0)?; let previous=std::mem::replace(&mut ctx.kernel.cpp_new_handler,next);
+    Ok(DispatchOutcome::ReturnedR0(previous))
+}
+fn crt_query_new_handler(ctx:&mut CallCtx<'_>) -> Result<DispatchOutcome,KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(ctx.kernel.crt_new_handler))
 }

@@ -1592,10 +1592,10 @@ real errors. Two PocketHLE hosts agree on a stable service UUID per guest channe
 an explicit SDK service GUID is honored. Real Gizmondo interoperability with its
 fixed physical RFCOMM channel is not verified or guaranteed by this mapping.
 
-Scope limits: general IP sockets and direct guest Winsock RFCOMM socket APIs are
-not implemented; neither are raw BTD HCI/L2CAP/SDP driver exports, service/filter
-lookup queries, overlapped COM I/O, non-default MTU/quota requests, or UART modem/
-DCB control. EV_RXCHAR and mask reset are supported. Legacy REMOTE_DCB/KEEP_DCD
+Scope limits: general IP sockets are not implemented. Direct guest Winsock
+RFCOMM sockets on Windows are covered by §37. Raw BTD HCI/L2CAP/SDP driver exports, service/filter
+lookup queries, overlapped COM I/O, non-default MTU/quota requests, and UART modem/
+DCB control remain unsupported. EV_RXCHAR and mask reset are supported. Legacy REMOTE_DCB/KEEP_DCD
 flags are accepted for SDK compatibility; they do not expose modem/DCB behavior.
 
 pockethle-bt-test is an optional standalone native-radio diagnostic, never run by
@@ -1610,8 +1610,13 @@ required before treating multiplayer compatibility as established.
 
 ## 36. Desktop physical controllers
 
-The desktop frontend uses gilrs 0.11.2 with its default Windows Gaming Input
-backend, rather than requiring an XInput wrapper for non-Xbox controllers.
+The desktop frontend uses bundled, statically linked SDL2 (sdl2 crate 0.38.0).
+SDL's HIDAPI Switch driver initializes the Nintendo Switch Pro USB/Bluetooth
+protocol. Only SDL input/event subsystems are initialized: egui owns the window
+and CPAL still owns audio. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1 is required
+because egui's window is not an SDL window; actual guest/capture focus is gated
+by egui. SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0 preserves position-based names.
+SDL_JOYSTICK_HIDAPI and SDL_JOYSTICK_HIDAPI_SWITCH are enabled before startup.
 A worker collects transitions every 4 ms and wakes egui; it ignores repeats,
 uses stick hysteresis (press 0.60 / release 0.35), and stops when the GUI drops
 its monitor. No controller polling or timing changes enter the guest kernel.
@@ -1629,4 +1634,42 @@ Face labels identify positions and Switch/Xbox lettering. D-pad and left stick
 are mapped by default; right stick and additional buttons can be captured.
 Connection is managed by the host OS. This does not depend on the emulated
 Gizmondo Bluetooth setting. Actual Switch Pro hardware validation remains a
-user-side check; software tests and native Linux desktop checks pass.
+user-side check. Native virtual SDL controller tests verify queued press/release
+without a physical controller. Capture updates the settings draft when an event
+arrives, so it survives UI redraws; a last-input indicator gives immediate user
+feedback without writing probe logs. Generic unmapped joysticks have raw button,
+axis and hat capture; normalized controller events are not duplicated by their
+underlying joystick events. CMake 4 users set CMAKE_POLICY_VERSION_MINIMUM=3.5
+when building SDL's bundled sources; build-patch.cmd provides this locally.
+
+## 37. Guest Winsock RFCOMM sockets
+
+ws2/sockets.rs registers socket/bind/listen/connect/accept/send/recv/select,
+closesocket/shutdown/ioctlsocket, options and local/peer address queries as
+stateful handlers. Handles are process-local IDs; native socket IDs never reach
+ARM. Windows uses real AF_BTH/RFCOMM sockets, always nonblocking internally.
+Guest blocking waits yield via the existing scheduler; receive/send timeouts
+and select deadlines persist across retries. Partial sends return their actual
+byte count. No-data returns WOULD_BLOCK/waits; zero receive means real EOF.
+FD_SET is count plus 32-bit IDs, max 64; readiness polling does not consume data.
+Pointers and address outputs are validated before accepting/consuming data.
+
+SOCKADDR_BTH on ARM/CE is 40 bytes: family at 0, u64 address at 8, GUID at 16,
+port at 32. Host padding differs and must be translated. Inquiry now returns
+40-byte addresses too; 30-byte packed and 32-byte caller layouts remain readable.
+Socket options go to the native provider; TCP-only options on RFCOMM may return
+WSAENOPROTOOPT rather than fake success. FIONBIO changes guest semantics only.
+Startup refcounts and WSA errors stay per process/thread. Final WSACleanup and
+process teardown drop sockets; disabling the shared Bluetooth service closes
+native sockets in all processes through weak registrations. No strong cycles.
+
+The new raw-socket backend is implemented on Windows. Android keeps its prior
+COM/RFCOMM transport; raw Winsock socket creation explicitly returns unsupported
+there (10045). General IP sockets, WSA event/async APIs and SDP service queries
+are outside this pass. Physical multiplayer tests remain required. The optional
+pockethle-bt-test socket-server/socket-client modes exercise real channel-2
+RFCOMM sockets and ping/pong on two Windows hosts without changing game behavior.
+
+CRT _set_new_handler and _query_new_handler store/return a process-local callback;
+C++ set_new_handler has a separate callback slot. They must not be constant
+thunks. This pass does not change the existing allocator's OOM callback policy.

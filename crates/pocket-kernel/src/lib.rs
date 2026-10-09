@@ -1166,6 +1166,8 @@ pub struct KernelState {
     pub thread_last_errors: HashMap<usize, u32>,
     /// Winsock errors belong to the calling thread and survive status reads.
     pub winsock_last_errors: HashMap<usize, u32>,
+    pub crt_new_handler: u32,
+    pub cpp_new_handler: u32,
     /// Next worker index to consider at a cooperative scheduling point.
     pub worker_schedule_cursor: usize,
     /// Workers already run since the main thread last yielded.
@@ -2782,6 +2784,7 @@ impl Process {
                 current_thread: 0,
                 thread_last_errors: HashMap::new(),
                 winsock_last_errors: HashMap::new(),
+                crt_new_handler:0, cpp_new_handler:0,
                 worker_schedule_cursor: 0,
                 worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,

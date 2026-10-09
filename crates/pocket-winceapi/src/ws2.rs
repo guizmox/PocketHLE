@@ -1,6 +1,6 @@
-//! CE Winsock startup and Bluetooth device inquiry. Other networking APIs
-//! remain explicit failures; an unsupported recv never fabricates peer EOF.
+//! CE Winsock startup, Bluetooth inquiry and RFCOMM socket operations.
 use crate::{CallCtx, WinCeDispatcher};
+mod sockets;
 use pocket_kernel::{DispatchOutcome, KernelError};
 
 const SOCKET_ERROR: u32 = u32::MAX;
@@ -8,7 +8,7 @@ const WSASYSNOTREADY: u32 = 10091;
 const WSANOTINITIALISED: u32 = 10093;
 
 pub fn register(dispatcher: &mut WinCeDispatcher) {
-    dispatcher.register_handler("ws2.dll", "recv", recv);
+    sockets::register(dispatcher);
     dispatcher.register_handler("ws2.dll", "WSAStartup", startup);
     dispatcher.register_handler("ws2.dll", "WSACleanup", cleanup);
     dispatcher.register_handler("ws2.dll", "WSAGetLastError", get_last_error);
@@ -35,7 +35,10 @@ fn startup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn cleanup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.kernel.vfs.bluetooth.startups == 0 { return not_initialized(ctx); }
     ctx.kernel.vfs.bluetooth.startups -= 1;
-    if ctx.kernel.vfs.bluetooth.startups == 0 { ctx.kernel.vfs.bluetooth.lookups.clear(); }
+    if ctx.kernel.vfs.bluetooth.startups == 0 {
+        ctx.kernel.vfs.bluetooth.lookups.clear(); ctx.kernel.vfs.bluetooth.sockets.clear();
+        ctx.kernel.vfs.bluetooth.socket_deadlines.clear();
+    }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn fail(ctx: &mut CallCtx<'_>, code: u32) -> Result<DispatchOutcome, KernelError> {
@@ -78,16 +81,16 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         Some(Ok(devices)) => match devices.get(lookup.index).cloned() { Some(d) => d, None => return fail(ctx, 10110) },
     };
     let name: Vec<u8> = device.name.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
-    let Some(required) = u32::try_from(name.len()).ok().and_then(|n| 116u32.checked_add(n)) else { return fail(ctx, 10055); };
+    let Some(required) = u32::try_from(name.len()).ok().and_then(|n| 124u32.checked_add(n)) else { return fail(ctx, 10055); };
     let capacity = ctx.cpu.read_u32_le(length)?;
     ctx.cpu.write_mem(length, &required.to_le_bytes())?;
     if capacity < required || ptr == 0 { return fail(ctx, 10014); }
     if ptr.checked_add(required).is_none() || ctx.cpu.check_guest_access(ptr, required, pocket_cpu::Prot::WRITE).is_err() { return fail(ctx, 10014); }
     let mut bytes = vec![0; required as usize];
-    for (offset, value) in [(0,60),(4,ptr+116),(20,16),(44,1),(48,ptr+60),(68,ptr+84),(72,30),(76,1),(80,3)] {
+    for (offset, value) in [(0,60),(4,ptr+124),(20,16),(44,1),(48,ptr+60),(68,ptr+84),(72,40),(76,1),(80,3)] {
         bytes[offset..offset+4].copy_from_slice(&value.to_le_bytes());
     }
-    bytes[84..86].copy_from_slice(&32u16.to_le_bytes()); bytes[86..94].copy_from_slice(&device.address.to_le_bytes()); bytes[116..].copy_from_slice(&name);
+    bytes[84..86].copy_from_slice(&32u16.to_le_bytes()); bytes[92..100].copy_from_slice(&device.address.to_le_bytes()); bytes[124..].copy_from_slice(&name);
     ctx.cpu.write_mem(ptr, &bytes)?;
     ctx.kernel.vfs.bluetooth.lookups.get_mut(&id).unwrap().index += 1;
     Ok(DispatchOutcome::ReturnedR0(0))
@@ -103,11 +106,6 @@ fn not_initialized(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(SOCKET_ERROR))
 }
 
-fn recv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // Initialization never succeeds in this offline boundary. In particular,
-    // the demo's recv(0, NULL, 4096, 0) must neither write NULL nor return EOF.
-    if ctx.kernel.vfs.bluetooth.startups == 0 { not_initialized(ctx) } else { fail(ctx, 10038) }
-}
 
 fn get_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(*ctx.kernel.winsock_last_errors
@@ -145,12 +143,12 @@ mod tests {
         assert!(result.lock().unwrap().is_some());
         cpu.write_mem(0x1204,&0u32.to_le_bytes()).unwrap();
         assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"ws2.dll","WSALookupServiceNextW",&[lookup,0x110,0x1204,0]),DispatchOutcome::ReturnedR0(u32::MAX));
-        let required = cpu.read_u32_le(0x1204).unwrap(); assert!(required>116);
+        let required = cpu.read_u32_le(0x1204).unwrap(); assert!(required>124);
         assert_eq!(kernel.vfs.bluetooth.lookups[&lookup].index,0);
         assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"ws2.dll","WSALookupServiceNextW",&[lookup,0x110,0x1204,0x2000]),DispatchOutcome::ReturnedR0(0));
-        assert_eq!(cpu.read_u32_le(0x2004).unwrap(),0x2074);
+        assert_eq!(cpu.read_u32_le(0x2004).unwrap(),0x207c);
         assert_eq!(cpu.read_u32_le(0x2030).unwrap(),0x203c);
-        assert_eq!(cpu.read_mem(0x2056,8).unwrap(),0x123456789abcu64.to_le_bytes());
+        assert_eq!(cpu.read_mem(0x205c,8).unwrap(),0x123456789abcu64.to_le_bytes());
         assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"ws2.dll","WSALookupServiceNextW",&[lookup,0x110,0x1204,0x2000]),DispatchOutcome::ReturnedR0(u32::MAX));
         assert_eq!(kernel.winsock_last_errors[&0],10110);
         assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"ws2.dll","WSALookupServiceEnd",&[lookup]),DispatchOutcome::ReturnedR0(0));

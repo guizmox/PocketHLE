@@ -412,6 +412,7 @@ pub(crate) mod tests {
             current_thread: 0,
             thread_last_errors: Default::default(),
             winsock_last_errors: Default::default(),
+                crt_new_handler:0, cpp_new_handler:0,
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,

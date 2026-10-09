@@ -27,6 +27,13 @@ fn nonblocking(s: SOCKET) -> BtResult<()> {
 struct Socket(SOCKET);
 impl Drop for Socket { fn drop(&mut self) { unsafe { closesocket(self.0); } } }
 impl Backend for WindowsBackend {
+    fn socket(&self) -> BtResult<Box<dyn RfcommSocket>> {
+        init()?;
+        let raw=unsafe { socket(AF_BTH as i32, SOCK_STREAM, BTHPROTO_RFCOMM as i32) };
+        if raw==INVALID_SOCKET { return Err(error()); }
+        let owned=Socket(raw); nonblocking(raw)?;
+        Ok(Box::new(NativeSocket(owned)))
+    }
     fn hostname(&self) -> BtResult<String> { init()?; Ok(std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PocketHLE".into())) }
     fn scan(&self) -> BtResult<Vec<Device>> {
         init()?;
@@ -135,3 +142,66 @@ impl Stream for WindowsStream {
 impl Drop for WindowsStream { fn drop(&mut self) {
     if let Some((addr, guid)) = &mut self.advertisement { let _ = advertise(addr, guid, RNRSERVICE_DELETE); }
 } }
+
+
+struct NativeSocket(Socket);
+fn native_address(a: &SocketAddress) -> SOCKADDR_BTH {
+    let b=a.uuid;
+    SOCKADDR_BTH { addressFamily: AF_BTH, btAddr:a.address, port:a.port,
+        serviceClassId: GUID { data1:u32::from_le_bytes(b[..4].try_into().unwrap()),
+            data2:u16::from_le_bytes(b[4..6].try_into().unwrap()), data3:u16::from_le_bytes(b[6..8].try_into().unwrap()),
+            data4:b[8..].try_into().unwrap() } }
+}
+fn guest_address(a: SOCKADDR_BTH) -> SocketAddress {
+    let guid=a.serviceClassId; let mut uuid=[0;16];
+    uuid[..4].copy_from_slice(&guid.data1.to_le_bytes()); uuid[4..6].copy_from_slice(&guid.data2.to_le_bytes());
+    uuid[6..8].copy_from_slice(&guid.data3.to_le_bytes()); uuid[8..].copy_from_slice(&guid.data4);
+    SocketAddress { address:a.btAddr, uuid, port:a.port }
+}
+fn status(result: i32) -> BtResult<()> { if result==SOCKET_ERROR { Err(error()) } else { Ok(()) } }
+impl RfcommSocket for NativeSocket {
+    fn bind(&mut self, addr:&SocketAddress) -> BtResult<()> {
+        let a=native_address(addr); status(unsafe { bind(self.0.0, (&a as *const SOCKADDR_BTH).cast(), size_of::<SOCKADDR_BTH>() as i32) })
+    }
+    fn listen(&mut self, backlog:i32) -> BtResult<()> { status(unsafe { listen(self.0.0, backlog) }) }
+    fn connect(&mut self, addr:&SocketAddress) -> BtResult<()> {
+        let a=native_address(addr); status(unsafe { connect(self.0.0, (&a as *const SOCKADDR_BTH).cast(), size_of::<SOCKADDR_BTH>() as i32) })
+    }
+    fn accept(&mut self) -> BtResult<(Box<dyn RfcommSocket>, SocketAddress)> {
+        let mut a=SOCKADDR_BTH::default(); let mut len=size_of::<SOCKADDR_BTH>() as i32;
+        let raw=unsafe { accept(self.0.0, (&mut a as *mut SOCKADDR_BTH).cast(), &mut len) };
+        if raw==INVALID_SOCKET { return Err(error()); } let owned=Socket(raw); nonblocking(raw)?;
+        Ok((Box::new(NativeSocket(owned)), guest_address(a)))
+    }
+    fn read(&mut self, bytes:&mut [u8], flags:i32) -> BtResult<usize> {
+        let n=unsafe { recv(self.0.0, bytes.as_mut_ptr(), bytes.len() as i32, flags) };
+        if n==SOCKET_ERROR { Err(error()) } else { Ok(n as usize) }
+    }
+    fn write(&mut self, bytes:&[u8], flags:i32) -> BtResult<usize> {
+        let n=unsafe { send(self.0.0, bytes.as_ptr(), bytes.len() as i32, flags) };
+        if n==SOCKET_ERROR { Err(error()) } else { Ok(n as usize) }
+    }
+    fn readiness(&mut self) -> BtResult<(bool,bool,bool)> {
+        let mut r=FD_SET::default(); r.fd_count=1; r.fd_array[0]=self.0.0;
+        let mut w=r; let mut e=r; let timeout=TIMEVAL::default();
+        let n=unsafe { select(0,&mut r,&mut w,&mut e,&timeout) }; if n==SOCKET_ERROR { return Err(error()); }
+        Ok((r.fd_count!=0,w.fd_count!=0,e.fd_count!=0))
+    }
+    fn available(&mut self) -> BtResult<u32> {
+        let mut n=0; status(unsafe { ioctlsocket(self.0.0,FIONREAD,&mut n) })?; Ok(n)
+    }
+    fn set_option(&mut self,level:i32,name:i32,value:&[u8]) -> BtResult<()> {
+        status(unsafe { setsockopt(self.0.0,level,name,value.as_ptr(),value.len() as i32) })
+    }
+    fn get_option(&mut self,level:i32,name:i32,size:usize) -> BtResult<Vec<u8>> {
+        let mut bytes=vec![0;size]; let mut len=size as i32;
+        status(unsafe { getsockopt(self.0.0,level,name,bytes.as_mut_ptr(),&mut len) })?;
+        if len<0 || len as usize>size { return Err(10014); } bytes.truncate(len as usize); Ok(bytes)
+    }
+    fn address(&mut self,peer:bool) -> BtResult<SocketAddress> {
+        let mut a=SOCKADDR_BTH::default(); let mut len=size_of::<SOCKADDR_BTH>() as i32;
+        status(unsafe { if peer { getpeername(self.0.0,(&mut a as *mut SOCKADDR_BTH).cast(),&mut len) }
+            else { getsockname(self.0.0,(&mut a as *mut SOCKADDR_BTH).cast(),&mut len) } })?; Ok(guest_address(a))
+    }
+    fn shutdown(&mut self,how:i32) -> BtResult<()> { status(unsafe { shutdown(self.0.0,how) }) }
+}
