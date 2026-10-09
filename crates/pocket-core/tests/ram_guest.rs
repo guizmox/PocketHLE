@@ -107,6 +107,7 @@ fn launch_pending(state: &mut KernelState, assets: &PathBuf, flash: &PathBuf,
     assert!(request.concurrent);
     let context=state.child_handle_context(request.process_handle).unwrap();
     let table=context.table.clone();let child_table=table.clone();
+    child_table.defer_process_exit();
     let ram=state.memory_division.clone();let assets=assets.clone();let flash=flash.clone();
     let key=request.call_key;let handle=request.process_handle;
     let (tx,rx)=std::sync::mpsc::channel();
@@ -125,7 +126,7 @@ fn launch_pending(state: &mut KernelState, assets: &PathBuf, flash: &PathBuf,
             emu.max_slices=3_000_000;emu.set_halt_on_unimplemented(true);Ok(emu)
         })();
         let mut emu=match built { Ok(emu)=>{tx.send(Ok(())).unwrap();emu},Err(_error)=>{
-            tx.send(Err(8)).unwrap();return;
+            tx.send(Err(8)).unwrap();child_table.complete_process_exit(0xc0000017);return;
         }};
         while !child_table.start_allowed(){std::thread::sleep(std::time::Duration::from_millis(1));}
         let mut children=Vec::new();
@@ -133,6 +134,7 @@ fn launch_pending(state: &mut KernelState, assets: &PathBuf, flash: &PathBuf,
         emu.run_with_hook(&mut hook).unwrap();drop(hook);
         let code=emu.process().unwrap().state.process_exit_code.expect("child exited");
         drop(emu);
+        child_table.complete_process_exit(code);
         for child in children {child.join().unwrap();}
         assert_eq!(child_table.exit_code(child_table.process_id(),None),Some(code));
     }));

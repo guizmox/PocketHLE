@@ -137,6 +137,7 @@ impl Runner {
         // platform before the title starts so GAPI sees the real geometry.
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
         if let Some(context) = handle_context {
+            context.table.defer_process_exit();
             if let Some(process) = emu.process_mut() { process.state.attach_handle_context(context); }
         }
         let ram = inherited_ram.or_else(|| is_gizmondo.then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default));
@@ -459,7 +460,7 @@ impl RunHook {
                 let spawned = std::thread::Builder::new().name(format!("pockethle-process-{}",table.process_id())).spawn(move || {
                     let result = context.runner.run_process(&context.library_root,&child_game,&context.card_root,
                         Some(&guest_path),ram,Some(handle_context),Some(startup),&mut child_hook);
-                    child_table.set_exit(None,result.1);
+                    child_table.complete_process_exit(result.1);
                     if child_table.exit_code(child_table.process_id(),Some(0)).is_none() { child_table.set_exit(Some(0),result.1); }
                     child_table.mark_inactive();
                     let next = child_table.focus_after_exit(parent_pid);
@@ -516,7 +517,7 @@ impl RunHook {
             log::warn!("child launch refused: path outside card or missing runner context");
         }
         if let Some(table) = state.object_handles.child(request.process_handle) {
-            table.set_exit(None, exit_code); table.set_exit(Some(0), exit_code); table.mark_inactive();
+            table.complete_process_exit(exit_code); table.set_exit(Some(0), exit_code); table.mark_inactive();
         }
         state.sync_transferred_handles();
         if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
@@ -569,7 +570,7 @@ impl RunHook {
             if self.children[index].thread.is_finished() {
                 let job = self.children.swap_remove(index);
                 if job.thread.join().is_err() {
-                    job.table.set_exit(None,0xc0000005); job.table.set_exit(Some(0),0xc0000005);job.table.mark_inactive();
+                    job.table.complete_process_exit(0xc0000005); job.table.set_exit(Some(0),0xc0000005);job.table.mark_inactive();
                 }
             } else { index += 1; }
         }

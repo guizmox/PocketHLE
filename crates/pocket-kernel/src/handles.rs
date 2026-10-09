@@ -28,6 +28,7 @@ struct Domain {
     next_pid: u32,
     active: HashSet<u32>,
     exits: HashMap<(u32, Option<usize>), u32>,
+    deferred_process_exits: HashSet<u32>,
     child_ids: HashMap<u32, u32>,
     files: HashMap<HandleObject, VfsObject>,
     imports: HashMap<(u32, u32), VfsObject>,
@@ -189,7 +190,20 @@ impl HandleTable {
         self.domain.lock().unwrap().exits.insert((self.pid, thread), code);
     }
     pub fn exit_code(&self, pid: u32, thread: Option<usize>) -> Option<u32> {
-        self.domain.lock().unwrap().exits.get(&(pid, thread)).copied()
+        let d = self.domain.lock().unwrap();
+        if thread.is_none() && d.deferred_process_exits.contains(&pid) { return None; }
+        d.exits.get(&(pid, thread)).copied()
+    }
+    /// A host-run child must not wake process waiters before its CPU image and
+    /// heap have been dropped. Thread exit remains independently observable.
+    pub fn defer_process_exit(&self) {
+        self.domain.lock().unwrap().deferred_process_exits.insert(self.pid);
+    }
+    /// Called by the host after dropping the child's emulator and private RAM.
+    pub fn complete_process_exit(&self, code: u32) {
+        let mut d = self.domain.lock().unwrap();
+        d.exits.insert((self.pid, None), code);
+        d.deferred_process_exits.remove(&self.pid);
     }
     pub fn mark_inactive(&self) {
         let mut d = self.domain.lock().unwrap();d.active.remove(&self.pid);d.held_start.remove(&self.pid);
@@ -215,6 +229,40 @@ impl HandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_wait_stays_pending_until_host_releases_child_ram() {
+        use crate::{Heap, memory_division::MemoryDivision};
+        let mut parent = HandleTable::default();
+        let (_, child) = parent.new_child().unwrap();
+        let pid = child.process_id();
+        let ram = MemoryDivision::new(32 * 4096, 16).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        child.defer_process_exit();
+        let budget = ram.clone();
+        let worker = std::thread::spawn(move || {
+            let mut heap = Heap::new(0x100000, 0x40000);
+            assert!(heap.attach_ram(Some(budget)));
+            heap.alloc(4 * 4096 - 8).unwrap();
+            child.set_exit(Some(0), 74);
+            child.set_exit(None, 74);
+            child.mark_inactive();
+            ready_tx.send(()).unwrap();
+            // Force the race window: guest exit has happened but host cleanup
+            // has deliberately not refunded the child's four pages yet.
+            release_rx.recv().unwrap();
+            drop(heap);
+            child.complete_process_exit(74);
+        });
+        ready_rx.recv().unwrap();
+        assert_eq!(ram.snapshot().program_used, 4);
+        assert_eq!(parent.exit_code(pid, Some(0)), Some(74));
+        assert_eq!(parent.exit_code(pid, None), None);
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(parent.exit_code(pid, None), Some(74));
+        assert_eq!(ram.snapshot().program_used, 0);
+    }
     #[test]
     fn handles_share_identity_until_the_last_reference_closes() {
         let mut table = HandleTable::default();

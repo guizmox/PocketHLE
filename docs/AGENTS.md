@@ -944,6 +944,15 @@ the new pixel buffer. Test fixtures must give the allocator the same arena
 capacity as the mapped CPU heap. Sleep already switches directly to a ready
 worker; scheduler tests must preserve that behavior.
 
+Host-run child process completion is deferred until `run_process` has dropped
+the child emulator, including its CPU image and heap RAM charges. Use
+`HandleTable::defer_process_exit` before guest execution and
+`complete_process_exit` after teardown. Guest exit codes are recorded earlier
+but process waiters and remote process exit queries must not observe them yet.
+Thread exit remains independently observable. Preserve the delayed-cleanup
+regression: a parent cannot finish its process wait while four child pages
+are still charged. VFSTEST keeps its strict NAND/RAM equality check.
+
 Cross-process handle tests cover closure of the original and intermediate
 aliases, parent teardown, retained shared state, final reference cleanup and
 rejected use of closed aliases. They do not imply general concurrent process
