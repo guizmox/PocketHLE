@@ -1,3 +1,8 @@
-crates/pocket-pe/src/lib.rs
+crates/pocket-kernel/src/camera.rs
+crates/pocket-winceapi/src/camera.rs
 crates/pocket-winceapi/src/coredll.rs
+crates/pocket-pe/src/lib.rs
 docs/AGENTS.md
+tools/camtest/src/camtest.c
+tools/camtest/README.md
+tools/camtest/dist/PocketHLE-CAMTEST.zip

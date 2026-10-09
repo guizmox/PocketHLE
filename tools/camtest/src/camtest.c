@@ -16,7 +16,7 @@ static void le32(unsigned char*p,U32 n){p[0]=n;p[1]=n>>8;p[2]=n>>16;p[3]=n>>24;}
 static U32 bitmap(const void*p){
  unsigned char header[66]={0};U32 h,ok;
  header[0]='B';header[1]='M';le32(header+2,66+153600);le32(header+10,66);le32(header+14,40);
- le32(header+18,320);le32(header+22,0u-240u);header[26]=1;header[28]=16;le32(header+30,3);le32(header+34,153600);
+ le32(header+18,320);le32(header+22,240u);header[26]=1;header[28]=16;le32(header+30,3);le32(header+34,153600);
  le32(header+54,0xf800);le32(header+58,0x07e0);le32(header+62,0x001f);
  h=CreateFileW(L"\\Flash Disk\\CAMTEST-preview.bmp",W,0,0,2,0,0);if(h==BAD)return 0;
  ok=write_all(h,header,66)&&write_all(h,p,153600);CloseHandle(h);return ok;

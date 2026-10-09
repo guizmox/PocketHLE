@@ -1681,7 +1681,7 @@ The supplied Gizmondo SDK camera sample uses CreateFileW("CAM1:") and
 DeviceIoControl HAL functions 2101..2106 (METHOD_BUFFERED, FILE_ANY_ACCESS).
 SETFORMAT/GETFORMAT transfer two SIZE records: capture 640x480, preview
 positive multiples of 8 up to 640x480. VINFRAMEINFO is 16 bytes (width, height,
-frame count IN/OUT, timeout ms). Preview is top-down little-endian RGB565;
+frame count IN/OUT, timeout ms). Preview is bottom-up little-endian RGB565;
 still capture is 640x480 planar Y/U/V I420, using limited-range BT.601. SDK
 states YUV420 without explicitly documenting chroma plane order; physical
 Gizmondo parity for I420 remains unverified. No proprietary SDK code is shipped.
@@ -1743,3 +1743,21 @@ currently issued: mixerClose rejects every supplied handle with
 MMSYSERR_INVALHANDLE (5), preserving GetLastError and never closing a wave
 or VFS handle. This implements cleanup validation, not the full WinMM mixer
 family; mixerOpen/line/control APIs remain outside this patch.
+
+
+## 40. CAM1 preview row orientation
+
+The Gizmondo SDK Camera sample supplies -height to CreateBltDIB, which negates
+it again: the resulting RGB565 DIB has positive height (bottom-up storage).
+The initial CAM1 implementation incorrectly sent top-down preview rows.
+A four-color host frame reproduced an upside-down Catapult camera view while
+menu text remained upright. Reverse output rows only in camera::preview;
+columns retain their order, native Windows/Android Frame RGB stays top-down,
+and still-capture I420 retains its previous layout. Do not rotate the GLES
+framebuffer, apply a game-name exception, or reverse host buffers globally.
+This shared CAM1 ABI fix applies to Agaju's preview too; its attached executable
+requests a 64x64 preview format. Its full gameplay assets were not attached,
+so physical Agaju validation remains user-side. The CAMTEST BMP now declares
+positive height to agree with the driver's bytes; older CAMTEST builds may
+save a vertically inverted BMP even though their API checks pass. Tests check
+all four preview corners and preserve left/right and capture orientation.

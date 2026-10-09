@@ -64,9 +64,12 @@ fn pixel(frame:&Frame,x:u32,y:u32,w:u32,h:u32)->[i32;3] {
     let x=x*frame.width/w;let y=y*frame.height/h;let at=((y*frame.width+x)*3) as usize;
     [frame.rgb[at] as i32,frame.rgb[at+1] as i32,frame.rgb[at+2] as i32]
 }
+// The SDK camera sample places preview bytes directly in a positive-height
+// RGB565 DIB: the first stored row is the bottom row. Host Frame RGB remains
+// top-down; reverse rows only at the CAM1 preview ABI, without mirroring x.
 pub fn preview(frame:&Frame,w:u32,h:u32)->Vec<u8> {
     let mut out=Vec::with_capacity((w*h*2) as usize);
-    for y in 0..h {for x in 0..w {let [r,g,b]=pixel(frame,x,y,w,h);let p=((r as u16>>3)<<11)|((g as u16>>2)<<5)|(b as u16>>3);out.extend_from_slice(&p.to_le_bytes());}}
+    for y in (0..h).rev() {for x in 0..w {let [r,g,b]=pixel(frame,x,y,w,h);let p=((r as u16>>3)<<11)|((g as u16>>2)<<5)|(b as u16>>3);out.extend_from_slice(&p.to_le_bytes());}}
     out
 }
 pub fn capture(frame:&Frame)->Vec<u8> {
@@ -116,10 +119,17 @@ mod tests {
         assert_eq!(d.set_format([640,480,640,480]),Ok(()));
     }
     #[test]
-    fn preview_has_little_endian_rgb565_top_down_rows() {
+    fn preview_has_sdk_bottom_up_rows_without_mirroring_columns() {
         let f=Frame{width:2,height:2,serial:0,rgb:vec![255,0,0, 0,255,0, 0,0,255, 255,255,255]};
-        assert_eq!(preview(&f,2,2),[0x00,0xf8,0xe0,0x07,0x1f,0x00,0xff,0xff]);
-        assert_eq!(preview(&f,4,4)[..8],[0,0xf8,0,0xf8,0xe0,7,0xe0,7]);
+        assert_eq!(preview(&f,2,2),[0x1f,0x00,0xff,0xff,0x00,0xf8,0xe0,0x07]);
+        assert_eq!(preview(&f,4,4)[..8],[0x1f,0,0x1f,0,0xff,0xff,0xff,0xff]);
+        // The preview layout must not rotate/mirror the host image or I420.
+        assert_eq!(&f.rgb[..3], &[255,0,0]);
+        let still = capture(&f);
+        assert_eq!(still[0], 82);
+        assert_eq!(still[639], 144);
+        assert_eq!(still[479*640], 41);
+        assert_eq!(still[479*640+639], 235);
     }
     #[test]
     fn capture_has_fixed_i420_planes_and_bt601_colors() {

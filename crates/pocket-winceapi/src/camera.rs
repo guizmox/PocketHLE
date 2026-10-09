@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(r.ctl(2101,0x1200,16,0,0),DispatchOutcome::ReturnedR0(1));
         assert_eq!(r.ctl(2102,0,0,0x1400,16),DispatchOutcome::ReturnedR0(1));assert_eq!(r.cpu.read_mem(0x1200,16).unwrap(),r.cpu.read_mem(0x1400,16).unwrap());
         r.start();r.info(8,8,1000);assert_eq!(r.ctl(2105,0x1100,16,0x10000,128),DispatchOutcome::ReturnedR0(1));
-        assert_eq!(r.cpu.read_mem(0x10000,2).unwrap(),[0,0xf8]);assert_eq!(r.cpu.read_u32_le(0x1108).unwrap(),1);assert_eq!(r.cpu.read_u32_le(0x1300).unwrap(),128);
+        assert_eq!(r.cpu.read_mem(0x10000,2).unwrap(),[0x1f,0]);assert_eq!(r.cpu.read_u32_le(0x1108).unwrap(),1);assert_eq!(r.cpu.read_u32_le(0x1300).unwrap(),128);
         r.frame.lock().unwrap().as_mut().map(|frame|*frame=Arc::new(Frame{width:1,height:1,serial:2,rgb:vec![255,0,0]}));
         r.info(640,480,1000);assert_eq!(r.ctl(2106,0x1100,16,0x10000,460800),DispatchOutcome::ReturnedR0(1));
         assert_eq!(r.cpu.read_u32_le(0x1300).unwrap(),460800);assert_eq!(r.cpu.read_mem(0x10000,1).unwrap(),[82]);assert_eq!(r.cpu.read_mem(0x10000+307200,1).unwrap(),[90]);assert_eq!(r.cpu.read_mem(0x10000+384000,1).unwrap(),[240]);

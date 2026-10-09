@@ -12,7 +12,8 @@ et ferme la caméra. Résultats dans le dossier `flash` de la librairie :
 
 - `CAMTEST.TXT` : attendre `CAMTEST_RESULT PASS`.
 - `CAMTEST-preview.bmp` : ouvrir ce BMP pour contrôler l’image réelle ;
-  RGB565, 320×240, sans inversion verticale.
+  RGB565, 320×240, lignes bottom-up et hauteur BMP positive comme dans le SDK.
+  Utiliser ce CAMTEST mis à jour avec le correctif d’orientation du pilote.
 - `CAMTEST-capture.i420` : Y/U/V 640×480, 460800 octets.
 
 Sous Windows les noms peuvent être affichés en minuscules. Un PASS confirme
