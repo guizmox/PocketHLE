@@ -3060,6 +3060,7 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let out_len = ctx.arg_u32(5)?;
     let returned_p = ctx.arg_u32(6)?;
 
+    if ctx.kernel.vfs.camera_open(handle).is_some(){return crate::camera::control(ctx);}
     if ctx.kernel.vfs.is_registration_service(handle) {
         if out_buf != 0 && out_len > 0 {
             ctx.cpu.write_mem(out_buf, &vec![0u8; out_len as usize])?;

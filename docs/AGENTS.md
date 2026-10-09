@@ -1640,7 +1640,7 @@ arrives, so it survives UI redraws; a last-input indicator gives immediate user
 feedback without writing probe logs. Generic unmapped joysticks have raw button,
 axis and hat capture; normalized controller events are not duplicated by their
 underlying joystick events. CMake 4 users set CMAKE_POLICY_VERSION_MINIMUM=3.5
-when building SDL's bundled sources; build-patch.cmd provides this locally.
+when building SDL's bundled sources. Deliver raw console commands, not BAT/CMD scripts.
 
 ## 37. Guest Winsock RFCOMM sockets
 
@@ -1673,3 +1673,50 @@ RFCOMM sockets and ping/pong on two Windows hosts without changing game behavior
 CRT _set_new_handler and _query_new_handler store/return a process-local callback;
 C++ set_new_handler has a separate callback slot. They must not be constant
 thunks. This pass does not change the existing allocator's OOM callback policy.
+
+
+## 38. Gizmondo CAM1 camera and host capture
+
+The supplied Gizmondo SDK camera sample uses CreateFileW("CAM1:") and
+DeviceIoControl HAL functions 2101..2106 (METHOD_BUFFERED, FILE_ANY_ACCESS).
+SETFORMAT/GETFORMAT transfer two SIZE records: capture 640x480, preview
+positive multiples of 8 up to 640x480. VINFRAMEINFO is 16 bytes (width, height,
+frame count IN/OUT, timeout ms). Preview is top-down little-endian RGB565;
+still capture is 640x480 planar Y/U/V I420, using limited-range BT.601. SDK
+states YUV420 without explicitly documenting chroma plane order; physical
+Gizmondo parity for I420 remains unverified. No proprietary SDK code is shipped.
+
+camera.rs owns a shared device and a latest-frame mailbox backend. Hardware
+frames never expose host pointers. Preview delivery is limited to 20fps per
+shared device. A serial is not consumed twice; returned frame count counts
+delivered frames. A pending guest request yields through the scheduler, with
+its timeout retained by (thread, thunk, SP). timeout 0 polls and returns 1460.
+Invalid guest buffers are checked before consuming the frame. Stop and final
+handle close release capture; duplicate/cross-process VFS handles retain the
+same device and sharing lease. Disabling the service stops capture across
+processes. Service stores the device weakly, avoiding a capture lifetime cycle.
+Undocumented 2107 GETTHREADS / 2108 WRITE / 2109 READ and overlapped requests
+return ERROR_NOT_SUPPORTED rather than fabricated success.
+
+Windows uses Media Foundation on a dedicated MTA thread. Only a bounded latest
+RGB frame reaches the guest; an agile COM reference permits Shutdown to cancel
+a pending reader when stopped. RGB32 signed stride is handled (including
+bottom-up contiguous buffers). Native geometry is resampled to guest geometry.
+Android uses Camera2 and YUV_420_888 ImageReader with row/pixel strides and
+crop handling. JNI stores JavaVM/GlobalRef before launching the emulator.
+CameraHost prefers the rear camera; Windows selects the first enumerated
+webcam. There is no camera-selection UI in this pass. camera_enabled defaults
+false and is exposed under Emulator options / Android settings. It grants
+permission to the driver, and does not start capture by itself. Android requests
+CAMERA runtime permission before opted-in game startup. Denial is a real error.
+Pause releases physical capture; resume reopens wanted sessions. Generations
+close stale asynchronous callbacks, and all Images are closed in finally.
+
+Tests cover buffers, formats, colors, errors, retries/deadlines, preview cadence,
+duplicate lifetimes, and actual ARM CAMTEST execution with synthetic frames.
+The optional tools/camtest ARM package writes CAMTEST.TXT, a RGB565 BMP preview
+and an I420 capture to Flash Disk. Native Windows and JNI integration were
+Rust type-checked. Android logging alone was omitted in a temporary Linux
+validation harness; production logging was retained. No physical webcam/mobile
+camera test or Android APK build was possible here. CAM1 support does not
+implement PocketPC/DirectShow camera interfaces or undocumented sensor controls.

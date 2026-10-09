@@ -35,6 +35,7 @@ use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry
 
 pub mod audio;
 pub mod bluetooth;
+pub mod camera;
 pub mod controls;
 pub mod font;
 pub mod framebuffer;

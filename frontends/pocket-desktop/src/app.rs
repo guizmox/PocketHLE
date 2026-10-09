@@ -1124,6 +1124,8 @@ impl PocketLauncher {
         ScrollArea::vertical().id_source("emulator_options_scroll").auto_shrink([false,false]).show(ui,|ui| {
         ui.heading("Emulator options");
         ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
+        ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
+            .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
         ui.add_space(8.0);
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")

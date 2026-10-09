@@ -42,9 +42,9 @@ import androidx.core.content.ContextCompat
  * loading spinner once the real Unicorn backend was wired up.
  */
 class GameActivity : AppCompatActivity() {
-    private var bluetoothStart: (() -> Unit)? = null
-    private val bluetoothPermissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        val start = bluetoothStart; bluetoothStart = null; start?.invoke()
+    private var hardwareStart: (() -> Unit)? = null
+    private val hardwarePermissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val start = hardwareStart; hardwareStart = null; start?.invoke()
     }
 
     private lateinit var surface: GLSurfaceView
@@ -203,9 +203,13 @@ class GameActivity : AppCompatActivity() {
         rotationDegrees = readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
         BluetoothHost.initialize(this)
-        if (config.bluetoothEnabled && BluetoothHost.permissions().any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
-            bluetoothStart = { startSession(rootDir, id) }
-            bluetoothPermissionRequest.launch(BluetoothHost.permissions())
+        CameraHost.initialize(this)
+        val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
+            (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList())
+        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            hardwareStart = { startSession(rootDir, id) }
+            hardwarePermissionRequest.launch(missing.toTypedArray())
         } else startSession(rootDir, id)
     }
 
@@ -248,11 +252,13 @@ class GameActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        CameraHost.resume()
         val handle = session
         if (handle != 0L && !audioRunning) startAudio(handle)
     }
 
     override fun onPause() {
+        CameraHost.pause()
         releaseHeldInput()
         stopAudio()
         super.onPause()
@@ -284,6 +290,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        CameraHost.closeAll()
         finishSession()
         mainHandler.removeCallbacksAndMessages(null)
         surface.onPause()
@@ -297,6 +304,7 @@ class GameActivity : AppCompatActivity() {
     private fun finishSession() {
         val handle = session
         if (handle == 0L) return
+        CameraHost.closeAll()
         releaseHeldInput()
         session = 0
         stopAudio()

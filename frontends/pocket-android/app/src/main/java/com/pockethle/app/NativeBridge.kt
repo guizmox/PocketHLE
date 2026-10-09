@@ -16,6 +16,9 @@ package com.pockethle.app
  * encoding the framebuffer on every poll.
  */
 object NativeBridge {
+    @JvmStatic fun camOpen(): Int = CameraHost.open()
+    @JvmStatic fun camRead(id: Int): ByteArray = CameraHost.read(id)
+    @JvmStatic fun camClose(id: Int) = CameraHost.close(id)
     @JvmStatic fun btHostname(): String = BluetoothHost.hostname()
     @JvmStatic fun btScan(): String = BluetoothHost.scan()
     @JvmStatic fun btOpen(server: Boolean, address: Long, uuid: String): Int = BluetoothHost.open(server, address, uuid)

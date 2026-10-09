@@ -27,6 +27,7 @@
 mod managed_game;
 mod runner;
 mod bluetooth;
+mod camera;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -586,6 +587,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     init_logger();
     if let Err(e) = bluetooth::install(&mut env, &_class) {
         log::error!("Cannot initialize Android Bluetooth bridge: {e}");
+        return 0;
+    }
+    if let Err(e) = camera::install(&mut env, &_class) {
+        log::error!("Cannot initialize Android camera bridge: {e}");
         return 0;
     }
     let root = match jstring_to_path(&mut env, library_root) {

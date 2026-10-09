@@ -49,6 +49,18 @@ class SettingsActivity : AppCompatActivity() {
                     true
                 }
             })
+            preferenceScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "camera_enabled"
+                title = "Camera hardware (CAM1)"
+                summary = "Allow games to use the rear camera (next launch)"
+                isPersistent = false
+                isChecked = current.cameraEnabled
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(cameraEnabled = value as Boolean)
+                    writeConfig()
+                    true
+                }
+            })
             findPreference<ListPreference>("default_cpu_backend")?.apply {
                 value = current.defaultCpuBackend
                 setOnPreferenceChangeListener { _, newValue ->

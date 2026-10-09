@@ -102,6 +102,7 @@ data class LauncherConfig(
      * in-game status panel ("Backend: Unicorn (ARM)…") is drawn. */
     val showBackendLog: Boolean,
     val bluetoothEnabled: Boolean = false,
+    val cameraEnabled: Boolean = false,
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
     /**
@@ -128,6 +129,7 @@ data class LauncherConfig(
         put("orientation", orientation)
         put("show_backend_log", showBackendLog)
         put("bluetooth_enabled", bluetoothEnabled)
+        put("camera_enabled", cameraEnabled)
         put("controls_opacity", controlsOpacity.toDouble())
         if (keybindingsJson != null) {
             runCatching { put("keybindings", JSONArray(keybindingsJson)) }
@@ -160,6 +162,7 @@ data class LauncherConfig(
             orientation = obj.optString("orientation", "auto"),
             showBackendLog = obj.optBoolean("show_backend_log", true),
             bluetoothEnabled = obj.optBoolean("bluetooth_enabled", false),
+            cameraEnabled = obj.optBoolean("camera_enabled", false),
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),
             keybindingsJson = obj.optJSONArray("keybindings")?.toString(),

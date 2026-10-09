@@ -35,3 +35,5 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Devices_Bluetooth", "Win32_Networking_WinSock", "Win32_System_Com"] }
+
+windows = { version = "0.54", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com"] }

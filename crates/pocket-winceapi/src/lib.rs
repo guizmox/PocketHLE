@@ -36,6 +36,7 @@ mod media_static;
 mod wavein;
 mod ws2;
 mod bluetooth;
+mod camera;
 pub mod ordinals;
 
 use std::collections::HashMap;
