@@ -1902,28 +1902,10 @@ fn current_thread_id(ctx: &CallCtx<'_>) -> u32 {
     }
 }
 
-/// Park the running worker so that its blocking call is *retried* when
-/// it next gets the CPU, instead of returning a value it never saw a
-/// message for.
-///
-/// `GetMessageW` has no "queue was empty" return: `FALSE` means
-/// `WM_QUIT` and ends the pump. A worker whose own queue is empty
-/// therefore cannot be resumed with `r0 = 0` — Spore Origins' loader
-/// thread exits on that and the game never draws again. Parking with
-/// the API thunk as the resume address makes the call block the way it
-/// does on the device: it re-dispatches, and either finds a message or
-/// yields again.
-fn park_worker_and_retry(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
-    let thunk_va = ctx.thunk.thunk_va;
-    park_worker_at(ctx, Some(0), Some(thunk_va))
-}
-
 /// Park the running worker and re-run the call it is blocked in with
 /// its **arguments intact**.
 ///
-/// [`park_worker_and_retry`] rewrites `r0` on the way out, which is
-/// harmless when the retried call re-reads its state from elsewhere but
-/// destroys the first argument of a call that has one. A blocking
+/// Re-entering the API thunk must preserve `r0`, the first argument. A blocking
 /// `WaitForSingleObject(handle, INFINITE)` has to see the same handle
 /// when it runs again, otherwise it wakes up waiting on handle 0.
 fn park_worker_and_reevaluate(
@@ -1970,8 +1952,7 @@ fn park_worker(
     park_worker_at(ctx, Some(return_r0), None)
 }
 
-/// Shared body of [`park_worker`] / [`park_worker_and_retry`] /
-/// [`park_worker_and_reevaluate`].
+/// Shared body of [`park_worker`] / [`park_worker_and_reevaluate`].
 ///
 /// `resume_at` is where the worker continues when it is scheduled
 /// again: `None` means "after the call" (the normal case), `Some(va)`
@@ -12596,7 +12577,7 @@ const MESSAGE_BOX_MAX_SPINS: u32 = 100_000;
 /// This is a *blocking* API: on a device it does not return until the
 /// user has answered, and the answer is its return value. The guest is
 /// therefore parked inside its own API thunk — the same trick
-/// [`park_worker_and_retry`] uses — so each pass through here either
+/// [`park_worker_and_reevaluate`] uses — so each pass through here either
 /// finds the box still unanswered and re-dispatches, or takes the
 /// answer down and returns it. Meanwhile the host keeps presenting
 /// frames, and [`KernelState::composite_controls`] draws the box on top
@@ -16410,13 +16391,6 @@ fn retire_wave_buffers_for(ctx: &mut CallCtx<'_>, handle: u32) -> Result<(), Ker
         if front.handle == handle { retire_wave_buffer(ctx, handle, front.hdr)?; } else { keep.push_back(front); }
     }
     ctx.kernel.wave_out.pending = keep;
-    Ok(())
-}
-
-fn retire_all_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
-    while let Some(front) = ctx.kernel.wave_out.pending.pop_front() {
-        retire_wave_buffer(ctx, front.handle, front.hdr)?;
-    }
     Ok(())
 }
 

@@ -1,4 +1,3 @@
+crates\pocket-winceapi\src\coredll.rs
+crates\pocket-kernel\src\lib.rs
 frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\main.rs
-frontends\pocket-desktop\src\pocketpc_layout.rs
-docs\AGENTS.md

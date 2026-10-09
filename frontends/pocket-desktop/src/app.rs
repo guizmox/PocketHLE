@@ -968,7 +968,7 @@ impl PocketLauncher {
                 let device = Rect::from_center_size(icon_rect.center(), Vec2::new(82.0, 116.0));
                 let painter = ui.painter();
                 painter.rect(device, 10.0, Color32::from_rgb(98, 112, 130),
-                    egui::Stroke::new(1.5, Color32::from_rgb(158, 174, 193)));
+                    egui::Stroke::new(1.5_f32, Color32::from_rgb(158, 174, 193)));
                 let screen = Rect::from_min_max(device.min + Vec2::new(8.0, 11.0),
                     device.max - Vec2::new(8.0, 24.0));
                 painter.rect_filled(screen, 3.0, Color32::from_rgb(38, 61, 80));

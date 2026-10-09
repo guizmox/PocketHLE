@@ -1620,7 +1620,7 @@ pub struct GuestThread {
     /// Closing a handle does not terminate its thread.
     pub handle_closed: bool,
     /// Set while the thread is parked on a *re-entering* blocking call
-    /// (`park_worker_and_retry` / `park_worker_and_reevaluate`): the
+    /// (`park_worker_and_reevaluate`): the
     /// parked state will re-run the same API call. It is eligible only
     /// when its message queue/object is ready or its finite wait deadline
     /// has expired — see `resume_worker_reenter`.
