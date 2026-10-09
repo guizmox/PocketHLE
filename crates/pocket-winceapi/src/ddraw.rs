@@ -191,6 +191,7 @@ const SURFACE_COMPAT_METHODS: [&str; 46] = {
     let mut i = 0;
     while i < SURFACE_METHODS.len() { names[i] = SURFACE_METHODS[i]; i += 1; }
     names[25] = "surface_ce_palette_or_legacy_lock";
+    names[7] = "surface_ce_flip_or_legacy_blt_fast";
     names
 };
 
@@ -245,6 +246,8 @@ pub fn register(d: &mut WinCeDispatcher) {
             "surface_add_ref" => add_ref,
             "surface_release" => release,
             "surface_blt" | "surface_alpha_blt" => surface_blt,
+            "surface_blt_fast" => surface_blt_fast,
+            "surface_ce_flip_or_legacy_blt_fast" => surface_ce_flip_or_legacy_blt_fast,
             "surface_get_blt_status" | "surface_get_flip_status" => surface_status,
             "surface_get_pixel_format" => surface_get_pixel_format,
             "surface_get_color_key" => surface_get_color_key,
@@ -888,6 +891,7 @@ fn surface_is_lost(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 fn surface_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ensure_framebuffer(ctx)?;
     let object = ctx.arg_u32(0)?;
+    let mut retained = false;
     // A compact slot-19 Lock resolves the ambiguous view in the other
     // direction. Later SetPalette calls must not reclassify it from stale args.
     if let Ok(table) = ctx.cpu.read_u32_le(object) {
@@ -895,11 +899,21 @@ fn surface_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         if ambiguous != 0 && ctx.cpu.read_u32_le(table + 25 * 4).ok() == Some(ambiguous) {
             write_vtable(ctx,table,&SURFACE_METHODS)?;
         }
+        let lock = dynamic_address(ctx,"surface_lock");
+        retained = lock != 0 && ctx.cpu.read_u32_le(table + 25 * 4).ok() == Some(lock);
     }
     let desc = ctx.arg_u32(2)?;
     let record = this_surface(ctx)?.unwrap_or_else(|| panel_record(ctx));
     if desc != 0 {
-        write_record_desc(ctx, desc, record)?;
+        if retained {
+            // The retained interface returns DDSURFACEDESC2. Some DXPAK
+            // callers pass an uninitialized output structure; its contents
+            // must not select the compact header's different field offsets.
+            let bytes=surface_desc2_bytes(record.width,record.height,record.pitch,record.pixels,record.primary);
+            ctx.cpu.write_mem(desc,&bytes)?;
+        } else {
+            write_record_desc(ctx, desc, record)?;
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -910,7 +924,9 @@ fn surface_ce_palette_or_legacy_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOu
     let object = ctx.arg_u32(0)?;
     // SetPalette has no descriptor argument. A writable DDSURFACEDESC2
     // and supported lock flags identify the older header's slot 25.
-    if flags & !0x1fff == 0 && ctx.cpu.read_u32_le(desc).ok() == Some(124)
+    let initialized=ctx.cpu.read_u32_le(desc).ok()==Some(124);
+    let write_only_output=!initialized && ctx.arg_u32(1)?==0 && flags & 0x20 != 0 && ctx.arg_u32(4)?==0;
+    if flags & !0x1fff == 0 && (initialized || write_only_output)
         && ctx.cpu.check_guest_access(desc,124,Prot::WRITE).is_ok()
         && surface_record(ctx,object).is_some() {
         let table = ctx.cpu.read_u32_le(object)?;
@@ -1059,6 +1075,36 @@ fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+fn surface_ce_flip_or_legacy_blt_fast(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let source=ctx.arg_u32(3)?;
+    let dest=this_surface(ctx)?;
+    let x=ctx.arg_u32(1)?;let y=ctx.arg_u32(2)?;
+    if surface_record(ctx,source).is_some() && dest.is_some_and(|d|x<d.width && y<d.height)
+        && ctx.arg_u32(5)? & !0xf == 0 {
+        let object=ctx.arg_u32(0)?;let table=ctx.cpu.read_u32_le(object)?;
+        write_vtable(ctx,table,&SURFACE5_METHODS)?;
+        return surface_blt_fast(ctx);
+    }
+    surface_flip(ctx)
+}
+
+/// Retained BltFast uses DWORD x/y, source, source RECT and flags. Its
+/// slot 7 is the compact header's Flip; preserve the argument layouts.
+fn surface_blt_fast(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let Some(dest)=this_surface(ctx)? else {return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));};
+    let source=ctx.arg_u32(3)?;
+    let Some(src)=surface_record(ctx,source) else {return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));};
+    let x=ctx.arg_u32(1)?;let y=ctx.arg_u32(2)?;
+    let rect=ctx.arg_u32(4)?;let area=read_rect(ctx,rect,src);
+    let width=area.2-area.0;let height=area.3-area.1;
+    if x<dest.width && y<dest.height {
+        let target=(x,y,x.saturating_add(width).min(dest.width),y.saturating_add(height).min(dest.height));
+        copy_rect(ctx,src,area,dest,target)?;
+        if dest.primary {publish_framebuffer(ctx)?;}
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1194,6 +1240,33 @@ mod tests {
         call(&mut cpu,&mut kernel,surface_unlock,[legacy,0,0,0]);
         assert_eq!(kernel.framebuffer.frame_counter,before+1);
         assert_eq!(&kernel.framebuffer.pixels[..2],&0xffffu16.to_le_bytes());
+
+        // DXPAK callers may leave the Lock output uninitialized, including
+        // on their first call. Select its ABI from the write-only Lock
+        // arguments, then keep returning the fixed retained layout.
+        call(&mut cpu,&mut kernel,surface_qi,[offscreen,0x1100,0x1018,0]);
+        let uninitialized=cpu.read_u32_le(0x1018).unwrap();
+        cpu.write_reg(ArmReg::Sp,0x1500).unwrap();
+        cpu.write_mem(0x1500,&0u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1504,&0u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1300,&[0xa5;128]).unwrap();
+        call(&mut cpu,&mut kernel,surface_ce_palette_or_legacy_lock,[uninitialized,0,0x1300,0x20]);
+        assert_eq!(cpu.read_u32_le(0x1300).unwrap(),124);
+        assert_eq!(cpu.read_u32_le(0x1324).unwrap(),back.pixels);
+        assert_eq!(cpu.read_u32_le(0x137c).unwrap(),0xa5a5a5a5);
+        cpu.write_mem(0x1300,&[0x5a;128]).unwrap();
+        call(&mut cpu,&mut kernel,surface_lock,[uninitialized,0,0x1300,0x20]);
+        assert_eq!(cpu.read_u32_le(0x1300).unwrap(),124);
+        assert_eq!(cpu.read_u32_le(0x1324).unwrap(),back.pixels);
+        assert_eq!(cpu.read_u32_le(0x137c).unwrap(),0x5a5a5a5a);
+
+        call(&mut cpu,&mut kernel,surface_qi,[primary,0x1100,0x101c,0]);
+        let blit_view=cpu.read_u32_le(0x101c).unwrap();
+        cpu.write_mem(back.pixels,&0x07e0u16.to_le_bytes()).unwrap();
+        call(&mut cpu,&mut kernel,surface_ce_flip_or_legacy_blt_fast,[blit_view,0,0,offscreen]);
+        assert_eq!(&kernel.framebuffer.pixels[..2],&0x07e0u16.to_le_bytes());
+        let table=cpu.read_u32_le(blit_view).unwrap();
+        assert_eq!(cpu.read_u32_le(table+7*4).unwrap(),kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_blt_fast"]);
 
         kernel.window_procs.insert(0xdead0001,0x1000);
         call(&mut cpu,&mut kernel,ddraw_get_available_vid_mem,[ce,0xdead0001,8,0x70001000]);

@@ -1210,3 +1210,16 @@ FIFA's observed failure was slot 25 dispatched as SetPalette, followed by 240
 invalid memcpy scanlines and a NULL slot-32 call. Validate its actual ARM startup
 and the compact/retained COM regression tests. Do not add title-name branches,
 swallow the invalid memcpy, or retain temporary tracing in production.
+
+Classic Compendium additionally leaves the Lock output uninitialized. On an
+ambiguous retained view, NULL RECT/event plus WRITEONLY flags and a writable
+124-byte output identify this Lock even without dwSize. After selecting the
+retained ABI, always return DDSURFACEDESC2; random previous output contents must
+not choose compact offsets. Tests cover first and subsequent dirty outputs and
+the untouched byte after the 124-byte structure.
+
+Retained slot 7 is BltFast, whereas compact slot 7 is Flip. A known source
+surface in r3 plus bounded x/y and BltFast flags selects the retained view.
+Implement the source rectangle to destination-coordinate copy and publish the
+primary surface; drawing only into off-screen memory is not a successful boot.
+The ARM game must visibly reach language selection and advance through input.
