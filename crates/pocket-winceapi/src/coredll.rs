@@ -16046,7 +16046,14 @@ fn wave_out_notify(
             if message == MM_WOM_DONE {
                 let key = event_key(ctx.kernel, device.callback_target);
                 if let Some(mut event) = ctx.kernel.events.get_mut(&key) {
-                    event.signalled = true;
+                    if !event.manual_reset && event.signalled {
+                        // The host may return several headers in one audio
+                        // block. Deliver their notifications separately so a
+                        // mixer waiting once per header can refill them all.
+                        ctx.kernel.wave_out.event_done.push_back(handle);
+                    } else {
+                        event.signalled = true;
+                    }
                 }
             }
         }
@@ -16143,6 +16150,7 @@ fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     ctx.kernel.audio.close_wave_stream(h);
     wave_out_notify(ctx, h, MM_WOM_CLOSE, 0, 0);
     ctx.kernel.wave_out.devices.remove(&h);
+    ctx.kernel.wave_out.event_done.retain(|handle| *handle != h);
     if ctx.kernel.wave_out.devices.is_empty() { ctx.kernel.audio.flush_wave_out(); }
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
@@ -16364,6 +16372,7 @@ fn service_wave_out(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
 /// Publish host-consumed buffers without media decoding, live-loop copies or
 /// guest callback entry. Safe to poll at the existing scheduling boundaries.
 fn retire_completed_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+    deliver_wave_event_completions(ctx.kernel);
     // A paused or long-running handle must not block completion on another.
     let mut keep = VecDeque::new();
     while let Some(buffer) = ctx.kernel.wave_out.pending.pop_front() {
@@ -16381,6 +16390,22 @@ fn retire_completed_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelErro
     }
     ctx.kernel.wave_out.pending = keep;
     Ok(())
+}
+
+fn deliver_wave_event_completions(kernel: &mut KernelState) {
+    let mut keep = VecDeque::new();
+    while let Some(handle) = kernel.wave_out.event_done.pop_front() {
+        let Some(device) = kernel.wave_out.devices.get(&handle) else { continue; };
+        let key = event_key(kernel, device.callback_target);
+        if let Some(mut event) = kernel.events.get_mut(&key) {
+            if !event.signalled {
+                event.signalled = true;
+            } else {
+                keep.push_back(handle);
+            }
+        }
+    }
+    kernel.wave_out.event_done = keep;
 }
 
 /// `waveOutReset` / `waveOutClose` semantics: everything still queued
@@ -21730,6 +21755,53 @@ mod tests {
         let flags = u32::from_le_bytes(cpu.read_mem(HDR + 16, 4).unwrap().try_into().unwrap());
         assert_eq!(flags & WHDR_DONE, WHDR_DONE);
         assert_eq!(flags & WHDR_INQUEUE, 0);
+    }
+
+    #[test]
+    fn batched_wave_returns_do_not_lose_auto_reset_event_notifications() {
+        const EVENT: u32 = 0xDEAD_E001;
+        const HDR: u32 = 0x1000;
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(HDR, 4096, Prot::READ | Prot::WRITE).unwrap();
+        kernel.events.insert(EVENT, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        kernel.object_handles.bind(EVENT, HandleObject::Event(EVENT));
+        kernel.wave_out.devices.insert(FAKE_HWAVEOUT, pocket_kernel::WaveOutDevice {
+            callback_kind: WaveCallbackKind::Event, callback_target: EVENT, instance: 0,
+            owner_thread: 0, format: pocket_kernel::audio::GuestFormat::default(), paused: false,
+        });
+        let t = thunk_at(0x7000_0140);
+        for i in 0..3 {
+            cpu.write_mem(HDR + i * 32 + 16, &WHDR_INQUEUE.to_le_bytes()).unwrap();
+            let mut c = CallCtx { cpu: &mut cpu, thunk: &t, kernel: &mut kernel };
+            retire_wave_buffer(&mut c, FAKE_HWAVEOUT, HDR + i * 32).unwrap();
+        }
+        assert_eq!(kernel.wave_out.event_done.len(), 2);
+        for _ in 0..3 {
+            deliver_wave_event_completions(&mut kernel);
+            assert!(kernel.events.get(&EVENT).unwrap().signalled);
+            consume_wait_signal(&mut kernel, EVENT);
+        }
+        deliver_wave_event_completions(&mut kernel);
+        assert!(!kernel.events.get(&EVENT).unwrap().signalled);
+        assert!(kernel.wave_out.event_done.is_empty());
+        for i in 0..3 {
+            let flags = u32::from_le_bytes(cpu.read_mem(HDR + i * 32 + 16, 4).unwrap().try_into().unwrap());
+            assert_eq!(flags & (WHDR_DONE | WHDR_INQUEUE), WHDR_DONE);
+        }
+        // A manual-reset callback event keeps its normal coalescing behavior.
+        kernel.events.get_mut(&EVENT).unwrap().manual_reset = true;
+        for _ in 0..3 {
+            let mut c = CallCtx { cpu: &mut cpu, thunk: &t, kernel: &mut kernel };
+            wave_out_notify(&mut c, FAKE_HWAVEOUT, MM_WOM_DONE, HDR, 0);
+        }
+        assert!(kernel.wave_out.event_done.is_empty());
+        consume_wait_signal(&mut kernel, EVENT);
+        assert!(kernel.events.get(&EVENT).unwrap().signalled);
+        kernel.wave_out.devices.remove(&FAKE_HWAVEOUT);
+        kernel.wave_out.event_done.push_back(FAKE_HWAVEOUT);
+        deliver_wave_event_completions(&mut kernel);
+        assert!(kernel.wave_out.event_done.is_empty());
     }
 
     /// `WaitForSingleObject(handle, INFINITE)` from a worker is a

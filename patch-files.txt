@@ -1,4 +1,4 @@
-crates/pocket-kernel/src/handles.rs
-frontends/pocket-desktop/src/runner.rs
-crates/pocket-core/tests/ram_guest.rs
+crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/audio.rs
+crates/pocket-winceapi/src/coredll.rs
 docs/AGENTS.md

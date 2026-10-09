@@ -630,9 +630,29 @@ independent paths that mix together. Which one a game uses decides where
 a silence bug lives.
 
 **`waveOut` (`coredll`).** The guest decodes audio itself and hands over
-finished PCM. `waveOutWrite` → `push_samples`. This is a *stream*: the
+finished PCM. `waveOutWrite` → `push_wave_samples`. This is a *stream*: the
 guest owns timing and back-pressure, so `CALLBACK_EVENT` must really
 signal or the mixer thread spins (§10).
+
+Host callback blocks are part of the refill latency. Stuntcar Extreme submits
+8192-byte stereo 16-bit buffers at 22050 Hz with CALLBACK_EVENT: each holds
+2048 frames / 92.9 ms. A simulated 100 ms host callback reproduces the uploaded
+PCM's 7.1 ms holes every 100 ms. Several returned buffers previously collapsed
+into one signal on its auto-reset callback event. Keep subsequent driver
+notifications in WaveOutState.event_done while that event is signalled, then
+deliver them separately during retirement service once the event is clear.
+WHDR_DONE still follows actual sample consumption. Ordinary SetEvent remains
+binary; manual-reset callback events retain their existing coalescing behavior.
+Discard undelivered entries when their wave device closes or event disappears.
+The native Stuntcar simulation no longer has those periodic holes even with
+100 ms host blocks; retain the batched completion regression test.
+
+Use the driver's default CPAL buffer size. The earlier 10 ms request did not
+resolve the Windows report and is removed. Never repeat samples, change
+playback speed, retire headers early or add a game-name exception.
+POCKETHLE_AUDIO_DIAGNOSTICS=1 temporarily logs actual host callback frame count,
+block duration, callback interval and queued wave samples, at most once a second.
+It is disabled by default; remove this temporary probe after Windows validation.
 
 *Buffer completion is not a message-pump event.* On WinCE the driver's
 own thread reports a drained buffer, so a game may wait for one without

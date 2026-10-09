@@ -440,6 +440,9 @@ pub struct WaveOutState {
     /// `CALLBACK_FUNCTION` buffers waiting for their `waveOutProc`
     /// call. The message pump drains this by re-entering the guest.
     pub function_done: VecDeque<(u32, u32, u32, u32)>,
+    /// Driver completions awaiting delivery to an already-signalled auto-reset
+    /// callback event. A large host block must not collapse several returns.
+    pub event_done: VecDeque<u32>,
     /// Set while the guest is executing `waveOutProc`, so the pump
     /// knows to restore the interrupted call's registers when the
     /// callback returns.

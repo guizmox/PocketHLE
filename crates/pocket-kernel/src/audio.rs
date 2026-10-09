@@ -189,6 +189,8 @@ impl MasPlayback {
 /// Inner state shared between the emulator thread (which calls
 /// [`AudioEngine::push_samples`]) and the cpal output callback.
 struct Shared {
+    #[cfg(feature = "audio-cpal")]
+    callback_probe: Option<(Option<Instant>, Instant)>,
     wave_streams: std::collections::BTreeMap<u32, WaveStream>,
     // MAS1 transport is independent: waveOutReset/Close cannot purge music.
     mas_streams: std::collections::BTreeMap<u32, MasPlayback>,
@@ -243,6 +245,9 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
+            #[cfg(feature = "audio-cpal")]
+            callback_probe: (std::env::var("POCKETHLE_AUDIO_DIAGNOSTICS").as_deref() == Ok("1"))
+                .then(|| (None, Instant::now())),
             wave_streams: Default::default(),
             mas_streams: Default::default(),
             ring: vec![0i16; RING_CAPACITY_SAMPLES],
@@ -1206,10 +1211,7 @@ fn run_audio_worker(shared: Arc<Mutex<Shared>>, shutdown: Arc<std::sync::atomic:
             )
         }
         other => {
-            log::warn!(
-                "AudioEngine: host device {device_name:?} wants sample format \
-                 {other:?}, which is not supported — running silently"
-            );
+            log::warn!("AudioEngine: host device {device_name:?} wants unsupported sample format {other:?} — running silently");
             return;
         }
     };
@@ -1229,11 +1231,12 @@ fn run_audio_worker(shared: Arc<Mutex<Shared>>, shutdown: Arc<std::sync::atomic:
         return;
     }
     log::info!(
-        "AudioEngine: opened {:?} at {} Hz / {} ch ({:?})",
+        "AudioEngine: opened {:?} at {} Hz / {} ch ({:?}), buffer={:?}",
         device_name,
         host_rate,
         host_channels,
-        sample_format
+        sample_format,
+        stream_config.buffer_size
     );
     if let Ok(mut s) = shared.lock() {
         s.device_active = true;
@@ -1261,6 +1264,18 @@ fn fill_output_f32(
             return;
         }
     };
+    if let Some((previous, next_report)) = s.callback_probe.as_mut() {
+        let now = Instant::now();
+        let interval = previous.map(|last| now.duration_since(last).as_secs_f64() * 1000.0);
+        *previous = Some(now);
+        if now >= *next_report {
+            *next_report = now + std::time::Duration::from_secs(1);
+            let frames = data.len() / host_channels.max(1) as usize;
+            let queued: usize = s.wave_streams.values().map(|v| v.buffered_samples()).sum();
+            log::info!("AudioEngine diagnostic: callback_frames={frames} block_ms={:.3} interval_ms={interval:?} queued_wave_samples={queued}",
+                frames as f64 * 1000.0 / host_rate.max(1) as f64);
+        }
+    }
     s.render_frames(data, host_rate, host_channels);
 }
 
