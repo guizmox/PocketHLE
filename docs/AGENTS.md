@@ -1,5 +1,42 @@
 # PocketHLE — architecture reference for coding agents
 
+## GPS1 host location bridge
+
+`gps::Service` belongs to the shared VFS device context, not to a single CPU.
+The permission gate defaults off (`gps_enabled`). Open descriptions retain an
+Arc capture and sharing lease through cross-process duplication; the service
+retains only a Weak device reference. Last close/close_all releases the capture.
+ReadFile requires the exact SDK packed LATEST_GPS_DATA size (180 bytes), with
+unaligned little-endian fields and 32-bit BOOL. Latitude/longitude are degrees
+×10^7; altitude, speed, course and errors use two decimal places. Timestamp uses
+the documented 1972 UTC epoch; GPS week/time include the historical GPS–UTC leap
+offset through the last leap second in 2017. No-fix snapshots have timestamp and
+validation zero, with unknown errors UINT32_MAX. Old host fixes lose validation
+after 30 seconds. Host position validity maps to FixValidated for game compatibility
+(Colors checks it); this is not a claim of SiRF four-satellite validation. Satellite
+counts and arrays remain zero, since generic host location does not expose them.
+Only known MSL altitude is returned; ellipsoid altitude is not relabeled MSL.
+
+Windows uses Geolocator events on an MTA with a single latest-position mailbox.
+Consent preparation MUST run on the desktop UI thread while foregrounded;
+`spawn_run` and enabled-option UI updates prepare it before the guest worker.
+Capture Drop signals the worker, which removes both event subscriptions. Event
+closures retain only Weak mailboxes. Missing permission/service/position is never
+turned into a synthetic location. Android uses foreground LocationManager
+subscriptions (fine GPS plus network fallback, or coarse network), application
+context only, one HandlerThread and one latest packet per session. pause removes
+updates; resume restarts live sessions; close/closeAll remove updates permanently.
+Coarse and fine permissions must be requested together for precise Android12+
+location. Prefer a recent more accurate GPS update over a worse network update.
+
+The current GPS scope is CreateFile/ReadFile/CloseHandle/duplication and native
+location; geofencing, SiRF/APM and undocumented version IOCTLs explicitly return
+50 rather than pretending success. No host clock changes or GNS notifications.
+GPSTEST ARM checks the binary ABI, errors and repeated open/close separately
+from native fix availability. Colors' actual ARM GPS constructor/read/destructor
+has been exercised with a deterministic provider; full gameplay and physical
+Windows/Android fixes still require hardware testing.
+
 PocketHLE runs Windows CE / Windows Mobile (Pocket PC) applications on
 modern hosts by **high-level emulation**: the guest's ARM (or MIPS) code
 is executed instruction-by-instruction, but every call into a Windows CE

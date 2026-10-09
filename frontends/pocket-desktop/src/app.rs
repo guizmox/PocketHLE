@@ -1123,6 +1123,8 @@ impl PocketLauncher {
         let mut cancel_clicked = false;
         ScrollArea::vertical().id_source("emulator_options_scroll").auto_shrink([false,false]).show(ui,|ui| {
         ui.heading("Emulator options");
+        ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
+            .on_hover_text("Allow games to read the Windows location service; availability and accuracy depend on the PC.");
         ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
         ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
             .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
@@ -1945,6 +1947,8 @@ impl PocketLauncher {
     }
 
     fn spawn_run(&mut self, game: &GameEntry) {
+        #[cfg(windows)]
+        if self.library.config().gps_enabled {pocket_core::kernel::gps::prepare_host_access();}
         if self.running_game.is_some() {
             self.pending_run = Some(game.clone());
             self.release_all_keys();
@@ -2039,6 +2043,8 @@ impl eframe::App for PocketLauncher {
         }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if self.library.config().gps_enabled {pocket_core::kernel::gps::prepare_host_access();}
         if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) { self.release_all_keys(); }
         self.handle_gamepads(ctx);
         self.handle_physical_keyboard(ctx);

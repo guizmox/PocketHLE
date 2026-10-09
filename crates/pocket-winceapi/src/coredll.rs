@@ -3061,6 +3061,7 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let out_len = ctx.arg_u32(5)?;
     let returned_p = ctx.arg_u32(6)?;
 
+    if ctx.kernel.vfs.gps_open(handle).is_some(){return crate::gps::control(ctx);}
     if ctx.kernel.vfs.camera_open(handle).is_some(){return crate::camera::control(ctx);}
     if ctx.kernel.vfs.is_registration_service(handle) {
         if out_buf != 0 && out_len > 0 {
@@ -6814,6 +6815,7 @@ fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 ///                LPOVERLAPPED ov)`
 fn read_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let bt_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.gps_open(bt_handle).is_some() { return crate::gps::read_file(ctx); }
     if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() { return crate::bluetooth::read_file(ctx); }
     let handle = ctx.arg_u32(0)?;
     let buf_p = ctx.arg_u32(1)?;
@@ -6860,6 +6862,7 @@ fn set_end_of_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 
 fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let bt_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.gps_open(bt_handle).is_some() { return crate::gps::write_file(ctx); }
     if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() { return crate::bluetooth::write_file(ctx); }
     let handle = ctx.arg_u32(0)?;
     let buf_p = ctx.arg_u32(1)?;

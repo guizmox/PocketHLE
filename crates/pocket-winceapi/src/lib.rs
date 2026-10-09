@@ -37,6 +37,7 @@ mod wavein;
 mod ws2;
 mod bluetooth;
 mod camera;
+mod gps;
 pub mod ordinals;
 
 use std::collections::HashMap;

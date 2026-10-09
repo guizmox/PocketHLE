@@ -61,6 +61,17 @@ class SettingsActivity : AppCompatActivity() {
                     true
                 }
             })
+            preferenceScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "gps_enabled"
+                title = "GPS / device location (GPS1)"
+                summary = "Allow games to read location while playing (next launch)"
+                isPersistent = false
+                isChecked = current.gpsEnabled
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(gpsEnabled = value as Boolean)
+                    writeConfig(); true
+                }
+            })
             findPreference<ListPreference>("default_cpu_backend")?.apply {
                 value = current.defaultCpuBackend
                 setOnPreferenceChangeListener { _, newValue ->

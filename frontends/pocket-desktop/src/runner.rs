@@ -147,10 +147,11 @@ impl Runner {
             return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 0xc0000017);
         }
         let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
-        let hardware = pocket_library::Library::open(library_root).map(|l| (l.config().bluetooth_enabled, l.config().camera_enabled)).unwrap_or((false, false));
+        let hardware = pocket_library::Library::open(library_root).map(|l| (l.config().bluetooth_enabled, l.config().camera_enabled, l.config().gps_enabled)).unwrap_or((false, false, false));
         if let Some(process) = emu.process_mut() {
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
             process.state.vfs.camera_service().set_allowed(hardware.1);
+            process.state.vfs.gps_service().set_allowed(hardware.2);
             if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
                 if let Some(startup) = startup.as_mut() { startup.error = 29; }
                 summary_lines.push(format!("Cannot load device registry: {e}"));

@@ -28,6 +28,7 @@ mod managed_game;
 mod runner;
 mod bluetooth;
 mod camera;
+mod gps;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -588,6 +589,9 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     if let Err(e) = bluetooth::install(&mut env, &_class) {
         log::error!("Cannot initialize Android Bluetooth bridge: {e}");
         return 0;
+    }
+    if let Err(e) = gps::install(&mut env, &_class) {
+        log::error!("Cannot initialize Android GPS bridge: {e}"); return 0;
     }
     if let Err(e) = camera::install(&mut env, &_class) {
         log::error!("Cannot initialize Android camera bridge: {e}");

@@ -4,7 +4,7 @@ use std::sync::Weak;
 #[derive(Clone, Default)]
 pub struct VfsShared(Arc<Mutex<Shared>>);
 #[derive(Default)]
-struct Shared { leases: HashMap<String, Vec<Weak<Lease>>>, attributes: HashMap<String,u32>, bluetooth: crate::bluetooth::Service, camera: crate::camera::Service }
+struct Shared { leases: HashMap<String, Vec<Weak<Lease>>>, attributes: HashMap<String,u32>, bluetooth: crate::bluetooth::Service, camera: crate::camera::Service, gps:crate::gps::Service }
 #[derive(Debug)]
 pub(super) struct Lease { pub access: u32, share: u32, pub(super) volume: Option<(PathBuf,u64)> }
 #[derive(Debug, PartialEq, Eq)]
@@ -75,6 +75,8 @@ impl Vfs {
     pub fn attach_shared_context(&mut self, shared: VfsShared) {
         self.bluetooth.service = shared.0.lock().unwrap().bluetooth.clone(); self.shared=shared;
     }
+    pub fn gps_service(&self)->crate::gps::Service {self.shared.0.lock().unwrap().gps.clone()}
+    pub fn set_gps_service(&self,service:crate::gps::Service){self.shared.0.lock().unwrap().gps=service;}
     pub fn camera_service(&self)->crate::camera::Service {self.shared.0.lock().unwrap().camera.clone()}
     pub fn set_camera_service(&self,service:crate::camera::Service){self.shared.0.lock().unwrap().camera=service;}
     pub(super) fn bluetooth_service(&self) -> crate::bluetooth::Service { self.shared.0.lock().unwrap().bluetooth.clone() }
@@ -114,6 +116,17 @@ impl Vfs {
     pub fn open_file(&mut self,path:&str,access:u32,share:u32,disposition:u32,append:bool,attributes:u32)->Result<OpenResult,u32> {
         if path.is_empty() || access>3 || share & !3 !=0 || !(1..=5).contains(&disposition) {return Err(87);}
         let normal=self.normalise_guest_path(path);
+        if normal.rsplit('/').next()==Some("gps1:") {
+            if disposition!=3{return Err(87);}
+            let mut state=self.shared.0.lock().unwrap();let key="gps:GPS1";busy(&mut state,key);
+            if state.leases.get(key).is_some_and(|leases|leases.iter().filter_map(Weak::upgrade)
+                .any(|l|access&!l.share!=0||l.access&!share!=0||(access&2!=0&&l.access&2!=0))){return Err(32);}
+            let device=state.gps.open()?;let lease=Arc::new(Lease{access,share,volume:None});
+            let handle=self.next_handle;self.next_handle=self.next_handle.checked_add(1).ok_or(8u32)?;
+            self.gps_handles.insert(handle,Arc::new(GpsOpen{device,access,_lease:lease.clone()}));
+            state.leases.entry(key.into()).or_default().push(Arc::downgrade(&lease));
+            return Ok(OpenResult{handle,existed:true});
+        }
         if normal.rsplit('/').next()==Some("cam1:") {
             if disposition!=3{return Err(87);}
             let mut state=self.shared.0.lock().unwrap();let key="camera:CAM1";

@@ -485,6 +485,9 @@ pub struct LauncherConfig {
     /// Allow CAM1 to acquire the host camera, only after the guest starts it.
     #[serde(default)]
     pub camera_enabled: bool,
+    /// Allow GPS1 to subscribe to the host location service.
+    #[serde(default)]
+    pub gps_enabled: bool,
     /// Desktop smoothing filter, remembered across sessions.
     #[serde(default = "default_upscale_filter")]
     pub upscale_filter: String,
@@ -563,6 +566,7 @@ impl Default for LauncherConfig {
             log_unimplemented_apis: default_log_unimplemented_apis(),
             bluetooth_enabled: false,
             camera_enabled: false,
+            gps_enabled: false,
             upscale_filter: default_upscale_filter(),
             last_import_dir: None,
             show_fps: default_show_fps(),

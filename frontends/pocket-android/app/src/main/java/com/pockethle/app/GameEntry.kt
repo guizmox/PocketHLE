@@ -103,6 +103,7 @@ data class LauncherConfig(
     val showBackendLog: Boolean,
     val bluetoothEnabled: Boolean = false,
     val cameraEnabled: Boolean = false,
+    val gpsEnabled: Boolean = false,
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
     /**
@@ -130,6 +131,7 @@ data class LauncherConfig(
         put("show_backend_log", showBackendLog)
         put("bluetooth_enabled", bluetoothEnabled)
         put("camera_enabled", cameraEnabled)
+        put("gps_enabled", gpsEnabled)
         put("controls_opacity", controlsOpacity.toDouble())
         if (keybindingsJson != null) {
             runCatching { put("keybindings", JSONArray(keybindingsJson)) }
@@ -163,6 +165,7 @@ data class LauncherConfig(
             showBackendLog = obj.optBoolean("show_backend_log", true),
             bluetoothEnabled = obj.optBoolean("bluetooth_enabled", false),
             cameraEnabled = obj.optBoolean("camera_enabled", false),
+            gpsEnabled = obj.optBoolean("gps_enabled", false),
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),
             keybindingsJson = obj.optJSONArray("keybindings")?.toString(),

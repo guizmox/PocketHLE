@@ -204,12 +204,17 @@ class GameActivity : AppCompatActivity() {
         glRenderer.setRotationDegrees(rotationDegrees)
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
+        GpsHost.initialize(this)
         val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
-            (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList())
+            (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList()) +
+            (if (config.gpsEnabled) GpsHost.permissions().toList() else emptyList())
         val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
             hardwareStart = { startSession(rootDir, id) }
-            hardwarePermissionRequest.launch(missing.toTypedArray())
+            // Android12 requires coarse and fine in the same precise-location request.
+            val requested = if (config.gpsEnabled && missing.contains(android.Manifest.permission.ACCESS_FINE_LOCATION))
+                (missing + GpsHost.permissions()).distinct() else missing
+            hardwarePermissionRequest.launch(requested.toTypedArray())
         } else startSession(rootDir, id)
     }
 
@@ -253,12 +258,14 @@ class GameActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         CameraHost.resume()
+        GpsHost.resume()
         val handle = session
         if (handle != 0L && !audioRunning) startAudio(handle)
     }
 
     override fun onPause() {
         CameraHost.pause()
+        GpsHost.pause()
         releaseHeldInput()
         stopAudio()
         super.onPause()
@@ -291,6 +298,7 @@ class GameActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         CameraHost.closeAll()
+        GpsHost.closeAll()
         finishSession()
         mainHandler.removeCallbacksAndMessages(null)
         surface.onPause()
@@ -305,6 +313,7 @@ class GameActivity : AppCompatActivity() {
         val handle = session
         if (handle == 0L) return
         CameraHost.closeAll()
+        GpsHost.closeAll()
         releaseHeldInput()
         session = 0
         stopAudio()
