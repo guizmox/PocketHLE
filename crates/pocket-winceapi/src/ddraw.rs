@@ -177,6 +177,23 @@ const SURFACE_METHODS: [&str; 31] = [
     "surface_alpha_blt",
 ];
 
+// The CE Surface5 IID is used by both the compact Mobile header and
+// the older DXPAK header (Surface4 slots plus AlphaBlt). Keep the compact
+// view until its first unambiguous legacy Lock selects the retained slots.
+const SURFACE5_METHODS: [&str; 46] = {
+    let mut names = ["surface_alpha_blt"; 46];
+    let mut i = 0;
+    while i < SURFACE4_METHODS.len() { names[i] = SURFACE4_METHODS[i]; i += 1; }
+    names
+};
+const SURFACE_COMPAT_METHODS: [&str; 46] = {
+    let mut names = SURFACE5_METHODS;
+    let mut i = 0;
+    while i < SURFACE_METHODS.len() { names[i] = SURFACE_METHODS[i]; i += 1; }
+    names[25] = "surface_ce_palette_or_legacy_lock";
+    names
+};
+
 pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler("ddraw.dll", "DirectDrawCreate", direct_draw_create);
     d.register_handler("coredll.dll", "DirectDrawCreate", direct_draw_create);
@@ -187,6 +204,7 @@ pub fn register(d: &mut WinCeDispatcher) {
         .chain(PALETTE_METHODS.iter())
         .chain(CLIPPER_METHODS.iter())
         .chain(SURFACE_METHODS.iter())
+        .chain(SURFACE_COMPAT_METHODS.iter())
     {
         let handler = match *name {
             "ddraw_qi" => ddraw_qi,
@@ -234,6 +252,7 @@ pub fn register(d: &mut WinCeDispatcher) {
             "surface_get_dc" => surface_get_dc,
             "surface_is_lost" => surface_is_lost,
             "surface_lock" => surface_lock,
+            "surface_ce_palette_or_legacy_lock" => surface_ce_palette_or_legacy_lock,
             "surface_unlock" => surface_unlock,
             "surface_flip" => surface_flip,
             "surface_get_dd_interface" => surface_get_dd_interface,
@@ -474,7 +493,8 @@ fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> Result<SurfaceRecord, 
     } else {
         0
     };
-    if caps & 0x0000_0040 != 0 {
+    let primary_cap = if size == 124 { 0x0000_0200 } else { 0x0000_0040 };
+    if caps & primary_cap != 0 {
         // DDSCAPS_PRIMARYSURFACE
         return Ok(panel);
     }
@@ -650,6 +670,12 @@ fn ddraw_get_surface_from_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
 fn ddraw_get_available_vid_mem(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let total = ctx.arg_u32(2)?;
     let free = ctx.arg_u32(3)?;
+    let window = ctx.arg_u32(1)?;
+    // Slot 20 in the retained IDirectDraw header is SetCooperativeLevel.
+    // Its HWND and flags are not output pointers for GetAvailableVidMem.
+    if total != 0 && total & !0x1ff == 0 && ctx.kernel.window_procs.contains_key(&window) {
+        return ddraw_set_cooperative_level(ctx);
+    }
     let bytes = ctx.kernel.framebuffer.byte_size().saturating_mul(4);
     if total != 0 {
         ctx.cpu.write_mem(total, &bytes.to_le_bytes())?;
@@ -682,7 +708,10 @@ fn surface_qi(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         let this = ctx.arg_u32(0)?;
         let iid = requested_iid(ctx)?;
         let table = if iid == IID_SURFACE_CE {
-            Some(SURFACE_METHODS.as_slice())
+            let retained = ctx.cpu.read_u32_le(this).ok()
+                .and_then(|table|ctx.cpu.read_u32_le(table + 25 * 4).ok())
+                .is_some_and(|address|address != 0 && address == dynamic_address(ctx,"surface_lock"));
+            Some(if retained { SURFACE_COMPAT_METHODS.as_slice() } else { SURFACE_METHODS.as_slice() })
         } else if iid == IID_SURFACE4 {
             Some(SURFACE4_METHODS.as_slice())
         } else {
@@ -758,7 +787,7 @@ fn surface_desc2_bytes(width: u32, height: u32, pitch: u32, surface: u32, primar
     let mut bytes = [0u8; 124];
     let flags = 0x1u32 | 0x2 | 0x4 | 0x8 | 0x800 | 0x1000;
     for (offset, value) in [(0, 124u32), (4, flags), (8, height), (12, width),
-        (16, pitch), (36, surface), (104, if primary { 0x40 } else { 0x40_0000 })] {
+        (16, pitch), (36, surface), (104, if primary { 0x200 } else { 0x40 })] {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
     bytes[72..104].copy_from_slice(&pixel_format_bytes());
@@ -858,12 +887,37 @@ fn surface_is_lost(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 
 fn surface_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ensure_framebuffer(ctx)?;
+    let object = ctx.arg_u32(0)?;
+    // A compact slot-19 Lock resolves the ambiguous view in the other
+    // direction. Later SetPalette calls must not reclassify it from stale args.
+    if let Ok(table) = ctx.cpu.read_u32_le(object) {
+        let ambiguous = dynamic_address(ctx,"surface_ce_palette_or_legacy_lock");
+        if ambiguous != 0 && ctx.cpu.read_u32_le(table + 25 * 4).ok() == Some(ambiguous) {
+            write_vtable(ctx,table,&SURFACE_METHODS)?;
+        }
+    }
     let desc = ctx.arg_u32(2)?;
     let record = this_surface(ctx)?.unwrap_or_else(|| panel_record(ctx));
     if desc != 0 {
         write_record_desc(ctx, desc, record)?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn surface_ce_palette_or_legacy_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let desc = ctx.arg_u32(2)?;
+    let flags = ctx.arg_u32(3)?;
+    let object = ctx.arg_u32(0)?;
+    // SetPalette has no descriptor argument. A writable DDSURFACEDESC2
+    // and supported lock flags identify the older header's slot 25.
+    if flags & !0x1fff == 0 && ctx.cpu.read_u32_le(desc).ok() == Some(124)
+        && ctx.cpu.check_guest_access(desc,124,Prot::WRITE).is_ok()
+        && surface_record(ctx,object).is_some() {
+        let table = ctx.cpu.read_u32_le(object)?;
+        write_vtable(ctx,table,&SURFACE5_METHODS)?;
+        return surface_lock(ctx);
+    }
+    surface_ok(ctx)
 }
 
 /// Read the guest's writes back out of the mapping and publish them.
@@ -1054,7 +1108,7 @@ mod tests {
         let exports = kernel.dynamic_exports.entry(FAKE_MODULE_HANDLE).or_default();
         let mut address = 0x7000_1000u32;
         for name in DDRAW_METHODS.iter().chain(DDRAW4_METHODS.iter())
-            .chain(SURFACE_METHODS.iter()).chain(SURFACE4_METHODS.iter()) {
+            .chain(SURFACE_METHODS.iter()).chain(SURFACE4_METHODS.iter()).chain(SURFACE_COMPAT_METHODS.iter()) {
             if !exports.contains_key(*name) {
                 exports.insert((*name).into(), address);
                 address += 16;
@@ -1118,6 +1172,34 @@ mod tests {
             assert_eq!(cpu.read_u32_le(0x1300 + pointer_offset).unwrap(), back.pixels);
             assert_eq!(cpu.read_u32_le(0x1300 + size).unwrap(), 0xa5a5a5a5);
         }
+        assert_eq!(cpu.read_u32_le(ce_surface_table + 25 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_set_palette"]);
+
+        // Replay the older DXPAK Surface5 path through the same IID.
+        // A fresh view must select slot 25 Lock / slot 32 Unlock while
+        // preserving pixels; the compact view above remains compact.
+        call(&mut cpu,&mut kernel,surface_qi,[primary,0x1100,0x1014,0]);
+        let legacy = cpu.read_u32_le(0x1014).unwrap();
+        let legacy_table = cpu.read_u32_le(legacy).unwrap();
+        cpu.write_mem(0x1300,&surface_desc2_bytes(320,240,640,0,true)).unwrap();
+        call(&mut cpu,&mut kernel,surface_ce_palette_or_legacy_lock,[legacy,0,0x1300,0x21]);
+        assert_eq!(cpu.read_u32_le(legacy_table + 25 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_lock"]);
+        assert_eq!(cpu.read_u32_le(legacy_table + 32 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_unlock"]);
+        assert_eq!(cpu.read_u32_le(0x1324).unwrap(),front.pixels);
+        assert_eq!(cpu.read_u32_le(0x1368).unwrap(),0x200);
+        cpu.write_mem(front.pixels,&0xffffu16.to_le_bytes()).unwrap();
+        let before=kernel.framebuffer.frame_counter;
+        call(&mut cpu,&mut kernel,surface_unlock,[legacy,0,0,0]);
+        assert_eq!(kernel.framebuffer.frame_counter,before+1);
+        assert_eq!(&kernel.framebuffer.pixels[..2],&0xffffu16.to_le_bytes());
+
+        kernel.window_procs.insert(0xdead0001,0x1000);
+        call(&mut cpu,&mut kernel,ddraw_get_available_vid_mem,[ce,0xdead0001,8,0x70001000]);
+        call(&mut cpu,&mut kernel,ddraw_get_available_vid_mem,[ce,0x1200,0x1400,0x1404]);
+        assert_eq!(cpu.read_u32_le(0x1400).unwrap(),320*240*2*4);
+        assert_eq!(cpu.read_u32_le(0x1404).unwrap(),320*240*2*4);
     }
 
     #[test]
@@ -1134,7 +1216,7 @@ mod tests {
         assert_eq!(word(36), 0x78000000);
         assert_eq!(word(72), 32);
         assert_eq!(word(84), 16);
-        assert_eq!(word(104), 0x400000);
+        assert_eq!(word(104), 0x40);
     }
 
     fn slot(table: &[&str], name: &str) -> usize {

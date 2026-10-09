@@ -475,6 +475,7 @@ impl Cpu for UnicornCpu {
 
     fn check_guest_access(&self,va:u32,len:u32,required:Prot)->Result<(),CpuError>{
         let regions=self.uc.mem_regions().map_err(|e|CpuError::Backend(format!("mem_regions: {e:?}")))?;
+        // Bindgen's C enum underlying type differs between Windows and Unix.
         let images=self.images.borrow();let permissions=map_prot(required).0 as u32;
         for page in crate::image_pages::ImagePages::range(va,len)? {
             let allowed=if let Some(r)=regions.iter().find(|r|r.begin<=page as u64&&r.end>=page as u64){

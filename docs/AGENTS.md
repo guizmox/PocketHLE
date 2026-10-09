@@ -1189,3 +1189,24 @@ quota exhaustion/refund and cleanup. Native integration runs it twice and verifi
 RAM restoration; the actual desktop runner also executes it. Keep the private
 probe-directory refusal and never clean unknown game files. RAMTEST v7's 132
 checks remain regression coverage. No temporary production instrumentation.
+
+## 23. DirectDraw DXPAK and compact Mobile interfaces
+
+Do not identify a surface ABI solely by its CE Surface5 IID: both SDK families
+use it. QueryInterface from a retained Surface4 starts an ambiguous view with
+compact slots. Its first slot-19 Lock fixes the compact ABI; a writable 124-byte
+DDSURFACEDESC2 passed to slot 25 fixes the retained Surface5 ABI (Lock 25,
+Unlock 32, AlphaBlt 45). Views own their vtables and share pixel storage; selecting
+one view must not rewrite another. Ordinary compact surfaces keep compact tables.
+
+For 124-byte descriptors, DDSCAPS_PRIMARYSURFACE is 0x200 and OFFSCREENPLAIN
+is 0x40. The compact 108-byte header uses 0x40 for its primary flag. Keep both
+creation and returned descriptors consistent; otherwise a primary surface is
+allocated off-screen and never published. A real HWND plus cooperative-level
+flags at DirectDraw slot 20 is the older SetCooperativeLevel call, not a pair
+of GetAvailableVidMem output pointers.
+
+FIFA's observed failure was slot 25 dispatched as SetPalette, followed by 240
+invalid memcpy scanlines and a NULL slot-32 call. Validate its actual ARM startup
+and the compact/retained COM regression tests. Do not add title-name branches,
+swallow the invalid memcpy, or retain temporary tracing in production.
