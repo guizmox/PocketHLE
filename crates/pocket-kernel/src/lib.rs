@@ -242,6 +242,9 @@ fn return_stub_bytes(arch: Arch) -> [u8; 8] {
 /// `frame_counter` has moved — the cadence only bounds the *polling*.
 const PRESENT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 
+/// Input and stop requests must progress even when the image is unchanged.
+const FRONTEND_POLL_INTERVAL: Duration = Duration::from_millis(4);
+
 /// Polling cadence once the guest has proven it announces its own
 /// frames, and how long that proof stays good.
 ///
@@ -2978,6 +2981,7 @@ pub fn run_main_loop_with_hook(
     // that told us; see [`PRESENT_POLL_BACKOFF`].
     let mut last_direct_frames = process.state.direct_fb_frames;
     let mut last_direct_present: Option<Instant> = None;
+    let mut last_frontend_poll: Option<Instant> = None;
     let process_gate = process.state.object_handles.execution_gate();
     loop {
         if max_slices != 0 && slice >= max_slices {
@@ -3391,6 +3395,14 @@ pub fn run_main_loop_with_hook(
                 last_present = Some(now);
                 sync_guest_framebuffer(cpu, &mut process.state);
                 process.state.composite_controls();
+            }
+            // The frontend also drains input and stop requests. Its polling
+            // cadence must not inherit the expensive framebuffer readback
+            // backoff, especially when a DirectDraw menu has static pixels.
+            let input_due = last_frontend_poll.is_none_or(|then|
+                now.duration_since(then) >= FRONTEND_POLL_INTERVAL);
+            if due || input_due {
+                last_frontend_poll = Some(now);
                 let action = hook.on_frame(&mut process.state);
                 last_presented_frame = process.state.framebuffer.frame_counter;
                 if action == FrameAction::Stop {
@@ -3837,6 +3849,41 @@ mod tests {
             100, 2, Some(&mut hook)).unwrap();
         assert_eq!(hook.0, 1);
         assert_eq!(process.state.pending_input.front(), Some(&InputEvent::KeyDown { vk: 0x28 }));
+    }
+
+    #[test]
+    fn static_directdraw_frames_do_not_delay_frontend_input_until_readback() {
+        let mut loader_cpu = StubCpu::new();
+        let mut process = Process::map_into(image_based_at(0x10000,0x1000),
+            &mut loader_cpu,&|_,_| None,&NullDispatcher).unwrap();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x11000,0x1000,Prot::READ|Prot::WRITE|Prot::EXEC).unwrap();
+        cpu.write_mem(0x11000,&0xeafffffeu32.to_le_bytes()).unwrap();
+        let started = Instant::now();
+        let mut calls = 0;
+        let before = process.state.framebuffer.frame_counter;
+        let mut hook = |state: &mut KernelState| {
+            assert_eq!(state.framebuffer.frame_counter,before,"a static image is not an input clock");
+            assert!(started.elapsed() < Duration::from_millis(200),"frontend inherited the 250 ms readback backoff");
+            let event = match calls {
+                0 => { state.direct_fb_frames += 1; InputEvent::KeyDown{vk:0x27} },
+                1 => InputEvent::KeyUp{vk:0x27},
+                2 => InputEvent::KeyDown{vk:0x27},
+                _ => InputEvent::KeyUp{vk:0x27},
+            };
+            state.pending_input.push_back(event);
+            calls += 1;
+            if calls == 4 { FrameAction::Stop } else {
+                std::thread::sleep(Duration::from_millis(6));
+                FrameAction::Continue
+            }
+        };
+        run_main_loop_with_hook(&mut cpu,&mut process,&mut NullDispatcher,
+            100,0,Some(&mut hook)).unwrap();
+        assert_eq!(calls,4);
+        assert_eq!(process.state.pending_input.iter().copied().collect::<Vec<_>>(),
+            vec![InputEvent::KeyDown{vk:0x27},InputEvent::KeyUp{vk:0x27},
+                 InputEvent::KeyDown{vk:0x27},InputEvent::KeyUp{vk:0x27}]);
     }
 
     /// Regression test for the slot-0 alias collision. A standard
