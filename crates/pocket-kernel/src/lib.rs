@@ -870,6 +870,7 @@ pub struct ChildProcess {
 #[derive(Clone)]
 pub struct ProcessHandleContext {
     pub table: handles::HandleTable,
+    vfs_shared: vfs::VfsShared,
     events: shared_objects::SharedObjects<EventObject>,
     semaphores: shared_objects::SharedObjects<SemaphoreObject>,
     mutexes: shared_objects::SharedObjects<MutexObject>,
@@ -1038,7 +1039,7 @@ pub struct KernelState {
     pub pending_startup: std::collections::VecDeque<(u32, u32, u32)>,
     /// Open `FindFirstFileW` enumerations: handle -> remaining
     /// `(name, size, is_dir)` entries.
-    pub find_handles: HashMap<u32, std::collections::VecDeque<(String, u64, bool)>>,
+    pub find_handles: HashMap<u32, std::collections::VecDeque<(String, u64, bool, u32)>>,
     /// Next `FindFirstFileW` handle to hand out.
     pub next_find_handle: u32,
     /// In-memory Windows CE registry. Seeded from the CAB's
@@ -1309,7 +1310,7 @@ impl KernelState {
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {
         self.publish_handles();
         Some(ProcessHandleContext { table: self.object_handles.child(handle)?,
-            events: self.events.clone(), semaphores: self.semaphores.clone(), mutexes: self.mutexes.clone() })
+            vfs_shared: self.vfs.shared_context(), events: self.events.clone(), semaphores: self.semaphores.clone(), mutexes: self.mutexes.clone() })
     }
     pub fn reclaim_finished_stacks(&mut self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
         self.reclaim_finished_tls();
@@ -1356,6 +1357,7 @@ impl KernelState {
         Ok(())
     }
     pub fn attach_handle_context(&mut self, context: ProcessHandleContext) {
+        self.vfs.attach_shared_context(context.vfs_shared);
         self.object_handles = context.table;
         self.events = context.events; self.semaphores = context.semaphores; self.mutexes = context.mutexes;
         self.sync_transferred_handles();

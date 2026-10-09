@@ -123,4 +123,23 @@ pub(crate) mod tests {
         cpu.unmap_region(0x1000, 0x3000).unwrap();
         assert_eq!(budget.count(), 0);
     }
+    fn api_permissions(cpu:&mut dyn crate::Cpu){
+        let budget=Budget::new(8);
+        cpu.map_image_region(0x1000,4096,Prot::READ,vec![7],budget.clone()).unwrap();
+        assert!(cpu.check_guest_access(0x1000,4096,Prot::READ).is_ok());
+        assert!(cpu.check_guest_access(0x1000,1,Prot::WRITE).is_err());assert_eq!(budget.count(),0);
+        cpu.map_region(0x4000,8192,Prot::READ|Prot::WRITE).unwrap();
+        cpu.protect_region(0x5000,4096,Prot::READ).unwrap();
+        assert!(cpu.check_guest_access(0x4fff,2,Prot::WRITE).is_err());
+        assert!(cpu.check_guest_access(0x4fff,2,Prot::READ).is_ok());
+        assert!(cpu.check_guest_access(0x6000,1,Prot::READ).is_err());
+        assert!(cpu.check_guest_access(u32::MAX,2,Prot::WRITE).is_err());
+        // Loader access is deliberately unaffected by guest permissions.
+        cpu.write_mem(0x5000,b"loader").unwrap();assert_eq!(cpu.read_mem(0x5000,6).unwrap(),b"loader");
+        cpu.unmap_region(0x1000,4096).unwrap();cpu.unmap_region(0x4000,8192).unwrap();assert_eq!(budget.count(),0);
+    }
+    #[test] fn stub_guest_api_permissions_do_not_commit_cold_pages(){api_permissions(&mut crate::stub::StubCpu::new());}
+    #[cfg(feature="unicorn")]
+    #[test] fn unicorn_guest_api_permissions_do_not_commit_cold_pages(){api_permissions(&mut crate::unicorn::UnicornCpu::new().unwrap());}
+
 }

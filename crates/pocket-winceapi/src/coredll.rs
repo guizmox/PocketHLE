@@ -312,8 +312,8 @@ pub fn register(d: &mut WinCeDispatcher) {
         find_close_change_notification,
     );
     d.register_handler(dll, "DeleteFileW", delete_file_w);
-    d.register_constant(dll, "SetFileAttributesW", 1, one_returning);
     d.register_handler(dll, "GetFileAttributesW", get_file_attributes_w);
+    d.register_handler(dll, "SetFileAttributesW", set_file_attributes_w);
     d.register_handler(dll, "CreateDirectoryW", create_directory_w);
     d.register_handler(dll, "RemoveDirectoryW", remove_directory_w);
     d.register_constant(dll, "CopyFileW", 1, one_returning);
@@ -2941,35 +2941,17 @@ fn get_store_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 }
 
 fn get_disk_free_space_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let free_available = ctx.arg_u32(1)?;
-    let total_bytes = ctx.arg_u32(2)?;
-    let free_bytes = ctx.arg_u32(3)?;
-    let path_p = ctx.arg_u32(0)?;
-    let path = if path_p == 0 { "\\".to_string() } else {
-        String::from_utf16_lossy(&read_wstr(ctx, path_p, 260)?)
-    };
-    if ctx.kernel.vfs.is_ram_path(&path) {
-        let division = ctx.kernel.memory_division.as_ref().unwrap();
-        let snapshot = division.snapshot();
-        let free = snapshot.store_free() as u64 * division.page_size() as u64;
-        let total = snapshot.store_pages as u64 * division.page_size() as u64;
-        for (ptr, value) in [(free_available, free), (total_bytes, total), (free_bytes, free)] {
-            if ptr != 0 { ctx.cpu.write_mem(ptr, &value.to_le_bytes())?; }
-        }
-        return Ok(DispatchOutcome::ReturnedR0(1));
-    }
-    const TOTAL: u64 = 64 * 1024 * 1024;
-    const FREE: u64 = 48 * 1024 * 1024;
-    for (ptr, value) in [
-        (free_available, FREE),
-        (total_bytes, TOTAL),
-        (free_bytes, FREE),
-    ] {
-        if ptr != 0 {
-            ctx.cpu.write_mem(ptr, &value.to_le_bytes())?;
+    let ptr=ctx.arg_u32(0)?;let outputs=[ctx.arg_u32(1)?,ctx.arg_u32(2)?,ctx.arg_u32(3)?];
+    let path=if ptr==0{Ok("\\".to_string())}else{vfs_api_path(ctx,0)};
+    let result=path.and_then(|p|ctx.kernel.vfs.disk_space(&p));
+    match result {
+        Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(0))},
+        Ok((total,free))=>{
+            for p in outputs {if p!=0 && !vfs_probe_output(ctx,p,8){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}}
+            for (p,n) in outputs.into_iter().zip([free,total,free]){if p!=0{ctx.cpu.write_mem(p,&n.to_le_bytes())?;}}
+            Ok(DispatchOutcome::ReturnedR0(1))
         }
     }
-    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 /// `BOOL DeviceIoControl(HANDLE h, DWORD code, void* in, DWORD in_len,
@@ -6750,49 +6732,16 @@ fn char_lower_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// `HANDLE CreateFileW(LPCWSTR name, DWORD access, DWORD share, ...,
 ///                     DWORD creation, DWORD flags, HANDLE template)`
 ///
-/// We honour `access` (`GENERIC_READ` 0x80000000, `GENERIC_WRITE`
-/// 0x40000000) and `creation` (`CREATE_ALWAYS` 2, `CREATE_NEW` 1,
-/// `OPEN_ALWAYS` 4) loosely — enough to satisfy a game that just
-/// wants to load assets and persist a save file.
+/// Open modes, guest access and sharing are enforced by the shared VFS domain.
 fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    use pocket_kernel::vfs::Access;
-    let name_p = ctx.arg_u32(0)?;
-    let access_flags = ctx.arg_u32(1)?;
-    let creation = ctx.arg_u32(4)?;
-    if name_p == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
-    }
-    let name_w = match read_wstr(ctx, name_p, 260) {
-        Ok(n) => n,
-        Err(_) => return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE)),
-    };
-    let path = String::from_utf16_lossy(&name_w);
-    let access = match (
-        access_flags & 0x8000_0000 != 0,
-        access_flags & 0x4000_0000 != 0,
-    ) {
-        (true, true) => Access::ReadWrite,
-        (false, true) => Access::Write,
-        _ => Access::Read,
-    };
-    let create = matches!(creation, 1 | 2 | 4);
-    match ctx.kernel.vfs.open(&path, access, create) {
-        Some(h) => {
-            log::debug!("CreateFileW({path:?}, access={access:?}) -> 0x{h:08x}");
-            Ok(DispatchOutcome::ReturnedR0(h))
-        }
-        None => {
-            // Promoted from `trace` to `debug` so that
-            // `RUST_LOG=…,pocket_winceapi=debug` reveals the exact
-            // path a game tried (and failed) to open. This is the
-            // single most-useful breadcrumb when figuring out which
-            // asset / save-game / config file the title needs us to
-            // mount under the guest VFS.
-            log::debug!(
-                "CreateFileW({path:?}, access={access:?}, creation={creation}) -> INVALID_HANDLE_VALUE",
-            );
-            Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE))
-        }
+    let ptr=ctx.arg_u32(0)?;let flags=ctx.arg_u32(1)?;let share=ctx.arg_u32(2)?;
+    let disposition=ctx.arg_u32(4)?;let attributes=ctx.arg_u32(5)?;
+    let name=if ptr==0 {Err(ERROR_INVALID_PARAMETER)}else{read_wstr(ctx,ptr,260).map(|v|String::from_utf16_lossy(&v)).map_err(|_|ERROR_INVALID_PARAMETER)};
+    let result=name.and_then(|name|ctx.kernel.vfs.open_file(&name,
+        u32::from(flags&0x80000000!=0)|u32::from(flags&0x40000000!=0)*2,share,disposition,false,attributes));
+    match result {
+        Ok(r)=>{if disposition==2||disposition==4{set_thread_error(ctx,if r.existed{183}else{0});}Ok(DispatchOutcome::ReturnedR0(r.handle))},
+        Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE))}
     }
 }
 
@@ -6807,9 +6756,12 @@ fn read_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let mut buf = vec![0u8; count as usize];
+    if (count!=0&&(!vfs_probe_output(ctx,buf_p,count))) || (out_read_p!=0&&!vfs_probe_output(ctx,out_read_p,4)) {
+        set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let mut buf = Vec::new();if buf.try_reserve_exact(count as usize).is_err(){set_thread_error(ctx,8);return Ok(DispatchOutcome::ReturnedR0(0));}buf.resize(count as usize,0);
     let Some(n) = ctx.kernel.vfs.read(handle, &mut buf) else {
-        set_thread_error(ctx, 30); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ctx.kernel.vfs.read_failure_error(handle)); return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if buf_p != 0 && n > 0 {
         if ctx.cpu.write_mem(buf_p, &buf[..n]).is_err() {
@@ -6863,6 +6815,8 @@ fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
+    if buf_p==0 || (out_written_p!=0&&!vfs_probe_output(ctx,out_written_p,4)) {set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}
+    if ctx.cpu.check_guest_access(buf_p,count,Prot::READ).is_err(){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}
     let bytes = match ctx.cpu.read_mem(buf_p, count) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -6915,6 +6869,7 @@ fn get_file_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
     if high_p != 0 {
+        if !vfs_probe_output(ctx,high_p,4){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(u32::MAX));}
         if ctx.cpu.write_mem(high_p, &((size >> 32) as u32).to_le_bytes()).is_err() {
             set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
         }
@@ -6922,118 +6877,42 @@ fn get_file_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(size as u32))
 }
 
-/// `DWORD GetFileAttributesW(LPCWSTR path)` — query the VFS so that
-/// games which probe asset paths before opening them get sensible
-/// answers. Returns `FILE_ATTRIBUTE_NORMAL` (0x80) for regular files
-/// and `FILE_ATTRIBUTE_DIRECTORY` (0x10) for directories. Missing
-/// files / NULL pointers / unmounted prefixes return
-/// `INVALID_FILE_ATTRIBUTES` (0xFFFF_FFFF) just like Windows does.
-/// `RemoveDirectoryW(lpPathName) -> BOOL`.
-///
-/// Both Asphalt 2 builds call this at start-up to tidy up a scratch
-/// directory. We report success without touching the host filesystem,
-/// which mirrors `CreateDirectoryW` — that is also a no-op, so a
-/// directory the guest believes it created never existed and removing
-/// it must succeed. Refusing to delete through a mount is deliberate:
-/// mounts point at the extracted CAB (or whatever `--rom-dir` names),
-/// and a guest should not be able to erase host content.
+// Filesystem handlers preserve LastError on ordinary success and expose failures
+// as WinCE return values, without leaking CPU memory errors into the run loop.
+// Validate output permissions before consuming file bytes or changing its contents.
+fn vfs_probe_output(ctx:&mut CallCtx<'_>,ptr:u32,len:u32)->bool {
+    ptr!=0 && ctx.cpu.check_guest_access(ptr,len,Prot::WRITE).is_ok()
+}
+fn vfs_api_path(ctx: &mut CallCtx<'_>, index:u8)->Result<String,u32>{
+    let p=ctx.arg_u32(index).map_err(|_|87u32)?;
+    if p==0{return Err(87);}let v=read_wstr(ctx,p,260).map_err(|_|87u32)?;
+    let s=String::from_utf16_lossy(&v);if s.is_empty(){Err(87)}else{Ok(s)}
+}
+fn vfs_api_bool(ctx:&mut CallCtx<'_>,result:Result<(),u32>)->Result<DispatchOutcome,KernelError>{
+    match result{Ok(())=>Ok(DispatchOutcome::ReturnedR0(1)),Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(0))}}
+}
+
 fn create_directory_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let name_p = ctx.arg_u32(0)?;
-    if name_p == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    let name = String::from_utf16_lossy(&read_wstr(ctx, name_p, 260)?);
-    let ok = ctx.kernel.vfs.create_dir(&name);
-    log::debug!("CreateDirectoryW({name:?}) -> {ok}");
-    Ok(DispatchOutcome::ReturnedR0(u32::from(ok)))
+    let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.create_directory(&p));vfs_api_bool(ctx,result)
 }
 
 fn delete_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let name_p = ctx.arg_u32(0)?;
-    if name_p == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    let name = String::from_utf16_lossy(&read_wstr(ctx, name_p, 260)?);
-    let ok = ctx.kernel.vfs.delete_file(&name);
-    log::debug!("DeleteFileW({name:?}) -> {ok}");
-    Ok(DispatchOutcome::ReturnedR0(u32::from(ok)))
+    let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.delete(&p));vfs_api_bool(ctx,result)
 }
 
 fn move_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let from_p = ctx.arg_u32(0)?;
-    let to_p = ctx.arg_u32(1)?;
-    if from_p == 0 || to_p == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    let from = String::from_utf16_lossy(&read_wstr(ctx, from_p, 260)?);
-    let to = String::from_utf16_lossy(&read_wstr(ctx, to_p, 260)?);
-    let ok = ctx.kernel.vfs.move_file(&from, &to);
-    log::debug!("MoveFileW({from:?}, {to:?}) -> {ok}");
-    Ok(DispatchOutcome::ReturnedR0(u32::from(ok)))
+    let result=vfs_api_path(ctx,0).and_then(|from|vfs_api_path(ctx,1).and_then(|to|ctx.kernel.vfs.rename(&from,&to)));
+    vfs_api_bool(ctx,result)
 }
 
 fn remove_directory_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let name_p = ctx.arg_u32(0)?;
-    if name_p == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    let path = String::from_utf16_lossy(&read_wstr(ctx, name_p, 260)?);
-    if ctx.kernel.vfs.is_ram_path(&path) {
-        let removed = ctx.kernel.vfs.remove_ram_dir(&path);
-        return Ok(DispatchOutcome::ReturnedR0(removed as u32));
-    }
-    if let Ok(name_w) = read_wstr(ctx, name_p, 260) {
-        log::debug!(
-            "RemoveDirectoryW({:?}) -> 1 (no-op)",
-            String::from_utf16_lossy(&name_w)
-        );
-    }
-    Ok(DispatchOutcome::ReturnedR0(1))
+    let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.remove_directory(&p));vfs_api_bool(ctx,result)
 }
 
 fn get_file_attributes_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
-    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
-    let name_p = ctx.arg_u32(0)?;
-    if name_p == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(INVALID_FILE_ATTRIBUTES));
+    match vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.attributes(&p)){
+        Ok(a)=>Ok(DispatchOutcome::ReturnedR0(a)),Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(u32::MAX))}
     }
-    let name_w = match read_wstr(ctx, name_p, 260) {
-        Ok(n) => n,
-        Err(_) => return Ok(DispatchOutcome::ReturnedR0(INVALID_FILE_ATTRIBUTES)),
-    };
-    let path = String::from_utf16_lossy(&name_w);
-    if ctx.kernel.vfs.is_ram_path(&path) {
-        if ctx.kernel.vfs.ram_file_size(&path).is_some() {
-            return Ok(DispatchOutcome::ReturnedR0(FILE_ATTRIBUTE_NORMAL));
-        }
-        if ctx.kernel.vfs.list_dir(&path).is_some() {
-            return Ok(DispatchOutcome::ReturnedR0(FILE_ATTRIBUTE_DIRECTORY));
-        }
-        return Ok(DispatchOutcome::ReturnedR0(INVALID_FILE_ATTRIBUTES));
-    }
-    let host = match ctx.kernel.vfs.resolve(&path) {
-        Some(p) => p,
-        None => {
-            log::trace!("GetFileAttributesW({path:?}) -> INVALID (no mount)");
-            return Ok(DispatchOutcome::ReturnedR0(INVALID_FILE_ATTRIBUTES));
-        }
-    };
-    let meta = match std::fs::metadata(&host) {
-        Ok(m) => m,
-        Err(_) => {
-            log::trace!("GetFileAttributesW({path:?}) -> INVALID (host miss {host:?})");
-            return Ok(DispatchOutcome::ReturnedR0(INVALID_FILE_ATTRIBUTES));
-        }
-    };
-    let attrs = if meta.is_dir() {
-        FILE_ATTRIBUTE_DIRECTORY
-    } else {
-        FILE_ATTRIBUTE_NORMAL
-    };
-    log::trace!("GetFileAttributesW({path:?}) -> 0x{attrs:08x}");
-    Ok(DispatchOutcome::ReturnedR0(attrs))
 }
 
 /// `DWORD SetFilePointer(HANDLE h, LONG distance, LONG* hi, DWORD whence)`
@@ -7041,6 +6920,10 @@ fn set_file_pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     use pocket_kernel::vfs::SeekKind;
     let handle = ctx.arg_u32(0)?;
     let distance = ctx.arg_u32(1)? as i32 as i64;
+    let high=ctx.arg_u32(2)?;
+    if high!=0 && (!vfs_probe_output(ctx,high,4)||ctx.cpu.read_mem(high,4).ok().is_none_or(|b|b!=[0,0,0,0])) {
+        set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
     let whence = ctx.arg_u32(3)?;
     let kind = match whence {
         0 => SeekKind::Begin,
@@ -7055,9 +6938,11 @@ fn set_file_pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     let Some(pos) = ctx.kernel.vfs.seek(handle, distance, kind) else {
-        set_thread_error(ctx, 25); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        set_thread_error(ctx, 131); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
-    Ok(DispatchOutcome::ReturnedR0(pos as u32))
+    if high!=0 {ctx.cpu.write_mem(high,&0u32.to_le_bytes())?;}
+    if pos==u32::MAX as u64 {set_thread_error(ctx,0);}
+    Ok(DispatchOutcome::ReturnedR0(pos.min(u32::MAX as u64) as u32))
 }
 
 // ---------- C-runtime file I/O ----------
@@ -7079,12 +6964,16 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     } else {
         Access::Read
     };
-    let create = mode.starts_with('w') || mode.starts_with('a') || mode.contains('+');
+    if !matches!(mode.as_bytes().first(),Some(b'r'|b'w'|b'a')) {return 0;}
+    let create = mode.starts_with('w') || mode.starts_with('a');
+    let disposition=if mode.starts_with('w'){2}else if mode.starts_with('a'){4}else{3};
+    let append=mode.starts_with('a');
+    let bits=match access {Access::Read=>1,Access::Write=>2,Access::ReadWrite=>3};
     // Rooted reads must stay rooted. Stripping the leading separator makes
     // the VFS prepend the module directory a second time and repeatedly scan
     // the whole card. The VFS itself handles wrapped-install suffix lookup.
     if !create && (path.starts_with('\\') || path.starts_with('/')) {
-        if let Some(handle) = ctx.kernel.vfs.open(path, access, false) {
+        if let Some(handle) = ctx.kernel.vfs.open_file(path,bits,3,disposition,append,0).ok().map(|r|r.handle) {
             if !mode.contains('b') {
                 ctx.kernel.vfs.mark_text_mode(handle);
             }
@@ -7152,7 +7041,7 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     }
     let text_mode = !mode.contains('b');
     for cand in &candidates {
-        if let Some(h) = ctx.kernel.vfs.open(cand, access, create) {
+        if let Some(h) = ctx.kernel.vfs.open_file(cand,bits,3,disposition,append,0).ok().map(|r|r.handle) {
             if text_mode {
                 ctx.kernel.vfs.mark_text_mode(h);
             }
@@ -17346,15 +17235,14 @@ fn split_search_pattern(path: &str) -> (String, String) {
 fn write_find_data(
     ctx: &mut CallCtx<'_>,
     out: u32,
-    entry: &(String, u64, bool),
+    entry: &(String, u64, bool, u32),
 ) -> Result<(), KernelError> {
     if out == 0 {
         return Ok(());
     }
-    let (name, size, is_dir) = entry;
+    let (name, size, _is_dir, attrs) = entry;
     let mut buf = vec![0u8; FIND_DATA_BYTES];
-    // FILE_ATTRIBUTE_DIRECTORY (0x10) or FILE_ATTRIBUTE_NORMAL (0x80).
-    let attrs: u32 = if *is_dir { 0x10 } else { 0x80 };
+    // Enumeration and GetFileAttributesW must describe the same object.
     buf[0..4].copy_from_slice(&attrs.to_le_bytes());
     buf[28..32].copy_from_slice(&((*size >> 32) as u32).to_le_bytes());
     buf[32..36].copy_from_slice(&(*size as u32).to_le_bytes());
@@ -17374,9 +17262,9 @@ fn write_find_data(
 /// `INVALID_HANDLE_VALUE` it wrote a settings file and exited before
 /// ever drawing a frame.
 fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let pattern_p = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
-    let pattern = String::from_utf16_lossy(&read_wstr(ctx, pattern_p, 520)?);
+    let pattern=match vfs_api_path(ctx,0){Ok(p)=>p,Err(e)=>{set_thread_error(ctx,e);return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));}};
+    if !vfs_probe_output(ctx,out,FIND_DATA_BYTES as u32){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));}
     if !pattern.contains('*') && !pattern.contains('?') {
         if let Some(host) = ctx.kernel.vfs.resolve(&pattern) {
             if let Ok(meta) = std::fs::metadata(&host) {
@@ -17386,7 +17274,8 @@ fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                     .filter(|name| !name.is_empty())
                     .unwrap_or(".")
                     .to_string();
-                let entry = (name, meta.len(), meta.is_dir());
+                let attrs=ctx.kernel.vfs.attributes(&pattern).unwrap_or(if meta.is_dir(){0x10}else{0x80});
+                let entry = (name, meta.len(), meta.is_dir(), attrs);
                 write_find_data(ctx, out, &entry)?;
                 let handle = FIND_HANDLE_BASE.saturating_add(ctx.kernel.next_find_handle);
                 ctx.kernel.next_find_handle = ctx.kernel.next_find_handle.wrapping_add(1);
@@ -17398,12 +17287,14 @@ fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         }
     }
     let (dir, mask) = split_search_pattern(&pattern);
-    let entries = ctx.kernel.vfs.list_dir(&dir).unwrap_or_default();
-    let mut matches: std::collections::VecDeque<(String, u64, bool)> = entries
+    let entries=match ctx.kernel.vfs.list_dir(&dir){Some(v)=>v,None=>{set_thread_error(ctx,3);return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));}};
+    let mut matches: std::collections::VecDeque<(String, u64, bool, u32)> = entries
         .into_iter()
         .filter(|(name, _, _)| wildcard_match(&mask, name))
+        .map(|(name,size,is_dir)|{let attrs=ctx.kernel.vfs.attributes(&format!("{dir}\\{name}")).unwrap_or(if is_dir{0x10}else{0x80});(name,size,is_dir,attrs)})
         .collect();
     let Some(first) = matches.pop_front() else {
+        set_thread_error(ctx,2);
         log::debug!("FindFirstFileW({pattern:?}) -> INVALID_HANDLE_VALUE");
         return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
     };
@@ -17423,6 +17314,8 @@ fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn find_next_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
+    if !ctx.kernel.find_handles.contains_key(&handle){set_thread_error(ctx,6);return Ok(DispatchOutcome::ReturnedR0(0));}
+    if !vfs_probe_output(ctx,out,FIND_DATA_BYTES as u32){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}
     let next = ctx
         .kernel
         .find_handles
@@ -17433,15 +17326,14 @@ fn find_next_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
             write_find_data(ctx, out, &entry)?;
             Ok(DispatchOutcome::ReturnedR0(1))
         }
-        None => Ok(DispatchOutcome::ReturnedR0(0)),
+        None => {set_thread_error(ctx,18);Ok(DispatchOutcome::ReturnedR0(0))},
     }
 }
 
 /// `BOOL FindClose(HANDLE hFindFile)`
 fn find_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let handle = ctx.arg_u32(0)?;
-    ctx.kernel.find_handles.remove(&handle);
-    Ok(DispatchOutcome::ReturnedR0(1))
+    let h=ctx.arg_u32(0)?;if ctx.kernel.find_handles.remove(&h).is_some(){Ok(DispatchOutcome::ReturnedR0(1))}
+    else{set_thread_error(ctx,6);Ok(DispatchOutcome::ReturnedR0(0))}
 }
 
 /// `HANDLE FindFirstChangeNotificationW(LPCWSTR path, BOOL subtree,
@@ -19434,6 +19326,7 @@ mod tests {
         cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         cpu.write_reg(ArmReg::R1, 0x8000_0000).unwrap(); // GENERIC_READ
         cpu.write_reg(ArmReg::Sp, 0x2800).unwrap();
+        cpu.write_mem(0x2800,&3u32.to_le_bytes()).unwrap();
         let t = dummy_thunk();
         let mut c = CallCtx {
             cpu: &mut cpu,
@@ -19502,7 +19395,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_directory_w_succeeds_without_deleting_host_dir() {
+    fn remove_directory_w_deletes_empty_writable_directory() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let dir = tempfile::tempdir().unwrap();
@@ -19526,7 +19419,7 @@ mod tests {
             remove_directory_w(&mut c).unwrap(),
             DispatchOutcome::ReturnedR0(1)
         );
-        assert!(dir.path().join("scratch").is_dir());
+        assert!(!dir.path().join("scratch").exists());
     }
 
     #[test]
@@ -19589,6 +19482,7 @@ mod tests {
         c.cpu.write_reg(ArmReg::R2, 4).unwrap();
         c.cpu.write_reg(ArmReg::R3, 0).unwrap();
         assert_eq!(write_file(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert!(c.kernel.vfs.close(handle));
         c.cpu.write_reg(ArmReg::R0, 0x1e00).unwrap();
         c.cpu.write_reg(ArmReg::R1, 0x2200).unwrap();
         assert_eq!(move_file_w(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
@@ -23054,4 +22948,8 @@ mod tests {
 
     }
 
+}
+
+fn set_file_attributes_w(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError>{
+    let flags=ctx.arg_u32(1)?;let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.set_attributes(&p,flags));vfs_api_bool(ctx,result)
 }

@@ -25,6 +25,10 @@ use std::sync::{Arc, Mutex};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[path = "vfs_contract.rs"]
+mod contracts;
+pub use contracts::{VfsShared, OpenResult};
+
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
 pub const INVALID_HANDLE_VALUE: u32 = 0xFFFF_FFFF;
 
@@ -68,6 +72,8 @@ pub struct OpenFile {
     /// `CreateFileW` has no text mode on Windows CE, so handles opened
     /// there are always binary.
     pub text_mode: bool,
+    lease: Option<Arc<contracts::Lease>>,
+    append: bool,
 }
 
 // MPEG Layer III frame size, used to retain a split frame until the next
@@ -237,6 +243,8 @@ struct OpenRamFile {
     position: u64,
     access: Access,
     text_mode: bool,
+    lease: Option<Arc<contracts::Lease>>,
+    append: bool,
 }
 
 static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xd3000000);
@@ -257,6 +265,7 @@ impl VfsObject {
 /// Mount-point + open-handle table.
 pub struct Vfs {
     mounts: Vec<Mount>,
+    shared: VfsShared,
     ram: Option<crate::memory_division::MemoryDivision>,
     ram_handles: HashMap<u32, Arc<Mutex<OpenRamFile>>>,
     handles: HashMap<u32, Arc<Mutex<OpenFile>>>,
@@ -290,6 +299,7 @@ impl Vfs {
     pub fn new() -> Self {
         Self {
             mounts: Vec::new(),
+            shared: VfsShared::default(),
             ram: None,
             ram_handles: HashMap::new(),
             handles: HashMap::new(),
@@ -344,9 +354,12 @@ impl Vfs {
         let handle = self.next_handle;
         self.next_handle += 1;
         self.ram_handles.insert(handle, Arc::new(Mutex::new(OpenRamFile {
-            file, position: 0, access, text_mode: false,
+            file, position: 0, access, text_mode: false, lease: None, append: false,
         })));
         Some(handle)
+    }
+    pub fn read_failure_error(&self,handle:u32)->u32 {
+        if self.lease(handle).is_some_and(|l|l.access&1==0) {5} else {30}
     }
     pub fn write_failure_error(&self, handle: u32) -> u32 {
         if let Some(open) = self.ram_handles.get(&handle) {
@@ -356,10 +369,11 @@ impl Vfs {
         if let Some(open) = self.handles.get(&handle) {
             if open.lock().is_ok_and(|open| open.access == Access::Read) { return 5; }
         }
+        if self.lease(handle).is_some_and(|l| l.volume.is_some()) {return 112;}
         29 // host backing write failed
     }
     /// SetEndOfFile acts on the shared open description, including duplicates.
-    pub fn set_end_of_file(&mut self, handle: u32) -> bool {
+    fn set_end_of_file_raw(&mut self, handle: u32) -> bool {
         if let Some(open) = self.ram_handles.get(&handle) {
             let Ok(open) = open.lock() else { return false; };
             if open.access == Access::Read { return false; }
@@ -732,7 +746,7 @@ impl Vfs {
     }
 
     /// Create a guest directory through the writable mount that owns it.
-    pub fn create_dir(&self, guest_path: &str) -> bool {
+    fn create_dir_raw(&self, guest_path: &str) -> bool {
         if self.is_ram_path(guest_path) {
             let Some(key) = self.ram_key(guest_path) else { return false; };
             let ram = self.ram.as_ref().unwrap();
@@ -757,11 +771,11 @@ impl Vfs {
         let Some(path) = self.host_path_for_mount(mount, &normalised) else {
             return false;
         };
-        std::fs::create_dir_all(path).is_ok()
+        std::fs::create_dir(path).is_ok()
     }
 
     /// Remove a guest file from the writable mount that owns it.
-    pub fn delete_file(&self, guest_path: &str) -> bool {
+    fn delete_file_raw(&self, guest_path: &str) -> bool {
         if self.is_ram_path(guest_path) {
             let Some(key) = self.ram_key(guest_path) else { return false; };
             let ram = self.ram.as_ref().unwrap();
@@ -794,7 +808,7 @@ impl Vfs {
     }
 
     /// Rename a guest file within the writable mount that owns it.
-    pub fn move_file(&self, from: &str, to: &str) -> bool {
+    fn move_file_raw(&self, from: &str, to: &str) -> bool {
         if self.is_ram_path(from) {
             if !self.is_ram_path(to) { return false; }
             let (Some(from), Some(to)) = (self.ram_key(from), self.ram_key(to)) else { return false; };
@@ -834,9 +848,7 @@ impl Vfs {
         let Some(destination) = self.host_path_for_mount(mount, &to_normalised) else {
             return false;
         };
-        if let Some(parent) = destination.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+        if destination.exists() { return false; }
         std::fs::rename(source, destination).is_ok()
     }
 
@@ -855,7 +867,7 @@ impl Vfs {
     }
 
     /// Open a host file behind a guest path. Returns the handle id.
-    pub fn open(&mut self, guest_path: &str, access: Access, create: bool) -> Option<u32> {
+    fn open_legacy(&mut self, guest_path: &str, access: Access, create: bool) -> Option<u32> {
         let normalised = self.normalise_guest_path(guest_path);
         // The MP3 decoder is a bare device name, not a path under any
         // mount, so it cannot be found by resolving against the
@@ -974,7 +986,7 @@ impl Vfs {
                 host_path,
                 access,
                 file,
-                text_mode: false,
+                text_mode: false, lease: None, append: false,
             })),
         );
         Some(h)
@@ -983,7 +995,7 @@ impl Vfs {
     pub fn read(&mut self, handle: u32, buf: &mut [u8]) -> Option<usize> {
         if let Some(open) = self.ram_handles.get(&handle) {
             let mut open = open.lock().ok()?;
-            if open.access == Access::Write { return None; }
+            if open.access == Access::Write || open.lease.as_ref().is_some_and(|l| l.access & 1 == 0) { return None; }
             let n = {
                 let file = open.file.lock().ok()?;
                 let start = usize::try_from(open.position).ok()?.min(file.data.len());
@@ -999,14 +1011,16 @@ impl Vfs {
             return Some(0);
         }
         let mut of = self.handles.get(&handle)?.lock().ok()?;
+        if of.lease.as_ref().is_some_and(|l| l.access & 1 == 0) { return None; }
         of.file.read(buf).ok()
     }
 
-    pub fn write(&mut self, handle: u32, buf: &[u8]) -> Option<usize> {
+    fn write_raw(&mut self, handle: u32, buf: &[u8]) -> Option<usize> {
         if let Some(open) = self.ram_handles.get(&handle) {
             let mut open = open.lock().ok()?;
             if open.access == Access::Read { return None; }
             if buf.is_empty() { return Some(0); }
+            if open.append { let end=open.file.lock().ok()?.data.len() as u64; open.position=end; }
             let start = usize::try_from(open.position).ok()?;
             let end = start.checked_add(buf.len())?;
             {
@@ -1021,6 +1035,7 @@ impl Vfs {
             return Some(buf.len());
         }
         let mut of = self.handles.get(&handle)?.lock().ok()?;
+        if of.append { of.file.seek(SeekFrom::End(0)).ok()?; }
         of.file.write(buf).ok()
     }
 
@@ -1047,7 +1062,7 @@ impl Vfs {
         }
         let mut of = self.handles.get(&handle)?.lock().ok()?;
         let from = match whence {
-            SeekKind::Begin => SeekFrom::Start(offset.max(0) as u64),
+            SeekKind::Begin => SeekFrom::Start(u64::try_from(offset).ok()?),
             SeekKind::Current => SeekFrom::Current(offset),
             SeekKind::End => SeekFrom::End(offset),
         };
@@ -1381,6 +1396,7 @@ mod tests {
         assert_eq!(parent.seek(0xd2000000, 0, SeekKind::Begin), Some(0));
         let mut child = Vfs::new();
         child.attach_ram(Some(ram.clone()));
+        child.attach_shared_context(parent.shared_context());
         let read = child.open("/temp/test", Access::Read, false).unwrap();
         let mut bytes = [0; 5];
         assert_eq!(child.read(read, &mut bytes), Some(5));
@@ -1392,12 +1408,13 @@ mod tests {
         ram.resize(12).unwrap();
         assert_eq!(parent.write(h, &vec![7; 8 * 4096]), Some(8 * 4096));
         assert_eq!(child.size(read), Some(8 * 4096));
-        assert!(parent.delete_file("/temp/test"));
-        assert!(parent.ram_file_size("/temp/test").is_none());
+        assert!(!parent.delete_file("/temp/test"));
         assert!(ram.resize(8).is_err()); // open descriptions keep data alive
         assert!(parent.close(h));
         assert!(parent.close(0xd2000000));
         assert!(child.close(read));
+        assert!(parent.delete_file("/temp/test"));
+        assert!(parent.ram_file_size("/temp/test").is_none());
         ram.resize(8).unwrap();
         assert!(parent.remove_ram_dir("/temp"));
         assert_eq!(ram.snapshot().store_used, 0);

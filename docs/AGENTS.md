@@ -1157,3 +1157,35 @@ is per process; thread-local multimedia stays on the owning host thread.
 ARM v7 verifies all 132 RAM checks plus the separate process/orphan reports in
 three exit variants; the real desktop runner executes the same process probes.
 No temporary instrumentation or game-specific exception is introduced.
+
+## 22. VFS contracts and per-device storage
+
+`vfs_contract.rs` owns guest creation/share contracts, error results and volume
+quotas. Keep `VfsShared` in the process launch context: open-description leases
+and attributes must be shared by parent, child and duplicated handles. A lease
+ends only when its last alias/export is dropped. Check share compatibility in
+both directions; a denied open must not truncate or create a file.
+
+Guest creation must not create missing parent directories. CRT append seeks to
+EOF on every write, including after an explicit seek. Directory removal is real
+and rejects nonempty directories. Rename must not overwrite a destination.
+Respect the most specific mount and canonical path boundary, including read-only
+overlays and symlinks. Find records carry the same attributes as attribute queries.
+Extra attributes are shared session state, not persistent filesystem metadata.
+
+Flash Disk has a 32 MiB logical file-data quota, independent of physical RAM and
+the object store. Serialize size-growth validation with writes/truncation; count
+sparse logical lengths and refund through current file sizes after truncate/delete.
+SD capacity is synthetic (minimum 64 MiB, rounded upward from content size).
+Do not report the host disk's capacity as the emulated device's capacity.
+
+Guest output buffers require `Cpu::check_guest_access` before consuming input or
+mutating files. Loader `read_mem`/`write_mem` intentionally bypass guest protection
+and are not permission probes. Stub and Unicorn check resident and cold image
+permissions without committing cold pages merely to validate a pointer.
+
+VFSTEST v1 exercises 103 ARM checks, child sharing/duplication, protected outputs,
+quota exhaustion/refund and cleanup. Native integration runs it twice and verifies
+RAM restoration; the actual desktop runner also executes it. Keep the private
+probe-directory refusal and never clean unknown game files. RAMTEST v7's 132
+checks remain regression coverage. No temporary production instrumentation.

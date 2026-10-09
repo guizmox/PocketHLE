@@ -117,6 +117,14 @@ impl Cpu for StubCpu {
         Ok(())
     }
 
+    fn check_guest_access(&self,va:u32,len:u32,required:Prot)->Result<(),CpuError>{
+        for address in crate::image_pages::ImagePages::range(va,len)? {
+            let prot=self.pages.get(&address).map(|p|p.prot)
+                .or_else(||self.images.pages.get(&address).map(|p|p.prot));
+            if !prot.is_some_and(|p|p.contains(required)){return Err(CpuError::BadMemory{va,size:len});}
+        }
+        Ok(())
+    }
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError> {
         self.page_in(va, data.len() as u32)?;
         let mut cur = va;

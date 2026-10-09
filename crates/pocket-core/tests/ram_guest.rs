@@ -118,7 +118,8 @@ fn launch_pending(state: &mut KernelState, assets: &PathBuf, flash: &PathBuf,
             anyhow::ensure!(emu.set_memory_division(ram),"child RAM exhausted");
             emu.set_startup_command_line(&request.command_line)?;
             let state=&mut emu.process_mut().unwrap().state;
-            state.vfs.mount_read_only("\\SD Card\\GZRT999999\\",&assets);
+            let guest_dir=request.guest_path.rsplit_once('\\').unwrap().0;
+            state.vfs.mount_read_only(&format!("{guest_dir}\\"),&assets);
             state.vfs.mount_save_dir("\\Flash Disk\\",&flash);
             state.module_path=request.guest_path;state.synthetic_message_budget=0;state.process_launch_enabled=true;
             emu.max_slices=3_000_000;emu.set_halt_on_unimplemented(true);Ok(emu)
@@ -136,4 +137,40 @@ fn launch_pending(state: &mut KernelState, assets: &PathBuf, flash: &PathBuf,
         assert_eq!(child_table.exit_code(child_table.process_id(),None),Some(code));
     }));
     state.process_launch_results.insert(key,rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap().map(|()|handle));
+}
+
+
+#[test]
+fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
+    let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let files=GuestFiles(std::env::temp_dir().join(format!("pockethle-vfs-{nonce}")));
+    fs::create_dir_all(&files.0).unwrap();let flash=files.0.join("flash");fs::create_dir_all(&flash).unwrap();
+    for (n,b) in [
+        ("AUTORUN.EXE",include_bytes!("../../../tools/vfstest/dist/GZVT999998/AUTORUN.EXE").as_slice()),
+        ("vfsworker.exe",include_bytes!("../../../tools/vfstest/dist/GZVT999998/vfsworker.exe").as_slice()),
+        ("asset.bin",include_bytes!("../../../tools/vfstest/dist/GZVT999998/asset.bin").as_slice())]{fs::write(files.0.join(n),b).unwrap();}
+    let ram=MemoryDivision::gizmondo_sdk_default();
+    // The device registry persists between sessions; initialize it before measuring.
+    {let mut init=Emulator::with_unicorn_cpu().unwrap();init.load_pe(files.0.join("AUTORUN.EXE")).unwrap();assert!(init.set_memory_division(Some(ram.clone())));}
+    let baseline=ram.snapshot();
+    for _ in 0..2 {
+        let mut emu=Emulator::with_unicorn_cpu().unwrap();emu.max_slices=3_000_000;emu.set_halt_on_unimplemented(true);
+        emu.load_pe(files.0.join("AUTORUN.EXE")).unwrap();assert!(emu.set_memory_division(Some(ram.clone())));
+        let state=&mut emu.process_mut().unwrap().state;
+        state.vfs.mount_read_only("\\SD Card\\GZVT999998\\",&files.0);
+        state.vfs.mount_save_dir("\\Flash Disk\\",&flash);
+        state.module_path="\\SD Card\\GZVT999998\\AUTORUN.EXE".into();state.synthetic_message_budget=0;state.process_launch_enabled=true;
+        let mut children=Vec::new();
+        let mut hook=|state:&mut KernelState|{
+            launch_pending(state,&files.0,&flash,&mut children);
+            if state.modal.is_some(){state.pending_input.push_back(InputEvent::KeyDown{vk:0x0d});}
+            FrameAction::Continue
+        };
+        emu.run_with_hook(&mut hook).unwrap();drop(hook);for child in children{child.join().unwrap();}
+        let path=fs::read_dir(&flash).unwrap().map(|e|e.unwrap().path()).find(|p|p.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case("VFSTEST.TXT")).unwrap();
+        let report=fs::read_to_string(path).unwrap();println!("{report}");assert!(report.contains("VFSTEST_RESULT PASS"),"{report}");assert!(!report.lines().any(|l|l.starts_with("FAIL ")),"{report}");
+        assert_eq!(emu.process().unwrap().state.process_exit_code,Some(0));drop(emu);
+        assert_eq!(ram.snapshot().program_used,baseline.program_used);assert_eq!(ram.snapshot().store_used,baseline.store_used);
+        assert_eq!(fs::read_dir(&flash).unwrap().count(),1,"all fixture data must be removed");
+    }
 }

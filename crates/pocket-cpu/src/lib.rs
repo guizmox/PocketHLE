@@ -166,6 +166,11 @@ pub trait Cpu {
     fn protect_region(&mut self, _va: u32, _size: u32, _prot: Prot) -> Result<(), CpuError> {
         Err(CpuError::Unsupported("page protection"))
     }
+    /// Validate an API buffer against guest permissions without materializing pages.
+    /// Host loader reads/writes intentionally bypass protection; guest API buffers do not.
+    fn check_guest_access(&self, _va:u32, _len:u32, _required:Prot)->Result<(),CpuError> {
+        Err(CpuError::Unsupported("guest buffer permissions"))
+    }
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError>;
     fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, CpuError>;
 

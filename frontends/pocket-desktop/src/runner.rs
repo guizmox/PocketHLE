@@ -703,6 +703,40 @@ mod launcher_return_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+
+    #[cfg(feature = "unicorn")]
+    #[test]
+    fn desktop_runner_executes_vfs_diagnostic_and_cleans_probe_files() {
+        let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root=std::env::temp_dir().join(format!("pockethle-runner-vfs-{nonce}"));
+        let card=root.join("games/probe/extracted");let dir=card.join("GZVT999998");std::fs::create_dir_all(&dir).unwrap();
+        for (n,b) in [
+            ("AUTORUN.EXE",include_bytes!("../../../tools/vfstest/dist/GZVT999998/AUTORUN.EXE").as_slice()),
+            ("vfsworker.exe",include_bytes!("../../../tools/vfstest/dist/GZVT999998/vfsworker.exe").as_slice()),
+            ("asset.bin",include_bytes!("../../../tools/vfstest/dist/GZVT999998/asset.bin").as_slice())]{std::fs::write(dir.join(n),b).unwrap();}
+        std::fs::write(dir.join("GZVT999998"),999998u32.to_le_bytes()).unwrap();
+        let mut settings=pocket_library::GameSettings::default();settings.cpu_backend=CpuBackendPref::Unicorn;
+        settings.max_slices=3_000_000;settings.halt_on_unimplemented=true;
+        let game=GameEntry{id:"probe".into(),display_name:"VFS diagnostic".into(),provider:None,
+            executable:PathBuf::from("extracted/GZVT999998/AUTORUN.EXE"),source_cab:"diagnostic.zip".into(),
+            install_dir:None,install_dirs:vec![],save_prefix:None,registry:vec![],imported_at:0,settings,icon:None,companions:vec![]};
+        let (tx,rx)=std::sync::mpsc::channel();let completed=Arc::new(AtomicBool::new(false));let finished=completed.clone();
+        let input=std::thread::spawn(move||{
+            while !finished.load(Ordering::Acquire){
+                let _=tx.send(InputCommand::Input(InputEvent::KeyDown{vk:0x0d}));
+                let _=tx.send(InputCommand::Input(InputEvent::KeyUp{vk:0x0d}));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut hook=RunHook::new(None,Some(rx));
+        let (outcome,code)=Runner::new().run_process(&root,&game,&card,None,None,None,None,&mut hook);
+        completed.store(true,Ordering::Release);input.join().unwrap();assert_eq!(code,0,"{}",outcome.summary);
+        let entries:Vec<_>=std::fs::read_dir(root.join("flash")).unwrap().map(|e|e.unwrap().path()).collect();
+        assert_eq!(entries.len(),1,"all fixture data must be removed");let report=std::fs::read_to_string(&entries[0]).unwrap();
+        assert!(report.contains("VFSTEST_RESULT PASS")&&!report.contains("FAIL "),"{report}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn child_stop_cancels_background_parent_and_other_children() {
         let (tx,rx)=std::sync::mpsc::channel();let parent=RunHook::new(None,Some(rx));
