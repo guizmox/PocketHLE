@@ -536,6 +536,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "waveOutSetVolume", wave_out_set_volume);
     d.register_handler(dll, "waveOutOpen", wave_out_open);
     d.register_handler(dll, "waveOutClose", wave_out_close);
+    d.register_handler(dll, "mixerClose", mixer_close);
     d.register_handler(dll, "waveOutWrite", wave_out_write);
     d.register_handler(dll, "waveOutReset", wave_out_reset);
     d.register_handler(dll, "waveOutBreakLoop", wave_out_break_loop);
@@ -16073,6 +16074,13 @@ fn wave_out_enter_callback(
     Ok(Some(DispatchOutcome::JumpTo(proc_va)))
 }
 
+/// `MMRESULT mixerClose(HMIXER)` — no mixer handles are currently issued.
+/// Chicane calls this with NULL during cleanup. MMRESULT errors travel in
+/// r0, not GetLastError; never close an unrelated wave/VFS handle here.
+fn mixer_close(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(5)) // MMSYSERR_INVALHANDLE
+}
+
 /// `MMRESULT waveOutGetNumDevs(void)` — number of host wave-out
 /// devices. We always claim one so games that probe before opening
 /// don't fall back to a "no audio" code path.
@@ -17562,6 +17570,18 @@ mod tests {
         Heap, KernelState, Thunk,
     };
     use pocket_pe::ImportBinding;
+
+    #[test]
+    fn mixer_cleanup_rejects_null_and_foreign_handles_without_changing_last_error() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        kernel.thread_last_errors.insert(kernel.current_thread, 123);
+        for handle in [0, 1, 0xdead_0001, u32::MAX] {
+            assert_eq!(crate::bluetooth::tests::call(
+                &mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "mixerClose", &[handle]
+            ), DispatchOutcome::ReturnedR0(5));
+            assert_eq!(kernel.thread_last_errors.get(&kernel.current_thread), Some(&123));
+        }
+    }
 
     #[test]
     fn dispatch_message_frames_are_thread_local_and_allow_worker_handoff() {
