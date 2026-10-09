@@ -14,11 +14,16 @@ use pocket_library::{
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpscaleFilter { Reconstruction, Smaa, SmaaSoft, Xbrz, Bicubic, Lanczos, Bilinear, Nearest }
 impl UpscaleFilter {
     const ALL: [Self; 8] = [Self::Reconstruction, Self::Smaa, Self::SmaaSoft, Self::Xbrz,
         Self::Bicubic, Self::Lanczos, Self::Bilinear, Self::Nearest];
+    fn id(self) -> &'static str {
+        match self { Self::Reconstruction=>"reconstruction",Self::Smaa=>"smaa",Self::SmaaSoft=>"smaa_soft",
+            Self::Xbrz=>"xbrz",Self::Bicubic=>"bicubic",Self::Lanczos=>"lanczos",Self::Bilinear=>"bilinear",Self::Nearest=>"nearest" }
+    }
+    fn from_id(id: &str) -> Self { Self::ALL.into_iter().find(|f|f.id()==id).unwrap_or(Self::Reconstruction) }
     fn label(self) -> &'static str {
         match self {
             Self::Reconstruction => "GPU reconstruction (sharp contours; GPU)",
@@ -74,6 +79,7 @@ pub struct PocketLauncher {
     screenshot: crate::screenshot::SharedScreenshot,
     library: Library,
     selected_game: Option<String>,
+    library_gizmondo: bool,
     rename_draft: Option<(String, String, bool)>,
     pending_run: Option<GameEntry>,
     screen: Screen,
@@ -121,6 +127,17 @@ pub struct PocketLauncher {
     binding_capture: Option<GuestButton>,
 }
 
+fn rotation_turns(rotation: RotationPref)->u8 {
+    match rotation {RotationPref::None=>0,RotationPref::Cw90=>1,RotationPref::Half=>2,RotationPref::Ccw90=>3}
+}
+fn rotate_direction_button(button: GuestButton, turns:u8)->GuestButton {
+    let directions=[GuestButton::DpadUp,GuestButton::DpadRight,GuestButton::DpadDown,GuestButton::DpadLeft];
+    directions.iter().position(|b|*b==button).map(|i|directions[(i+turns as usize)%4]).unwrap_or(button)
+}
+fn rotate_direction_vk(vk:u16,turns:u8)->u16 {
+    let directions=[GuestButton::DpadUp,GuestButton::DpadRight,GuestButton::DpadDown,GuestButton::DpadLeft];
+    directions.into_iter().find(|b|b.vk()==vk).map(|b|rotate_direction_button(b,turns).vk()).unwrap_or(vk)
+}
 /// Texture corners for a rotated presentation, in
 /// `[left-top, right-top, left-bottom, right-bottom]` order.
 ///
@@ -580,13 +597,16 @@ impl PocketLauncher {
         let (tx, rx) = mpsc::channel();
         let runner=Runner::new();
         runner.set_missing_api_logging(library.config().log_unimplemented_apis);
+        let upscale_filter=UpscaleFilter::from_id(&library.config().upscale_filter);
+        let library_gizmondo=library.games().iter().any(|g|is_gizmondo_game(g,library.root()));
         Self {
             library,
+            library_gizmondo,
             icon_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
             gizmondo_skin: None,
             upscale_x2: false,
-            upscale_filter: UpscaleFilter::Reconstruction,
+            upscale_filter,
             upscale_window_size: None,
             console_fit_pending: false,
             library_window_size: None,
@@ -631,6 +651,10 @@ impl PocketLauncher {
                 UiEvent::ImportFinished(Ok(name)) => {
                     self.status = format!("Imported {name}.");
                     self.reload_library();
+                    if let Some(game)=self.library.games().iter().find(|g|g.display_name==name) {
+                        self.library_gizmondo=is_gizmondo_game(game,self.library.root());
+                        self.selected_game=Some(game.id.clone());
+                    }
                 }
                 UiEvent::ImportFinished(Err(e)) => {
                     self.status = format!("Import failed: {e}");
@@ -672,6 +696,7 @@ impl PocketLauncher {
         if !self.running_is_gizmondo && self.last_frame_snapshot.as_ref()
             .map(|old|(old.width,old.height))!=Some((frame.width,frame.height)) {
             self.console_fit_pending=true;
+            if self.last_frame_snapshot.is_some() {self.release_all_keys();}
         }
         // Keep native pixels for input coordinates and rebuilding filtered images.
         self.last_frame_snapshot = Some(frame.clone());
@@ -823,6 +848,8 @@ impl PocketLauncher {
                     if ui.selectable_value(&mut self.upscale_filter, filter, filter.label()).clicked() { ui.close_menu(); }
                 }
                 if previous != self.upscale_filter {
+                    self.library.config_mut().upscale_filter=self.upscale_filter.id().into();
+                    if let Err(e)=self.library.save() {self.status=format!("Could not save filter: {e}");}
                     if let Some(frame) = self.last_frame_snapshot.clone() { self.refresh_frame_texture(ui.ctx(), &frame); }
                 }
             });
@@ -864,13 +891,21 @@ impl PocketLauncher {
     }
 
     fn ui_library(&mut self, ui: &mut egui::Ui) {
-        let games: Vec<GameEntry> = self.library.games().to_vec();
+        let all: Vec<GameEntry> = self.library.games().to_vec();
+        let (gizmondo,pocketpc):(Vec<_>,Vec<_>)=all.into_iter().partition(|g|is_gizmondo_game(g,self.library.root()));
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.library_gizmondo,false,format!("PocketPC ({})",pocketpc.len()));
+            ui.selectable_value(&mut self.library_gizmondo,true,format!("Gizmondo ({})",gizmondo.len()));
+        });
+        ui.separator();
+        let games=if self.library_gizmondo {gizmondo}else{pocketpc};
         if games.is_empty() {
+            self.selected_game=None;
             ui.add_space(80.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("No games yet").heading().color(Color32::from_gray(160)));
                 ui.add_space(8.0);
-                ui.label("Click \"Import .CAB / .ZIP / .RAR...\" to add a Pocket PC game.");
+                ui.label("Use Import to add a game to this platform.");
                 ui.add_space(20.0);
                 if ui.button("Import .CAB / .ZIP / .RAR...").clicked() { self.spawn_import_dialog(); }
             });
@@ -1506,15 +1541,16 @@ impl PocketLauncher {
         let lcd=layout.screen();self.paint_guest_frame(ui,lcd);
         self.handle_pointer(ui.ctx(),&lcd,guest_size);
         for (rect,label,button) in layout.controls() {
-            let vk=button.vk();
+            let display_button=rotate_direction_button(button,layout.turns);
+            let vk=rotate_direction_vk(display_button.vk(),(4-rotation_turns(self.game_rotation))%4);
             let now=pointer_held_in(ui.ctx(),&rect.intersect(ui.clip_rect()));
             let was=self.held.is_held_by(InputSource::Pointer,vk);
             if now&&!was&&self.held.press(InputSource::Pointer,vk) {self.send_input(InputEvent::KeyDown{vk});}
             else if was&&!now&&self.held.release(InputSource::Pointer,vk) {self.send_input(InputEvent::KeyUp{vk});}
             layout.draw_button(ui.painter(),rect,label,self.held.is_held(vk));
-            let keys=self.library.config().keybindings.keys_for(button).join(", ");
+            let keys=self.library.config().keybindings.keys_for(display_button).join(", ");
             ui.interact(rect,ui.make_persistent_id(("ppc_button",vk)),Sense::click_and_drag())
-                .on_hover_text(format!("{} — keyboard: {}",button.label(),if keys.is_empty(){"unbound"}else{&keys}));
+                .on_hover_text(format!("{} — keyboard: {}",display_button.label(),if keys.is_empty(){"unbound"}else{&keys}));
         }
     }
 
@@ -1725,9 +1761,10 @@ impl PocketLauncher {
             }
             if self.screen != Screen::Run { continue; }
             // Both PocketPC and Gizmondo use the same configurable host-key map.
-            // The skin is only presentation; Settings are the single source of truth.
+            // PocketPC directions follow the displayed image; action bindings stay fixed.
             let vk = self.library.config().keybindings.vk_for_key(key.name());
             let Some(vk) = vk else { continue; };
+            let vk=if self.running_is_gizmondo {vk}else{rotate_direction_vk(vk,(4-rotation_turns(self.game_rotation))%4)};
             if pressed {
                 if !repeat && self.held.press(InputSource::Keyboard, vk) {
                     self.send_input(InputEvent::KeyDown { vk });
@@ -1980,6 +2017,38 @@ impl eframe::App for PocketLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_filter_ids_restore_every_mode_and_unknown_ids_fall_back() {
+        for filter in UpscaleFilter::ALL {assert_eq!(UpscaleFilter::from_id(filter.id()),filter);}
+        assert_eq!(UpscaleFilter::from_id("future_filter"),UpscaleFilter::Reconstruction);
+    }
+    #[test]
+    fn ppc_directions_follow_display_rotation_and_rotated_shell() {
+        let up=GuestButton::DpadUp.vk();
+        assert_eq!(rotate_direction_vk(up,3),GuestButton::DpadLeft.vk());
+        assert_eq!(rotate_direction_vk(up,1),GuestButton::DpadRight.vk());
+        assert_eq!(rotate_direction_vk(up,2),GuestButton::DpadDown.vk());
+        for native in [[240,320],[320,240]] {
+            for rotation in RotationPref::ALL {
+                let layout=crate::pocketpc_layout::PocketPcLayout::new(native,rotation,1.0,Pos2::ZERO);
+                let controls=layout.controls();
+                let center=controls.iter().find(|(_,_,b)|*b==GuestButton::Action).unwrap().0.center();
+                for (rect,_,button) in controls {
+                    if !matches!(button,GuestButton::DpadUp|GuestButton::DpadDown|GuestButton::DpadLeft|GuestButton::DpadRight){continue;}
+                    let delta=rect.center()-center;
+                    let visible=if delta.x.abs()>delta.y.abs(){if delta.x>0.0{GuestButton::DpadRight}else{GuestButton::DpadLeft}}
+                        else if delta.y>0.0{GuestButton::DpadDown}else{GuestButton::DpadUp};
+                    assert_eq!(rotate_direction_button(button,layout.turns),visible);
+                    let pointer_vk=rotate_direction_vk(visible.vk(),(4-rotation_turns(rotation))%4);
+                    let keyboard_vk=rotate_direction_vk(visible.vk(),(4-rotation_turns(rotation))%4);
+                    assert_eq!(pointer_vk,keyboard_vk);
+                    assert_eq!(pointer_vk,rotate_direction_button(button,u8::from(native[0]>native[1])).vk());
+                }
+                assert_eq!(rotate_direction_vk(GuestButton::ButtonA.vk(),layout.turns),GuestButton::ButtonA.vk());
+            }
+        }
+    }
+
 
     use pocket_core::kernel::gapi;
     use pocket_library::KeyBindings;

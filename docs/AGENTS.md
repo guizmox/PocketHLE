@@ -650,9 +650,8 @@ The native Stuntcar simulation no longer has those periodic holes even with
 Use the driver's default CPAL buffer size. The earlier 10 ms request did not
 resolve the Windows report and is removed. Never repeat samples, change
 playback speed, retire headers early or add a game-name exception.
-POCKETHLE_AUDIO_DIAGNOSTICS=1 temporarily logs actual host callback frame count,
-block duration, callback interval and queued wave samples, at most once a second.
-It is disabled by default; remove this temporary probe after Windows validation.
+The temporary host callback probe was removed after Windows validation of
+the event-completion correction. No diagnostic environment flag remains.
 
 *Buffer completion is not a message-pump event.* On WinCE the driver's
 own thread reports a drained buffer, so a game may wait for one without
@@ -1459,3 +1458,26 @@ quota.nand_not_ram equality and all 103 checks; do not add a tolerance that
 conceals genuine NAND/RAM accounting defects. Windows v1's isolated quota
 failure was not reproduced in native ARM or the actual frontend runner here.
 The v2 report is needed to identify the direction and size of that variation.
+
+
+## 32. Desktop preferences, platform tabs and PocketPC directional controls
+
+LauncherConfig.upscale_filter stores a stable filter identifier, saved when the
+user selects a filter and restored on launcher startup. Old configurations and
+unknown identifiers fall back to GPU reconstruction. Keep all eight filter IDs
+stable; screenshots and fullscreen use the restored selection too.
+
+Library tabs use the same is_gizmondo_game classifier as the running device
+layout. Keep the details/selection restricted to the visible platform, show
+both tab counts and allow imports from an empty tab. Successful imports select
+the imported game's platform. No game files move when switching tabs.
+
+For PPC keyboard arrows apply the inverse user presentation rotation to the
+guest VK. A natively landscape framebuffer already has landscape coordinates,
+so its orientation must not be applied again to keyboard input. Pointer pad
+buttons instead rotate with the entire shell (natural orientation plus user
+rotation), then follow that same inverse presentation mapping. Their visible
+arrow and the matching host arrow key must agree. Action buttons retain their
+bindings; Gizmondo keys retain their existing behavior. Release held input on
+rotation or PPC framebuffer geometry changes. Preserve geometry-based checks
+for all four rotations with portrait and landscape native framebuffers.

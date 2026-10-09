@@ -480,6 +480,9 @@ pub struct LauncherConfig {
     /// Append missing API reports beside the main launcher log.
     #[serde(default = "default_log_unimplemented_apis")]
     pub log_unimplemented_apis: bool,
+    /// Desktop smoothing filter, remembered across sessions.
+    #[serde(default = "default_upscale_filter")]
+    pub upscale_filter: String,
     /// Last folder the user picked a `.cab` from. Used to remember
     /// the file dialog start directory.
     #[serde(default)]
@@ -521,6 +524,7 @@ pub struct LauncherConfig {
 }
 
 fn default_log_unimplemented_apis()->bool {true}
+fn default_upscale_filter()->String { "reconstruction".into() }
 
 fn default_show_fps() -> bool {
     true
@@ -549,6 +553,7 @@ impl Default for LauncherConfig {
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,
             log_unimplemented_apis: default_log_unimplemented_apis(),
+            upscale_filter: default_upscale_filter(),
             last_import_dir: None,
             show_fps: default_show_fps(),
             fullscreen: false,
@@ -2384,11 +2389,13 @@ mod tests {
         let mut lib = Library::open(&root).unwrap();
         lib.config_mut().verbosity = 2;
         lib.config_mut().show_fps = false;
+        lib.config_mut().upscale_filter = "smaa_soft".into();
         lib.save().unwrap();
 
         let lib2 = Library::open(&root).unwrap();
         assert_eq!(lib2.config().verbosity, 2);
         assert!(!lib2.config().show_fps);
+        assert_eq!(lib2.config().upscale_filter, "smaa_soft");
 
         lib.config_mut().orientation = "landscape".to_string();
         lib.save().unwrap();
@@ -2402,6 +2409,7 @@ mod tests {
         assert!(lib.config().log_unimplemented_apis);
         fs::write(root.join("config.json"),br#"{"schema_version":1}"#).unwrap();
         lib=Library::open(&root).unwrap();assert!(lib.config().log_unimplemented_apis);
+        assert_eq!(lib.config().upscale_filter,"reconstruction");
         lib.config_mut().log_unimplemented_apis=false;lib.save().unwrap();
         assert!(!Library::open(&root).unwrap().config().log_unimplemented_apis);
     }

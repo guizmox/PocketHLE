@@ -1,4 +1,4 @@
-crates/pocket-kernel/src/lib.rs
 crates/pocket-kernel/src/audio.rs
-crates/pocket-winceapi/src/coredll.rs
+crates/pocket-library/src/lib.rs
+frontends/pocket-desktop/src/app.rs
 docs/AGENTS.md
