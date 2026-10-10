@@ -18,6 +18,7 @@ import androidx.appcompat.widget.AppCompatImageButton
 class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLayout(context, attrs) {
     private val dp = resources.displayMetrics.density
     private val keys = mutableMapOf<Int, View>()
+    val dpad = TouchDpad(context)
     init {
         layoutDirection = View.LAYOUT_DIRECTION_LTR
         isMotionEventSplittingEnabled = true
@@ -33,7 +34,7 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         button(R.id.btn_c, "◀◀").contentDescription = "Rewind"
         button(R.id.btn_b, "▶▶").contentDescription = "Forward"
         button(R.id.btn_action, "▶").contentDescription = "Play"
-        button(R.id.btn_up, "▲"); button(R.id.btn_down, "▼"); button(R.id.btn_left, "◀"); button(R.id.btn_right, "▶")
+        addView(dpad)
         val icons = listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3, R.id.btn_piano4, R.id.btn_piano5)
         val names = listOf("Home", "Volume", "Brightness", "Geofence", "Power")
         icons.forEachIndexed { index, id ->
@@ -42,9 +43,12 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             }
             keys[id] = icon; addView(icon)
         }
-        button(R.id.btn_stop_emulation, "Exit").apply { (this as Button).textSize = 13f }
+        button(R.id.btn_stop_emulation, "Exit").apply {
+            (this as Button).textSize = 13f
+            background = backgroundShape(emulatorAction = true)
+        }
     }
-    private fun backgroundShape(): StateListDrawable {
+    private fun backgroundShape(emulatorAction: Boolean = false): StateListDrawable {
         fun shape(top: Int, bottom: Int, outline: Int) = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom)
         ).apply {
@@ -54,33 +58,57 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         // Keep a visible highlight for the entire hold, including simultaneous keys.
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed),
-                shape(0xff3288bf.toInt(), 0xff195b8c.toInt(), 0xff91d6ff.toInt()))
+                if (emulatorAction) shape(0xffdd8b49.toInt(), 0xffa94d20.toInt(), 0xffffc48f.toInt())
+                else shape(0xff3288bf.toInt(), 0xff195b8c.toInt(), 0xff91d6ff.toInt()))
             addState(intArrayOf(),
-                shape(0xff303a47.toInt(), 0xff141c28.toInt(), 0xff506078.toInt()))
+                if (emulatorAction) shape(0xffa9592d.toInt(), 0xff71371f.toInt(), 0xffcf8b58.toInt())
+                else shape(0xff303a47.toInt(), 0xff141c28.toInt(), 0xff506078.toInt()))
         }
     }
     fun clearPressedControls() {
         keys.values.forEach { it.isPressed = false }
+        dpad.clearInput()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec); val h = MeasureSpec.getSize(heightMeasureSpec)
         setMeasuredDimension(w,h)
+        val padSize = (140 * dp).toInt()
+        dpad.measure(MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY))
         keys.forEach { (id,v) ->
-            val bw = if (id == R.id.btn_stop_emulation) 80f else if (id == R.id.btn_soft1 || id == R.id.btn_soft2) 92f else 44f
-            v.measure(MeasureSpec.makeMeasureSpec((bw*dp).toInt(),MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec((44*dp).toInt(),MeasureSpec.EXACTLY))
+            val shoulder = id == R.id.btn_soft1 || id == R.id.btn_soft2
+            val toolbarScale = ((w / dp - 296f) / 344f).coerceIn(0.1f, 1f)
+            val function = id in listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3,
+                R.id.btn_piano4, R.id.btn_piano5, R.id.btn_stop_emulation)
+            val bw = if (shoulder) 124f else if (id == R.id.btn_stop_emulation) 64f else 44f
+            val bh = if (shoulder) 132f else 44f
+            val scale = if (function) toolbarScale else 1f
+            v.measure(MeasureSpec.makeMeasureSpec((bw*dp*scale).toInt(),MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec((bh*dp*scale).toInt(),MeasureSpec.EXACTLY))
         }
     }
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         fun place(id: Int, x: Float, y: Float) { val v = keys.getValue(id); val left=(x-v.measuredWidth/2).toInt(); val top=(y-v.measuredHeight/2).toInt(); v.layout(left,top,left+v.measuredWidth,top+v.measuredHeight) }
         // Physical sides stay fixed in both landscape orientations and every locale.
         val dpadCenter = 74*dp; val actionPadCenter = width-74*dp
-        val middle = (height*.62f).coerceAtLeast(158*dp).coerceAtMost(height-76*dp)
-        place(R.id.btn_soft1,dpadCenter,88*dp); place(R.id.btn_soft2,actionPadCenter,88*dp)
+        // Bottom edge padding is shared by the 140dp pad and the action diamond.
+        val middle = height - 78 * dp
+        place(R.id.btn_soft1, dpadCenter, 74 * dp)
+        place(R.id.btn_soft2, actionPadCenter, 74 * dp)
         listOf(R.id.btn_a,R.id.btn_c,R.id.btn_b,R.id.btn_action).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,actionPadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
-        listOf(R.id.btn_up,R.id.btn_left,R.id.btn_right,R.id.btn_down).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,dpadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
-        listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5).forEachIndexed { i,id -> place(id,width/2f+(i-2)*52*dp,28*dp) }
-        place(R.id.btn_stop_emulation,width-56*dp,28*dp)
+        val padLeft = (dpadCenter - dpad.measuredWidth / 2f).toInt()
+        val padTop = (middle - dpad.measuredHeight / 2f).toInt()
+        dpad.layout(padLeft, padTop, padLeft + dpad.measuredWidth, padTop + dpad.measuredHeight)
+        // Centre the complete toolbar, so the hardware group itself shifts left.
+        // Exit has a 28dp gap after Power instead of the hardware buttons' 8dp gaps.
+        val toolbarScale = ((width / dp - 296f) / 344f).coerceIn(0.1f, 1f)
+        val unit = dp * toolbarScale
+        val start = (width - 344 * unit) / 2f
+        val topCenter = 8 * dp + 22 * unit
+        listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5)
+            .forEachIndexed { i,id -> place(id, start + (22 + i * 52) * unit, topCenter) }
+        place(R.id.btn_stop_emulation, start + 312 * unit, topCenter)
     }
 }
 

@@ -2292,3 +2292,37 @@ CPAL/static video; the complete hosted workspace job still requires a new run.
 The regenerated fixture files also enable all 167 kernel and 255 WinCE API
 library tests to pass sequentially, including the two loader tests that were
 previously unavailable without pageprobe.dll/depleaf.dll.
+
+
+### Android continuous touch D-pad
+
+GizmondoControls uses one 140dp TouchDpad target instead of four independent
+arrow Buttons. DpadDirections maps eight equal angular sectors to the four
+existing guest directional keys: diagonals hold two contacts, never opposite
+contacts. The centre has a 16%-radius neutral zone; coordinates outside the
+view release directions. Sliding sends only changed key edges, with no repeat
+or per-frame polling. The first pointer owns the pad until release/cancel;
+additional fingers cannot take over. FrameLayout retains split multitouch so
+action buttons work while the thumb remains on the pad.
+
+GameActivity routes pad edges through existing guest key reference counts,
+preserving simultaneous keyboard/controller input. Sector changes release
+old contacts before acquiring new ones, and request one existing haptic pulse
+when a new contact appears. Pause/teardown clear ownership and pressed sectors;
+no timers, workers or native resources are allocated by the D-pad.
+
+Validation: actual D-pad/control Kotlin sources compile against Android14 API
+classes. A host sweep checks 19600 positions, cardinal/diagonal/dead-zone and
+outside behaviour. Harnesses execute the actual touch handler and Activity
+callback with fake platform/input sinks for sliding, holds, up/cancel/pause,
+second-finger ownership and shared hardware key references. These checks do
+not constitute an APK build or a physical Android gameplay test.
+
+The validated Android layout anchors the pad 8dp above the lower edge and the
+action diamond 10dp above it. Shoulder buttons are 124dp wide by 132dp tall,
+8dp from the top (three times a standard 44dp button height). The central top
+toolbar includes five function buttons with 8dp spacing, then a 28dp gap and
+a distinct orange 64dp Exit. Centre the entire 344dp toolbar so hardware
+functions shift left; scale only that toolbar to fit narrower landscape space.
+Actual measurement/layout bodies pass host checks across four landscape sizes
+and three densities for padding, shoulder sizes, ordering and no overlaps.

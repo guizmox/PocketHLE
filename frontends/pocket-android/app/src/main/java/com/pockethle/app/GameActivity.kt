@@ -682,17 +682,31 @@ class GameActivity : AppCompatActivity() {
     }
 
     /**
-     * j2me-loader-inspired virtual gamepad: a D-pad on the left and
-     * three action / soft-key buttons on the right. The button views
-     * live in `activity_game.xml`. We listen for touch events
-     * directly so the WM_KEYDOWN/WM_KEYUP pair is fired as the user
-     * presses and releases the button — not just once per click.
+     * Continuous directional pad and independent action buttons. Touch
+     * transitions send guest key edges immediately through the same reference
+     * counts as hardware input; a diagonal uses two existing directional keys.
      */
     private fun wireVirtualGamepad() {
-        bindVk(R.id.btn_up, VK_UP)
-        bindVk(R.id.btn_down, VK_DOWN)
-        bindVk(R.id.btn_left, VK_LEFT)
-        bindVk(R.id.btn_right, VK_RIGHT)
+        (gameControls as? GizmondoControls)?.dpad?.onDirectionsChanged = { view, mask ->
+            val handle = session
+            if (handle != 0L) {
+                var newlyPressed = false
+                val directions = listOf(DpadDirections.UP to VK_UP, DpadDirections.DOWN to VK_DOWN,
+                    DpadDirections.LEFT to VK_LEFT, DpadDirections.RIGHT to VK_RIGHT)
+                // Release the previous sector before pressing the next one. Other input
+                // sources retain their own references to these guest keys.
+                directions.forEach { (bit, vk) ->
+                    if (mask and bit == 0 && heldVirtualKeys.remove(vk)) releaseGuestKey(handle, vk)
+                }
+                directions.forEach { (bit, vk) ->
+                    if (mask and bit != 0 && heldVirtualKeys.add(vk)) {
+                        acquireGuestKey(handle, vk)
+                        newlyPressed = true
+                    }
+                }
+                if (newlyPressed) controlHaptic(view)
+            }
+        }
         bindVk(R.id.btn_action, VK_RETURN)
         bindVk(R.id.btn_piano1, 0x70)
         bindVk(R.id.btn_piano2, 0x71)
