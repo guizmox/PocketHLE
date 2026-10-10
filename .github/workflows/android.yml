@@ -15,7 +15,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
-      - run: sudo apt-get update && sudo apt-get install -y cmake make curl unzip python3
+      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config make curl unzip python3
       - run: cargo install cargo-ndk --version 3.5.4 --locked
       - run: bash tools/build-android-native.sh 4
         env:

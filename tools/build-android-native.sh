@@ -7,6 +7,7 @@ android_jobs="${1:-4}"
 command -v cargo >/dev/null
 command -v cargo-ndk >/dev/null || { echo 'Install cargo-ndk: cargo install cargo-ndk --version 3.5.4 --locked' >&2; exit 1; }
 command -v cmake >/dev/null
+command -v pkg-config >/dev/null || { echo 'Install pkg-config (required by Unicorn/QEMU configure)' >&2; exit 1; }
 rustup target add aarch64-linux-android armv7-linux-androideabi
 for android_pair in 'aarch64-linux-android:arm64-v8a' 'armv7-linux-androideabi:armeabi-v7a'; do
     android_target="${android_pair%%:*}"

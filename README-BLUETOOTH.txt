@@ -2,105 +2,98 @@ PocketHLE — Bluetooth Classic / RFCOMM — 2026-10-09
 
 Installation
 ============
-Extraire à la racine du dépôt PocketHLE, en remplaçant les fichiers.
-Fichiers complets, avec les corrections de la précédente livraison API générales.
-Les DLL originales et les fichiers temporaires de validation ne sont pas inclus.
+Extract into the PocketHLE repository root, replacing existing files.
+The complete files preserve the preceding general API fixes.
+Original system DLLs and temporary validation files are not included.
 
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 cargo build --release -p pocket-desktop
 
-Activation
-==========
-Dans Emulator options, activer "Bluetooth hardware (Classic / RFCOMM)" puis Save.
-Le réglage est désactivé par défaut et s'applique au prochain lancement de jeu.
-Allumer la radio Bluetooth dans Windows ; PocketHLE ne force pas son état global.
-Appairer les appareils depuis les paramètres Bluetooth de leur OS.
-Le message BT_MSG active/désactive le service émulé sous réserve de ce réglage.
-Les autres jeux ne lancent pas de recherche ni de connexion Bluetooth.
+Enabling Bluetooth
+==================
+Enable "Bluetooth hardware (Classic / RFCOMM)" in the emulator/Gizmondo options
+and save. The setting is disabled by default and applies at the next game launch.
+Turn on the Windows Bluetooth radio; PocketHLE does not force its global state.
+Pair devices through their operating systems' Bluetooth settings.
+BT_MSG enables/disables the emulated service subject to the hardware setting.
+Other games do not initiate discovery or connections automatically.
 
-Android : même réglage dans Settings. Les permissions Bluetooth / localisation
-nécessaires sont demandées avant le lancement d'un jeu avec ce réglage activé.
-Allumer la radio et appairer les appareils depuis Android. Une permission refusée
-reste une vraie erreur ; aucune connexion n'est simulée pour masquer ce refus.
+Android uses the same setting. Required Bluetooth/location permissions are
+requested before launching a game with Bluetooth enabled. Enable the radio and
+pair devices through Android. A denied permission remains an actual error;
+the bridge does not simulate a connection to hide the denial.
 
-Test matériel Windows, indépendamment du jeu
-============================================
-Le build produit aussi target\release\pockethle-bt-test.exe.
-Cet outil n'est jamais lancé automatiquement par le GUI.
+Windows hardware test, independent of the game
+=============================================
+The desktop build also produces target\release\pockethle-bt-test.exe.
+The GUI never launches this diagnostic automatically.
 
-Sur le PC serveur :
+On the server PC:
 target\release\pockethle-bt-test.exe server
 
-Sur le second PC, pendant que le serveur attend :
+On a second PC while the server is waiting:
 target\release\pockethle-bt-test.exe scan
 target\release\pockethle-bt-test.exe client AA:BB:CC:DD:EE:FF
 
-Remplacer AA:BB:CC:DD:EE:FF par l'adresse du PC serveur affichée par scan.
-Le délai d'attente est de 60 secondes. Relancer le serveur si le délai expire.
-PASS signifie connexion RFCOMM réelle + ping/pong dans les deux sens.
-scan seul vérifie la recherche matérielle, pas l'échange de données.
-Deux instances sur un seul PC ne suffisent pas : RFCOMM ne fournit pas un
-loopback radio. Ce diagnostic est un exécutable natif, pas un test ARM invité.
+Replace AA:BB:CC:DD:EE:FF with the server PC address reported by scan.
+The timeout is 60 seconds; restart the server if it expires.
+PASS confirms a real RFCOMM connection and bidirectional ping/pong.
+Scanning alone checks hardware discovery, not data exchange.
+Two instances on one PC are insufficient: RFCOMM has no radio loopback.
+This diagnostic is a native executable, not a guest ARM test.
+After it passes, test multiplayer between two PocketHLE hosts by creating a
+session on one and joining from the other. Android needs a rebuilt APK and
+an actual second device for multiplayer validation.
 
-Une fois ce test passé, vérifier le multijoueur du jeu entre deux PocketHLE,
-en créant la partie sur l'un puis en rejoignant depuis l'autre. Sur Android,
-la validation doit se faire avec un APK reconstruit et un vrai second appareil.
-
-Parcours SDK pris en charge
-==========================
+Supported SDK path
+==================
 BT_MSG, WSAStartup/WSACleanup, gethostname, WSALookupServiceBeginW/NextW/End,
-RegisterDevice/DeregisterDevice pour btd.dll et COM1..COM9, ouverture COMn:,
-SetCommMask/GetCommMask/WaitCommEvent pour EV_RXCHAR et annulation par masque zéro,
-ReadFile/WriteFile synchrones. Les variantes sans suffixe W des fonctions de
-recherche sont également reconnues. WS2 est accessible par LoadLibrary/GetProcAddress
-avec les ordinaux relevés dans la DLL Gizmondo fournie.
+RegisterDevice/DeregisterDevice for btd.dll and COM1..COM9, opening COMn:,
+SetCommMask/GetCommMask/WaitCommEvent for EV_RXCHAR and cancellation through a
+zero mask, and synchronous ReadFile/WriteFile are supported.
+Discovery names without the W suffix are recognised too. WS2 is available
+through LoadLibrary/GetProcAddress using ordinals from the supplied Gizmondo DLL.
 
-Les handles COM se dupliquent et se transfèrent entre processus avec la connexion
-et les permissions conservées. Désinscrire un périphérique annule ses opérations
-en attente ; une nouvelle inscription COM4 fonctionne même si le jeu n'a pas fermé
-ses anciens handles. Les écritures partielles reprennent à leur offset sans
-dupliquer ni tronquer le paquet. Les buffers invités sont contrôlés avant les E/S.
+COM handles can be duplicated/transferred between processes while retaining
+their connection and permissions. Deregistering a device cancels pending
+operations; COM4 can be registered again even if old handles remain open.
+Partial writes resume at their offset without duplicating or truncating data.
+Guest buffers are checked before I/O.
+Windows uses nonblocking Winsock AF_BTH, Bluetooth discovery and SDP advertising.
+Android uses secure BluetoothSocket connections, host threads and bounded RX/TX
+queues. Both transports share a service UUID per guest channel and respect an
+explicit GUID supplied by the program.
 
-Windows : Winsock AF_BTH non bloquant, recherche Bluetooth et annonce SDP.
-Android : BluetoothSocket sécurisé, threads hôtes et files RX/TX bornées.
-Les deux transports utilisent le même UUID de service par canal invité ; un GUID
-explicite fourni par le programme est respecté.
-
-Limites et validation
-====================
-415 tests logiciels passent : 145 kernel, 234 winceapi, 36 bibliothèque.
-Le parcours SDK est testé via le dispatcher et un transport contrôlé : tailles
-WSADATA/WSAQUERYSET, pointeurs ARM, découverte, attente, échanges, erreurs, masque,
-duplication, annulation, réinscription et reprise d'écriture partielle.
-Le frontend desktop est vérifié avec Unicorn et audio. Les modules Rust Windows
-et JNI Android sont vérifiés avec les types de leurs API natives.
-La vérification desktop Linux désactive temporairement la vidéo statique faute de
-FFmpeg local et utilise xdg-portal ; ces adaptations ne sont pas livrées.
-
-IMPORTANT : aucune liaison entre radios physiques n'a été testée ici.
-Le code Kotlin et l'APK Android complet n'ont pas été compilés dans cet
-environnement (SDK Android / dépendances de construction indisponibles).
-Ces vérifications ne prouvent donc pas encore la compatibilité multijoueur réelle.
-
-Ce patch n'implémente pas les 79 exports Winsock et 83 exports BTD dans leur
-intégralité. Restent hors périmètre : sockets IP et sockets RFCOMM directement
-ouverts par l'invité via Winsock, APIs bas niveau HCI/L2CAP/SDP du pilote BTD,
-recherches de services ou avec filtres, E/S COM overlapped, MTU/quotas personnalisés,
-contrôle UART/modem/DCB. REMOTE_DCB et KEEP_DCD sont acceptés pour le chemin SDK,
-mais ne fournissent pas de contrôle modem/DCB. Sans transport disponible,
-WSAStartup continue d'échouer réellement ; recv ne fabrique jamais un EOF.
-
-L'interopérabilité avec une Gizmondo physique n'est pas garantie : le SDK emploie
-un canal physique fixe tandis que les hôtes PocketHLE partagent un service UUID
-dont le système alloue le canal RFCOMM. Le premier essai doit porter sur deux
-hôtes PocketHLE. Windows recherche sur le premier adaptateur radio disponible.
-
-Aucune instrumentation temporaire ajoutée. Les traces et l'audio ordinaires
-conservent leur fonctionnement précédent.
-
-Références techniques
+Limits and validation
 =====================
-SDK Gizmondo fourni : Examples/Bluetooth/Bluetooth.cpp ; exports ws2.dll/btd.dll.
+The original Bluetooth delivery reported 415 passing software tests:
+145 kernel, 234 WinCE API and 36 library. A controlled transport tested the SDK
+path through the dispatcher: WSADATA/WSAQUERYSET sizes, ARM pointers, discovery,
+waiting, exchanges, errors, masks, duplication, cancellation, registration
+and partial-write retries. Desktop was checked with Unicorn and audio;
+Windows Rust and Android JNI modules were checked against native API types.
+The original Linux desktop check temporarily disabled static video and used
+xdg-portal; those environment-specific changes were not delivered.
+The current Kotlin code, both Android native libraries and the full debug APK
+have now compiled. See docs/ANDROID-BUILD.md for exact validation results.
+No connection between physical Bluetooth radios has been tested here.
+Software checks do not establish real multiplayer compatibility.
+
+The patch does not implement all 79 Winsock and 83 BTD exports. General IP
+sockets, direct guest Winsock RFCOMM sockets, low-level HCI/L2CAP/SDP driver APIs,
+service/filter searches, overlapped COM I/O, custom MTU/quotas and UART/modem/DCB
+control remain outside its scope. REMOTE_DCB and KEEP_DCD are accepted for the
+SDK path but do not provide modem/DCB control. Without an available transport,
+WSAStartup fails normally; recv never fabricates EOF.
+Interoperability with a physical Gizmondo is not guaranteed: its SDK uses a
+fixed physical channel, whereas PocketHLE hosts share a service UUID whose
+RFCOMM channel is allocated by the operating system. Start with two PocketHLE
+hosts. Windows discovery uses the first available radio adapter.
+Normal logging and audio are preserved; no temporary instrumentation was added.
+
+Technical references
+====================
+Supplied Gizmondo SDK: Examples/Bluetooth/Bluetooth.cpp; ws2.dll/btd.dll exports.
 https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-wsaqueryset-for-set-service
 https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-bind
 https://developer.android.com/develop/connectivity/bluetooth/connect-bluetooth-devices

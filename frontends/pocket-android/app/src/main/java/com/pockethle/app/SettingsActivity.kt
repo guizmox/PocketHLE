@@ -49,7 +49,7 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             toggle("gprs_enabled", "GPRS/data", current.gprsEnabled) { current = current.copy(gprsEnabled = it) }
-            toggle("gps_fixed_enabled", "Position GPS fixe", current.gpsFixedEnabled) { current = current.copy(gpsFixedEnabled = it) }
+            toggle("gps_fixed_enabled", "Fixed GPS position", current.gpsFixedEnabled) { current = current.copy(gpsFixedEnabled = it) }
             fun coordinate(keyName: String, label: String, latitude: Boolean) {
                 giz.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                     key = keyName; title = label; isPersistent = false
@@ -60,7 +60,7 @@ class SettingsActivity : AppCompatActivity() {
                         val number = value.toString().trim().replace(',', '.').toDoubleOrNull()
                         val limit = if (latitude) 90.0 else 180.0
                         if (number == null || !number.isFinite() || number !in -limit..limit) {
-                            android.widget.Toast.makeText(context, "Coordonnée invalide (−$limit à $limit)", android.widget.Toast.LENGTH_LONG).show(); false
+                            android.widget.Toast.makeText(context, "Invalid coordinate (−$limit to $limit)", android.widget.Toast.LENGTH_LONG).show(); false
                         } else {
                             current = if (latitude) current.copy(gpsFixedLatitude = number) else current.copy(gpsFixedLongitude = number)
                             writeConfig(); true
@@ -72,17 +72,17 @@ class SettingsActivity : AppCompatActivity() {
             coordinate("gps_fixed_longitude", "Longitude", false)
             val display = findPreference<androidx.preference.PreferenceScreen>("display_options")!!
             display.addPreference(ListPreference(requireContext()).apply {
-                key = "upscale_filter"; title = "Filtre"; isPersistent = false
-                entries = arrayOf("Reconstruction", "SMAA", "SMAA doux", "xBRZ", "Bicubique", "Lanczos", "Bilinéaire", "Nearest")
+                key = "upscale_filter"; title = "Filter"; isPersistent = false
+                entries = arrayOf("Reconstruction", "SMAA", "SMAA Soft", "xBRZ", "Bicubic", "Lanczos", "Bilinear", "Nearest")
                 entryValues = arrayOf("reconstruction", "smaa", "smaa_soft", "xbrz", "bicubic", "lanczos", "bilinear", "nearest")
                 value = current.upscaleFilter; summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, v -> current = current.copy(upscaleFilter = v.toString()); writeConfig(); true }
             })
             display.addPreference(ListPreference(requireContext()).apply {
-                key = "android_display_scale"; title = "Échelle d’affichage"; isPersistent = false
-                entries = arrayOf("Auto (ajuster à l’écran)", "Native ×1", "×2", "×3", "×4")
+                key = "android_display_scale"; title = "Display scale"; isPersistent = false
+                entries = arrayOf("Auto (largest integer scale that fits)", "Native ×1", "×2", "×3", "×4")
                 entryValues = arrayOf("0", "1", "2", "3", "4"); value = current.displayScale.toString()
-                summary = "Rapport conservé ; une échelle trop grande est réduite pour tenir à l’écran."
+                summary = "Whole multiples of the native resolution. Larger scales are limited to the available space."
                 setOnPreferenceChangeListener { _, v -> current = current.copy(displayScale = v.toString().toInt()); writeConfig(); true }
             })
             giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
@@ -112,7 +112,7 @@ class SettingsActivity : AppCompatActivity() {
             giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "gps_enabled"
                 title = "GPS / device location (GPS1)"
-                summary = "Localisation réelle ; la position fixe fonctionne indépendamment de cette option."
+                summary = "Real device location; fixed position works independently of this option."
                 isPersistent = false
                 isChecked = current.gpsEnabled
                 setOnPreferenceChangeListener { _, value ->
@@ -123,7 +123,7 @@ class SettingsActivity : AppCompatActivity() {
             giz.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                 key = "colors_server_url"
                 title = "Colors multiplayer server"
-                summary = "Hôte, IP ou URL, par exemple nas.local:8080. Pris en compte au prochain lancement."
+                summary = "Host, IP or URL, for example nas.local:8080. Applied on the next launch."
                 isPersistent = false
                 text = current.colorsServerUrl
                 setOnPreferenceChangeListener { _, value ->
@@ -131,7 +131,7 @@ class SettingsActivity : AppCompatActivity() {
                     val origin = if (input.isEmpty() || input.contains("://")) input else "http://$input"
                     val uri = android.net.Uri.parse(origin)
                     if (origin.isNotEmpty() && (uri.scheme !in listOf("http", "https") || uri.host.isNullOrBlank() || !uri.userInfo.isNullOrBlank() || !uri.query.isNullOrBlank() || !uri.fragment.isNullOrBlank() || (uri.path ?: "") !in listOf("", "/"))) {
-                        android.widget.Toast.makeText(context, "Indiquer un hôte ou une origine HTTP(S), sans chemin", android.widget.Toast.LENGTH_LONG).show(); false
+                        android.widget.Toast.makeText(context, "Enter a host or HTTP(S) origin without a path", android.widget.Toast.LENGTH_LONG).show(); false
                     } else { current = current.copy(colorsServerUrl = origin.trimEnd('/')); writeConfig(); true }
                 }
             })
@@ -143,24 +143,24 @@ class SettingsActivity : AppCompatActivity() {
                 text = current.colorsTerminalId
                 setOnPreferenceChangeListener { _, value ->
                     val identity=value.toString().trim()
-                    if(identity.length>128 || !identity.matches(Regex("[A-Za-z0-9_.-]*"))) { android.widget.Toast.makeText(context,"ID : lettres ASCII, chiffres, tiret, point ou underscore (128 maximum)",android.widget.Toast.LENGTH_LONG).show();false }
+                    if(identity.length>128 || !identity.matches(Regex("[A-Za-z0-9_.-]*"))) { android.widget.Toast.makeText(context,"ID: ASCII letters, digits, hyphen, dot or underscore (maximum 128 characters)",android.widget.Toast.LENGTH_LONG).show();false }
                     else { current=current.copy(colorsTerminalId=identity);writeConfig();true }
                 }
             })
-            val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Clavier et manettes" }
+            val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Keyboard and controllers" }
             preferenceScreen.addPreference(input)
-            val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Clavier physique" }
-            val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Manette physique" }
+            val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Physical keyboard" }
+            val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Physical controller" }
             input.addPreference(keyboard);input.addPreference(gamepad)
             InputBindings.buttons.forEach { (button,info) ->
                 keyboard.addPreference(Preference(requireContext()).apply {
                     key="keyboard_$button";title=info.first;isPersistent=false
                     val snapshot=InputBindings(current)
                     val existing=(0 until snapshot.keyboard.length()).map { snapshot.keyboard.getJSONObject(it) }.find { it.optString("button")==button }?.optJSONArray("keys")
-                    summary=existing?.let { (0 until it.length()).joinToString(", ") { i -> it.getString(i) } }?.ifEmpty { "Non assigné" } ?: "Non assigné"
+                    summary=existing?.let { (0 until it.length()).joinToString(", ") { i -> it.getString(i) } }?.ifEmpty { "Unassigned" } ?: "Unassigned"
                     setOnPreferenceClickListener {
-                        val dialog=androidx.appcompat.app.AlertDialog.Builder(requireContext()).setTitle(info.first).setMessage("Appuyer sur une touche du clavier (F10 est réservé aux captures).")
-                            .setNegativeButton("Annuler",null).setNeutralButton("Effacer") { _,_-> saveKeyboardBinding(button,null);summary="Non assigné" }.create()
+                        val dialog=androidx.appcompat.app.AlertDialog.Builder(requireContext()).setTitle(info.first).setMessage("Press a keyboard key (F10 is reserved for screenshots).")
+                            .setNegativeButton("Cancel",null).setNeutralButton("Clear") { _,_-> saveKeyboardBinding(button,null);summary="Unassigned" }.create()
                         dialog.setOnKeyListener { _,code,event ->
                             val name=InputBindings.keyName(event)
                             if(code==android.view.KeyEvent.KEYCODE_BACK) false
@@ -173,7 +173,7 @@ class SettingsActivity : AppCompatActivity() {
                 })
                 gamepad.addPreference(ListPreference(requireContext()).apply {
                     key="gamepad_$button";title=info.first;isPersistent=false
-                    entries=(listOf("Non assigné")+InputBindings.controls).toTypedArray();entryValues=(listOf("")+InputBindings.controls).toTypedArray()
+                    entries=(listOf("Unassigned")+InputBindings.controls).toTypedArray();entryValues=(listOf("")+InputBindings.controls).toTypedArray()
                     val map=InputBindings(current).controller
                     value=map.keys().asSequence().firstOrNull { map.optString(it)==button } ?: ""
                     summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
@@ -186,8 +186,8 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
-                key="log_unimplemented_apis";title="Rapport des API manquantes";isPersistent=false;isChecked=current.logUnimplementedApis
-                summary="Fichier pockethle-unimplemented.log dans le dossier de la bibliothèque."
+                key="log_unimplemented_apis";title="Unimplemented API report";isPersistent=false;isChecked=current.logUnimplementedApis
+                summary="Writes pockethle-unimplemented.log in the library folder."
                 setOnPreferenceChangeListener { _,v -> current=current.copy(logUnimplementedApis=v as Boolean);writeConfig();true }
             })
             findPreference<SeekBarPreference>("verbosity")?.apply {
@@ -254,7 +254,7 @@ class SettingsActivity : AppCompatActivity() {
 
         private fun writeConfig() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
-            if(result?.optBoolean("ok",false)!=true) android.widget.Toast.makeText(context,result?.optString("error") ?: "Enregistrement impossible",android.widget.Toast.LENGTH_LONG).show()
+            if(result?.optBoolean("ok",false)!=true) android.widget.Toast.makeText(context,result?.optString("error") ?: "Could not save settings",android.widget.Toast.LENGTH_LONG).show()
         }
     }
 }

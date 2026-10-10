@@ -1,42 +1,48 @@
-PocketHLE — GPS Windows + Android
+PocketHLE — GPS on Windows and Android
 
-Extraire ce ZIP à la racine du dépôt PocketHLE, en remplaçant les fichiers.
-Aucun script BAT/CMD fourni.
+Extract the patch into the PocketHLE repository root, replacing existing files.
 
-Commandes CMD :
+From CMD at the repository root:
   powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
   cargo build --release -p pocket-desktop
 
-Activer « GPS / host location (GPS1) » dans Emulator options avant le lancement.
-Windows : activer la localisation et l'accès des applications de bureau dans les
-paramètres Windows. La demande de permission WinRT est initiée depuis le thread
-UI ; l'acquisition reste asynchrone et ne bloque pas l'ARM. La précision dépend
-du service de localisation du PC, aucun récepteur GPS n'est simulé artificiellement.
-Android : activer l'option GPS et accorder la localisation précise au lancement.
-Les abonnements sont suspendus en arrière-plan et fermés à la fin du jeu.
+Enable "GPS / host location (GPS1)" in the emulator settings before launch.
+Windows: enable location services and desktop application access in Windows
+Settings. The UI thread requests WinRT permission; acquisition is asynchronous
+and does not block ARM execution. Accuracy depends on the PC's location service.
+Android: enable GPS and grant precise location permission when launching the game.
+Subscriptions pause in the background and close when the game ends.
 
-Importer tools/gpstest/dist/PocketHLE-GPSTEST.zip comme jeu Gizmondo.
-Le test attend 30 secondes pour une position. GPSTEST_RESULT PASS valide les API ;
-GPS_POSITION AVAILABLE confirme séparément la réception d'une position.
-Le rapport et la structure brute sont dans Flash Disk (GPSTEST.TXT/GPSTEST.BIN).
-COLORS_POSITION_ELIGIBLE YES confirme validité + précision <100 m. Colors exige
-également un horodatage récent. Un service Windows peu précis peut donc être
-fonctionnel tout en restant insuffisant pour le jeu.
+Windows and Android also support a fixed position through Gizmondo options.
+Enable the override and enter a signed latitude (-90 to 90) and longitude
+(-180 to 180). It supplies GPS1 independently of host location access. Android
+skips real GPS permission for this mode; older Bluetooth transports may still
+require a separate location permission. Satellite counts are not fabricated.
 
-Fonctions livrées : GPS1 / position native, format binaire SDK 180 octets, unités,
-date UTC, absence de fix, permissions, partage, duplication et fermeture VFS.
-La validation native est adaptée au bit FixValidated ; les compteurs de satellites
-restent à zéro. L'altitude ellipsoïdale n'est pas présentée comme altitude MSL.
-Les écritures geofence, commandes SiRF/APM et IOCTL de version non documenté
-renvoient explicitement ERROR_NOT_SUPPORTED (50). Pas de notifications GNS,
-pas de correction de l'horloge du PC et pas de localisation de fond Android.
+Import tools/gpstest/dist/PocketHLE-GPSTEST.zip as a Gizmondo game.
+The test waits up to 30 seconds for a position. GPSTEST_RESULT PASS validates
+the API contract; GPS_POSITION AVAILABLE separately confirms position reception.
+The report and raw snapshot are in Flash Disk (GPSTEST.TXT/GPSTEST.BIN).
+COLORS_POSITION_ELIGIBLE YES confirms a valid fix and accuracy below 100 metres.
+Colors also requires a recent timestamp. A working but inaccurate Windows
+location provider may therefore remain unsuitable for the game.
 
-Validation : 437 tests Rust passent. GPSTEST exécuté sur CPU ARM/Unicorn avec
-fournisseur déterministe : PASS, position et éligibilité Colors confirmées.
-Routines ARM GPS réelles de Colors (constructeur, lecture, destruction) exécutées :
-coordonnées attendues et aucun handle VFS restant. 100 cycles de fermeture avec
-duplication inter-processus vérifient la destruction de la capture au dernier handle.
-Desktop Linux, bindings natifs Windows et JNI Android vérifiés par cargo check.
-Pas de mesure sur matériel GPS Windows/Android ; APK Kotlin/Android non compilé
-ici. Le test de Colors concerne son chemin GPS, pas une partie complète du jeu.
-Aucune instrumentation par frame ni modification de l'EXE Colors livré.
+Supported features: GPS1/native position, packed 180-byte SDK format, units,
+UTC date, no-fix state, permissions, sharing, duplication and VFS closing.
+Native validation maps to FixValidated; satellite counters remain zero.
+Ellipsoidal altitude is not reported as mean sea level altitude.
+Geofence writes, SiRF/APM commands and the undocumented version IOCTL explicitly
+return ERROR_NOT_SUPPORTED (50). GNS notifications, host clock adjustment and
+Android background location are not implemented.
+
+The original GPS delivery reported 437 passing Rust tests. GPSTEST ran on ARM
+with Unicorn and a deterministic provider: PASS, position and Colors eligibility
+were confirmed. Colors' real ARM GPS constructor/read/destructor routines produced
+the expected coordinates and left no VFS handles. One hundred close cycles with
+cross-process duplication verified capture teardown at the last handle.
+Desktop Linux, Windows native bindings and Android JNI passed cargo check.
+The current Android build and software checks are in docs/ANDROID-BUILD.md.
+The debug APK has now been compiled and its signature/alignment verified.
+Physical Windows/Android GPS hardware remains untested here. The original Colors
+test covered its GPS path rather than a complete game session.
+No per-frame instrumentation or Colors executable change is required by this bridge.

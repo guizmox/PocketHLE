@@ -1,69 +1,69 @@
-PocketHLE — caméra Gizmondo CAM1 — Windows + Android
+PocketHLE — Gizmondo CAM1 camera on Windows and Android
 
-Ce ZIP contient les fichiers sources complets à remplacer à la racine du dépôt.
-Il conserve aussi les corrections Bluetooth et manette SDL2 du patch précédent.
-Aucun script BAT/CMD n'est fourni. Ne remplace pas le Cargo.toml racine, ni
-Cargo.lock, ni votre configuration de compilation locale.
+Extract the complete source files into the repository root, replacing existing
+files. The camera delivery preserves the preceding Bluetooth and SDL2 controller
+fixes. Follow the patch's file list when merging it.
 
-WINDOWS — depuis votre console CMD, après extraction dans le dépôt :
+WINDOWS — from CMD after extraction:
 
 cd /d C:\Users\gtristant\source\repos\PocketHLE
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 set CMAKE_POLICY_VERSION_MINIMUM=3.5
 cargo build --release -p pocket-desktop
 
-Activer Settings > Emulator options > Camera hardware (CAM1), puis lancer
-un jeu ou le diagnostic. La case est désactivée par défaut ; elle autorise
-l'accès, et le jeu déclenche réellement la capture via CAM_START.
-Windows utilise la première webcam. Dans les paramètres Confidentialité de
-Windows, autoriser la caméra aux applications de bureau si nécessaire.
+Enable "Camera hardware (CAM1)" in the emulator/Gizmondo options before launching
+a game or diagnostic. It is disabled by default. The setting permits access;
+the game actually starts capture through CAM_START.
+Windows uses the first webcam. Allow desktop applications to access the camera
+in Windows Privacy settings if needed.
 
-TEST ARM — importer dans la librairie :
+ARM TEST — import into the library:
 tools/camtest/dist/PocketHLE-CAMTEST.zip
 
-Lancer CAMTEST après activation de la caméra. Il écrit dans le dossier flash
-de la librairie : camtest.txt, camtest-preview.bmp, camtest-capture.i420.
-Attendre CAMTEST_RESULT PASS et ouvrir le BMP pour vérifier l'image réelle.
-Relancer une deuxième fois pour vérifier la libération/réouverture de la caméra.
-Voir tools/camtest/README.md pour les détails et la conversion I420 avec FFmpeg.
-Ces fichiers de test remplacent uniquement leurs propres sorties CAMTEST.
+Launch CAMTEST with the camera enabled. It writes camtest.txt,
+camtest-preview.bmp and camtest-capture.i420 into the library's flash directory.
+Wait for CAMTEST_RESULT PASS and open the BMP to check the actual image.
+Run it again to check camera release and reopening.
+See tools/camtest/README.md for details and I420 conversion with FFmpeg.
+The diagnostic replaces only its own CAMTEST output files.
 
-ANDROID — sources intégrées ; permissions CAMERA, pause/reprise et fermeture.
-Activer Camera hardware dans les settings. L'autorisation CAMERA est demandée
-au lancement. La caméra arrière est préférée, sinon la première disponible.
-Avec votre installation NDK/JDK/Gradle habituelle, depuis la racine du dépôt :
+ANDROID
+=======
+The sources include CAMERA permission handling, pause/resume and closing.
+Enable the camera before launch; CAMERA permission is requested when needed.
+The rear camera is preferred, otherwise the first available camera.
+Build both native libraries and the APK using docs/ANDROID-BUILD.md, which covers
+the pinned SDK/NDK/JDK/Gradle setup and static FFmpeg dependencies.
+The debug APK is written to:
+frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk
 
-cargo ndk -t arm64-v8a -t armeabi-v7a -o frontends/pocket-android/app/src/main/jniLibs build --release -p pocket-android-jni
-cd frontends\pocket-android
-gradle assembleDebug
-
-L'APK est dans app\build\outputs\apk\debug. Utiliser votre commande Gradle
-habituelle si Gradle n'est pas installé dans PATH. L'environnement de livraison
-n'a pas de SDK/JDK Android opérationnel : la construction de cet APK n'a pas
-été validée ici.
-
-CONTRAT IMPLEMENTE
-CAM1 : SETFORMAT, GETFORMAT, START, STOP, PREVIEW, CAPTURE.
-Aperçu RGB565 top-down, multiples de 8 jusqu'à 640x480, maximum 20 ips.
-Capture 640x480 I420 (Y/U/V). Buffers guest validés avant consommation.
-Délais conservés entre reprises du scheduler ; duplication et partages
-respectés ; dernier CloseHandle/STOP libère la capture matérielle.
-Pas de capture simulée quand la caméra est absente ou interdite.
-Les IOCTL 2107/2108/2109 non documentés et l'overlapped retournent unsupported.
-La caméra PocketPC via DirectShow et les contrôles capteur non documentés
-ne font pas partie de ce pilote CAM1.
+IMPLEMENTED CONTRACT
+====================
+CAM1: SETFORMAT, GETFORMAT, START, STOP, PREVIEW and CAPTURE.
+Preview: top-down RGB565, dimensions divisible by eight up to 640x480, at most 20 fps.
+Capture: 640x480 I420 (Y/U/V). Guest buffers are validated before frame consumption.
+Deadlines survive scheduler retries; sharing and duplication are respected.
+The last CloseHandle or STOP releases hardware capture.
+An absent or denied camera does not produce a simulated image.
+Undocumented IOCTLs 2107/2108/2109 and overlapped operations return unsupported.
+Pocket PC DirectShow camera support and undocumented sensor controls are outside
+this CAM1 driver's scope.
 
 VALIDATION
-456 tests logiciels réussis (151 kernel, 37 library, 245 WinCE API, 23 desktop).
-CAMTEST ARM exécuté avec Unicorn et caméra synthétique : 15 contrôles PASS.
-BMP vérifié : 320x240, couleurs RGB565 correctes, pas d'inversion verticale.
-Backend Windows Media Foundation et pont JNI/integration Rust type-checkés.
-Pour la vérification Linux de l'intégration JNI, seul le logger Android non
-disponible a été omis dans un fichier temporaire, sans changer les sources
-livrées. Desktop vérifié avec Unicorn/CPAL ; FFmpeg statique non reconstruit.
-Pas de test de webcam réelle ni de caméra Android ici, ni de build APK complet.
-I420 est le choix Y/U/V standard ; le SDK indique YUV420 sans documenter
-explicitement l'ordre des plans chroma sur le matériel Gizmondo.
+==========
+The original camera delivery reported 456 passing software tests
+(151 kernel, 37 library, 245 WinCE API and 23 desktop).
+ARM CAMTEST ran with Unicorn and a synthetic camera: 15 checks passed.
+The 320x240 BMP had correct RGB565 colours and no vertical inversion.
+Windows Media Foundation and Rust/JNI bindings were type-checked. In the original
+Linux JNI integration check, the unavailable Android logger was omitted from a
+temporary file; delivered sources were unchanged. Desktop checks used Unicorn
+and CPAL; static FFmpeg was not rebuilt during that original validation.
+The current full Android native/APK build has now succeeded, including FFmpeg.
+See docs/ANDROID-BUILD.md for software checks and packaging validation.
+Real Windows webcam and Android camera operation remain untested here.
+I420 uses standard Y/U/V order; the Gizmondo SDK specifies YUV420 without
+explicitly documenting physical hardware chroma plane order.
 
-Pas de nouvelles traces de diagnostic activées dans les jeux. CAMTEST est un
-outil volontaire à importer/lancer ; il ne s'exécute pas automatiquement.
+CAMTEST is an optional diagnostic that must be imported and launched manually.
+It does not run automatically or enable additional game diagnostic logging.

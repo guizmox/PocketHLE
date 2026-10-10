@@ -1,42 +1,41 @@
-# CAMTEST — caméra Gizmondo CAM1
+# CAMTEST — Gizmondo CAM1 camera
 
-Importer `dist/PocketHLE-CAMTEST.zip` dans la librairie, comme un jeu Gizmondo.
-Activer **Emulator options → Camera hardware (CAM1)** avant de le lancer.
-Windows utilise la première webcam ; Android préfère la caméra arrière et
-demande l’autorisation CAMERA. Une caméra occupée, absente ou interdite reste
-une erreur réelle. Fermer les autres applications qui utilisent la caméra.
+Import `dist/PocketHLE-CAMTEST.zip` into the library as a Gizmondo game.
+Enable **Settings → Gizmondo options → Camera hardware (CAM1)** before launching.
+Windows uses the first webcam; Android prefers the rear camera and requests CAMERA
+permission. A missing, busy or denied camera produces a real error. Close other
+applications using the camera.
 
-Le test exécute les appels ARM du pilote, vérifie le format, récupère deux
-aperçus à une cadence maximale de 20 ips, capture une image I420, puis arrête
-et ferme la caméra. Résultats dans le dossier `flash` de la librairie :
+The diagnostic executes ARM driver calls, checks the format, reads two previews
+at up to 20 fps, captures an I420 image, then stops and closes the camera.
+Results are stored in the library's `flash` folder:
 
-- `CAMTEST.TXT` : attendre `CAMTEST_RESULT PASS`.
-- `CAMTEST-preview.bmp` : ouvrir ce BMP pour contrôler l’image réelle ;
-  RGB565, 320×240, lignes bottom-up et hauteur BMP positive comme dans le SDK.
-  Utiliser ce CAMTEST mis à jour avec le correctif d’orientation du pilote.
-- `CAMTEST-capture.i420` : Y/U/V 640×480, 460800 octets.
+- `CAMTEST.TXT`: expect `CAMTEST_RESULT PASS`.
+- `CAMTEST-preview.bmp`: inspect the actual image; RGB565, 320×240, bottom-up
+  rows and positive BMP height, as in the SDK. Use the updated diagnostic with
+  the camera driver orientation fix.
+- `CAMTEST-capture.i420`: Y/U/V 640×480, 460800 bytes.
 
-Sous Windows les noms peuvent être affichés en minuscules. Un PASS confirme
-les appels et la capture ; contrôler aussi visuellement le BMP. Pour vérifier
-la libération du périphérique, relancer le test et ouvrir ensuite l’application
-Caméra Windows. Sur Android, vérifier également pause/reprise avec un jeu qui
-utilise un aperçu continu ; ce diagnostic termine et ferme sa capture avant
-d’afficher son message final.
+Windows may display filenames in lowercase. PASS confirms the API calls and
+capture; also inspect the BMP visually. To check device release, run the test
+again, then open the Windows Camera app. On Android, also test pause/resume with
+an application that uses a continuous preview: this diagnostic finishes and closes
+its capture before displaying its final message.
 
-Pour visualiser la capture brute avec FFmpeg installé :
+To view the raw capture using an installed FFmpeg:
 
 ```text
 ffmpeg -f rawvideo -pixel_format yuv420p -video_size 640x480 -i CAMTEST-capture.i420 -frames:v 1 CAMTEST-capture.png
 ```
 
-La source C est indépendante du SDK propriétaire. Pour reconstruire le binaire
-avec Python, Clang et LLD disponibles :
+The C source does not depend on the proprietary SDK. Rebuild with Python, Clang
+and LLD available:
 
 ```text
 python tools/camtest/build.py --clang clang --lld ld.lld
 ```
 
-Validation locale : exécution ARM réelle avec Unicorn et caméra synthétique,
-15 vérifications réussies, dimensions et couleurs du BMP vérifiées. Le test
-matériel Windows/Android et la construction complète de l’APK restent à faire
-sur ces systèmes.
+Original diagnostic validation: real ARM execution with Unicorn and a synthetic
+camera, 15 successful checks, BMP dimensions and colors verified. This does not
+establish Windows/Android hardware compatibility. Current Android APK build and
+hardware test status are recorded in [the build guide](../../docs/ANDROID-BUILD.md).

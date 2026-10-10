@@ -1,9 +1,16 @@
 .github/workflows/android.yml
 Cargo.lock
+README-BLUETOOTH.txt
+README-Camera.txt
+README-GPS.txt
+README-Internet.txt
+README.md
+README.ru.md
 build-support/cmake/aarch64-linux-android.cmake
 build-support/cmake/armv7-linux-androideabi.cmake
 crates/pocket-library/src/lib.rs
 crates/pocket-winceapi/build.rs
+crates/pocket-winceapi/src/coredll.rs
 docs/AGENTS.md
 docs/ANDROID-BUILD.md
 frontends/pocket-android-jni/Cargo.toml
@@ -11,6 +18,7 @@ frontends/pocket-android-jni/build.rs
 frontends/pocket-android-jni/src/lib.rs
 frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android-jni/src/unimplemented_log.rs
+frontends/pocket-android/README.md
 frontends/pocket-android/app/build.gradle.kts
 frontends/pocket-android/app/src/main/AndroidManifest.xml
 frontends/pocket-android/app/src/main/assets/licenses/FFmpeg-LGPL.txt
@@ -47,4 +55,7 @@ patch-files.txt
 tools/build-android-apk.sh
 tools/build-android-native.sh
 tools/build-ffmpeg.sh
+tools/camtest/README.md
 tools/check-android-native.py
+tools/ramtest/README.md
+tools/vfstest/README.md

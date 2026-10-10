@@ -1,94 +1,87 @@
-# Diagnostic RAM invité PocketHLE
+# PocketHLE guest RAM diagnostic
 
-`dist/PocketHLE-RAMTEST.zip` est un titre de diagnostic importable dans la GUI.
-Le programme exécute de vraies instructions ARM et appelle les API WinCE de
-PocketHLE. Il ne nécessite ni SDK propriétaire ni assets commerciaux.
+`dist/PocketHLE-RAMTEST.zip` is a diagnostic title importable through the GUI.
+It executes real ARM instructions and calls PocketHLE's WinCE APIs without
+requiring a proprietary SDK or commercial assets.
 
-1. Installer les sources du patch puis reconstruire la GUI.
-2. Importer `PocketHLE-RAMTEST.zip` comme un jeu ZIP Gizmondo.
-3. Lancer le titre. La boîte finale doit afficher **SUCCES**. Fermer avec Entrée.
-4. Consulter `RAMTEST.TXT` : la dernière ligne doit être
-   `RAMTEST_RESULT PASS checks=0x00000084 failures=0x00000000` (132 contrôles).
-5. Après fermeture de la boîte, vérifier `flash/DLLTEST.TXT` : sa dernière
-   ligne doit être `DLLTEST_RESULT PASS`. Les callbacks de sortie du processus
-   écrivent cette ligne après acquittement de la boîte finale.
-6. Vérifier `flash/DEPTEST.TXT` : sa dernière ligne doit être
-   `DEPTEST_RESULT PASS` (ordre des dépendances et rollback).
-7. Vérifier `flash/PROCTEST.TXT` et `flash/ORPHANTEST.TXT` :
-   `PROCTEST_RESULT PASS` et `ORPHANTEST_RESULT PASS`.
-8. Relancer une deuxième fois. En cas d'échec, transmettre le rapport et
-   `pockethle-gui.log`.
+1. Apply the source patch and rebuild the GUI.
+2. Import `PocketHLE-RAMTEST.zip` as a Gizmondo ZIP game.
+3. Launch it. The final dialog must display **SUCCES** (the existing guest message).
+   Press Enter to close it.
+4. Read `RAMTEST.TXT`. Its final line must be
+   `RAMTEST_RESULT PASS checks=0x00000084 failures=0x00000000` (132 checks).
+5. After closing the dialog, check `flash/DLLTEST.TXT` for a final
+   `DLLTEST_RESULT PASS`. Process exit callbacks write it after acknowledgment.
+6. Check `flash/DEPTEST.TXT` for `DEPTEST_RESULT PASS` (dependency order and rollback).
+7. Check `flash/PROCTEST.TXT` and `flash/ORPHANTEST.TXT` for
+   `PROCTEST_RESULT PASS` and `ORPHANTEST_RESULT PASS`.
+8. Run it a second time. If it fails, provide the report and `pockethle-gui.log`.
 
-Le rapport est créé dans `\Flash Disk\RAMTEST.TXT`, sur le stockage inscriptible.
-Dans la GUI, sa copie hôte se trouve dans `flash/ramtest.txt` sous la racine PocketHLE.
-La carte SD contenant l’EXE reste en lecture seule.
-Pour retrouver son chemin sous Windows, depuis cmd.exe :
+The report is created at `\Flash Disk\RAMTEST.TXT` on writable storage. Its host
+copy is `flash/ramtest.txt` below the PocketHLE library root. The EXE's SD card
+remains read-only. To find the report from Windows CMD:
 
 ```bat
 powershell -NoProfile -Command "Get-ChildItem 'C:\Users\gtristant\Documents\PocketHLE' -Recurse -Filter RAMTEST.TXT | Select-Object -ExpandProperty FullName"
 ```
 
-La version 7 ajoute une suite multiprocessus : création réelle normale ou
-suspendue, commandes/identifiants, duplication explicite, TLS privé, contrôle
-distant des threads, attentes/codes de sortie, enfant survivant au parent et
-rollback sur manque de RAM ou sortie PROCESS_INFORMATION invalide.
-Quatre contrôles RAMTEST encadrent cette suite et sa restitution mémoire.
-Les processus ont leurs propres CPU et threads hôtes ; SDCreateProcess conserve
-le retour au launcher existant. L’héritage automatique des handles est refusé
-conformément au contrat CE ; utiliser DuplicateHandle.
+Version 7 adds a multiprocess suite: normal/suspended process creation, command
+lines and identifiers, explicit duplication, private TLS, remote thread control,
+waits and exit codes, a child outliving its parent, and rollback on insufficient
+RAM or invalid PROCESS_INFORMATION output. Four RAMTEST checks surround the
+suite and verify memory reclamation. Processes have their own CPUs and host
+threads; SDCreateProcess retains the existing return-to-launcher behavior.
+Automatic handle inheritance is rejected according to the CE contract; use
+DuplicateHandle.
 
-La version 6 ajoute 33 contrôles TLS/erreurs : 64 slots, épuisement,
-paramètres invalides, remise à zéro à la réallocation, isolation du main et
-de deux workers, écritures directes via KData, réutilisation pendant qu’un
-worker attend, conservation du TLS pendant DllMain et erreurs des attentes.
-TlsGetValue efface GetLastError en cas de succès, même pour une valeur nulle.
-Les autres succès TLS conservent l’erreur. Get/Set suivent la validation minimale
-WinCE des indices 0..63, y compris pour un slot non alloué.
+Version 6 adds 33 TLS/error checks: 64 slots, exhaustion, invalid parameters,
+reset on reallocation, isolation between main and two workers, direct KData
+writes, reuse while a worker waits, TLS preservation during DllMain and wait
+errors. Successful TlsGetValue clears GetLastError, even for a null value.
+Other successful TLS operations preserve the error. Get/Set implement WinCE's
+minimal index validation for 0..63, including unallocated slots.
 
-Le diagnostic vérifie les notifications DllMain de thread, leur ordre et leur
-contexte, puis les detach de processus dans un second rapport DLLTEST.TXT.
-Il vérifie les imports natifs par nom/ordinal, les dépendances partagées,
-leur conservation par LoadLibrary explicite, les cycles, les dépendances
-absentes, les exports absents et le rollback d’un attach rejeté.
-La DLL `pageprobe.dll` vérifie le chargement à la première utilisation du
-code, des données initialisées et des pages zéro, le décompte unique des pages,
-les données modifiées, puis la libération/recharge sans fuite. Le programme
-préchauffe ses propres pages avant les mesures pour isoler ces opérations.
-Il vérifie aussi réservation/commit/decommit/release, restitution des
-allocations et échecs de realloc, isolation de GetLastError entre threads,
-32 cycles de piles, 24 cycles de DLL avec références multiples, exports,
-rejet de DllMain, erreurs de chargement, redistribution RAM et refus de réduire
-la partition programme sous les pages occupées. La partition initiale est
-restaurée. Les mesures sont hexadécimales, en octets sauf les nombres de pages
-retournés par GetSystemMemoryDivision.
+The diagnostic checks thread DllMain notifications, ordering and context, followed
+by process detach events in DLLTEST.TXT. It checks native imports by name/ordinal,
+shared dependencies, retention by explicit LoadLibrary, cycles, missing dependencies
+and exports, and rollback after a rejected attach.
 
-Le marqueur `GZRT999999` sélectionne le profil Gizmondo par la détection normale
-des titres. Aucun traitement spécial du diagnostic n'existe dans le noyau.
-Le programme est conçu pour les API exposées par PocketHLE ; sa compatibilité
-avec un appareil physique n'a pas été vérifiée.
+`pageprobe.dll` checks first-use loading of code, initialized data and zero pages,
+unique page accounting, modified data, and unload/reload without leaks. The program
+warms its own pages before measuring to isolate these operations. It also checks
+reserve/commit/decommit/release, allocation reclamation and realloc failures,
+thread-local GetLastError, 32 stack cycles, 24 DLL cycles with multiple references,
+exports, rejected DllMain, load errors, RAM redistribution and refusal to shrink
+the program partition below occupied pages. The initial partition is restored.
+Measurements are hexadecimal bytes, except page counts returned by
+GetSystemMemoryDivision.
 
-## Reconstruire les binaires
+`GZRT999999` selects the Gizmondo profile through normal title detection. The kernel
+has no diagnostic-specific behavior. The program targets PocketHLE's exposed APIs;
+compatibility with physical hardware has not been verified.
 
-Python 3, Clang et LLD avec cible ARM sont requis. Validation locale avec
-Clang/LLD 18.1.3 :
+## Rebuild the binaries
+
+Python 3, Clang and LLD with ARM support are required. Original local validation
+used Clang/LLD 18.1.3:
 
 ```sh
 python3 tools/ramtest/build.py --clang clang --lld ld.lld
 ```
 
-Le script compile le C freestanding et assemble les en-têtes PE32/WinCE,
-imports et exports. Les binaires de `dist/GZRT999999` servent aussi de fixtures
-au test d'intégration ; reconstruire après chaque modification du C.
+The script compiles freestanding C and assembles PE32/WinCE headers, imports and
+exports. `dist/GZRT999999` binaries are also integration fixtures; rebuild after
+changing C sources.
 
 ```sh
 cargo test -p pocket-core --no-default-features --features unicorn --test ram_guest -- --nocapture
 ```
 
-Le test monte la carte SD en lecture seule et Flash Disk en écriture, exécute l'EXE avec Unicorn, acquitte la
-boîte finale et vérifie rapport, code de sortie, partition restaurée, modules
-déchargés et piles de workers libérées. Il supprime ensuite ses fichiers.
-Aucune journalisation de diagnostic n'est activée dans les jeux de production.
+The test mounts SD read-only and Flash Disk writable, executes the EXE through
+Unicorn, acknowledges the final dialog and checks the report, exit code, restored
+partition, unloaded modules and reclaimed worker stacks. It removes its files
+afterward. Production games do not enable diagnostic logging.
 
-Les fixtures `dist/fixtures` exécutent aussi ExitProcess(77) et le cas où le
-main appelle ExitThread(11) puis le dernier worker retourne 33. Elles ne font
-pas partie du ZIP importable. Les trois variantes sont testées avec Unicorn.
+The `dist/fixtures` tests also execute ExitProcess(77), and a case where main calls
+ExitThread(11) before the last worker returns 33. They are not included in the
+importable ZIP. All three variants are tested with Unicorn.

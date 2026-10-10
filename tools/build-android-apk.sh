@@ -15,6 +15,7 @@ fi
 python3 "$android_root/tools/check-android-native.py"
 "$android_gradle_dir/bin/gradle" -p "$android_root/frontends/pocket-android" --no-daemon assembleDebug
 android_apk="$android_root/frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk"
-"$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$android_apk"
+LD_LIBRARY_PATH="$ANDROID_HOME/build-tools/35.0.0/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$android_apk"
 "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$android_apk"
 echo "APK: $android_apk"

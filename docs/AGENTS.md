@@ -1987,3 +1987,22 @@ Windows raw Winsock RFCOMM and a general CLR/.NET CF backend are not implemented
 on Android by this UI/build update; existing Android COM/RFCOMM adapters are kept.
 
 Android peripheral software checks: 4 kernel GPS + 1 GPS ABI, 6 kernel camera + 6 camera ABI and 3 Bluetooth serial tests passed. These do not validate Android physical sensors or Bluetooth radio.
+
+COREDLL `_wcsrev` reverses 16-bit wchar_t units in place, returns its input address, leaves NUL/guard bytes intact and propagates invalid memory access. Two targeted tests cover empty/null, odd/even lengths, unaligned addresses, non-ASCII/surrogate units and page boundaries.
+
+Android validation update (2026-10-10): both release native ABI builds passed with NDK r28c, real Unicorn and static FFmpeg. Full Gradle/Java/Kotlin/D8 assembleDebug succeeded with Build Tools 35.0.0 explicitly selected. APK v2 signature, zipalign 16 KiB, both packaged ELF alignments/JIT symbols and assets verified. No physical-device launch, camera/GPS/radio or Android Turf Wars session was executed. pkg-config is required by Unicorn configure; native script now checks it before compilation.
+
+### Android presentation and documentation invariants
+
+Project documentation and Android user-facing text are maintained in English.
+The portrait game library and separate settings menus precede immersive landscape
+sessions. Gizmondo action buttons remain on the physical left, D-pad on the
+physical right, with L/R above the corresponding groups; gameplay layout is LTR
+independently of device locale and landscape rotation.
+
+`DisplayGeometry.kt` owns the integer viewport shared by GL output, screenshot
+readback and inverse touch mapping. Auto selects the largest positive integer
+native-size multiple that fits the game area. Explicit factors are capped at
+that integer; unused pixels form letterboxes. Gizmondo always uses native 320×240.
+An undersized viewport clips at ×1 rather than fractionally resizing. Keep these
+rules synchronized with `docs/ANDROID-BUILD.md` and Android settings labels.

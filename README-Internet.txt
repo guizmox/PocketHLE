@@ -1,33 +1,38 @@
-PocketHLE – Internet Windows + Android
+PocketHLE — Internet access on Windows and Android
 
-Extraire ce ZIP à la racine du dépôt en remplaçant les fichiers.
-Les fichiers complets conservent les modifications RAM/VFS, affichage, audio,
-caméra, Bluetooth et GPS de la version de travail actuelle.
+Extract the patch into the repository root, replacing existing files.
+The complete files preserve the current RAM/VFS, display, audio, camera,
+Bluetooth and GPS changes.
 
-Dans CMD, à la racine du dépôt :
+From CMD at the repository root:
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 cargo build --release -p pocket-desktop
 
-Windows : aucun réglage à activer, le jeu utilise la connexion du PC.
-Android : reconstruire l'APK ET la bibliothèque native Rust selon le processus
-habituel du projet. INTERNET est déclaré ; HTTP historique est autorisé ; HTTPS
-vérifie les certificats normalement. Aucun nouveau crate réseau tiers.
+Windows games use the PC's Internet connection. For Colors, configure its server
+address and enable GPRS/data in Gizmondo options before starting the game.
+Android requires rebuilding both the APK and Rust native libraries; follow
+docs/ANDROID-BUILD.md. INTERNET permission is declared, legacy HTTP is allowed,
+and HTTPS uses normal certificate validation. The original Internet patch
+introduced no additional networking crate.
 
-Scope : neuf API WinINet HTTP/HTTPS réclamées par Colors, GET/POST, en-têtes,
-statuts, flux binaires, cookies de session, redirections, proxy, GetLastError,
-attente non bloquante pour le CPU invité, annulation et fermeture en cascade.
-Ce patch ne généralise pas encore les sockets TCP/UDP Winsock hors Bluetooth,
-ni FTP, callbacks WinINet asynchrones, ou toutes les options WinINet Windows CE.
-Les huit autres imports CRT/date de Colors identifiés ne font pas partie de
-cette livraison. Les anciens serveurs Gizmondo ne sont pas recréés ici.
+Scope: nine WinINet HTTP/HTTPS APIs requested by Colors, GET/POST, headers,
+status codes, binary streams, session cookies, redirects, proxy handling,
+GetLastError, guest CPU yielding, cancellation and cascading close.
+The bridge does not implement general Winsock TCP/UDP sockets, FTP, asynchronous
+WinINet callbacks or every Windows CE WinINet option. The original delivery
+excluded the eight other Colors CRT/date imports identified at that stage;
+additional Colors fixes are included in later cumulative patches.
+The Internet bridge itself does not recreate the original Gizmondo servers.
 
-Test matériel : importer tools/nettest/dist/PocketHLE-NETTEST.zip, puis lancer.
-Attendre les deux requêtes HTTP et HTTPS. NETTEST.TXT est écrit dans le Flash Disk
-propre au test. Les erreurs indiquent GetLastError en hexadécimal.
-Ensuite tester Colors et communiquer son log/API log si besoin.
+Device test: import tools/nettest/dist/PocketHLE-NETTEST.zip and launch it.
+Wait for both HTTP and HTTPS requests. NETTEST.TXT is written to the test's
+Flash Disk directory; failures record GetLastError in hexadecimal.
+Then test Colors and provide its application/API log if needed.
 
-Validation ici : 442 tests Rust réussis ; ARM NETTEST loopback réussi (GET,
-POST, 256 Ko/réponse, ABI UTF-16, EOF, handles). Contrôles compilation desktop,
-JNI et signatures WinHTTP réussis. Pas d'exécution native Windows/TLS ni de
-compilation APK Android dans cet environnement ; validation appareil requise.
-Aucune instrumentation par frame ajoutée.
+The original Internet delivery reported 442 passing Rust tests and a successful
+ARM NETTEST loopback run (GET, POST, 256 KiB per response, UTF-16 ABI, EOF and
+handles). Desktop/JNI compilation checks and WinHTTP signature checks passed.
+Native Windows/TLS execution was not performed in that validation environment.
+The current Android APK has now been built; see docs/ANDROID-BUILD.md for
+its checks and remaining physical-device/Turf Wars validation.
+No per-frame diagnostic instrumentation was added.

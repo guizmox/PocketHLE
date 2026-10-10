@@ -23,7 +23,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
   <strong>Join our Discord for development updates, compatibility discussions, support and community chat.</strong>
 </p>
 
-[Русская версия → `README.ru.md`](README.ru.md)
+Documentation is maintained in English.
 
 ---
 
@@ -193,22 +193,25 @@ The resulting binaries are `target\release\pockethle.exe` and `target\release\po
 
 ### Android
 
-The Android frontend lives in [`frontends/pocket-android`](frontends/pocket-android). It requires Android Studio Iguana or newer, Android NDK r26 or newer and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk).
+The [Android frontend](frontends/pocket-android) uses real Unicorn ARM emulation
+and static FFmpeg on arm64-v8a and armeabi-v7a. Follow the complete
+[Android build guide](docs/ANDROID-BUILD.md) for Linux or WSL2 prerequisites:
+JDK 17, Rust 1.90.0, SDK 35, NDK r28c, Gradle 8.10.2 and AGP 8.7.3.
 
 ```bash
-cargo ndk \
-  -t arm64-v8a \
-  -t armeabi-v7a \
-  -o frontends/pocket-android/app/src/main/jniLibs \
-  build --release -p pocket-android-jni
-
-cd frontends/pocket-android
-./gradlew assembleRelease
+bash tools/build-android-native.sh 4
+bash tools/build-android-apk.sh
 ```
 
-The APK is created under `frontends/pocket-android/app/build/outputs/apk/release/`.
+The installable debug APK is
+`frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk`.
+The build verifies native libraries, APK signature and 16 KiB alignment.
 
-The Android launcher imports `.CAB` files through the system picker, stores the game library in app storage, offers global and per-game settings, and opens each title in a `GameActivity` backed by the native emulator and a framebuffer renderer.
+The portrait library offers SD card tiles, rename and separate settings menus.
+Gameplay is immersive landscape with actions on the left, D-pad on the right,
+shoulders and all five Gizmondo function buttons. Gizmondo images use exact integer
+multiples of 320×240; Auto chooses the largest scale that fits. Device/fixed GPS,
+Bluetooth, camera, GPRS/data and the Colors server are configurable from Settings.
 
 ## Library
 

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
  <PreferenceScreen android:key="emulator_options" android:title="Emulator Settings">
-  <SeekBarPreference android:key="verbosity" android:title="Niveau des logs" android:max="3" app:min="0" app:showSeekBarValue="true"/>
-  <Preference android:key="library_root" android:title="Dossier des jeux" android:selectable="false"/>
+  <SeekBarPreference android:key="verbosity" android:title="Log verbosity" android:max="3" app:min="0" app:showSeekBarValue="true"/>
+  <Preference android:key="library_root" android:title="Game library folder" android:selectable="false"/>
  </PreferenceScreen>
- <PreferenceScreen android:key="display_options" android:title="Affichage et contrôles">
-  <SeekBarPreference android:key="controls_opacity" android:title="Opacité des boutons" android:max="100" app:min="10" app:showSeekBarValue="true"/>
+ <PreferenceScreen android:key="display_options" android:title="Display and controls">
+  <SeekBarPreference android:key="controls_opacity" android:title="Control opacity" android:max="100" app:min="10" app:showSeekBarValue="true"/>
  </PreferenceScreen>
 </PreferenceScreen>

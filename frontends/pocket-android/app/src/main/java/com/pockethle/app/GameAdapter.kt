@@ -58,7 +58,7 @@ class GameAdapter(
         private fun showOverflowMenu(anchor: View, entry: GameEntry) {
             val popup = PopupMenu(anchor.context, anchor)
             popup.menu.add(0, 2, 0, "Jouer")
-            popup.menu.add(0, 3, 1, "Renommer")
+            popup.menu.add(0, 3, 1, "Rename")
             popup.menu.add(0, 0, 2, R.string.action_settings)
             popup.menu.add(0, 1, 1, R.string.action_remove)
             popup.setOnMenuItemClickListener { item ->

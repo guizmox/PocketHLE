@@ -1,75 +1,81 @@
-# PocketHLE — mise à jour Android cumulative
+# PocketHLE — cumulative Android update
 
-Ce patch s’applique directement à `PocketHLE(3).zip`. Il comprend la première base
-Android et les changements demandés ensuite. Il contient exclusivement les fichiers
-ajoutés/modifiés, listés dans `patch-files.txt`, sans binaires ni sauvegardes.
-Extraire à la racine des sources, en conservant les dossiers et en remplaçant les
-fichiers existants. Les correctifs Colors/CRT/GPS déjà dans ces sources sont conservés.
+The source patch applies directly to `PocketHLE(3).zip`. It includes the initial
+Android implementation and subsequent changes, with only added/modified files
+listed in `patch-files.txt`; it contains no binaries or saves. Extract into the
+source root, preserve directories and replace existing files. Existing
+Colors/CRT/GPS fixes are retained.
 
-## Interface et réglages
+## Interface and settings
 
-- Bibliothèque en portrait : cartes SD neutres, noms des jeux, onglets Gizmondo/Pocket PC.
-  Chaque carte possède un menu ⋮ : jouer, renommer, réglages du jeu, supprimer.
-  Renommer conserve l’identifiant, les dossiers et les sauvegardes.
-- Menu ⋮ principal → Settings : Emulator Settings, Affichage et contrôles,
-  Gizmondo options, Clavier et manettes. Tous les réglages sont hors du jeu.
-- Jeu en paysage plein écran : image centrale, boutons uniquement, un bouton Quitter.
-  Stop/Rewind/Forward/Play à gauche, D-pad à droite, épaules L/R au-dessus.
-  Les cinq fonctions sont Home, Volume, Brightness, Geofence, Power : mêmes
-  symboles que la skin PC, VK F1/F2/F3/F4/F11. Power n’est pas la touche F5 du guest.
-  Le clavier PC par défaut peut utiliser la touche hôte F5 pour produire VK_F11.
-- Affichage Gizmondo 320×240 (4:3), sans étirement ; les commandes restent hors
-  de l’image. Pocket PC conserve sa définition et sa rotation configurées.
-- Auto, ×1/×2/×3/×4 : multiples des pixels natifs, limités à l’espace disponible
-  pour que l’image entière reste visible. Ce réglage n’augmente pas la définition
-  du moteur émulé. Le rendu garde le rapport d’image.
-- Filtres : reconstruction, SMAA, SMAA doux, xBRZ, bicubique, Lanczos, bilinéaire,
-  nearest. Même shader PC, SMAA de référence en trois passes, xbrz-rs 0.1.0
-  en prétraitement ×3. GLES 3 est requis ; aucun filtre de remplacement maquillé.
-- F10 d’un clavier physique : capture PNG des vrais pixels affichés après filtre
-  et rotation, sans interface/boutons. Fichiers dans `library/screenshots/`.
-- Gizmondo options : GPRS/data ; serveur Colors (hôte, IP ou origine HTTP(S)),
-  ID joueur ; GPS réel ou position fixe ; Bluetooth ; caméra. Les options prennent
-  effet au prochain lancement. Pas de consentement GPS réel nécessaire en position
-  fixe ; une demande distincte peut rester nécessaire pour le Bluetooth ancien.
-  Latitude signée −90..90, longitude −180..180 ; pas de satellites inventés.
-- Le domaine fixe de Colors est redirigé par le pont WinINet existant. Exemples :
-  `192.168.1.10:8080`, `nas.local:8080`, `http://192.168.1.10:8080`.
-  Ne pas utiliser `localhost` pour un NAS : sur le téléphone il désigne le téléphone.
-  Aucun changement du serveur NAS n’est nécessaire pour cette mise à jour Android.
-- Sauvegardes Gizmondo : `library/flash/`, monté à `\Flash Disk\` comme sur PC.
-  Configuration et registre de l’identité Colors restent persistants.
+- Portrait library: neutral SD card tiles, game names, Gizmondo/Pocket PC tabs.
+  Each card has a ⋮ menu: Run, Rename, Settings, Remove. Rename preserves the
+  game identifier, folders and saves.
+- Main ⋮ → Settings: Emulator Settings, Display and controls, Gizmondo options,
+  Keyboard and controllers. All settings remain outside gameplay. Interface text
+  and project documentation are maintained in English.
+- Immersive landscape gameplay: central image, controls and Exit. Stop, Rewind,
+  Forward and Play are on the physical left; D-pad is on the physical right.
+  L/R shoulders sit above their respective groups. The layout remains the same
+  in both landscape orientations and is not mirrored for right-to-left locales.
+- Five function buttons use the desktop skin's Home, Volume, Brightness, Geofence
+  and Power symbols, mapped to guest F1/F2/F3/F4/F11. Power is not guest F5.
+  The default PC keyboard may use host F5 to produce guest VK_F11.
+- Gizmondo's native framebuffer remains 320×240, without rotation or stretching.
+  Pocket PC retains its configured native dimensions and rotation.
+- Auto chooses the largest integer scale that fits the available game area,
+  excluding controls and system insets. Examples: ×1 = 320×240, ×2 = 640×480,
+  ×3 = 960×720, ×4 = 1280×960. Auto can use a larger integer on larger screens.
+  Explicit ×1/×2/×3/×4 choices are capped at the largest integer scale that fits.
+  Remaining space is letterboxed. A viewport smaller than the native frame clips
+  at ×1 rather than introducing fractional scaling. Scaling does not increase
+  the emulated renderer's resolution.
+- Filters: reconstruction, SMAA, SMAA Soft, xBRZ, bicubic, Lanczos, bilinear,
+  nearest. Desktop shaders, reference three-pass SMAA and xbrz-rs 0.1.0 ×3
+  preprocessing are used. GLES 3 is required.
+- Physical keyboard F10 captures actual filtered/rotated GL pixels, excluding
+  the UI/buttons. PNGs are stored in `library/screenshots/`.
+- Gizmondo options include GPRS/data, Colors server and player ID, real or fixed
+  GPS, Bluetooth and camera. Changes take effect on the next game launch.
+  Fixed GPS does not require real-location permission; older Bluetooth APIs may
+  independently require that permission. Latitude accepts −90..90 and longitude
+  −180..180. Satellite counts are not fabricated.
+- The existing WinINet bridge redirects Colors' fixed server domain. Supply a
+  host, IP or HTTP(S) origin, for example `nas.local:8080`, `192.168.1.10:8080`
+  or `http://192.168.1.10:8080`. On a phone, `localhost` means the phone itself,
+  not the NAS. This Android update does not require a NAS server change.
+- Gizmondo saves use `library/flash/`, mounted at `\Flash Disk\` as on PC.
+  Colors identity, configuration and registry data remain persistent.
 
-## Compilation depuis Windows : WSL2 / Ubuntu
+## Build from Windows using WSL2 / Ubuntu
 
-Utiliser un SDK/NDK **Linux dans WSL2**, ainsi que Java et Rust Linux. Ne pas mélanger
-le NDK Windows avec cargo Linux. L’installation unique nécessite Internet ; les
-scripts téléchargent la version fixe de Gradle et FFmpeg si absents, puis vérifient
-leurs empreintes. FFmpeg est lié statiquement : aucun ffmpeg.exe/dll à copier.
+Use a **Linux SDK/NDK in WSL2**, with Linux Java and Rust. Do not combine a Windows
+NDK with Linux cargo. Initial installation requires network access. The scripts
+download pinned Gradle and FFmpeg versions when absent and verify their hashes.
+FFmpeg is linked statically; no ffmpeg.exe or DLL needs to be copied.
 
-À la racine des sources, pour remettre les dates à jour depuis CMD :
+From the source root in Windows CMD, refresh patched file timestamps:
 
 ```cmd
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 wsl
 ```
 
-Dans WSL2, se placer dans la racine des sources (par exemple
-`cd /mnt/c/Users/TON_NOM/Documents/PocketHLE`). Pour des builds plus rapides,
-une copie dans le système de fichiers Linux de WSL2 est préférable.
+In WSL2, change to the source root, for example
+`cd /mnt/c/Users/YOUR_NAME/Documents/PocketHLE`. A copy in WSL2's Linux filesystem
+can improve build performance.
 
-Prérequis à installer une fois :
+Install prerequisites once:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake curl unzip python3 openjdk-17-jdk
+sudo apt-get install -y build-essential cmake pkg-config curl unzip python3 openjdk-17-jdk
 ```
 
-Installer Rust avec rustup si nécessaire : https://rustup.rs/.
-Installer les command-line tools Android **Linux** depuis
-https://developer.android.com/studio#command-line-tools-only, puis placer leur
-contenu sous `$HOME/Android/Sdk/cmdline-tools/latest/` (le répertoire doit contenir
-`bin/sdkmanager` directement).
+Install Rust using rustup if necessary: https://rustup.rs/.
+Install the Android **Linux** command-line tools from
+https://developer.android.com/studio#command-line-tools-only under
+`$HOME/Android/Sdk/cmdline-tools/latest/`, with `bin/sdkmanager` directly inside it.
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
@@ -83,7 +89,7 @@ rustup override set 1.90.0
 cargo install cargo-ndk --version 3.5.4 --locked
 ```
 
-Puis, pour chaque compilation :
+For subsequent builds:
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
@@ -94,62 +100,63 @@ bash tools/build-android-native.sh 4
 bash tools/build-android-apk.sh
 ```
 
-Le premier script compile FFmpeg et le pont Rust pour **arm64-v8a** et
-**armeabi-v7a**. Le second compile un APK debug installable, vérifie l’alignement
-16 Kio et la signature. Il utilise AGP 8.7.3, Gradle 8.10.2, Kotlin 2.1.21,
-SDK 35, NDK r28c ; Android minimum 7.0 (API 24), targetSdk 34 conservé.
-`4` est le nombre de tâches parallèles de FFmpeg, ajustable.
+The first script builds FFmpeg and the Rust bridge for **arm64-v8a** and
+**armeabi-v7a**. The second builds an installable debug APK and checks signature
+and 16 KiB alignment. Versions: AGP 8.7.3, Gradle 8.10.2, Kotlin 2.1.21,
+SDK 35, Build Tools 35.0.0, NDK r28c. Minimum Android version is 7.0 (API 24);
+targetSdk remains 34. `4` sets the FFmpeg build's parallel job count.
 
-APK produit :
+Output:
 
 ```text
 frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Si un pont natif manque ou si son ABI/alignement/JIT est invalide, la compilation
-s’arrête au lieu de produire un APK inutilisable. Sans Unicorn, le lancement
-échoue explicitement ; il ne bascule pas vers un faux moteur de jeu.
+Missing native libraries or invalid ABI/alignment/JIT checks fail the build.
+Without Unicorn, game launch fails explicitly; it does not fall back to a
+trace-only CPU.
 
-Avec un téléphone accessible à adb dans cet environnement :
+With a phone accessible through adb:
 
 ```bash
 adb install -r frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s PocketHLE
 ```
 
-Sous Windows on peut utiliser l’adb Windows pour installer l’APK copié depuis WSL2.
-Le rapport des API manquantes est également enregistré dans le dossier de la
-bibliothèque (`pockethle-unimplemented.log`), option réglable dans Emulator Settings.
+Windows adb can install an APK copied out of WSL2. Unimplemented APIs are also
+reported in the library's `pockethle-unimplemented.log`, controlled by the option
+in Emulator Settings. `.github/workflows/android.yml` supports manual GitHub
+Actions builds after integration; no remote workflow was started here.
 
-Le workflow `.github/workflows/android.yml` permet aussi une compilation manuelle
-sur GitHub Actions après intégration du patch. Aucun workflow n’a été lancé ici.
+## Validation and limits
 
-## Vérifications faites et limites
+Completed software/build checks:
 
-- Compilation/type-check des **17 fichiers Kotlin** avec les dépendances AndroidX,
-  Android 14 et le R généré par AAPT2 ; ressources compilées et liées par AAPT2.
-- 240 combinaisons de dimensions, rotation et zoom : coins, rapport d’image,
-  rejet des touches dans les bandes et correspondance avec les pixels natifs.
-- Préservation JSON des réglages PC, position GPS fixe, filtres, zoom et codes des boutons.
-- 28 rendus OpenGL ES sous Mesa : sept modes GPU dans les quatre rotations ;
-  compilation des shaders, FBO/lookup textures des trois passes SMAA, coins RGBA.
-  xBRZ utilise la bibliothèque Rust PC, contrôlée lors du type-check JNI.
-- Type-check Rust du pont JNI **sur Linux sans fonctionnalités natives**,
-  38 tests `pocket-library` passés, syntaxe XML/TOML/Python/Bash vérifiée.
-- Tests logiciels des périphériques : 4 tests GPS du moteur et 1 test ABI GPS,
-  6 tests caméra du moteur et 6 tests ABI caméra, 3 tests Bluetooth série passés.
-  Ils vérifient simulation et contrats invités, pas les capteurs physiques Android.
-- L’archive FFmpeg 8.0.1 officielle a été téléchargée et son SHA-256 vérifié.
+- Kotlin/Java compilation, AAPT2 resources and D8 packaging with AndroidX.
+- 240 viewport/native-size/rotation/scale combinations: exact integer scaling,
+  Auto's largest fitting scale, inverse corner mapping and letterbox rejection.
+- Configuration JSON preservation, fixed GPS, filter/scale settings and the
+  fifteen SDK control codes, including Power as VK_F11.
+- 28 Mesa OpenGL ES renders covering seven GPU modes in four rotations:
+  shader compilation, reference three-pass SMAA FBO/lookups and RGBA corners.
+  xBRZ uses the desktop Rust implementation.
+- JNI Rust type checks, 38 pocket-library tests, XML/TOML/Python/Bash validation.
+- Device contract tests: four kernel GPS and one GPS ABI test, six kernel camera
+  and six camera ABI tests, and three Bluetooth serial tests. These exercise
+  simulation and guest contracts, not physical Android sensors/radios.
+- Official FFmpeg 8.0.1 download with SHA-256 verification.
+- Release cross-builds of both native ABIs with NDK r28c, Unicorn and static
+  FFmpeg; ELF, 16 KiB alignment and JIT symbol checks.
+- Two targeted COREDLL `_wcsrev` tests.
+- Gradle debug APK build, APK v2 signature verification and
+  `zipalign -c -P 16 4`. Both packaged native ELF libraries were checked.
 
-**Non exécutés ici** : cross-build des deux `.so` Android avec le NDK,
-compilation complète Gradle/D8/signature APK, lancement sur téléphone,
-Turf Wars Android et capteurs/radio physiques. Les vérifications ci-dessus ne
-remplacent pas ces essais. Les scripts font les contrôles de packaging au build.
-Le pont caméra/GPS/Bluetooth natif Android existant est conservé ; la couche
-Winsock RFCOMM propre à Windows et un CLR/.NET CF général ne sont pas portés.
+**Not executed in this environment:** launch on a physical phone, Android Turf
+Wars, or physical GPS/camera/Bluetooth tests. Build checks do not replace those
+tests. The existing Android camera/GPS/Bluetooth bridge is retained. Windows-specific
+Winsock RFCOMM and a general CLR/.NET CF runtime are not ported.
 
-FFmpeg est compilé sans composants GPL/nonfree, selon ses conditions LGPL 2.1+.
-xBRZ est GPL-3.0-only comme sur PC ; textes de licence joints aux assets.
-Les shaders et tables SMAA conservent leur licence MIT. Pour distribuer un APK
-publiquement, fournir les sources et les éléments de reconstruction/relinking requis
-par ces licences ; ce patch est une livraison de sources.
+FFmpeg is built without GPL/nonfree components under LGPL 2.1+ terms. xBRZ is
+GPL-3.0-only as on PC. License texts are included in assets. SMAA shaders and lookup
+tables retain their MIT license. Public APK distribution must include the source
+and reconstruction/relinking materials required by these licenses.

@@ -18,6 +18,7 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
     private val dp = resources.displayMetrics.density
     private val keys = mutableMapOf<Int, View>()
     init {
+        layoutDirection = View.LAYOUT_DIRECTION_LTR
         isMotionEventSplittingEnabled = true
         fun button(id: Int, label: String): View = Button(context).apply {
             this.id = id; text = label; contentDescription = label
@@ -27,7 +28,10 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             keys[id] = this; addView(this)
         }
         button(R.id.btn_soft1, "L"); button(R.id.btn_soft2, "R")
-        button(R.id.btn_a, "■"); button(R.id.btn_c, "◀◀"); button(R.id.btn_b, "▶▶"); button(R.id.btn_action, "▶")
+        button(R.id.btn_a, "■").contentDescription = "Stop"
+        button(R.id.btn_c, "◀◀").contentDescription = "Rewind"
+        button(R.id.btn_b, "▶▶").contentDescription = "Forward"
+        button(R.id.btn_action, "▶").contentDescription = "Play"
         button(R.id.btn_up, "▲"); button(R.id.btn_down, "▼"); button(R.id.btn_left, "◀"); button(R.id.btn_right, "▶")
         val icons = listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3, R.id.btn_piano4, R.id.btn_piano5)
         val names = listOf("Home", "Volume", "Brightness", "Geofence", "Power")
@@ -37,7 +41,7 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             }
             keys[id] = icon; addView(icon)
         }
-        button(R.id.btn_stop_emulation, "Quitter").apply { (this as Button).textSize = 13f }
+        button(R.id.btn_stop_emulation, "Exit").apply { (this as Button).textSize = 13f }
     }
     private fun backgroundShape() = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xff303a47.toInt(),0xff141c28.toInt())).apply {
         cornerRadius = 14 * dp; setStroke((dp).toInt().coerceAtLeast(1),0xff506078.toInt())
@@ -52,11 +56,12 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
     }
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         fun place(id: Int, x: Float, y: Float) { val v = keys.getValue(id); val left=(x-v.measuredWidth/2).toInt(); val top=(y-v.measuredHeight/2).toInt(); v.layout(left,top,left+v.measuredWidth,top+v.measuredHeight) }
-        val left = 74*dp; val right = width-74*dp
+        // Physical sides stay fixed in both landscape orientations and every locale.
+        val actionPadCenter = 74*dp; val dpadCenter = width-74*dp
         val middle = (height*.62f).coerceAtLeast(158*dp).coerceAtMost(height-76*dp)
-        place(R.id.btn_soft1,left,88*dp); place(R.id.btn_soft2,right,88*dp)
-        listOf(R.id.btn_a,R.id.btn_c,R.id.btn_b,R.id.btn_action).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,left+offsets[i].first*dp,middle+offsets[i].second*dp) }
-        listOf(R.id.btn_up,R.id.btn_left,R.id.btn_right,R.id.btn_down).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,right+offsets[i].first*dp,middle+offsets[i].second*dp) }
+        place(R.id.btn_soft1,actionPadCenter,88*dp); place(R.id.btn_soft2,dpadCenter,88*dp)
+        listOf(R.id.btn_a,R.id.btn_c,R.id.btn_b,R.id.btn_action).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,actionPadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
+        listOf(R.id.btn_up,R.id.btn_left,R.id.btn_right,R.id.btn_down).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,dpadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
         listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5).forEachIndexed { i,id -> place(id,width/2f+(i-2)*52*dp,28*dp) }
         place(R.id.btn_stop_emulation,width-56*dp,28*dp)
     }

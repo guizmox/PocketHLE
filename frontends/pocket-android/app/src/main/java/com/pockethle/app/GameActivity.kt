@@ -185,7 +185,7 @@ class GameActivity : AppCompatActivity() {
         val handle = NativeBridge.nativeStartGame(rootDir, id)
         if (handle == 0L) {
             progress.visibility = View.GONE
-            android.widget.Toast.makeText(this, "Démarrage impossible : consulter logcat", android.widget.Toast.LENGTH_LONG).show()
+            android.widget.Toast.makeText(this, "Could not start the game: see logcat", android.widget.Toast.LENGTH_LONG).show()
             finish()
             return
         }
@@ -293,7 +293,7 @@ class GameActivity : AppCompatActivity() {
                 joiningSession = false
                 android.util.Log.i("PocketHLE", summary)
                 if (!isFinishing && !isDestroyed) {
-                    android.widget.Toast.makeText(this, "Émulation terminée. Détails dans les logs.", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(this, "Emulation finished. See the logs for details.", android.widget.Toast.LENGTH_SHORT).show()
                     finish()
                 }
             }
