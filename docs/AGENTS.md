@@ -2230,3 +2230,28 @@ actual-editor egui harness, and compilation of all Android Kotlin sources
 against API 35/AndroidX pass. Kotlin compilation uses generated resource IDs,
 not a Gradle APK build. A fake-platform harness executes the actual GPS request
 and haptic body; physical vibration/location and target builds remain untested.
+
+
+### CI ARM diagnostic test scheduling
+
+The supplied GitHub cargo-test log ends at android_runner_ramtest_processes_and_orphan_complete:
+90 seconds expire, then finish() requests a stop and produces a clean shutdown
+summary. That summary is not proof that the diagnostic completed on its own.
+ALSA's missing-card warnings are not the failing assertion.
+
+The CI test command now runs the entire workspace in release/locked mode with
+--test-threads=1. ARM process diagnostics have short guest wait deadlines and
+multiple emulated process trees; avoid running competing host tests on limited
+CI vCPUs. Do not skip diagnostics, relax guest assertions or extend the timeout.
+On timeout, run_diagnostic captures all Flash Disk text reports BEFORE calling
+finish(), so forced exit callbacks cannot overwrite the stalled-stage evidence.
+
+Local evidence: the original exact RAMTEST timeout was not reproduced. Repeated
+parallel runner suites under compilation load did reproduce a VFSTEST second-run
+fixture-directory failure. All eight Android runner tests pass sequentially in
+dev and release, using freshly generated Clang 18 ARM fixtures (RAMTEST: 132
+checks; VFSTEST: 103 checks and repeat cleanup). Local release validation omits
+CPAL/static video; the complete hosted workspace job still requires a new run.
+The regenerated fixture files also enable all 167 kernel and 255 WinCE API
+library tests to pass sequentially, including the two loader tests that were
+previously unavailable without pageprobe.dll/depleaf.dll.

@@ -43,8 +43,35 @@ fn run_diagnostic(root: &Path, id: &str) {
         std::thread::sleep(Duration::from_millis(20));
     }
     let completed = !session.is_running();
+    // Capture progress before finish() forces a stop and runs exit callbacks.
+    // A clean shutdown after that stop does not explain where the test stalled.
+    let progress = if completed {
+        String::new()
+    } else {
+        let mut paths: Vec<_> = fs::read_dir(root.join("flash"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+            })
+            .collect();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let text = fs::read_to_string(&path).ok()?;
+                Some(format!("\n{}:\n{text}", path.display()))
+            })
+            .collect::<String>()
+    };
     let summary = session.finish();
-    assert!(completed, "diagnostic timed out: {summary}");
+    assert!(
+        completed,
+        "diagnostic timed out: {summary}\nARM reports before forced stop:{progress}"
+    );
     assert!(summary.contains("Emulator exited cleanly."), "{summary}");
 }
 

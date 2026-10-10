@@ -90,7 +90,10 @@ jobs:
         run: |
           python3 tools/ramtest/build.py
           python3 tools/vfstest/build.py
-      - run: cargo test --workspace --release --locked
+      - name: run workspace tests sequentially
+        # ARM process diagnostics use short guest wait deadlines. Avoid competing
+        # emulator/process trees on the runner's limited vCPUs; keep every test.
+        run: cargo test --workspace --release --locked -- --test-threads=1
 
   build-unicorn:
     name: build with unicorn-engine
