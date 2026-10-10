@@ -5,7 +5,7 @@ Pocket PC CABs, standalone ARM EXEs, ZIP/RAR packages and Windows installers
 containing Pocket PC CABs into its private game library.
 
 The library and settings use portrait orientation. Gameplay uses immersive
-landscape: a centered game screen, action buttons on the left, D-pad on the right,
+landscape: a centered game screen, action buttons on the right, D-pad on the left,
 L/R shoulders, the five Gizmondo function buttons and Exit. All interface text is
 in English. Settings remain in separate menus.
 

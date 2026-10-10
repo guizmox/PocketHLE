@@ -15,7 +15,7 @@ Colors/CRT/GPS fixes are retained.
   Keyboard and controllers. All settings remain outside gameplay. Interface text
   and project documentation are maintained in English.
 - Immersive landscape gameplay: central image, controls and Exit. Stop, Rewind,
-  Forward and Play are on the physical left; D-pad is on the physical right.
+  Forward and Play are on the physical right; D-pad is on the physical left.
   L/R shoulders sit above their respective groups. The layout remains the same
   in both landscape orientations and is not mirrored for right-to-left locales.
 - Five function buttons use the desktop skin's Home, Volume, Brightness, Geofence

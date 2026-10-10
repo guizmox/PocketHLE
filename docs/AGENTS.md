@@ -1996,8 +1996,8 @@ Android validation update (2026-10-10): both release native ABI builds passed wi
 
 Project documentation and Android user-facing text are maintained in English.
 The portrait game library and separate settings menus precede immersive landscape
-sessions. Gizmondo action buttons remain on the physical left, D-pad on the
-physical right, with L/R above the corresponding groups; gameplay layout is LTR
+sessions. Gizmondo action buttons remain on the physical right, D-pad on the
+physical left, with L/R above the corresponding groups; gameplay layout is LTR
 independently of device locale and landscape rotation.
 
 `DisplayGeometry.kt` owns the integer viewport shared by GL output, screenshot

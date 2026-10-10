@@ -57,9 +57,9 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         fun place(id: Int, x: Float, y: Float) { val v = keys.getValue(id); val left=(x-v.measuredWidth/2).toInt(); val top=(y-v.measuredHeight/2).toInt(); v.layout(left,top,left+v.measuredWidth,top+v.measuredHeight) }
         // Physical sides stay fixed in both landscape orientations and every locale.
-        val actionPadCenter = 74*dp; val dpadCenter = width-74*dp
+        val dpadCenter = 74*dp; val actionPadCenter = width-74*dp
         val middle = (height*.62f).coerceAtLeast(158*dp).coerceAtMost(height-76*dp)
-        place(R.id.btn_soft1,actionPadCenter,88*dp); place(R.id.btn_soft2,dpadCenter,88*dp)
+        place(R.id.btn_soft1,dpadCenter,88*dp); place(R.id.btn_soft2,actionPadCenter,88*dp)
         listOf(R.id.btn_a,R.id.btn_c,R.id.btn_b,R.id.btn_action).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,actionPadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
         listOf(R.id.btn_up,R.id.btn_left,R.id.btn_right,R.id.btn_down).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,dpadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
         listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5).forEachIndexed { i,id -> place(id,width/2f+(i-2)*52*dp,28*dp) }

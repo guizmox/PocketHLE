@@ -208,7 +208,7 @@ The installable debug APK is
 The build verifies native libraries, APK signature and 16 KiB alignment.
 
 The portrait library offers SD card tiles, rename and separate settings menus.
-Gameplay is immersive landscape with actions on the left, D-pad on the right,
+Gameplay is immersive landscape with actions on the right, D-pad on the left,
 shoulders and all five Gizmondo function buttons. Gizmondo images use exact integer
 multiples of 320×240; Auto chooses the largest scale that fits. Device/fixed GPS,
 Bluetooth, camera, GPRS/data and the Colors server are configurable from Settings.

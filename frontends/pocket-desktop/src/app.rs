@@ -1136,8 +1136,8 @@ impl PocketLauncher {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the Windows location service; availability and accuracy depend on the PC.");
         #[cfg(windows)] {
-            ui.checkbox(&mut draft.gps_fixed_enabled, "GPS fixe (simulé, prochain lancement)")
-                .on_hover_text("Remplace la localisation Windows par cette position, même sans autorisation de localisation.");
+            ui.checkbox(&mut draft.gps_fixed_enabled, "Fixed GPS position (simulated, next launch)")
+                .on_hover_text("Use this position instead of Windows location, even when location permission is unavailable.");
             ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Latitude");
@@ -1147,8 +1147,8 @@ impl PocketLauncher {
                     ui.label("Longitude");
                     ui.add(egui::DragValue::new(&mut draft.gps_fixed_longitude).speed(0.0001).clamp_range(-180.0..=180.0).max_decimals(7));
                 });
-                ui.label("Coordonnées décimales : nord/est positifs, sud/ouest négatifs.");
-                ui.label("Le jeu utilisera cette position fixe plutôt que la position Windows.");
+                ui.label("Decimal coordinates: north/east positive, south/west negative.");
+                ui.label("The game will use this fixed position instead of Windows location.");
             });
         }
         ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
@@ -2119,7 +2119,7 @@ impl eframe::App for PocketLauncher {
                     if show_fps {
                         ui.label(RichText::new(format!("{:.1} IPS",self.frame_stats.current_fps())).small()
                             .color(Color32::from_rgb(116,205,176)))
-                            .on_hover_text("Images du jeu par seconde. Le débit peut diminuer dans les menus statiques.");
+                            .on_hover_text("Game frames per second. The frame rate may drop in static menus.");
                     }
                     ui.label(
                         RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
