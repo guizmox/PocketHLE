@@ -176,6 +176,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "memcmp", memcmp);
     d.register_handler(dll, "strlen", strlen);
     d.register_handler(dll, "wcslen", wcslen);
+    d.register_handler(dll, "_wcsrev", wcsrev);
     d.register_handler(dll, "strcpy", strcpy);
     d.register_handler(dll, "strncpy", strncpy);
     d.register_handler(dll, "strcat", strcat);
@@ -4646,6 +4647,27 @@ fn wcslen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let chars = read_wstr(ctx, s, 0x10000)?.len() as u32;
     Ok(DispatchOutcome::ReturnedR0(chars))
+}
+
+/// Windows CE wchar_t is a 16-bit unit: reverse units in place, leaving
+/// the terminator and following memory intact, and return the original pointer.
+fn wcsrev(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let original = ctx.arg_u32(0)?;
+    if original == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    let mut units = Vec::new();
+    let mut address = original;
+    loop {
+        let unit = ctx.cpu.read_u16_le(address)?;
+        if unit == 0 { break; }
+        units.push(unit);
+        address = address.wrapping_add(2);
+    }
+    units.reverse();
+    if !units.is_empty() {
+        let bytes: Vec<u8> = units.into_iter().flat_map(u16::to_le_bytes).collect();
+        ctx.cpu.write_mem(original, &bytes)?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(original))
 }
 
 fn strcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -19619,6 +19641,43 @@ mod tests {
         }
         assert_eq!(c.cpu.read_reg(ArmReg::R4).unwrap(), 0xCAFE);
         assert_eq!(c.cpu.read_reg(ArmReg::Lr).unwrap(), 0xBADC0DE);
+    }
+
+    #[test]
+    fn wcsrev_reverses_utf16_units_and_preserves_terminator_and_guard() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let t = dummy_thunk();
+        for units in [vec![0x41,0xe9,0x4e2d],vec![0xd83d,0xde00],vec![0x78],vec![]] {
+            let mut input: Vec<u8> = units.iter().copied().flat_map(u16::to_le_bytes).collect();
+            input.extend_from_slice(&[0,0,0xa5,0x5a]);
+            cpu.write_mem(0x1001, &input).unwrap();
+            cpu.write_reg(ArmReg::R0, 0x1001).unwrap();
+            let mut c = CallCtx {cpu:&mut cpu,thunk:&t,kernel:&mut kernel};
+            assert_eq!(wcsrev(&mut c).unwrap(),DispatchOutcome::ReturnedR0(0x1001));
+            let mut expected: Vec<u8> = units.into_iter().rev().flat_map(u16::to_le_bytes).collect();
+            expected.extend_from_slice(&[0,0,0xa5,0x5a]);
+            let actual=c.cpu.read_mem(0x1001,expected.len() as u32).unwrap();
+            assert_eq!(actual,expected);
+        }
+    }
+
+    #[test]
+    fn wcsrev_empty_at_page_end_null_and_invalid_access() {
+        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();let t=dummy_thunk();
+        cpu.map_region(0x1000,0x1000,Prot::READ|Prot::WRITE).unwrap();
+        for address in [0,0x1ffe] {
+            cpu.write_reg(ArmReg::R0,address).unwrap();
+            let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};
+            assert_eq!(wcsrev(&mut c).unwrap(),DispatchOutcome::ReturnedR0(address));
+        }
+        cpu.write_mem(0x1ffe,&[0x41,0]).unwrap();
+        cpu.write_reg(ArmReg::R0,0x1ffe).unwrap();
+        let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};
+        assert!(wcsrev(&mut c).is_err());
+        let actual=c.cpu.read_mem(0x1ffe,2).unwrap();
+        assert_eq!(actual,[0x41,0]);
     }
 
     #[test]

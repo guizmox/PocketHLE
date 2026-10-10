@@ -29,6 +29,8 @@ fn main() {
         for name in ["bcrypt", "ole32", "uuid", "user32", "advapi32", "ws2_32", "psapi"] {
             println!("cargo:rustc-link-lib={name}");
         }
+    } else if target.contains("android") {
+        for name in ["m", "dl"] { println!("cargo:rustc-link-lib={name}"); }
     } else if target.contains("linux") {
         for name in ["m", "pthread", "dl"] { println!("cargo:rustc-link-lib={name}"); }
     }
