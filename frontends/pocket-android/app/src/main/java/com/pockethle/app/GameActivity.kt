@@ -323,67 +323,83 @@ class GameActivity : AppCompatActivity() {
             var track: AudioTrack? = null
             try {
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
-                var packed = 0L
-                while (audioRunning && generation == audioGeneration && session == handle && packed == 0L) {
-                    packed = NativeBridge.nativeAudioFormat(handle)
-                    if (packed == 0L) Thread.sleep(20)
-                }
-                if (!audioRunning || generation != audioGeneration || session != handle || packed == 0L) {
-                    android.util.Log.w("PocketHLE", "Audio format was not announced by the guest")
-                    return@Thread
-                }
-                val rate = (packed ushr 16).toInt().coerceIn(8000, 48000)
-                val channels = (packed and 0xffff).toInt().coerceIn(1, 2)
-                val manager = getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
-                val outputRate = manager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
-                    ?.toIntOrNull()?.takeIf { it in 8000..192000 }
-                    ?: AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
-                        .takeIf { it in 8000..192000 } ?: rate
-                val resampler = AudioResampler(rate, outputRate, channels)
-                val channelMask = if (channels == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-                val minBuffer = AudioTrack.getMinBufferSize(outputRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
-                // Small pulls let live circular mixers observe intermediate playback positions.
-                // Colors uses a 4096-sample loop: a 4096-sample pull skips a full turn.
-                val pullSamples = maxOf(1, rate / 100) * channels
-                val targetFrames = maxOf(1, outputRate / 100) * 3 // Approximately 30 ms.
-                // Allocate enough for Android's minimum, then limit the effective queue.
-                val bufferSize = maxOf(minBuffer.takeIf { it > 0 } ?: 0, targetFrames * channels * 2)
-                val trackBuilder = AudioTrack.Builder()
-                    .setAudioAttributes(AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_GAME)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build())
-                    .setAudioFormat(AudioFormat.Builder()
-                        .setSampleRate(outputRate)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setChannelMask(channelMask)
-                        .build())
-                    .setBufferSizeInBytes(bufferSize)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                }
-                track = trackBuilder.build()
-                if (track?.state != AudioTrack.STATE_INITIALIZED) {
-                    android.util.Log.e("PocketHLE", "AudioTrack was not initialized")
-                    return@Thread
-                }
-                val selectedFrames = track.setBufferSizeInFrames(targetFrames)
-                val actualFrames = track.bufferSizeInFrames
-                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) track.performanceMode else 0
-                audioTrack = track
-                track.play()
-                android.util.Log.i("PocketHLE", "AudioTrack started: ${outputRate}Hz (guest=${rate}Hz), ${channels}ch, " +
-                    "bufferFrames=$actualFrames (~${actualFrames * 1000 / outputRate}ms), " +
-                    "requestedFrames=$targetFrames result=$selectedFrames performance=$mode")
                 while (audioRunning && generation == audioGeneration && session == handle) {
-                    val pcm = NativeBridge.nativePollAudio(handle, pullSamples)
-                    if (pcm != null && pcm.isNotEmpty()) {
-                        writeAudio(track, resampler.convert(pcm), generation)
-                    } else {
-                        writeSilence(track, maxOf(channels * outputRate / 200, 256), generation)
-                        Thread.sleep(5)
+                    var packed = 0L
+                    while (audioRunning && generation == audioGeneration && session == handle && packed == 0L) {
+                        packed = NativeBridge.nativeAudioFormat(handle)
+                        if (packed == 0L) Thread.sleep(20)
                     }
+                    if (!audioRunning || generation != audioGeneration || session != handle || packed == 0L) {
+                        android.util.Log.w("PocketHLE", "Audio format was not announced by the guest")
+                        return@Thread
+                    }
+                    val rate = (packed ushr 16).toInt().coerceIn(8000, 48000)
+                    val channels = (packed and 0xffff).toInt().coerceIn(1, 2)
+                    val manager = getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+                    val outputRate = manager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
+                        ?.toIntOrNull()?.takeIf { it in 8000..192000 }
+                        ?: AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
+                            .takeIf { it in 8000..192000 } ?: rate
+                    val resampler = AudioResampler(rate, outputRate, channels)
+                    val channelMask = if (channels == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+                    val minBuffer = AudioTrack.getMinBufferSize(outputRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
+                    // Small pulls let live circular mixers observe intermediate playback positions.
+                    // Colors uses a 4096-sample loop: a 4096-sample pull skips a full turn.
+                    val pullSamples = maxOf(1, rate / 100) * channels
+                    val targetFrames = maxOf(1, outputRate / 100) * 3 // Approximately 30 ms.
+                    // Allocate enough for Android's minimum, then limit the effective queue.
+                    val bufferSize = maxOf(minBuffer.takeIf { it > 0 } ?: 0, targetFrames * channels * 2)
+                    val trackBuilder = AudioTrack.Builder()
+                        .setAudioAttributes(AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_GAME)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build())
+                        .setAudioFormat(AudioFormat.Builder()
+                            .setSampleRate(outputRate)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setChannelMask(channelMask)
+                            .build())
+                        .setBufferSizeInBytes(bufferSize)
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                    }
+                    track = trackBuilder.build()
+                    if (track?.state != AudioTrack.STATE_INITIALIZED) {
+                        android.util.Log.e("PocketHLE", "AudioTrack was not initialized")
+                        return@Thread
+                    }
+                    val selectedFrames = track.setBufferSizeInFrames(targetFrames)
+                    val actualFrames = track.bufferSizeInFrames
+                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) track.performanceMode else 0
+                    audioTrack = track
+                    track.play()
+                    android.util.Log.i("PocketHLE", "AudioTrack started: ${outputRate}Hz (guest=${rate}Hz), ${channels}ch, " +
+                        "bufferFrames=$actualFrames (~${actualFrames * 1000 / outputRate}ms), " +
+                        "requestedFrames=$targetFrames result=$selectedFrames performance=$mode")
+                    while (audioRunning && generation == audioGeneration && session == handle) {
+                        val currentFormat = NativeBridge.nativeAudioFormat(handle)
+                        if (currentFormat != packed) {
+                            android.util.Log.i("PocketHLE", "Audio guest format changed: $packed -> $currentFormat; rebuilding output")
+                            break
+                        }
+                        val pcm = NativeBridge.nativePollAudio(handle, pullSamples)
+                        // The foreground child can change while the JNI pull is in flight.
+                        // Never interpret its first PCM chunk using the parent's format.
+                        if (NativeBridge.nativeAudioFormat(handle) != packed) break
+                        if (pcm != null && pcm.isNotEmpty()) {
+                            writeAudio(track, resampler.convert(pcm), generation)
+                        } else {
+                            writeSilence(track, maxOf(channels * outputRate / 200, 256), generation)
+                            Thread.sleep(5)
+                        }
+                    }
+                    // Drop queued parent PCM and reset interpolation for the new format.
+                    track.pause()
+                    track.flush()
+                    track.release()
+                    if (audioTrack === track) audioTrack = null
+                    track = null
                 }
             } catch (error: Throwable) {
                 android.util.Log.e("PocketHLE", "AudioTrack playback failed", error)
