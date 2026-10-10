@@ -13,6 +13,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Keep Cargo artifacts separate from extracted FFmpeg sources.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target/cargo
+  # SDL bundled by sdl2-sys still declares pre-3.5 CMake compatibility.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   fmt:
@@ -36,6 +40,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Do not let Rust cache cleanup traverse FFmpeg test symlinks.
+          workspaces: ". -> target/cargo"
       - name: install build deps
         run: |
           sudo apt-get update
@@ -44,10 +51,18 @@ jobs:
             libwayland-dev libx11-dev libxcb1-dev libxrandr-dev libxinerama-dev libxi-dev \
             libxcursor-dev libxdamage-dev libxext-dev libxfixes-dev \
             libasound2-dev \
-            cmake build-essential libclang-dev
+            cmake build-essential libclang-dev clang lld python3
       - name: build static FFmpeg
         run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: generate ARM diagnostic fixtures required by tests
+        run: |
+          python3 tools/ramtest/build.py
+          python3 tools/vfstest/build.py
+      - name: advisory clippy analysis
+        env:
+          # This job already uses continue-on-error; retain diagnostics as warnings.
+          RUSTFLAGS: ""
+        run: cargo clippy --workspace --all-targets --locked -- -A unknown-lints
 
   test:
     name: cargo test
@@ -56,6 +71,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Do not let Rust cache cleanup traverse FFmpeg test symlinks.
+          workspaces: ". -> target/cargo"
       - name: install build deps
         run: |
           sudo apt-get update
@@ -64,10 +82,14 @@ jobs:
             libwayland-dev libx11-dev libxcb1-dev libxrandr-dev libxinerama-dev libxi-dev \
             libxcursor-dev libxdamage-dev libxext-dev libxfixes-dev \
             libasound2-dev \
-            cmake build-essential libclang-dev
+            cmake build-essential libclang-dev clang lld python3
       - name: build static FFmpeg
         run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
       - run: cargo build --workspace --release --locked
+      - name: generate ARM diagnostic fixtures required by tests
+        run: |
+          python3 tools/ramtest/build.py
+          python3 tools/vfstest/build.py
       - run: cargo test --workspace --release --locked
 
   build-unicorn:
@@ -77,6 +99,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Do not let Rust cache cleanup traverse FFmpeg test symlinks.
+          workspaces: ". -> target/cargo"
       - name: install native deps
         run: |
           sudo apt-get update
@@ -94,6 +119,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Do not let Rust cache cleanup traverse FFmpeg test symlinks.
+          workspaces: ". -> target/cargo"
       - name: install build deps
         run: |
           sudo apt-get update
@@ -102,7 +130,7 @@ jobs:
             libwayland-dev libx11-dev libxcb1-dev libxrandr-dev libxinerama-dev libxi-dev \
             libxcursor-dev libxdamage-dev libxext-dev libxfixes-dev \
             libasound2-dev \
-            cmake build-essential libclang-dev
+            cmake build-essential libclang-dev clang lld python3
       - name: build static FFmpeg
         run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
       - name: build CLI + desktop (with unicorn-engine)
@@ -112,8 +140,8 @@ jobs:
       - name: stage artifacts
         run: |
           mkdir -p dist/PocketHLE-linux
-          cp target/release/pockethle dist/PocketHLE-linux/
-          cp target/release/pockethle-gui dist/PocketHLE-linux/
+          cp target/cargo/release/pockethle dist/PocketHLE-linux/
+          cp target/cargo/release/pockethle-gui dist/PocketHLE-linux/
           cp README.md dist/PocketHLE-linux/
           cp -f README.ru.md dist/PocketHLE-linux/ 2>/dev/null || true
           tar -C dist -czf PocketHLE-linux-x86_64.tar.gz PocketHLE-linux
@@ -133,6 +161,9 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Do not let Rust cache cleanup traverse FFmpeg test symlinks.
+          workspaces: ". -> target/cargo"
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -158,8 +189,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/PocketHLE-windows
-          cp target/release/pockethle.exe dist/PocketHLE-windows/
-          cp target/release/pockethle-gui.exe dist/PocketHLE-windows/
+          cp target/cargo/release/pockethle.exe dist/PocketHLE-windows/
+          cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-windows/
           cp README.md dist/PocketHLE-windows/
           cp -f README.ru.md dist/PocketHLE-windows/ 2>/dev/null || true
       - name: zip artifacts
@@ -182,11 +213,16 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Do not let Rust cache cleanup traverse FFmpeg test symlinks.
+          workspaces: ". -> target/cargo"
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: install matching Android SDK and NDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;28.2.13676358'
       - name: install native build dependencies

@@ -2134,3 +2134,15 @@ overrides the 16 KiB ELF alignment arguments.
 Local checks: rustfmt and strict Unicorn CLI check pass; core/CPU/kernel library
 tests pass. The actual Kotlin feeder harness still rebuilds output across a
 44100 stereo -> 22050 mono transition with the requested buffer now 20 ms.
+
+CI log follow-up: generate RAMTEST/VFSTEST ARM PE fixtures with the checked-in
+Python scripts before workspace test or clippy --all-targets compilation;
+include_bytes requires them even when no tests run. Install clang/lld for this.
+SDK setup must explicitly request platform-tools rather than the removed tools
+package. CMAKE_POLICY_VERSION_MINIMUM=3.5 permits bundled SDL's older CMake
+minimum on CMake 4 Windows hosts. Keep Cargo cache and artifact paths under
+target/cargo, separate from FFmpeg sources under target/native. Clippy remains
+advisory (the original job already had continue-on-error); report its lints as
+warnings and tolerate unknown version-specific Clippy lint names. Normal build
+and test jobs retain global -D warnings. These fixes target the supplied
+GitHub log; full hosted workflow validation still requires a fresh run.
