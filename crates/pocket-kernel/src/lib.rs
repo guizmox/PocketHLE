@@ -1321,6 +1321,16 @@ pub struct MainThreadState {
 }
 
 impl KernelState {
+    /// Colors writes the shared device registry from its own brightness slider.
+    pub fn sync_backlight(&mut self) {
+        if let Some(crate::registry::RegistryValue::Dword(level)) = self
+            .registry
+            .value(r"HKCU\ControlPanel\Backlight", "OnLevel")
+        {
+            self.framebuffer.set_backlight_level(level);
+        }
+    }
+
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {
         self.publish_handles();
         Some(ProcessHandleContext {
@@ -3778,6 +3788,7 @@ pub fn run_main_loop_with_hook(
                 .is_none_or(|then| now.duration_since(then) >= FRONTEND_POLL_INTERVAL);
             if due || input_due {
                 last_frontend_poll = Some(now);
+                process.state.sync_backlight();
                 let action = hook.on_frame(&mut process.state);
                 last_presented_frame = process.state.framebuffer.frame_counter;
                 if action == FrameAction::Stop {

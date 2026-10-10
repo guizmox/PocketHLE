@@ -11,6 +11,8 @@ import android.view.View
 
 /** One continuous touch target: slide without lifting; diagonals hold two keys. */
 class TouchDpad(context: Context) : View(context) {
+    var deadZoneRadius: Float = DpadDirections.DEAD_ZONE_RADIUS
+        set(value) { field = value.coerceIn(0.16f, 0.45f); clearInput(); invalidate() }
     var onDirectionsChanged: ((View, Int) -> Unit)? = null
     private var pointerId = -1
     private var directions = 0
@@ -52,7 +54,7 @@ class TouchDpad(context: Context) : View(context) {
         // A second finger never steals the pad from the original thumb.
         val index = event.findPointerIndex(pointerId)
         if (index >= 0) update(DpadDirections.at(event.getX(index), event.getY(index),
-            width.toFloat(), height.toFloat()))
+            width.toFloat(), height.toFloat(), deadZoneRadius))
         return true
     }
 
@@ -92,10 +94,10 @@ class TouchDpad(context: Context) : View(context) {
         // Match the visible central disc to the actual neutral radius. Touch
         // sectors still fill the square target, including gaps between arms.
         ink.color = 0xff172230.toInt()
-        canvas.drawCircle(70f, 70f, 70f * DpadDirections.DEAD_ZONE_RADIUS, ink)
+        canvas.drawCircle(70f, 70f, 70f * deadZoneRadius, ink)
         ink.style = Paint.Style.STROKE; ink.strokeWidth = 1.5f
         ink.color = 0xff506078.toInt()
-        canvas.drawCircle(70f, 70f, 70f * DpadDirections.DEAD_ZONE_RADIUS, ink)
+        canvas.drawCircle(70f, 70f, 70f * deadZoneRadius, ink)
         canvas.restore()
     }
 }

@@ -9,8 +9,8 @@ use egui_extras::image::load_image_bytes;
 
 use pocket_core::kernel::InputEvent;
 use pocket_library::{
-    is_gizmondo_game, CpuBackendPref, GameEntry, GameSettings, GuestButton, LauncherConfig,
-    Library, RotationPref, ScreenPref,
+    is_gizmondo_game, CpuBackendPref, DpadDeadzone, GameEntry, GameSettings, GuestButton,
+    LauncherConfig, Library, RotationPref, ScreenPref,
 };
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
@@ -1680,6 +1680,15 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
+                ui.label("D-pad dead zone");
+                egui::ComboBox::from_id_source("game_dpad_deadzone")
+                    .selected_text(draft.dpad_deadzone.label())
+                    .show_ui(ui, |ui| {
+                        for value in DpadDeadzone::ALL {
+                            ui.selectable_value(&mut draft.dpad_deadzone, value, value.label());
+                        }
+                    });
+                ui.end_row();
                 ui.label("CPU backend");
                 egui::ComboBox::from_id_source("game_cpu_backend")
                     .selected_text(draft.cpu_backend.label())
@@ -2579,6 +2588,7 @@ impl PocketLauncher {
         // landscape title is unplayable until it is turned, and the user
         // should not have to re-pick that on every launch.
         self.game_rotation = game.settings.rotation;
+        self.gamepad_rx.set_deadzone(game.settings.dpad_deadzone);
         self.screen = Screen::Run;
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
@@ -2671,6 +2681,12 @@ impl eframe::App for PocketLauncher {
         if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             self.release_all_keys();
         }
+        self.gamepad_rx.set_output(
+            self.gamepad_selected,
+            self.screen == Screen::Run
+                && self.running_game.is_some()
+                && ctx.input(|i| i.viewport().focused.unwrap_or(true)),
+        );
         self.handle_gamepads(ctx);
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);

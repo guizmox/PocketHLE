@@ -88,6 +88,14 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
+            findPreference<ListPreference>("dpad_deadzone")?.apply {
+                value = current.dpadDeadzone
+                setOnPreferenceChangeListener { _, newValue ->
+                    current = current.copy(dpadDeadzone = newValue.toString())
+                    writeGameSettings()
+                    true
+                }
+            }
             findPreference<ListPreference>("rotation")?.apply {
                 value = current.rotation
                 setOnPreferenceChangeListener { _, newValue ->

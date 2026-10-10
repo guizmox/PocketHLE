@@ -8,10 +8,12 @@ use sdl2::{
 use std::{
     collections::{BTreeMap, HashSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        mpsc::SyncSender,
         mpsc::{self, Receiver, Sender},
         Arc,
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -61,9 +63,17 @@ fn button_name(button: Button) -> String {
 fn axis_down(value: f32, held: bool) -> bool {
     value >= if held { 0.35 } else { 0.60 }
 }
-#[derive(Default)]
 struct Transitions {
+    deadzone: pocket_library::DpadDeadzone,
     held: HashSet<(usize, String)>,
+}
+impl Default for Transitions {
+    fn default() -> Self {
+        Self {
+            deadzone: pocket_library::DpadDeadzone::Medium,
+            held: HashSet::new(),
+        }
+    }
 }
 impl Transitions {
     fn change(&mut self, id: usize, control: String, down: bool) -> Option<Event> {
@@ -83,11 +93,17 @@ impl Transitions {
         let mut values = vec![
             (
                 negative,
-                axis_down(-value, self.held.contains(&(id, negative.into()))),
+                -value
+                    >= self
+                        .deadzone
+                        .stick_threshold(self.held.contains(&(id, negative.into()))),
             ),
             (
                 positive,
-                axis_down(value, self.held.contains(&(id, positive.into()))),
+                value
+                    >= self
+                        .deadzone
+                        .stick_threshold(self.held.contains(&(id, positive.into()))),
             ),
         ];
         values.sort_by_key(|(_, down)| *down);
@@ -171,6 +187,20 @@ impl Device {
             Self::Raw(d) => d.attached(),
         }
     }
+    fn has_rumble(&self) -> bool {
+        match self {
+            Self::Controller(d) => d.has_rumble(),
+            Self::Raw(d) => d.has_rumble(),
+        }
+    }
+    fn rumble(&mut self, on: bool) -> Result<(), String> {
+        let strength = if on { 32768 } else { 0 };
+        match self {
+            Self::Controller(d) => d.set_rumble(strength, strength, 100),
+            Self::Raw(d) => d.set_rumble(strength, strength, 100),
+        }
+        .map_err(|e| e.to_string())
+    }
     fn raw(&self) -> bool {
         matches!(self, Self::Raw(_))
     }
@@ -208,7 +238,15 @@ fn list(devices: &BTreeMap<u32, Device>) -> Event {
             .collect(),
     )
 }
-fn worker(ctx: &egui::Context, tx: &Sender<Event>, alive: &AtomicBool) -> Result<(), String> {
+fn worker(
+    ctx: &egui::Context,
+    tx: &Sender<Event>,
+    alive: &AtomicBool,
+    profile: &AtomicU8,
+    selected: &AtomicUsize,
+    enabled: &AtomicBool,
+    commands: &Receiver<crate::rumble::Command>,
+) -> Result<(), String> {
     // egui's window is not an SDL window. SDL must receive reports even with
     // no SDL keyboard focus; guest input is still gated by egui's real focus.
     sdl2::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
@@ -223,8 +261,106 @@ fn worker(ctx: &egui::Context, tx: &Sender<Event>, alive: &AtomicBool) -> Result
     let mut state = Transitions::default();
     scan(&controllers, &joysticks, &mut devices)?;
     publish(tx, ctx, list(&devices))?;
+    let mut motors = BTreeMap::<u64, Option<crate::rumble::Pattern>>::new();
+    let mut playing: Option<u32> = None;
+    let mut rumble_on = false;
+    let mut last_rumble = Instant::now() - Duration::from_secs(1);
     let mut next_scan = Instant::now() + Duration::from_secs(1);
     while alive.load(Ordering::Relaxed) {
+        state.deadzone = match profile.load(Ordering::Relaxed) {
+            0 => pocket_library::DpadDeadzone::Small,
+            1 => pocket_library::DpadDeadzone::Medium,
+            _ => pocket_library::DpadDeadzone::Large,
+        };
+        let selected = selected.load(Ordering::Relaxed);
+        while let Ok(command) = commands.try_recv() {
+            use crate::rumble::Command;
+            match command {
+                Command::Open(id, reply) => {
+                    let result = if motors.len() >= 64 {
+                        Err(8)
+                    } else if devices
+                        .get(&(selected as u32))
+                        .is_some_and(Device::has_rumble)
+                    {
+                        Ok(())
+                    } else {
+                        Err(50)
+                    };
+                    if reply.send(result).is_ok() && result.is_ok() {
+                        motors.insert(id, None);
+                    }
+                }
+                Command::Apply(id, timings, submitted, reply) => {
+                    let result = if submitted.elapsed() >= Duration::from_secs(1) {
+                        Err(21)
+                    } else if !motors.contains_key(&id) {
+                        Err(6)
+                    } else if timings.is_empty() {
+                        Ok(())
+                    } else if let Some(device) = devices.get_mut(&(selected as u32)) {
+                        if !device.has_rumble() {
+                            Err(50)
+                        } else {
+                            device
+                                .rumble(
+                                    enabled.load(Ordering::Relaxed)
+                                        && crate::rumble::Pattern {
+                                            timings: timings.clone(),
+                                            started: Instant::now(),
+                                        }
+                                        .active(),
+                                )
+                                .map_err(|_| 21)
+                        }
+                    } else {
+                        Err(21)
+                    };
+                    if result.is_ok() {
+                        motors.insert(
+                            id,
+                            if timings.is_empty() {
+                                None
+                            } else {
+                                Some(crate::rumble::Pattern {
+                                    timings,
+                                    started: Instant::now(),
+                                })
+                            },
+                        );
+                        // Force the owner loop to apply/stop immediately below.
+                        last_rumble = Instant::now() - Duration::from_secs(1);
+                    }
+                    let _ = reply.send(result);
+                }
+                Command::Close(id) => {
+                    motors.remove(&id);
+                }
+            }
+        }
+        let target = devices
+            .get(&(selected as u32))
+            .filter(|d| d.has_rumble())
+            .map(|_| selected as u32);
+        let on = enabled.load(Ordering::Relaxed) && motors.values().flatten().any(|p| p.active());
+        if target != playing {
+            if let Some(id) = playing {
+                if let Some(d) = devices.get_mut(&id) {
+                    let _ = d.rumble(false);
+                }
+            }
+            playing = target;
+            rumble_on = !on; // force the new device into the current state
+        }
+        if on != rumble_on || (on && last_rumble.elapsed() >= Duration::from_millis(40)) {
+            if let Some(id) = playing {
+                if let Some(d) = devices.get_mut(&id) {
+                    let _ = d.rumble(on);
+                }
+            }
+            rumble_on = on;
+            last_rumble = Instant::now();
+        }
         for event in events.poll_iter() {
             let mut changes = Vec::new();
             match event {
@@ -310,34 +446,115 @@ fn worker(ctx: &egui::Context, tx: &Sender<Event>, alive: &AtomicBool) -> Result
         }
         std::thread::sleep(Duration::from_millis(4));
     }
+    for device in devices.values_mut() {
+        if device.has_rumble() {
+            let _ = device.rumble(false);
+        }
+    }
     Ok(())
 }
 pub struct Monitor {
     pub rx: Receiver<Event>,
     alive: Arc<AtomicBool>,
+    profile: Arc<AtomicU8>,
+    selected: Arc<AtomicUsize>,
+    enabled: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    _commands: SyncSender<crate::rumble::Command>,
+}
+impl Monitor {
+    pub fn set_deadzone(&self, value: pocket_library::DpadDeadzone) {
+        self.profile.store(
+            match value {
+                pocket_library::DpadDeadzone::Small => 0,
+                pocket_library::DpadDeadzone::Medium => 1,
+                pocket_library::DpadDeadzone::Large => 2,
+            },
+            Ordering::Relaxed,
+        );
+    }
+    pub fn set_output(&self, device: Option<usize>, enabled: bool) {
+        self.selected
+            .store(device.unwrap_or(usize::MAX), Ordering::Relaxed);
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
 }
 impl Drop for Monitor {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 pub fn start(ctx: egui::Context) -> Monitor {
     let (tx, rx) = mpsc::channel();
     let alive = Arc::new(AtomicBool::new(true));
     let worker_alive = alive.clone();
-    std::thread::Builder::new()
+    let profile = Arc::new(AtomicU8::new(1));
+    let worker_profile = profile.clone();
+    let selected = Arc::new(AtomicUsize::new(usize::MAX));
+    let worker_selected = selected.clone();
+    let enabled = Arc::new(AtomicBool::new(false));
+    let worker_enabled = enabled.clone();
+    let (command_tx, command_rx) = mpsc::sync_channel(32);
+    pocket_core::kernel::vibration::install_host(Arc::new(crate::rumble::Bridge::new(
+        command_tx.clone(),
+    )));
+    let thread = std::thread::Builder::new()
         .name("gamepad-input".into())
         .spawn(move || {
-            if let Err(error) = worker(&ctx, &tx, &worker_alive) {
+            if let Err(error) = worker(
+                &ctx,
+                &tx,
+                &worker_alive,
+                &worker_profile,
+                &worker_selected,
+                &worker_enabled,
+                &command_rx,
+            ) {
                 let _ = publish(&tx, &ctx, Event::Error(error));
             }
         })
         .expect("spawn controller worker");
-    Monitor { rx, alive }
+    Monitor {
+        rx,
+        alive,
+        profile,
+        selected,
+        enabled,
+        thread: Some(thread),
+        _commands: command_tx,
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn directional_presets_leave_digital_hat_contacts_direct() {
+        for zone in pocket_library::DpadDeadzone::ALL {
+            let mut state = Transitions {
+                deadzone: zone,
+                ..Transitions::default()
+            };
+            assert_eq!(state.hat(1, 0, HatState::RightUp).len(), 2);
+            assert_eq!(state.hat(1, 0, HatState::Centered).len(), 2);
+            assert!(state.controller_axis(1, Axis::LeftX, 0).is_empty());
+        }
+        let mut small = Transitions {
+            deadzone: pocket_library::DpadDeadzone::Small,
+            ..Transitions::default()
+        };
+        let mut large = Transitions {
+            deadzone: pocket_library::DpadDeadzone::Large,
+            ..Transitions::default()
+        };
+        assert_eq!(small.controller_axis(1, Axis::LeftX, 16000).len(), 1);
+        assert!(large.controller_axis(1, Axis::LeftX, 16000).is_empty());
+        assert_eq!(large.controller_axis(1, Axis::LeftX, 26000).len(), 1);
+        assert!(large.controller_axis(1, Axis::LeftX, 20000).is_empty());
+        assert_eq!(large.controller_axis(1, Axis::LeftX, 0).len(), 1);
+    }
     #[test]
     fn stick_hysteresis_and_crossing_release_before_press() {
         let mut state = Transitions::default();

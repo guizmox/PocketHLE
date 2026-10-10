@@ -21,6 +21,8 @@
 //! answered generically.
 
 pub mod aygshell;
+#[cfg(test)]
+mod backlight_tests;
 mod bluetooth;
 mod camera;
 pub mod commctrl;

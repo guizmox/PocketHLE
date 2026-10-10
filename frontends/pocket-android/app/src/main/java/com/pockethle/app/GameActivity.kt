@@ -84,6 +84,7 @@ class GameActivity : AppCompatActivity() {
      * launcher's "Rotate display" combo already does.
      */
     private var rotationDegrees: Int = 0
+    private var dpadDeadzone = ControlDeadzone.LARGE
 
     /** Android keycode -> guest virtual key currently held. */
     private val heldPhysicalKeys = HashMap<Int, Int>()
@@ -175,6 +176,9 @@ class GameActivity : AppCompatActivity() {
 
         val rootDir = LibraryPaths.root(this)
         val isGizmondo = NativeBridge.isGizmondoGame(rootDir, id)
+        val gameSettings = runCatching { GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(rootDir, id))) }.getOrDefault(GameSettings.default())
+        dpadDeadzone = ControlDeadzone.from(gameSettings.dpadDeadzone)
+        (gameControls as? GizmondoControls)?.dpad?.deadZoneRadius = dpadDeadzone.radius
         val fixedGps = config.gpsFixedEnabled && isGizmondo
         rotationDegrees = if (isGizmondo) 0 else readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
@@ -583,8 +587,10 @@ class GameActivity : AppCompatActivity() {
         }
         val desired = linkedMapOf<String,Int>()
         fun axis(name: String,value: Float,negative: String,positive: String) {
-            if(value <= -AXIS_DEADZONE) bindings.controllerKey(name+negative)?.let { desired[name+negative]=it }
-            if(value >= AXIS_DEADZONE) bindings.controllerKey(name+positive)?.let { desired[name+positive]=it }
+            fun active(v: Float, control: String) = if (name == "DPad") v >= 0.5f
+                else dpadDeadzone.active(v, heldAxisKeys.containsKey(control))
+            if(active(-value, name+negative)) bindings.controllerKey(name+negative)?.let { desired[name+negative]=it }
+            if(active(value, name+positive)) bindings.controllerKey(name+positive)?.let { desired[name+positive]=it }
         }
         axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_X),"Left","Right")
         axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_Y),"Up","Down")
@@ -816,7 +822,6 @@ class GameActivity : AppCompatActivity() {
 
         /** How far a stick has to travel before it counts as a press.
          * A DualShock 4 rests a few percent off centre. */
-        private const val AXIS_DEADZONE = 0.5f
 
     }
 }

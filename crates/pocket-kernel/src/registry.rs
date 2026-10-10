@@ -237,6 +237,16 @@ impl Registry {
     /// tends to give up and exit rather than fall back.
     pub fn with_device_defaults() -> Self {
         let mut reg = Self::new();
+        // Gizmondo OEMINC.H: range 1..31, normal 24, dim 8. Colors reads
+        // OnLevel to initialise its own brightness slider, then writes both
+        // OnLevel and DimLevel and signals BackLightChangeEvent.
+        for (name, value) in [("Level", 24), ("OnLevel", 24), ("DimLevel", 8)] {
+            reg.set_value(
+                r"HKCU\ControlPanel\Backlight",
+                name,
+                RegistryValue::Dword(value),
+            );
+        }
         reg.set_value(
             r"HKCU\ControlPanel\Owner",
             "Owner",
@@ -486,6 +496,19 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gizmondo_sdk_backlight_defaults_are_queryable() {
+        let registry = super::Registry::with_device_defaults();
+        assert_eq!(
+            registry.value(r"HKCU\ControlPanel\Backlight", "OnLevel"),
+            Some(super::RegistryValue::Dword(24))
+        );
+        assert_eq!(
+            registry.value(r"HKCU\ControlPanel\Backlight", "DimLevel"),
+            Some(super::RegistryValue::Dword(8))
+        );
+    }
+
     use super::*;
 
     #[test]

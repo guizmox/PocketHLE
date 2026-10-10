@@ -125,4 +125,6 @@
     <string name="gps_fill_position">Fill</string>
     <string name="action_play">Play</string>
     <string name="action_information">Informations</string>
+    <string-array name="dpad_deadzone_entries"><item>Small (sensitive)</item><item>Medium</item><item>Large (precise)</item></string-array>
+    <string-array name="dpad_deadzone_values"><item>small</item><item>medium</item><item>large</item></string-array>
 </resources>

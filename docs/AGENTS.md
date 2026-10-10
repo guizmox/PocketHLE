@@ -2299,7 +2299,7 @@ previously unavailable without pageprobe.dll/depleaf.dll.
 GizmondoControls uses one 140dp TouchDpad target instead of four independent
 arrow Buttons. DpadDirections maps eight equal angular sectors to the four
 existing guest directional keys: diagonals hold two contacts, never opposite
-contacts. The centre has a 45%-radius neutral zone (31.5dp at 140dp size); coordinates outside the
+contacts. The default centre has a 45%-radius neutral zone (31.5dp at 140dp size); coordinates outside the
 view release directions. Sliding sends only changed key edges, with no repeat
 or per-frame polling. The first pointer owns the pad until release/cancel;
 additional fingers cannot take over. FrameLayout retains split multitouch so
@@ -2327,8 +2327,56 @@ functions shift left; scale only that toolbar to fit narrower landscape space.
 Actual measurement/layout bodies pass host checks across four landscape sizes
 and three densities for padding, shoulder sizes, ordering and no overlaps.
 
-The D-pad neutral disc is drawn with the same DEAD_ZONE_RADIUS constant as hit
-mapping. Its radius grew from 11.2dp to 31.5dp following device feedback about
+The D-pad neutral disc is drawn with the same deadZoneRadius property as hit
+mapping (defaulting to DEAD_ZONE_RADIUS). Its radius grew from 11.2dp to 31.5dp following device feedback about
 accidental contacts near the centre. Keep the complete square touch target,
 including areas between the drawn arms, available for directional/diagonal
 activation outside that disc. No additional debounce, delay or repeat is added.
+
+### Per-game D-pad tuning, SDL vibration and Gizmondo backlight
+
+GameSettings.dpad_deadzone is shared JSON (`small`, `medium`, `large`), defaults
+large and survives per-game settings edits on both frontends. Android touch
+neutral radii are 0.16/0.305/0.45; rendering and hit mapping use the same radius.
+Directional stick press/release thresholds are respectively 0.35/0.20,
+0.60/0.35 and 0.75/0.50. Hysteresis prevents edge chatter. Digital D-pad contacts
+remain direct; trigger thresholds remain unchanged. Dead-zone tuning cannot
+create an analogue centre for a controller whose D-pad only exposes digital
+contacts.
+
+Desktop installs an SDL vibration backend into the existing Gizmondo vibration
+service. Only the SDL owner thread touches native controller handles. A bounded
+command queue (32) and motor table (64) service SDK waveform requests; fixed
+half-scale motor strength replaces hardware amplitude tuning. Native pulses
+expire after 100ms and renew every 40ms while requested. Selection changes,
+loss of focus, game exit and worker shutdown stop output. Motor drop removes its
+waveform, and monitor drop joins its worker. Unsupported hardware returns 50;
+disconnected/unavailable backends return 21 through existing LastError handling.
+Closing a guest handle alone preserves SDK-active vibration; service-off and
+last shared service destruction release the native motor.
+
+Colors' brightness slider uses SDK OEMINC.H, HKCU ControlPanel\Backlight,
+OnLevel/DimLevel and BackLightChangeEvent (EventModify SET). Its ARM setter at
+0x135e0 writes OnLevel 1/11/21/31 and DimLevel 0/0/10/20; getter is 0x136cc.
+VK_BACKLIGHT is F3. Do not intercept that key with a host brightness cycle: the
+game owns its menu. Registry defaults are Level/OnLevel 24, DimLevel 8. Runners
+synchronise OnLevel during existing frontend polling. Presentation maps RGB
+channels by level/24, clamped to 255; native RGB565 surfaces remain unchanged.
+A changed level increments the presentation counter even on static menus.
+Screenshots and upscalers therefore receive the same adjusted image. Shared
+registry values survive child/parent transitions. Host display brightness and
+platform-wide power management are not modified.
+
+Validation for this change: 172 kernel, 259 WinCE API and 42 library tests pass
+without default features; seven controller tests compile the actual desktop
+SDL/rumble sources and pass, including an SDL virtual controller short press and
+100 motor open/apply/drop cycles. Replay of the supplied Colors ARM setter and
+getter confirms all four slider values and EVENT_SET. The complete Android
+Kotlin sources compile against Android14 framework/AndroidX classes (generated
+resource identifiers, not an APK build); JVM checks cover 58,800 touch positions,
+stick hysteresis and per-game JSON preservation. Physical Switch Pro vibration,
+Windows release builds and an Android APK/device test remain target validation.
+Desktop cargo check also passes on Linux without default features. The local
+SDL native check disables unused X11/Wayland/DBus support; the emulator's window
+and presentation remain owned by egui, not SDL. No repository build flags or
+platform dependencies were changed for this environment-only verification.

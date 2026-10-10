@@ -85,6 +85,8 @@ pub struct Framebuffer {
     /// it to decide whether they need to re-upload the surface.
     pub frame_counter: u64,
     pub directdraw: DirectDrawTiming,
+    /// Host presentation only; RGB565 guest pixels remain unchanged.
+    backlight_level: u32,
 }
 
 impl Default for Framebuffer {
@@ -102,7 +104,23 @@ impl Framebuffer {
             pixels: vec![0u8; (width * height * 2) as usize],
             frame_counter: 0,
             directdraw: DirectDrawTiming::default(),
+            backlight_level: 24,
         }
+    }
+
+    pub fn set_backlight_level(&mut self, level: u32) {
+        let level = level.clamp(1, 31);
+        if self.backlight_level != level {
+            self.backlight_level = level;
+            // Publish even when a menu's native pixels have not changed.
+            self.frame_counter = self.frame_counter.wrapping_add(1);
+        }
+    }
+    pub fn backlight_level(&self) -> u32 {
+        self.backlight_level
+    }
+    fn backlight_channel(&self, channel: u8) -> u8 {
+        ((channel as u32 * self.backlight_level + 12) / 24).min(255) as u8
     }
 
     /// Re-point the emulated panel at a new geometry.
@@ -292,7 +310,18 @@ impl Framebuffer {
         let src: &[u16] = bytemuck::cast_slice(&self.pixels);
         let dst: &mut [u32] = bytemuck::cast_slice_mut(out.as_mut_slice());
         for (s, d) in src.iter().zip(dst.iter_mut()) {
-            *d = rgb565_to_rgba8888(u16::from_le(*s));
+            let color = rgb565_to_rgba8888(u16::from_le(*s));
+            *d = if self.backlight_level == 24 {
+                color
+            } else {
+                let [red, green, blue, alpha] = color.to_le_bytes();
+                u32::from_le_bytes([
+                    self.backlight_channel(red),
+                    self.backlight_channel(green),
+                    self.backlight_channel(blue),
+                    alpha,
+                ])
+            };
         }
     }
 
@@ -309,9 +338,9 @@ impl Framebuffer {
             let r5 = ((p >> 11) & 0x1f) as u8;
             let g6 = ((p >> 5) & 0x3f) as u8;
             let b5 = (p & 0x1f) as u8;
-            out.push((r5 << 3) | (r5 >> 2));
-            out.push((g6 << 2) | (g6 >> 4));
-            out.push((b5 << 3) | (b5 >> 2));
+            out.push(self.backlight_channel((r5 << 3) | (r5 >> 2)));
+            out.push(self.backlight_channel((g6 << 2) | (g6 >> 4)));
+            out.push(self.backlight_channel((b5 << 3) | (b5 >> 2)));
         }
         out
     }
@@ -361,6 +390,31 @@ fn clip_rect(x: i32, y: i32, w: i32, h: i32, max_w: u32, max_h: u32) -> (u32, u3
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backlight_changes_host_snapshots_without_modifying_guest_pixels() {
+        let mut fb = super::Framebuffer::new(1, 1);
+        fb.pixels = 0x7befu16.to_le_bytes().to_vec();
+        let original = fb.pixels.clone();
+        let normal = fb.snapshot_rgba8888();
+        let counter = fb.frame_counter;
+        fb.set_backlight_level(24);
+        assert_eq!(fb.frame_counter, counter);
+        fb.set_backlight_level(12);
+        let dim = fb.snapshot_rgba8888();
+        assert!(dim[0] < normal[0] && dim[1] < normal[1]);
+        assert_eq!(dim[3], 255);
+        assert_eq!(fb.pixels, original);
+        assert_eq!(fb.frame_counter, counter + 1);
+        fb.set_backlight_level(31);
+        assert!(fb.snapshot_rgba8888()[0] > normal[0]);
+        fb.set_backlight_level(0);
+        assert_eq!(fb.backlight_level(), 1);
+        fb.set_backlight_level(u32::MAX);
+        assert_eq!(fb.backlight_level(), 31);
+        fb.set_backlight_level(24);
+        assert_eq!(fb.snapshot_rgba8888(), normal);
+    }
+
     use super::*;
 
     #[test]

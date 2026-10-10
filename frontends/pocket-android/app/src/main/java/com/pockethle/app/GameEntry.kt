@@ -58,9 +58,11 @@ data class GameSettings(
      * keep the guest portrait and turn the *picture* instead.
      */
     val rotation: String,
+    val dpadDeadzone: String = "large",
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        put("dpad_deadzone", dpadDeadzone)
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
         put("instructions_per_slice", instructionsPerSlice)
@@ -86,6 +88,7 @@ data class GameSettings(
             haltOnUnimplemented = obj.optBoolean("halt_on_unimplemented", false),
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
+            dpadDeadzone = obj.optString("dpad_deadzone", "large"),
             originalJson = obj.toString(),
         )
     }

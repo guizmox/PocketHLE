@@ -311,6 +311,48 @@ pub struct GameSettings {
     /// the presented frame a quarter turn is what actually works.
     #[serde(default)]
     pub rotation: RotationPref,
+    /// Touch D-pad and directional analog-stick sensitivity, per game.
+    #[serde(default)]
+    pub dpad_deadzone: DpadDeadzone,
+}
+
+/// Digital D-pad contacts stay direct; these thresholds apply to analog sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DpadDeadzone {
+    Small,
+    Medium,
+    #[default]
+    Large,
+}
+impl DpadDeadzone {
+    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small (sensitive)",
+            Self::Medium => "Medium",
+            Self::Large => "Large (precise)",
+        }
+    }
+    pub fn touch_radius(self) -> f32 {
+        match self {
+            Self::Small => 0.16,
+            Self::Medium => 0.305,
+            Self::Large => 0.45,
+        }
+    }
+    pub fn stick_threshold(self, held: bool) -> f32 {
+        let (press, release) = match self {
+            Self::Small => (0.35, 0.20),
+            Self::Medium => (0.60, 0.35),
+            Self::Large => (0.75, 0.50),
+        };
+        if held {
+            release
+        } else {
+            press
+        }
+    }
 }
 
 impl Default for GameSettings {
@@ -322,6 +364,7 @@ impl Default for GameSettings {
             halt_on_unimplemented: false,
             screen: ScreenPref::default(),
             rotation: RotationPref::default(),
+            dpad_deadzone: DpadDeadzone::default(),
         }
     }
 }
@@ -2291,6 +2334,25 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deadzone_defaults_and_per_game_json_roundtrip() {
+        use super::*;
+        let settings: GameSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.dpad_deadzone, DpadDeadzone::Large);
+        for zone in DpadDeadzone::ALL {
+            let settings = GameSettings {
+                dpad_deadzone: zone,
+                ..GameSettings::default()
+            };
+            let restored: GameSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(restored.dpad_deadzone, zone);
+            assert!(zone.stick_threshold(true) < zone.stick_threshold(false));
+        }
+        assert_eq!(DpadDeadzone::Small.touch_radius(), 0.16);
+        assert_eq!(DpadDeadzone::Large.touch_radius(), 0.45);
+    }
+
     use super::*;
     use std::path::PathBuf;
 

@@ -44,6 +44,10 @@
         android:entryValues="@array/rotation_values"
         android:defaultValue="none" />
 
+    <ListPreference android:key="dpad_deadzone" android:title="D-pad dead zone"
+        android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values"
+        android:defaultValue="large" app:useSimpleSummaryProvider="true" />
+
     <SwitchPreferenceCompat
         android:key="halt_on_unimplemented"
         android:title="@string/pref_halt_unimpl_title"
