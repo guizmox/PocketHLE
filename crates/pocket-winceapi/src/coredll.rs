@@ -8405,6 +8405,21 @@ fn post_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let message = ctx.arg_u32(1)?;
     let wparam = ctx.arg_u32(2)?;
     let lparam = ctx.arg_u32(3)?;
+    // Colors waits for GTShell's GPRS_STATUS before InternetConnectW. There
+    // is no cellular shell in HLE: the Gizmondo data option supplies
+    // that gate, while HTTP still reports real connection/server failures.
+    if hwnd == 0xffff && message == registered_window_message_id("GPRS_CONNECT") {
+        if let Some(available) = ctx.kernel.internet.gprs_shell_network_available() {
+            let connected = available && wparam != 0;
+            if ctx.kernel.posted_messages.len() < 256 {
+                ctx.kernel.posted_messages.push_back((hwnd,
+                    registered_window_message_id("GPRS_STATUS"),
+                    if connected { 0x1f9c } else { 0x1f9d }, u32::from(connected)));
+            }
+            log::debug!("Gizmondo GPRS shell gate: connected={connected}");
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
+    }
     // Bound the queue: a guest that posts faster than it pumps would
     // otherwise grow it without limit.
     if ctx.kernel.posted_messages.len() < 256 {
@@ -15329,14 +15344,18 @@ fn register_window_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     // FNV-1a over the name, folded into the atom range. Registered
     // message names are compared case-sensitively by Windows, so hash
     // the string as given.
+    let id = registered_window_message_id(&name);
+    log::debug!("RegisterWindowMessageW({name:?}) -> 0x{id:04x}");
+    Ok(DispatchOutcome::ReturnedR0(id))
+}
+
+fn registered_window_message_id(name: &str) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in name.as_bytes() {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    let id = 0xC000 + (hash % 0x4000);
-    log::debug!("RegisterWindowMessageW({name:?}) -> 0x{id:04x}");
-    Ok(DispatchOutcome::ReturnedR0(id))
+    0xC000 + (hash % 0x4000)
 }
 
 fn virtual_query(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -17610,6 +17629,48 @@ fn find_close_change_notification(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn colors_gprs_shell_status_unblocks_host_transport_and_honors_disconnect() {
+        use pocket_kernel::internet;
+        struct Host;
+        impl internet::Backend for Host {
+            fn open(&self, _: &internet::SessionSpec) -> internet::Result<std::sync::Arc<dyn internet::Client>> {
+                Err(12004) // This test exercises shell messages, without network I/O.
+            }
+        }
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.internet = internet::State::with_backend(std::sync::Arc::new(Host));
+        let connect = registered_window_message_id("GPRS_CONNECT");
+        let status = registered_window_message_id("GPRS_STATUS");
+        assert_eq!(connect, 59280); // ID observed in the original Colors client.
+        for (gizmondo, request, expected) in [
+            (false, 1, (0xffff, connect, 1, 0)),
+            (true, 1, (0xffff, status, 0x1f9c, 1)),
+            (true, 0, (0xffff, status, 0x1f9d, 0)),
+        ] {
+            if gizmondo { kernel.internet.set_gprs_enabled(true); }
+            for (reg, value) in [(ArmReg::R0, 0xffff), (ArmReg::R1, connect),
+                (ArmReg::R2, request), (ArmReg::R3, 0)] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+            assert_eq!(post_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(ctx.kernel.posted_messages.pop_front(), Some(expected));
+            assert!(ctx.kernel.posted_messages.is_empty());
+        }
+        // Local window messages with the same ID do not request shell service.
+        cpu.write_reg(ArmReg::R0, 123).unwrap();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        post_message_w(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.posted_messages.pop_front(), Some((123, connect, 0, 0)));
+        ctx.kernel.internet.set_gprs_enabled(false);
+        ctx.cpu.write_reg(ArmReg::R0, 0xffff).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
+        post_message_w(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.posted_messages.pop_front(), Some((0xffff, status, 0x1f9d, 0)));
+    }
     use super::*;
     use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
     use pocket_kernel::{

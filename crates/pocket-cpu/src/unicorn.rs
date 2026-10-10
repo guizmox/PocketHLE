@@ -643,9 +643,17 @@ impl Cpu for UnicornCpu {
                 }
             }
             Err(e) => {
-                if let Some((kind, addr)) = self.last_fault.borrow().clone() {
+                let fault = self.last_fault.borrow().clone();
+                if let Some((kind, addr)) = fault {
                     Err(CpuError::Backend(format!(
-                        "emu_start: {e:?} ({kind}) at guest address 0x{addr:08x}"
+                        "emu_start: {e:?} ({kind}) at guest address 0x{addr:08x}; pc=0x{:08x} lr=0x{:08x} sp=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x}",
+                        self.read_reg(ArmReg::Pc).unwrap_or(0),
+                        self.read_reg(ArmReg::Lr).unwrap_or(0),
+                        self.read_reg(ArmReg::Sp).unwrap_or(0),
+                        self.read_reg(ArmReg::R0).unwrap_or(0),
+                        self.read_reg(ArmReg::R1).unwrap_or(0),
+                        self.read_reg(ArmReg::R2).unwrap_or(0),
+                        self.read_reg(ArmReg::R3).unwrap_or(0),
                     )))
                 } else {
                     Err(CpuError::Backend(format!("emu_start: {e:?}")))

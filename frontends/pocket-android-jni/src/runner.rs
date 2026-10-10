@@ -327,6 +327,7 @@ fn run_game_to_completion(
             return summary_lines.join("\n");
         }
         if is_gizmondo {
+            process.state.internet.set_gprs_enabled(launcher_config.gprs_enabled);
             if let Err(e) = pocket_core::kernel::colors::configure(&mut process.state, &launcher_config.colors_server_url, &launcher_config.colors_terminal_id) {
                 summary_lines.push(e);
                 return summary_lines.join("\n");

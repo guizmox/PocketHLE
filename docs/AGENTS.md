@@ -1847,7 +1847,21 @@ HKLM\GTShell\TerminalID is the player identity. Empty launcher ID preserves
 an existing value; first launch generates and immediately flushes one to the
 installation registry. Explicit ASCII alphanumeric, '-', '_', '.' ID overrides
 it persistently. Separate players require distinct libraries/registries or IDs.
-Seed the original GNS host only if absent. Never regenerate identity every boot.
+Seed GNS as http://us.mygiz.gizmondo.com/ when absent, and migrate the old
+bare-host seed. Colors f41e4 extracts the host between URL slashes: a bare
+host produces an empty InternetConnectW server. Preserve other GNS values.
+Never regenerate identity every boot.
+
+LauncherConfig.gprs_enabled defaults to true, including older JSON configs.
+Desktop and Android set the per-process data gate on Gizmondo launch. For a
+Gizmondo process with the data option configured, HWND_BROADCAST / registered
+GPRS_CONNECT receives
+registered GPRS_STATUS, wParam=0x1f9c and lParam=1 when data is enabled and a
+host HTTP backend exists; disabled/disconnect returns 0x1f9d and 0. This is
+transport availability, not proof that the server is reachable. Actual HTTP
+errors remain real. Do not change the registered-message hash or pretend to
+connect the historical cellular network. Other processes retain ordinary PostMessage behavior. Colors f39a0 waits on this shell notification
+before InternetConnectW; missing it leaves Logging in indefinitely.
 
 Register coredll.dll/_atoi64 (ordinal 1418 is resolved by the existing ordinal
 map). Parse the signed decimal prefix and return the full i64 register pair
@@ -1861,3 +1875,17 @@ submission, fragmented reads and cleanup. Original Colors ARM component tests
 live in the separate server project and require the user's executable. Windows
 desktop and Android packaging and a full interactive Turf War session are not
 validated by a Linux CLI boot or component-parser success.
+
+
+## 42. Desktop Gizmondo options navigation
+
+The desktop Settings menu has Emulator Settings followed immediately by
+Gizmondo options. Screen::GizmondoOptions renders GPS, GPRS/data, Colors server/ID,
+Bluetooth and camera controls; Screen::Settings renders general emulator
+options and keyboard/controller bindings. Both views edit a full LauncherConfig
+draft and share Save/Cancel persistence, so saving either preserves fields
+from the other. They have separate scroll IDs. Only the general settings
+screen participates in keyboard/controller binding capture; opening Gizmondo
+options releases held keys and clears pending captures. GPRS/data is saved through
+the same draft and takes effect on the next launch. Android JSON mirrors its
+boolean default, while this menu organization applies to the desktop launcher.

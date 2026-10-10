@@ -26,10 +26,10 @@ pub struct Connection {pub parent:u32,pub server:String,pub port:u16,pub user:St
 pub struct Request {pub parent:u32,pub client:Arc<dyn Client>,pub spec:RequestSpec,pub transfer:Option<Box<dyn Transfer>>,pub sending:Option<(usize,u32,u32)>}
 pub enum Handle {Session(Session),Connection(Connection),Request(Request)}
 impl Handle {fn parent(&self)->Option<u32>{match self{Self::Session(_)=>None,Self::Connection(v)=>Some(v.parent),Self::Request(v)=>Some(v.parent)}}}
-pub struct State {pub handles:HashMap<u32,Handle>,next:u32,backend:Option<Arc<dyn Backend>>,colors_endpoint:Option<ColorsEndpoint>}
+pub struct State {pub handles:HashMap<u32,Handle>,next:u32,backend:Option<Arc<dyn Backend>>,colors_endpoint:Option<ColorsEndpoint>,gprs_enabled:Option<bool>}
 impl Default for State {fn default()->Self{Self::new(host())}}
 impl State {
-    fn new(backend:Option<Arc<dyn Backend>>)->Self{Self{handles:HashMap::new(),next:0xb7300000,backend,colors_endpoint:None}}
+    fn new(backend:Option<Arc<dyn Backend>>)->Self{Self{handles:HashMap::new(),next:0xb7300000,backend,colors_endpoint:None,gprs_enabled:None}}
     pub fn with_backend(backend:Arc<dyn Backend>)->Self{Self::new(Some(backend))}
     pub fn open(&mut self,spec:SessionSpec)->Result<u32>{let client=self.backend.as_ref().ok_or(12004u32)?.open(&spec)?;self.insert(Handle::Session(Session{spec,client}))}
     pub fn insert(&mut self,h:Handle)->Result<u32>{
@@ -47,6 +47,12 @@ impl State {
         self.colors_endpoint = if value.trim().is_empty() { None } else { Some(ColorsEndpoint::parse(value)?) };
         Ok(())
     }
+    /// The Gizmondo shell's GPRS gate represents access to the host HTTP
+    /// transport, not proof that the configured server is reachable.
+    pub fn gprs_shell_network_available(&self)->Option<bool> {
+        self.gprs_enabled.map(|enabled| enabled && self.backend.is_some())
+    }
+    pub fn set_gprs_enabled(&mut self,enabled:bool) {self.gprs_enabled=Some(enabled);}
     pub fn route_colors_request(&self, mut spec:RequestSpec)->RequestSpec {
         // Only the historical Colors endpoint is rerouted. Other games, host
         // requests and URLs returned by unrelated services retain their origin.
@@ -124,6 +130,14 @@ impl Drop for ChannelTransfer {fn drop(&mut self){self.channel.cancel();if let S
 
 #[cfg(test)] mod tests {
  use super::*;
+ #[test] fn colors_shell_gate_requires_configuration_and_a_host_transport() {
+    let mut state=State::new(None);
+    assert_eq!(state.gprs_shell_network_available(),None);
+    state.set_gprs_enabled(true);
+    assert_eq!(state.gprs_shell_network_available(),Some(false));
+    state.set_gprs_enabled(false);
+    assert_eq!(state.gprs_shell_network_available(),Some(false));
+ }
  #[test] fn colors_route_is_scoped_and_preserves_request_body_metadata() {
   let mut state=State::new(None);
   let spec=RequestSpec{server:"us.mygiz.gizmondo.com".into(),port:80,secure:false,method:"POST".into(),

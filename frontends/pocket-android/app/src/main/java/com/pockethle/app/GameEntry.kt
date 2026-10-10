@@ -104,6 +104,7 @@ data class LauncherConfig(
     val bluetoothEnabled: Boolean = false,
     val cameraEnabled: Boolean = false,
     val gpsEnabled: Boolean = false,
+    val gprsEnabled: Boolean = true,
     val colorsServerUrl: String = "",
     val colorsTerminalId: String = "",
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
@@ -134,6 +135,7 @@ data class LauncherConfig(
         put("bluetooth_enabled", bluetoothEnabled)
         put("camera_enabled", cameraEnabled)
         put("gps_enabled", gpsEnabled)
+        put("gprs_enabled", gprsEnabled)
         put("colors_server_url", colorsServerUrl)
         put("colors_terminal_id", colorsTerminalId)
         put("controls_opacity", controlsOpacity.toDouble())
@@ -170,6 +172,7 @@ data class LauncherConfig(
             bluetoothEnabled = obj.optBoolean("bluetooth_enabled", false),
             cameraEnabled = obj.optBoolean("camera_enabled", false),
             gpsEnabled = obj.optBoolean("gps_enabled", false),
+            gprsEnabled = obj.optBoolean("gprs_enabled", true),
             colorsServerUrl = obj.optString("colors_server_url", ""),
             colorsTerminalId = obj.optString("colors_terminal_id", ""),
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()

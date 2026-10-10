@@ -488,6 +488,9 @@ pub struct LauncherConfig {
     /// Allow GPS1 to subscribe to the host location service.
     #[serde(default)]
     pub gps_enabled: bool,
+    /// Bridge Gizmondo GPRS shell requests to the configured host transport.
+    #[serde(default = "default_gprs_enabled")]
+    pub gprs_enabled: bool,
     /// Optional replacement origin for Colors Turf War; empty keeps original routing.
     #[serde(default)]
     pub colors_server_url: String,
@@ -541,6 +544,7 @@ pub struct LauncherConfig {
 }
 
 fn default_log_unimplemented_apis()->bool {true}
+fn default_gprs_enabled()->bool {true}
 fn default_upscale_filter()->String { "reconstruction".into() }
 
 fn default_show_fps() -> bool {
@@ -573,6 +577,7 @@ impl Default for LauncherConfig {
             bluetooth_enabled: false,
             camera_enabled: false,
             gps_enabled: false,
+            gprs_enabled: default_gprs_enabled(),
             colors_server_url: String::new(),
             colors_terminal_id: String::new(),
             upscale_filter: default_upscale_filter(),
@@ -2258,12 +2263,15 @@ mod tests {
         let old: LauncherConfig = serde_json::from_str("{}").unwrap();
         assert!(old.colors_server_url.is_empty());
         assert!(old.colors_terminal_id.is_empty());
+        assert!(old.gprs_enabled);
         let mut updated = old;
         updated.colors_server_url = "https://colors.example.org".into();
         updated.colors_terminal_id = "Player-A".into();
+        updated.gprs_enabled = false;
         let decoded: LauncherConfig = serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert_eq!(decoded.colors_server_url, updated.colors_server_url);
         assert_eq!(decoded.colors_terminal_id, updated.colors_terminal_id);
+        assert!(!decoded.gprs_enabled);
     }
 
     fn tmpdir(name: &str) -> PathBuf {

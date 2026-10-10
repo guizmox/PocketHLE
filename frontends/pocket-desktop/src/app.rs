@@ -452,6 +452,7 @@ fn analyze_game(game:&GameEntry, root:&std::path::Path)->GameAnalysis {
 enum Screen {
     Library,
     Settings,
+    GizmondoOptions,
     GameSettings,
     Run,
 }
@@ -891,10 +892,16 @@ impl PocketLauncher {
                 self.screen = Screen::GameSettings; ui.close_menu();
             }
         }
-        if ui.button("Emulator options…").clicked() {
+        if ui.button("Emulator Settings").clicked() {
             self.release_all_keys();
             self.config_draft = Some(self.library.config().clone());
             self.screen = Screen::Settings; ui.close_menu();
+        }
+        if ui.button("Gizmondo options").clicked() {
+            self.release_all_keys();
+            self.gamepad_capture=None; self.binding_capture=None;
+            self.config_draft = Some(self.library.config().clone());
+            self.screen = Screen::GizmondoOptions; ui.close_menu();
         }
         if ui.button("Fullscreen (F11)").clicked() {
             let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -1121,10 +1128,15 @@ impl PocketLauncher {
         };
         let mut save_clicked = false;
         let mut cancel_clicked = false;
-        ScrollArea::vertical().id_source("emulator_options_scroll").auto_shrink([false,false]).show(ui,|ui| {
-        ui.heading("Emulator options");
+        let gizmondo = self.screen == Screen::GizmondoOptions;
+        let scroll_id = if gizmondo { "gizmondo_options_scroll" } else { "emulator_options_scroll" };
+        ScrollArea::vertical().id_source(scroll_id).auto_shrink([false,false]).show(ui,|ui| {
+        ui.heading(if gizmondo { "Gizmondo options" } else { "Emulator Settings" });
+        if gizmondo {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the Windows location service; availability and accuracy depend on the PC.");
+        ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
+            .on_hover_text("Use the PC Internet connection for the Gizmondo data connection. Takes effect on the next launch.");
         ui.label("Colors multiplayer server (next launch)");
         ui.text_edit_singleline(&mut draft.colors_server_url)
             .on_hover_text("Example: http://192.168.1.10:8080. Leave empty for the original server.");
@@ -1134,7 +1146,7 @@ impl PocketLauncher {
         ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
         ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
             .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
-        ui.add_space(8.0);
+        } else {
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")
             .num_columns(2)
@@ -1185,6 +1197,7 @@ impl PocketLauncher {
 
         ui.add_space(12.0);
         self.ui_keybindings(ui, &mut draft);
+        }
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -2111,7 +2124,7 @@ impl eframe::App for PocketLauncher {
             if console_only { self.ui_fullscreen_game(ui); return; }
             match self.screen {
             Screen::Library => self.ui_library(ui),
-            Screen::Settings => self.ui_settings(ui),
+            Screen::Settings | Screen::GizmondoOptions => self.ui_settings(ui),
             Screen::GameSettings => self.ui_game_settings(ui),
             Screen::Run => self.ui_run(ui),
             }

@@ -26,8 +26,12 @@ fn configure_identity(registry: &mut Registry, terminal: &str) -> Result<(), Str
             return Err("Insufficient device RAM for Colors player identity".into());
         }
     }
-    if registry.value(r"HKLM\GTShell", "GNS").is_none()
-        && !registry.set_value(r"HKLM\GTShell", "GNS", RegistryValue::Sz("us.mygiz.gizmondo.com".into())) {
+    // Colors f41e4 extracts the host between the URL's second and third
+    // slash. A bare hostname silently becomes an empty InternetConnectW host.
+    // Repair the previous reconstruction's seed, preserving custom settings.
+    let gns = registry.value(r"HKLM\GTShell", "GNS");
+    if (gns.is_none() || matches!(gns, Some(RegistryValue::Sz(ref value)) if value == "us.mygiz.gizmondo.com"))
+        && !registry.set_value(r"HKLM\GTShell", "GNS", RegistryValue::Sz("http://us.mygiz.gizmondo.com/".into())) {
         return Err("Insufficient device RAM for Gizmondo network settings".into());
     }
     registry.flush().map_err(|e| format!("Cannot save Colors player identity: {e}"))
@@ -36,6 +40,16 @@ fn configure_identity(registry: &mut Registry, terminal: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gns_seed_is_a_url_and_migrates_only_the_previous_default() {
+        let mut registry=Registry::default();
+        registry.set_value(r"HKLM\GTShell", "GNS", RegistryValue::Sz("us.mygiz.gizmondo.com".into()));
+        configure_identity(&mut registry,"Player-A").unwrap();
+        assert_eq!(registry.value(r"HKLM\GTShell","GNS"),Some(RegistryValue::Sz("http://us.mygiz.gizmondo.com/".into())));
+        registry.set_value(r"HKLM\GTShell", "GNS", RegistryValue::Sz("https://custom.example/".into()));
+        configure_identity(&mut registry,"Player-A").unwrap();
+        assert_eq!(registry.value(r"HKLM\GTShell","GNS"),Some(RegistryValue::Sz("https://custom.example/".into())));
+    }
     #[test]
     fn repeated_launch_keeps_identity_and_explicit_player_override_is_persisted() {
         let temp = tempfile::tempdir().unwrap();

@@ -159,6 +159,7 @@ impl Runner {
                 return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 29);
             }
             if is_gizmondo {
+                process.state.internet.set_gprs_enabled(launcher_config.gprs_enabled);
                 if let Err(e) = pocket_core::kernel::colors::configure(&mut process.state, &launcher_config.colors_server_url, &launcher_config.colors_terminal_id) {
                     if let Some(startup) = startup.as_mut() { startup.error = 87; }
                     summary_lines.push(e);
