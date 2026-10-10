@@ -122,4 +122,7 @@
         <item>landscape</item>
     </string-array>
     <string name="toggle_fullscreen">Toggle controls and fullscreen</string>
+    <string name="gps_fill_position">Fill</string>
+    <string name="action_play">Play</string>
+    <string name="action_information">Informations</string>
 </resources>

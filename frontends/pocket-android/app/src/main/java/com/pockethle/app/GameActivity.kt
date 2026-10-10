@@ -148,7 +148,7 @@ class GameActivity : AppCompatActivity() {
         findViewById<View>(R.id.btn_stop_emulation).apply {
             setOnTouchListener { view, event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    controlHaptic(view)
                 }
                 false // Preserve normal pressed-state, cancellation and click handling.
             }
@@ -701,6 +701,25 @@ class GameActivity : AppCompatActivity() {
         bindVk(R.id.btn_soft2, VK_ESCAPE)
     }
 
+    /** A short, firmer pulse; still respect disabled system/view touch feedback. */
+    @Suppress("DEPRECATION")
+    private fun controlHaptic(view: View) {
+        if (!view.isHapticFeedbackEnabled || android.provider.Settings.System.getInt(
+                contentResolver, android.provider.Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) return
+        val vibrator = getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+        val applied = runCatching {
+            if (vibrator == null || !vibrator.hasVibrator()) false
+            else {
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    val amplitude = if (vibrator.hasAmplitudeControl()) 180 else android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                    vibrator.vibrate(android.os.VibrationEffect.createOneShot(30L, amplitude))
+                } else vibrator.vibrate(30L)
+                true
+            }
+        }.getOrDefault(false)
+        if (!applied) view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     private fun bindVk(viewId: Int, vk: Int) {
         val btn = findViewById<View?>(viewId) ?: return
@@ -711,7 +730,7 @@ class GameActivity : AppCompatActivity() {
                 MotionEvent.ACTION_DOWN -> {
                     if (heldVirtualKeys.add(vk)) {
                         acquireGuestKey(handle, vk)
-                        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                        controlHaptic(v)
                     }
                     v.isPressed = true
                 }

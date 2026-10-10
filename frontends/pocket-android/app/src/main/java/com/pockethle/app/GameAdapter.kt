@@ -21,6 +21,7 @@ class GameAdapter(
     private val onSettings: (GameEntry) -> Unit,
     private val onRemove: (GameEntry) -> Unit,
     private val onRename: (GameEntry) -> Unit,
+    private val onInformation: (GameEntry) -> Unit,
     private val libraryRoot: String,
 ) : RecyclerView.Adapter<GameAdapter.ViewHolder>() {
 
@@ -57,14 +58,16 @@ class GameAdapter(
 
         private fun showOverflowMenu(anchor: View, entry: GameEntry) {
             val popup = PopupMenu(anchor.context, anchor)
-            popup.menu.add(0, 2, 0, "Jouer")
-            popup.menu.add(0, 3, 1, "Rename")
-            popup.menu.add(0, 0, 2, R.string.action_settings)
-            popup.menu.add(0, 1, 1, R.string.action_remove)
+            popup.menu.add(0, 2, 0, R.string.action_play)
+            popup.menu.add(0, 4, 1, R.string.action_information)
+            popup.menu.add(0, 3, 2, "Rename")
+            popup.menu.add(0, 0, 3, R.string.action_settings)
+            popup.menu.add(0, 1, 4, R.string.action_remove)
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     2 -> onRun(entry)
                     3 -> onRename(entry)
+                    4 -> onInformation(entry)
                     0 -> onSettings(entry)
                     1 -> onRemove(entry)
                 }

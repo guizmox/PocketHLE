@@ -2070,8 +2070,9 @@ TW_UNKNOWN_ERROR at 0xdd948; it has not yet been observed on the device.
 GizmondoControls supplies independent StateListDrawable backgrounds: a blue
 highlight lasts until release/cancel. Clear platform background tint so themed
 buttons do not obscure that highlight. Virtual key ACTION_DOWN requests one
-VIRTUAL_KEY haptic per newly held key; do not repeat it during holds or on
-release. Respect Android's system haptic settings and preserve split multitouch
+30 ms vibration per newly held key (amplitude 180 where supported, default
+amplitude otherwise, including API 24/25); do not repeat it during holds or on
+release. Respect Android's system/view haptic settings and preserve split multitouch
 and guest-key reference counting. Exit uses normal Android touch/click handling.
 releaseHeldInput clears child pressed states as well as held guest input.
 
@@ -2184,3 +2185,48 @@ MAS queues/aliases, and actual dispatched WinMM/MAS calls plus PCM output.
 The supplied Colors ARM wrapper is replayed separately to verify its IOCTL
 encoding. Full game-menu playback and native Windows/Android builds require
 the complete game assets and target-device checks.
+
+
+### Launcher controls, position fill and shared executable information
+
+The desktop binding editor uses three columns (control, keyboard, controller).
+Each assignment list has its own bounded horizontal scroll area and unwrapped
+labels; capture buttons stay below that list, outside the scroll. Retain stable
+IDs per guest button and the existing key/controller capture and removal rules.
+A headless egui harness runs the actual editor with 80 keyboard and 30 controller
+assignments at 480, 800 and 1200 pixel widths and checks single-line labels.
+
+Android control feedback uses a 30 ms pulse with amplitude 180 when supported;
+check the system touch-feedback setting and the view's haptic flag first.
+Declare VIBRATE. Older devices use the duration API; missing/failed vibrators
+fall back to LONG_PRESS. Keep feedback on new ACTION_DOWN only.
+
+The Fill button beside the manual GPS preferences requests coarse/fine consent
+if neither permission is granted. DevicePositionRequest uses the newest valid
+cached GPS/network/passive fix (GPS requires fine consent), or subscribes to
+active GPS/network providers for at most 20 seconds. Success fills and persists
+both coordinates and displays the original fix timestamp; an old cache is not
+presented as a newly measured fix. Filling does not enable fixed GPS mode or
+change game GPS sessions. Stop/timeout/success remove all listeners; canceled
+or invalid/late updates never write coordinates. No Google services dependency.
+
+GameAnalysis and analyze_game now belong to pocket-library::analysis; desktop
+and Android use the same binary/resource scan and evidence sections. Keep
+VERSIONINFO versions and company distinct from the user-edited library title.
+Detected capabilities/language strings are evidence, not runtime guarantees.
+Android's Informations menu calls NativeBridge.analyzeGame off the UI thread
+and shows identity, executable, graphics, hardware, game data, languages and
+technical evidence in a scrollable dialog. The JNI export must ship with the
+updated Kotlin app; rebuild native libraries before the APK. Play is English.
+
+Colors rerouting was audited and is already restricted to the case-insensitive
+host us.mygiz.gizmondo.com AND /applications/games/colors/open/command.do.
+Other hosts/paths and raw socket data are not redirected by this rule. The
+existing scoped-routing test passes; no networking behavior was changed.
+
+Validation: 41 launcher-library tests (including metadata serialization,
+UTF-16 resource alignment and malformed PE offsets), host JNI type check,
+actual-editor egui harness, and compilation of all Android Kotlin sources
+against API 35/AndroidX pass. Kotlin compilation uses generated resource IDs,
+not a Gradle APK build. A fake-platform harness executes the actual GPS request
+and haptic body; physical vibration/location and target builds remain untested.

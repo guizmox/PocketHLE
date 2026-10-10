@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
             },
             onRemove = { entry -> confirmRemove(entry) },
             onRename = { entry -> renameGame(entry) },
+            onInformation = { entry -> showInformation(entry) },
             libraryRoot = rootDir,
         )
         recycler.layoutManager = GridLayoutManager(this, gridSpanCount())
@@ -117,6 +118,18 @@ class MainActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("gizmondo_tab", gizmondoTab); super.onSaveInstanceState(outState)
+    }
+
+    private fun showInformation(entry: GameEntry) {
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { JSONObject(NativeBridge.analyzeGame(rootDir, entry.id)) }
+            }
+            val metadata = result.getOrNull()
+            if (metadata == null || !metadata.optBoolean("ok", true)) {
+                Snackbar.make(recycler, metadata?.optString("error") ?: "Could not read game information", Snackbar.LENGTH_LONG).show()
+            } else GameInformation.show(this@MainActivity, entry.displayName, metadata)
+        }
     }
 
     private fun renameGame(entry: GameEntry) {

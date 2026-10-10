@@ -43,6 +43,7 @@ object NativeBridge {
     @JvmStatic external fun renameGame(libraryRoot: String, id: String, name: String): String
     @JvmStatic external fun isGizmondoGame(libraryRoot: String, id: String): Boolean
     @JvmStatic external fun upscaleXbrz(rgba: ByteArray, width: Int, height: Int): ByteArray?
+    @JvmStatic external fun analyzeGame(libraryRoot: String, id: String): String
     @JvmStatic external fun banner(): String
 
     /** Returns a JSON array of [GameEntry]. */

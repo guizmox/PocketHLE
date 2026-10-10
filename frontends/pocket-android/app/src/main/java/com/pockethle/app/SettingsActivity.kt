@@ -32,6 +32,16 @@ class SettingsActivity : AppCompatActivity() {
     class GlobalPreferencesFragment : PreferenceFragmentCompat() {
         private lateinit var rootDir: String
         private var current: LauncherConfig = LauncherConfig.default()
+        private var positionRequest: DevicePositionRequest? = null
+        private var positionPreference: Preference? = null
+        private val locationPermissionRequest = registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+        ) { grants ->
+            if (isAdded && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                if (grants.values.any { it }) fillDevicePosition()
+                else android.widget.Toast.makeText(context, "Location permission denied", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             rootDir = LibraryPaths.root(requireContext())
@@ -70,6 +80,20 @@ class SettingsActivity : AppCompatActivity() {
             }
             coordinate("gps_fixed_latitude", "Latitude", true)
             coordinate("gps_fixed_longitude", "Longitude", false)
+            positionPreference = object : Preference(requireContext()) {
+                override fun onBindViewHolder(holder: androidx.preference.PreferenceViewHolder) {
+                    super.onBindViewHolder(holder)
+                    val button = holder.findViewById(android.R.id.button1) as android.widget.Button
+                    button.isEnabled = isEnabled
+                    button.setOnClickListener { fillDevicePosition() }
+                }
+            }.apply {
+                key = "gps_fill_position"; title = "Device position"; isPersistent = false
+                summary = "Copy the latest known position, or request a new fix."
+                widgetLayoutResource = R.layout.preference_fill_position
+                setOnPreferenceClickListener { fillDevicePosition(); true }
+            }
+            giz.addPreference(positionPreference!!)
             val display = findPreference<androidx.preference.PreferenceScreen>("display_options")!!
             display.addPreference(ListPreference(requireContext()).apply {
                 key = "upscale_filter"; title = "Filter"; isPersistent = false
@@ -227,6 +251,44 @@ class SettingsActivity : AppCompatActivity() {
                 return true
             }
             return super.onPreferenceTreeClick(preference)
+        }
+
+        private fun fillDevicePosition() {
+            if (positionRequest != null || !isAdded) return
+            val permissions = GpsHost.permissions()
+            val granted = permissions.any {
+                androidx.core.content.ContextCompat.checkSelfPermission(requireContext(), it) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+            if (!granted) { locationPermissionRequest.launch(permissions); return }
+            positionPreference?.isEnabled = false
+            positionPreference?.summary = "Waiting for device position…"
+            positionRequest = DevicePositionRequest(requireContext()) { location, message ->
+                positionRequest = null
+                positionPreference?.isEnabled = true
+                if (location != null) {
+                    // Filling coordinates does not silently enable fixed GPS mode.
+                    current = readConfig() ?: current
+                    current = current.copy(gpsFixedLatitude = location.latitude, gpsFixedLongitude = location.longitude)
+                    findPreference<androidx.preference.EditTextPreference>("gps_fixed_latitude")?.text = location.latitude.toString()
+                    findPreference<androidx.preference.EditTextPreference>("gps_fixed_longitude")?.text = location.longitude.toString()
+                    writeConfig()
+                    val timestamp = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(location.time))
+                    positionPreference?.summary = "Coordinates copied (position: $timestamp)"
+                } else {
+                    positionPreference?.summary = message
+                    android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+            positionRequest?.start()
+        }
+
+        override fun onStop() {
+            if (positionRequest != null) {
+                positionRequest?.close(); positionRequest = null
+                positionPreference?.isEnabled = true
+                positionPreference?.summary = "Position request canceled. Tap Fill to try again."
+            }
+            super.onStop()
         }
 
         private fun saveKeyboardBinding(button: String, name: String?) {

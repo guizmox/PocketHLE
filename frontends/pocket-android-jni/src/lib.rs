@@ -883,3 +883,37 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_upscaleXbrz<'local>(
         .map(|a| a.into_raw())
         .unwrap_or(std::ptr::null_mut())
 }
+
+/// Reuse the desktop's analyzer; never run the executable to inspect metadata.
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_analyzeGame<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    game_id: JString<'local>,
+) -> jstring {
+    init_logger();
+    let root = match jstring_to_path(&mut env, library_root) {
+        Some(p) => p,
+        None => return new_jstring(&env, error_json("missing library root")),
+    };
+    let id = match env.get_string(&game_id) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return new_jstring(&env, error_json("missing game id")),
+    };
+    let result = (|| -> anyhow::Result<String> {
+        let lib = Library::open(&root)?;
+        let game = lib
+            .games()
+            .iter()
+            .find(|game| game.id == id)
+            .ok_or_else(|| anyhow::anyhow!("game not found: {id}"))?;
+        Ok(serde_json::to_string(&pocket_library::analyze_game(
+            game, &root,
+        ))?)
+    })();
+    match result {
+        Ok(json) => new_jstring(&env, json),
+        Err(error) => new_jstring(&env, error_json(&format!("analyzeGame: {error:#}"))),
+    }
+}

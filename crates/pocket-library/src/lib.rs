@@ -32,6 +32,9 @@ use rars::ArchiveReader;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod analysis;
+pub use analysis::{analyze_game, detect_gizmondo_title_id, GameAnalysis};
+
 pub mod keybindings;
 pub mod save_data;
 
