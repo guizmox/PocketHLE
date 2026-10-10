@@ -2157,3 +2157,30 @@ These variables are passed only to the individual cargo ndk invocation;
 Windows/Linux host builds retain their own headers. A host shell harness
 checks both actual script invocations, paths with spaces, warning flags and
 16 KiB linker alignment. It does not compile Android binaries or an APK.
+
+### Live output and MAS volume controls
+
+Colors calls waveOutSetVolume with device ID 0 for the output level, and its
+original ARM MAS volume wrapper (0xa5978 in the supplied image) sends packed
+16-bit left/right levels through MASG_SET_VOLUME (0x001d1028). Both previously
+returned success without changing output PCM. Apply gains when rendering, never
+when submitting or refreshing buffers: queued PCM and live wave loops must
+respond immediately, and muted streams must keep advancing their cursors.
+
+AudioEngine retains the output-device level for existing/future waveOut opens.
+A waveOut handle sets only that instance; device ID 0 replaces all instance
+levels and controls MAS/legacy/HSS output through the same emulated device.
+GetVolume returns the applied packed value; unknown handles and null output
+pointers return MMRESULT errors. WAVEOUTCAPS advertises volume/LR volume.
+Reset preserves volume while dropping that stream's PCM. The mixer is shared
+by CPAL desktop output and Android AudioTap; host system volume is untouched.
+
+MAS volume belongs to MasPlayback, shared with imported aliases and retained
+before START or after STOP. Each newly queued MAS stream inherits it, and
+SET_VOLUME updates already queued PCM. Keep VFS GET_VOLUME replies synchronized
+with the request. Gain changes do not reset phases, queues, callbacks or clocks.
+Tests cover live-loop mute/restore, reset/new-open inheritance, independent L/R,
+MAS queues/aliases, and actual dispatched WinMM/MAS calls plus PCM output.
+The supplied Colors ARM wrapper is replayed separately to verify its IOCTL
+encoding. Full game-menu playback and native Windows/Android builds require
+the complete game assets and target-device checks.

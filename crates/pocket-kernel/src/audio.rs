@@ -102,6 +102,7 @@ struct WaveStream {
     written: u64,
     consumed: u64,
     paused: bool,
+    volume: u32,
     tick: Instant,
     fraction: u128,
 }
@@ -116,6 +117,7 @@ impl WaveStream {
             written: 0,
             consumed: 0,
             paused: false,
+            volume: u32::MAX,
             tick: Instant::now(),
             fraction: 0,
         }
@@ -213,13 +215,25 @@ impl WaveStream {
         if self.samples.is_empty() && self.loop_buffer.is_none() {
             self.phase = 0;
         }
-        (left as f32 / 32768.0, right as f32 / 32768.0)
+        (
+            left as f32 / 32768.0 * volume_gain(self.volume, 0),
+            right as f32 / 32768.0 * volume_gain(self.volume, 1),
+        )
     }
 }
 
-/// PCM transport shared by aliases of one MAS device, including other processes.
-#[derive(Clone, Default)]
-pub struct MasPlayback(Arc<Mutex<Option<WaveStream>>>);
+fn volume_gain(volume: u32, channel: usize) -> f32 {
+    ((volume >> (if channel == 0 { 0 } else { 16 })) & 0xffff) as f32 / 65535.0
+}
+
+/// PCM and volume shared by aliases of one MAS device, including other processes.
+#[derive(Clone)]
+pub struct MasPlayback(Arc<Mutex<Option<WaveStream>>>, Arc<Mutex<u32>>);
+impl Default for MasPlayback {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(u32::MAX)))
+    }
+}
 impl MasPlayback {
     fn buffered_samples(&self) -> usize {
         self.0
@@ -233,6 +247,7 @@ impl MasPlayback {
 /// Inner state shared between the emulator thread (which calls
 /// [`AudioEngine::push_samples`]) and the cpal output callback.
 struct Shared {
+    device_volume: u32,
     wave_streams: std::collections::BTreeMap<u32, WaveStream>,
     // MAS1 transport is independent: waveOutReset/Close cannot purge music.
     mas_streams: std::collections::BTreeMap<u32, MasPlayback>,
@@ -287,6 +302,7 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
+            device_volume: u32::MAX,
             wave_streams: Default::default(),
             mas_streams: Default::default(),
             ring: vec![0i16; RING_CAPACITY_SAMPLES],
@@ -455,11 +471,6 @@ impl Shared {
                     self.resampler_phase = 0;
                 }
 
-                for stream in self.wave_streams.values_mut() {
-                    let (l, r) = stream.frame(output_rate);
-                    left += l;
-                    right += r;
-                }
                 for transport in self.mas_streams.values() {
                     if let Some(stream) = transport.0.lock().unwrap().as_mut() {
                         let (l, r) = stream.frame(output_rate);
@@ -505,6 +516,15 @@ impl Shared {
                         );
                         index += 1;
                     }
+                }
+                // MAS, legacy PCM and HSS share the emulated output device.
+                // waveOut handles have absolute instance volumes of their own.
+                left *= volume_gain(self.device_volume, 0);
+                right *= volume_gain(self.device_volume, 1);
+                for stream in self.wave_streams.values_mut() {
+                    let (l, r) = stream.frame(output_rate);
+                    left += l;
+                    right += r;
                 }
             }
             left = left.clamp(-1.0, 1.0);
@@ -665,6 +685,7 @@ impl AudioEngine {
         let transport = s.mas_streams.entry(handle).or_default();
         let mut buffer = transport.0.lock().unwrap();
         let stream = buffer.get_or_insert_with(|| WaveStream::new(format));
+        stream.volume = *transport.1.lock().unwrap();
         stream.advance_virtual(active);
         stream.samples.extend(samples.iter().copied());
         stream.written += samples.len() as u64;
@@ -751,7 +772,49 @@ impl AudioEngine {
     pub fn open_wave_stream(&self, handle: u32, format: GuestFormat) {
         self.set_guest_format(format);
         if let Ok(mut s) = self.shared.lock() {
-            s.wave_streams.insert(handle, WaveStream::new(format));
+            let mut stream = WaveStream::new(format);
+            stream.volume = s.device_volume;
+            s.wave_streams.insert(handle, stream);
+        }
+    }
+
+    /// Device ID 0 updates existing instances and the default for future opens.
+    /// An open HWAVEOUT updates only that stream, including queued/live-loop PCM.
+    pub fn set_wave_volume(&self, handle: u32, volume: u32) -> bool {
+        let Ok(mut shared) = self.shared.lock() else {
+            return false;
+        };
+        if handle == 0 {
+            shared.device_volume = volume;
+            for stream in shared.wave_streams.values_mut() {
+                stream.volume = volume;
+            }
+            true
+        } else if let Some(stream) = shared.wave_streams.get_mut(&handle) {
+            stream.volume = volume;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn wave_volume(&self, handle: u32) -> Option<u32> {
+        let shared = self.shared.lock().ok()?;
+        if handle == 0 {
+            Some(shared.device_volume)
+        } else {
+            shared.wave_streams.get(&handle).map(|stream| stream.volume)
+        }
+    }
+
+    /// Retain MAS volume before START and share it with imported aliases.
+    pub fn set_mas_volume(&self, key: u32, volume: u32) {
+        if let Ok(mut shared) = self.shared.lock() {
+            let transport = shared.mas_streams.entry(key).or_default();
+            *transport.1.lock().unwrap() = volume;
+            if let Some(stream) = transport.0.lock().unwrap().as_mut() {
+                stream.volume = volume;
+            }
         }
     }
 
@@ -856,7 +919,9 @@ impl AudioEngine {
     pub fn reset_wave_stream(&self, handle: u32) {
         if let Ok(mut s) = self.shared.lock() {
             if let Some(v) = s.wave_streams.get_mut(&handle) {
+                let volume = v.volume;
                 *v = WaveStream::new(v.format);
+                v.volume = volume;
             }
         }
     }
@@ -1242,7 +1307,10 @@ impl AudioTap {
         while n < dst.len() {
             match s.pop_one() {
                 Some(v) => {
-                    dst[n] = v;
+                    let channel = (s.consumed.saturating_sub(1)
+                        % s.guest_format.channels.max(1) as u64)
+                        as usize;
+                    dst[n] = (v as f32 * volume_gain(s.device_volume, channel)) as i16;
                     n += 1;
                 }
                 None => break,
@@ -1479,6 +1547,99 @@ fn fill_output_u16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave_volume_updates_queued_loop_and_future_streams_without_stopping_cursors() {
+        let engine = AudioEngine::new();
+        let tap = engine.tap();
+        tap.drain_into(&mut []);
+        engine.open_wave_stream(1, mono(44100));
+        engine.queue_wave_loop(1, vec![12000; 4], 10);
+        assert!(engine.set_wave_volume(0, 0));
+        let mut out = [1; 2];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0, 0]);
+        assert_eq!(engine.wave_playback_cursor(1), 2);
+        assert!(engine.set_wave_volume(0, 0x8000_8000));
+        tap.drain_into(&mut out);
+        assert_eq!(out, [6000, 6000]);
+        engine.open_wave_stream(2, mono(44100));
+        assert_eq!(engine.wave_volume(2), Some(0x8000_8000));
+        assert!(engine.set_wave_volume(1, u32::MAX));
+        assert_eq!(engine.wave_volume(2), Some(0x8000_8000));
+        tap.drain_into(&mut out);
+        assert_eq!(out, [12000, 12000]);
+        assert_eq!(engine.wave_playback_cursor(1), 6);
+        engine.set_wave_volume(1, 0x8000_8000);
+        engine.reset_wave_stream(1);
+        assert_eq!(engine.wave_volume(1), Some(0x8000_8000));
+        engine.push_wave_samples(1, &[12000; 2]);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [6000, 6000]);
+        assert!(!engine.set_wave_volume(99, 0));
+        assert_eq!(engine.wave_volume(99), None);
+    }
+
+    #[test]
+    fn mas_volume_is_live_retained_before_start_and_shared_by_aliases() {
+        let engine = AudioEngine::new();
+        let tap = engine.tap();
+        tap.drain_into(&mut []);
+        engine.set_mas_volume(7, 0x8000_8000);
+        engine.queue_mas_samples(7, mono(44100), &[12000; 8]);
+        let mut out = [0; 1];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [6000]);
+        let alias = AudioEngine::new();
+        alias.import_mas_stream(7, engine.export_mas_stream(7));
+        alias.set_mas_volume(7, 0);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0]);
+        assert_eq!(engine.mas_playback_cursor(7), 2);
+        alias.set_mas_volume(7, u32::MAX);
+        engine.set_wave_volume(0, 0x8000_8000);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [6000]);
+        engine.stop_mas_stream(7);
+        engine.queue_mas_samples(7, mono(44100), &[12000; 2]);
+        engine.set_wave_volume(0, u32::MAX);
+        tap.drain_into(&mut out);
+        assert_eq!(out, [12000]);
+    }
+
+    #[test]
+    fn legacy_volume_keeps_channel_alignment_across_short_pulls() {
+        let engine = AudioEngine::new();
+        engine.set_guest_format(GuestFormat::default());
+        engine.push_samples(&[12000; 4]);
+        engine.set_wave_volume(0, 0xffff_0000);
+        let tap = engine.tap();
+        let mut out = [1; 1];
+        for expected in [0, 12000, 0, 12000] {
+            assert_eq!(tap.drain_into(&mut out), 1);
+            assert_eq!(out, [expected]);
+        }
+    }
+
+    #[test]
+    fn wave_volume_has_independent_left_and_right_channels() {
+        let engine = AudioEngine::new();
+        engine.open_wave_stream(
+            1,
+            GuestFormat {
+                channels: 2,
+                ..GuestFormat::default()
+            },
+        );
+        engine.push_wave_samples(1, &[12000; 4]);
+        engine.set_wave_volume(1, 0xffff_0000);
+        let mut out = [0; 2];
+        engine.tap().drain_into(&mut out);
+        assert_eq!(out, [0, 12000]);
+        engine.set_wave_volume(1, 0x0000_ffff);
+        engine.tap().drain_into(&mut out);
+        assert_eq!(out, [12000, 0]);
+    }
 
     #[test]
     fn break_loop_finishes_current_iteration_and_preserves_suffix() {

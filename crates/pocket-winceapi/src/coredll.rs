@@ -3746,6 +3746,9 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                     ctx.cpu.read_mem(input_buf, 4)?.try_into().unwrap_or([0; 4]),
                 );
                 ctx.kernel.vfs.set_mp3_decoder_volume(handle, value);
+                ctx.kernel
+                    .audio
+                    .set_mas_volume(ctx.kernel.vfs.mp3_stream_key(handle), value);
             }
             // The Micronas capability query accepts the call but only writes
             // its DWORD when the output size is exactly four. In particular,
@@ -17715,27 +17718,38 @@ fn wave_out_get_dev_caps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         if buf.len() >= 78 {
             buf[76..78].copy_from_slice(&1u16.to_le_bytes());
         }
+        if buf.len() >= 84 {
+            buf[80..84].copy_from_slice(&12u32.to_le_bytes()); // WAVECAPS_VOLUME | WAVECAPS_LRVOLUME
+        }
         ctx.cpu.write_mem(caps, &buf)?;
     }
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
-/// `MMRESULT waveOutGetVolume(HWAVEOUT, LPDWORD pdwVolume)` — write
-/// 0xFFFFFFFF (max volume left + right) to the out parameter.
+/// Device ID 0 selects the shared output; an open handle selects one stream.
 fn wave_out_get_volume(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _h = ctx.arg_u32(0)?;
-    let p = ctx.arg_u32(1)?;
-    if p != 0 {
-        ctx.cpu.write_mem(p, &0xFFFF_FFFFu32.to_le_bytes())?;
+    let handle = ctx.arg_u32(0)?;
+    let out = ctx.arg_u32(1)?;
+    let Some(volume) = ctx.kernel.audio.wave_volume(handle) else {
+        return Ok(DispatchOutcome::ReturnedR0(5)); // MMSYSERR_INVALHANDLE
+    };
+    if out == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(11)); // MMSYSERR_INVALPARAM
     }
+    ctx.cpu.write_mem(out, &volume.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
-/// `MMRESULT waveOutSetVolume(HWAVEOUT, DWORD dwVolume)` — accept
-/// the volume request silently. We don't have a host-side volume
-/// control, so just return success.
-fn wave_out_set_volume(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
+fn wave_out_set_volume(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let volume = ctx.arg_u32(1)?;
+    let applied = ctx.kernel.audio.set_wave_volume(handle, volume);
+    log::debug!("waveOutSetVolume(0x{handle:08x}, 0x{volume:08x}) applied={applied}");
+    Ok(DispatchOutcome::ReturnedR0(if applied {
+        MMSYSERR_NOERROR
+    } else {
+        5
+    }))
 }
 
 fn wave_out_notify(ctx: &mut CallCtx<'_>, handle: u32, message: u32, param1: u32, param2: u32) {
@@ -19422,6 +19436,96 @@ mod tests {
         Heap, KernelState, Thunk,
     };
     use pocket_pe::ImportBinding;
+
+    #[test]
+    fn guest_volume_apis_update_music_pcm_and_report_the_applied_value() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        let tap = kernel.audio.tap();
+        tap.drain_into(&mut []);
+        let handle = kernel.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
+        let key = kernel.vfs.mp3_stream_key(handle);
+        kernel.audio.queue_mas_samples(
+            key,
+            pocket_kernel::audio::GuestFormat::default(),
+            &[12000; 16],
+        );
+        cpu.write_mem(0x2000, &0x8000_8000u32.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[handle, 0x001d_1028, 0x2000, 4, 0, 0, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        let mut out = [0; 2];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [6000, 6000]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "waveOutSetVolume",
+                &[0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0, 0]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "waveOutGetVolume",
+                &[0, 0x2004]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_mem(0x2004, 4).unwrap(), 0u32.to_le_bytes());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "waveOutGetVolume",
+                &[0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(11)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "waveOutSetVolume",
+                &[99, 0]
+            ),
+            DispatchOutcome::ReturnedR0(5)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "waveOutGetDevCaps",
+                &[0, 0x2100, 84]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_mem(0x2150, 4).unwrap(), 12u32.to_le_bytes());
+    }
 
     #[test]
     fn mixer_cleanup_rejects_null_and_foreign_handles_without_changing_last_error() {
