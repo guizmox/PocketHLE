@@ -2146,3 +2146,14 @@ advisory (the original job already had continue-on-error); report its lints as
 warnings and tolerate unknown version-specific Clippy lint names. Normal build
 and test jobs retain global -D warnings. These fixes target the supplied
 GitHub log; full hosted workflow validation still requires a fresh run.
+
+Android Unicorn bindgen cross-compilation: host libclang must use the NDK
+sysroot, API 24 target and ABI-specific system headers. The native build script
+sets BINDGEN_EXTRA_CLANG_ARGS_<underscored-target> separately for arm64-v8a
+and armeabi-v7a; this avoids /usr/include/stdint.h and missing Linux multiarch
+headers. ARMv7 uses Clang target armv7a-linux-androideabi24 and NDK header
+directory arm-linux-androideabi. Quote paths for Bindgen's shlex parser.
+These variables are passed only to the individual cargo ndk invocation;
+Windows/Linux host builds retain their own headers. A host shell harness
+checks both actual script invocations, paths with spaces, warning flags and
+16 KiB linker alignment. It does not compile Android binaries or an APK.
