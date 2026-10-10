@@ -333,7 +333,10 @@ class GameActivity : AppCompatActivity() {
                 val channels = (packed and 0xffff).toInt().coerceIn(1, 2)
                 val channelMask = if (channels == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
                 val minBuffer = AudioTrack.getMinBufferSize(rate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
-                val bufferSize = maxOf(minBuffer.takeIf { it > 0 } ?: 0, rate * channels * 2 / 2, 4096)
+                // Small pulls let live circular mixers observe intermediate playback positions.
+                // Colors uses a 4096-sample loop: a 4096-sample pull skips a full turn.
+                val pullSamples = maxOf(1, rate / 100) * channels
+                val bufferSize = maxOf(minBuffer.takeIf { it > 0 } ?: 0, pullSamples * 2 * 10)
                 track = AudioTrack.Builder()
                     .setAudioAttributes(AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_GAME)
@@ -355,7 +358,7 @@ class GameActivity : AppCompatActivity() {
                 track.play()
                 android.util.Log.i("PocketHLE", "AudioTrack started: ${rate}Hz, ${channels}ch, buffer=${bufferSize}B")
                 while (audioRunning && generation == audioGeneration && session == handle) {
-                    val pcm = NativeBridge.nativePollAudio(handle, 4096)
+                    val pcm = NativeBridge.nativePollAudio(handle, pullSamples)
                     if (pcm != null && pcm.isNotEmpty()) {
                         writeAudio(track, pcm, generation)
                     } else {
