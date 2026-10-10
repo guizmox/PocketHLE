@@ -104,12 +104,13 @@ impl Framebuffer {
             pixels: vec![0u8; (width * height * 2) as usize],
             frame_counter: 0,
             directdraw: DirectDrawTiming::default(),
-            backlight_level: 24,
+            backlight_level: 16,
         }
     }
 
     pub fn set_backlight_level(&mut self, level: u32) {
-        let level = level.clamp(1, 31);
+        // Zero/uninitialised and malformed registry values must stay readable.
+        let level = if (1..=31).contains(&level) { level } else { 16 };
         if self.backlight_level != level {
             self.backlight_level = level;
             // Publish even when a menu's native pixels have not changed.
@@ -120,7 +121,14 @@ impl Framebuffer {
         self.backlight_level
     }
     fn backlight_channel(&self, channel: u8) -> u8 {
-        ((channel as u32 * self.backlight_level + 12) / 24).min(255) as u8
+        let c = channel as u32;
+        if self.backlight_level <= 16 {
+            // Minimum is 50%: an intentional low slider position stays visible.
+            ((c * (14 + self.backlight_level) + 15) / 30) as u8
+        } else {
+            // Upper half blends towards white by at most 50%, preserving contrast.
+            (c + (255 - c) * (self.backlight_level - 16) / 30) as u8
+        }
     }
 
     /// Re-point the emulated panel at a new geometry.
@@ -311,7 +319,7 @@ impl Framebuffer {
         let dst: &mut [u32] = bytemuck::cast_slice_mut(out.as_mut_slice());
         for (s, d) in src.iter().zip(dst.iter_mut()) {
             let color = rgb565_to_rgba8888(u16::from_le(*s));
-            *d = if self.backlight_level == 24 {
+            *d = if self.backlight_level == 16 {
                 color
             } else {
                 let [red, green, blue, alpha] = color.to_le_bytes();
@@ -397,7 +405,7 @@ mod tests {
         let original = fb.pixels.clone();
         let normal = fb.snapshot_rgba8888();
         let counter = fb.frame_counter;
-        fb.set_backlight_level(24);
+        fb.set_backlight_level(16);
         assert_eq!(fb.frame_counter, counter);
         fb.set_backlight_level(12);
         let dim = fb.snapshot_rgba8888();
@@ -408,11 +416,44 @@ mod tests {
         fb.set_backlight_level(31);
         assert!(fb.snapshot_rgba8888()[0] > normal[0]);
         fb.set_backlight_level(0);
-        assert_eq!(fb.backlight_level(), 1);
+        assert_eq!(fb.backlight_level(), 16);
         fb.set_backlight_level(u32::MAX);
-        assert_eq!(fb.backlight_level(), 31);
-        fb.set_backlight_level(24);
+        assert_eq!(fb.backlight_level(), 16);
+        fb.set_backlight_level(16);
         assert_eq!(fb.snapshot_rgba8888(), normal);
+    }
+
+    #[test]
+    fn backlight_extremes_preserve_visible_monotonic_contrast() {
+        let mut fb = super::Framebuffer::new(1, 1);
+        for level in 1..=31 {
+            fb.set_backlight_level(level);
+            let mut previous = 0;
+            for channel in 0..=255u8 {
+                let shown = fb.backlight_channel(channel);
+                assert!(shown >= previous);
+                assert!(shown as u32 >= channel as u32 / 2);
+                if channel > 0 {
+                    assert!(shown > 0);
+                }
+                if channel < 255 {
+                    assert!(shown < 255);
+                }
+                previous = shown;
+            }
+            if level <= 16 {
+                assert_eq!(fb.backlight_channel(0), 0);
+            }
+            assert!(fb.backlight_channel(255) > fb.backlight_channel(0));
+        }
+        fb.set_backlight_level(1);
+        assert_eq!(fb.backlight_channel(128), 64);
+        fb.set_backlight_level(31);
+        assert_eq!(fb.backlight_channel(128), 191);
+        fb.set_backlight_level(16);
+        for channel in 0..=255u8 {
+            assert_eq!(fb.backlight_channel(channel), channel);
+        }
     }
 
     use super::*;

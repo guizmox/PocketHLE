@@ -165,7 +165,20 @@ impl Registry {
         };
         if let Some(snapshot) = snapshot {
             let mut keys = store.keys.clone();
-            for (key, values) in snapshot.keys {
+            for (key, mut values) in snapshot.keys {
+                // Old snapshots may contain an empty backlight key or a zero
+                // left by an uninitialised game setting. Repair device defaults
+                // before Colors queries them to initialise its own slider.
+                if key == r"hkcu\controlpanel\backlight" && store.keys.contains_key(&key) {
+                    for name in ["level", "onlevel"] {
+                        if !matches!(values.get(name), Some(RegistryValue::Dword(1..=31))) {
+                            values.insert(name.into(), RegistryValue::Dword(16));
+                        }
+                    }
+                    values
+                        .entry("dimlevel".into())
+                        .or_insert(RegistryValue::Dword(8));
+                }
                 keys.insert(key, values);
             }
             if store
@@ -237,10 +250,11 @@ impl Registry {
     /// tends to give up and exit rather than fall back.
     pub fn with_device_defaults() -> Self {
         let mut reg = Self::new();
-        // Gizmondo OEMINC.H: range 1..31, normal 24, dim 8. Colors reads
+        // Gizmondo OEMINC.H: range 1..31. Host neutral defaults to midpoint 16
+        // (SDK hardware default is 24); dim remains 8. Colors reads
         // OnLevel to initialise its own brightness slider, then writes both
         // OnLevel and DimLevel and signals BackLightChangeEvent.
-        for (name, value) in [("Level", 24), ("OnLevel", 24), ("DimLevel", 8)] {
+        for (name, value) in [("Level", 16), ("OnLevel", 16), ("DimLevel", 8)] {
             reg.set_value(
                 r"HKCU\ControlPanel\Backlight",
                 name,
@@ -497,11 +511,11 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn gizmondo_sdk_backlight_defaults_are_queryable() {
+    fn gizmondo_backlight_midpoint_defaults_are_queryable() {
         let registry = super::Registry::with_device_defaults();
         assert_eq!(
             registry.value(r"HKCU\ControlPanel\Backlight", "OnLevel"),
-            Some(super::RegistryValue::Dword(24))
+            Some(super::RegistryValue::Dword(16))
         );
         assert_eq!(
             registry.value(r"HKCU\ControlPanel\Backlight", "DimLevel"),
@@ -540,6 +554,42 @@ mod tests {
         );
         drop(registry);
         assert_eq!(ram.snapshot().store_used, 1); // object store outlives a process
+    }
+
+    #[test]
+    fn backlight_persistence_repairs_invalid_defaults_and_preserves_valid_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let key = r"HKCU\ControlPanel\Backlight";
+        for saved in [
+            None,
+            Some(RegistryValue::Dword(0)),
+            Some(RegistryValue::Dword(32)),
+            Some(RegistryValue::Sz("".into())),
+            Some(RegistryValue::Dword(11)),
+            Some(RegistryValue::Dword(31)),
+        ] {
+            let mut prior = Registry::with_device_defaults();
+            prior.configure_persistence(&path).unwrap();
+            prior.delete_value(key, "OnLevel");
+            prior.delete_value(key, "DimLevel");
+            if let Some(value) = saved.clone() {
+                prior.set_value(key, "OnLevel", value);
+            }
+            prior.flush().unwrap();
+            let mut loaded = Registry::with_device_defaults();
+            loaded.configure_persistence(&path).unwrap();
+            let expected = match saved {
+                Some(RegistryValue::Dword(level @ 1..=31)) => level,
+                _ => 16,
+            };
+            assert_eq!(
+                loaded.value(key, "OnLevel"),
+                Some(RegistryValue::Dword(expected))
+            );
+            assert_eq!(loaded.value(key, "DimLevel"), Some(RegistryValue::Dword(8)));
+            assert!(loaded.handles.is_empty());
+        }
     }
 
     #[test]

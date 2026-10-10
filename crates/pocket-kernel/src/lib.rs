@@ -1323,12 +1323,14 @@ pub struct MainThreadState {
 impl KernelState {
     /// Colors writes the shared device registry from its own brightness slider.
     pub fn sync_backlight(&mut self) {
-        if let Some(crate::registry::RegistryValue::Dword(level)) = self
+        let level = match self
             .registry
             .value(r"HKCU\ControlPanel\Backlight", "OnLevel")
         {
-            self.framebuffer.set_backlight_level(level);
-        }
+            Some(crate::registry::RegistryValue::Dword(level)) => level,
+            _ => 16,
+        };
+        self.framebuffer.set_backlight_level(level);
     }
 
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {

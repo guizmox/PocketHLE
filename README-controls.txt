@@ -32,7 +32,7 @@ Implementation notes:
 - Existing vibration API error/LastError handling preserved.
 
 Local validation:
-- 172 kernel +259 WinCE API +42 library tests passed (no default features).
+- 174 kernel +259 WinCE API +42 library tests passed (no default features).
 - 7 tests passed using actual desktop SDL/input/rumble source, including native
   SDL virtual input and100 motor-session cleanup cycles.
 - Actual supplied Colors ARM setter/getter replay: all4levels and notification.
@@ -42,3 +42,13 @@ Local validation:
 - Windows release build and physical Android/Switch Pro tests not run locally.
 - Desktop cargo check passed on Linux without default features; local SDL check
   disabled unused X11/Wayland/DBus support. Repo build configuration unchanged.
+
+V2 brightness correction:
+- Neutral level16 reproduces the original pre-patch image exactly.
+- Brightness range25%-75%; continuous bounded blends over all31 SDK levels.
+  Minimum blends halfway towards black, maximum halfway towards white.
+- Missing, zero, malformed or wrongly typed OnLevel uses neutral16.
+- Old device registry snapshots repair invalid/missing brightness defaults on
+  load, before guest queries; valid saved settings remain valid.
+- Kernel tests exhaustively check all31levels and all256channel values, plus
+  startup snapshot repair, neutral identity, guest pixels and alpha preservation.

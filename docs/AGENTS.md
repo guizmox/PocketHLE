@@ -2359,15 +2359,23 @@ Colors' brightness slider uses SDK OEMINC.H, HKCU ControlPanel\Backlight,
 OnLevel/DimLevel and BackLightChangeEvent (EventModify SET). Its ARM setter at
 0x135e0 writes OnLevel 1/11/21/31 and DimLevel 0/0/10/20; getter is 0x136cc.
 VK_BACKLIGHT is F3. Do not intercept that key with a host brightness cycle: the
-game owns its menu. Registry defaults are Level/OnLevel 24, DimLevel 8. Runners
+game owns its menu. Registry defaults are Level/OnLevel 16, DimLevel 8 (the SDK
+hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
-channels by level/24, clamped to 255; native RGB565 surfaces remain unchanged.
+channels over a 25%-75% brightness range: level 16 reproduces the unmodified
+image, 1 blends halfway to black, 31 halfway to white. All 31 SDK levels work.
+Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 16 on every
+frontend sync, including after a previous dim setting. Device snapshot loading
+also repairs missing/invalid Level and OnLevel and missing DimLevel before
+Colors reads its initial slider position; valid saved levels are preserved. The bounded blends
+preserve contrast without clipping to a uniform black/white image; native
+RGB565 surfaces remain unchanged.
 A changed level increments the presentation counter even on static menus.
 Screenshots and upscalers therefore receive the same adjusted image. Shared
 registry values survive child/parent transitions. Host display brightness and
 platform-wide power management are not modified.
 
-Validation for this change: 172 kernel, 259 WinCE API and 42 library tests pass
+Validation for this change: 174 kernel, 259 WinCE API and 42 library tests pass
 without default features; seven controller tests compile the actual desktop
 SDL/rumble sources and pass, including an SDL virtual controller short press and
 100 motor open/apply/drop cycles. Replay of the supplied Colors ARM setter and
