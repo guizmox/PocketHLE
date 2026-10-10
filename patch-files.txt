@@ -1,1 +1,5 @@
-frontends/pocket-desktop/src/app.rs
+docs/AGENTS.md
+docs/ANDROID-BUILD.md
+frontends/pocket-android-jni/src/runner.rs
+frontends/pocket-android-jni/src/runner_tests.rs
+ANDROID-RAM-VFS-PATCH.txt

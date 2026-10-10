@@ -2006,3 +2006,28 @@ native-size multiple that fits the game area. Explicit factors are capped at
 that integer; unused pixels form letterboxes. Gizmondo always uses native 320×240.
 An undersized viewport clips at ×1 rather than fractionally resizing. Keep these
 rules synchronized with `docs/ANDROID-BUILD.md` and Android settings labels.
+
+### Android child processes and RAM/VFS diagnostic parity
+
+The Android session runner enables generic CreateProcessW and drives each child
+on its own host thread, using the same shared handle domain, VFS leases/object
+store and MemoryDivision as its parent. Child setup acknowledges readiness before
+the parent commits PROCESS_INFORMATION and releases the startup gate. Command
+lines, CREATE_SUSPENDED, remote thread controls and descendants retain the core
+contracts. Keep the original SD-card mount root when launching a nested executable.
+SDCreateProcess retains the card-bound, preserved-parent foreground handoff.
+
+Only the foreground process consumes UI input and publishes frames/audio. Stop
+is shared by all jobs, including children waiting for startup; session completion
+joins all descendants. Drop each emulator and refund its private RAM, then publish
+its process completion BEFORE joining its children. Otherwise an orphan waiting
+for that parent times out. Do not announce process completion before RAM teardown.
+
+The previous Android runner left process_launch_enabled false. Executing VFSTEST
+with that configuration reproduces all 24 failures in the supplied Android report,
+including the later rename/delete/quota failures. The enabled runner passes all
+103 checks twice with complete cleanup; RAMTEST passes 132 checks and the separate
+process, orphan, DLL and dependency reports. These are actual ARM programs driven
+by the Android Rust runner on a Linux host, not Android APK/VM/device execution.
+Keep that validation distinction explicit. No shared Windows kernel/VFS behavior
+was changed to compensate for the Android launcher omission.

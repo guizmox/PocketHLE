@@ -160,3 +160,37 @@ FFmpeg is built without GPL/nonfree components under LGPL 2.1+ terms. xBRZ is
 GPL-3.0-only as on PC. License texts are included in assets. SMAA shaders and lookup
 tables retain their MIT license. Public APK distribution must include the source
 and reconstruction/relinking materials required by these licenses.
+
+## RAMTEST / VFSTEST runner update
+
+The Android runner now supports child processes, suspended startup, shared file
+handles/object storage and the shared device RAM budget. Process completion is
+published after CPU/RAM teardown and before joining descendants, so an orphan
+can observe its parent's exit. The session waits for all jobs before returning
+to the library; Stop reaches foreground/background jobs and startup gates.
+
+Host regression commands (require Rust, a C/C++ compiler, CMake, pkg-config,
+Python and libclang for Unicorn):
+
+```sh
+cargo test -p pocket-android-jni --no-default-features --features unicorn --lib
+```
+
+The full core `ram_guest` suite additionally requires regenerated fixtures;
+follow `tools/ramtest/README.md` and `tools/vfstest/README.md` before running it.
+The alternate process-exit fixtures are not included in the diagnostic ZIPs.
+
+The runner tests import the shipped diagnostic archives, execute their original
+ARM programs and verify reports. VFSTEST runs twice to verify sharing, rename,
+32 MiB Flash quota/refunds and complete cleanup. RAMTEST also verifies the child,
+orphan, DLL and dependency reports. An intentionally disabled process runner
+reproduces the previous 24-failure VFSTEST report without changing VFS semantics.
+
+To apply a source-only patch, extract its files at the repository root. Rebuild
+both native ABIs and the APK using the existing build commands in this document.
+An older installed APK does not receive source changes automatically. On Android,
+rerun the diagnostics from a fresh test library: a failed VFSTEST intentionally
+leaves its private probe directory and refuses to overwrite it on a later run.
+Keep game data separate; do not erase an existing gameplay library for this check.
+Host ARM regression success is not a claim of APK, physical storage or sensor
+validation. This update does not change Windows frontend or shared kernel sources.
