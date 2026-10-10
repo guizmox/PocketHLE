@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.util.AttributeSet
 import android.view.View
 import android.widget.Button
@@ -24,7 +25,7 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             this.id = id; text = label; contentDescription = label
             setTextColor(Color.WHITE); textSize = 18f
             minWidth = 0; minHeight = 0; minimumWidth = 0; minimumHeight = 0
-            setPadding(0,0,0,0); background = backgroundShape(); stateListAnimator = null
+            setPadding(0,0,0,0); background = backgroundShape(); backgroundTintList = null; stateListAnimator = null
             keys[id] = this; addView(this)
         }
         button(R.id.btn_soft1, "L"); button(R.id.btn_soft2, "R")
@@ -37,15 +38,31 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         val names = listOf("Home", "Volume", "Brightness", "Geofence", "Power")
         icons.forEachIndexed { index, id ->
             val icon = FunctionButton(context, index).apply {
-                this.id = id; contentDescription = names[index]; background = backgroundShape()
+                this.id = id; contentDescription = names[index]; background = backgroundShape(); backgroundTintList = null
             }
             keys[id] = icon; addView(icon)
         }
         button(R.id.btn_stop_emulation, "Exit").apply { (this as Button).textSize = 13f }
     }
-    private fun backgroundShape() = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xff303a47.toInt(),0xff141c28.toInt())).apply {
-        cornerRadius = 14 * dp; setStroke((dp).toInt().coerceAtLeast(1),0xff506078.toInt())
+    private fun backgroundShape(): StateListDrawable {
+        fun shape(top: Int, bottom: Int, outline: Int) = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom)
+        ).apply {
+            cornerRadius = 14 * dp
+            setStroke(dp.toInt().coerceAtLeast(1), outline)
+        }
+        // Keep a visible highlight for the entire hold, including simultaneous keys.
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed),
+                shape(0xff3288bf.toInt(), 0xff195b8c.toInt(), 0xff91d6ff.toInt()))
+            addState(intArrayOf(),
+                shape(0xff303a47.toInt(), 0xff141c28.toInt(), 0xff506078.toInt()))
+        }
     }
+    fun clearPressedControls() {
+        keys.values.forEach { it.isPressed = false }
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec); val h = MeasureSpec.getSize(heightMeasureSpec)
         setMeasuredDimension(w,h)

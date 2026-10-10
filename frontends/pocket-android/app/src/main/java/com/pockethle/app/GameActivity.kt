@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
@@ -142,7 +143,18 @@ class GameActivity : AppCompatActivity() {
         progress = findViewById(R.id.progress)
         status = findViewById(R.id.status)
 
-        findViewById<View>(R.id.btn_stop_emulation).setOnClickListener { it.isEnabled=false; finishSession() }
+        findViewById<View>(R.id.btn_stop_emulation).apply {
+            setOnTouchListener { view, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                }
+                false // Preserve normal pressed-state, cancellation and click handling.
+            }
+            setOnClickListener {
+                it.isEnabled = false
+                finishSession()
+            }
+        }
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.game_root)) { view, insets ->
             val safe = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.displayCutout())
             view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
@@ -576,6 +588,7 @@ class GameActivity : AppCompatActivity() {
         }
         heldPhysicalKeys.clear()
         heldGuestKeys.clear()
+        (gameControls as? GizmondoControls)?.clearPressedControls()
         heldVirtualKeys.clear()
         heldAxisKeys.clear()
         surfacePointerDown = false
@@ -658,7 +671,10 @@ class GameActivity : AppCompatActivity() {
             if (handle == 0L) return@setOnTouchListener false
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    if (heldVirtualKeys.add(vk)) acquireGuestKey(handle, vk)
+                    if (heldVirtualKeys.add(vk)) {
+                        acquireGuestKey(handle, vk)
+                        v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    }
                     v.isPressed = true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
