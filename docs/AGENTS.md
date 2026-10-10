@@ -1890,15 +1890,15 @@ options releases held keys and clears pending captures. GPRS/data is saved throu
 the same draft and takes effect on the next launch. Android JSON mirrors its
 boolean default, while this menu organization applies to the desktop launcher.
 
-## Windows desktop fixed GPS position
+## Windows and Android fixed GPS position
 
 Gizmondo options exposes an explicit simulated fixed GPS setting on Windows only,
-with decimal latitude [-90,90] and longitude [-180,180]. LauncherConfig persists
+with decimal latitude [-90,90] and longitude [-180,180]. Android exposes the same simulator in its separate Gizmondo menu. LauncherConfig persists
 gps_fixed_enabled (default false), gps_fixed_latitude and gps_fixed_longitude.
 At the next Gizmondo launch the desktop runner validates the coordinates and
 sets the per-VFS gps::Service override, enabling GPS1 independently of the host
 GPS permission checkbox. Host consent preparation is skipped while this mode is
-selected. Android does not apply or expose this override. The override is never
+selected. Android applies the same per-VFS override before GPS1 opens and skips real GPS permission requests while using it (other features may still require location permission for legacy Bluetooth). The override is never
 installed globally and therefore does not leak between emulators.
 FixedCapture creates a new current Unix timestamp at each read; existing packet
 serialization supplies the GPS1 1972 clock and signed coordinates. Horizontal
@@ -1939,3 +1939,51 @@ actual local HTTP and saved real OSM GIF now renders the Turf Wars map: XML
 verifies payload handling rather than live OSM rendering at those coordinates.
 No production CLI adapter or server change. Windows desktop build remains
 to run; no claim of Windows UI or physical Synology execution.
+
+
+## Android cumulative update (October 2026)
+
+Android library/settings activities are portrait; gameplay is immersive sensor-landscape
+with no settings/FPS/backend panels. Stop waits for the native worker and audio readers
+before returning to the library, preserving registry/save flushes and JNI session lifetime.
+Audio generations prevent a paused reader from restarting alongside its replacement.
+The game surface occupies a separate center rectangle; independent multitouch child
+buttons live in side rails. Actions are LEFT, D-pad RIGHT, shoulders above each rail.
+Five traced native function icons match the desktop skin; the fifth sends VK_F11.
+Physical keyboard/controller maps use the shared stable config names and are editable
+in a separate settings submenu. Explicitly empty bindings stay empty. F10 captures
+actual GL output after filter/rotation, without introducing a gameplay settings bar.
+
+Gizmondo launch forces 320x240, preserves the SD-card layout, and mounts writable
+library/flash at \Flash Disk. It applies fixed GPS, GPRS/data, Colors origin/identity,
+Bluetooth and camera permissions through the existing native adapters. PocketPC keeps
+its configured guest dimensions and presentation rotation. Android DTO saves preserve
+the entire incoming JSON alongside edited fields, including PC controller/logging fields.
+Rename uses Library::rename_game and never changes IDs, paths or save locations.
+
+Display scale android_display_scale defaults to 0 (fit); 1..4 are native pixel multiples,
+clamped to the available center surface. Never change guest dimensions for zoom.
+DisplayGeometry supplies the same integer rectangle to GL, stylus mapping and readback.
+All eight desktop filter IDs are used: exact reconstruction/bicubic/Lanczos shader,
+reference three-pass SMAA and lookup textures, xbrz-rs 0.1.0 at internal x3, bilinear,
+nearest. SMAA/xBRZ work only on fresh snapshots; cached textures redraw on resize.
+GLES 3 is required. Shader/FBO failures are reported, never silently mislabeled.
+
+Native packaging enables Unicorn and video-static by default. No successful gameplay
+fallback to the trace-only Stub. Build scripts use per-target NDK CMake wrappers,
+pinned FFmpeg 8.0.1 (same codecs as desktop), compiler-rt builtins and 16 KiB ELF
+alignment. Never enable Unicorn arch_all. No global Cargo target configuration.
+Gradle preBuild rejects missing bridges; ELF and APK alignment/signature checks run
+in the build scripts. Workflow is manual only. See docs/ANDROID-BUILD.md.
+
+Validation: all Kotlin sources type-checked against Android 14 framework and actual
+AndroidX dependencies/generated R; AAPT2 compiles/links resources; 240 display
+configurations pass inverse touch/corner/letterbox checks; 28 headless Mesa GLES
+renders check seven GPU modes in all rotations, including all three SMAA passes.
+JNI Rust type-check (Linux, no native/default features) and 38 library tests pass.
+No Android ABI .so, full Gradle/D8 APK, physical phone or Android Turf Wars session
+was built/run in this environment. These remain required integration checks.
+Windows raw Winsock RFCOMM and a general CLR/.NET CF backend are not implemented
+on Android by this UI/build update; existing Android COM/RFCOMM adapters are kept.
+
+Android peripheral software checks: 4 kernel GPS + 1 GPS ABI, 6 kernel camera + 6 camera ABI and 3 Bluetooth serial tests passed. These do not validate Android physical sensors or Bluetooth radio.

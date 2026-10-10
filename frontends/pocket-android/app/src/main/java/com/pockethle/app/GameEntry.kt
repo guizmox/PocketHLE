@@ -58,8 +58,9 @@ data class GameSettings(
      * keep the guest portrait and turn the *picture* instead.
      */
     val rotation: String,
+    val originalJson: String = "{}",
 ) {
-    fun toJson(): JSONObject = JSONObject().apply {
+    fun toJson(): JSONObject = JSONObject(originalJson).apply {
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
         put("instructions_per_slice", instructionsPerSlice)
@@ -85,6 +86,7 @@ data class GameSettings(
             haltOnUnimplemented = obj.optBoolean("halt_on_unimplemented", false),
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
+            originalJson = obj.toString(),
         )
     }
 }
@@ -93,6 +95,7 @@ data class LauncherConfig(
     val schemaVersion: Int,
     val defaultCpuBackend: String,
     val verbosity: Int,
+    val logUnimplementedApis: Boolean = true,
     val lastImportDir: String?,
     val showFps: Boolean,
     val fullscreen: Boolean,
@@ -104,6 +107,12 @@ data class LauncherConfig(
     val bluetoothEnabled: Boolean = false,
     val cameraEnabled: Boolean = false,
     val gpsEnabled: Boolean = false,
+    val gpsFixedEnabled: Boolean = false,
+    val gpsFixedLatitude: Double = 0.0,
+    val gpsFixedLongitude: Double = 0.0,
+    val upscaleFilter: String = "reconstruction",
+    val displayScale: Int = 0,
+    val originalJson: String = "{}",
     val gprsEnabled: Boolean = true,
     val colorsServerUrl: String = "",
     val colorsTerminalId: String = "",
@@ -122,10 +131,11 @@ data class LauncherConfig(
      */
     val keybindingsJson: String?,
 ) {
-    fun toJson(): JSONObject = JSONObject().apply {
+    fun toJson(): JSONObject = JSONObject(originalJson).apply {
         put("schema_version", schemaVersion)
         put("default_cpu_backend", defaultCpuBackend)
         put("verbosity", verbosity)
+        put("log_unimplemented_apis", logUnimplementedApis)
         if (lastImportDir != null) put("last_import_dir", lastImportDir) else put("last_import_dir", JSONObject.NULL)
         put("show_fps", showFps)
         put("fullscreen", fullscreen)
@@ -135,6 +145,11 @@ data class LauncherConfig(
         put("bluetooth_enabled", bluetoothEnabled)
         put("camera_enabled", cameraEnabled)
         put("gps_enabled", gpsEnabled)
+        put("gps_fixed_enabled", gpsFixedEnabled)
+        put("gps_fixed_latitude", gpsFixedLatitude)
+        put("gps_fixed_longitude", gpsFixedLongitude)
+        put("upscale_filter", upscaleFilter)
+        put("android_display_scale", displayScale)
         put("gprs_enabled", gprsEnabled)
         put("colors_server_url", colorsServerUrl)
         put("colors_terminal_id", colorsTerminalId)
@@ -147,7 +162,7 @@ data class LauncherConfig(
     companion object {
         fun default(): LauncherConfig = LauncherConfig(
             schemaVersion = 1,
-            defaultCpuBackend = "stub",
+            defaultCpuBackend = "unicorn",
             verbosity = 1,
             lastImportDir = null,
             showFps = true,
@@ -161,8 +176,9 @@ data class LauncherConfig(
 
         fun fromJson(obj: JSONObject): LauncherConfig = LauncherConfig(
             schemaVersion = obj.optInt("schema_version", 1),
-            defaultCpuBackend = obj.optString("default_cpu_backend", "stub"),
+            defaultCpuBackend = obj.optString("default_cpu_backend", "unicorn"),
             verbosity = obj.optInt("verbosity", 1),
+            logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
             fullscreen = obj.optBoolean("fullscreen", false),
@@ -172,6 +188,12 @@ data class LauncherConfig(
             bluetoothEnabled = obj.optBoolean("bluetooth_enabled", false),
             cameraEnabled = obj.optBoolean("camera_enabled", false),
             gpsEnabled = obj.optBoolean("gps_enabled", false),
+            gpsFixedEnabled = obj.optBoolean("gps_fixed_enabled", false),
+            gpsFixedLatitude = obj.optDouble("gps_fixed_latitude", 0.0),
+            gpsFixedLongitude = obj.optDouble("gps_fixed_longitude", 0.0),
+            upscaleFilter = obj.optString("upscale_filter", "reconstruction"),
+            displayScale = obj.optInt("android_display_scale", 0).coerceIn(0,4),
+            originalJson = obj.toString(),
             gprsEnabled = obj.optBoolean("gprs_enabled", true),
             colorsServerUrl = obj.optString("colors_server_url", ""),
             colorsTerminalId = obj.optString("colors_terminal_id", ""),

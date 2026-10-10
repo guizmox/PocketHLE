@@ -1,0 +1,4 @@
+xbrz-rs 0.1.0 (same dependency as PocketHLE desktop).
+Upstream: https://crates.io/crates/xbrz-rs/0.1.0
+Dependency source/license is downloaded by Cargo and remains available in the Cargo registry.
+SMAA reference shaders and lookup textures include their MIT license under shaders/smaa/LICENSE.txt.

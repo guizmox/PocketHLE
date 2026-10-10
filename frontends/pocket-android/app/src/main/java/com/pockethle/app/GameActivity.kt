@@ -2,7 +2,6 @@ package com.pockethle.app
 
 import android.annotation.SuppressLint
 import android.content.res.Configuration
-import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -14,11 +13,9 @@ import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
-import android.widget.ImageButton
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.Toolbar
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.json.JSONObject
@@ -50,51 +47,26 @@ class GameActivity : AppCompatActivity() {
     private lateinit var surface: GLSurfaceView
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
-    private lateinit var fpsOverlay: TextView
-    private lateinit var toolbar: Toolbar
-    private lateinit var fullscreenButton: ImageButton
     private lateinit var gameControls: View
-    private lateinit var gameArea: View
-    private lateinit var glRenderer: FrameRenderer
+    private lateinit var glRenderer: AndroidFrameRenderer
+    private var displayScale = 0
+    private lateinit var bindings: InputBindings
 
     /** Cached handle from `nativeStartGame` (`0` once we've finished). */
     @Volatile private var session: Long = 0
+    private var joiningSession = false
 
     /** Most recent framebuffer the worker produced — held so we can
      * repaint after `surfaceChanged` resizes the SurfaceView even if
      * the worker has not produced a new frame yet. */
     private var lastFrame: FrameSnapshot? = null
 
-    /**
-     * j2me-loader-style FPS counter. Counts frames painted to the
-     * SurfaceView in a 1-second sliding window and exposes the
-     * latest value as the `displayed` text drawn in [paintFrame].
-     * Toggleable via the global "Show FPS counter" preference; when
-     * disabled the overlay is skipped entirely so it costs nothing.
-     */
-    private val fpsCounter = FpsCounter()
     @Volatile private var audioRunning = false
+    @Volatile private var audioGeneration = 0L
+    private val audioThreads = mutableListOf<Thread>()
     private var audioThread: Thread? = null
     private var audioTrack: AudioTrack? = null
 
-    /** Mirrors `LauncherConfig::show_fps`. Read once at activity
-     * start; toggling the global preference mid-game does not
-     * affect an already-running session, the same way j2me-loader
-     * applies its `Settings.showFps` snapshot at MIDlet start. */
-    private var showFps: Boolean = true
-
-    private var fullscreen: Boolean = false
-    private var fullscreenMode: String = "with_controls"
-
-    /** Mirrors `LauncherConfig::show_backend_log`. The status panel is
-     * a developer aid ("Backend: Unicorn (ARM)"), so it has to be
-     * possible to get it out of the picture. */
-    private var showBackendLog: Boolean = true
-
-    /** Mirrors `LauncherConfig::controls_opacity`, applied as the
-     * control strip's alpha. In landscape the buttons float over the
-     * framebuffer, so a solid pad would cover the bottom of the game;
-     * dropping the alpha lets the picture through. */
     private var controlsOpacity: Float = 1f
 
     /**
@@ -116,7 +88,7 @@ class GameActivity : AppCompatActivity() {
     private val heldGuestKeys = HashMap<Int, Int>()
     private val heldVirtualKeys = HashSet<Int>()
     /** Guest keys currently asserted by a gamepad stick or hat. */
-    private val heldAxisKeys = HashSet<Int>()
+    private val heldAxisKeys = HashMap<String, Int>()
     private var surfacePointerDown = false
     private var lastPointerX = 0
     private var lastPointerY = 0
@@ -149,70 +121,60 @@ class GameActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val config = readLauncherConfig()
-        fullscreen = config.fullscreen
-        fullscreenMode = config.fullscreenMode
-        showBackendLog = config.showBackendLog
+        bindings = InputBindings(config)
+        displayScale = config.displayScale
         controlsOpacity = config.controlsOpacity
-        requestedOrientation = orientationFor(config.orientation)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         setContentView(R.layout.activity_game)
-        toolbar = findViewById(R.id.toolbar)
-        setSupportActionBar(toolbar)
-        fullscreenButton = findViewById(R.id.btn_fullscreen)
-        fullscreenButton.setOnClickListener { toggleFullscreenWithControls() }
         gameControls = findViewById(R.id.game_controls)
-        gameArea = findViewById(R.id.game_area)
         gameControls.alpha = controlsOpacity
-        // The control strip overlays the game area, so the padding that
-        // keeps the picture clear of it in portrait can only be applied
-        // once the strip has been measured — and again whenever its
-        // height changes (fullscreen toggle, rotation).
-        gameControls.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateControlsLayout() }
-        updateFullscreenLayout()
-        if (fullscreen) {
-            toolbar.visibility = View.GONE
-            hideSystemBars()
-        }
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        hideSystemBars()
 
         val name = intent.getStringExtra(EXTRA_GAME_NAME) ?: "PocketHLE"
         title = name
 
         surface = findViewById(R.id.surface)
-        glRenderer = FrameRenderer()
-        surface.setEGLContextClientVersion(2)
+        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, displayScale)
+        surface.setEGLContextClientVersion(3)
         surface.setRenderer(glRenderer)
         surface.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         progress = findViewById(R.id.progress)
-        fpsOverlay = findViewById(R.id.fps_overlay)
         status = findViewById(R.id.status)
 
-        showFps = readShowFpsPreference()
-        status.visibility = if (showBackendLog) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.btn_stop_emulation).setOnClickListener { it.isEnabled=false; finishSession() }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.game_root)) { view, insets ->
+            val safe = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom); insets
+        }
+        status.visibility = View.GONE
 
         wireSurfaceTouchInput()
         wireVirtualGamepad()
 
         val id = intent.getStringExtra(EXTRA_GAME_ID)
         if (id == null) {
-            status.text = getString(R.string.run_failed_no_id)
-            progress.visibility = View.GONE
+            android.widget.Toast.makeText(this, getString(R.string.run_failed_no_id), android.widget.Toast.LENGTH_LONG).show()
+            finish()
             return
         }
 
         val rootDir = LibraryPaths.root(this)
-        rotationDegrees = readRotationDegrees(rootDir, id)
+        val isGizmondo = NativeBridge.isGizmondoGame(rootDir, id)
+        val fixedGps = config.gpsFixedEnabled && isGizmondo
+        rotationDegrees = if (isGizmondo) 0 else readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
         GpsHost.initialize(this)
         val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
             (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList()) +
-            (if (config.gpsEnabled) GpsHost.permissions().toList() else emptyList())
+            (if (config.gpsEnabled && !fixedGps) GpsHost.permissions().toList() else emptyList())
         val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
             hardwareStart = { startSession(rootDir, id) }
             // Android12 requires coarse and fine in the same precise-location request.
-            val requested = if (config.gpsEnabled && missing.contains(android.Manifest.permission.ACCESS_FINE_LOCATION))
+            val requested = if (config.gpsEnabled && !fixedGps && missing.contains(android.Manifest.permission.ACCESS_FINE_LOCATION))
                 (missing + GpsHost.permissions()).distinct() else missing
             hardwarePermissionRequest.launch(requested.toTypedArray())
         } else startSession(rootDir, id)
@@ -223,7 +185,8 @@ class GameActivity : AppCompatActivity() {
         val handle = NativeBridge.nativeStartGame(rootDir, id)
         if (handle == 0L) {
             progress.visibility = View.GONE
-            status.text = "Could not start emulator (see logcat)."
+            android.widget.Toast.makeText(this, "Démarrage impossible : consulter logcat", android.widget.Toast.LENGTH_LONG).show()
+            finish()
             return
         }
         session = handle
@@ -243,8 +206,7 @@ class GameActivity : AppCompatActivity() {
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        updateControlsLayout()
-        if (fullscreen) hideSystemBars()
+        hideSystemBars()
         // Re-submit the last frame so the picture is re-letterboxed for
         // the new window shape even if the guest is between frames. This
         // deliberately does not go through `paintFrame`, which would
@@ -257,6 +219,7 @@ class GameActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (::surface.isInitialized) surface.onResume()
         CameraHost.resume()
         GpsHost.resume()
         val handle = session
@@ -264,6 +227,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        if (::surface.isInitialized) surface.onPause()
         CameraHost.pause()
         GpsHost.pause()
         releaseHeldInput()
@@ -273,7 +237,7 @@ class GameActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && fullscreen) hideSystemBars()
+        if (hasFocus) hideSystemBars()
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -283,17 +247,14 @@ class GameActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (fullscreen) {
-            exitFullscreenWithControls()
-            return
-        }
+        if (joiningSession) return
+
         // Ask the emulator to wind down gracefully; the polling
         // tick will notice the worker exited and call finishSession.
         if (session != 0L) {
             NativeBridge.nativeRequestStop(session)
         }
-        @Suppress("DEPRECATION")
-        super.onBackPressed()
+        if (session != 0L) finishSession() else finish()
     }
 
     override fun onDestroy() {
@@ -312,11 +273,13 @@ class GameActivity : AppCompatActivity() {
     private fun finishSession() {
         val handle = session
         if (handle == 0L) return
+        joiningSession = true
         CameraHost.closeAll()
         GpsHost.closeAll()
         releaseHeldInput()
         session = 0
         stopAudio()
+        val audioToJoin = audioThreads.toList()
         progress.visibility = View.GONE
         // `nativeFinishGame` blocks on the worker thread join, so
         // do it off the UI thread to keep the UI responsive — the
@@ -324,9 +287,15 @@ class GameActivity : AppCompatActivity() {
         // a long emulator slice can drag it out a few hundred ms.
         Thread {
             NativeBridge.nativeRequestStop(handle)
+            audioToJoin.forEach { it.join() }
             val summary = NativeBridge.nativeFinishGame(handle)
             mainHandler.post {
-                status.text = summary
+                joiningSession = false
+                android.util.Log.i("PocketHLE", summary)
+                if (!isFinishing && !isDestroyed) {
+                    android.widget.Toast.makeText(this, "Émulation terminée. Détails dans les logs.", android.widget.Toast.LENGTH_SHORT).show()
+                    finish()
+                }
             }
         }.start()
     }
@@ -334,15 +303,17 @@ class GameActivity : AppCompatActivity() {
     private fun startAudio(handle: Long) {
         stopAudio()
         audioRunning = true
+        val generation=audioGeneration
+        audioThreads.removeAll { !it.isAlive }
         audioThread = Thread({
             var track: AudioTrack? = null
             try {
                 var packed = 0L
-                while (audioRunning && session == handle && packed == 0L) {
+                while (audioRunning && generation == audioGeneration && session == handle && packed == 0L) {
                     packed = NativeBridge.nativeAudioFormat(handle)
                     if (packed == 0L) Thread.sleep(20)
                 }
-                if (!audioRunning || session != handle || packed == 0L) {
+                if (!audioRunning || generation != audioGeneration || session != handle || packed == 0L) {
                     android.util.Log.w("PocketHLE", "Audio format was not announced by the guest")
                     return@Thread
                 }
@@ -371,12 +342,12 @@ class GameActivity : AppCompatActivity() {
                 audioTrack = track
                 track.play()
                 android.util.Log.i("PocketHLE", "AudioTrack started: ${rate}Hz, ${channels}ch, buffer=${bufferSize}B")
-                while (audioRunning && session == handle) {
+                while (audioRunning && generation == audioGeneration && session == handle) {
                     val pcm = NativeBridge.nativePollAudio(handle, 4096)
                     if (pcm != null && pcm.isNotEmpty()) {
-                        writeAudio(track, pcm)
+                        writeAudio(track, pcm, generation)
                     } else {
-                        writeSilence(track, maxOf(channels * rate / 200, 256))
+                        writeSilence(track, maxOf(channels * rate / 200, 256), generation)
                         Thread.sleep(5)
                     }
                 }
@@ -389,13 +360,14 @@ class GameActivity : AppCompatActivity() {
                 if (audioTrack === track) audioTrack = null
             }
         }, "pockethle-audio")
-        audioThread?.start()
+        audioThread?.let { audioThreads.add(it);it.start() }
     }
 
     private fun stopAudio() {
         audioRunning = false
-        audioTrack?.pause()
-        audioTrack?.flush()
+        audioGeneration++
+        runCatching { audioTrack?.pause() }
+        runCatching { audioTrack?.flush() }
         val oldThread = audioThread
         audioThread = null
         audioTrack = null
@@ -405,17 +377,17 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
-    private fun writeAudio(track: AudioTrack, pcm: ShortArray) {
+    private fun writeAudio(track: AudioTrack, pcm: ShortArray, generation: Long) {
         var offset = 0
-        while (offset < pcm.size && audioRunning) {
+        while (offset < pcm.size && audioRunning && generation == audioGeneration) {
             val written = track.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_BLOCKING)
             if (written <= 0) return
             offset += written
         }
     }
 
-    private fun writeSilence(track: AudioTrack, samples: Int) {
-        writeAudio(track, ShortArray(samples))
+    private fun writeSilence(track: AudioTrack, samples: Int, generation: Long) {
+        writeAudio(track, ShortArray(samples), generation)
     }
 
     // -------------------------------------------------------------------
@@ -437,31 +409,7 @@ class GameActivity : AppCompatActivity() {
         progress.visibility = View.GONE
         glRenderer.submit(frame)
         surface.requestRender()
-        fpsCounter.recordFrame()
-        updateFpsOverlay()
-    }
 
-    private fun updateFpsOverlay() {
-        if (showFps) {
-            fpsOverlay.text = "FPS ${fpsCounter.lastSecondCount}"
-            fpsOverlay.visibility = View.VISIBLE
-        } else {
-            fpsOverlay.visibility = View.GONE
-        }
-    }
-
-    /**
-     * Read the global "Show FPS counter" preference from the
-     * library's `config.json`. Falls back to `true` if the file is
-     * missing or malformed, matching `LauncherConfig::default`.
-     */
-    private fun readShowFpsPreference(): Boolean {
-        val raw = NativeBridge.readConfig(LibraryPaths.root(this))
-        return runCatching {
-            val obj = JSONObject(raw)
-            if (obj.has("ok") && !obj.optBoolean("ok", true)) true
-            else obj.optBoolean("show_fps", true)
-        }.getOrDefault(true)
     }
 
     /**
@@ -484,76 +432,11 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
-    private fun orientationFor(value: String): Int = when (value) {
-        "portrait" -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        "landscape" -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-    }
-
     private fun hideSystemBars() {
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = (
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-            )
-        window.decorView.setOnSystemUiVisibilityChangeListener { visibility ->
-            if (fullscreen && visibility and View.SYSTEM_UI_FLAG_FULLSCREEN == 0) {
-                hideSystemBars()
-            }
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
         }
-    }
-
-    private fun toggleFullscreenWithControls() {
-        if (fullscreen) {
-            exitFullscreenWithControls()
-        } else {
-            fullscreen = true
-            updateFullscreenLayout()
-            fullscreenButton.setImageResource(R.drawable.ic_fullscreen_exit)
-            hideSystemBars()
-        }
-    }
-
-    private fun exitFullscreenWithControls() {
-        fullscreen = false
-        updateFullscreenLayout()
-        fullscreenButton.setImageResource(R.drawable.ic_fullscreen)
-        showSystemBars()
-    }
-
-    private fun updateFullscreenLayout() {
-        toolbar.visibility = if (fullscreen) View.GONE else View.VISIBLE
-        gameControls.visibility = if (fullscreen && fullscreenMode == "without_controls") View.GONE else View.VISIBLE
-        updateControlsLayout()
-    }
-
-    /**
-     * Keep the framebuffer clear of the overlaid control strip.
-     *
-     * In portrait there is height to spare, so the game area is padded
-     * by exactly the strip's height and the picture sits above the
-     * buttons the way it always has. In landscape the window is barely
-     * taller than the strip itself — the old vertical LinearLayout is
-     * what squeezed the surface into a sliver in the rotated screenshot
-     * — so the padding is dropped and the (semi-transparent, see
-     * `controls_opacity`) buttons float over the picture instead.
-     */
-    private fun updateControlsLayout() {
-        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        val strip = if (gameControls.visibility == View.VISIBLE && !landscape) gameControls.height else 0
-        if (gameArea.paddingBottom != strip) {
-            gameArea.setPadding(0, 0, 0, strip)
-        }
-    }
-
-    private fun showSystemBars() {
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        window.decorView.setOnSystemUiVisibilityChangeListener(null)
     }
 
     private fun readLauncherConfig(): LauncherConfig {
@@ -563,36 +446,6 @@ class GameActivity : AppCompatActivity() {
             if (obj.has("ok") && !obj.optBoolean("ok", true)) LauncherConfig.default()
             else LauncherConfig.fromJson(obj)
         }.getOrDefault(LauncherConfig.default())
-    }
-
-    /**
-     * j2me-loader-inspired FPS sampler. `recordFrame()` is called
-     * once per painted frame; every full second of wall-clock the
-     * total is latched into [lastSecondCount] (the number drawn in
-     * the overlay) and the running counter is reset. Mirrors the
-     * `FpsCounter` class shipped with j2me-loader, just without
-     * the periodic `Timer`: we already have a UI repaint cadence,
-     * so we sample lazily.
-     */
-    private class FpsCounter {
-        private var windowStart: Long = 0L
-        private var inFlight: Int = 0
-
-        @Volatile var lastSecondCount: Int = 0
-            private set
-
-        fun recordFrame() {
-            val now = SystemClock.uptimeMillis()
-            if (windowStart == 0L) {
-                windowStart = now
-            }
-            inFlight += 1
-            if (now - windowStart >= 1000L) {
-                lastSecondCount = inFlight
-                inFlight = 0
-                windowStart = now
-            }
-        }
     }
 
     // -------------------------------------------------------------------
@@ -608,7 +461,14 @@ class GameActivity : AppCompatActivity() {
      * Start code.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val vk = virtualKeyFor(event.keyCode) ?: return super.dispatchKeyEvent(event)
+        if (event.keyCode == KeyEvent.KEYCODE_F10) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) { glRenderer.requestScreenshot(); surface.requestRender() }
+            return true
+        }
+        val sources = event.device?.sources ?: event.source
+        val isController = sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD || sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+        val vk = (if (isController) InputBindings.controllerName(event.keyCode)?.let { bindings.controllerKey(it) }
+            else if (InputBindings.keyName(event) != null) bindings.keyboardKey(event) else virtualKeyFor(event.keyCode)) ?: return super.dispatchKeyEvent(event)
         val handle = session
         if (handle == 0L) return super.dispatchKeyEvent(event)
         when (event.action) {
@@ -646,6 +506,7 @@ class GameActivity : AppCompatActivity() {
         KeyEvent.KEYCODE_F1 -> VK_F1
         KeyEvent.KEYCODE_F2 -> VK_F2
         KeyEvent.KEYCODE_F3 -> VK_F3
+        KeyEvent.KEYCODE_F4 -> 0x73
         KeyEvent.KEYCODE_F11 -> VK_F11
         else -> null
     }
@@ -665,27 +526,23 @@ class GameActivity : AppCompatActivity() {
         if (!joystick || handle == 0L || event.action != MotionEvent.ACTION_MOVE) {
             return super.onGenericMotionEvent(event)
         }
-        val x = strongestAxis(event, MotionEvent.AXIS_HAT_X, MotionEvent.AXIS_X)
-        val y = strongestAxis(event, MotionEvent.AXIS_HAT_Y, MotionEvent.AXIS_Y)
-        applyAxisKey(handle, VK_LEFT, x <= -AXIS_DEADZONE)
-        applyAxisKey(handle, VK_RIGHT, x >= AXIS_DEADZONE)
-        applyAxisKey(handle, VK_UP, y <= -AXIS_DEADZONE)
-        applyAxisKey(handle, VK_DOWN, y >= AXIS_DEADZONE)
-        return true
-    }
-
-    /** The hat wins when it is off centre, otherwise the analog stick. */
-    private fun strongestAxis(event: MotionEvent, hatAxis: Int, stickAxis: Int): Float {
-        val hat = event.getAxisValue(hatAxis)
-        return if (kotlin.math.abs(hat) >= AXIS_DEADZONE) hat else event.getAxisValue(stickAxis)
-    }
-
-    private fun applyAxisKey(handle: Long, vk: Int, pressed: Boolean) {
-        if (pressed) {
-            if (heldAxisKeys.add(vk)) acquireGuestKey(handle, vk)
-        } else if (heldAxisKeys.remove(vk)) {
-            releaseGuestKey(handle, vk)
+        val desired = linkedMapOf<String,Int>()
+        fun axis(name: String,value: Float,negative: String,positive: String) {
+            if(value <= -AXIS_DEADZONE) bindings.controllerKey(name+negative)?.let { desired[name+negative]=it }
+            if(value >= AXIS_DEADZONE) bindings.controllerKey(name+positive)?.let { desired[name+positive]=it }
         }
+        axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_X),"Left","Right")
+        axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_Y),"Up","Down")
+        axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_X),"Left","Right")
+        axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_Y),"Up","Down")
+        axis("RightStick",event.getAxisValue(MotionEvent.AXIS_Z),"Left","Right")
+        axis("RightStick",event.getAxisValue(MotionEvent.AXIS_RZ),"Up","Down")
+        listOf("LeftTrigger2" to MotionEvent.AXIS_LTRIGGER,"RightTrigger2" to MotionEvent.AXIS_RTRIGGER).forEach { (name,axis) ->
+            if(event.getAxisValue(axis)>.60f) bindings.controllerKey(name)?.let { desired[name]=it }
+        }
+        heldAxisKeys.keys.toList().filter { it !in desired }.forEach { name -> heldAxisKeys.remove(name)?.let { releaseGuestKey(handle,it) } }
+        desired.forEach { (name,vk) -> if (heldAxisKeys.putIfAbsent(name,vk)==null) acquireGuestKey(handle,vk) }
+        return true
     }
 
     private fun acquireGuestKey(handle: Long, vk: Int) {
@@ -781,7 +638,11 @@ class GameActivity : AppCompatActivity() {
         bindVk(R.id.btn_left, VK_LEFT)
         bindVk(R.id.btn_right, VK_RIGHT)
         bindVk(R.id.btn_action, VK_RETURN)
-        bindVk(R.id.btn_turbo, VK_F3)
+        bindVk(R.id.btn_piano1, 0x70)
+        bindVk(R.id.btn_piano2, 0x71)
+        bindVk(R.id.btn_piano3, 0x72)
+        bindVk(R.id.btn_piano4, 0x73)
+        bindVk(R.id.btn_piano5, 0x7A)
         bindVk(R.id.btn_a, VK_CTRL)
         bindVk(R.id.btn_b, VK_SPACE)
         bindVk(R.id.btn_c, VK_SHIFT)
@@ -827,184 +688,15 @@ class GameActivity : AppCompatActivity() {
         event: MotionEvent,
         frame: FrameSnapshot,
     ): Pair<Int, Int>? {
-        val viewW = v.width.toFloat()
-        val viewH = v.height.toFloat()
-        if (viewW <= 0 || viewH <= 0) return null
-        val quarter = rotationDegrees == 90 || rotationDegrees == 270
-        val shownW = if (quarter) frame.height else frame.width
-        val shownH = if (quarter) frame.width else frame.height
-        val scale = minOf(viewW / shownW, viewH / shownH)
-        val drawnW = shownW * scale
-        val drawnH = shownH * scale
-        val dx = event.x - (viewW - drawnW) / 2f
-        val dy = event.y - (viewH - drawnH) / 2f
-        if (dx < 0f || dy < 0f || dx >= drawnW || dy >= drawnH) return null
-        val px = (dx / scale).toInt().coerceIn(0, shownW - 1)
-        val py = (dy / scale).toInt().coerceIn(0, shownH - 1)
-        val (gx, gy) = when (rotationDegrees) {
-            90 -> py to (shownW - 1 - px)
-            180 -> (shownW - 1 - px) to (shownH - 1 - py)
-            270 -> (shownH - 1 - py) to px
-            else -> px to py
-        }
-        return gx.coerceIn(0, frame.width - 1) to gy.coerceIn(0, frame.height - 1)
+        return displayPointToGuest(event.x,event.y,v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale)
     }
 
-    private data class FrameSnapshot(
+    data class FrameSnapshot(
         val width: Int,
         val height: Int,
         val rgba: ByteArray,
         val rgbaOffset: Int,
     )
-
-    private class FrameRenderer : GLSurfaceView.Renderer {
-        @Volatile private var pending: FrameSnapshot? = null
-        private var texture = 0
-        private var program = 0
-        private var vertexBuffer: java.nio.FloatBuffer? = null
-        private var positionHandle = 0
-        private var texCoordHandle = 0
-        private var textureHandle = 0
-        private var samplerHandle = 0
-        private var textureWidth = 0
-        private var textureHeight = 0
-        private var viewportWidth = 1
-        private var viewportHeight = 1
-        /** Clockwise quarter turn applied when the quad is drawn. */
-        @Volatile private var rotationDegrees = 0
-
-        fun submit(frame: FrameSnapshot) {
-            pending = frame
-        }
-
-        /**
-         * Set the presentation turn (0/90/180/270, clockwise).
-         *
-         * The rotation is applied to the texture coordinates rather than
-         * to the guest framebuffer, so the game keeps rendering into the
-         * 240x320 panel it was written for (JumpyBall only draws
-         * correctly at that size) while the player sees the landscape
-         * picture the game was designed around.
-         */
-        fun setRotationDegrees(degrees: Int) {
-            rotationDegrees = ((degrees % 360) + 360) % 360
-        }
-
-        override fun onSurfaceCreated(gl: javax.microedition.khronos.opengles.GL10?, config: javax.microedition.khronos.egl.EGLConfig?) {
-            GLES20.glClearColor(0f, 0f, 0f, 1f)
-            program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
-            val textures = IntArray(1)
-            GLES20.glGenTextures(1, textures, 0)
-            texture = textures[0]
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            vertexBuffer = java.nio.ByteBuffer.allocateDirect(VERTICES.size * 4)
-                .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer().apply { put(VERTICES); position(0) }
-            positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
-            texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
-            textureHandle = GLES20.glGetUniformLocation(program, "uTexture")
-            samplerHandle = textureHandle
-        }
-
-        override fun onSurfaceChanged(gl: javax.microedition.khronos.opengles.GL10?, width: Int, height: Int) {
-            GLES20.glViewport(0, 0, width, height)
-            viewportWidth = width
-            viewportHeight = height
-        }
-
-        override fun onDrawFrame(gl: javax.microedition.khronos.opengles.GL10?) {
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            val frame = pending ?: return
-            GLES20.glUseProgram(program)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-            val pixels = java.nio.ByteBuffer.wrap(frame.rgba, frame.rgbaOffset, frame.width * frame.height * 4).slice()
-            if (frame.width != textureWidth || frame.height != textureHeight) {
-                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, frame.width, frame.height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
-                textureWidth = frame.width
-                textureHeight = frame.height
-            } else {
-                GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, frame.width, frame.height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
-            }
-            // A quarter turn swaps the presented aspect ratio, so the
-            // letterbox has to be computed from the *shown* size, not
-            // from the framebuffer's own width and height.
-            val turn = rotationDegrees
-            val quarter = turn == 90 || turn == 270
-            val shownWidth = if (quarter) frame.height else frame.width
-            val shownHeight = if (quarter) frame.width else frame.height
-            val scale = minOf(viewportWidth.toFloat() / shownWidth, viewportHeight.toFloat() / shownHeight)
-            val drawnWidth = shownWidth * scale
-            val drawnHeight = shownHeight * scale
-            val left = (viewportWidth - drawnWidth) / viewportWidth - 1f
-            val right = (viewportWidth + drawnWidth) / viewportWidth - 1f
-            val bottom = 1f - (viewportHeight + drawnHeight) / viewportHeight
-            val top = 1f - (viewportHeight - drawnHeight) / viewportHeight
-            // Texture coordinates per screen corner. Rotating the image
-            // clockwise means each displayed corner samples the source
-            // corner one step counter-clockwise from it: at 90° the
-            // top-left of the picture is the bottom-left of the guest
-            // framebuffer.
-            // Order: bottom-left, bottom-right, top-left, top-right —
-            // the order the quad's vertices are written below.
-            val uv = when (turn) {
-                90 -> floatArrayOf(1f, 1f, 1f, 0f, 0f, 1f, 0f, 0f)
-                180 -> floatArrayOf(1f, 0f, 0f, 0f, 1f, 1f, 0f, 1f)
-                270 -> floatArrayOf(0f, 0f, 0f, 1f, 1f, 0f, 1f, 1f)
-                else -> floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f)
-            }
-            vertexBuffer?.let { buffer ->
-                buffer.clear()
-                buffer.put(floatArrayOf(
-                    left, bottom, uv[0], uv[1],
-                    right, bottom, uv[2], uv[3],
-                    left, top, uv[4], uv[5],
-                    right, top, uv[6], uv[7],
-                ))
-                buffer.position(0)
-                GLES20.glEnableVertexAttribArray(positionHandle)
-                GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 16, buffer)
-                buffer.position(2)
-                GLES20.glEnableVertexAttribArray(texCoordHandle)
-                GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 16, buffer)
-                GLES20.glUniform1i(samplerHandle, 0)
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            }
-        }
-
-        private fun buildProgram(vertex: String, fragment: String): Int {
-            val vs = compileShader(GLES20.GL_VERTEX_SHADER, vertex)
-            val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fragment)
-            return GLES20.glCreateProgram().also { p ->
-                GLES20.glAttachShader(p, vs)
-                GLES20.glAttachShader(p, fs)
-                GLES20.glLinkProgram(p)
-                GLES20.glDeleteShader(vs)
-                GLES20.glDeleteShader(fs)
-            }
-        }
-
-        private fun compileShader(type: Int, source: String): Int {
-            return GLES20.glCreateShader(type).also { shader ->
-                GLES20.glShaderSource(shader, source)
-                GLES20.glCompileShader(shader)
-            }
-        }
-
-        companion object {
-            private val VERTICES = floatArrayOf(
-                -1f, -1f, 0f, 1f,
-                 1f, -1f, 1f, 1f,
-                -1f,  1f, 0f, 0f,
-                 1f,  1f, 1f, 0f,
-            )
-            private const val VERTEX_SHADER = "attribute vec2 aPosition; attribute vec2 aTexCoord; varying vec2 vTexCoord; void main() { gl_Position = vec4(aPosition, 0.0, 1.0); vTexCoord = aTexCoord; }"
-            private const val FRAGMENT_SHADER = "precision mediump float; varying vec2 vTexCoord; uniform sampler2D uTexture; void main() { gl_FragColor = texture2D(uTexture, vTexCoord); }"
-        }
-    }
 
     companion object {
         const val EXTRA_GAME_ID = "com.pockethle.app.EXTRA_GAME_ID"

@@ -1,0 +1,18 @@
+<resources>
+<item name="btn_up" type="id"/>
+<item name="btn_down" type="id"/>
+<item name="btn_left" type="id"/>
+<item name="btn_right" type="id"/>
+<item name="btn_action" type="id"/>
+<item name="btn_a" type="id"/>
+<item name="btn_b" type="id"/>
+<item name="btn_c" type="id"/>
+<item name="btn_soft1" type="id"/>
+<item name="btn_soft2" type="id"/>
+<item name="btn_piano1" type="id"/>
+<item name="btn_piano2" type="id"/>
+<item name="btn_piano3" type="id"/>
+<item name="btn_piano4" type="id"/>
+<item name="btn_piano5" type="id"/>
+<item name="btn_stop_emulation" type="id"/>
+</resources>

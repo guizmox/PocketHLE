@@ -2846,6 +2846,7 @@ dependencies = [
  "pocket-library",
  "serde",
  "serde_json",
+ "xbrz-rs",
 ]
 
 [[package]]

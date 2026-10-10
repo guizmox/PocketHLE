@@ -1,0 +1,5 @@
+FFmpeg 8.0.1 is statically linked with GPL/nonfree features disabled.
+License: LGPL version 2.1 or later. Upstream source: https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+The pinned source and exact build switches are supplied by tools/build-ffmpeg.sh.
+The native build copies the complete LGPL text into this directory.
+Distribute source/build instructions and relinkable app/native objects with public APK releases as required by LGPL.

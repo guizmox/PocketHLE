@@ -19,6 +19,7 @@
             android:background="?attr/colorPrimary"
             app:popupTheme="@style/ThemeOverlay.AppCompat.Light"
             app:title="@string/app_name" />
+        <com.google.android.material.tabs.TabLayout android:id="@+id/platform_tabs" android:layout_width="match_parent" android:layout_height="48dp" app:tabMode="fixed"/>
     </com.google.android.material.appbar.AppBarLayout>
 
     <FrameLayout

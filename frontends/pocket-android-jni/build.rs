@@ -67,8 +67,8 @@ fn main() {
         // search-order quirks in `cargo-ndk`'s linker wrapper.
         println!("cargo:rustc-link-arg={}", builtins.display());
     } else {
-        println!(
-            "cargo:warning=pocket-android-jni: could not locate \
+        panic!(
+            "pocket-android-jni: could not locate \
              libclang_rt.builtins for target {target}; \
              set ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) to your NDK root. \
              Android JIT (unicorn) will fail to dlopen without this archive."
@@ -136,15 +136,12 @@ fn clang_rt_arch_for_target(target: &str) -> Option<&'static str> {
 /// developer machines targeted here all use `linux-x86_64`; this still
 /// produces sensible names for other dev hosts that may clone the repo.
 fn ndk_host_tag() -> String {
-    let host_os = match env::consts::OS {
-        "macos" => "darwin",
-        // "linux" / "windows" / anything else maps to itself; the NDK uses
-        // the same names.
-        other => other,
-    };
-    // `env::consts::ARCH` already matches the suffixes the NDK uses
-    // (`x86_64` / `aarch64`), so no remap is needed.
-    format!("{host_os}-{}", env::consts::ARCH)
+    match env::consts::OS {
+        "macos" => "darwin-x86_64".into(),
+        "linux" => "linux-x86_64".into(),
+        "windows" => "windows-x86_64".into(),
+        other => panic!("Unsupported NDK build host: {other}"),
+    }
 }
 
 fn parse_version(name: &str) -> i64 {

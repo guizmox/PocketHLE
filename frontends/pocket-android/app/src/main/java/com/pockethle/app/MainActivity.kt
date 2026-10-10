@@ -32,6 +32,7 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
 
     private lateinit var adapter: GameAdapter
+    private var gizmondoTab = true
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
     private lateinit var rootDir: String
@@ -60,10 +61,20 @@ class MainActivity : AppCompatActivity() {
                 )
             },
             onRemove = { entry -> confirmRemove(entry) },
+            onRename = { entry -> renameGame(entry) },
             libraryRoot = rootDir,
         )
         recycler.layoutManager = GridLayoutManager(this, gridSpanCount())
         recycler.adapter = adapter
+        gizmondoTab = savedInstanceState?.getBoolean("gizmondo_tab", true) ?: true
+        val tabs = findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs)
+        tabs.addTab(tabs.newTab().setText("Gizmondo"), gizmondoTab)
+        tabs.addTab(tabs.newTab().setText("Pocket PC"), !gizmondoTab)
+        tabs.addOnTabSelectedListener(object : com.google.android.material.tabs.TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab) { gizmondoTab = tab.position == 0; refreshLibrary() }
+            override fun onTabUnselected(tab: com.google.android.material.tabs.TabLayout.Tab) {}
+            override fun onTabReselected(tab: com.google.android.material.tabs.TabLayout.Tab) {}
+        })
 
         findViewById<FloatingActionButton>(R.id.fab_import).setOnClickListener {
             importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
@@ -101,12 +112,32 @@ class MainActivity : AppCompatActivity() {
     /** Roughly 110dp-wide tiles, like a game launcher grid; at least 2 columns. */
     private fun gridSpanCount(): Int {
         val widthDp = resources.configuration.screenWidthDp
-        return (widthDp / 110).coerceAtLeast(2)
+        return (widthDp / 164).coerceAtLeast(2)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("gizmondo_tab", gizmondoTab); super.onSaveInstanceState(outState)
+    }
+
+    private fun renameGame(entry: GameEntry) {
+        val input = android.widget.EditText(this).apply { setText(entry.displayName); selectAll(); isSingleLine = true }
+        val dialog = AlertDialog.Builder(this).setTitle("Renommer le jeu").setView(input)
+            .setNegativeButton(android.R.string.cancel,null).setPositiveButton("Enregistrer",null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name=input.text.toString().trim()
+                if(name.isBlank()) { input.error="Le nom est obligatoire"; return@setOnClickListener }
+                val result=runCatching { JSONObject(NativeBridge.renameGame(rootDir,entry.id,name)) }.getOrNull()
+                if(result?.optBoolean("ok",false)==true) { dialog.dismiss(); refreshLibrary() }
+                else input.error=result?.optString("error") ?: "Enregistrement impossible"
+            }
+        }
+        dialog.show()
     }
 
     private fun refreshLibrary() {
         val raw = NativeBridge.listGames(rootDir)
-        val parsed = parseGamesOrToast(raw)
+        val parsed = parseGamesOrToast(raw).filter { NativeBridge.isGizmondoGame(rootDir,it.id) == gizmondoTab }
         adapter.submit(parsed)
         if (parsed.isEmpty()) {
             recycler.visibility = View.GONE

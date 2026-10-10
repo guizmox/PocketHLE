@@ -26,11 +26,13 @@
 
 mod managed_game;
 mod runner;
+mod unimplemented_log;
 mod bluetooth;
 mod camera;
 mod gps;
 mod internet;
 
+use anyhow::Context;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -40,7 +42,7 @@ use jni::JNIEnv;
 
 use pocket_core::kernel::InputEvent;
 use pocket_core::Emulator;
-use pocket_library::{CpuBackendPref, GameEntry, GameSettings, Library};
+use pocket_library::{GameEntry, GameSettings, Library};
 use serde::Serialize;
 
 use crate::runner::{InputCommand, Session};
@@ -386,16 +388,7 @@ fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
         ];
         let exe = entry.launch_path(root);
         summary_lines.push(format!("Executable: {}", exe.display()));
-        let mut emu = match entry.settings.cpu_backend {
-            CpuBackendPref::Stub => Emulator::with_stub_cpu(),
-            CpuBackendPref::Unicorn => match build_unicorn() {
-                Ok(emu) => emu,
-                Err(e) => {
-                    summary_lines.push(format!("Unicorn unavailable, falling back to stub: {e}"));
-                    Emulator::with_stub_cpu()
-                }
-            },
-        };
+        let mut emu = build_unicorn().context("Unicorn unavailable")?;
         emu.set_halt_on_unimplemented(entry.settings.halt_on_unimplemented);
         emu.max_slices = entry.settings.max_slices;
         emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
@@ -538,7 +531,7 @@ fn init_logger() {
     ONCE.call_once(|| {
         android_logger::init_once(
             android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Info)
+                .with_max_level(log::LevelFilter::Trace)
                 .with_tag("PocketHLE"),
         );
     });
@@ -816,4 +809,43 @@ mod tests {
         assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_renameGame<'local>(
+    mut env: JNIEnv<'local>, _class: JClass<'local>, root: JString<'local>, id: JString<'local>, name: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<()> {
+        let root = jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        let id: String = env.get_string(&id)?.into();
+        let name: String = env.get_string(&name)?.into();
+        Library::open(root)?.rename_game(&id, &name)?;
+        Ok(())
+    })();
+    new_jstring(&env, match result { Ok(()) => "{\"ok\":true}".into(), Err(e) => error_json(&e.to_string()) })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_isGizmondoGame<'local>(
+    mut env: JNIEnv<'local>, _class: JClass<'local>, root: JString<'local>, id: JString<'local>,
+) -> jni::sys::jboolean {
+    let result = (|| -> anyhow::Result<bool> {
+        let root = jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        let id: String = env.get_string(&id)?.into();
+        let lib = Library::open(&root)?;
+        Ok(lib.games().iter().find(|e| e.id == id).map(|e| pocket_library::is_gizmondo_game(e, &root)).unwrap_or(false))
+    })();
+    u8::from(result.unwrap_or(false))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_upscaleXbrz<'local>(
+    env: JNIEnv<'local>, _class: JClass<'local>, rgba: jni::objects::JByteArray<'local>, width: jint, height: jint,
+) -> jbyteArray {
+    if width <= 0 || height <= 0 || width > 2048 || height > 2048 { return std::ptr::null_mut(); }
+    let Ok(bytes) = env.convert_byte_array(rgba) else { return std::ptr::null_mut(); };
+    if bytes.len() != width as usize * height as usize * 4 { return std::ptr::null_mut(); }
+    let scaled = xbrz::scale_rgba(&bytes, width as usize, height as usize, 3);
+    env.byte_array_from_slice(&scaled).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut())
 }

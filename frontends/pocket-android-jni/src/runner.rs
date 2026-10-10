@@ -281,9 +281,8 @@ fn run_game_to_completion(
         CpuBackendPref::Unicorn => match build_unicorn_for_machine(machine) {
             Ok(emu) => emu,
             Err(e) => {
-                summary_lines.push(format!("Unicorn unavailable, falling back to stub: {e}"));
-                effective_backend = CpuBackendPref::Stub;
-                Emulator::with_stub_cpu()
+                summary_lines.push(format!("Unicorn unavailable: {e}"));
+                return summary_lines.join("\n");
             }
         },
         CpuBackendPref::Stub => match build_unicorn_for_machine(machine) {
@@ -296,7 +295,7 @@ fn run_game_to_completion(
                 effective_backend = CpuBackendPref::Unicorn;
                 emu
             }
-            Err(_) => Emulator::with_stub_cpu(),
+            Err(e) => return format!("Unicorn unavailable: {e}"),
         },
     };
     summary_lines.push(format!("Effective backend: {}", effective_backend.label()));
@@ -317,11 +316,24 @@ fn run_game_to_completion(
     }
     let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
     let launcher_config = pocket_library::Library::open(library_root).map(|l| l.config().clone()).unwrap_or_default();
+    emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
+        library_root.join("pockethle-unimplemented.log"), entry.display_name.clone(),
+        exe.display().to_string(), Arc::new(std::sync::atomic::AtomicBool::new(launcher_config.log_unimplemented_apis)),
+    )));
+    log::set_max_level(match launcher_config.verbosity { 0 => log::LevelFilter::Warn, 1 => log::LevelFilter::Info, 2 => log::LevelFilter::Debug, _ => log::LevelFilter::Trace });
     let hardware = (launcher_config.bluetooth_enabled, launcher_config.camera_enabled, launcher_config.gps_enabled);
     if let Some(process) = emu.process_mut() {
         process.state.vfs.bluetooth.service.set_allowed(hardware.0);
         process.state.vfs.camera_service().set_allowed(hardware.1);
         process.state.vfs.gps_service().set_allowed(hardware.2);
+        if is_gizmondo && launcher_config.gps_fixed_enabled {
+            let gps = process.state.vfs.gps_service();
+            if let Err(e) = gps.set_fixed_position(Some((launcher_config.gps_fixed_latitude, launcher_config.gps_fixed_longitude))) {
+                return format!("Invalid fixed GPS coordinates: {e}");
+            }
+            gps.set_allowed(true);
+            log::info!("GPS1 fixed simulation activated on Android");
+        }
         if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
             summary_lines.push(format!("Cannot load device registry: {e}"));
             return summary_lines.join("\n");
@@ -354,7 +366,7 @@ fn run_game_to_completion(
         *slot = emu.audio_tap();
     }
     emu.start_audio();
-    let (screen_width, screen_height) = entry.settings.screen.size();
+    let (screen_width, screen_height) = if is_gizmondo { (320, 240) } else { entry.settings.screen.size() };
     emu.set_screen_size(screen_width, screen_height);
     summary_lines.push(format!("Screen: {screen_width}x{screen_height}"));
     let extracted = entry.extracted_dir(library_root);
@@ -362,6 +374,7 @@ fn run_game_to_completion(
     emu.mount_read_only_dir("\\Program Files\\", &extracted);
     emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
     if is_gizmondo {
+        emu.mount_save_dir("\\Flash Disk\\", library_root.join("flash"));
         emu.mount_read_only_dir("\\SD Card\\", &extracted);
         emu.mount_read_only_dir("\\Storage Card\\", &extracted);
         emu.mount_read_only_dir("\\SD Card\\Game\\", &extracted);

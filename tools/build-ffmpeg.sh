@@ -10,6 +10,14 @@ media_build="$project_root/target/native/ffmpeg-build/$media_target"
 media_source="$project_root/target/native/ffmpeg-source/ffmpeg-8.0.1"
 media_archive="$project_root/third-party/ffmpeg/ffmpeg-8.0.1.tar.xz"
 mkdir -p "$media_build" "$media_prefix" "$(dirname "$media_source")"
+# Older source ZIPs omitted third-party/. Fetch only the pinned upstream archive.
+if [[ ! -f "$media_archive" ]]; then
+    media_archive="$project_root/target/native/ffmpeg-source/ffmpeg-8.0.1.tar.xz"
+    if [[ ! -f "$media_archive" ]]; then
+        curl --fail --location --retry 3 https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz -o "$media_archive.partial"
+        mv "$media_archive.partial" "$media_archive"
+    fi
+fi
 printf '%s  %s\n' '05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41' "$media_archive" | sha256sum -c -
 if [[ ! -f "$media_source/configure" ]]; then
     tar --no-same-owner -xf "$media_archive" -C "$(dirname "$media_source")"
@@ -33,6 +41,24 @@ if [[ "$media_target" == x86_64-pc-windows-msvc ]]; then
     # Rust's normal MSVC build uses the dynamic system CRT (/MD). FFmpeg
     # itself remains static; no FFmpeg DLLs or executables are produced.
     options+=(--toolchain=msvc --arch=x86_64 --target-os=win64 --extra-cflags=-MD)
+elif [[ "$media_target" == *android* ]]; then
+    : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to Android NDK r28c}"
+    case "$(uname -s)" in
+        Linux) media_host=linux-x86_64;;
+        Darwin) media_host=darwin-x86_64;;
+        *) echo "Android cross-build: use Linux/WSL2 or macOS" >&2; exit 1;;
+    esac
+    media_toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$media_host"
+    case "$media_target" in
+        aarch64-linux-android) media_arch=aarch64; media_triple=aarch64-linux-android;;
+        armv7-linux-androideabi) media_arch=arm; media_triple=armv7a-linux-androideabi;;
+        *) echo "Unsupported Android target: $media_target" >&2; exit 1;;
+    esac
+    options+=(--target-os=android --arch="$media_arch" --enable-cross-compile
+        --cc="$media_toolchain/bin/${media_triple}24-clang"
+        --cxx="$media_toolchain/bin/${media_triple}24-clang++"
+        --ar="$media_toolchain/bin/llvm-ar" --ranlib="$media_toolchain/bin/llvm-ranlib"
+        --strip="$media_toolchain/bin/llvm-strip" --sysroot="$media_toolchain/sysroot")
 elif [[ "$media_target" != x86_64-unknown-linux-gnu ]]; then
     echo "Unsupported native build target: $media_target" >&2
     exit 1
@@ -49,5 +75,9 @@ if [[ "$media_target" == x86_64-pc-windows-msvc ]]; then
     done
 fi
 cp "$media_source/COPYING.LGPLv2.1" "$media_prefix/"
-cp "$project_root/third-party/ffmpeg/README.md" "$media_prefix/BUILD-NOTES.md"
+if [[ -f "$project_root/third-party/ffmpeg/README.md" ]]; then
+    cp "$project_root/third-party/ffmpeg/README.md" "$media_prefix/BUILD-NOTES.md"
+else
+    cp "$project_root/docs/ANDROID-BUILD.md" "$media_prefix/BUILD-NOTES.md"
+fi
 echo "Static FFmpeg installed in $media_prefix"

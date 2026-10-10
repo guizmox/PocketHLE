@@ -17,12 +17,14 @@ crate-type = ["cdylib", "rlib"]
 # armv7-linux-androideabi works only when `cargo ndk` is invoked with
 # `ANDROID_NDK_HOME` set; the toolchain glue lives in
 # `.cargo/config.toml` (`CMAKE_TOOLCHAIN_FILE_<target>`) and points at
-# the per-ABI wrappers in `build-support/cmake/`. Pass
-# `--no-default-features` to fall back to the trace-only stub backend.
-default = ["unicorn"]
+# the per-ABI wrappers in `build-support/cmake/`.
+# `--no-default-features` is for type checks only: running a game requires Unicorn.
+default = ["unicorn", "video-static"]
+video-static = ["pocket-core/video-static"]
 unicorn = ["pocket-core/unicorn"]
 
 [dependencies]
+xbrz = { package = "xbrz-rs", version = "0.1.0" }
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true

@@ -488,7 +488,7 @@ pub struct LauncherConfig {
     /// Allow GPS1 to subscribe to the host location service.
     #[serde(default)]
     pub gps_enabled: bool,
-    /// Windows desktop only: explicit simulated GPS, independent of host permission.
+    /// Explicit simulated GPS on Windows and Android, independent of host permission.
     #[serde(default)]
     pub gps_fixed_enabled: bool,
     #[serde(default)]
@@ -507,6 +507,9 @@ pub struct LauncherConfig {
     /// Desktop smoothing filter, remembered across sessions.
     #[serde(default = "default_upscale_filter")]
     pub upscale_filter: String,
+    /// Android presentation scale: 0 = fit, 1..4 = native multiple (clamped to fit).
+    #[serde(default)]
+    pub android_display_scale: u32,
     /// Last folder the user picked a `.cab` from. Used to remember
     /// the file dialog start directory.
     #[serde(default)]
@@ -591,6 +594,7 @@ impl Default for LauncherConfig {
             colors_server_url: String::new(),
             colors_terminal_id: String::new(),
             upscale_filter: default_upscale_filter(),
+            android_display_scale: 0,
             last_import_dir: None,
             show_fps: default_show_fps(),
             fullscreen: false,
