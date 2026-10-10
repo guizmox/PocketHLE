@@ -4628,9 +4628,17 @@ fn read_wstr(ctx: &mut CallCtx<'_>, p: u32, max: u32) -> Result<Vec<u16>, Kernel
     Ok(out)
 }
 
+// Unbounded CRT strings may contain an entire Base64 map response. Do not
+// silently stop at 64 KiB: strstr would miss the closing XML/CDATA markers.
+// The scanner stops at NUL or the first inaccessible byte; also prevent an
+// address wrap at the end of the guest's 32-bit address space.
+fn read_crt_cstr(ctx:&mut CallCtx<'_>,p:u32)->Result<Vec<u8>,KernelError> {
+    read_cstr(ctx,p,u32::MAX.saturating_sub(p))
+}
+
 fn strlen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
-    let len = read_cstr(ctx, s, 0x10000)?.len() as u32;
+    let len = read_crt_cstr(ctx, s)?.len() as u32;
     Ok(DispatchOutcome::ReturnedR0(len))
 }
 
@@ -4643,7 +4651,7 @@ fn wcslen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn strcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let src = ctx.arg_u32(1)?;
-    let mut s = read_cstr(ctx, src, 0x10000)?;
+    let mut s = read_crt_cstr(ctx, src)?;
     s.push(0);
     ctx.cpu.write_mem(dst, &s)?;
     Ok(DispatchOutcome::ReturnedR0(dst))
@@ -4694,8 +4702,8 @@ fn strncpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn strcat(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let src = ctx.arg_u32(1)?;
-    let dst_len = read_cstr(ctx, dst, 0x10000)?.len() as u32;
-    let mut s = read_cstr(ctx, src, 0x10000)?;
+    let dst_len = read_crt_cstr(ctx, dst)?.len() as u32;
+    let mut s = read_crt_cstr(ctx, src)?;
     s.push(0);
     ctx.cpu.write_mem(dst + dst_len, &s)?;
     Ok(DispatchOutcome::ReturnedR0(dst))
@@ -4705,7 +4713,7 @@ fn strncat(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let src = ctx.arg_u32(1)?;
     let n = ctx.arg_u32(2)?;
-    let dst_len = read_cstr(ctx, dst, 0x10000)?.len() as u32;
+    let dst_len = read_crt_cstr(ctx, dst)?.len() as u32;
     let mut s = read_cstr(ctx, src, n)?;
     s.push(0);
     ctx.cpu.write_mem(dst + dst_len, &s)?;
@@ -4715,8 +4723,8 @@ fn strncat(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn strcmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pa = ctx.arg_u32(0)?;
     let pb = ctx.arg_u32(1)?;
-    let a = read_cstr(ctx, pa, 0x10000)?;
-    let b = read_cstr(ctx, pb, 0x10000)?;
+    let a = read_crt_cstr(ctx, pa)?;
+    let b = read_crt_cstr(ctx, pb)?;
     Ok(DispatchOutcome::ReturnedR0(cmp_to_int(a.cmp(&b)) as u32))
 }
 
@@ -4725,8 +4733,8 @@ fn strcmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn stricmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pa = ctx.arg_u32(0)?;
     let pb = ctx.arg_u32(1)?;
-    let a = read_cstr(ctx, pa, 0x10000)?.to_ascii_lowercase();
-    let b = read_cstr(ctx, pb, 0x10000)?.to_ascii_lowercase();
+    let a = read_crt_cstr(ctx, pa)?.to_ascii_lowercase();
+    let b = read_crt_cstr(ctx, pb)?.to_ascii_lowercase();
     Ok(DispatchOutcome::ReturnedR0(cmp_to_int(a.cmp(&b)) as u32))
 }
 
@@ -5000,7 +5008,7 @@ fn strncmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn strchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let c = ctx.arg_u32(1)? as u8;
-    let bytes = read_cstr(ctx, s, 0x10000)?;
+    let bytes = read_crt_cstr(ctx, s)?;
     for (i, b) in bytes.iter().enumerate() {
         if *b == c {
             return Ok(DispatchOutcome::ReturnedR0(s + i as u32));
@@ -5012,7 +5020,7 @@ fn strchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn strrchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let c = ctx.arg_u32(1)? as u8;
-    let bytes = read_cstr(ctx, s, 0x10000)?;
+    let bytes = read_crt_cstr(ctx, s)?;
     let mut found = None;
     for (i, b) in bytes.iter().enumerate() {
         if *b == c {
@@ -5027,8 +5035,8 @@ fn strrchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn strstr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let n = ctx.arg_u32(1)?;
-    let hay = read_cstr(ctx, h, 0x10000)?;
-    let needle = read_cstr(ctx, n, 0x10000)?;
+    let hay = read_crt_cstr(ctx, h)?;
+    let needle = read_crt_cstr(ctx, n)?;
     // An empty needle matches at the start, and a miss is NULL — not
     // the haystack. `windows(0)` also panics, so it must not be reached.
     if needle.is_empty() {
@@ -5057,8 +5065,8 @@ fn strtok(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if base == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let delims = read_cstr(ctx, delimp, 0x10000)?;
-    let rest = read_cstr(ctx, base, 0x10000)?;
+    let delims = read_crt_cstr(ctx, delimp)?;
+    let rest = read_crt_cstr(ctx, base)?;
     // Leading delimiters are skipped, and a run of nothing but
     // delimiters ends the scan.
     let Some(start) = rest.iter().position(|b| !delims.contains(b)) else {
@@ -5085,8 +5093,8 @@ fn strtok(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// leading run of `s` made up only of bytes from `accept`.
 fn strspn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (sp, setp) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
-    let s = read_cstr(ctx, sp, 0x10000)?;
-    let set = read_cstr(ctx, setp, 0x10000)?;
+    let s = read_crt_cstr(ctx, sp)?;
+    let set = read_crt_cstr(ctx, setp)?;
     let n = s.iter().take_while(|b| set.contains(b)).count();
     Ok(DispatchOutcome::ReturnedR0(n as u32))
 }
@@ -5095,8 +5103,8 @@ fn strspn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// leading run of `s` containing no byte from `reject`.
 fn strcspn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (sp, setp) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
-    let s = read_cstr(ctx, sp, 0x10000)?;
-    let set = read_cstr(ctx, setp, 0x10000)?;
+    let s = read_crt_cstr(ctx, sp)?;
+    let set = read_crt_cstr(ctx, setp)?;
     let n = s.iter().take_while(|b| !set.contains(b)).count();
     Ok(DispatchOutcome::ReturnedR0(n as u32))
 }
@@ -5105,8 +5113,8 @@ fn strcspn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// `s` that appears in `accept`, or NULL.
 fn strpbrk(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (base, setp) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
-    let s = read_cstr(ctx, base, 0x10000)?;
-    let set = read_cstr(ctx, setp, 0x10000)?;
+    let s = read_crt_cstr(ctx, base)?;
+    let set = read_crt_cstr(ctx, setp)?;
     let found = s.iter().position(|b| set.contains(b));
     Ok(DispatchOutcome::ReturnedR0(
         found.map_or(0, |i| base + i as u32),
@@ -5115,7 +5123,7 @@ fn strpbrk(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn strdup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let src = ctx.arg_u32(0)?;
-    let bytes = read_cstr(ctx, src, 0x10000)?;
+    let bytes = read_crt_cstr(ctx, src)?;
     let size = bytes.len().saturating_add(1) as u32;
     let Some(dst) = ctx.kernel.heap.alloc(size) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -5461,7 +5469,7 @@ fn mbstowcs(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let src = ctx.arg_u32(1)?;
     let n = ctx.arg_u32(2)?;
-    let s = read_cstr(ctx, src, 0x10000)?;
+    let s = read_crt_cstr(ctx, src)?;
     let wide: Vec<u16> = s.iter().map(|&b| b as u16).collect();
     let written = if dst != 0 && n > 0 {
         let take = (n as usize).min(wide.len());
@@ -5666,7 +5674,7 @@ fn render_printf(
                     let w = read_wstr(ctx, p, 0x10000)?;
                     piece = String::from_utf16_lossy(&w);
                 } else {
-                    let b = read_cstr(ctx, p, 0x10000)?;
+                    let b = read_crt_cstr(ctx, p)?;
                     piece = String::from_utf8_lossy(&b).into_owned();
                 }
             }
@@ -5680,7 +5688,7 @@ fn render_printf(
                     let w = read_wstr(ctx, p, 0x10000)?;
                     piece = String::from_utf16_lossy(&w);
                 } else {
-                    let b = read_cstr(ctx, p, 0x10000)?;
+                    let b = read_crt_cstr(ctx, p)?;
                     piece = String::from_utf8_lossy(&b).into_owned();
                 }
             }
@@ -5708,7 +5716,7 @@ fn render_printf(
 /// `int printf(const char *fmt, ...)`.
 fn printf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let fmt_p = ctx.arg_u32(0)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf(ctx, &fmt, false, 1)?;
     log::debug!("guest printf: {s}");
     Ok(DispatchOutcome::ReturnedR0(s.len() as u32))
@@ -5784,7 +5792,7 @@ fn freopen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn crt_fprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let stream = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf(ctx, &fmt, false, 2)?;
     emit_stream_text(ctx, stream, &s)?;
     Ok(DispatchOutcome::ReturnedR0(s.len() as u32))
@@ -5795,7 +5803,7 @@ fn crt_vfprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let stream = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
     let va_p = ctx.arg_u32(2)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf_va(ctx, &fmt, false, va_p)?;
     emit_stream_text(ctx, stream, &s)?;
     Ok(DispatchOutcome::ReturnedR0(s.len() as u32))
@@ -5820,7 +5828,7 @@ fn emit_stream_text(ctx: &mut CallCtx<'_>, stream: u32, text: &str) -> Result<()
 fn sprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf(ctx, &fmt, false, 2)?;
     let mut bytes = s.into_bytes();
     bytes.push(0);
@@ -5837,7 +5845,7 @@ fn vsprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
     let va_p = ctx.arg_u32(2)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf_va(ctx, &fmt, false, va_p)?;
     let mut bytes = s.into_bytes();
     bytes.push(0);
@@ -5853,7 +5861,7 @@ fn vsnprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let cap = ctx.arg_u32(1)?;
     let fmt_p = ctx.arg_u32(2)?;
     let va_p = ctx.arg_u32(3)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf_va(ctx, &fmt, false, va_p)?;
     let mut bytes = s.into_bytes();
     bytes.push(0);
@@ -5869,7 +5877,7 @@ fn snprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let cap = ctx.arg_u32(1)?;
     let fmt_p = ctx.arg_u32(2)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let s = render_printf(ctx, &fmt, false, 3)?;
     let mut bytes = s.into_bytes();
     bytes.push(0);
@@ -6201,7 +6209,7 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if format == 0 || !ctx.kernel.vfs.is_open(handle) {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
-    let fmt = read_cstr_string(ctx, format, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, format)?).into_owned();
     let Some(start) = ctx.kernel.vfs.seek(handle, 0, SeekKind::Current) else {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
@@ -6252,7 +6260,7 @@ fn sscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(-1i32 as u32));
     }
     let input = read_cstr_string(ctx, src_p, 0x4000)?;
-    let fmt = read_cstr_string(ctx, fmt_p, 0x4000)?;
+    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
     let mut idx = 2u8;
     let n = run_sscanf(ctx, &input, &fmt, move |c| {
         let a = c.arg_u32(idx)?;
@@ -6663,7 +6671,7 @@ fn render_printf_va(
                     let w = read_wstr(ctx, p, 0x10000)?;
                     piece = String::from_utf16_lossy(&w);
                 } else {
-                    let b = read_cstr(ctx, p, 0x10000)?;
+                    let b = read_crt_cstr(ctx, p)?;
                     piece = String::from_utf8_lossy(&b).into_owned();
                 }
             }
@@ -6677,7 +6685,7 @@ fn render_printf_va(
                     let w = read_wstr(ctx, p, 0x10000)?;
                     piece = String::from_utf16_lossy(&w);
                 } else {
-                    let b = read_cstr(ctx, p, 0x10000)?;
+                    let b = read_crt_cstr(ctx, p)?;
                     piece = String::from_utf8_lossy(&b).into_owned();
                 }
             }
@@ -6765,7 +6773,7 @@ fn strupr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if p == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let bytes = read_cstr(ctx, p, 0x10000)?;
+    let bytes = read_crt_cstr(ctx, p)?;
     let upper: Vec<u8> = bytes.into_iter().map(|c| c.to_ascii_uppercase()).collect();
     ctx.cpu.write_mem(p, &upper)?;
     Ok(DispatchOutcome::ReturnedR0(p))
@@ -6820,7 +6828,7 @@ fn char_upper_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if p == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let bytes = read_cstr(ctx, p, 0x10000)?;
+    let bytes = read_crt_cstr(ctx, p)?;
     let upper: Vec<u8> = String::from_utf8_lossy(&bytes).to_uppercase().into_bytes();
     ctx.cpu.write_mem(p, &upper)?;
     Ok(DispatchOutcome::ReturnedR0(p))
@@ -6831,7 +6839,7 @@ fn char_lower_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if p == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let bytes = read_cstr(ctx, p, 0x10000)?;
+    let bytes = read_crt_cstr(ctx, p)?;
     let lower: Vec<u8> = String::from_utf8_lossy(&bytes).to_lowercase().into_bytes();
     ctx.cpu.write_mem(p, &lower)?;
     Ok(DispatchOutcome::ReturnedR0(p))
@@ -19539,6 +19547,27 @@ mod tests {
         };
         assert_eq!(qsort(&mut c).unwrap(), DispatchOutcome::ReturnedR0(0));
         assert!(kernel.qsort_frames.is_empty());
+    }
+
+    #[test]
+    fn crt_large_map_strings_keep_the_xml_tail() {
+        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();
+        cpu.map_region(0x10000,0x40000,Prot::READ|Prot::WRITE).unwrap();
+        let mut xml=vec![b'A';100000];xml.extend_from_slice(b"</image-data></getmapview>");
+        let length=xml.len();xml.push(0);cpu.write_mem(0x10000,&xml).unwrap();
+        let t=dummy_thunk();
+        cpu.write_reg(ArmReg::R0,0x10000).unwrap();
+        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(strlen(&mut c).unwrap(),DispatchOutcome::ReturnedR0(length as u32));}
+        cpu.write_reg(ArmReg::R0,0x30000).unwrap();cpu.write_reg(ArmReg::R1,0x10000).unwrap();
+        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(strcpy(&mut c).unwrap(),DispatchOutcome::ReturnedR0(0x30000));}
+        assert_eq!(cpu.read_mem(0x30000,xml.len() as u32).unwrap(),xml);
+        cpu.write_reg(ArmReg::R0,0x30000).unwrap();cpu.write_reg(ArmReg::R1,0x10000).unwrap();cpu.write_reg(ArmReg::R2,0).unwrap();
+        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(vsprintf(&mut c).unwrap(),DispatchOutcome::ReturnedR0(length as u32));}
+        assert_eq!(cpu.read_mem(0x30000,xml.len() as u32).unwrap(),xml);
+        cpu.write_mem(0x4f000,b"</image-data>\0").unwrap();
+        cpu.write_reg(ArmReg::R0,0x10000).unwrap();cpu.write_reg(ArmReg::R1,0x4f000).unwrap();
+        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(strstr(&mut c).unwrap(),DispatchOutcome::ReturnedR0(0x10000+100000));}
+
     }
 
     #[test]

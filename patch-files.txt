@@ -1,3 +1,2 @@
-crates/pocket-kernel/src/gps.rs
-frontends/pocket-desktop/src/runner.rs
+crates/pocket-winceapi/src/coredll.rs
 docs/AGENTS.md

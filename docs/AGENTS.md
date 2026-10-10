@@ -1923,3 +1923,19 @@ transitions (error, initialized, validated, GPS1972 time and horizontal accuracy
 Unchanged reads do not repeat the diagnostic. No satellite counts are fabricated.
 These diagnostics do not establish the cause of a user's blocked validation
 until their resulting logs and server clock/version are available.
+
+Colors large map responses: native string construction calls vsprintf with the
+entire XML as its format. A silent 16 KiB format scan cap truncated a 96,824-byte
+getmapview response, losing closing XML/CDATA and producing Server Error after
+Retrieving map data. Unbounded narrow CRT format/string scans now stop at NUL,
+unreadable memory or the 32-bit address boundary, without arbitrary 16/64 KiB
+limits. Explicit destination capacities and bounded string operations remain.
+Regression checks 100,026-byte strlen/strcpy/vsprintf and a strstr match after
+100,000 bytes; 14 string tests and printf precision regression pass.
+Native Linux Unicorn run with patched Colors, production fixed GPS service,
+actual local HTTP and saved real OSM GIF now renders the Turf Wars map: XML
+96,824 bytes, GIF 62,693 bytes. Requested GPS coordinates were
+45.62191112730281, 6.773974779758014; replayed GIF depicts Paris, so this test
+verifies payload handling rather than live OSM rendering at those coordinates.
+No production CLI adapter or server change. Windows desktop build remains
+to run; no claim of Windows UI or physical Synology execution.
