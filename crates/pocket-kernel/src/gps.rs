@@ -36,10 +36,10 @@ impl Service {
         Ok(())
     }
     pub fn open(&self)->Result<Arc<Mutex<Device>>>{
-        if !self.0.allowed.load(Ordering::Acquire){return Err(5);}
+        if !self.0.allowed.load(Ordering::Acquire){log::warn!("GPS1 open: error=5 (device access disabled)");return Err(5);}
         let mut slot=self.0.device.lock().unwrap();if let Some(d)=slot.upgrade(){return Ok(d);}
-        let capture=self.0.start_capture()?;
-        let d=Arc::new(Mutex::new(Device{capture:Some(capture),gate:self.0.clone(),fixed:false}));*slot=Arc::downgrade(&d);Ok(d)
+        let capture=match self.0.start_capture(){Ok(c)=>c,Err(e)=>{log::warn!("GPS1 open: error={}",e);return Err(e);}};
+        let d=Arc::new(Mutex::new(Device{capture:Some(capture),gate:self.0.clone(),fixed:false,last_diagnostic:None}));*slot=Arc::downgrade(&d);Ok(d)
     }
 }
 impl Inner {
@@ -58,15 +58,22 @@ impl Capture for FixedCapture {
             altitude_msl:None,speed:Some(0.),course:None,horizontal_error:5.,vertical_error:None}))
     }
 }
-pub struct Device {capture:Option<Box<dyn Capture>>,gate:Arc<Inner>,fixed:bool}
+pub struct Device {capture:Option<Box<dyn Capture>>,gate:Arc<Inner>,fixed:bool,last_diagnostic:Option<(u32,u32,u32)>}
 impl Device {
+    fn diagnostic(&mut self,error:u32,initialized:u32,validated:u32,utc:u32,accuracy:u32) {
+        let state=(error,initialized,validated);
+        if self.last_diagnostic!=Some(state) {
+            log::info!("GPS1 read: error={} initialized={} validated={} utc_1972={} horizontal_error_cm={}",error,initialized,validated,utc,accuracy);
+            self.last_diagnostic=Some(state);
+        }
+    }
     pub fn packet(&mut self)->Result<[u8;PACKET_SIZE]>{
-        if !self.gate.allowed.load(Ordering::Acquire){return Err(5);}
-        if self.capture.is_none(){self.capture=Some(self.gate.start_capture()?);}
-        let position=self.capture.as_mut().unwrap().latest()?;
+        if !self.gate.allowed.load(Ordering::Acquire){self.diagnostic(5,0,0,0,u32::MAX);return Err(5);}
+        if self.capture.is_none(){match self.gate.start_capture(){Ok(c)=>self.capture=Some(c),Err(e)=>{self.diagnostic(e,0,0,0,u32::MAX);return Err(e);}}}
+        let position=match self.capture.as_mut().unwrap().latest(){Ok(p)=>p,Err(e)=>{self.diagnostic(e,0,0,0,u32::MAX);return Err(e);}};
         let mut b=[0u8;PACKET_SIZE];b[0]=1;
         if let Some(p)=position {
-            validate(&p)?;self.fixed=true;
+            if let Err(e)=validate(&p){self.diagnostic(e,0,0,0,u32::MAX);return Err(e);}self.fixed=true;
             let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
             // Preserve the last known coordinates, but do not label old data a fresh fix.
             let fresh=p.unix_ms<=now.saturating_add(5000)&&now.saturating_sub(p.unix_ms)<=30000;
@@ -88,6 +95,8 @@ impl Device {
             put(&mut b,37,(p.horizontal_error*100.).ceil().clamp(0.,u32::MAX as f64) as u32);
             put(&mut b,41,p.vertical_error.map(|v|(v*100.).ceil().clamp(0.,u32::MAX as f64) as u32).unwrap_or(u32::MAX));
         }else {put(&mut b,1,u32::from(self.fixed));put(&mut b,37,u32::MAX);put(&mut b,41,u32::MAX);}
+        let word=|o:usize|u32::from_le_bytes(b[o..o+4].try_into().unwrap());
+        self.diagnostic(0,word(1),word(15),word(11),word(37));
         Ok(b)
     }
 }

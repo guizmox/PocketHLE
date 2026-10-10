@@ -1915,3 +1915,11 @@ Sydney (-33.8688,151.2093), with no host GPS backend installed. The actual local
 HTTP server receives precisely these coordinates. Map tiles are fixtures; the
 Linux native game test does not compile or exercise the Windows settings UI.
 Desktop UI/runner syntax is checked separately; a Windows build remains to run.
+
+GPS diagnostics now use the standard launcher INFO log, not just RunOutcome's
+UI summary. Desktop startup records gizmondo/host/fixed settings, and the Windows
+fixed override records activation. GPS1 records open errors and read-state
+transitions (error, initialized, validated, GPS1972 time and horizontal accuracy).
+Unchanged reads do not repeat the diagnostic. No satellite counts are fabricated.
+These diagnostics do not establish the cause of a user's blocked validation
+until their resulting logs and server clock/version are available.

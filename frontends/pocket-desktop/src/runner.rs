@@ -148,6 +148,7 @@ impl Runner {
         }
         let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
         let launcher_config = pocket_library::Library::open(library_root).map(|l| l.config().clone()).unwrap_or_default();
+        log::info!("Gizmondo GPS configuration: gizmondo={} host_enabled={} fixed_enabled={} latitude={} longitude={}",is_gizmondo,launcher_config.gps_enabled,launcher_config.gps_fixed_enabled,launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude);
         let hardware = (launcher_config.bluetooth_enabled, launcher_config.camera_enabled, launcher_config.gps_enabled);
         if let Some(process) = emu.process_mut() {
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
@@ -161,6 +162,7 @@ impl Runner {
                     return (RunOutcome{summary:summary_lines.join("\n"),framebuffer:None},87);
                 }
                 gps.set_allowed(true);
+                log::info!("GPS1 fixed simulation activated; Windows location is not used");
                 summary_lines.push(format!("GPS: simulated fixed position ({:.7}, {:.7})",launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude));
             }
 
