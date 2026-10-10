@@ -1,4 +1,4 @@
-//! Gizmondo GPS1 position snapshots. No NMEA stream and no fabricated fixes.
+//! Gizmondo GPS1 position snapshots. Host location or an explicitly configured simulated position; no NMEA stream.
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak, atomic::{AtomicBool, Ordering}};
 pub const PACKET_SIZE: usize = 180;
 pub type Result<T> = std::result::Result<T,u32>;
@@ -19,24 +19,50 @@ fn host()->Option<Arc<dyn Backend>> {
 }
 #[derive(Clone)]
 pub struct Service(Arc<Inner>);
-struct Inner {allowed:AtomicBool,backend:Option<Arc<dyn Backend>>,device:Mutex<Weak<Mutex<Device>>>}
+struct Inner {allowed:AtomicBool,backend:Option<Arc<dyn Backend>>,device:Mutex<Weak<Mutex<Device>>>,fixed_position:Mutex<Option<(f64,f64)>>}
 impl Default for Service {fn default()->Self{Self::new(host())}}
 impl Service {
-    fn new(backend:Option<Arc<dyn Backend>>)->Self{Self(Arc::new(Inner{allowed:AtomicBool::new(false),backend,device:Mutex::new(Weak::new())}))}
+    fn new(backend:Option<Arc<dyn Backend>>)->Self{Self(Arc::new(Inner{allowed:AtomicBool::new(false),backend,device:Mutex::new(Weak::new()),fixed_position:Mutex::new(None)}))}
     pub fn with_backend(backend:Arc<dyn Backend>)->Self{Self::new(Some(backend))}
     pub fn set_allowed(&self,allowed:bool){self.0.allowed.store(allowed,Ordering::Release);if !allowed {if let Some(d)=self.0.device.lock().unwrap().upgrade(){d.lock().unwrap().capture.take();}}}
+    /// Explicit simulator setting, configured before the guest opens GPS1.
+    /// This does not enable device access by itself.
+    pub fn set_fixed_position(&self,position:Option<(f64,f64)>)->Result<()> {
+        if let Some((lat,lon))=position {
+            if !lat.is_finite() || !(-90. ..=90.).contains(&lat) || !lon.is_finite() || !(-180. ..=180.).contains(&lon) {return Err(13);}
+        }
+        *self.0.fixed_position.lock().unwrap()=position;
+        if let Some(d)=self.0.device.lock().unwrap().upgrade(){d.lock().unwrap().capture.take();}
+        Ok(())
+    }
     pub fn open(&self)->Result<Arc<Mutex<Device>>>{
         if !self.0.allowed.load(Ordering::Acquire){return Err(5);}
         let mut slot=self.0.device.lock().unwrap();if let Some(d)=slot.upgrade(){return Ok(d);}
-        let capture=self.0.backend.as_ref().ok_or(21u32)?.start()?;
+        let capture=self.0.start_capture()?;
         let d=Arc::new(Mutex::new(Device{capture:Some(capture),gate:self.0.clone(),fixed:false}));*slot=Arc::downgrade(&d);Ok(d)
+    }
+}
+impl Inner {
+    fn start_capture(&self)->Result<Box<dyn Capture>> {
+        if let Some((latitude,longitude))=*self.fixed_position.lock().unwrap() {
+            return Ok(Box::new(FixedCapture{latitude,longitude}));
+        }
+        self.backend.as_ref().ok_or(21u32)?.start()
+    }
+}
+struct FixedCapture {latitude:f64,longitude:f64}
+impl Capture for FixedCapture {
+    fn latest(&mut self)->Result<Option<Position>> {
+        let unix_ms=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|13u32)?.as_millis() as u64;
+        Ok(Some(Position{unix_ms,latitude:self.latitude,longitude:self.longitude,
+            altitude_msl:None,speed:Some(0.),course:None,horizontal_error:5.,vertical_error:None}))
     }
 }
 pub struct Device {capture:Option<Box<dyn Capture>>,gate:Arc<Inner>,fixed:bool}
 impl Device {
     pub fn packet(&mut self)->Result<[u8;PACKET_SIZE]>{
         if !self.gate.allowed.load(Ordering::Acquire){return Err(5);}
-        if self.capture.is_none(){self.capture=Some(self.gate.backend.as_ref().ok_or(21u32)?.start()?);}
+        if self.capture.is_none(){self.capture=Some(self.gate.start_capture()?);}
         let position=self.capture.as_mut().unwrap().latest()?;
         let mut b=[0u8;PACKET_SIZE];b[0]=1;
         if let Some(p)=position {
@@ -94,6 +120,24 @@ fn put(b:&mut[u8],offset:usize,v:impl Le){v.write(b,offset);}
     fn position()->Position{Position{unix_ms:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
         latitude:-33.1234567,longitude:151.7654321,altitude_msl:Some(-12.34),speed:Some(3.25),course:Some(270.5),horizontal_error:4.5,vertical_error:Some(9.)}}
     fn word(b:&[u8],o:usize)->u32{u32::from_le_bytes(b[o..o+4].try_into().unwrap())}
+    #[test] fn fixed_position_without_host_validates_coordinates_and_refreshes_time() {
+        let s=Service::new(None);
+        assert_eq!(s.set_fixed_position(Some((f64::NAN,0.))),Err(13));
+        assert_eq!(s.set_fixed_position(Some((0.,181.))),Err(13));
+        s.set_fixed_position(Some((-33.1234567,151.7654321))).unwrap();
+        assert!(matches!(s.open(),Err(5)));
+        s.set_allowed(true);
+        let d=s.open().unwrap();let b=d.lock().unwrap().packet().unwrap();
+        assert_eq!(word(&b,15),1);assert_eq!(word(&b,21) as i32,-331234567);
+        assert_eq!(word(&b,25) as i32,1517654321);assert_eq!(word(&b,37),500);
+        assert!(b[45..].iter().all(|v|*v==0));
+        let mut capture=FixedCapture{latitude:0.,longitude:0.};
+        let first=capture.latest().unwrap().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert!(capture.latest().unwrap().unwrap().unix_ms>first.unix_ms);
+        s.set_fixed_position(None).unwrap();assert_eq!(d.lock().unwrap().packet(),Err(21));
+        s.set_allowed(false);assert!(matches!(s.open(),Err(5)));
+    }
     #[test] fn packed_snapshot_signed_coordinates_units_epochs_and_unknown_satellites(){
         let(s,p,_)=fixture();s.set_allowed(true);*p.lock().unwrap()=Some(position());let d=s.open().unwrap();let b=d.lock().unwrap().packet().unwrap();
         assert_eq!(b.len(),180);assert_eq!(word(&b,1),1);assert_eq!(word(&b,15),1);assert_eq!(word(&b,21) as i32,-331234567);

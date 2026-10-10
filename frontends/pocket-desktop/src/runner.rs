@@ -153,6 +153,17 @@ impl Runner {
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
             process.state.vfs.camera_service().set_allowed(hardware.1);
             process.state.vfs.gps_service().set_allowed(hardware.2);
+            #[cfg(windows)] if is_gizmondo && launcher_config.gps_fixed_enabled {
+                let gps=process.state.vfs.gps_service();
+                if gps.set_fixed_position(Some((launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude))).is_err() {
+                    if let Some(startup)=startup.as_mut(){startup.error=87;}
+                    summary_lines.push("Invalid fixed GPS position: latitude -90..90, longitude -180..180".into());
+                    return (RunOutcome{summary:summary_lines.join("\n"),framebuffer:None},87);
+                }
+                gps.set_allowed(true);
+                summary_lines.push(format!("GPS: simulated fixed position ({:.7}, {:.7})",launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude));
+            }
+
             if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
                 if let Some(startup) = startup.as_mut() { startup.error = 29; }
                 summary_lines.push(format!("Cannot load device registry: {e}"));

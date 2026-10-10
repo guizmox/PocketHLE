@@ -488,6 +488,13 @@ pub struct LauncherConfig {
     /// Allow GPS1 to subscribe to the host location service.
     #[serde(default)]
     pub gps_enabled: bool,
+    /// Windows desktop only: explicit simulated GPS, independent of host permission.
+    #[serde(default)]
+    pub gps_fixed_enabled: bool,
+    #[serde(default)]
+    pub gps_fixed_latitude: f64,
+    #[serde(default)]
+    pub gps_fixed_longitude: f64,
     /// Bridge Gizmondo GPRS shell requests to the configured host transport.
     #[serde(default = "default_gprs_enabled")]
     pub gprs_enabled: bool,
@@ -577,6 +584,9 @@ impl Default for LauncherConfig {
             bluetooth_enabled: false,
             camera_enabled: false,
             gps_enabled: false,
+            gps_fixed_enabled: false,
+            gps_fixed_latitude: 0.,
+            gps_fixed_longitude: 0.,
             gprs_enabled: default_gprs_enabled(),
             colors_server_url: String::new(),
             colors_terminal_id: String::new(),
@@ -2264,14 +2274,21 @@ mod tests {
         assert!(old.colors_server_url.is_empty());
         assert!(old.colors_terminal_id.is_empty());
         assert!(old.gprs_enabled);
+        assert!(!old.gps_fixed_enabled);
         let mut updated = old;
         updated.colors_server_url = "https://colors.example.org".into();
         updated.colors_terminal_id = "Player-A".into();
         updated.gprs_enabled = false;
+        updated.gps_fixed_enabled = true;
+        updated.gps_fixed_latitude = -33.1234567;
+        updated.gps_fixed_longitude = 151.7654321;
         let decoded: LauncherConfig = serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert_eq!(decoded.colors_server_url, updated.colors_server_url);
         assert_eq!(decoded.colors_terminal_id, updated.colors_terminal_id);
         assert!(!decoded.gprs_enabled);
+        assert!(decoded.gps_fixed_enabled);
+        assert_eq!(decoded.gps_fixed_latitude, -33.1234567);
+        assert_eq!(decoded.gps_fixed_longitude, 151.7654321);
     }
 
     fn tmpdir(name: &str) -> PathBuf {

@@ -1135,6 +1135,22 @@ impl PocketLauncher {
         if gizmondo {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the Windows location service; availability and accuracy depend on the PC.");
+        #[cfg(windows)] {
+            ui.checkbox(&mut draft.gps_fixed_enabled, "GPS fixe (simulé, prochain lancement)")
+                .on_hover_text("Remplace la localisation Windows par cette position, même sans autorisation de localisation.");
+            ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Latitude");
+                    ui.add(egui::DragValue::new(&mut draft.gps_fixed_latitude).speed(0.0001).clamp_range(-90.0..=90.0).max_decimals(7));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Longitude");
+                    ui.add(egui::DragValue::new(&mut draft.gps_fixed_longitude).speed(0.0001).clamp_range(-180.0..=180.0).max_decimals(7));
+                });
+                ui.label("Coordonnées décimales : nord/est positifs, sud/ouest négatifs.");
+                ui.label("Le jeu utilisera cette position fixe plutôt que la position Windows.");
+            });
+        }
         ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
             .on_hover_text("Use the PC Internet connection for the Gizmondo data connection. Takes effect on the next launch.");
         ui.label("Colors multiplayer server (next launch)");
@@ -1967,7 +1983,7 @@ impl PocketLauncher {
 
     fn spawn_run(&mut self, game: &GameEntry) {
         #[cfg(windows)]
-        if self.library.config().gps_enabled {pocket_core::kernel::gps::prepare_host_access();}
+        if self.library.config().gps_enabled && !(self.library.config().gps_fixed_enabled && is_gizmondo_game(game, self.library.root())) {pocket_core::kernel::gps::prepare_host_access();}
         if self.running_game.is_some() {
             self.pending_run = Some(game.clone());
             self.release_all_keys();
@@ -2063,7 +2079,7 @@ impl eframe::App for PocketLauncher {
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
-        if self.library.config().gps_enabled {pocket_core::kernel::gps::prepare_host_access();}
+        if self.library.config().gps_enabled && (!self.library.config().gps_fixed_enabled || (self.screen == Screen::Run && !self.running_is_gizmondo)) {pocket_core::kernel::gps::prepare_host_access();}
         if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) { self.release_all_keys(); }
         self.handle_gamepads(ctx);
         self.handle_physical_keyboard(ctx);

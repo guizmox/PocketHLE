@@ -1,10 +1,5 @@
-crates/pocket-cpu/src/unicorn.rs
-crates/pocket-kernel/src/colors.rs
-crates/pocket-kernel/src/internet.rs
+crates/pocket-kernel/src/gps.rs
 crates/pocket-library/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs
-frontends/pocket-android-jni/src/runner.rs
-frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
 docs/AGENTS.md

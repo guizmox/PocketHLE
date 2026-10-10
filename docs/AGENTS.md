@@ -1889,3 +1889,29 @@ screen participates in keyboard/controller binding capture; opening Gizmondo
 options releases held keys and clears pending captures. GPRS/data is saved through
 the same draft and takes effect on the next launch. Android JSON mirrors its
 boolean default, while this menu organization applies to the desktop launcher.
+
+## Windows desktop fixed GPS position
+
+Gizmondo options exposes an explicit simulated fixed GPS setting on Windows only,
+with decimal latitude [-90,90] and longitude [-180,180]. LauncherConfig persists
+gps_fixed_enabled (default false), gps_fixed_latitude and gps_fixed_longitude.
+At the next Gizmondo launch the desktop runner validates the coordinates and
+sets the per-VFS gps::Service override, enabling GPS1 independently of the host
+GPS permission checkbox. Host consent preparation is skipped while this mode is
+selected. Android does not apply or expose this override. The override is never
+installed globally and therefore does not leak between emulators.
+FixedCapture creates a new current Unix timestamp at each read; existing packet
+serialization supplies the GPS1 1972 clock and signed coordinates. Horizontal
+error is an explicit simulator value of 5 m; speed is zero. Altitude and satellite
+data remain unknown. Turning off simulation restores the ordinary host GPS
+choice at the next launch. Invalid stored coordinates fail the launch clearly.
+Kernel tests cover no-host operation, validity, coordinate ranges, fresh clock,
+permission revocation and restoring the host path. Launcher tests cover backward
+compatibility and persistence of the simulator settings.
+
+Validation: four kernel GPS tests and all 38 launcher-library tests pass. The
+patched Colors executable also reaches Turf War's map using FixedCapture at
+Sydney (-33.8688,151.2093), with no host GPS backend installed. The actual local
+HTTP server receives precisely these coordinates. Map tiles are fixtures; the
+Linux native game test does not compile or exercise the Windows settings UI.
+Desktop UI/runner syntax is checked separately; a Windows build remains to run.
