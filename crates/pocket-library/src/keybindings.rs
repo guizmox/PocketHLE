@@ -339,7 +339,10 @@ mod tests {
             bindings.button_for_key("Left"),
             Some(GuestButton::DpadRight)
         );
-        assert!(!bindings.keys_for(GuestButton::DpadLeft).iter().any(|key|key.eq_ignore_ascii_case("Left")));
+        assert!(!bindings
+            .keys_for(GuestButton::DpadLeft)
+            .iter()
+            .any(|key| key.eq_ignore_ascii_case("Left")));
     }
 
     #[test]
@@ -394,14 +397,27 @@ mod tests {
 /// South button is B, East is A, North is X and West is Y.
 pub fn default_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
     use GuestButton::*;
-    [("DPadUp", DpadUp), ("DPadDown", DpadDown),
-     ("DPadLeft", DpadLeft), ("DPadRight", DpadRight),
-     ("LeftStickUp", DpadUp), ("LeftStickDown", DpadDown),
-     ("LeftStickLeft", DpadLeft), ("LeftStickRight", DpadRight),
-     ("South", Action), ("North", ButtonA), ("East", ButtonB),
-     ("West", ButtonC), ("LeftTrigger", Soft1), ("RightTrigger", Soft2),
-     ("LeftTrigger2", Turbo), ("Start", GizPiano1)]
-        .into_iter().map(|(name, button)| (name.to_owned(), button)).collect()
+    [
+        ("DPadUp", DpadUp),
+        ("DPadDown", DpadDown),
+        ("DPadLeft", DpadLeft),
+        ("DPadRight", DpadRight),
+        ("LeftStickUp", DpadUp),
+        ("LeftStickDown", DpadDown),
+        ("LeftStickLeft", DpadLeft),
+        ("LeftStickRight", DpadRight),
+        ("South", Action),
+        ("North", ButtonA),
+        ("East", ButtonB),
+        ("West", ButtonC),
+        ("LeftTrigger", Soft1),
+        ("RightTrigger", Soft2),
+        ("LeftTrigger2", Turbo),
+        ("Start", GizPiano1),
+    ]
+    .into_iter()
+    .map(|(name, button)| (name.to_owned(), button))
+    .collect()
 }
 
 #[cfg(test)]
@@ -409,18 +425,30 @@ mod controller_tests {
     use super::*;
     #[test]
     fn old_config_gets_controller_defaults_and_custom_bindings_survive() {
-        let old: crate::LauncherConfig=serde_json::from_str("{}").unwrap();
-        assert_eq!(old.gamepad_bindings.get("South"), Some(&GuestButton::Action));
-        let mut custom=old;
+        let old: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            old.gamepad_bindings.get("South"),
+            Some(&GuestButton::Action)
+        );
+        let mut custom = old;
         custom.gamepad_bindings.clear();
-        custom.gamepad_bindings.insert("East".into(), GuestButton::Action);
-        let saved=serde_json::to_string(&custom).unwrap();
-        let loaded: crate::LauncherConfig=serde_json::from_str(&saved).unwrap();
+        custom
+            .gamepad_bindings
+            .insert("East".into(), GuestButton::Action);
+        let saved = serde_json::to_string(&custom).unwrap();
+        let loaded: crate::LauncherConfig = serde_json::from_str(&saved).unwrap();
         assert_eq!(loaded.gamepad_bindings.len(), 1);
-        assert_eq!(loaded.gamepad_bindings.get("East"), Some(&GuestButton::Action));
-        assert_eq!(loaded.keybindings.vk_for_key("Z"), Some(GuestButton::DpadUp.vk()));
+        assert_eq!(
+            loaded.gamepad_bindings.get("East"),
+            Some(&GuestButton::Action)
+        );
+        assert_eq!(
+            loaded.keybindings.vk_for_key("Z"),
+            Some(GuestButton::DpadUp.vk())
+        );
         custom.gamepad_bindings.clear();
-        let empty:crate::LauncherConfig=serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
+        let empty: crate::LauncherConfig =
+            serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
         assert!(empty.gamepad_bindings.is_empty());
     }
 }

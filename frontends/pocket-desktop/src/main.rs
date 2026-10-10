@@ -11,13 +11,13 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
-mod gamepad;
-mod runner;
 mod fullscreen_layout;
-mod reconstruction;
-mod smaa;
-mod screenshot;
+mod gamepad;
 mod pocketpc_layout;
+mod reconstruction;
+mod runner;
+mod screenshot;
+mod smaa;
 mod unimplemented_log;
 
 use anyhow::{Context, Result};

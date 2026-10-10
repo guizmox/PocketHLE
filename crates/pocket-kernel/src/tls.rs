@@ -19,7 +19,10 @@ impl KernelState {
         for (value, bytes) in outgoing.iter_mut().zip(raw.chunks_exact(4)) {
             *value = u32::from_le_bytes(bytes.try_into().unwrap());
         }
-        let incoming = self.thread_tls.get(&self.current_thread).copied()
+        let incoming = self
+            .thread_tls
+            .get(&self.current_thread)
+            .copied()
             .unwrap_or([0; TLS_SLOT_COUNT as usize]);
         let mut bytes = [0u8; TLS_SLOT_COUNT as usize * 4];
         for (value, dst) in incoming.iter().zip(bytes.chunks_exact_mut(4)) {
@@ -48,8 +51,11 @@ impl KernelState {
         let main_finished = self.main_thread.exit_code.is_some();
         let threads = &self.threads;
         self.thread_tls.retain(|&thread, _| {
-            if thread == 0 { !main_finished }
-            else { !threads.get(thread - 1).is_some_and(|t| t.finished) }
+            if thread == 0 {
+                !main_finished
+            } else {
+                !threads.get(thread - 1).is_some_and(|t| t.finished)
+            }
         });
     }
 }

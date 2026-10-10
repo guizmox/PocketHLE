@@ -20,9 +20,15 @@ pub struct RamSnapshot {
     pub store_used: u32,
 }
 impl RamSnapshot {
-    pub fn ram_pages(self) -> u32 { self.total_pages - self.store_pages }
-    pub fn program_free(self) -> u32 { self.ram_pages().saturating_sub(self.program_used) }
-    pub fn store_free(self) -> u32 { self.store_pages.saturating_sub(self.store_used) }
+    pub fn ram_pages(self) -> u32 {
+        self.total_pages - self.store_pages
+    }
+    pub fn program_free(self) -> u32 {
+        self.ram_pages().saturating_sub(self.program_used)
+    }
+    pub fn store_free(self) -> u32 {
+        self.store_pages.saturating_sub(self.store_used)
+    }
 }
 
 /// Clones refer to the SAME device, including its RAM files. In particular,
@@ -41,16 +47,27 @@ impl PartialEq for MemoryDivision {
 impl Eq for MemoryDivision {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResizeError { InvalidSize, InUse }
+pub enum ResizeError {
+    InvalidSize,
+    InUse,
+}
 
 impl MemoryDivision {
     pub fn new(divisible_bytes: u32, store_pages: u32) -> Option<Self> {
-        if divisible_bytes == 0 || divisible_bytes % CE_PAGE_SIZE != 0 { return None; }
+        if divisible_bytes == 0 || divisible_bytes % CE_PAGE_SIZE != 0 {
+            return None;
+        }
         let total_pages = divisible_bytes / CE_PAGE_SIZE;
-        if store_pages >= total_pages { return None; }
+        if store_pages >= total_pages {
+            return None;
+        }
         Some(Self {
-            state: Arc::new(Mutex::new(RamSnapshot { total_pages, store_pages,
-                program_used: 0, store_used: 0 })),
+            state: Arc::new(Mutex::new(RamSnapshot {
+                total_pages,
+                store_pages,
+                program_used: 0,
+                store_used: 0,
+            })),
             files: Arc::new(Mutex::new(crate::vfs::RamStore::default())),
             registry: Arc::new(Mutex::new(crate::registry::RegistryStore::default())),
         })
@@ -59,18 +76,30 @@ impl MemoryDivision {
         let total_pages = 44 * 1024 * 1024 / CE_PAGE_SIZE;
         Self::new(total_pages * CE_PAGE_SIZE, total_pages * 30 / 100).unwrap()
     }
-    pub(crate) fn same_device(&self, other: &Self) -> bool { Arc::ptr_eq(&self.state, &other.state) }
-    pub fn snapshot(&self) -> RamSnapshot { *self.state.lock().unwrap_or_else(|e| e.into_inner()) }
-    pub fn store_pages(&self) -> u32 { self.snapshot().store_pages }
-    pub fn ram_pages(&self) -> u32 { self.snapshot().ram_pages() }
-    pub fn page_size(&self) -> u32 { CE_PAGE_SIZE }
+    pub(crate) fn same_device(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+    pub fn snapshot(&self) -> RamSnapshot {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn store_pages(&self) -> u32 {
+        self.snapshot().store_pages
+    }
+    pub fn ram_pages(&self) -> u32 {
+        self.snapshot().ram_pages()
+    }
+    pub fn page_size(&self) -> u32 {
+        CE_PAGE_SIZE
+    }
 
     /// Only unoccupied pages may cross the boundary. HLE pages are movable,
     /// so an accepted change is effective immediately and needs no reboot.
     pub fn resize(&self, store_pages: u32) -> Result<(), ResizeError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // CE's object store has a 32 KiB minimum (pOEMCalcFSPages docs).
-        if store_pages < 8 || store_pages >= state.total_pages { return Err(ResizeError::InvalidSize); }
+        if store_pages < 8 || store_pages >= state.total_pages {
+            return Err(ResizeError::InvalidSize);
+        }
         if store_pages < state.store_used || state.total_pages - store_pages < state.program_used {
             return Err(ResizeError::InUse);
         }
@@ -79,7 +108,9 @@ impl MemoryDivision {
     }
     pub(crate) fn acquire_program(&self, count: u32) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if count > state.program_free() { return false; }
+        if count > state.program_free() {
+            return false;
+        }
         state.program_used += count;
         true
     }
@@ -90,15 +121,24 @@ impl MemoryDivision {
     }
     pub(crate) fn acquire_store(&self, count: u32) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if count > state.store_free() { return false; }
+        if count > state.store_free() {
+            return false;
+        }
         state.store_used += count;
         true
     }
     pub(crate) fn store_charge(&self, count: u32) -> Option<StoreCharge> {
-        self.acquire_store(count).then(|| StoreCharge { state: Arc::downgrade(&self.state), count })
+        self.acquire_store(count).then(|| StoreCharge {
+            state: Arc::downgrade(&self.state),
+            count,
+        })
     }
 }
-impl Default for MemoryDivision { fn default() -> Self { Self::gizmondo_sdk_default() } }
+impl Default for MemoryDivision {
+    fn default() -> Self {
+        Self::gizmondo_sdk_default()
+    }
+}
 
 /// A file's pages remain occupied after deletion while an open handle refers
 /// to it. Weak ownership prevents the device's file table forming a cycle.
@@ -109,9 +149,13 @@ pub(crate) struct StoreCharge {
 }
 impl StoreCharge {
     pub fn resize(&mut self, count: u32) -> bool {
-        let Some(state) = self.state.upgrade() else { return false; };
+        let Some(state) = self.state.upgrade() else {
+            return false;
+        };
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        if count > self.count && count - self.count > state.store_free() { return false; }
+        if count > self.count && count - self.count > state.store_free() {
+            return false;
+        }
         state.store_used = state.store_used - self.count + count;
         self.count = count;
         true
@@ -132,7 +176,10 @@ mod tests {
     #[test]
     fn memory_division_sdk_profile_conserves_the_documented_pool() {
         let d = MemoryDivision::default();
-        assert_eq!((d.store_pages() + d.ram_pages()) * d.page_size(), 44 * 1024 * 1024);
+        assert_eq!(
+            (d.store_pages() + d.ram_pages()) * d.page_size(),
+            44 * 1024 * 1024
+        );
         assert_eq!(d.store_pages(), 3379);
         assert_eq!(d.ram_pages(), 7885);
     }

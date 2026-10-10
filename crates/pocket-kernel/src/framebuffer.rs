@@ -35,8 +35,14 @@ pub struct DirectDrawTiming {
 }
 impl Default for DirectDrawTiming {
     fn default() -> Self {
-        Self { epoch: std::time::Instant::now(), last_present: None,
-            pending: Default::default(), recent_blank: Default::default(), paced_primary_locks: Default::default(), primary_locks: Default::default() }
+        Self {
+            epoch: std::time::Instant::now(),
+            last_present: None,
+            pending: Default::default(),
+            recent_blank: Default::default(),
+            paced_primary_locks: Default::default(),
+            primary_locks: Default::default(),
+        }
     }
 }
 impl DirectDrawTiming {
@@ -49,11 +55,16 @@ impl DirectDrawTiming {
         let cycle = elapsed / period;
         let offset = if end { Self::BLANK.as_nanos() } else { 0 };
         let target = cycle * period + offset;
-        let target = if target > elapsed { target } else { target + period };
+        let target = if target > elapsed {
+            target
+        } else {
+            target + period
+        };
         self.epoch + std::time::Duration::from_nanos(target as u64)
     }
     pub fn present_deadline(&self, now: std::time::Instant) -> std::time::Instant {
-        self.last_present.map_or(now, |last| (last + Self::PERIOD).max(now))
+        self.last_present
+            .map_or(now, |last| (last + Self::PERIOD).max(now))
     }
     pub fn in_blank(&self, now: std::time::Instant) -> bool {
         now.saturating_duration_since(self.epoch).as_nanos() % Self::PERIOD.as_nanos()
@@ -413,14 +424,23 @@ mod display_timing_tests {
     fn blank_waits_cross_an_edge_and_end_waits_cross_the_blank_interval() {
         let clock = DirectDrawTiming::default();
         let period = DirectDrawTiming::PERIOD;
-        assert_eq!(clock.blank_deadline(clock.epoch, false), clock.epoch + period);
+        assert_eq!(
+            clock.blank_deadline(clock.epoch, false),
+            clock.epoch + period
+        );
         let during = clock.epoch + std::time::Duration::from_micros(500);
         assert!(clock.in_blank(during));
-        assert_eq!(clock.blank_deadline(during, true), clock.epoch + DirectDrawTiming::BLANK);
+        assert_eq!(
+            clock.blank_deadline(during, true),
+            clock.epoch + DirectDrawTiming::BLANK
+        );
         assert_eq!(clock.blank_deadline(during, false), clock.epoch + period);
         let active = clock.epoch + std::time::Duration::from_millis(2);
         assert!(!clock.in_blank(active));
-        assert_eq!(clock.blank_deadline(active, true), clock.epoch + period + DirectDrawTiming::BLANK);
+        assert_eq!(
+            clock.blank_deadline(active, true),
+            clock.epoch + period + DirectDrawTiming::BLANK
+        );
     }
     #[test]
     fn primary_presentations_do_not_catch_up_or_depend_on_pixel_changes() {
@@ -428,10 +448,16 @@ mod display_timing_tests {
         let start = clock.epoch;
         assert_eq!(clock.present_deadline(start), start);
         clock.last_present = Some(start);
-        assert_eq!(clock.present_deadline(start), start + DirectDrawTiming::PERIOD);
+        assert_eq!(
+            clock.present_deadline(start),
+            start + DirectDrawTiming::PERIOD
+        );
         let late = start + std::time::Duration::from_secs(2);
         assert_eq!(clock.present_deadline(late), late);
         clock.last_present = Some(late);
-        assert_eq!(clock.present_deadline(late), late + DirectDrawTiming::PERIOD);
+        assert_eq!(
+            clock.present_deadline(late),
+            late + DirectDrawTiming::PERIOD
+        );
     }
 }

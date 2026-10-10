@@ -376,6 +376,11 @@ fn run_process(
     }
 
     let is_gizmondo = is_gizmondo_game(entry, library_root);
+    if is_gizmondo {
+        if let Ok(image) = &image {
+            crate::colors_trace::install(&mut emu, image);
+        }
+    }
     if let Some(context) = handle_context {
         context.table.defer_process_exit();
         emu.process_mut()

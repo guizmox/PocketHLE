@@ -21,8 +21,6 @@
 //! and they get called many thousands of times before the game ever
 //! reaches `WinMain`.
 
-use std::collections::VecDeque;
-use pocket_kernel::handles::HandleObject;
 use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
@@ -33,6 +31,7 @@ use pocket_kernel::gdi::{
     STOCK_DKGRAY_BRUSH, STOCK_GRAY_BRUSH, STOCK_LTGRAY_BRUSH, STOCK_NULL_BRUSH, STOCK_NULL_PEN,
     STOCK_SYSTEM_FONT, STOCK_WHITE_BRUSH, STOCK_WHITE_PEN,
 };
+use pocket_kernel::handles::HandleObject;
 use pocket_kernel::msgbox::MessageBox;
 use pocket_kernel::{
     module_file_name, CreateStage, DispatchOutcome, GuestCallFrame, GuestThread, InputEvent,
@@ -43,6 +42,7 @@ use pocket_kernel::{
     USER_KDATA_TLS_ARRAY_VA,
 };
 use pocket_pe::{ResourceEntry, ResourceKey};
+use std::collections::VecDeque;
 
 use crate::{CallCtx, WinCeDispatcher};
 
@@ -781,7 +781,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ResetEvent", reset_event);
     d.register_handler(dll, "EventModify", event_modify);
     d.register_handler(dll, "WaitForSingleObject", wait_for_single_object);
-    d.register_handler(dll, "InitializeCriticalSection", initialize_critical_section);
+    d.register_handler(
+        dll,
+        "InitializeCriticalSection",
+        initialize_critical_section,
+    );
     d.register_handler(dll, "DeleteCriticalSection", delete_critical_section);
     d.register_handler(dll, "EnterCriticalSection", enter_critical_section);
     d.register_handler(dll, "LeaveCriticalSection", leave_critical_section);
@@ -909,7 +913,9 @@ pub fn register(d: &mut WinCeDispatcher) {
         let (subkey, path) = read_key_path(ctx, root, subkey_ptr);
         let existed = ctx.kernel.registry.contains_key(&path);
         let handle = ctx.kernel.registry.create_and_open(&path);
-        if handle == 0 { return Ok(DispatchOutcome::ReturnedR0(8)); }
+        if handle == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(8));
+        }
         log::debug!("RegCreateKeyExW(root=0x{root:08x}, {subkey:?}) -> 0x{handle:08x}");
         if out_key != 0 {
             ctx.cpu.write_mem(out_key, &handle.to_le_bytes())?;
@@ -1237,9 +1243,21 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "__report_gsfailure", report_gsfailure);
     d.register_constant(dll, "CacheSync", 1, one_returning);
     d.register_constant(dll, "ord:1825", 0, zero_returning);
-    d.register_handler(dll, "?set_new_handler@@YAP6AXXZP6AXXZ@Z", cpp_set_new_handler);
-    d.register_handler(dll, "?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z", crt_set_new_handler);
-    d.register_handler(dll, "?_query_new_handler@@YAP6AHI@ZXZ", crt_query_new_handler);
+    d.register_handler(
+        dll,
+        "?set_new_handler@@YAP6AXXZP6AXXZ@Z",
+        cpp_set_new_handler,
+    );
+    d.register_handler(
+        dll,
+        "?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z",
+        crt_set_new_handler,
+    );
+    d.register_handler(
+        dll,
+        "?_query_new_handler@@YAP6AHI@ZXZ",
+        crt_query_new_handler,
+    );
     d.register_handler(dll, "_set_new_handler", crt_set_new_handler);
     d.register_handler(dll, "_query_new_handler", crt_query_new_handler);
 
@@ -1903,7 +1921,11 @@ const MAIN_THREAD_ID: u32 = 1;
 /// Id of whichever guest thread currently owns the CPU.
 fn current_thread_id(ctx: &CallCtx<'_>) -> u32 {
     match ctx.kernel.current_thread.checked_sub(1) {
-        None => ctx.kernel.object_handles.thread_id(0).unwrap_or(MAIN_THREAD_ID),
+        None => ctx
+            .kernel
+            .object_handles
+            .thread_id(0)
+            .unwrap_or(MAIN_THREAD_ID),
         Some(index) => ctx
             .kernel
             .threads
@@ -1929,9 +1951,14 @@ fn park_worker_and_reevaluate(
 
 /// Cooperatively retry a display wait without losing the guest call arguments.
 pub(crate) fn wait_display_until(
-    ctx: &mut CallCtx<'_>, deadline: std::time::Instant,
+    ctx: &mut CallCtx<'_>,
+    deadline: std::time::Instant,
 ) -> Result<Option<DispatchOutcome>, KernelError> {
-    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(ArmReg::Sp)?,
+    );
     let now = std::time::Instant::now();
     if now >= deadline {
         ctx.kernel.wait_deadlines.remove(&key);
@@ -1944,7 +1971,9 @@ pub(crate) fn wait_display_until(
         ctx.kernel.threads[index].sleep_until_ms = wake;
         return park_worker_and_reevaluate(ctx);
     }
-    if let Some(outcome) = resume_worker_reenter(ctx)? { return Ok(Some(outcome)); }
+    if let Some(outcome) = resume_worker_reenter(ctx)? {
+        return Ok(Some(outcome));
+    }
     // Bound host blocking so input, audio and the run-loop hook keep progressing.
     std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(1)));
     Ok(Some(DispatchOutcome::JumpTo(ctx.thunk.thunk_va)))
@@ -2008,28 +2037,44 @@ fn park_worker_at(
     let Some(main_regs) = main_regs else {
         return Ok(None);
     };
-    if ctx.kernel.main_thread.exit_code.is_some() || ctx.kernel.main_thread.suspend_count != 0
-        || ctx.kernel.main_thread.saved_regs.is_some() {
-        return Ok(Some(DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA)));
+    if ctx.kernel.main_thread.exit_code.is_some()
+        || ctx.kernel.main_thread.suspend_count != 0
+        || ctx.kernel.main_thread.saved_regs.is_some()
+    {
+        return Ok(Some(DispatchOutcome::JumpTo(
+            pocket_kernel::THREAD_SCHEDULER_IDLE_VA,
+        )));
     }
     write_guest_regs(ctx.cpu, &main_regs)?;
-    ctx.kernel.worker_preempt_after_ms = monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
+    ctx.kernel.worker_preempt_after_ms =
+        monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
     Ok(Some(DispatchOutcome::JumpTo(main_regs[15] & !1)))
 }
 
 fn thread_handle_is_closed(kernel: &KernelState, handle: u32) -> bool {
     kernel.object_handles.is_closed(handle)
-        || (matches!(kernel.object_handles.get(handle), Some(HandleObject::File(_))) && !kernel.vfs.is_open(handle))
-        || kernel.threads.iter().any(|t| t.handle == handle && t.handle_closed)
-        || kernel.child_processes.iter().any(|(&h, c)|
+        || (matches!(
+            kernel.object_handles.get(handle),
+            Some(HandleObject::File(_))
+        ) && !kernel.vfs.is_open(handle))
+        || kernel
+            .threads
+            .iter()
+            .any(|t| t.handle == handle && t.handle_closed)
+        || kernel.child_processes.iter().any(|(&h, c)| {
             (h == handle && c.process_handle_closed)
-            || (c.thread_handle == handle && c.thread_handle_closed))
+                || (c.thread_handle == handle && c.thread_handle_closed)
+        })
 }
 
 fn invalid_wait_handle(kernel: &KernelState, handle: u32) -> bool {
-    handle == 0 || handle == u32::MAX || thread_handle_is_closed(kernel,handle)
-        || (kernel.object_handles.known_elsewhere(handle) && handle_object(kernel,handle).is_none()
-            && !kernel.msg_queues.contains_key(&handle) && !kernel.critical_sections.contains_key(&handle))
+    handle == 0
+        || handle == u32::MAX
+        || thread_handle_is_closed(kernel, handle)
+        || (kernel.object_handles.known_elsewhere(handle)
+            && handle_object(kernel, handle).is_none()
+            && !kernel.msg_queues.contains_key(&handle)
+            && !kernel.critical_sections.contains_key(&handle))
 }
 
 fn waitable_is_signalled(kernel: &KernelState, handle: u32) -> bool {
@@ -2038,24 +2083,56 @@ fn waitable_is_signalled(kernel: &KernelState, handle: u32) -> bool {
 fn waitable_is_signalled_for(kernel: &KernelState, handle: u32, thread: usize) -> bool {
     match handle_object(kernel, handle) {
         Some(HandleObject::Thread(0)) => kernel.main_thread.exit_code.is_some(),
-        Some(HandleObject::Thread(index)) => kernel.threads.get(index - 1).is_some_and(|t| t.finished),
+        Some(HandleObject::Thread(index)) => {
+            kernel.threads.get(index - 1).is_some_and(|t| t.finished)
+        }
         Some(HandleObject::CurrentProcess) => kernel.process_exit_code.is_some(),
-        Some(HandleObject::ChildProcess(key)) => kernel.object_handles.child_id(key)
-            .and_then(|pid| kernel.object_handles.exit_code(pid,None)).is_some()
-            || kernel.child_processes.get(&key).is_some_and(|c| c.exit_code.is_some()),
-        Some(HandleObject::ChildThread(key)) => kernel.object_handles.child_id(key)
-            .and_then(|pid| kernel.object_handles.exit_code(pid,Some(0))).is_some()
-            || kernel.child_processes.get(&key).is_some_and(|c| c.exit_code.is_some()),
+        Some(HandleObject::ChildProcess(key)) => {
+            kernel
+                .object_handles
+                .child_id(key)
+                .and_then(|pid| kernel.object_handles.exit_code(pid, None))
+                .is_some()
+                || kernel
+                    .child_processes
+                    .get(&key)
+                    .is_some_and(|c| c.exit_code.is_some())
+        }
+        Some(HandleObject::ChildThread(key)) => {
+            kernel
+                .object_handles
+                .child_id(key)
+                .and_then(|pid| kernel.object_handles.exit_code(pid, Some(0)))
+                .is_some()
+                || kernel
+                    .child_processes
+                    .get(&key)
+                    .is_some_and(|c| c.exit_code.is_some())
+        }
         Some(HandleObject::Event(key)) => kernel.events.get(&key).is_some_and(|e| e.signalled),
-        Some(HandleObject::Semaphore(key)) => kernel.semaphores.get(&key).is_some_and(|s| s.count > 0),
-        Some(HandleObject::RemoteProcess(pid)) => kernel.object_handles.exit_code(pid, None).is_some(),
-        Some(HandleObject::RemoteThread(pid, index)) => kernel.object_handles.exit_code(pid, Some(index)).is_some(),
+        Some(HandleObject::Semaphore(key)) => {
+            kernel.semaphores.get(&key).is_some_and(|s| s.count > 0)
+        }
+        Some(HandleObject::RemoteProcess(pid)) => {
+            kernel.object_handles.exit_code(pid, None).is_some()
+        }
+        Some(HandleObject::RemoteThread(pid, index)) => {
+            kernel.object_handles.exit_code(pid, Some(index)).is_some()
+        }
         Some(HandleObject::Mutex(key)) => mutex_ready(kernel, key, thread),
         Some(HandleObject::File(_) | HandleObject::RemoteFile(..)) => true, // synchronous regular-file I/O
         Some(HandleObject::Device(_) | HandleObject::RemoteDevice(..)) => false,
         None if kernel.object_handles.is_closed(handle) => false,
-        None => kernel.msg_queues.get(&handle).map(|q| !q.messages.is_empty())
-            .or_else(|| kernel.critical_sections.get(&handle).map(|(_, depth)| *depth == 0))
+        None => kernel
+            .msg_queues
+            .get(&handle)
+            .map(|q| !q.messages.is_empty())
+            .or_else(|| {
+                kernel
+                    .critical_sections
+                    .get(&handle)
+                    .map(|(_, depth)| *depth == 0)
+            })
             .unwrap_or(false),
     }
 }
@@ -2064,25 +2141,43 @@ fn consume_wait_signal(kernel: &mut KernelState, handle: u32) {
     match handle_object(kernel, handle) {
         Some(HandleObject::Event(key)) => {
             if let Some(mut event) = kernel.events.get_mut(&key) {
-                if !event.manual_reset { event.signalled = false; }
+                if !event.manual_reset {
+                    event.signalled = false;
+                }
             }
         }
         Some(HandleObject::Semaphore(key)) => {
-            if let Some(mut semaphore) = kernel.semaphores.get_mut(&key) { semaphore.count -= 1; }
+            if let Some(mut semaphore) = kernel.semaphores.get_mut(&key) {
+                semaphore.count -= 1;
+            }
         }
         _ => {}
     }
 }
 
-fn worker_wait_expired(kernel: &KernelState, index: usize,
-    thread: &pocket_kernel::GuestThread, now: u64) -> bool {
-    kernel.wait_deadlines.get(&(index + 1, thread.worker_regs[15], thread.worker_regs[13]))
+fn worker_wait_expired(
+    kernel: &KernelState,
+    index: usize,
+    thread: &pocket_kernel::GuestThread,
+    now: u64,
+) -> bool {
+    kernel
+        .wait_deadlines
+        .get(&(index + 1, thread.worker_regs[15], thread.worker_regs[13]))
         .is_some_and(|deadline| now >= *deadline)
 }
 
-fn worker_is_ready(kernel: &KernelState, index: usize,
-    thread: &pocket_kernel::GuestThread, now: u64) -> bool {
-    if kernel.dll_notification_frame.as_ref().is_some_and(|frame| frame.thread != index + 1) {
+fn worker_is_ready(
+    kernel: &KernelState,
+    index: usize,
+    thread: &pocket_kernel::GuestThread,
+    now: u64,
+) -> bool {
+    if kernel
+        .dll_notification_frame
+        .as_ref()
+        .is_some_and(|frame| frame.thread != index + 1)
+    {
         return false;
     }
     if !thread.parked_in_pump || worker_wait_expired(kernel, index, thread, now) {
@@ -2092,9 +2187,15 @@ fn worker_is_ready(kernel: &KernelState, index: usize,
         return !thread.messages.is_empty();
     }
     if thread.parked_wait_all {
-        thread.parked_wait_handles.iter().all(|handle| waitable_is_signalled_for(kernel, *handle, index + 1))
+        thread
+            .parked_wait_handles
+            .iter()
+            .all(|handle| waitable_is_signalled_for(kernel, *handle, index + 1))
     } else {
-        thread.parked_wait_handles.iter().any(|handle| waitable_is_signalled_for(kernel, *handle, index + 1))
+        thread
+            .parked_wait_handles
+            .iter()
+            .any(|handle| waitable_is_signalled_for(kernel, *handle, index + 1))
     }
 }
 
@@ -2156,7 +2257,7 @@ fn resume_worker(
     switch_guest_fp(ctx, thread_index + 1)?;
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
-    
+
     log::debug!(
         "scheduling worker thread {} at 0x{:08x}",
         thread_index,
@@ -2205,9 +2306,7 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         .iter()
         .enumerate()
         .filter(|(_, thread)| thread.sleep_until_ms <= now)
-        .filter(|(_, thread)| {
-            thread.worker_saved && thread.started && !thread.finished
-        })
+        .filter(|(_, thread)| thread.worker_saved && thread.started && !thread.finished)
         .filter(|(index, thread)| worker_is_ready(ctx.kernel, *index, thread, now))
         .min_by_key(|(index, _)| {
             let count = ctx.kernel.threads.len().max(1);
@@ -2234,7 +2333,7 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
     switch_guest_fp(ctx, thread_index + 1)?;
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
-    
+
     log::debug!(
         "scheduling worker thread {} at 0x{:08x} from a blocking wait",
         thread_index,
@@ -2247,23 +2346,39 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
 /// resumes. Bound the round so Sleep(0) workers cannot starve the main thread.
 /// The CPU already holds the exact main continuation restored by park_worker;
 /// preserve it rather than rebuilding it from the worker's Sleep thunk/LR.
-fn resume_ready_worker_after_sleep(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
+fn resume_ready_worker_after_sleep(
+    ctx: &mut CallCtx<'_>,
+) -> Result<Option<DispatchOutcome>, KernelError> {
     // In this case park_worker returned an idle continuation, not restored
     // main registers. Let the independent scheduler choose the next context.
-    if ctx.kernel.main_thread.exit_code.is_some() || ctx.kernel.main_thread.suspend_count != 0
-        || ctx.kernel.main_thread.saved_regs.is_some() {
+    if ctx.kernel.main_thread.exit_code.is_some()
+        || ctx.kernel.main_thread.suspend_count != 0
+        || ctx.kernel.main_thread.saved_regs.is_some()
+    {
         return Ok(None);
     }
     let now = monotonic_ms();
     let count = ctx.kernel.threads.len().max(1);
-    let next = ctx.kernel.threads.iter().enumerate()
-        .filter(|(index, thread)| !ctx.kernel.worker_round_seen.contains(index)
-            && thread.worker_saved && thread.started && !thread.finished
-            && thread.sleep_until_ms <= now
-            && worker_is_ready(ctx.kernel, *index, thread, now))
-        .min_by_key(|(index, _)| (index + count - ctx.kernel.worker_schedule_cursor % count) % count)
+    let next = ctx
+        .kernel
+        .threads
+        .iter()
+        .enumerate()
+        .filter(|(index, thread)| {
+            !ctx.kernel.worker_round_seen.contains(index)
+                && thread.worker_saved
+                && thread.started
+                && !thread.finished
+                && thread.sleep_until_ms <= now
+                && worker_is_ready(ctx.kernel, *index, thread, now)
+        })
+        .min_by_key(|(index, _)| {
+            (index + count - ctx.kernel.worker_schedule_cursor % count) % count
+        })
         .map(|(index, thread)| (index, thread.worker_regs));
-    let Some((index, regs)) = next else { return Ok(None); };
+    let Some((index, regs)) = next else {
+        return Ok(None);
+    };
     let main_regs = read_guest_regs(ctx.cpu)?;
     let thread = &mut ctx.kernel.threads[index];
     thread.saved_regs = main_regs;
@@ -2281,16 +2396,29 @@ fn resume_ready_worker_after_sleep(ctx: &mut CallCtx<'_>) -> Result<Option<Dispa
 /// Poll runnable workers at API boundaries, preserving the interrupted main
 /// call and its arguments before handler side effects. Critical sections block
 /// contenders, not the scheduler; shared callback trampolines stay indivisible.
-pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
-    if ctx.kernel.current_thread != 0 { return Ok(None); }
+pub(crate) fn wake_due_worker(
+    ctx: &mut CallCtx<'_>,
+) -> Result<Option<DispatchOutcome>, KernelError> {
+    if ctx.kernel.current_thread != 0 {
+        return Ok(None);
+    }
     let now = monotonic_ms();
-    if ctx.kernel.dll_notification_frame.is_some() { return Ok(None); }
-    if now < ctx.kernel.worker_preempt_after_ms { return Ok(None); }
+    if ctx.kernel.dll_notification_frame.is_some() {
+        return Ok(None);
+    }
+    if now < ctx.kernel.worker_preempt_after_ms {
+        return Ok(None);
+    }
     ctx.kernel.worker_preempt_after_ms = now.saturating_add(timer_poll_interval(ctx.kernel));
     if ctx.kernel.wave_out.function_frame.is_some()
-        || ctx.kernel.create_frame.is_some() || ctx.kernel.dialog_frame.is_some()
+        || ctx.kernel.create_frame.is_some()
+        || ctx.kernel.dialog_frame.is_some()
         || !ctx.kernel.vector_iter_stack.is_empty()
-        || !ctx.kernel.qsort_frames.is_empty() || !ctx.kernel.module_attach_frames.is_empty() { return Ok(None); }
+        || !ctx.kernel.qsort_frames.is_empty()
+        || !ctx.kernel.module_attach_frames.is_empty()
+    {
+        return Ok(None);
+    }
     // Host playback continues independently of the guest message pump.
     // Publish completed headers/events before deciding which blocked worker
     // is ready. This only queues notifications; it never enters guest callbacks.
@@ -2299,11 +2427,21 @@ pub(crate) fn wake_due_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOu
     // still runnable: do not make its next turn depend on a message pump.
     // park_worker and this poll retain the normal quantum so a Sleep(0)
     // loop cannot immediately re-enter ahead of the interrupted main API.
-    let due = ctx.kernel.threads.iter().enumerate().any(|(index, thread)|
-        thread.started && !thread.finished && thread.worker_saved
-        && thread.sleep_until_ms <= now
-        && worker_is_ready(ctx.kernel, index, thread, now));
-    if !due { return Ok(None); }
+    let due = ctx
+        .kernel
+        .threads
+        .iter()
+        .enumerate()
+        .any(|(index, thread)| {
+            thread.started
+                && !thread.finished
+                && thread.worker_saved
+                && thread.sleep_until_ms <= now
+                && worker_is_ready(ctx.kernel, index, thread, now)
+        });
+    if !due {
+        return Ok(None);
+    }
     resume_worker_reenter(ctx)
 }
 
@@ -2320,7 +2458,11 @@ fn delete_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
 fn enter_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let key = ctx.arg_u32(0)?;
     let current = ctx.kernel.current_thread;
-    let lock = ctx.kernel.critical_sections.entry(key).or_insert((usize::MAX, 0));
+    let lock = ctx
+        .kernel
+        .critical_sections
+        .entry(key)
+        .or_insert((usize::MAX, 0));
     if lock.1 == 0 || lock.0 == current {
         lock.0 = current;
         lock.1 = lock.1.saturating_add(1);
@@ -2331,7 +2473,9 @@ fn enter_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
         ctx.kernel.threads[index].parked_wait_handles.push(key);
         return Ok(result.unwrap_or(DispatchOutcome::ReturnedR0(0)));
     }
-    if let Some(result) = resume_worker_reenter(ctx)? { return Ok(result); }
+    if let Some(result) = resume_worker_reenter(ctx)? {
+        return Ok(result);
+    }
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
 }
 fn leave_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2340,7 +2484,10 @@ fn leave_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     if let Some(lock) = ctx.kernel.critical_sections.get_mut(&key) {
         if lock.0 == ctx.kernel.current_thread && lock.1 != 0 {
             lock.1 -= 1;
-            if lock.1 == 0 { lock.0 = usize::MAX; released = true; }
+            if lock.1 == 0 {
+                lock.0 = usize::MAX;
+                released = true;
+            }
         }
     }
     if released {
@@ -2401,11 +2548,17 @@ fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         if let Some(thread) = ctx.kernel.threads.get_mut(index) {
             // Sleep(0) yields immediately. Positive sleeps remain ineligible
             // until host monotonic time advances; no host thread is blocked.
-            thread.sleep_until_ms = if _ms == u32::MAX { u64::MAX } else { monotonic_ms().saturating_add(u64::from(_ms)) };
+            thread.sleep_until_ms = if _ms == u32::MAX {
+                u64::MAX
+            } else {
+                monotonic_ms().saturating_add(u64::from(_ms))
+            };
         }
     }
     if let Some(outcome) = park_worker(ctx, 0)? {
-        if let Some(next) = resume_ready_worker_after_sleep(ctx)? { return Ok(next); }
+        if let Some(next) = resume_ready_worker_after_sleep(ctx)? {
+            return Ok(next);
+        }
         return Ok(outcome);
     }
     if let Some(outcome) = resume_worker(ctx, 0)? {
@@ -2420,7 +2573,9 @@ const ERROR_NOT_SUPPORTED: u32 = 50;
 const MAXIMUM_SUSPEND_COUNT: u32 = 127;
 
 pub(crate) fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
-    ctx.kernel.thread_last_errors.insert(ctx.kernel.current_thread, error);
+    ctx.kernel
+        .thread_last_errors
+        .insert(ctx.kernel.current_thread, error);
 }
 
 /// Stable virtual power source: mains connected, full main battery, no backup.
@@ -2440,8 +2595,16 @@ fn virtual_power_status() -> [u8; 56] {
 }
 
 fn write_power_status(ctx: &mut CallCtx<'_>, pointer: u32, size: usize) -> bool {
-    if pointer == 0 || ctx.cpu.check_guest_access(pointer, size as u32, Prot::WRITE).is_err()
-        || ctx.cpu.write_mem(pointer, &virtual_power_status()[..size]).is_err() {
+    if pointer == 0
+        || ctx
+            .cpu
+            .check_guest_access(pointer, size as u32, Prot::WRITE)
+            .is_err()
+        || ctx
+            .cpu
+            .write_mem(pointer, &virtual_power_status()[..size])
+            .is_err()
+    {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return false;
     }
@@ -2468,8 +2631,12 @@ fn get_system_power_status_ex2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
 }
 
 fn get_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(*ctx.kernel.thread_last_errors
-        .get(&ctx.kernel.current_thread).unwrap_or(&0)))
+    Ok(DispatchOutcome::ReturnedR0(
+        *ctx.kernel
+            .thread_last_errors
+            .get(&ctx.kernel.current_thread)
+            .unwrap_or(&0),
+    ))
 }
 
 fn set_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2479,42 +2646,87 @@ fn set_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 fn handle_object(kernel: &KernelState, handle: u32) -> Option<HandleObject> {
-    if handle == FAKE_CURRENT_THREAD_HANDLE { return Some(HandleObject::Thread(kernel.current_thread)); }
+    if handle == FAKE_CURRENT_THREAD_HANDLE {
+        return Some(HandleObject::Thread(kernel.current_thread));
+    }
     if handle == FAKE_CURRENT_PROCESS_HANDLE || handle == pocket_kernel::CE_CURRENT_PROCESS_HANDLE {
         return Some(HandleObject::CurrentProcess);
     }
     if kernel.object_handles.contains(handle) {
         let object = kernel.object_handles.get(handle);
-        if matches!(object, Some(HandleObject::File(_) | HandleObject::RemoteFile(..))) && !kernel.vfs.is_open(handle) { return None; }
-        if matches!(object, Some(HandleObject::Device(_) | HandleObject::RemoteDevice(..))) && !kernel.vfs.is_handle(handle) { return None; }
+        if matches!(
+            object,
+            Some(HandleObject::File(_) | HandleObject::RemoteFile(..))
+        ) && !kernel.vfs.is_open(handle)
+        {
+            return None;
+        }
+        if matches!(
+            object,
+            Some(HandleObject::Device(_) | HandleObject::RemoteDevice(..))
+        ) && !kernel.vfs.is_handle(handle)
+        {
+            return None;
+        }
         if let Some(HandleObject::RemoteProcess(pid)) = object {
-            if let Some((&key, _)) = kernel.child_processes.iter().find(|(key, _)| kernel.object_handles.child_id(**key) == Some(pid)) {
+            if let Some((&key, _)) = kernel
+                .child_processes
+                .iter()
+                .find(|(key, _)| kernel.object_handles.child_id(**key) == Some(pid))
+            {
                 return Some(HandleObject::ChildProcess(key));
             }
         }
         if let Some(HandleObject::RemoteThread(pid, 0)) = object {
-            if let Some((&key, _)) = kernel.child_processes.iter().find(|(key, _)| kernel.object_handles.child_id(**key) == Some(pid)) {
+            if let Some((&key, _)) = kernel
+                .child_processes
+                .iter()
+                .find(|(key, _)| kernel.object_handles.child_id(**key) == Some(pid))
+            {
                 return Some(HandleObject::ChildThread(key));
             }
         }
         return object;
     }
-    if let Some(index) = kernel.threads.iter().position(|t| t.handle == handle && !t.handle_closed) {
+    if let Some(index) = kernel
+        .threads
+        .iter()
+        .position(|t| t.handle == handle && !t.handle_closed)
+    {
         return Some(HandleObject::Thread(index + 1));
     }
-    if kernel.child_processes.get(&handle).is_some_and(|c| !c.process_handle_closed) {
+    if kernel
+        .child_processes
+        .get(&handle)
+        .is_some_and(|c| !c.process_handle_closed)
+    {
         return Some(HandleObject::ChildProcess(handle));
     }
-    if let Some((&process, _)) = kernel.child_processes.iter()
-        .find(|(_, c)| c.thread_handle == handle && !c.thread_handle_closed) {
+    if let Some((&process, _)) = kernel
+        .child_processes
+        .iter()
+        .find(|(_, c)| c.thread_handle == handle && !c.thread_handle_closed)
+    {
         return Some(HandleObject::ChildThread(process));
     }
-    if kernel.vfs.is_open(handle) { return Some(HandleObject::File(handle)); }
-    if kernel.vfs.is_handle(handle) { return Some(HandleObject::Device(handle)); }
-    if kernel.object_handles.known_elsewhere(handle) { return None; }
-    if kernel.mutexes.contains_key(&handle) { return Some(HandleObject::Mutex(handle)); }
-    if kernel.events.contains_key(&handle) { return Some(HandleObject::Event(handle)); }
-    if kernel.semaphores.contains_key(&handle) { return Some(HandleObject::Semaphore(handle)); }
+    if kernel.vfs.is_open(handle) {
+        return Some(HandleObject::File(handle));
+    }
+    if kernel.vfs.is_handle(handle) {
+        return Some(HandleObject::Device(handle));
+    }
+    if kernel.object_handles.known_elsewhere(handle) {
+        return None;
+    }
+    if kernel.mutexes.contains_key(&handle) {
+        return Some(HandleObject::Mutex(handle));
+    }
+    if kernel.events.contains_key(&handle) {
+        return Some(HandleObject::Event(handle));
+    }
+    if kernel.semaphores.contains_key(&handle) {
+        return Some(HandleObject::Semaphore(handle));
+    }
     None
 }
 
@@ -2544,39 +2756,85 @@ fn worker_handle_index(ctx: &CallCtx<'_>, handle: u32) -> Option<usize> {
 }
 
 fn close_owned_handle(kernel: &mut KernelState, handle: u32) -> bool {
-    if handle == FAKE_CURRENT_THREAD_HANDLE || handle == FAKE_CURRENT_PROCESS_HANDLE
-        || handle == pocket_kernel::CE_CURRENT_PROCESS_HANDLE { return false; }
-    let Some(object) = handle_object(kernel, handle) else { return false; };
+    if handle == FAKE_CURRENT_THREAD_HANDLE
+        || handle == FAKE_CURRENT_PROCESS_HANDLE
+        || handle == pocket_kernel::CE_CURRENT_PROCESS_HANDLE
+    {
+        return false;
+    }
+    let Some(object) = handle_object(kernel, handle) else {
+        return false;
+    };
     kernel.object_handles.bind(handle, object);
-    let Some((_, last)) = kernel.object_handles.close(handle) else { return false; };
+    let Some((_, last)) = kernel.object_handles.close(handle) else {
+        return false;
+    };
     match object {
         HandleObject::Thread(index) => {
             if let Some(thread) = index.checked_sub(1).and_then(|i| kernel.threads.get_mut(i)) {
-                if thread.handle == handle { thread.handle_closed = true; }
+                if thread.handle == handle {
+                    thread.handle_closed = true;
+                }
             }
         }
         HandleObject::ChildProcess(key) => {
             if handle == key {
-                if let Some(child) = kernel.child_processes.get_mut(&key) { child.process_handle_closed = true; }
+                if let Some(child) = kernel.child_processes.get_mut(&key) {
+                    child.process_handle_closed = true;
+                }
             }
-            if last { kernel.events.remove(&key); }
+            if last {
+                kernel.events.remove(&key);
+            }
         }
         HandleObject::ChildThread(key) => {
             if let Some(child) = kernel.child_processes.get_mut(&key) {
-                if child.thread_handle == handle { child.thread_handle_closed = true; }
-                if last { kernel.events.remove(&child.thread_handle); }
+                if child.thread_handle == handle {
+                    child.thread_handle_closed = true;
+                }
+                if last {
+                    kernel.events.remove(&child.thread_handle);
+                }
             }
         }
-        HandleObject::Event(key) => { if last { kernel.events.remove(&key); } }
-        HandleObject::Semaphore(key) => { if last { kernel.semaphores.remove(&key); } }
-        HandleObject::Mutex(key) => { if last { kernel.mutexes.remove(&key); } }
-        HandleObject::File(_) | HandleObject::RemoteFile(..) => { kernel.vfs.close(handle); }
+        HandleObject::Event(key) => {
+            if last {
+                kernel.events.remove(&key);
+            }
+        }
+        HandleObject::Semaphore(key) => {
+            if last {
+                kernel.semaphores.remove(&key);
+            }
+        }
+        HandleObject::Mutex(key) => {
+            if last {
+                kernel.mutexes.remove(&key);
+            }
+        }
+        HandleObject::File(_) | HandleObject::RemoteFile(..) => {
+            kernel.vfs.close(handle);
+        }
         HandleObject::Device(_) | HandleObject::RemoteDevice(..) => {
-            let stream = kernel.vfs.is_mp3_decoder(handle).then(|| kernel.vfs.mp3_stream_key(handle));
-            if last { if let Some(key) = stream { kernel.audio.stop_mas_stream(key); } }
+            let stream = kernel
+                .vfs
+                .is_mp3_decoder(handle)
+                .then(|| kernel.vfs.mp3_stream_key(handle));
+            if last {
+                if let Some(key) = stream {
+                    kernel.audio.stop_mas_stream(key);
+                }
+            }
             kernel.vfs.close(handle);
             if let Some(key) = stream {
-                if !kernel.vfs.mp3_decoder_handles().iter().any(|&h| kernel.vfs.mp3_stream_key(h) == key) { kernel.audio.detach_mas_stream(key); }
+                if !kernel
+                    .vfs
+                    .mp3_decoder_handles()
+                    .iter()
+                    .any(|&h| kernel.vfs.mp3_stream_key(h) == key)
+                {
+                    kernel.audio.detach_mas_stream(key);
+                }
             }
         }
         HandleObject::RemoteProcess(_) | HandleObject::RemoteThread(..) => {}
@@ -2595,73 +2853,139 @@ fn process_namespace(kernel: &KernelState, handle: u32) -> Option<u32> {
     }
 }
 fn close_namespace_handle(kernel: &mut KernelState, pid: u32, handle: u32) {
-    if pid == kernel.object_handles.process_id() { close_owned_handle(kernel, handle); return; }
+    if pid == kernel.object_handles.process_id() {
+        close_owned_handle(kernel, handle);
+        return;
+    }
     if let Some((object, last)) = kernel.object_handles.close_in(pid, handle) {
         if last {
             match object {
-                HandleObject::Event(key) => { kernel.events.remove(&key); }
-                HandleObject::Semaphore(key) => { kernel.semaphores.remove(&key); }
-                HandleObject::Mutex(key) => { kernel.mutexes.remove(&key); }
+                HandleObject::Event(key) => {
+                    kernel.events.remove(&key);
+                }
+                HandleObject::Semaphore(key) => {
+                    kernel.semaphores.remove(&key);
+                }
+                HandleObject::Mutex(key) => {
+                    kernel.mutexes.remove(&key);
+                }
                 _ => {}
             }
         }
     }
 }
 fn duplicate_handle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let source_process = ctx.arg_u32(0)?; let source = ctx.arg_u32(1)?;
-    let target_process = ctx.arg_u32(2)?; let output = ctx.arg_u32(3)?;
-    let _access = ctx.arg_u32(4)?; let _inherit = ctx.arg_u32(5)?;
+    let source_process = ctx.arg_u32(0)?;
+    let source = ctx.arg_u32(1)?;
+    let target_process = ctx.arg_u32(2)?;
+    let output = ctx.arg_u32(3)?;
+    let _access = ctx.arg_u32(4)?;
+    let _inherit = ctx.arg_u32(5)?;
     let flags = ctx.arg_u32(6)?;
     ctx.kernel.sync_transferred_handles();
     let local = ctx.kernel.object_handles.process_id();
     let source_pid = process_namespace(ctx.kernel, source_process);
     let target_pid = process_namespace(ctx.kernel, target_process);
-    let object = source_pid.and_then(|pid| if pid == local { handle_object(ctx.kernel, source) }
-        else { ctx.kernel.object_handles.get_in(pid, source) });
-    if source_pid == Some(local) { ctx.kernel.publish_handles(); }
+    let object = source_pid.and_then(|pid| {
+        if pid == local {
+            handle_object(ctx.kernel, source)
+        } else {
+            ctx.kernel.object_handles.get_in(pid, source)
+        }
+    });
+    if source_pid == Some(local) {
+        ctx.kernel.publish_handles();
+    }
     let close_source = flags & 1 != 0;
-    let mut error = if source_pid.is_none() || target_pid.is_none() { Some(ERROR_INVALID_HANDLE) }
-        else if !ctx.kernel.object_handles.is_active(source_pid.unwrap()) || !ctx.kernel.object_handles.is_active(target_pid.unwrap()) { Some(ERROR_INVALID_HANDLE) }
-        else if object.is_none() { Some(ERROR_INVALID_HANDLE) }
-        else if flags & !3 != 0 || (output == 0 && !close_source) { Some(ERROR_INVALID_PARAMETER) }
-        else { None };
-    let file_object = object.filter(|o| matches!(o, HandleObject::File(_) | HandleObject::RemoteFile(..) | HandleObject::Device(_) | HandleObject::RemoteDevice(..)));
-    let file = file_object.and_then(|o| if source_pid == Some(local) {
+    let mut error = if source_pid.is_none() || target_pid.is_none() {
+        Some(ERROR_INVALID_HANDLE)
+    } else if !ctx.kernel.object_handles.is_active(source_pid.unwrap())
+        || !ctx.kernel.object_handles.is_active(target_pid.unwrap())
+    {
+        Some(ERROR_INVALID_HANDLE)
+    } else if object.is_none() {
+        Some(ERROR_INVALID_HANDLE)
+    } else if flags & !3 != 0 || (output == 0 && !close_source) {
+        Some(ERROR_INVALID_PARAMETER)
+    } else {
+        None
+    };
+    let file_object = object.filter(|o| {
+        matches!(
+            o,
+            HandleObject::File(_)
+                | HandleObject::RemoteFile(..)
+                | HandleObject::Device(_)
+                | HandleObject::RemoteDevice(..)
+        )
+    });
+    let file = file_object.and_then(|o| {
+        if source_pid == Some(local) {
             ctx.kernel.vfs.export_handle(source).map(|file| {
                 if ctx.kernel.vfs.is_mp3_decoder(source) {
-                    let key = ctx.kernel.vfs.mp3_stream_key(source); file.with_mas(key, ctx.kernel.audio.export_mas_stream(key))
-                } else { file }
+                    let key = ctx.kernel.vfs.mp3_stream_key(source);
+                    file.with_mas(key, ctx.kernel.audio.export_mas_stream(key))
+                } else {
+                    file
+                }
             })
-        } else { ctx.kernel.object_handles.file(o) });
+        } else {
+            ctx.kernel.object_handles.file(o)
+        }
+    });
     if error.is_none() && output != 0 && file_object.is_some() {
-        if file.is_none() { error = Some(ERROR_NOT_SUPPORTED); }
+        if file.is_none() {
+            error = Some(ERROR_NOT_SUPPORTED);
+        }
     }
     if let Some(error) = error {
-        if close_source { if let Some(pid) = source_pid { close_namespace_handle(ctx.kernel, pid, source); } }
-        set_thread_error(ctx, error); return Ok(DispatchOutcome::ReturnedR0(0));
+        if close_source {
+            if let Some(pid) = source_pid {
+                close_namespace_handle(ctx.kernel, pid, source);
+            }
+        }
+        set_thread_error(ctx, error);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     if output == 0 {
         close_namespace_handle(ctx.kernel, source_pid.unwrap(), source);
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     let Some(alias) = ctx.kernel.object_handles.reserve() else {
-        if close_source { close_namespace_handle(ctx.kernel, source_pid.unwrap(), source); }
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        if close_source {
+            close_namespace_handle(ctx.kernel, source_pid.unwrap(), source);
+        }
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if ctx.cpu.write_mem(output, &alias.to_le_bytes()).is_err() {
-        if close_source { close_namespace_handle(ctx.kernel, source_pid.unwrap(), source); }
-        set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        if close_source {
+            close_namespace_handle(ctx.kernel, source_pid.unwrap(), source);
+        }
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let object = object.unwrap();
     // Bind the source before its first duplication, including legacy handles.
-    if source_pid == Some(local) && source != FAKE_CURRENT_THREAD_HANDLE && source != FAKE_CURRENT_PROCESS_HANDLE
-        && source != pocket_kernel::CE_CURRENT_PROCESS_HANDLE { ctx.kernel.object_handles.bind(source, object); }
-    ctx.kernel.object_handles.bind_in(target_pid.unwrap(), alias, object);
+    if source_pid == Some(local)
+        && source != FAKE_CURRENT_THREAD_HANDLE
+        && source != FAKE_CURRENT_PROCESS_HANDLE
+        && source != pocket_kernel::CE_CURRENT_PROCESS_HANDLE
+    {
+        ctx.kernel.object_handles.bind(source, object);
+    }
+    ctx.kernel
+        .object_handles
+        .bind_in(target_pid.unwrap(), alias, object);
     if let Some(file) = file {
-        ctx.kernel.object_handles.queue_file(target_pid.unwrap(), alias, file);
+        ctx.kernel
+            .object_handles
+            .queue_file(target_pid.unwrap(), alias, file);
         ctx.kernel.sync_transferred_handles();
     }
-    if close_source { close_namespace_handle(ctx.kernel, source_pid.unwrap(), source); }
+    if close_source {
+        close_namespace_handle(ctx.kernel, source_pid.unwrap(), source);
+    }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -2677,31 +3001,47 @@ pub(crate) fn schedule_idle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         }
     }
     if ctx.kernel.main_thread.exit_code.is_some() && ctx.kernel.threads.iter().all(|t| t.finished) {
-        let code = ctx.kernel.main_thread.last_exit_code
+        let code = ctx
+            .kernel
+            .main_thread
+            .last_exit_code
             .unwrap_or_else(|| ctx.kernel.main_thread.exit_code.unwrap());
-        if let Some(entry) = ctx.kernel.begin_dll_notifications(ctx.cpu, 0,
-            pocket_kernel::dll_lifecycle::DllContinuation::ExitProcess(code))? {
+        if let Some(entry) = ctx.kernel.begin_dll_notifications(
+            ctx.cpu,
+            0,
+            pocket_kernel::dll_lifecycle::DllContinuation::ExitProcess(code),
+        )? {
             return Ok(DispatchOutcome::JumpTo(entry));
         }
         ctx.kernel.finish_dll_process_exit(ctx.cpu, code)?;
         return Ok(DispatchOutcome::Halt);
     }
-    if let Some(outcome) = resume_worker_reenter(ctx)? { return Ok(outcome); }
+    if let Some(outcome) = resume_worker_reenter(ctx)? {
+        return Ok(outcome);
+    }
     std::thread::sleep(std::time::Duration::from_millis(1));
-    Ok(DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA))
+    Ok(DispatchOutcome::JumpTo(
+        pocket_kernel::THREAD_SCHEDULER_IDLE_VA,
+    ))
 }
 
 fn finish_main_thread(ctx: &mut CallCtx<'_>, code: u32) -> Result<DispatchOutcome, KernelError> {
     if ctx.kernel.threads.iter().all(|thread| thread.finished) {
-        if let Some(entry) = ctx.kernel.begin_dll_notifications(ctx.cpu, 0,
-            pocket_kernel::dll_lifecycle::DllContinuation::ExitProcess(code))? {
+        if let Some(entry) = ctx.kernel.begin_dll_notifications(
+            ctx.cpu,
+            0,
+            pocket_kernel::dll_lifecycle::DllContinuation::ExitProcess(code),
+        )? {
             return Ok(DispatchOutcome::JumpTo(entry));
         }
         ctx.kernel.finish_dll_process_exit(ctx.cpu, code)?;
         return Ok(DispatchOutcome::Halt);
     }
-    if let Some(entry) = ctx.kernel.begin_dll_notifications(ctx.cpu, 3,
-        pocket_kernel::dll_lifecycle::DllContinuation::FinishMain(code))? {
+    if let Some(entry) = ctx.kernel.begin_dll_notifications(
+        ctx.cpu,
+        3,
+        pocket_kernel::dll_lifecycle::DllContinuation::FinishMain(code),
+    )? {
         return Ok(DispatchOutcome::JumpTo(entry));
     }
     complete_main_thread(ctx, code)
@@ -2713,45 +3053,76 @@ fn complete_main_thread(ctx: &mut CallCtx<'_>, code: u32) -> Result<DispatchOutc
     ctx.kernel.main_thread.saved_regs = None;
     ctx.kernel.message_frames.remove(&0);
     ctx.kernel.reclaim_finished_stacks(ctx.cpu)?;
-    Ok(DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA))
+    Ok(DispatchOutcome::JumpTo(
+        pocket_kernel::THREAD_SCHEDULER_IDLE_VA,
+    ))
 }
 
-fn remote_thread_target(kernel: &KernelState, handle: u32) -> Option<(u32,usize)> {
+fn remote_thread_target(kernel: &KernelState, handle: u32) -> Option<(u32, usize)> {
     match handle_object(kernel, handle)? {
-        HandleObject::RemoteThread(pid,index) => Some((pid,index)),
-        HandleObject::ChildThread(key) => Some((kernel.object_handles.child_id(key)?,0)),
+        HandleObject::RemoteThread(pid, index) => Some((pid, index)),
+        HandleObject::ChildThread(key) => Some((kernel.object_handles.child_id(key)?, 0)),
         _ => None,
     }
 }
-fn remote_suspend_result(ctx: &mut CallCtx<'_>, pid: u32, index: usize, suspend: bool) -> DispatchOutcome {
-    match ctx.kernel.object_handles.change_remote_suspend(pid,index,suspend) {
+fn remote_suspend_result(
+    ctx: &mut CallCtx<'_>,
+    pid: u32,
+    index: usize,
+    suspend: bool,
+) -> DispatchOutcome {
+    match ctx
+        .kernel
+        .object_handles
+        .change_remote_suspend(pid, index, suspend)
+    {
         Ok(previous) => DispatchOutcome::ReturnedR0(previous),
-        Err(error) => { set_thread_error(ctx,error); DispatchOutcome::ReturnedR0(u32::MAX) }
+        Err(error) => {
+            set_thread_error(ctx, error);
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        }
     }
 }
 
 /// Suspension is counted; only suspending the current thread parks the caller.
 fn suspend_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if let Some((pid,index)) = remote_thread_target(ctx.kernel, handle) {
-        return Ok(remote_suspend_result(ctx,pid,index,true));
+    if let Some((pid, index)) = remote_thread_target(ctx.kernel, handle) {
+        return Ok(remote_suspend_result(ctx, pid, index, true));
     }
     if thread_object_index(ctx.kernel, handle) == Some(0) {
         let previous = ctx.kernel.main_thread.suspend_count;
         if ctx.kernel.main_thread.exit_code.is_some() || previous == MAXIMUM_SUSPEND_COUNT {
-            set_thread_error(ctx, if previous == MAXIMUM_SUSPEND_COUNT { 156 } else { ERROR_INVALID_HANDLE });
+            set_thread_error(
+                ctx,
+                if previous == MAXIMUM_SUSPEND_COUNT {
+                    156
+                } else {
+                    ERROR_INVALID_HANDLE
+                },
+            );
             return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
         }
         if previous == 0 {
-            let mut regs = if ctx.kernel.current_thread == 0 { read_guest_regs(ctx.cpu)? }
-                else { ctx.kernel.threads[ctx.kernel.current_thread - 1].saved_regs };
-            if ctx.kernel.current_thread == 0 { regs[0] = previous; regs[15] = regs[14]; }
+            let mut regs = if ctx.kernel.current_thread == 0 {
+                read_guest_regs(ctx.cpu)?
+            } else {
+                ctx.kernel.threads[ctx.kernel.current_thread - 1].saved_regs
+            };
+            if ctx.kernel.current_thread == 0 {
+                regs[0] = previous;
+                regs[15] = regs[14];
+            }
             ctx.kernel.main_thread.saved_regs = Some(regs);
         }
         ctx.kernel.main_thread.suspend_count += 1;
-        ctx.kernel.object_handles.set_thread_count(0, ctx.kernel.main_thread.suspend_count);
+        ctx.kernel
+            .object_handles
+            .set_thread_count(0, ctx.kernel.main_thread.suspend_count);
         if ctx.kernel.current_thread == 0 {
-            return Ok(DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA));
+            return Ok(DispatchOutcome::JumpTo(
+                pocket_kernel::THREAD_SCHEDULER_IDLE_VA,
+            ));
         }
         return Ok(DispatchOutcome::ReturnedR0(previous));
     }
@@ -2770,18 +3141,22 @@ fn suspend_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     thread.suspend_count += 1;
-    ctx.kernel.object_handles.set_thread_count(index + 1, thread.suspend_count);
+    ctx.kernel
+        .object_handles
+        .set_thread_count(index + 1, thread.suspend_count);
     thread.started = false;
     if ctx.kernel.current_thread == index + 1 {
-        if let Some(outcome) = park_worker(ctx, previous)? { return Ok(outcome); }
+        if let Some(outcome) = park_worker(ctx, previous)? {
+            return Ok(outcome);
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(previous))
 }
 
 fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if let Some((pid,index)) = remote_thread_target(ctx.kernel, handle) {
-        return Ok(remote_suspend_result(ctx,pid,index,false));
+    if let Some((pid, index)) = remote_thread_target(ctx.kernel, handle) {
+        return Ok(remote_suspend_result(ctx, pid, index, false));
     }
     if thread_object_index(ctx.kernel, handle) == Some(0) {
         if ctx.kernel.main_thread.exit_code.is_some() {
@@ -2790,7 +3165,9 @@ fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }
         let previous = ctx.kernel.main_thread.suspend_count;
         ctx.kernel.main_thread.suspend_count = previous.saturating_sub(1);
-        ctx.kernel.object_handles.set_thread_count(0, ctx.kernel.main_thread.suspend_count);
+        ctx.kernel
+            .object_handles
+            .set_thread_count(0, ctx.kernel.main_thread.suspend_count);
         return Ok(DispatchOutcome::ReturnedR0(previous));
     }
     let Some(index) = worker_handle_index(ctx, handle) else {
@@ -2804,10 +3181,14 @@ fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     }
     let previous = thread.suspend_count;
     thread.suspend_count = previous.saturating_sub(1);
-    ctx.kernel.object_handles.set_thread_count(index + 1, thread.suspend_count);
+    ctx.kernel
+        .object_handles
+        .set_thread_count(index + 1, thread.suspend_count);
     thread.started = thread.suspend_count == 0;
     if thread.started && ctx.kernel.current_thread == 0 {
-        ctx.kernel.worker_preempt_after_ms = ctx.kernel.worker_preempt_after_ms
+        ctx.kernel.worker_preempt_after_ms = ctx
+            .kernel
+            .worker_preempt_after_ms
             .max(monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel)));
     }
     Ok(DispatchOutcome::ReturnedR0(previous))
@@ -2816,7 +3197,9 @@ fn resume_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 fn exit_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let code = ctx.arg_u32(0)?;
     log::info!("ExitProcess called by guest (code 0x{code:08x})");
-    Ok(DispatchOutcome::JumpTo(pocket_kernel::PROCESS_EXIT_TRAMPOLINE_VA))
+    Ok(DispatchOutcome::JumpTo(
+        pocket_kernel::PROCESS_EXIT_TRAMPOLINE_VA,
+    ))
 }
 
 /// TerminateProcess has two arguments; ExitProcess has one.
@@ -2825,8 +3208,13 @@ fn terminate_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let code = ctx.arg_u32(1)?;
     let target = process_namespace(ctx.kernel, handle);
     if let Some(pid) = target.filter(|&pid| pid != ctx.kernel.object_handles.process_id()) {
-        let ok = ctx.kernel.object_handles.terminate_remote_process(pid,code);
-        if !ok { set_thread_error(ctx,ERROR_INVALID_HANDLE); }
+        let ok = ctx
+            .kernel
+            .object_handles
+            .terminate_remote_process(pid, code);
+        if !ok {
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        }
         return Ok(DispatchOutcome::ReturnedR0(ok as u32));
     }
     if target != Some(ctx.kernel.object_handles.process_id()) {
@@ -2850,7 +3238,9 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     }
     let name = String::from_utf16_lossy(&read_wstr(ctx, application, 1024)?);
     let arguments = String::from_utf16_lossy(&read_wstr(ctx, command, 1024)?);
-    log::info!("SDCreateProcess(application={name:?}, command_line={arguments:?}, flags=0x{flags:x})");
+    log::info!(
+        "SDCreateProcess(application={name:?}, command_line={arguments:?}, flags=0x{flags:x})"
+    );
     if flags != 0 || !arguments.trim().is_empty() {
         log::warn!("SDCreateProcess: flags and nonempty command lines are not supported by foreground handoff yet");
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -2860,43 +3250,93 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let image = match pocket_pe::load_file(&path) {
-        Ok(image) if image.entry_point != 0 && matches!(image.machine,
-            pocket_pe::machine::ARM | pocket_pe::machine::THUMB | pocket_pe::machine::ARMNT
-            | pocket_pe::machine::MIPS_R3000 | pocket_pe::machine::MIPS_R4000) => image,
+        Ok(image)
+            if image.entry_point != 0
+                && matches!(
+                    image.machine,
+                    pocket_pe::machine::ARM
+                        | pocket_pe::machine::THUMB
+                        | pocket_pe::machine::ARMNT
+                        | pocket_pe::machine::MIPS_R3000
+                        | pocket_pe::machine::MIPS_R4000
+                ) =>
+        {
+            image
+        }
         _ => {
-            log::warn!("SDCreateProcess: unsupported or protected executable: {}", path.display());
+            log::warn!(
+                "SDCreateProcess: unsupported or protected executable: {}",
+                path.display()
+            );
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
     };
     drop(image);
     let Some((process_handle, child_table)) = ctx.kernel.object_handles.new_child() else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let id = child_table.process_id();
     let thread_handle = process_handle + 1;
     let mut info = [0u8; 16];
-    for (slot, value) in [process_handle, thread_handle, id, child_table.thread_id(0).unwrap()].iter().enumerate() {
+    for (slot, value) in [
+        process_handle,
+        thread_handle,
+        id,
+        child_table.thread_id(0).unwrap(),
+    ]
+    .iter()
+    .enumerate()
+    {
         info[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
     // Commit only after all guest writes have succeeded.
-    if let Err(error) = ctx.cpu.write_mem(process_info, &info) { child_table.mark_inactive(); return Err(error.into()); }
+    if let Err(error) = ctx.cpu.write_mem(process_info, &info) {
+        child_table.mark_inactive();
+        return Err(error.into());
+    }
     ctx.kernel.next_process_id = id + 1;
-    ctx.kernel.object_handles.bind(process_handle, HandleObject::ChildProcess(process_handle));
-    ctx.kernel.object_handles.bind(thread_handle, HandleObject::ChildThread(process_handle));
-    ctx.kernel.child_processes.insert(process_handle, pocket_kernel::ChildProcess {
-        thread_handle, exit_code: None, process_handle_closed: false, thread_handle_closed: false,
-    });
+    ctx.kernel
+        .object_handles
+        .bind(process_handle, HandleObject::ChildProcess(process_handle));
+    ctx.kernel
+        .object_handles
+        .bind(thread_handle, HandleObject::ChildThread(process_handle));
+    ctx.kernel.child_processes.insert(
+        process_handle,
+        pocket_kernel::ChildProcess {
+            thread_handle,
+            exit_code: None,
+            process_handle_closed: false,
+            thread_handle_closed: false,
+        },
+    );
     for handle in [process_handle, thread_handle] {
-        ctx.kernel.events.insert(handle, pocket_kernel::EventObject {
-            manual_reset: true, signalled: false,
-        });
+        ctx.kernel.events.insert(
+            handle,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: false,
+            },
+        );
     }
     ctx.kernel.pending_process_launch = Some(pocket_kernel::ProcessLaunch {
-        executable: path, guest_path: name, process_handle, thread_handle,
-        concurrent: false, command_line: arguments, creation_flags: flags,
-        call_key: (ctx.kernel.current_thread,ctx.thunk.thunk_va,ctx.cpu.read_reg(ArmReg::Sp)?),
+        executable: path,
+        guest_path: name,
+        process_handle,
+        thread_handle,
+        concurrent: false,
+        command_line: arguments,
+        creation_flags: flags,
+        call_key: (
+            ctx.kernel.current_thread,
+            ctx.thunk.thunk_va,
+            ctx.cpu.read_reg(ArmReg::Sp)?,
+        ),
     });
-    log::info!("SDCreateProcess: suspending parent for selected child process 0x{process_handle:08x}");
+    log::info!(
+        "SDCreateProcess: suspending parent for selected child process 0x{process_handle:08x}"
+    );
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -2909,8 +3349,17 @@ fn get_exit_code_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     }
     let code = match handle_object(ctx.kernel, handle) {
         Some(HandleObject::CurrentProcess) => Some(ctx.kernel.process_exit_code.unwrap_or(259)),
-        Some(HandleObject::ChildProcess(key)) => ctx.kernel.child_processes.get(&key).map(|c| c.exit_code.unwrap_or(259)),
-        Some(HandleObject::RemoteProcess(pid)) => Some(ctx.kernel.object_handles.exit_code(pid, None).unwrap_or(259)),
+        Some(HandleObject::ChildProcess(key)) => ctx
+            .kernel
+            .child_processes
+            .get(&key)
+            .map(|c| c.exit_code.unwrap_or(259)),
+        Some(HandleObject::RemoteProcess(pid)) => Some(
+            ctx.kernel
+                .object_handles
+                .exit_code(pid, None)
+                .unwrap_or(259),
+        ),
         _ => None,
     };
     let Some(code) = code else {
@@ -2925,58 +3374,138 @@ fn get_exit_code_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 }
 
 fn create_process_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let key = (ctx.kernel.current_thread,ctx.thunk.thunk_va,ctx.cpu.read_reg(ArmReg::Sp)?);
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(ArmReg::Sp)?,
+    );
     if let Some(result) = ctx.kernel.process_launch_results.remove(&key) {
-        let handle = match result { Ok(handle) => handle, Err(error) => {
-            set_thread_error(ctx,error); return Ok(DispatchOutcome::ReturnedR0(0));
-        }};
+        let handle = match result {
+            Ok(handle) => handle,
+            Err(error) => {
+                set_thread_error(ctx, error);
+                return Ok(DispatchOutcome::ReturnedR0(0));
+            }
+        };
         let table = ctx.kernel.object_handles.child(handle).unwrap();
-        let mut info = [0u8;16];
-        for (slot,value) in [handle,handle+1,table.process_id(),table.thread_id(0).unwrap()].iter().enumerate() {
-            info[slot*4..slot*4+4].copy_from_slice(&value.to_le_bytes());
+        let mut info = [0u8; 16];
+        for (slot, value) in [
+            handle,
+            handle + 1,
+            table.process_id(),
+            table.thread_id(0).unwrap(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            info[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         let output = ctx.arg_u32(9)?;
-        if ctx.cpu.write_mem(output,&info).is_err() {
-            table.terminate_remote_process(table.process_id(),0xc0000001); table.allow_start();
-            set_thread_error(ctx,ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        if ctx.cpu.write_mem(output, &info).is_err() {
+            table.terminate_remote_process(table.process_id(), 0xc0000001);
+            table.allow_start();
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
-        ctx.kernel.object_handles.bind(handle,HandleObject::ChildProcess(handle));
-        ctx.kernel.object_handles.bind(handle+1,HandleObject::ChildThread(handle));
-        ctx.kernel.child_processes.insert(handle,pocket_kernel::ChildProcess {
-            thread_handle: handle+1, exit_code: None, process_handle_closed: false, thread_handle_closed: false });
+        ctx.kernel
+            .object_handles
+            .bind(handle, HandleObject::ChildProcess(handle));
+        ctx.kernel
+            .object_handles
+            .bind(handle + 1, HandleObject::ChildThread(handle));
+        ctx.kernel.child_processes.insert(
+            handle,
+            pocket_kernel::ChildProcess {
+                thread_handle: handle + 1,
+                exit_code: None,
+                process_handle_closed: false,
+                thread_handle_closed: false,
+            },
+        );
         table.allow_start();
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
-    let app = ctx.arg_u32(0)?; let command = ctx.arg_u32(1)?; let flags = ctx.arg_u32(5)?;
-    if !ctx.kernel.process_launch_enabled { set_thread_error(ctx,ERROR_NOT_SUPPORTED); return Ok(DispatchOutcome::ReturnedR0(0)); }
-    if app == 0 || ctx.arg_u32(9)? == 0 || [2,3,4,6,7,8].iter().any(|&arg| ctx.arg_u32(arg).map_or(true,|v| v != 0)) {
-        set_thread_error(ctx,ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+    let app = ctx.arg_u32(0)?;
+    let command = ctx.arg_u32(1)?;
+    let flags = ctx.arg_u32(5)?;
+    if !ctx.kernel.process_launch_enabled {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if flags & !CREATE_SUSPENDED != 0 { set_thread_error(ctx,ERROR_NOT_SUPPORTED); return Ok(DispatchOutcome::ReturnedR0(0)); }
+    if app == 0
+        || ctx.arg_u32(9)? == 0
+        || [2, 3, 4, 6, 7, 8]
+            .iter()
+            .any(|&arg| ctx.arg_u32(arg).map_or(true, |v| v != 0))
+    {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if flags & !CREATE_SUSPENDED != 0 {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     if ctx.kernel.dll_notification_frame.is_some() || !ctx.kernel.module_attach_frames.is_empty() {
-        set_thread_error(ctx,ERROR_NOT_SUPPORTED); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let name = match read_wstr(ctx,app,1024) { Ok(v) => String::from_utf16_lossy(&v), Err(_) => {
-        set_thread_error(ctx,ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0)); }};
-    let command_line = if command == 0 { name.clone() } else { match read_wstr(ctx,command,1024) {
-        Ok(v) => String::from_utf16_lossy(&v), Err(_) => { set_thread_error(ctx,ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0)); }
-    }};
+    let name = match read_wstr(ctx, app, 1024) {
+        Ok(v) => String::from_utf16_lossy(&v),
+        Err(_) => {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+    };
+    let command_line = if command == 0 {
+        name.clone()
+    } else {
+        match read_wstr(ctx, command, 1024) {
+            Ok(v) => String::from_utf16_lossy(&v),
+            Err(_) => {
+                set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+                return Ok(DispatchOutcome::ReturnedR0(0));
+            }
+        }
+    };
     let Some(path) = ctx.kernel.vfs.resolve(&name).filter(|p| p.is_file()) else {
-        set_thread_error(ctx,2); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 2);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     match pocket_pe::load_file(&path) {
-        Ok(image) if image.entry_point != 0 && matches!(image.machine,pocket_pe::machine::ARM | pocket_pe::machine::THUMB
-            | pocket_pe::machine::ARMNT | pocket_pe::machine::MIPS_R3000 | pocket_pe::machine::MIPS_R4000) => {},
-        _ => { set_thread_error(ctx,193); return Ok(DispatchOutcome::ReturnedR0(0)); }
+        Ok(image)
+            if image.entry_point != 0
+                && matches!(
+                    image.machine,
+                    pocket_pe::machine::ARM
+                        | pocket_pe::machine::THUMB
+                        | pocket_pe::machine::ARMNT
+                        | pocket_pe::machine::MIPS_R3000
+                        | pocket_pe::machine::MIPS_R4000
+                ) => {}
+        _ => {
+            set_thread_error(ctx, 193);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
     }
-    let Some((handle,table)) = ctx.kernel.object_handles.new_child() else {
-        set_thread_error(ctx,8); return Ok(DispatchOutcome::ReturnedR0(0));
+    let Some((handle, table)) = ctx.kernel.object_handles.new_child() else {
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     table.hold_start();
-    if flags & CREATE_SUSPENDED != 0 { table.change_remote_suspend(table.process_id(),0,true).unwrap(); }
+    if flags & CREATE_SUSPENDED != 0 {
+        table
+            .change_remote_suspend(table.process_id(), 0, true)
+            .unwrap();
+    }
     ctx.kernel.pending_process_launch = Some(pocket_kernel::ProcessLaunch {
-        executable: path, guest_path: name, process_handle: handle, thread_handle: handle+1,
-        concurrent: true, command_line, creation_flags: flags, call_key: key,
+        executable: path,
+        guest_path: name,
+        process_handle: handle,
+        thread_handle: handle + 1,
+        concurrent: true,
+        command_line,
+        creation_flags: flags,
+        call_key: key,
     });
     // The runner maps the child before this call commits its guest output.
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
@@ -2989,8 +3518,14 @@ fn get_store_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     }
     if let Some(division) = &ctx.kernel.memory_division {
         let snapshot = division.snapshot();
-        ctx.cpu.write_mem(info, &(snapshot.store_pages * division.page_size()).to_le_bytes())?;
-        ctx.cpu.write_mem(info + 4, &(snapshot.store_free() * division.page_size()).to_le_bytes())?;
+        ctx.cpu.write_mem(
+            info,
+            &(snapshot.store_pages * division.page_size()).to_le_bytes(),
+        )?;
+        ctx.cpu.write_mem(
+            info + 4,
+            &(snapshot.store_free() * division.page_size()).to_le_bytes(),
+        )?;
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     ctx.cpu
@@ -3001,14 +3536,31 @@ fn get_store_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 }
 
 fn get_disk_free_space_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let ptr=ctx.arg_u32(0)?;let outputs=[ctx.arg_u32(1)?,ctx.arg_u32(2)?,ctx.arg_u32(3)?];
-    let path=if ptr==0{Ok("\\".to_string())}else{vfs_api_path(ctx,0)};
-    let result=path.and_then(|p|ctx.kernel.vfs.disk_space(&p));
+    let ptr = ctx.arg_u32(0)?;
+    let outputs = [ctx.arg_u32(1)?, ctx.arg_u32(2)?, ctx.arg_u32(3)?];
+    let path = if ptr == 0 {
+        Ok("\\".to_string())
+    } else {
+        vfs_api_path(ctx, 0)
+    };
+    let result = path.and_then(|p| ctx.kernel.vfs.disk_space(&p));
     match result {
-        Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(0))},
-        Ok((total,free))=>{
-            for p in outputs {if p!=0 && !vfs_probe_output(ctx,p,8){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}}
-            for (p,n) in outputs.into_iter().zip([free,total,free]){if p!=0{ctx.cpu.write_mem(p,&n.to_le_bytes())?;}}
+        Err(e) => {
+            set_thread_error(ctx, e);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
+        Ok((total, free)) => {
+            for p in outputs {
+                if p != 0 && !vfs_probe_output(ctx, p, 8) {
+                    set_thread_error(ctx, 87);
+                    return Ok(DispatchOutcome::ReturnedR0(0));
+                }
+            }
+            for (p, n) in outputs.into_iter().zip([free, total, free]) {
+                if p != 0 {
+                    ctx.cpu.write_mem(p, &n.to_le_bytes())?;
+                }
+            }
             Ok(DispatchOutcome::ReturnedR0(1))
         }
     }
@@ -3031,21 +3583,40 @@ fn get_disk_free_space_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
 /// returning zero bypassed its refill path entirely (0x3a5d4..0x3a5fc).
 fn service_mas_audio(kernel: &mut KernelState) {
     for handle in kernel.vfs.mp3_decoder_handles() {
-        let cursor = kernel.audio.mas_playback_cursor(kernel.vfs.mp3_stream_key(handle));
+        let cursor = kernel
+            .audio
+            .mas_playback_cursor(kernel.vfs.mp3_stream_key(handle));
         if let Some((callback, _completed)) = kernel.vfs.service_mp3_decoder(handle, cursor) {
             let key = callback;
-            if let Some(mut event) = kernel.events.get_mut(&key) { event.signalled = true; }
+            if let Some(mut event) = kernel.events.get_mut(&key) {
+                event.signalled = true;
+            }
         }
     }
 }
 
 fn submit_mas_buffer(ctx: &mut CallCtx<'_>, handle: u32, data: &[u8]) {
     let _ = ctx.kernel.vfs.feed_mp3_decoder_data(handle, data);
-    let mut end_cursor = ctx.kernel.audio.mas_written_samples(ctx.kernel.vfs.mp3_stream_key(handle));
+    let mut end_cursor = ctx
+        .kernel
+        .audio
+        .mas_written_samples(ctx.kernel.vfs.mp3_stream_key(handle));
     if let Some((sample_rate, channels, samples)) = ctx.kernel.vfs.take_mp3_decoder_pcm(handle) {
-        let format = pocket_kernel::audio::GuestFormat { sample_rate, channels, bits_per_sample: 16 };
-        end_cursor = ctx.kernel.audio.queue_mas_samples(ctx.kernel.vfs.mp3_stream_key(handle), format, &samples);
-        if ctx.kernel.vfs.mp3_decoder_paused(handle) { ctx.kernel.audio.pause_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle), true); }
+        let format = pocket_kernel::audio::GuestFormat {
+            sample_rate,
+            channels,
+            bits_per_sample: 16,
+        };
+        end_cursor = ctx.kernel.audio.queue_mas_samples(
+            ctx.kernel.vfs.mp3_stream_key(handle),
+            format,
+            &samples,
+        );
+        if ctx.kernel.vfs.mp3_decoder_paused(handle) {
+            ctx.kernel
+                .audio
+                .pause_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle), true);
+        }
         // Unit tests drain the tap explicitly; never open real audio hardware.
         #[cfg(not(test))]
         ctx.kernel.audio.start();
@@ -3063,8 +3634,12 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let out_len = ctx.arg_u32(5)?;
     let returned_p = ctx.arg_u32(6)?;
 
-    if ctx.kernel.vfs.gps_open(handle).is_some(){return crate::gps::control(ctx);}
-    if ctx.kernel.vfs.camera_open(handle).is_some(){return crate::camera::control(ctx);}
+    if ctx.kernel.vfs.gps_open(handle).is_some() {
+        return crate::gps::control(ctx);
+    }
+    if ctx.kernel.vfs.camera_open(handle).is_some() {
+        return crate::camera::control(ctx);
+    }
     if ctx.kernel.vfs.is_registration_service(handle) {
         if out_buf != 0 && out_len > 0 {
             ctx.cpu.write_mem(out_buf, &vec![0u8; out_len as usize])?;
@@ -3103,25 +3678,47 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 // not a request to allocate a replacement notification event.
                 let supplied_callback = if out_buf != 0 && out_len >= 4 {
                     ctx.cpu.read_u32_le(out_buf)?
-                } else { 0 };
+                } else {
+                    0
+                };
                 let old_callback = ctx.kernel.vfs.mp3_callback_event(handle);
-                let callback = if supplied_callback != 0 && event_key(ctx.kernel, supplied_callback) != u32::MAX {
+                let callback = if supplied_callback != 0
+                    && event_key(ctx.kernel, supplied_callback) != u32::MAX
+                {
                     supplied_callback
                 } else if old_callback != 0 && ctx.kernel.events.contains_key(&old_callback) {
-                    if event_key(ctx.kernel, old_callback) == old_callback { old_callback }
-                    else { ctx.kernel.object_handles.duplicate(HandleObject::Event(old_callback))
-                        .ok_or_else(|| KernelError::Loader("event handle space exhausted".into()))? }
+                    if event_key(ctx.kernel, old_callback) == old_callback {
+                        old_callback
+                    } else {
+                        ctx.kernel
+                            .object_handles
+                            .duplicate(HandleObject::Event(old_callback))
+                            .ok_or_else(|| {
+                                KernelError::Loader("event handle space exhausted".into())
+                            })?
+                    }
                 } else {
-                    let event_handle = ctx.kernel.object_handles.reserve()
-                        .ok_or_else(|| KernelError::Loader("event handle space exhausted".into()))?;
-                    ctx.kernel.object_handles.bind(event_handle, HandleObject::Event(event_handle));
+                    let event_handle = ctx.kernel.object_handles.reserve().ok_or_else(|| {
+                        KernelError::Loader("event handle space exhausted".into())
+                    })?;
+                    ctx.kernel
+                        .object_handles
+                        .bind(event_handle, HandleObject::Event(event_handle));
                     event_handle
                 };
                 // Preserve the caller's event kind/state. Only the legacy
                 // zero-handle compatibility path needs a new event object.
                 let key = event_key(ctx.kernel, callback);
-                ctx.kernel.events.insert_if_absent(key, pocket_kernel::EventObject { manual_reset: false, signalled: false });
-                ctx.kernel.audio.stop_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle));
+                ctx.kernel.events.insert_if_absent(
+                    key,
+                    pocket_kernel::EventObject {
+                        manual_reset: false,
+                        signalled: false,
+                    },
+                );
+                ctx.kernel
+                    .audio
+                    .stop_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle));
                 start_callback = callback;
                 ctx.kernel.vfs.start_mp3_decoder(handle, key);
             }
@@ -3130,16 +3727,24 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 submit_mas_buffer(ctx, handle, &data);
             } else if code == MASG_STOP {
                 ctx.kernel.vfs.stop_mp3_decoder(handle);
-                ctx.kernel.audio.stop_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle));
+                ctx.kernel
+                    .audio
+                    .stop_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle));
                 let callback = ctx.kernel.vfs.mp3_callback_event(handle);
                 let key = callback;
-                if let Some(mut event) = ctx.kernel.events.get_mut(&key) { event.signalled = true; }
+                if let Some(mut event) = ctx.kernel.events.get_mut(&key) {
+                    event.signalled = true;
+                }
             } else if code == MASG_PAUSE || code == MASG_RESUME {
                 let paused = code == MASG_PAUSE;
                 ctx.kernel.vfs.pause_mp3_decoder(handle, paused);
-                ctx.kernel.audio.pause_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle), paused);
+                ctx.kernel
+                    .audio
+                    .pause_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle), paused);
             } else if code == MASG_SET_VOLUME && in_len >= 4 {
-                let value = u32::from_le_bytes(ctx.cpu.read_mem(input_buf, 4)?.try_into().unwrap_or([0; 4]));
+                let value = u32::from_le_bytes(
+                    ctx.cpu.read_mem(input_buf, 4)?.try_into().unwrap_or([0; 4]),
+                );
                 ctx.kernel.vfs.set_mp3_decoder_volume(handle, value);
             }
             // The Micronas capability query accepts the call but only writes
@@ -3147,16 +3752,24 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
             // a caller's one-byte default must remain untouched.
             let writes_reply = code != MASG_HAS_MP3 || out_len == 4;
             if out_buf != 0 && out_len > 0 && writes_reply {
-                let mut reply = ctx.kernel.vfs.mp3_decoder_reply(handle, code, out_len as usize);
+                let mut reply = ctx
+                    .kernel
+                    .vfs
+                    .mp3_decoder_reply(handle, code, out_len as usize);
                 if code == MASG_START && out_len >= 4 {
                     reply[..4].copy_from_slice(&start_callback.to_le_bytes());
                 }
                 ctx.cpu.write_mem(out_buf, &reply)?;
             }
             if returned_p != 0 {
-                let returned = if matches!(code, MASG_START | MASG_STATE | MASG_GET_POSITION | MASG_GET_VOLUME) {
+                let returned = if matches!(
+                    code,
+                    MASG_START | MASG_STATE | MASG_GET_POSITION | MASG_GET_VOLUME
+                ) {
                     out_len.min(4)
-                } else { 0 };
+                } else {
+                    0
+                };
                 ctx.cpu.write_mem(returned_p, &returned.to_le_bytes())?;
             }
             return Ok(DispatchOutcome::ReturnedR0(1));
@@ -3261,7 +3874,11 @@ fn get_system_memory_division(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let snapshot = division.snapshot();
-    let values = [snapshot.store_pages, snapshot.ram_pages(), division.page_size()];
+    let values = [
+        snapshot.store_pages,
+        snapshot.ram_pages(),
+        division.page_size(),
+    ];
     // Validate each output before publishing any result. Writing its original
     // bytes back also detects a readable but non-writable output mapping.
     for pointer in pointers {
@@ -3301,8 +3918,13 @@ fn set_system_memory_division(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     match division.resize(store_pages) {
         Ok(()) => Ok(DispatchOutcome::ReturnedR0(SYSMEM_CHANGED)),
         Err(error) => {
-            set_thread_error(ctx, match error { ResizeError::InvalidSize => ERROR_INVALID_PARAMETER,
-                ResizeError::InUse => 8 }); // ERROR_NOT_ENOUGH_MEMORY
+            set_thread_error(
+                ctx,
+                match error {
+                    ResizeError::InvalidSize => ERROR_INVALID_PARAMETER,
+                    ResizeError::InUse => 8,
+                },
+            ); // ERROR_NOT_ENOUGH_MEMORY
             Ok(DispatchOutcome::ReturnedR0(SYSMEM_FAILED))
         }
     }
@@ -3311,7 +3933,9 @@ fn set_system_memory_division(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
 fn global_memory_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let status = ctx.arg_u32(0)?;
     if status == 0 {
-        if ctx.kernel.memory_division.is_some() { set_thread_error(ctx, ERROR_INVALID_PARAMETER); }
+        if ctx.kernel.memory_division.is_some() {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        }
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     if let Some(division) = &ctx.kernel.memory_division {
@@ -3321,13 +3945,23 @@ fn global_memory_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
         let load = ((snapshot.program_used as u64 * 100) / snapshot.ram_pages() as u64) as u32;
         // No swap file exists in this CE device. Virtual fields describe the
         // private 32 MiB CE slot, excluding the shared overflow arena.
-        let values = [32, load, total, available, 0, 0,
-            0x0200_0000, ctx.kernel.heap.private_virtual_free()];
+        let values = [
+            32,
+            load,
+            total,
+            available,
+            0,
+            0,
+            0x0200_0000,
+            ctx.kernel.heap.private_virtual_free(),
+        ];
         let mut data = [0u8; 32];
         for (i, value) in values.into_iter().enumerate() {
             data[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
-        if ctx.cpu.write_mem(status, &data).is_err() { set_thread_error(ctx, ERROR_INVALID_PARAMETER); }
+        if ctx.cpu.write_mem(status, &data).is_err() {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        }
         return Ok(DispatchOutcome::ReturnedR0(0)); // VOID
     }
     // PocketPC compatibility path is unchanged by the Gizmondo profile.
@@ -3414,7 +4048,9 @@ fn get_module_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 }
 
 fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(result) = finish_module_attach(ctx)? { return Ok(result); }
+    if let Some(result) = finish_module_attach(ctx)? {
+        return Ok(result);
+    }
     let path_p = ctx.arg_u32(0)?;
     let path = match read_wstr(ctx, path_p, 260) {
         Ok(path) if path_p != 0 && !path.is_empty() => path,
@@ -3426,11 +4062,19 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let name = String::from_utf16_lossy(&path).to_ascii_lowercase();
     if name.ends_with("sdlaunch.dll") || name == "sdlaunch" {
         let handle = if ctx.kernel.process_launch_enabled
-            && ctx.kernel.dynamic_exports.contains_key(&pocket_kernel::SDLAUNCH_MODULE_HANDLE) {
+            && ctx
+                .kernel
+                .dynamic_exports
+                .contains_key(&pocket_kernel::SDLAUNCH_MODULE_HANDLE)
+        {
             pocket_kernel::SDLAUNCH_MODULE_HANDLE
-        } else { 0 };
+        } else {
+            0
+        };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE SD launch)");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if name.ends_with("coredll.dll") || name == "coredll" {
@@ -3448,7 +4092,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE AYGSHELL)");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if name.ends_with("gx.dll") || name == "gx" {
@@ -3458,7 +4104,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x}");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if name.ends_with("commctrl.dll") || name == "commctrl" {
@@ -3468,7 +4116,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x}");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if name.ends_with("hss.dll") || name == "hss" {
@@ -3478,14 +4128,20 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE HSS)");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if name.ends_with("wininet.dll") || name == "wininet" {
-        return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::WININET_MODULE_HANDLE));
+        return Ok(DispatchOutcome::ReturnedR0(
+            pocket_kernel::WININET_MODULE_HANDLE,
+        ));
     }
     if name.ends_with("ws2.dll") || name == "ws2" {
-        return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::WS2_MODULE_HANDLE));
+        return Ok(DispatchOutcome::ReturnedR0(
+            pocket_kernel::WS2_MODULE_HANDLE,
+        ));
     }
     if name.ends_with("ole32.dll") || name == "ole32" {
         let handle = if ctx
@@ -3498,7 +4154,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE OLE32)");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if name.ends_with("imgdecmp.dll") || name == "imgdecmp" {
@@ -3508,7 +4166,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::debug!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE image decoder)");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     if let Some(handle) = gles_module_handle(&name) {
@@ -3522,7 +4182,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             0
         };
         log::info!("LoadLibraryW({name:?}) -> 0x{handle:08x} (PocketHLE GLES)");
-        if handle == 0 { set_thread_error(ctx, 126); }
+        if handle == 0 {
+            set_thread_error(ctx, 126);
+        }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     // Already resident? CE hands back the same base and bumps the
@@ -3548,40 +4210,84 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 
 fn runtime_hle_dll(dll: &str) -> bool {
     let name = dll.to_ascii_lowercase();
-    matches!(name.as_str(), "coredll.dll" | "aygshell.dll" | "commctrl.dll" | "gx.dll"
-        | "ddraw.dll" | "ole32.dll" | "sdlaunch.dll" | "hss.dll" | "ws2.dll" | "wininet.dll")
-        || gles_module_handle(&name).is_some()
+    matches!(
+        name.as_str(),
+        "coredll.dll"
+            | "aygshell.dll"
+            | "commctrl.dll"
+            | "gx.dll"
+            | "ddraw.dll"
+            | "ole32.dll"
+            | "sdlaunch.dll"
+            | "hss.dll"
+            | "ws2.dll"
+            | "wininet.dll"
+    ) || gles_module_handle(&name).is_some()
 }
 
 fn begin_module_attach(ctx: &mut CallCtx<'_>, base: u32) -> Result<DispatchOutcome, KernelError> {
     let mut closure = std::collections::HashSet::new();
     let mut pending = vec![base];
     while let Some(current) = pending.pop() {
-        if !closure.insert(current) { continue; }
-        if let Some(module) = ctx.kernel.modules.iter().find(|module| module.base == current) {
+        if !closure.insert(current) {
+            continue;
+        }
+        if let Some(module) = ctx
+            .kernel
+            .modules
+            .iter()
+            .find(|module| module.base == current)
+        {
             pending.extend(&module.dependencies);
         }
     }
-    let cleanup: Vec<_> = ctx.kernel.modules.iter()
+    let cleanup: Vec<_> = ctx
+        .kernel
+        .modules
+        .iter()
         .filter(|module| closure.contains(&module.base) && !module.attached)
-        .map(|module| module.base).collect();
+        .map(|module| module.base)
+        .collect();
     let mut sequence = cleanup.clone();
     sequence.reverse();
     let frame = GuestCallFrame {
-        args: [ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?, ctx.arg_u32(3)?],
-        lr: ctx.cpu.read_reg(ArmReg::Lr)?, sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+        args: [
+            ctx.arg_u32(0)?,
+            ctx.arg_u32(1)?,
+            ctx.arg_u32(2)?,
+            ctx.arg_u32(3)?,
+        ],
+        lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+        sp: ctx.cpu.read_reg(ArmReg::Sp)?,
     };
-    advance_module_callback(ctx, pocket_kernel::ModuleAttachFrame {
-        detaching: false, base, thunk: ctx.thunk.thunk_va,
-        thread: ctx.kernel.current_thread, frame, sequence, cleanup,
-        completed: vec![], result: base, error: None,
-    })
+    advance_module_callback(
+        ctx,
+        pocket_kernel::ModuleAttachFrame {
+            detaching: false,
+            base,
+            thunk: ctx.thunk.thunk_va,
+            thread: ctx.kernel.current_thread,
+            frame,
+            sequence,
+            cleanup,
+            completed: vec![],
+            result: base,
+            error: None,
+        },
+    )
 }
 
 fn free_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(outcome) = finish_module_attach(ctx)? { return Ok(outcome); }
+    if let Some(outcome) = finish_module_attach(ctx)? {
+        return Ok(outcome);
+    }
     let base = ctx.arg_u32(0)?;
-    let Some(module) = ctx.kernel.modules.iter_mut().find(|module| module.base == base) else {
+    let Some(module) = ctx
+        .kernel
+        .modules
+        .iter_mut()
+        .find(|module| module.base == base)
+    else {
         if base != ctx.kernel.image_base && ctx.kernel.dynamic_exports.contains_key(&base) {
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
@@ -3596,63 +4302,111 @@ fn free_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let cleanup = ctx.kernel.unreachable_runtime_modules();
     let sequence = cleanup.clone(); // pop visits reverse initialization order.
     let frame = GuestCallFrame {
-        args: [ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?, ctx.arg_u32(3)?],
-        lr: ctx.cpu.read_reg(ArmReg::Lr)?, sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+        args: [
+            ctx.arg_u32(0)?,
+            ctx.arg_u32(1)?,
+            ctx.arg_u32(2)?,
+            ctx.arg_u32(3)?,
+        ],
+        lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+        sp: ctx.cpu.read_reg(ArmReg::Sp)?,
     };
-    advance_module_callback(ctx, pocket_kernel::ModuleAttachFrame {
-        detaching: true, base, thunk: ctx.thunk.thunk_va,
-        thread: ctx.kernel.current_thread, frame, sequence, cleanup,
-        completed: vec![], result: 1, error: None,
-    })
+    advance_module_callback(
+        ctx,
+        pocket_kernel::ModuleAttachFrame {
+            detaching: true,
+            base,
+            thunk: ctx.thunk.thunk_va,
+            thread: ctx.kernel.current_thread,
+            frame,
+            sequence,
+            cleanup,
+            completed: vec![],
+            result: 1,
+            error: None,
+        },
+    )
 }
 
 fn unload_module(ctx: &mut CallCtx<'_>, base: u32) -> Result<(), KernelError> {
     ctx.kernel.unload_runtime_module(ctx.cpu, base)
 }
 
-fn advance_module_callback(ctx: &mut CallCtx<'_>, mut pending: pocket_kernel::ModuleAttachFrame)
-    -> Result<DispatchOutcome, KernelError>
-{
+fn advance_module_callback(
+    ctx: &mut CallCtx<'_>,
+    mut pending: pocket_kernel::ModuleAttachFrame,
+) -> Result<DispatchOutcome, KernelError> {
     while let Some(base) = pending.sequence.pop() {
-        let Some(module) = ctx.kernel.modules.iter_mut().find(|module| module.base == base) else { continue; };
+        let Some(module) = ctx
+            .kernel
+            .modules
+            .iter_mut()
+            .find(|module| module.base == base)
+        else {
+            continue;
+        };
         let entry = module.image_entry;
         if entry == 0 {
-            if !pending.detaching { module.attached = true; pending.completed.push(base); }
+            if !pending.detaching {
+                module.attached = true;
+                pending.completed.push(base);
+            }
             continue;
         }
-        if pending.detaching && !module.attached { continue; }
+        if pending.detaching && !module.attached {
+            continue;
+        }
         pending.base = base;
         ctx.cpu.write_reg(ArmReg::R0, base)?;
-        ctx.cpu.write_reg(ArmReg::R1, u32::from(!pending.detaching))?;
+        ctx.cpu
+            .write_reg(ArmReg::R1, u32::from(!pending.detaching))?;
         ctx.cpu.write_reg(ArmReg::R2, 0)?;
         ctx.cpu.write_reg(ArmReg::Lr, pending.thunk)?;
         ctx.kernel.module_attach_frames.push(pending);
         return Ok(DispatchOutcome::JumpTo(entry));
     }
     if pending.detaching {
-        for base in pending.cleanup.iter().rev() { unload_module(ctx, *base)?; }
+        for base in pending.cleanup.iter().rev() {
+            unload_module(ctx, *base)?;
+        }
     }
-    for (register, value) in [ArmReg::R1, ArmReg::R2, ArmReg::R3].into_iter()
-        .zip(pending.frame.args[1..].iter().copied()) {
+    for (register, value) in [ArmReg::R1, ArmReg::R2, ArmReg::R3]
+        .into_iter()
+        .zip(pending.frame.args[1..].iter().copied())
+    {
         ctx.cpu.write_reg(register, value)?;
     }
     ctx.cpu.write_reg(ArmReg::Lr, pending.frame.lr)?;
     ctx.cpu.write_reg(ArmReg::Sp, pending.frame.sp)?;
-    if let Some(error) = pending.error { set_thread_error(ctx, error); }
+    if let Some(error) = pending.error {
+        set_thread_error(ctx, error);
+    }
     Ok(DispatchOutcome::ReturnedR0(pending.result))
 }
 
 fn finish_module_attach(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
-    if !ctx.kernel.module_attach_frames.last().is_some_and(|pending|
-        pending.thread == ctx.kernel.current_thread && pending.thunk == ctx.thunk.thunk_va
-        && pending.frame.sp == sp) {
+    if !ctx
+        .kernel
+        .module_attach_frames
+        .last()
+        .is_some_and(|pending| {
+            pending.thread == ctx.kernel.current_thread
+                && pending.thunk == ctx.thunk.thunk_va
+                && pending.frame.sp == sp
+        })
+    {
         return Ok(None);
     }
     let mut pending = ctx.kernel.module_attach_frames.pop().unwrap();
     if !pending.detaching {
         if ctx.cpu.read_reg(ArmReg::R0)? != 0 {
-            if let Some(module) = ctx.kernel.modules.iter_mut().find(|module| module.base == pending.base) {
+            if let Some(module) = ctx
+                .kernel
+                .modules
+                .iter_mut()
+                .find(|module| module.base == pending.base)
+            {
                 module.attached = true;
             }
             pending.completed.push(pending.base);
@@ -3727,10 +4481,17 @@ fn load_mui_satellites(ctx: &mut CallCtx<'_>, host_path: &std::path::Path, owner
     });
     for satellite in satellites {
         let sat_path = parent.join(&satellite);
-        let loaded = if let Some(module) = ctx.kernel.modules.iter_mut().find(|m| m.name == module_file_name(&satellite)) {
+        let loaded = if let Some(module) = ctx
+            .kernel
+            .modules
+            .iter_mut()
+            .find(|m| m.name == module_file_name(&satellite))
+        {
             module.refcount = module.refcount.saturating_add(1);
             Ok(Some(module.handle))
-        } else { map_resource_module(ctx, &sat_path, &satellite) };
+        } else {
+            map_resource_module(ctx, &sat_path, &satellite)
+        };
         match loaded {
             Ok(Some(handle)) => {
                 if let Some(module) = ctx.kernel.modules.iter_mut().find(|m| m.handle == owner) {
@@ -3750,10 +4511,16 @@ fn load_mui_satellites(ctx: &mut CallCtx<'_>, host_path: &std::path::Path, owner
 /// its resources and, for native DLLs, exports and imports. Returns `None` when the file can't be found
 /// or parsed, or when the module region is exhausted.
 #[derive(Default)]
-struct NativeModuleGraph { new: Vec<u32>, order: Vec<u32> }
+struct NativeModuleGraph {
+    new: Vec<u32>,
+    order: Vec<u32>,
+}
 
-fn map_resource_module(ctx: &mut CallCtx<'_>, host_path: &std::path::Path,
-    request: &str) -> Result<Option<u32>, KernelError> {
+fn map_resource_module(
+    ctx: &mut CallCtx<'_>,
+    host_path: &std::path::Path,
+    request: &str,
+) -> Result<Option<u32>, KernelError> {
     let mut graph = NativeModuleGraph::default();
     let next = ctx.kernel.next_module_base;
     let free = ctx.kernel.free_module_bases.clone();
@@ -3762,8 +4529,13 @@ fn map_resource_module(ctx: &mut CallCtx<'_>, host_path: &std::path::Path,
         // The loader needs each entry page for the attach transaction. Preflight
         // these before callbacks, so insufficient RAM still rolls back cleanly.
         for base in &graph.order {
-            let entry = ctx.kernel.modules.iter().find(|module| module.base == *base)
-                .map(|module| module.image_entry).unwrap_or(0);
+            let entry = ctx
+                .kernel
+                .modules
+                .iter()
+                .find(|module| module.base == *base)
+                .map(|module| module.image_entry)
+                .unwrap_or(0);
             if entry != 0 {
                 if let Err(error) = ctx.cpu.read_mem(entry & !1, 1) {
                     result = Err(error.into());
@@ -3772,22 +4544,36 @@ fn map_resource_module(ctx: &mut CallCtx<'_>, host_path: &std::path::Path,
             }
         }
     }
-    if matches!(&result, Err(KernelError::Cpu(pocket_cpu::CpuError::ImageOutOfMemory { .. }))) {
+    if matches!(
+        &result,
+        Err(KernelError::Cpu(
+            pocket_cpu::CpuError::ImageOutOfMemory { .. }
+        ))
+    ) {
         set_thread_error(ctx, 8);
         result = Ok(None);
     }
     if !matches!(result, Ok(Some(_))) {
-        for base in graph.new.iter().rev() { ctx.kernel.unload_runtime_module(ctx.cpu, *base)?; }
+        for base in graph.new.iter().rev() {
+            ctx.kernel.unload_runtime_module(ctx.cpu, *base)?;
+        }
         ctx.kernel.next_module_base = next;
         ctx.kernel.free_module_bases = free;
     } else {
         // Dependencies precede importers in initialization and process lifetime order.
         let mut new = std::collections::HashMap::new();
         for module in std::mem::take(&mut ctx.kernel.modules) {
-            if graph.new.contains(&module.base) { new.insert(module.base, module); }
-            else { ctx.kernel.modules.push(module); }
+            if graph.new.contains(&module.base) {
+                new.insert(module.base, module);
+            } else {
+                ctx.kernel.modules.push(module);
+            }
         }
-        for base in graph.order { if let Some(module)=new.remove(&base) { ctx.kernel.modules.push(module); } }
+        for base in graph.order {
+            if let Some(module) = new.remove(&base) {
+                ctx.kernel.modules.push(module);
+            }
+        }
     }
     result
 }
@@ -3796,11 +4582,15 @@ fn map_resource_module_inner(
     ctx: &mut CallCtx<'_>,
     host_path: &std::path::Path,
     request: &str,
-    explicit: bool, graph: &mut NativeModuleGraph,
+    explicit: bool,
+    graph: &mut NativeModuleGraph,
 ) -> Result<Option<u32>, KernelError> {
     let bytes = match std::fs::read(host_path) {
         Ok(bytes) => bytes,
-        Err(_) => { set_thread_error(ctx, 5); return Ok(None); },
+        Err(_) => {
+            set_thread_error(ctx, 5);
+            return Ok(None);
+        }
     };
     let mut image = match pocket_pe::load_bytes(&bytes) {
         Ok(img) => img,
@@ -3813,7 +4603,12 @@ fn map_resource_module_inner(
             return Ok(None);
         }
     };
-    let base = ctx.kernel.free_module_bases.last().copied().unwrap_or(ctx.kernel.next_module_base);
+    let base = ctx
+        .kernel
+        .free_module_bases
+        .last()
+        .copied()
+        .unwrap_or(ctx.kernel.next_module_base);
     if base
         .checked_add(MODULE_REGION_STRIDE)
         .is_none_or(|end| end > MODULE_REGION_END)
@@ -3822,26 +4617,40 @@ fn map_resource_module_inner(
         set_thread_error(ctx, 8);
         return Ok(None);
     }
-    let executable = image.entry_point != 0 || !image.exports.is_empty() || !image.imports.is_empty();
-    if image.size_of_image > MODULE_REGION_STRIDE || image.sections.iter().any(|section|
-        section.virtual_address.checked_add(section.virtual_size.max(section.data.len() as u32))
-            .is_none_or(|end| end > image.size_of_image)) {
+    let executable =
+        image.entry_point != 0 || !image.exports.is_empty() || !image.imports.is_empty();
+    if image.size_of_image > MODULE_REGION_STRIDE
+        || image.sections.iter().any(|section| {
+            section
+                .virtual_address
+                .checked_add(section.virtual_size.max(section.data.len() as u32))
+                .is_none_or(|end| end > image.size_of_image)
+        })
+    {
         log::warn!("LoadLibraryW({request:?}): invalid image bounds");
         set_thread_error(ctx, 193);
         return Ok(None);
     }
     let thunk_base = base + pocket_cpu::round_up_to_page(image.size_of_image);
-    let thunk_size = pocket_cpu::round_up_to_page((image.imports.len() as u32)
-        .saturating_mul(pocket_kernel::THUNK_STRIDE));
+    let thunk_size = pocket_cpu::round_up_to_page(
+        (image.imports.len() as u32).saturating_mul(pocket_kernel::THUNK_STRIDE),
+    );
     if image.size_of_image > MODULE_REGION_STRIDE
-        || thunk_base.checked_add(thunk_size).is_none_or(|end| end > base + MODULE_REGION_STRIDE) {
+        || thunk_base
+            .checked_add(thunk_size)
+            .is_none_or(|end| end > base + MODULE_REGION_STRIDE)
+    {
         log::warn!("LoadLibraryW({request:?}): image exceeds module slot");
         set_thread_error(ctx, 193);
         return Ok(None);
     }
     if executable {
-        if ctx.cpu.arch() != pocket_cpu::Arch::Arm || !matches!(image.machine,
-            pocket_pe::machine::ARM | pocket_pe::machine::THUMB | pocket_pe::machine::ARMNT) {
+        if ctx.cpu.arch() != pocket_cpu::Arch::Arm
+            || !matches!(
+                image.machine,
+                pocket_pe::machine::ARM | pocket_pe::machine::THUMB | pocket_pe::machine::ARMNT
+            )
+        {
             log::warn!("LoadLibraryW({request:?}): runtime machine is not supported");
             set_thread_error(ctx, 193);
             return Ok(None);
@@ -3851,17 +4660,30 @@ fn map_resource_module_inner(
             set_thread_error(ctx, 193);
             return Ok(None);
         }
-
     }
-    let mut resident: Vec<(u32, u32)> = image.sections.iter().map(|section| (
-        base + section.virtual_address,
-        pocket_cpu::round_up_to_page(section.virtual_size.max(section.data.len() as u32)),
-    )).collect();
-    if executable && thunk_size != 0 { resident.push((thunk_base, thunk_size)); }
+    let mut resident: Vec<(u32, u32)> = image
+        .sections
+        .iter()
+        .map(|section| {
+            (
+                base + section.virtual_address,
+                pocket_cpu::round_up_to_page(section.virtual_size.max(section.data.len() as u32)),
+            )
+        })
+        .collect();
+    if executable && thunk_size != 0 {
+        resident.push((thunk_base, thunk_size));
+    }
     let lazy = ctx.cpu.supports_image_paging();
     let charge = if lazy {
-        if executable && thunk_size != 0 { vec![(thunk_base, thunk_size)] } else { vec![] }
-    } else { resident.clone() };
+        if executable && thunk_size != 0 {
+            vec![(thunk_base, thunk_size)]
+        } else {
+            vec![]
+        }
+    } else {
+        resident.clone()
+    };
     if !ctx.kernel.heap.retain_resident_batch(&charge) {
         set_thread_error(ctx, 8);
         return Ok(None);
@@ -3881,32 +4703,57 @@ fn map_resource_module_inner(
                 continue;
             }
             if lazy {
-                ctx.cpu.map_image_region(base + s.virtual_address, aligned, prot,
-                    s.data.clone(), ctx.kernel.heap.image_page_budget())?;
+                ctx.cpu.map_image_region(
+                    base + s.virtual_address,
+                    aligned,
+                    prot,
+                    s.data.clone(),
+                    ctx.kernel.heap.image_page_budget(),
+                )?;
             } else {
-                ctx.cpu.map_region(base + s.virtual_address, aligned, prot)?;
+                ctx.cpu
+                    .map_region(base + s.virtual_address, aligned, prot)?;
             }
             mapped.push((base + s.virtual_address, aligned));
-            if !lazy { ctx.cpu.write_mem(base + s.virtual_address, &s.data)?; }
+            if !lazy {
+                ctx.cpu.write_mem(base + s.virtual_address, &s.data)?;
+            }
         }
         if executable {
-            if thunk_size != 0 { ctx.cpu.map_region(thunk_base, thunk_size, Prot::READ | Prot::EXEC)?; mapped.push((thunk_base, thunk_size)); }
-            for (index, import) in image.imports.iter().enumerate().filter(|(_, import)| runtime_hle_dll(&import.dll)) {
+            if thunk_size != 0 {
+                ctx.cpu
+                    .map_region(thunk_base, thunk_size, Prot::READ | Prot::EXEC)?;
+                mapped.push((thunk_base, thunk_size));
+            }
+            for (index, import) in image
+                .imports
+                .iter()
+                .enumerate()
+                .filter(|(_, import)| runtime_hle_dll(&import.dll))
+            {
                 let address = thunk_base + index as u32 * pocket_kernel::THUNK_STRIDE;
                 let friendly_name = match &import.binding {
                     pocket_pe::ImportBinding::Name(name) => Some(name.clone()),
-                    pocket_pe::ImportBinding::Ordinal(ordinal) => crate::resolve_ordinal(&import.dll, *ordinal),
+                    pocket_pe::ImportBinding::Ordinal(ordinal) => {
+                        crate::resolve_ordinal(&import.dll, *ordinal)
+                    }
                 };
                 let thunk = pocket_kernel::Thunk {
-                    thunk_va: address, iat_va: import.iat_va, dll: import.dll.clone(),
-                    binding: import.binding.clone(), friendly_name,
+                    thunk_va: address,
+                    iat_va: import.iat_va,
+                    dll: import.dll.clone(),
+                    binding: import.binding.clone(),
+                    friendly_name,
                 };
-                let native = thunk.friendly_name.as_deref().and_then(|name|
-                    pocket_kernel::native_thunks::native_thunk_for(&import.dll, name));
+                let native = thunk.friendly_name.as_deref().and_then(|name| {
+                    pocket_kernel::native_thunks::native_thunk_for(&import.dll, name)
+                });
                 if let Some(words) = native {
-                    ctx.cpu.write_mem(address, &pocket_kernel::native_thunks::thunk_bytes(&words))?;
-                    if let Some(offset) = thunk.friendly_name.as_deref().and_then(|name|
-                        pocket_kernel::native_thunks::hybrid_fallback_offset(&import.dll, name)) {
+                    ctx.cpu
+                        .write_mem(address, &pocket_kernel::native_thunks::thunk_bytes(&words))?;
+                    if let Some(offset) = thunk.friendly_name.as_deref().and_then(|name| {
+                        pocket_kernel::native_thunks::hybrid_fallback_offset(&import.dll, name)
+                    }) {
                         ctx.cpu.add_code_hook(address + offset)?;
                         ctx.kernel.runtime_thunks.insert(address + offset, thunk);
                     }
@@ -3917,20 +4764,33 @@ fn map_resource_module_inner(
                 }
                 ctx.cpu.write_mem(import.iat_va, &address.to_le_bytes())?;
             }
-            let exports = image.exports.iter().map(|(name, rva)| (name.clone(), base + *rva)).collect();
+            let exports = image
+                .exports
+                .iter()
+                .map(|(name, rva)| (name.clone(), base + *rva))
+                .collect();
             ctx.kernel.dynamic_exports.insert(base, exports);
         }
         Ok(())
     })();
     if let Err(error) = mapping {
-        for &(start, size) in mapped.iter().rev() { ctx.cpu.unmap_region(start, size)?; }
-        for &(start, size) in &resident { ctx.kernel.heap.release_resident(start, size); }
-        ctx.kernel.runtime_thunks.retain(|address, _| *address < base || *address >= base + MODULE_REGION_STRIDE);
+        for &(start, size) in mapped.iter().rev() {
+            ctx.cpu.unmap_region(start, size)?;
+        }
+        for &(start, size) in &resident {
+            ctx.kernel.heap.release_resident(start, size);
+        }
+        ctx.kernel
+            .runtime_thunks
+            .retain(|address, _| *address < base || *address >= base + MODULE_REGION_STRIDE);
         ctx.kernel.dynamic_exports.remove(&base);
         return Err(error);
     }
-    if ctx.kernel.free_module_bases.last() == Some(&base) { ctx.kernel.free_module_bases.pop(); }
-    else { ctx.kernel.next_module_base = base + MODULE_REGION_STRIDE; }
+    if ctx.kernel.free_module_bases.last() == Some(&base) {
+        ctx.kernel.free_module_bases.pop();
+    } else {
+        ctx.kernel.next_module_base = base + MODULE_REGION_STRIDE;
+    }
     let name = module_file_name(request);
     log::info!(
         "loaded module {name} from {} at 0x{base:08x} ({} sections, {} resources)",
@@ -3947,43 +4807,77 @@ fn map_resource_module_inner(
         name,
         base,
         image_size: image.size_of_image,
-        image_entry: if executable && image.entry_point != 0 { image.entry_va() } else { 0 },
+        image_entry: if executable && image.entry_point != 0 {
+            image.entry_va()
+        } else {
+            0
+        },
         resources: image.resources,
         refcount: u32::from(explicit),
     });
     graph.new.push(base);
     // Publish exports before following edges, so circular imports can bind
     // addresses without recursively allocating the same DLL again.
-    for import in image.imports.iter().filter(|import| !runtime_hle_dll(&import.dll)) {
+    for import in image
+        .imports
+        .iter()
+        .filter(|import| !runtime_hle_dll(&import.dll))
+    {
         let dependency = if let Some(module) = ctx.kernel.module_by_name(&import.dll) {
             module.base
         } else {
             let sibling = host_path.parent().and_then(|dir| {
-                std::fs::read_dir(dir).ok()?.flatten().find(|entry|
-                    entry.file_name().to_string_lossy().eq_ignore_ascii_case(&module_file_name(&import.dll))
-                    && entry.path().is_file()).map(|entry| entry.path())
+                std::fs::read_dir(dir)
+                    .ok()?
+                    .flatten()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&module_file_name(&import.dll))
+                            && entry.path().is_file()
+                    })
+                    .map(|entry| entry.path())
             });
             let Some(path) = sibling.or_else(|| ctx.kernel.find_module_file(&import.dll)) else {
-                set_thread_error(ctx, 126); return Ok(None);
+                set_thread_error(ctx, 126);
+                return Ok(None);
             };
-            let Some(dependency) = map_resource_module_inner(ctx, &path, &import.dll, false, graph)? else { return Ok(None); };
+            let Some(dependency) =
+                map_resource_module_inner(ctx, &path, &import.dll, false, graph)?
+            else {
+                return Ok(None);
+            };
             dependency
         };
         let key = match &import.binding {
             pocket_pe::ImportBinding::Name(name) => name.clone(),
             pocket_pe::ImportBinding::Ordinal(ordinal) => format!("#{ordinal}"),
         };
-        let Some(address) = ctx.kernel.dynamic_exports.get(&dependency).and_then(|exports| exports.get(&key)).copied() else {
-            set_thread_error(ctx, 127); return Ok(None);
+        let Some(address) = ctx
+            .kernel
+            .dynamic_exports
+            .get(&dependency)
+            .and_then(|exports| exports.get(&key))
+            .copied()
+        else {
+            set_thread_error(ctx, 127);
+            return Ok(None);
         };
         ctx.cpu.write_mem(import.iat_va, &address.to_le_bytes())?;
-        let module = ctx.kernel.modules.iter_mut().find(|module| module.base == base).unwrap();
-        if !module.dependencies.contains(&dependency) { module.dependencies.push(dependency); }
+        let module = ctx
+            .kernel
+            .modules
+            .iter_mut()
+            .find(|module| module.base == base)
+            .unwrap();
+        if !module.dependencies.contains(&dependency) {
+            module.dependencies.push(dependency);
+        }
     }
     graph.order.push(base);
     Ok(Some(base))
 }
-
 
 /// Find a resource in the scope named by `hModule`, falling back to a
 /// search across every loaded image.
@@ -4063,7 +4957,11 @@ fn get_command_line_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if let Some(cached) = ctx.kernel.command_line_cache {
         return Ok(DispatchOutcome::ReturnedR0(cached));
     }
-    let path = ctx.kernel.command_line.clone().unwrap_or_else(|| ctx.kernel.module_path.clone());
+    let path = ctx
+        .kernel
+        .command_line
+        .clone()
+        .unwrap_or_else(|| ctx.kernel.module_path.clone());
     let bytes_needed = (path.encode_utf16().count() as u32 + 1) * 2;
     let va = match ctx.kernel.heap.alloc(bytes_needed) {
         Some(p) => p,
@@ -4461,7 +5359,9 @@ fn sync_direct_framebuffer_write(
     dst: u32,
     len: usize,
 ) -> Result<(), KernelError> {
-    if !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty() { return Ok(()); }
+    if !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty() {
+        return Ok(());
+    }
     let base = SYNTHETIC_FRAMEBUFFER_BASE;
     let end = base.saturating_add(ctx.kernel.framebuffer.byte_size());
     let write_end = dst.saturating_add(len as u32);
@@ -4633,8 +5533,8 @@ fn read_wstr(ctx: &mut CallCtx<'_>, p: u32, max: u32) -> Result<Vec<u16>, Kernel
 // silently stop at 64 KiB: strstr would miss the closing XML/CDATA markers.
 // The scanner stops at NUL or the first inaccessible byte; also prevent an
 // address wrap at the end of the guest's 32-bit address space.
-fn read_crt_cstr(ctx:&mut CallCtx<'_>,p:u32)->Result<Vec<u8>,KernelError> {
-    read_cstr(ctx,p,u32::MAX.saturating_sub(p))
+fn read_crt_cstr(ctx: &mut CallCtx<'_>, p: u32) -> Result<Vec<u8>, KernelError> {
+    read_cstr(ctx, p, u32::MAX.saturating_sub(p))
 }
 
 fn strlen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -4653,12 +5553,16 @@ fn wcslen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// the terminator and following memory intact, and return the original pointer.
 fn wcsrev(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let original = ctx.arg_u32(0)?;
-    if original == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    if original == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let mut units = Vec::new();
     let mut address = original;
     loop {
         let unit = ctx.cpu.read_u16_le(address)?;
-        if unit == 0 { break; }
+        if unit == 0 {
+            break;
+        }
         units.push(unit);
         address = address.wrapping_add(2);
     }
@@ -4685,13 +5589,19 @@ fn strcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// Colors normalizes resource lookup names with this function.
 fn strlwr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let original = ctx.arg_u32(0)?;
-    if original == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    if original == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let mut address = original;
     loop {
         let byte = ctx.cpu.read_u8(address)?;
-        if byte == 0 { break; }
+        if byte == 0 {
+            break;
+        }
         let lower = byte.to_ascii_lowercase();
-        if lower != byte { ctx.cpu.write_mem(address, &[lower])?; }
+        if lower != byte {
+            ctx.cpu.write_mem(address, &[lower])?;
+        }
         address = address.wrapping_add(1);
     }
     Ok(DispatchOutcome::ReturnedR0(original))
@@ -4700,13 +5610,21 @@ fn strlwr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 // The default CRT C locale folds ASCII letters and preserves all other
 // wint_t values, including WEOF. Never return a stub zero for valid text.
 fn towupper(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let value=ctx.arg_u32(0)?;
-    let folded=if (0x61..=0x7a).contains(&value) { value-0x20 } else { value };
+    let value = ctx.arg_u32(0)?;
+    let folded = if (0x61..=0x7a).contains(&value) {
+        value - 0x20
+    } else {
+        value
+    };
     Ok(DispatchOutcome::ReturnedR0(folded))
 }
 fn towlower(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let value=ctx.arg_u32(0)?;
-    let folded=if (0x41..=0x5a).contains(&value) { value+0x20 } else { value };
+    let value = ctx.arg_u32(0)?;
+    let folded = if (0x41..=0x5a).contains(&value) {
+        value + 0x20
+    } else {
+        value
+    };
     Ok(DispatchOutcome::ReturnedR0(folded))
 }
 
@@ -4775,7 +5693,10 @@ fn strnicmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn parse_atof_prefix(text: &str) -> f64 {
     let bytes = text.as_bytes();
     let mut end = 0;
-    while bytes.get(end).is_some_and(|byte| byte.is_ascii_whitespace()) {
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
         end += 1;
     }
     let start = end;
@@ -4797,7 +5718,10 @@ fn parse_atof_prefix(text: &str) -> f64 {
     if digits == 0 {
         return 0.0;
     }
-    if matches!(bytes.get(end), Some(b'e') | Some(b'E') | Some(b'd') | Some(b'D')) {
+    if matches!(
+        bytes.get(end),
+        Some(b'e') | Some(b'E') | Some(b'd') | Some(b'D')
+    ) {
         let exponent = end;
         end += 1;
         if matches!(bytes.get(end), Some(b'+') | Some(b'-')) {
@@ -4811,7 +5735,10 @@ fn parse_atof_prefix(text: &str) -> f64 {
             end = exponent;
         }
     }
-    text[start..end].replace(['d', 'D'], "e").parse::<f64>().unwrap_or(0.0)
+    text[start..end]
+        .replace(['d', 'D'], "e")
+        .parse::<f64>()
+        .unwrap_or(0.0)
 }
 
 fn atof_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -4847,35 +5774,71 @@ fn atoi_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn atoi64_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     let text = read_cstr_string(ctx, p, 0x1000)?;
-    let mut bytes = text.bytes().skip_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 11 | 12)).peekable();
+    let mut bytes = text
+        .bytes()
+        .skip_while(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 11 | 12))
+        .peekable();
     let negative = bytes.peek() == Some(&b'-');
-    if matches!(bytes.peek(), Some(b'+') | Some(b'-')) { bytes.next(); }
-    let limit = if negative { 1u64 << 63 } else { i64::MAX as u64 };
+    if matches!(bytes.peek(), Some(b'+') | Some(b'-')) {
+        bytes.next();
+    }
+    let limit = if negative {
+        1u64 << 63
+    } else {
+        i64::MAX as u64
+    };
     let mut value = 0u64;
     for byte in bytes {
-        if !byte.is_ascii_digit() { break; }
-        value = value.saturating_mul(10).saturating_add((byte - b'0') as u64).min(limit);
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value
+            .saturating_mul(10)
+            .saturating_add((byte - b'0') as u64)
+            .min(limit);
     }
     // WinCE leaves overflow undefined; clamp deterministically without wrapping.
-    let bits = if negative { 0u64.wrapping_sub(value) } else { value };
-    Ok(DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32))
+    let bits = if negative {
+        0u64.wrapping_sub(value)
+    } else {
+        value
+    };
+    Ok(DispatchOutcome::ReturnedR0R1(
+        bits as u32,
+        (bits >> 32) as u32,
+    ))
 }
 
 #[cfg(test)]
 mod colors_time_tests {
     use super::*;
-    use crate::bluetooth::tests::{setup, call};
+    use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
     #[test]
     fn atoi64_returns_full_arm_register_pair_and_decimal_prefix() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
-        for (text, expected) in [("1791583200123trailing", 1791583200123i64),
-            (" \t-4294967297", -4294967297), ("+9223372036854775807", i64::MAX),
-            ("-9223372036854775808", i64::MIN), ("+x", 0), ("", 0)] {
-            cpu.write_mem(0x1100, format!("{text}\0").as_bytes()).unwrap();
+        for (text, expected) in [
+            ("1791583200123trailing", 1791583200123i64),
+            (" \t-4294967297", -4294967297),
+            ("+9223372036854775807", i64::MAX),
+            ("-9223372036854775808", i64::MIN),
+            ("+x", 0),
+            ("", 0),
+        ] {
+            cpu.write_mem(0x1100, format!("{text}\0").as_bytes())
+                .unwrap();
             let bits = expected as u64;
-            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "_atoi64", &[0x1100]),
-                DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "_atoi64",
+                    &[0x1100]
+                ),
+                DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32)
+            );
         }
     }
 }
@@ -5007,14 +5970,30 @@ fn iswctype(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let mask = ctx.arg_u32(1)?;
     let ch = char::from_u32(c).unwrap_or('\0');
     let mut bits = 0u32;
-    if ch.is_uppercase() { bits |= UPPER | ALPHA; }
-    if ch.is_lowercase() { bits |= LOWER | ALPHA; }
-    if ch.is_numeric() { bits |= DIGIT; }
-    if ch.is_whitespace() { bits |= SPACE; }
-    if ch == ' ' || ch == '\t' { bits |= BLANK; }
-    if ch.is_control() { bits |= CONTROL; }
-    if ch.is_ascii_hexdigit() { bits |= HEX; }
-    if ch.is_ascii_punctuation() { bits |= PUNCT; }
+    if ch.is_uppercase() {
+        bits |= UPPER | ALPHA;
+    }
+    if ch.is_lowercase() {
+        bits |= LOWER | ALPHA;
+    }
+    if ch.is_numeric() {
+        bits |= DIGIT;
+    }
+    if ch.is_whitespace() {
+        bits |= SPACE;
+    }
+    if ch == ' ' || ch == '\t' {
+        bits |= BLANK;
+    }
+    if ch.is_control() {
+        bits |= CONTROL;
+    }
+    if ch.is_ascii_hexdigit() {
+        bits |= HEX;
+    }
+    if ch.is_ascii_punctuation() {
+        bits |= PUNCT;
+    }
     Ok(DispatchOutcome::ReturnedR0(bits & mask))
 }
 
@@ -5383,9 +6362,12 @@ thread_local! {
     static WCSTOK_NEXT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-pub(crate) fn suspend_tokenizer() -> u32 { WCSTOK_NEXT.with(|next| next.replace(0)) }
-pub(crate) fn resume_tokenizer(next: u32) { WCSTOK_NEXT.with(|slot| slot.set(next)); }
-
+pub(crate) fn suspend_tokenizer() -> u32 {
+    WCSTOK_NEXT.with(|next| next.replace(0))
+}
+pub(crate) fn resume_tokenizer(next: u32) {
+    WCSTOK_NEXT.with(|slot| slot.set(next));
+}
 
 /// `wchar_t *wcstok(wchar_t *str, const wchar_t *delim)`
 ///
@@ -5573,11 +6555,20 @@ fn pulls_wide_arg(fmt_is_wide: bool, long: bool, short: bool) -> bool {
 /// Integer precision is a minimum digit count, independent of field width.
 /// An explicit precision disables the `0` width flag, and %.0d suppresses zero.
 fn apply_printf_precision(piece: &mut String, conv: char, precision: Option<usize>) {
-    let Some(precision) = precision else { return; };
+    let Some(precision) = precision else {
+        return;
+    };
     if matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X') {
         let negative = piece.starts_with('-');
-        let digits = if negative { &piece[1..] } else { piece.as_str() };
-        if precision == 0 && digits == "0" { piece.clear(); return; }
+        let digits = if negative {
+            &piece[1..]
+        } else {
+            piece.as_str()
+        };
+        if precision == 0 && digits == "0" {
+            piece.clear();
+            return;
+        }
         if digits.len() < precision {
             let padding = "0".repeat(precision - digits.len());
             *piece = format!("{}{}{}", if negative { "-" } else { "" }, padding, digits);
@@ -5622,7 +6613,9 @@ fn render_printf(
             chars.next();
             let mut digits = 0usize;
             while let Some(d) = chars.peek().copied().filter(|c| c.is_ascii_digit()) {
-                digits = digits.saturating_mul(10).saturating_add(d as usize - '0' as usize);
+                digits = digits
+                    .saturating_mul(10)
+                    .saturating_add(d as usize - '0' as usize);
                 chars.next();
             }
             precision = Some(digits.min(0x10000));
@@ -5724,7 +6717,9 @@ fn render_printf(
         let numeric = matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X');
         if zero_pad && numeric && precision.is_none() {
             let sign = piece.starts_with('-');
-            if sign { out.push('-'); }
+            if sign {
+                out.push('-');
+            }
             out.extend(std::iter::repeat_n('0', pad));
             out.push_str(if sign { &piece[1..] } else { &piece });
         } else {
@@ -5928,293 +6923,296 @@ fn run_scan_bytes(
     let f = fmt.as_bytes();
     let mut si = 0usize;
     let result = (|| -> Result<i32, KernelError> {
-    let mut fi = 0usize;
-    let mut assigned = 0i32;
+        let mut fi = 0usize;
+        let mut assigned = 0i32;
 
-    while fi < f.len() {
-        let fc = f[fi];
+        while fi < f.len() {
+            let fc = f[fi];
 
-        // Whitespace in the format matches any run of input whitespace,
-        // including none at all.
-        if fc.is_ascii_whitespace() {
-            fi += 1;
-            while si < src.len() && src[si].is_ascii_whitespace() {
-                si += 1;
-            }
-            continue;
-        }
-
-        if fc != b'%' {
-            // Literal: must match exactly.
-            if si >= src.len() {
-                return Ok(if assigned == 0 { -1 } else { assigned });
-            }
-            if src[si] != fc {
-                return Ok(assigned);
-            }
-            si += 1;
-            fi += 1;
-            continue;
-        }
-
-        fi += 1;
-        if fi >= f.len() {
-            break;
-        }
-        if f[fi] == b'%' {
-            while si < src.len() && src[si].is_ascii_whitespace() {
-                si += 1;
-            }
-            if si >= src.len() || src[si] != b'%' {
-                return Ok(if assigned == 0 && si >= src.len() {
-                    -1
-                } else {
-                    assigned
-                });
-            }
-            si += 1;
-            fi += 1;
-            continue;
-        }
-
-        // `*` suppresses the assignment: the conversion still happens
-        // and still has to succeed, it just consumes no argument.
-        let suppress = f[fi] == b'*';
-        if suppress {
-            fi += 1;
-        }
-
-        // Field width.
-        let mut width = 0usize;
-        while fi < f.len() && f[fi].is_ascii_digit() {
-            width = width * 10 + (f[fi] - b'0') as usize;
-            fi += 1;
-        }
-        let width = if width == 0 { usize::MAX } else { width };
-
-        // Length modifiers. `ll` (and the MSVC `I64`) widen to 64 bits;
-        // `h` narrows to 16. `l` on a float means `double`.
-        let mut short_form = false;
-        let mut long_count = 0u32;
-        loop {
-            match f.get(fi) {
-                Some(b'h') => {
-                    short_form = true;
-                    fi += 1;
-                }
-                Some(b'l') | Some(b'L') => {
-                    long_count += 1;
-                    fi += 1;
-                }
-                Some(b'I') if f[fi..].starts_with(b"I64") => {
-                    long_count = 2;
-                    fi += 3;
-                }
-                _ => break,
-            }
-        }
-        let long_long = long_count >= 2;
-
-        let Some(&conv) = f.get(fi) else { break };
-        fi += 1;
-
-        // Every conversion except `%c`, `%[` and `%n` skips leading
-        // whitespace first.
-        if !matches!(conv, b'c' | b'[' | b'n') {
-            while si < src.len() && src[si].is_ascii_whitespace() {
-                si += 1;
-            }
-        }
-
-        match conv {
-            b'n' => {
-                // Not a conversion: reports how far we have read. Never
-                // counts toward the return value.
-                if !suppress {
-                    let addr = next_arg(ctx)?;
-                    scanf_store_int(ctx, addr, si as i64, short_form, long_long)?;
-                }
-            }
-            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'p' => {
-                let start = si;
-                let mut neg = false;
-                if si < src.len() && (src[si] == b'+' || src[si] == b'-') {
-                    neg = src[si] == b'-';
+            // Whitespace in the format matches any run of input whitespace,
+            // including none at all.
+            if fc.is_ascii_whitespace() {
+                fi += 1;
+                while si < src.len() && src[si].is_ascii_whitespace() {
                     si += 1;
                 }
-                // `%i` sniffs the base from the prefix; `%x` accepts an
-                // optional `0x`; the rest are fixed.
-                let mut radix: u32 = match conv {
-                    b'x' | b'X' | b'p' => 16,
-                    b'o' => 8,
-                    b'i' => 0,
-                    _ => 10,
-                };
-                if (radix == 16 || radix == 0)
-                    && src.len() > si + 1
-                    && src[si] == b'0'
-                    && (src[si + 1] | 0x20) == b'x'
-                {
-                    si += 2;
-                    radix = 16;
-                } else if radix == 0 {
-                    radix = if src.get(si) == Some(&b'0') { 8 } else { 10 };
+                continue;
+            }
+
+            if fc != b'%' {
+                // Literal: must match exactly.
+                if si >= src.len() {
+                    return Ok(if assigned == 0 { -1 } else { assigned });
                 }
-                let digits_from = si;
-                let limit = start.saturating_add(width);
-                let mut acc: i64 = 0;
-                let mut any = false;
-                while si < src.len() && si < limit {
-                    let Some(d) = (src[si] as char).to_digit(radix) else {
-                        break;
-                    };
-                    acc = acc.wrapping_mul(radix as i64).wrapping_add(d as i64);
-                    any = true;
+                if src[si] != fc {
+                    return Ok(assigned);
+                }
+                si += 1;
+                fi += 1;
+                continue;
+            }
+
+            fi += 1;
+            if fi >= f.len() {
+                break;
+            }
+            if f[fi] == b'%' {
+                while si < src.len() && src[si].is_ascii_whitespace() {
                     si += 1;
                 }
-                if !any {
-                    // A lone `0x` with no hex digits still yields the 0.
-                    if radix == 16 && digits_from > start && digits_from - start >= 2 {
-                        si = digits_from - 1;
-                        acc = 0;
+                if si >= src.len() || src[si] != b'%' {
+                    return Ok(if assigned == 0 && si >= src.len() {
+                        -1
                     } else {
-                        return Ok(if assigned == 0 { -1 } else { assigned });
+                        assigned
+                    });
+                }
+                si += 1;
+                fi += 1;
+                continue;
+            }
+
+            // `*` suppresses the assignment: the conversion still happens
+            // and still has to succeed, it just consumes no argument.
+            let suppress = f[fi] == b'*';
+            if suppress {
+                fi += 1;
+            }
+
+            // Field width.
+            let mut width = 0usize;
+            while fi < f.len() && f[fi].is_ascii_digit() {
+                width = width * 10 + (f[fi] - b'0') as usize;
+                fi += 1;
+            }
+            let width = if width == 0 { usize::MAX } else { width };
+
+            // Length modifiers. `ll` (and the MSVC `I64`) widen to 64 bits;
+            // `h` narrows to 16. `l` on a float means `double`.
+            let mut short_form = false;
+            let mut long_count = 0u32;
+            loop {
+                match f.get(fi) {
+                    Some(b'h') => {
+                        short_form = true;
+                        fi += 1;
+                    }
+                    Some(b'l') | Some(b'L') => {
+                        long_count += 1;
+                        fi += 1;
+                    }
+                    Some(b'I') if f[fi..].starts_with(b"I64") => {
+                        long_count = 2;
+                        fi += 3;
+                    }
+                    _ => break,
+                }
+            }
+            let long_long = long_count >= 2;
+
+            let Some(&conv) = f.get(fi) else { break };
+            fi += 1;
+
+            // Every conversion except `%c`, `%[` and `%n` skips leading
+            // whitespace first.
+            if !matches!(conv, b'c' | b'[' | b'n') {
+                while si < src.len() && src[si].is_ascii_whitespace() {
+                    si += 1;
+                }
+            }
+
+            match conv {
+                b'n' => {
+                    // Not a conversion: reports how far we have read. Never
+                    // counts toward the return value.
+                    if !suppress {
+                        let addr = next_arg(ctx)?;
+                        scanf_store_int(ctx, addr, si as i64, short_form, long_long)?;
                     }
                 }
-                if neg {
-                    acc = acc.wrapping_neg();
+                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'p' => {
+                    let start = si;
+                    let mut neg = false;
+                    if si < src.len() && (src[si] == b'+' || src[si] == b'-') {
+                        neg = src[si] == b'-';
+                        si += 1;
+                    }
+                    // `%i` sniffs the base from the prefix; `%x` accepts an
+                    // optional `0x`; the rest are fixed.
+                    let mut radix: u32 = match conv {
+                        b'x' | b'X' | b'p' => 16,
+                        b'o' => 8,
+                        b'i' => 0,
+                        _ => 10,
+                    };
+                    if (radix == 16 || radix == 0)
+                        && src.len() > si + 1
+                        && src[si] == b'0'
+                        && (src[si + 1] | 0x20) == b'x'
+                    {
+                        si += 2;
+                        radix = 16;
+                    } else if radix == 0 {
+                        radix = if src.get(si) == Some(&b'0') { 8 } else { 10 };
+                    }
+                    let digits_from = si;
+                    let limit = start.saturating_add(width);
+                    let mut acc: i64 = 0;
+                    let mut any = false;
+                    while si < src.len() && si < limit {
+                        let Some(d) = (src[si] as char).to_digit(radix) else {
+                            break;
+                        };
+                        acc = acc.wrapping_mul(radix as i64).wrapping_add(d as i64);
+                        any = true;
+                        si += 1;
+                    }
+                    if !any {
+                        // A lone `0x` with no hex digits still yields the 0.
+                        if radix == 16 && digits_from > start && digits_from - start >= 2 {
+                            si = digits_from - 1;
+                            acc = 0;
+                        } else {
+                            return Ok(if assigned == 0 { -1 } else { assigned });
+                        }
+                    }
+                    if neg {
+                        acc = acc.wrapping_neg();
+                    }
+                    if !suppress {
+                        let addr = next_arg(ctx)?;
+                        scanf_store_int(ctx, addr, acc, short_form, long_long)?;
+                        assigned += 1;
+                    }
                 }
-                if !suppress {
-                    let addr = next_arg(ctx)?;
-                    scanf_store_int(ctx, addr, acc, short_form, long_long)?;
-                    assigned += 1;
-                }
-            }
-            b'f' | b'e' | b'E' | b'g' | b'G' | b'a' => {
-                let start = si;
-                let limit = start.saturating_add(width);
-                let mut end = si;
-                if end < src.len() && (src[end] == b'+' || src[end] == b'-') {
-                    end += 1;
-                }
-                while end < src.len() && end < limit && src[end].is_ascii_digit() {
-                    end += 1;
-                }
-                if end < src.len() && end < limit && src[end] == b'.' {
-                    end += 1;
+                b'f' | b'e' | b'E' | b'g' | b'G' | b'a' => {
+                    let start = si;
+                    let limit = start.saturating_add(width);
+                    let mut end = si;
+                    if end < src.len() && (src[end] == b'+' || src[end] == b'-') {
+                        end += 1;
+                    }
                     while end < src.len() && end < limit && src[end].is_ascii_digit() {
                         end += 1;
                     }
-                }
-                // Only accept an exponent if it actually has digits, so
-                // "1e" parses as 1.0 and leaves the 'e' unread.
-                if end < src.len() && end < limit && (src[end] | 0x20) == b'e' {
-                    let mut probe = end + 1;
-                    if probe < src.len() && (src[probe] == b'+' || src[probe] == b'-') {
-                        probe += 1;
+                    if end < src.len() && end < limit && src[end] == b'.' {
+                        end += 1;
+                        while end < src.len() && end < limit && src[end].is_ascii_digit() {
+                            end += 1;
+                        }
                     }
-                    if probe < src.len() && src[probe].is_ascii_digit() {
-                        while probe < src.len() && probe < limit && src[probe].is_ascii_digit() {
+                    // Only accept an exponent if it actually has digits, so
+                    // "1e" parses as 1.0 and leaves the 'e' unread.
+                    if end < src.len() && end < limit && (src[end] | 0x20) == b'e' {
+                        let mut probe = end + 1;
+                        if probe < src.len() && (src[probe] == b'+' || src[probe] == b'-') {
                             probe += 1;
                         }
-                        end = probe;
-                    }
-                }
-                let text = std::str::from_utf8(&src[start..end]).unwrap_or("");
-                let Ok(value) = text.parse::<f64>() else {
-                    return Ok(if assigned == 0 { -1 } else { assigned });
-                };
-                si = end;
-                if !suppress {
-                    let addr = next_arg(ctx)?;
-                    if addr != 0 {
-                        // Bare `%f` writes a 4-byte float; `%lf` a
-                        // double. Getting this backwards silently
-                        // corrupts the caller's next field.
-                        if long_count >= 1 {
-                            ctx.cpu.write_mem(addr, &value.to_bits().to_le_bytes())?;
-                        } else {
-                            ctx.cpu
-                                .write_mem(addr, &(value as f32).to_bits().to_le_bytes())?;
+                        if probe < src.len() && src[probe].is_ascii_digit() {
+                            while probe < src.len() && probe < limit && src[probe].is_ascii_digit()
+                            {
+                                probe += 1;
+                            }
+                            end = probe;
                         }
                     }
-                    assigned += 1;
-                }
-            }
-            b'c' => {
-                let n = if width == usize::MAX { 1 } else { width };
-                if si + n > src.len() {
-                    return Ok(if assigned == 0 { -1 } else { assigned });
-                }
-                let bytes = src[si..si + n].to_vec();
-                si += n;
-                if !suppress {
-                    let addr = next_arg(ctx)?;
-                    if addr != 0 {
-                        // `%c` does *not* append a terminator.
-                        ctx.cpu.write_mem(addr, &bytes)?;
+                    let text = std::str::from_utf8(&src[start..end]).unwrap_or("");
+                    let Ok(value) = text.parse::<f64>() else {
+                        return Ok(if assigned == 0 { -1 } else { assigned });
+                    };
+                    si = end;
+                    if !suppress {
+                        let addr = next_arg(ctx)?;
+                        if addr != 0 {
+                            // Bare `%f` writes a 4-byte float; `%lf` a
+                            // double. Getting this backwards silently
+                            // corrupts the caller's next field.
+                            if long_count >= 1 {
+                                ctx.cpu.write_mem(addr, &value.to_bits().to_le_bytes())?;
+                            } else {
+                                ctx.cpu
+                                    .write_mem(addr, &(value as f32).to_bits().to_le_bytes())?;
+                            }
+                        }
+                        assigned += 1;
                     }
-                    assigned += 1;
                 }
-            }
-            b's' => {
-                let start = si;
-                let limit = start.saturating_add(width);
-                while si < src.len() && si < limit && !src[si].is_ascii_whitespace() {
-                    si += 1;
-                }
-                if si == start {
-                    return Ok(if assigned == 0 { -1 } else { assigned });
-                }
-                let mut bytes = src[start..si].to_vec();
-                bytes.push(0);
-                if !suppress {
-                    let addr = next_arg(ctx)?;
-                    if addr != 0 {
-                        ctx.cpu.write_mem(addr, &bytes)?;
+                b'c' => {
+                    let n = if width == usize::MAX { 1 } else { width };
+                    if si + n > src.len() {
+                        return Ok(if assigned == 0 { -1 } else { assigned });
                     }
-                    assigned += 1;
-                }
-            }
-            b'[' => {
-                let (negated, members, next_fi) = scanf_scanset(f, fi);
-                fi = next_fi;
-                let start = si;
-                let limit = start.saturating_add(width);
-                while si < src.len() && si < limit {
-                    let hit = members.contains(&src[si]);
-                    if hit == negated {
-                        break;
+                    let bytes = src[si..si + n].to_vec();
+                    si += n;
+                    if !suppress {
+                        let addr = next_arg(ctx)?;
+                        if addr != 0 {
+                            // `%c` does *not* append a terminator.
+                            ctx.cpu.write_mem(addr, &bytes)?;
+                        }
+                        assigned += 1;
                     }
-                    si += 1;
                 }
-                if si == start {
-                    return Ok(if assigned == 0 { -1 } else { assigned });
-                }
-                let mut bytes = src[start..si].to_vec();
-                bytes.push(0);
-                if !suppress {
-                    let addr = next_arg(ctx)?;
-                    if addr != 0 {
-                        ctx.cpu.write_mem(addr, &bytes)?;
+                b's' => {
+                    let start = si;
+                    let limit = start.saturating_add(width);
+                    while si < src.len() && si < limit && !src[si].is_ascii_whitespace() {
+                        si += 1;
                     }
-                    assigned += 1;
+                    if si == start {
+                        return Ok(if assigned == 0 { -1 } else { assigned });
+                    }
+                    let mut bytes = src[start..si].to_vec();
+                    bytes.push(0);
+                    if !suppress {
+                        let addr = next_arg(ctx)?;
+                        if addr != 0 {
+                            ctx.cpu.write_mem(addr, &bytes)?;
+                        }
+                        assigned += 1;
+                    }
                 }
-            }
-            other => {
-                log::warn!("sscanf: unsupported conversion %{}", other as char);
-                return Ok(assigned);
+                b'[' => {
+                    let (negated, members, next_fi) = scanf_scanset(f, fi);
+                    fi = next_fi;
+                    let start = si;
+                    let limit = start.saturating_add(width);
+                    while si < src.len() && si < limit {
+                        let hit = members.contains(&src[si]);
+                        if hit == negated {
+                            break;
+                        }
+                        si += 1;
+                    }
+                    if si == start {
+                        return Ok(if assigned == 0 { -1 } else { assigned });
+                    }
+                    let mut bytes = src[start..si].to_vec();
+                    bytes.push(0);
+                    if !suppress {
+                        let addr = next_arg(ctx)?;
+                        if addr != 0 {
+                            ctx.cpu.write_mem(addr, &bytes)?;
+                        }
+                        assigned += 1;
+                    }
+                }
+                other => {
+                    log::warn!("sscanf: unsupported conversion %{}", other as char);
+                    return Ok(assigned);
+                }
             }
         }
-    }
 
-    Ok(assigned)
+        Ok(assigned)
     })();
     result.map(|assigned| (assigned, si))
 }
 
 fn run_sscanf(
-    ctx: &mut CallCtx<'_>, input: &str, fmt: &str,
+    ctx: &mut CallCtx<'_>,
+    input: &str,
+    fmt: &str,
     next_arg: impl FnMut(&mut CallCtx<'_>) -> Result<u32, KernelError>,
 ) -> Result<i32, KernelError> {
     run_scan_bytes(ctx, input.as_bytes(), fmt, next_arg).map(|(assigned, _)| assigned)
@@ -6253,8 +7251,12 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let mut i = 0;
     while i < raw.len() {
         if text_mode && raw[i] == b'\r' && raw.get(i + 1) == Some(&b'\n') {
-            input.push(b'\n'); i += 2;
-        } else { input.push(raw[i]); i += 1; }
+            input.push(b'\n');
+            i += 2;
+        } else {
+            input.push(raw[i]);
+            i += 1;
+        }
         offsets.push(i);
     }
     let mut arg = 2u8;
@@ -6264,7 +7266,11 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         Ok(pointer)
     });
     let used = result.as_ref().map(|(_, used)| offsets[*used]).unwrap_or(0);
-    ctx.kernel.vfs.seek(handle, start.saturating_add(used as u64) as i64, SeekKind::Begin);
+    ctx.kernel.vfs.seek(
+        handle,
+        start.saturating_add(used as u64) as i64,
+        SeekKind::Begin,
+    );
     let (assigned, _) = result?;
     Ok(DispatchOutcome::ReturnedR0(assigned as u32))
 }
@@ -6625,7 +7631,9 @@ fn render_printf_va(
             chars.next();
             let mut digits = 0usize;
             while let Some(d) = chars.peek().copied().filter(|c| c.is_ascii_digit()) {
-                digits = digits.saturating_mul(10).saturating_add(d as usize - '0' as usize);
+                digits = digits
+                    .saturating_mul(10)
+                    .saturating_add(d as usize - '0' as usize);
                 chars.next();
             }
             precision = Some(digits.min(0x10000));
@@ -6721,7 +7729,9 @@ fn render_printf_va(
         let numeric = matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X');
         if zero_pad && numeric && precision.is_none() {
             let sign = piece.starts_with('-');
-            if sign { out.push('-'); }
+            if sign {
+                out.push('-');
+            }
             out.extend(std::iter::repeat_n('0', pad));
             out.push_str(if sign { &piece[1..] } else { &piece });
         } else {
@@ -6874,14 +7884,39 @@ fn char_lower_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 ///
 /// Open modes, guest access and sharing are enforced by the shared VFS domain.
 fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let ptr=ctx.arg_u32(0)?;let flags=ctx.arg_u32(1)?;let share=ctx.arg_u32(2)?;
-    let disposition=ctx.arg_u32(4)?;let attributes=ctx.arg_u32(5)?;
-    let name=if ptr==0 {Err(ERROR_INVALID_PARAMETER)}else{read_wstr(ctx,ptr,260).map(|v|String::from_utf16_lossy(&v)).map_err(|_|ERROR_INVALID_PARAMETER)};
-    let result=name.and_then(|name|ctx.kernel.vfs.open_file(&name,
-        u32::from(flags&0x80000000!=0)|u32::from(flags&0x40000000!=0)*2,share,disposition,false,attributes));
+    let ptr = ctx.arg_u32(0)?;
+    let flags = ctx.arg_u32(1)?;
+    let share = ctx.arg_u32(2)?;
+    let disposition = ctx.arg_u32(4)?;
+    let attributes = ctx.arg_u32(5)?;
+    let name = if ptr == 0 {
+        Err(ERROR_INVALID_PARAMETER)
+    } else {
+        read_wstr(ctx, ptr, 260)
+            .map(|v| String::from_utf16_lossy(&v))
+            .map_err(|_| ERROR_INVALID_PARAMETER)
+    };
+    let result = name.and_then(|name| {
+        ctx.kernel.vfs.open_file(
+            &name,
+            u32::from(flags & 0x80000000 != 0) | u32::from(flags & 0x40000000 != 0) * 2,
+            share,
+            disposition,
+            false,
+            attributes,
+        )
+    });
     match result {
-        Ok(r)=>{if disposition==2||disposition==4{set_thread_error(ctx,if r.existed{183}else{0});}Ok(DispatchOutcome::ReturnedR0(r.handle))},
-        Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE))}
+        Ok(r) => {
+            if disposition == 2 || disposition == 4 {
+                set_thread_error(ctx, if r.existed { 183 } else { 0 });
+            }
+            Ok(DispatchOutcome::ReturnedR0(r.handle))
+        }
+        Err(e) => {
+            set_thread_error(ctx, e);
+            Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE))
+        }
     }
 }
 
@@ -6889,8 +7924,12 @@ fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 ///                LPOVERLAPPED ov)`
 fn read_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let bt_handle = ctx.arg_u32(0)?;
-    if ctx.kernel.vfs.gps_open(bt_handle).is_some() { return crate::gps::read_file(ctx); }
-    if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() { return crate::bluetooth::read_file(ctx); }
+    if ctx.kernel.vfs.gps_open(bt_handle).is_some() {
+        return crate::gps::read_file(ctx);
+    }
+    if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() {
+        return crate::bluetooth::read_file(ctx);
+    }
     let handle = ctx.arg_u32(0)?;
     let buf_p = ctx.arg_u32(1)?;
     let count = ctx.arg_u32(2)?;
@@ -6899,21 +7938,36 @@ fn read_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if (count!=0&&(!vfs_probe_output(ctx,buf_p,count))) || (out_read_p!=0&&!vfs_probe_output(ctx,out_read_p,4)) {
-        set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));
+    if (count != 0 && (!vfs_probe_output(ctx, buf_p, count)))
+        || (out_read_p != 0 && !vfs_probe_output(ctx, out_read_p, 4))
+    {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let mut buf = Vec::new();if buf.try_reserve_exact(count as usize).is_err(){set_thread_error(ctx,8);return Ok(DispatchOutcome::ReturnedR0(0));}buf.resize(count as usize,0);
+    let mut buf = Vec::new();
+    if buf.try_reserve_exact(count as usize).is_err() {
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    buf.resize(count as usize, 0);
     let Some(n) = ctx.kernel.vfs.read(handle, &mut buf) else {
-        set_thread_error(ctx, ctx.kernel.vfs.read_failure_error(handle)); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ctx.kernel.vfs.read_failure_error(handle));
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if buf_p != 0 && n > 0 {
         if ctx.cpu.write_mem(buf_p, &buf[..n]).is_err() {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
     }
     if out_read_p != 0 {
-        if ctx.cpu.write_mem(out_read_p, &(n as u32).to_le_bytes()).is_err() {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        if ctx
+            .cpu
+            .write_mem(out_read_p, &(n as u32).to_le_bytes())
+            .is_err()
+        {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
     }
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -6936,8 +7990,12 @@ fn set_end_of_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 
 fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let bt_handle = ctx.arg_u32(0)?;
-    if ctx.kernel.vfs.gps_open(bt_handle).is_some() { return crate::gps::write_file(ctx); }
-    if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() { return crate::bluetooth::write_file(ctx); }
+    if ctx.kernel.vfs.gps_open(bt_handle).is_some() {
+        return crate::gps::write_file(ctx);
+    }
+    if ctx.kernel.vfs.bluetooth_open(bt_handle).is_some() {
+        return crate::bluetooth::write_file(ctx);
+    }
     let handle = ctx.arg_u32(0)?;
     let buf_p = ctx.arg_u32(1)?;
     let count = ctx.arg_u32(2)?;
@@ -6953,20 +8011,38 @@ fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     if !ctx.kernel.vfs.is_open(handle) {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     if count == 0 {
-        if out_written_p != 0 && ctx.cpu.write_mem(out_written_p, &0u32.to_le_bytes()).is_err() {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        if out_written_p != 0
+            && ctx
+                .cpu
+                .write_mem(out_written_p, &0u32.to_le_bytes())
+                .is_err()
+        {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
-    if buf_p==0 || (out_written_p!=0&&!vfs_probe_output(ctx,out_written_p,4)) {set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}
-    if ctx.cpu.check_guest_access(buf_p,count,Prot::READ).is_err(){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}
+    if buf_p == 0 || (out_written_p != 0 && !vfs_probe_output(ctx, out_written_p, 4)) {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if ctx
+        .cpu
+        .check_guest_access(buf_p, count, Prot::READ)
+        .is_err()
+    {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let bytes = match ctx.cpu.read_mem(buf_p, count) {
         Ok(bytes) => bytes,
         Err(_) => {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
     };
     let Some(n) = ctx.kernel.vfs.write(handle, &bytes) else {
@@ -6975,8 +8051,13 @@ fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if out_written_p != 0 {
-        if ctx.cpu.write_mem(out_written_p, &(n as u32).to_le_bytes()).is_err() {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        if ctx
+            .cpu
+            .write_mem(out_written_p, &(n as u32).to_le_bytes())
+            .is_err()
+        {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
     }
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -6985,25 +8066,39 @@ fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn flush_file_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     if !ctx.kernel.vfs.is_open(handle) {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let ok = ctx.kernel.vfs.flush(handle).is_ok();
-    if !ok { set_thread_error(ctx, 29); }
+    if !ok {
+        set_thread_error(ctx, 29);
+    }
     Ok(DispatchOutcome::ReturnedR0(u32::from(ok)))
 }
 
 fn close_handle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if close_owned_handle(ctx.kernel, handle) { return Ok(DispatchOutcome::ReturnedR0(1)); }
-    if thread_handle_is_closed(ctx.kernel, handle) || handle == FAKE_CURRENT_THREAD_HANDLE
-        || handle == FAKE_CURRENT_PROCESS_HANDLE || handle == pocket_kernel::CE_CURRENT_PROCESS_HANDLE {
+    if close_owned_handle(ctx.kernel, handle) {
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    if thread_handle_is_closed(ctx.kernel, handle)
+        || handle == FAKE_CURRENT_THREAD_HANDLE
+        || handle == FAKE_CURRENT_PROCESS_HANDLE
+        || handle == pocket_kernel::CE_CURRENT_PROCESS_HANDLE
+    {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     // Device handles retain their existing subsystem-specific teardown.
-    if ctx.kernel.vfs.is_mp3_decoder(handle) { ctx.kernel.audio.stop_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle)); }
+    if ctx.kernel.vfs.is_mp3_decoder(handle) {
+        ctx.kernel
+            .audio
+            .stop_mas_stream(ctx.kernel.vfs.mp3_stream_key(handle));
+    }
     let closed = ctx.kernel.vfs.close(handle);
-    if !closed { set_thread_error(ctx, ERROR_INVALID_HANDLE); }
+    if !closed {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+    }
     Ok(DispatchOutcome::ReturnedR0(u32::from(closed)))
 }
 
@@ -7012,12 +8107,21 @@ fn get_file_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let handle = ctx.arg_u32(0)?;
     let high_p = ctx.arg_u32(1)?;
     let Some(size) = ctx.kernel.vfs.size(handle) else {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
     if high_p != 0 {
-        if !vfs_probe_output(ctx,high_p,4){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(u32::MAX));}
-        if ctx.cpu.write_mem(high_p, &((size >> 32) as u32).to_le_bytes()).is_err() {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        if !vfs_probe_output(ctx, high_p, 4) {
+            set_thread_error(ctx, 87);
+            return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        }
+        if ctx
+            .cpu
+            .write_mem(high_p, &((size >> 32) as u32).to_le_bytes())
+            .is_err()
+        {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
         }
     }
     Ok(DispatchOutcome::ReturnedR0(size as u32))
@@ -7026,45 +8130,71 @@ fn get_file_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 // Filesystem handlers preserve LastError on ordinary success and expose failures
 // as WinCE return values, without leaking CPU memory errors into the run loop.
 // Validate output permissions before consuming file bytes or changing its contents.
-fn vfs_probe_output(ctx:&mut CallCtx<'_>,ptr:u32,len:u32)->bool {
-    ptr!=0 && ctx.cpu.check_guest_access(ptr,len,Prot::WRITE).is_ok()
+fn vfs_probe_output(ctx: &mut CallCtx<'_>, ptr: u32, len: u32) -> bool {
+    ptr != 0 && ctx.cpu.check_guest_access(ptr, len, Prot::WRITE).is_ok()
 }
-fn vfs_api_path(ctx: &mut CallCtx<'_>, index:u8)->Result<String,u32>{
-    let p=ctx.arg_u32(index).map_err(|_|87u32)?;
-    if p==0{return Err(87);}let v=read_wstr(ctx,p,260).map_err(|_|87u32)?;
-    let s=String::from_utf16_lossy(&v);if s.is_empty(){Err(87)}else{Ok(s)}
+fn vfs_api_path(ctx: &mut CallCtx<'_>, index: u8) -> Result<String, u32> {
+    let p = ctx.arg_u32(index).map_err(|_| 87u32)?;
+    if p == 0 {
+        return Err(87);
+    }
+    let v = read_wstr(ctx, p, 260).map_err(|_| 87u32)?;
+    let s = String::from_utf16_lossy(&v);
+    if s.is_empty() {
+        Err(87)
+    } else {
+        Ok(s)
+    }
 }
-fn vfs_api_bool(ctx:&mut CallCtx<'_>,result:Result<(),u32>)->Result<DispatchOutcome,KernelError>{
-    match result{Ok(())=>Ok(DispatchOutcome::ReturnedR0(1)),Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(0))}}
+fn vfs_api_bool(
+    ctx: &mut CallCtx<'_>,
+    result: Result<(), u32>,
+) -> Result<DispatchOutcome, KernelError> {
+    match result {
+        Ok(()) => Ok(DispatchOutcome::ReturnedR0(1)),
+        Err(e) => {
+            set_thread_error(ctx, e);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
+    }
 }
 
 fn create_directory_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.create_directory(&p));vfs_api_bool(ctx,result)
+    let result = vfs_api_path(ctx, 0).and_then(|p| ctx.kernel.vfs.create_directory(&p));
+    vfs_api_bool(ctx, result)
 }
 
 fn delete_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.delete(&p));vfs_api_bool(ctx,result)
+    let result = vfs_api_path(ctx, 0).and_then(|p| ctx.kernel.vfs.delete(&p));
+    vfs_api_bool(ctx, result)
 }
 
 fn move_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let result=vfs_api_path(ctx,0).and_then(|from|vfs_api_path(ctx,1).and_then(|to|ctx.kernel.vfs.rename(&from,&to)));
-    vfs_api_bool(ctx,result)
+    let result = vfs_api_path(ctx, 0)
+        .and_then(|from| vfs_api_path(ctx, 1).and_then(|to| ctx.kernel.vfs.rename(&from, &to)));
+    vfs_api_bool(ctx, result)
 }
 
 fn copy_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let fail_if_exists = ctx.arg_u32(2)? != 0;
-    let result = vfs_api_path(ctx, 0).and_then(|from|
-        vfs_api_path(ctx, 1).and_then(|to| ctx.kernel.vfs.copy_file(&from, &to, fail_if_exists)));
+    let result = vfs_api_path(ctx, 0).and_then(|from| {
+        vfs_api_path(ctx, 1).and_then(|to| ctx.kernel.vfs.copy_file(&from, &to, fail_if_exists))
+    });
     vfs_api_bool(ctx, result)
 }
 
 fn remove_directory_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.remove_directory(&p));vfs_api_bool(ctx,result)
+    let result = vfs_api_path(ctx, 0).and_then(|p| ctx.kernel.vfs.remove_directory(&p));
+    vfs_api_bool(ctx, result)
 }
 
 fn get_file_attributes_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    match vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.attributes(&p)){
-        Ok(a)=>Ok(DispatchOutcome::ReturnedR0(a)),Err(e)=>{set_thread_error(ctx,e);Ok(DispatchOutcome::ReturnedR0(u32::MAX))}
+    match vfs_api_path(ctx, 0).and_then(|p| ctx.kernel.vfs.attributes(&p)) {
+        Ok(a) => Ok(DispatchOutcome::ReturnedR0(a)),
+        Err(e) => {
+            set_thread_error(ctx, e);
+            Ok(DispatchOutcome::ReturnedR0(u32::MAX))
+        }
     }
 }
 
@@ -7073,9 +8203,17 @@ fn set_file_pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     use pocket_kernel::vfs::SeekKind;
     let handle = ctx.arg_u32(0)?;
     let distance = ctx.arg_u32(1)? as i32 as i64;
-    let high=ctx.arg_u32(2)?;
-    if high!=0 && (!vfs_probe_output(ctx,high,4)||ctx.cpu.read_mem(high,4).ok().is_none_or(|b|b!=[0,0,0,0])) {
-        set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    let high = ctx.arg_u32(2)?;
+    if high != 0
+        && (!vfs_probe_output(ctx, high, 4)
+            || ctx
+                .cpu
+                .read_mem(high, 4)
+                .ok()
+                .is_none_or(|b| b != [0, 0, 0, 0]))
+    {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     let whence = ctx.arg_u32(3)?;
     let kind = match whence {
@@ -7085,16 +8223,22 @@ fn set_file_pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         _ => {
             set_thread_error(ctx, ERROR_INVALID_PARAMETER);
             return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
-        },
+        }
     };
     if !ctx.kernel.vfs.is_open(handle) {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     let Some(pos) = ctx.kernel.vfs.seek(handle, distance, kind) else {
-        set_thread_error(ctx, 131); return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        set_thread_error(ctx, 131);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
-    if high!=0 {ctx.cpu.write_mem(high,&0u32.to_le_bytes())?;}
-    if pos==u32::MAX as u64 {set_thread_error(ctx,0);}
+    if high != 0 {
+        ctx.cpu.write_mem(high, &0u32.to_le_bytes())?;
+    }
+    if pos == u32::MAX as u64 {
+        set_thread_error(ctx, 0);
+    }
     Ok(DispatchOutcome::ReturnedR0(pos.min(u32::MAX as u64) as u32))
 }
 
@@ -7117,16 +8261,34 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     } else {
         Access::Read
     };
-    if !matches!(mode.as_bytes().first(),Some(b'r'|b'w'|b'a')) {return 0;}
+    if !matches!(mode.as_bytes().first(), Some(b'r' | b'w' | b'a')) {
+        return 0;
+    }
     let create = mode.starts_with('w') || mode.starts_with('a');
-    let disposition=if mode.starts_with('w'){2}else if mode.starts_with('a'){4}else{3};
-    let append=mode.starts_with('a');
-    let bits=match access {Access::Read=>1,Access::Write=>2,Access::ReadWrite=>3};
+    let disposition = if mode.starts_with('w') {
+        2
+    } else if mode.starts_with('a') {
+        4
+    } else {
+        3
+    };
+    let append = mode.starts_with('a');
+    let bits = match access {
+        Access::Read => 1,
+        Access::Write => 2,
+        Access::ReadWrite => 3,
+    };
     // Rooted reads must stay rooted. Stripping the leading separator makes
     // the VFS prepend the module directory a second time and repeatedly scan
     // the whole card. The VFS itself handles wrapped-install suffix lookup.
     if !create && (path.starts_with('\\') || path.starts_with('/')) {
-        if let Some(handle) = ctx.kernel.vfs.open_file(path,bits,3,disposition,append,0).ok().map(|r|r.handle) {
+        if let Some(handle) = ctx
+            .kernel
+            .vfs
+            .open_file(path, bits, 3, disposition, append, 0)
+            .ok()
+            .map(|r| r.handle)
+        {
             if !mode.contains('b') {
                 ctx.kernel.vfs.mark_text_mode(handle);
             }
@@ -7194,7 +8356,13 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     }
     let text_mode = !mode.contains('b');
     for cand in &candidates {
-        if let Some(h) = ctx.kernel.vfs.open_file(cand,bits,3,disposition,append,0).ok().map(|r|r.handle) {
+        if let Some(h) = ctx
+            .kernel
+            .vfs
+            .open_file(cand, bits, 3, disposition, append, 0)
+            .ok()
+            .map(|r| r.handle)
+        {
             if text_mode {
                 ctx.kernel.vfs.mark_text_mode(h);
             }
@@ -7257,9 +8425,14 @@ fn crt_fclose(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// is why it only showed up once a mingw32ce binary was loaded.
 fn crt_fcloseall(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handles = ctx.kernel.vfs.open_handles();
-    let closed = handles.iter().filter(|&&h| ctx.kernel.vfs.is_open(h)).count() as u32;
+    let closed = handles
+        .iter()
+        .filter(|&&h| ctx.kernel.vfs.is_open(h))
+        .count() as u32;
     for handle in handles {
-        if ctx.kernel.vfs.is_open(handle) { let _ = ctx.kernel.vfs.flush(handle); }
+        if ctx.kernel.vfs.is_open(handle) {
+            let _ = ctx.kernel.vfs.flush(handle);
+        }
         close_owned_handle(ctx.kernel, handle);
     }
     log::debug!("_fcloseall() -> {closed}");
@@ -7306,19 +8479,27 @@ fn read_stdio_bytes(ctx: &mut CallCtx<'_>, h: u32, output: &mut [u8]) -> usize {
     while written < output.len() {
         let capacity = raw.len().min(output.len() - written);
         let count = ctx.kernel.vfs.read(h, &mut raw[..capacity]).unwrap_or(0);
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         let mut index = 0;
         while index < count {
             let mut byte = raw[index];
             index += 1;
             if byte == b'\r' {
                 if index < count {
-                    if raw[index] == b'\n' { byte = b'\n'; index += 1; }
+                    if raw[index] == b'\n' {
+                        byte = b'\n';
+                        index += 1;
+                    }
                 } else {
                     let mut next = [0u8; 1];
                     if ctx.kernel.vfs.read(h, &mut next).unwrap_or(0) != 0 {
-                        if next[0] == b'\n' { byte = b'\n'; }
-                        else { ctx.kernel.vfs.seek(h, -1, SeekKind::Current); }
+                        if next[0] == b'\n' {
+                            byte = b'\n';
+                        } else {
+                            ctx.kernel.vfs.seek(h, -1, SeekKind::Current);
+                        }
                     }
                 }
             }
@@ -7852,15 +9033,22 @@ fn virtual_commit_ranges(pages: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)
 #[test]
 fn memory_division_virtual_commit_ranges() {
     // Toy Golf's 9 MiB startup allocation is one CPU protection operation.
-    assert_eq!(virtual_commit_ranges(0x200..0xb00), vec![(0x200000, 0x900000)]);
-    assert_eq!(virtual_commit_ranges([7, 4, 5, 7, 9]),
-        vec![(0x4000, 0x2000), (0x7000, 0x1000), (0x9000, 0x1000)]);
+    assert_eq!(
+        virtual_commit_ranges(0x200..0xb00),
+        vec![(0x200000, 0x900000)]
+    );
+    assert_eq!(
+        virtual_commit_ranges([7, 4, 5, 7, 9]),
+        vec![(0x4000, 0x2000), (0x7000, 0x1000), (0x9000, 0x1000)]
+    );
     assert!(virtual_commit_ranges(std::iter::empty::<u32>()).is_empty());
     // An existing committed page remains outside the new ranges.
     let committed: std::collections::HashSet<u32> = [4, 5, 6].into_iter().collect();
     let old: std::collections::HashSet<u32> = [5].into_iter().collect();
-    assert_eq!(virtual_commit_ranges(committed.difference(&old).copied()),
-        vec![(0x4000, 0x1000), (0x6000, 0x1000)]);
+    assert_eq!(
+        virtual_commit_ranges(committed.difference(&old).copied()),
+        vec![(0x4000, 0x1000), (0x6000, 0x1000)]
+    );
 }
 
 fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -7872,8 +9060,11 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         let kind = ctx.arg_u32(2)?;
         let protect = ctx.arg_u32(3)?;
         let prot = match protect {
-            1 => Prot::NONE, 2 => Prot::READ, 4 => Prot::READ | Prot::WRITE,
-            0x10 => Prot::EXEC, 0x20 => Prot::EXEC | Prot::READ,
+            1 => Prot::NONE,
+            2 => Prot::READ,
+            4 => Prot::READ | Prot::WRITE,
+            0x10 => Prot::EXEC,
+            0x20 => Prot::EXEC | Prot::READ,
             0x40 => Prot::EXEC | Prot::READ | Prot::WRITE,
             _ => {
                 set_thread_error(ctx, ERROR_INVALID_PARAMETER);
@@ -7886,7 +9077,11 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }
         let old_block = ctx.kernel.heap.virtual_block(addr);
         let old = old_block.as_ref().map(|b| b.2.clone()).unwrap_or_default();
-        let Some(base) = ctx.kernel.heap.virtual_alloc(addr, size, kind & 0x2000 != 0, kind & 0x1000 != 0) else {
+        let Some(base) =
+            ctx.kernel
+                .heap
+                .virtual_alloc(addr, size, kind & 0x2000 != 0, kind & 0x1000 != 0)
+        else {
             set_thread_error(ctx, 8);
             return Ok(DispatchOutcome::ReturnedR0(0));
         };
@@ -7894,7 +9089,9 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         let new_reservation = old_block.is_none();
         let new_ranges = virtual_commit_ranges(committed.difference(&old).copied());
         let result = (|| -> Result<(), pocket_cpu::CpuError> {
-            if new_reservation { ctx.cpu.protect_region(block_base, block_size, Prot::NONE)?; }
+            if new_reservation {
+                ctx.cpu.protect_region(block_base, block_size, Prot::NONE)?;
+            }
             // Unicorn protection changes flush its TLB. Apply one change per
             // contiguous range, rather than one flush for each 4 KiB page.
             for &(start, bytes) in &new_ranges {
@@ -7939,7 +9136,9 @@ fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let address = ctx.arg_u32(0)?;
     let size = ctx.arg_u32(1)?;
     let kind = ctx.arg_u32(2)?;
-    if ctx.kernel.memory_division.is_none() { return Ok(DispatchOutcome::ReturnedR0(1)); }
+    if ctx.kernel.memory_division.is_none() {
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
     let Some((base, block_size, _)) = ctx.kernel.heap.virtual_block(address) else {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -7947,8 +9146,11 @@ fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let range = match kind {
         0x8000 if address == base && size == 0 => Some((base, block_size, Prot::ALL)),
         0x4000 if size == 0 && address == base => Some((base, block_size, Prot::NONE)),
-        0x4000 if size != 0 => address.checked_add(size).and_then(|end| end.checked_add(4095))
-            .map(|end| end & !0xfff).filter(|end| *end <= base + block_size)
+        0x4000 if size != 0 => address
+            .checked_add(size)
+            .and_then(|end| end.checked_add(4095))
+            .map(|end| end & !0xfff)
+            .filter(|end| *end <= base + block_size)
             .map(|end| (address & !0xfff, end - (address & !0xfff), Prot::NONE)),
         _ => None,
     };
@@ -8442,9 +9644,12 @@ fn post_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         if let Some(available) = ctx.kernel.internet.gprs_shell_network_available() {
             let connected = available && wparam != 0;
             if ctx.kernel.posted_messages.len() < 256 {
-                ctx.kernel.posted_messages.push_back((hwnd,
+                ctx.kernel.posted_messages.push_back((
+                    hwnd,
                     registered_window_message_id("GPRS_STATUS"),
-                    if connected { 0x1f9c } else { 0x1f9d }, u32::from(connected)));
+                    if connected { 0x1f9c } else { 0x1f9d },
+                    u32::from(connected),
+                ));
             }
             log::debug!("Gizmondo GPRS shell gate: connected={connected}");
             return Ok(DispatchOutcome::ReturnedR0(1));
@@ -8911,7 +10116,9 @@ fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let wparam = ctx.arg_u32(2)?;
     let lparam = ctx.arg_u32(3)?;
     // The status bar is a control we implement ourselves — its messages
-    if crate::bluetooth::shell_message(ctx, hwnd, message, wparam) { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    if crate::bluetooth::shell_message(ctx, hwnd, message, wparam) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     // must never trampoline into the application's WndProc.
     if hwnd == FAKE_STATUSBAR_HWND {
         if let Some(r) = status_bar_message(ctx, message, wparam, lparam)? {
@@ -9049,11 +10256,21 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let wparam = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
     let lparam = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
     let timer_callback = message == WM_TIMER && lparam != 0;
-    let wnd_proc = if timer_callback { lparam & !1 } else { wnd_proc };
-    if wnd_proc == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    let wnd_proc = if timer_callback {
+        lparam & !1
+    } else {
+        wnd_proc
+    };
+    if wnd_proc == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let callback_arg = if timer_callback {
-        ctx.cpu.read_u32_le(lp_msg.saturating_add(16)).unwrap_or(monotonic_ms() as u32)
-    } else { lparam };
+        ctx.cpu
+            .read_u32_le(lp_msg.saturating_add(16))
+            .unwrap_or(monotonic_ms() as u32)
+    } else {
+        lparam
+    };
     if message == WM_QUIT {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -9225,7 +10442,9 @@ fn controls_take_input(
 }
 
 fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
-    if vk >= 256 { return 0; }
+    if vk >= 256 {
+        return 0;
+    }
     let aliases = |code: usize| -> [usize; 2] {
         match code {
             0xC1..=0xC4 => [code, code + 0x10],
@@ -9251,11 +10470,13 @@ fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
         .find_map(|event| match event {
             pocket_kernel::InputEvent::KeyDown { vk: pending } => {
                 let keys = aliases(*pending as usize);
-                (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0]).then_some(true)
+                (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0])
+                    .then_some(true)
             }
             pocket_kernel::InputEvent::KeyUp { vk: pending } => {
                 let keys = aliases(*pending as usize);
-                (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0]).then_some(false)
+                (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0])
+                    .then_some(false)
             }
             _ => None,
         })
@@ -9467,12 +10688,19 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
 /// the user-visible bug we want to avoid.
 fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     let now = monotonic_ms();
-    let timer_next = ctx.kernel.timers.iter().filter(|(key, _)| key.0 == ctx.kernel.current_thread)
-        .map(|(_, timer)| timer.1).min();
+    let timer_next = ctx
+        .kernel
+        .timers
+        .iter()
+        .filter(|(key, _)| key.0 == ctx.kernel.current_thread)
+        .map(|(_, timer)| timer.1)
+        .min();
     let timer_due = timer_next.is_some_and(|next| now >= next);
     let paint_due = now >= ctx.kernel.synthetic_paint_next_ms;
     if !timer_due && !paint_due {
-        let next = timer_next.unwrap_or(u64::MAX).min(ctx.kernel.synthetic_paint_next_ms);
+        let next = timer_next
+            .unwrap_or(u64::MAX)
+            .min(ctx.kernel.synthetic_paint_next_ms);
         let wait_ms = next.saturating_sub(now);
         if wait_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(wait_ms.min(16)));
@@ -9610,10 +10838,15 @@ fn advance_deadline(previous: u64, interval: u64, now: u64) -> u64 {
 /// this way — 240 dispatched messages, `frame_counter=0`).
 fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     let now = monotonic_ms();
-    if let Some(timer) = timer_message_if_due(ctx, true) { return Some(timer); }
+    if let Some(timer) = timer_message_if_due(ctx, true) {
+        return Some(timer);
+    }
     if now >= ctx.kernel.synthetic_paint_next_ms {
         ctx.kernel.synthetic_paint_next_ms = advance_deadline(
-            ctx.kernel.synthetic_paint_next_ms, SYNTHETIC_PAINT_INTERVAL_MS, now);
+            ctx.kernel.synthetic_paint_next_ms,
+            SYNTHETIC_PAINT_INTERVAL_MS,
+            now,
+        );
         return Some((FAKE_HWND, WM_PAINT, 0, 0));
     }
     None
@@ -9621,12 +10854,18 @@ fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
 
 fn timer_message_if_due(ctx: &mut CallCtx<'_>, remove: bool) -> Option<(u32, u32, u32, u32)> {
     let now = monotonic_ms();
-    let due = ctx.kernel.timers.iter()
+    let due = ctx
+        .kernel
+        .timers
+        .iter()
         .filter(|(key, timer)| key.0 == ctx.kernel.current_thread && now >= timer.1)
-        .min_by_key(|(key, timer)| (timer.1, **key)).map(|(key, _)| *key);
+        .min_by_key(|(key, timer)| (timer.1, **key))
+        .map(|(key, _)| *key);
     if let Some(key) = due {
         let timer = ctx.kernel.timers.get_mut(&key).unwrap();
-        if remove { timer.1 = advance_deadline(timer.1, timer.0.max(1) as u64, now); }
+        if remove {
+            timer.1 = advance_deadline(timer.1, timer.0.max(1) as u64, now);
+        }
         return Some((key.1, WM_TIMER, key.2, timer.2));
     }
     None
@@ -9822,7 +11061,11 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // forever and the main thread — the one that actually renders —
     // would never get the CPU back.
     if let Some(thread_index) = ctx.kernel.current_thread.checked_sub(1) {
-        let wait_key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+        let wait_key = (
+            ctx.kernel.current_thread,
+            ctx.thunk.thunk_va,
+            ctx.cpu.read_reg(ArmReg::Sp)?,
+        );
         ctx.kernel.wait_deadlines.remove(&wait_key);
         let queued = ctx
             .kernel
@@ -9840,10 +11083,18 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
-        if let Some(next) = ctx.kernel.timers.iter().filter(|(key, _)| key.0 == ctx.kernel.current_thread)
-            .map(|(_, timer)| timer.1).min() {
+        if let Some(next) = ctx
+            .kernel
+            .timers
+            .iter()
+            .filter(|(key, _)| key.0 == ctx.kernel.current_thread)
+            .map(|(_, timer)| timer.1)
+            .min()
+        {
             ctx.kernel.wait_deadlines.insert(wait_key, next);
-            if let Some(thread) = ctx.kernel.threads.get_mut(thread_index) { thread.sleep_until_ms = next; }
+            if let Some(thread) = ctx.kernel.threads.get_mut(thread_index) {
+                thread.sleep_until_ms = next;
+            }
         }
         if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
             return Ok(outcome);
@@ -9986,9 +11237,14 @@ fn post_quit_message(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
             thread.messages.push_back((WM_QUIT, exit_code, 0));
         }
     } else {
-        ctx.kernel.posted_messages.push_back((0, WM_QUIT, exit_code, 0));
+        ctx.kernel
+            .posted_messages
+            .push_back((0, WM_QUIT, exit_code, 0));
     }
-    log::info!("PostQuitMessage({exit_code}) queued as WM_QUIT for thread {}", ctx.kernel.current_thread);
+    log::info!(
+        "PostQuitMessage({exit_code}) queued as WM_QUIT for thread {}",
+        ctx.kernel.current_thread
+    );
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -10007,7 +11263,10 @@ fn msg_wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcom
 /// A satisfied wait is still a cooperative scheduling boundary. A worker
 /// looping on a permanently signalled event must not monopolise the CPU.
 /// Save the completed result and continue after the call when it next runs.
-fn complete_satisfied_wait(ctx: &mut CallCtx<'_>, result: u32) -> Result<DispatchOutcome, KernelError> {
+fn complete_satisfied_wait(
+    ctx: &mut CallCtx<'_>,
+    result: u32,
+) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = park_worker(ctx, result)? {
         return Ok(outcome);
     }
@@ -10015,19 +11274,31 @@ fn complete_satisfied_wait(ctx: &mut CallCtx<'_>, result: u32) -> Result<Dispatc
 }
 
 fn finish_wait(ctx: &mut CallCtx<'_>, result: u32) -> Result<DispatchOutcome, KernelError> {
-    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(ArmReg::Sp)?,
+    );
     ctx.kernel.wait_deadlines.remove(&key);
     complete_satisfied_wait(ctx, result)
 }
 
-fn block_on_wait(ctx: &mut CallCtx<'_>, handles: &[u32], wait_all: bool,
-    timeout: u32) -> Result<DispatchOutcome, KernelError> {
+fn block_on_wait(
+    ctx: &mut CallCtx<'_>,
+    handles: &[u32],
+    wait_all: bool,
+    timeout: u32,
+) -> Result<DispatchOutcome, KernelError> {
     // A zero timeout is a poll; a positive timeout belongs to the entire
     // call, not to each cooperative handoff. Never return a guessed timeout
     // just because the signalling thread yielded before it could signal.
     const INFINITE: u32 = u32::MAX;
     const WAIT_TIMEOUT: u32 = 0x102;
-    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(ArmReg::Sp)?,
+    );
     if timeout == 0 {
         // This poll has completed; yielding a worker preserves fairness
         // without parking it on an unsignalled object or inventing a delay.
@@ -10035,7 +11306,10 @@ fn block_on_wait(ctx: &mut CallCtx<'_>, handles: &[u32], wait_all: bool,
     }
     if timeout != INFINITE {
         let now = monotonic_ms();
-        let deadline = *ctx.kernel.wait_deadlines.entry(key)
+        let deadline = *ctx
+            .kernel
+            .wait_deadlines
+            .entry(key)
             .or_insert_with(|| now.saturating_add(u64::from(timeout)));
         if now >= deadline {
             return finish_wait(ctx, WAIT_TIMEOUT);
@@ -10087,7 +11361,10 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         return Ok(DispatchOutcome::ReturnedR0(WAIT_FAILED));
     }
 
-    if handles.iter().any(|&handle| invalid_wait_handle(ctx.kernel,handle)) {
+    if handles
+        .iter()
+        .any(|&handle| invalid_wait_handle(ctx.kernel, handle))
+    {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(WAIT_FAILED));
     }
@@ -10119,7 +11396,9 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         if wait_all {
             let mut result = WAIT_OBJECT_0;
             for (index, &handle) in handles.iter().enumerate() {
-                if acquire_wait_signal(ctx.kernel, handle) == 0x80 && result == WAIT_OBJECT_0 { result = 0x80 + index as u32; }
+                if acquire_wait_signal(ctx.kernel, handle) == 0x80 && result == WAIT_OBJECT_0 {
+                    result = 0x80 + index as u32;
+                }
             }
             return finish_wait(ctx, result);
         }
@@ -11926,8 +13205,10 @@ fn get_window_thread_process_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome
     let _hwnd = ctx.arg_u32(0)?;
     let process_id_out = ctx.arg_u32(1)?;
     if process_id_out != 0 {
-        ctx.cpu
-            .write_mem(process_id_out, &ctx.kernel.object_handles.process_id().to_le_bytes())?;
+        ctx.cpu.write_mem(
+            process_id_out,
+            &ctx.kernel.object_handles.process_id().to_le_bytes(),
+        )?;
     }
     Ok(DispatchOutcome::ReturnedR0(MAIN_THREAD_ID))
 }
@@ -12875,16 +14156,28 @@ fn set_timer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             candidate = candidate.wrapping_add(1).max(1);
         }
         candidate
-    } else { id };
-    ctx.kernel.timers.insert((owner, hwnd, final_id),
-        (interval, monotonic_ms().saturating_add(interval as u64), callback));
+    } else {
+        id
+    };
+    ctx.kernel.timers.insert(
+        (owner, hwnd, final_id),
+        (
+            interval,
+            monotonic_ms().saturating_add(interval as u64),
+            callback,
+        ),
+    );
     Ok(DispatchOutcome::ReturnedR0(final_id))
 }
 
 fn kill_timer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let id = ctx.arg_u32(1)?;
-    let removed = ctx.kernel.timers.remove(&(ctx.kernel.current_thread, hwnd, id)).is_some();
+    let removed = ctx
+        .kernel
+        .timers
+        .remove(&(ctx.kernel.current_thread, hwnd, id))
+        .is_some();
     Ok(DispatchOutcome::ReturnedR0(removed as u32))
 }
 
@@ -12895,34 +14188,52 @@ fn kill_timer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// `WaitForSingleObject` needs in order to answer honestly.
 fn object_name(ctx: &mut CallCtx<'_>, argument: u8) -> Result<Option<String>, KernelError> {
     let pointer = ctx.arg_u32(argument)?;
-    if pointer == 0 { return Ok(None); }
+    if pointer == 0 {
+        return Ok(None);
+    }
     if crate::import_name(ctx.thunk).ends_with('A') {
         return Ok(Some(read_cstr_string(ctx, pointer, 260)?));
     }
-    Ok(Some(String::from_utf16_lossy(&read_wstr(ctx, pointer, 260)?)))
+    Ok(Some(String::from_utf16_lossy(&read_wstr(
+        ctx, pointer, 260,
+    )?)))
 }
 
 fn create_event_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let manual_reset = ctx.arg_u32(1)? != 0;
     let initial = ctx.arg_u32(2)? != 0;
     let name = object_name(ctx, 3)?;
-    if let Some(object) = name.as_ref().and_then(|name| ctx.kernel.object_handles.named(name)) {
+    if let Some(object) = name
+        .as_ref()
+        .and_then(|name| ctx.kernel.object_handles.named(name))
+    {
         if !matches!(object, HandleObject::Event(_)) {
-            set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
         let Some(handle) = ctx.kernel.object_handles.duplicate(object) else {
-            set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, 8);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         };
         set_thread_error(ctx, 183); // ERROR_ALREADY_EXISTS
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     let Some(handle) = ctx.kernel.object_handles.reserve() else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let object = HandleObject::Event(handle);
     ctx.kernel.object_handles.bind(handle, object);
-    if let Some(name) = name { ctx.kernel.object_handles.name(name, object); }
-    ctx.kernel.events.insert(handle, pocket_kernel::EventObject { manual_reset, signalled: initial });
+    if let Some(name) = name {
+        ctx.kernel.object_handles.name(name, object);
+    }
+    ctx.kernel.events.insert(
+        handle,
+        pocket_kernel::EventObject {
+            manual_reset,
+            signalled: initial,
+        },
+    );
     set_thread_error(ctx, 0);
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
@@ -12930,14 +14241,18 @@ fn create_event_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 fn open_named_object(ctx: &mut CallCtx<'_>, event: bool) -> Result<DispatchOutcome, KernelError> {
     let name = object_name(ctx, 2)?;
     let Some(object) = name.and_then(|name| ctx.kernel.object_handles.named(&name)) else {
-        set_thread_error(ctx, 2); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 2);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if (event && !matches!(object, HandleObject::Event(_)))
-        || (!event && !matches!(object, HandleObject::Semaphore(_))) {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+        || (!event && !matches!(object, HandleObject::Semaphore(_)))
+    {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let Some(handle) = ctx.kernel.object_handles.duplicate(object) else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
@@ -13036,7 +14351,7 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     let handle = ctx.arg_u32(0)?;
     let timeout = ctx.arg_u32(1)?;
 
-    if invalid_wait_handle(ctx.kernel,handle) {
+    if invalid_wait_handle(ctx.kernel, handle) {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
@@ -13057,11 +14372,15 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
         service_wave_out(ctx)?;
     }
 
-    let known = handle_object(ctx.kernel, handle).is_some()
-        || ctx.kernel.msg_queues.contains_key(&handle);
+    let known =
+        handle_object(ctx.kernel, handle).is_some() || ctx.kernel.msg_queues.contains_key(&handle);
     if !known {
         // Preserve existing compatibility for object classes not modeled here.
-        let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+        let key = (
+            ctx.kernel.current_thread,
+            ctx.thunk.thunk_va,
+            ctx.cpu.read_reg(ArmReg::Sp)?,
+        );
         ctx.kernel.wait_deadlines.remove(&key);
         return Ok(DispatchOutcome::ReturnedR0(WAIT_OBJECT_0));
     }
@@ -13121,7 +14440,8 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // reserved because `PostThreadMessageW(0, ...)` is what a guest
     // ends up posting when it never learned a real id.
     let Some(thread_id) = ctx.kernel.object_handles.allocate_thread_id() else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     // The creator resumes with the new thread's handle in R0 — that is
     // `CreateThread`'s return value. Without this the guest stores a
@@ -13141,7 +14461,8 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         // Already mapped in the private slot. Normal allocations cannot
         // reuse this storage; keep the existing writable guard below SP.
         if let Err(error) = ctx.cpu.write_mem(base, &vec![0u8; reservation as usize]) {
-            ctx.kernel.heap.release_stack(base, reservation); return Err(error.into());
+            ctx.kernel.heap.release_stack(base, reservation);
+            return Err(error.into());
         }
         stack_region = (base, reservation, true);
         stack_top = base + 0x2000 + pocket_cpu::round_up_to_page(stack_size);
@@ -13152,12 +14473,22 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         loop {
             let start = stack_top.saturating_sub(stack_size + 0x2000) & !0xfff;
             if start < pocket_kernel::HEAP_BASE + pocket_kernel::HEAP_SIZE {
-                set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+                set_thread_error(ctx, 8);
+                return Ok(DispatchOutcome::ReturnedR0(0));
             }
             let overlaps = |base: u32, size: u32| start < base + size && base < start + reservation;
-            let occupied = ctx.kernel.main_thread.stack_region.is_some_and(|(base, size)| overlaps(base, size))
-                || ctx.kernel.threads.iter().any(|t| t.stack_region.is_some_and(|(base, size, _)| overlaps(base, size)));
-            if !occupied { break; }
+            let occupied = ctx
+                .kernel
+                .main_thread
+                .stack_region
+                .is_some_and(|(base, size)| overlaps(base, size))
+                || ctx.kernel.threads.iter().any(|t| {
+                    t.stack_region
+                        .is_some_and(|(base, size, _)| overlaps(base, size))
+                });
+            if !occupied {
+                break;
+            }
             stack_top -= 0x200000;
         }
         let stack_base = stack_top.saturating_sub(stack_size) & !0xfff;
@@ -13167,8 +14498,11 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             set_thread_error(ctx, 8);
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
-        if let Err(error) = ctx.cpu.map_region(mapped_base, reservation,
-            pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE) {
+        if let Err(error) = ctx.cpu.map_region(
+            mapped_base,
+            reservation,
+            pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+        ) {
             ctx.kernel.heap.release_resident(mapped_base, reservation);
             return Err(error.into());
         }
@@ -13184,18 +14518,24 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // driver to notify thread 0.
     let setup = (|| -> Result<(), KernelError> {
         let thread_id_out = ctx.arg_u32(5)?;
-        if thread_id_out != 0 { ctx.cpu.write_mem(thread_id_out, &thread_id.to_le_bytes())?; }
+        if thread_id_out != 0 {
+            ctx.cpu.write_mem(thread_id_out, &thread_id.to_le_bytes())?;
+        }
         ctx.cpu.add_code_hook(exit_va)?;
         Ok(())
     })();
     if let Err(error) = setup {
         let (base, size, private) = stack_region;
-        if private { ctx.kernel.heap.release_stack(base, size); }
-        else { ctx.cpu.unmap_region(base, size)?; ctx.kernel.heap.release_resident(base, size); }
+        if private {
+            ctx.kernel.heap.release_stack(base, size);
+        } else {
+            ctx.cpu.unmap_region(base, size)?;
+            ctx.kernel.heap.release_resident(base, size);
+        }
         return Err(error);
     }
     let suspended = creation_flags & CREATE_SUSPENDED != 0;
-    
+
     log::debug!(
         "CreateThread entry=0x{entry:08x} parameter=0x{parameter:08x} stack={} suspended={suspended} -> handle=0x{handle:08x} id={thread_id}",
         stack_size,
@@ -13230,14 +14570,20 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     thread.worker_saved = true;
     thread.started = !suspended;
     thread.suspend_count = u32::from(suspended);
-    ctx.kernel.object_handles.register_thread(thread_index + 1, thread.suspend_count, thread_id);
-    ctx.kernel.object_handles.bind(handle,HandleObject::Thread(thread_index + 1));
+    ctx.kernel
+        .object_handles
+        .register_thread(thread_index + 1, thread.suspend_count, thread_id);
+    ctx.kernel
+        .object_handles
+        .bind(handle, HandleObject::Thread(thread_index + 1));
     ctx.kernel.threads.push(thread);
     // Return to the creator first; let the normal scheduling quantum expire
     // before an API-boundary first dispatch. Do not defer startup until the
     // first message pump: audio buffers can finish during resource loading.
     if !suspended && ctx.kernel.current_thread == 0 {
-        ctx.kernel.worker_preempt_after_ms = ctx.kernel.worker_preempt_after_ms
+        ctx.kernel.worker_preempt_after_ms = ctx
+            .kernel
+            .worker_preempt_after_ms
             .max(monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel)));
     }
     Ok(DispatchOutcome::ReturnedR0(handle))
@@ -13253,11 +14599,39 @@ fn get_exit_code_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     }
     let code = match handle_object(ctx.kernel, handle) {
         Some(HandleObject::Thread(0)) => Some(ctx.kernel.main_thread.exit_code.unwrap_or(259)),
-        Some(HandleObject::Thread(index)) => ctx.kernel.threads.get(index - 1).map(|t| t.exit_code.unwrap_or(259)),
-        Some(HandleObject::ChildThread(key)) => ctx.kernel.object_handles.child_id(key)
-            .map(|pid| ctx.kernel.object_handles.exit_code(pid,Some(0)).or_else(|| ctx.kernel.child_processes.get(&key).and_then(|c| c.exit_code)).unwrap_or(259))
-            .or_else(|| ctx.kernel.child_processes.get(&key).map(|c| c.exit_code.unwrap_or(259))),
-        Some(HandleObject::RemoteThread(pid, index)) => Some(ctx.kernel.object_handles.exit_code(pid, Some(index)).unwrap_or(259)),
+        Some(HandleObject::Thread(index)) => ctx
+            .kernel
+            .threads
+            .get(index - 1)
+            .map(|t| t.exit_code.unwrap_or(259)),
+        Some(HandleObject::ChildThread(key)) => ctx
+            .kernel
+            .object_handles
+            .child_id(key)
+            .map(|pid| {
+                ctx.kernel
+                    .object_handles
+                    .exit_code(pid, Some(0))
+                    .or_else(|| {
+                        ctx.kernel
+                            .child_processes
+                            .get(&key)
+                            .and_then(|c| c.exit_code)
+                    })
+                    .unwrap_or(259)
+            })
+            .or_else(|| {
+                ctx.kernel
+                    .child_processes
+                    .get(&key)
+                    .map(|c| c.exit_code.unwrap_or(259))
+            }),
+        Some(HandleObject::RemoteThread(pid, index)) => Some(
+            ctx.kernel
+                .object_handles
+                .exit_code(pid, Some(index))
+                .unwrap_or(259),
+        ),
         _ => None,
     };
     let Some(code) = code else {
@@ -13285,17 +14659,29 @@ fn exit_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn terminate_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let code = ctx.arg_u32(1)?;
-    if let Some((pid,index)) = remote_thread_target(ctx.kernel,handle) {
-        let ok = ctx.kernel.object_handles.terminate_remote_thread(pid,index,code);
-        if !ok { set_thread_error(ctx,ERROR_INVALID_HANDLE); }
+    if let Some((pid, index)) = remote_thread_target(ctx.kernel, handle) {
+        let ok = ctx
+            .kernel
+            .object_handles
+            .terminate_remote_thread(pid, index, code);
+        if !ok {
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        }
         return Ok(DispatchOutcome::ReturnedR0(ok as u32));
     }
     let target = thread_object_index(ctx.kernel, handle);
-    if target.is_some_and(|target| ctx.kernel.dll_notification_frame.as_ref().is_some_and(|frame| frame.thread == target)) {
+    if target.is_some_and(|target| {
+        ctx.kernel
+            .dll_notification_frame
+            .as_ref()
+            .is_some_and(|frame| frame.thread == target)
+    }) {
         ctx.kernel.dll_notification_frame = None;
     }
     if target == Some(0) {
-        if ctx.kernel.current_thread == 0 { return complete_main_thread(ctx, code); }
+        if ctx.kernel.current_thread == 0 {
+            return complete_main_thread(ctx, code);
+        }
         if ctx.kernel.main_thread.exit_code.is_none() {
             ctx.kernel.main_thread.last_exit_code = Some(code);
             ctx.kernel.main_thread.exit_code = Some(code);
@@ -14180,7 +15566,11 @@ fn en_us_lang_id(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 // ---------- random / time ----------
 
 fn rand_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let next = ctx.kernel.random_seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    let next = ctx
+        .kernel
+        .random_seed
+        .wrapping_mul(1664525)
+        .wrapping_add(1013904223);
     ctx.kernel.random_seed = next;
     Ok(DispatchOutcome::ReturnedR0(next & 0x7FFF))
 }
@@ -14249,7 +15639,8 @@ fn tls_set_value(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     ctx.kernel.sync_thread_tls(ctx.cpu)?;
-    ctx.cpu.write_mem(USER_KDATA_TLS_ARRAY_VA + slot * 4, &value.to_le_bytes())?;
+    ctx.cpu
+        .write_mem(USER_KDATA_TLS_ARRAY_VA + slot * 4, &value.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -14483,14 +15874,27 @@ fn query_performance_frequency(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
 /// pseudo-handle, matching what the user-kdata `ahSys[SH_CURPROC]`
 /// short-cut returns.
 fn get_current_process_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(ctx.kernel.object_handles.process_id()))
+    Ok(DispatchOutcome::ReturnedR0(
+        ctx.kernel.object_handles.process_id(),
+    ))
 }
 fn open_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _access = ctx.arg_u32(0)?; let _inherit = ctx.arg_u32(1)?; let pid = ctx.arg_u32(2)?;
-    if !ctx.kernel.object_handles.is_active(pid) { set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0)); }
-    let object = if pid == ctx.kernel.object_handles.process_id() { HandleObject::CurrentProcess }
-        else { HandleObject::RemoteProcess(pid) };
-    let Some(handle) = ctx.kernel.object_handles.duplicate(object) else { set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0)); };
+    let _access = ctx.arg_u32(0)?;
+    let _inherit = ctx.arg_u32(1)?;
+    let pid = ctx.arg_u32(2)?;
+    if !ctx.kernel.object_handles.is_active(pid) {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let object = if pid == ctx.kernel.object_handles.process_id() {
+        HandleObject::CurrentProcess
+    } else {
+        HandleObject::RemoteProcess(pid)
+    };
+    let Some(handle) = ctx.kernel.object_handles.duplicate(object) else {
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
@@ -15437,7 +16841,11 @@ fn get_proc_address_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let address = resolve_dynamic_export(ctx, module, &name);
     if address == 0 {
         let valid = ctx.kernel.dynamic_exports.contains_key(&module)
-            || ctx.kernel.modules.iter().any(|loaded| loaded.handle == module);
+            || ctx
+                .kernel
+                .modules
+                .iter()
+                .any(|loaded| loaded.handle == module);
         set_thread_error(ctx, if valid { 127 } else { ERROR_INVALID_HANDLE });
     }
     log::debug!("GetProcAddressA(0x{module:08x}, {name:?}) -> 0x{address:08x}");
@@ -15462,7 +16870,11 @@ fn get_proc_address_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let address = resolve_dynamic_export(ctx, module, &name);
     if address == 0 {
         let valid = ctx.kernel.dynamic_exports.contains_key(&module)
-            || ctx.kernel.modules.iter().any(|loaded| loaded.handle == module);
+            || ctx
+                .kernel
+                .modules
+                .iter()
+                .any(|loaded| loaded.handle == module);
         set_thread_error(ctx, if valid { 127 } else { ERROR_INVALID_HANDLE });
     }
     log::debug!("GetProcAddressW(0x{module:08x}, {name:?}) -> 0x{address:08x}");
@@ -15470,9 +16882,19 @@ fn get_proc_address_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 }
 
 fn resolve_dynamic_export(ctx: &CallCtx<'_>, module: u32, name: &str) -> u32 {
-    if ctx.kernel.modules.iter().any(|loaded| loaded.handle == module) {
-        return ctx.kernel.dynamic_exports.get(&module)
-            .and_then(|exports| exports.get(name)).copied().unwrap_or(0);
+    if ctx
+        .kernel
+        .modules
+        .iter()
+        .any(|loaded| loaded.handle == module)
+    {
+        return ctx
+            .kernel
+            .dynamic_exports
+            .get(&module)
+            .and_then(|exports| exports.get(name))
+            .copied()
+            .unwrap_or(0);
     }
     if module == 0x1000_0001 && name.eq_ignore_ascii_case("?GXCloseInput@@YAHXZ") {
         return ctx
@@ -15875,25 +17297,34 @@ fn create_semaphore_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let initial_count = ctx.arg_u32(1)?;
     let max_count = ctx.arg_u32(2)?;
     if (initial_count as i32) < 0 || (max_count as i32) <= 0 || initial_count > max_count {
-        set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let name = object_name(ctx, 3)?;
-    if let Some(object) = name.as_ref().and_then(|name| ctx.kernel.object_handles.named(name)) {
+    if let Some(object) = name
+        .as_ref()
+        .and_then(|name| ctx.kernel.object_handles.named(name))
+    {
         if !matches!(object, HandleObject::Semaphore(_)) {
-            set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
         let Some(handle) = ctx.kernel.object_handles.duplicate(object) else {
-            set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, 8);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         };
         set_thread_error(ctx, 183);
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     let Some(handle) = ctx.kernel.object_handles.reserve() else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let object = HandleObject::Semaphore(handle);
     ctx.kernel.object_handles.bind(handle, object);
-    if let Some(name) = name { ctx.kernel.object_handles.name(name, object); }
+    if let Some(name) = name {
+        ctx.kernel.object_handles.name(name, object);
+    }
     ctx.kernel.semaphores.insert(
         handle,
         pocket_kernel::SemaphoreObject {
@@ -15919,19 +17350,34 @@ fn release_semaphore(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let handle = semaphore_key(ctx.kernel, raw_handle);
     let release_count = ctx.arg_u32(1)? as i32;
     let previous_ptr = ctx.arg_u32(2)?;
-    let state = ctx.kernel.semaphores.get(&handle).map(|s| (s.count, s.max_count));
+    let state = ctx
+        .kernel
+        .semaphores
+        .get(&handle)
+        .map(|s| (s.count, s.max_count));
     let Some((previous, maximum)) = state else {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if release_count <= 0 {
-        set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let next = previous.checked_add(release_count as u32).filter(|&n| n <= maximum);
+    let next = previous
+        .checked_add(release_count as u32)
+        .filter(|&n| n <= maximum);
     let Some(next) = next else {
-        set_thread_error(ctx, 298); return Ok(DispatchOutcome::ReturnedR0(0)); // ERROR_TOO_MANY_POSTS
+        set_thread_error(ctx, 298);
+        return Ok(DispatchOutcome::ReturnedR0(0)); // ERROR_TOO_MANY_POSTS
     };
-    if previous_ptr != 0 && ctx.cpu.write_mem(previous_ptr, &previous.to_le_bytes()).is_err() {
-        set_thread_error(ctx, ERROR_INVALID_PARAMETER); return Ok(DispatchOutcome::ReturnedR0(0));
+    if previous_ptr != 0
+        && ctx
+            .cpu
+            .write_mem(previous_ptr, &previous.to_le_bytes())
+            .is_err()
+    {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     ctx.kernel.semaphores.get_mut(&handle).unwrap().count = next;
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -15940,70 +17386,130 @@ fn release_semaphore(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn create_mutex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let initially_owned = ctx.arg_u32(1)? != 0;
     let name = object_name(ctx, 2)?;
-    if let Some(object) = name.as_ref().and_then(|n| ctx.kernel.object_handles.named(n)) {
+    if let Some(object) = name
+        .as_ref()
+        .and_then(|n| ctx.kernel.object_handles.named(n))
+    {
         if !matches!(object, HandleObject::Mutex(_)) {
-            set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
         let Some(handle) = ctx.kernel.object_handles.duplicate(object) else {
-            set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+            set_thread_error(ctx, 8);
+            return Ok(DispatchOutcome::ReturnedR0(0));
         };
-        set_thread_error(ctx, 183); return Ok(DispatchOutcome::ReturnedR0(handle));
+        set_thread_error(ctx, 183);
+        return Ok(DispatchOutcome::ReturnedR0(handle));
     }
     let Some(handle) = ctx.kernel.object_handles.reserve() else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let object = HandleObject::Mutex(handle); ctx.kernel.object_handles.bind(handle, object);
-    if let Some(name) = name { ctx.kernel.object_handles.name(name, object); }
-    ctx.kernel.mutexes.insert(handle, pocket_kernel::MutexObject {
-        owner: initially_owned.then_some((ctx.kernel.object_handles.process_id(), ctx.kernel.current_thread)),
-        depth: u32::from(initially_owned), abandoned: false,
-    });
-    set_thread_error(ctx, 0); Ok(DispatchOutcome::ReturnedR0(handle))
+    let object = HandleObject::Mutex(handle);
+    ctx.kernel.object_handles.bind(handle, object);
+    if let Some(name) = name {
+        ctx.kernel.object_handles.name(name, object);
+    }
+    ctx.kernel.mutexes.insert(
+        handle,
+        pocket_kernel::MutexObject {
+            owner: initially_owned.then_some((
+                ctx.kernel.object_handles.process_id(),
+                ctx.kernel.current_thread,
+            )),
+            depth: u32::from(initially_owned),
+            abandoned: false,
+        },
+    );
+    set_thread_error(ctx, 0);
+    Ok(DispatchOutcome::ReturnedR0(handle))
 }
 fn open_mutex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let object = object_name(ctx, 2)?.and_then(|n| ctx.kernel.object_handles.named(&n));
-    let Some(object) = object else { set_thread_error(ctx, 2); return Ok(DispatchOutcome::ReturnedR0(0)); };
-    if !matches!(object, HandleObject::Mutex(_)) { set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0)); }
-    let Some(handle) = ctx.kernel.object_handles.duplicate(object) else { set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0)); };
+    let Some(object) = object else {
+        set_thread_error(ctx, 2);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if !matches!(object, HandleObject::Mutex(_)) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let Some(handle) = ctx.kernel.object_handles.duplicate(object) else {
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 fn release_mutex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let Some(HandleObject::Mutex(key)) = handle_object(ctx.kernel, handle) else {
-        set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let mutexes = ctx.kernel.mutexes.clone();
-    let Some(mut mutex) = mutexes.get_mut(&key) else { set_thread_error(ctx, ERROR_INVALID_HANDLE); return Ok(DispatchOutcome::ReturnedR0(0)); };
-    if mutex.owner != Some((ctx.kernel.object_handles.process_id(), ctx.kernel.current_thread)) {
-        set_thread_error(ctx, 288); return Ok(DispatchOutcome::ReturnedR0(0)); // ERROR_NOT_OWNER
+    let Some(mut mutex) = mutexes.get_mut(&key) else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if mutex.owner
+        != Some((
+            ctx.kernel.object_handles.process_id(),
+            ctx.kernel.current_thread,
+        ))
+    {
+        set_thread_error(ctx, 288);
+        return Ok(DispatchOutcome::ReturnedR0(0)); // ERROR_NOT_OWNER
     }
-    mutex.depth -= 1; if mutex.depth == 0 { mutex.owner = None; }
+    mutex.depth -= 1;
+    if mutex.depth == 0 {
+        mutex.owner = None;
+    }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 fn mutex_owner_exited(kernel: &KernelState, owner: (u32, usize)) -> bool {
     if owner.0 == kernel.object_handles.process_id() {
-        if owner.1 == 0 { kernel.main_thread.exit_code.is_some() }
-        else { kernel.threads.get(owner.1 - 1).is_some_and(|t| t.finished) }
-    } else { kernel.object_handles.exit_code(owner.0, Some(owner.1)).is_some() }
+        if owner.1 == 0 {
+            kernel.main_thread.exit_code.is_some()
+        } else {
+            kernel.threads.get(owner.1 - 1).is_some_and(|t| t.finished)
+        }
+    } else {
+        kernel
+            .object_handles
+            .exit_code(owner.0, Some(owner.1))
+            .is_some()
+    }
 }
 fn mutex_ready(kernel: &KernelState, key: u32, thread: usize) -> bool {
-    kernel.mutexes.get(&key).is_some_and(|mutex|
-        mutex.owner.is_none() || mutex.owner == Some((kernel.object_handles.process_id(), thread))
-        || mutex.owner.is_some_and(|owner| mutex_owner_exited(kernel, owner)))
+    kernel.mutexes.get(&key).is_some_and(|mutex| {
+        mutex.owner.is_none()
+            || mutex.owner == Some((kernel.object_handles.process_id(), thread))
+            || mutex
+                .owner
+                .is_some_and(|owner| mutex_owner_exited(kernel, owner))
+    })
 }
 /// Acquiring an abandoned mutex succeeds and reports WAIT_ABANDONED.
 fn acquire_wait_signal(kernel: &mut KernelState, handle: u32) -> u32 {
     if let Some(HandleObject::Mutex(key)) = handle_object(kernel, handle) {
         let mutexes = kernel.mutexes.clone();
         let mut mutex = mutexes.get_mut(&key).unwrap();
-        if mutex.owner.is_some_and(|owner| mutex_owner_exited(kernel, owner)) {
-            mutex.owner = None; mutex.depth = 0; mutex.abandoned = true;
+        if mutex
+            .owner
+            .is_some_and(|owner| mutex_owner_exited(kernel, owner))
+        {
+            mutex.owner = None;
+            mutex.depth = 0;
+            mutex.abandoned = true;
         }
-        let abandoned = mutex.abandoned; mutex.abandoned = false;
-        mutex.owner = Some((kernel.object_handles.process_id(), kernel.current_thread)); mutex.depth += 1;
+        let abandoned = mutex.abandoned;
+        mutex.abandoned = false;
+        mutex.owner = Some((kernel.object_handles.process_id(), kernel.current_thread));
+        mutex.depth += 1;
         return if abandoned { 0x80 } else { 0 };
     }
-    consume_wait_signal(kernel, handle); 0
+    consume_wait_signal(kernel, handle);
+    0
 }
 
 fn tls_call(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -16140,7 +17646,14 @@ fn wave_out_enter_callback(
     else {
         return Ok(None);
     };
-    let Some(device) = ctx.kernel.wave_out.devices.get(&callback_handle).copied().or_else(|| crate::wavein::callback_device(callback_handle, message)) else {
+    let Some(device) = ctx
+        .kernel
+        .wave_out
+        .devices
+        .get(&callback_handle)
+        .copied()
+        .or_else(|| crate::wavein::callback_device(callback_handle, message))
+    else {
         return Ok(None);
     };
     let proc_va = device.callback_target;
@@ -16225,31 +17738,37 @@ fn wave_out_set_volume(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
-fn wave_out_notify(
-    ctx: &mut CallCtx<'_>,
-    handle: u32,
-    message: u32,
-    param1: u32,
-    param2: u32,
-) {
-    let Some(device) = ctx.kernel.wave_out.devices.get(&handle).copied() else { return; };
+fn wave_out_notify(ctx: &mut CallCtx<'_>, handle: u32, message: u32, param1: u32, param2: u32) {
+    let Some(device) = ctx.kernel.wave_out.devices.get(&handle).copied() else {
+        return;
+    };
     match device.callback_kind {
         WaveCallbackKind::Window => {
-            ctx.kernel.posted_messages.push_back((device.callback_target, message, handle, param1));
+            ctx.kernel
+                .posted_messages
+                .push_back((device.callback_target, message, handle, param1));
         }
         WaveCallbackKind::Thread => {
-            if let Some(thread) = ctx.kernel.threads.iter_mut()
+            if let Some(thread) = ctx
+                .kernel
+                .threads
+                .iter_mut()
                 .find(|thread| thread.id == device.callback_target && !thread.finished)
             {
                 if thread.messages.len() < 256 {
                     thread.messages.push_back((message, handle, param1));
                 }
             } else if ctx.kernel.posted_messages.len() < 256 {
-                ctx.kernel.posted_messages.push_back((0, message, handle, param1));
+                ctx.kernel
+                    .posted_messages
+                    .push_back((0, message, handle, param1));
             }
         }
         WaveCallbackKind::Function => {
-            ctx.kernel.wave_out.function_done.push_back((handle, message, param1, param2));
+            ctx.kernel
+                .wave_out
+                .function_done
+                .push_back((handle, message, param1, param2));
         }
         WaveCallbackKind::Event => {
             // CE signals this event only when buffers are returned. OPEN and
@@ -16298,7 +17817,9 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         let sample_rate = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
         let bits = u16::from_le_bytes([hdr[14], hdr[15]]);
         let fmt = pocket_kernel::audio::GuestFormat {
-            sample_rate: sample_rate.max(1), channels: channels.max(1), bits_per_sample: bits.max(8),
+            sample_rate: sample_rate.max(1),
+            channels: channels.max(1),
+            bits_per_sample: bits.max(8),
         };
         log::debug!("waveOutOpen tag={format_tag} {sample_rate} Hz / {channels} ch / {bits}-bit, flags=0x{flags:08x}");
         fmt
@@ -16335,10 +17856,17 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         ctx.kernel.wave_out.next_handle
     };
     ctx.kernel.wave_out.next_handle = handle.wrapping_add(1).max(FIRST_HWAVEOUT);
-    ctx.kernel.wave_out.devices.insert(handle, pocket_kernel::WaveOutDevice {
-        callback_kind: kind, callback_target: callback, instance,
-        owner_thread: ctx.kernel.current_thread, format: fmt, paused: false,
-    });
+    ctx.kernel.wave_out.devices.insert(
+        handle,
+        pocket_kernel::WaveOutDevice {
+            callback_kind: kind,
+            callback_target: callback,
+            instance,
+            owner_thread: ctx.kernel.current_thread,
+            format: fmt,
+            paused: false,
+        },
+    );
     ctx.kernel.wave_out.handle = handle;
     ctx.kernel.wave_out.callback_kind = kind;
     ctx.kernel.wave_out.callback_target = callback;
@@ -16347,9 +17875,15 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     ctx.kernel.wave_out_format = fmt;
     ctx.kernel.audio.start();
     ctx.kernel.audio.open_wave_stream(handle, fmt);
-    if phwo != 0 { ctx.cpu.write_mem(phwo, &handle.to_le_bytes())?; }
+    if phwo != 0 {
+        ctx.cpu.write_mem(phwo, &handle.to_le_bytes())?;
+    }
     wave_out_notify(ctx, handle, MM_WOM_OPEN, 0, 0);
-    log::debug!("waveOutOpen -> 0x{handle:08x} ({:?}), open={}", kind, ctx.kernel.wave_out.devices.len());
+    log::debug!(
+        "waveOutOpen -> 0x{handle:08x} ({:?}), open={}",
+        kind,
+        ctx.kernel.wave_out.devices.len()
+    );
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
@@ -16363,7 +17897,9 @@ fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     wave_out_notify(ctx, h, MM_WOM_CLOSE, 0, 0);
     ctx.kernel.wave_out.devices.remove(&h);
     ctx.kernel.wave_out.event_done.retain(|handle| *handle != h);
-    if ctx.kernel.wave_out.devices.is_empty() { ctx.kernel.audio.flush_wave_out(); }
+    if ctx.kernel.wave_out.devices.is_empty() {
+        ctx.kernel.audio.flush_wave_out();
+    }
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
@@ -16390,7 +17926,9 @@ fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let h = ctx.arg_u32(0)?;
     ctx.kernel.wave_out.live_loops.remove(&h);
     ctx.kernel.audio.reset_wave_stream(h);
-    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = false; }
+    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) {
+        d.paused = false;
+    }
     // MSDN: reset only this HWAVEOUT and report its queued buffers done.
     retire_wave_buffers_for(ctx, h)?;
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
@@ -16401,7 +17939,9 @@ fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `waveOutRestart`.
 fn wave_out_pause(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
-    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = true; }
+    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) {
+        d.paused = true;
+    }
     ctx.kernel.audio.pause_wave_stream(h, true);
     log::debug!("waveOutPause");
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
@@ -16410,7 +17950,9 @@ fn wave_out_pause(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `MMRESULT waveOutRestart(HWAVEOUT)` — resume after a pause.
 fn wave_out_restart(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
-    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) { d.paused = false; }
+    if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) {
+        d.paused = false;
+    }
     ctx.kernel.audio.pause_wave_stream(h, false);
     log::debug!("waveOutRestart");
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
@@ -16426,14 +17968,20 @@ fn wave_out_restart(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 fn wave_out_get_position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     service_wave_out(ctx)?;
     let h = ctx.arg_u32(0)?;
-    
+
     let pmmt = ctx.arg_u32(1)?;
     let size = ctx.arg_u32(2)?;
     if pmmt == 0 || size < 8 {
         return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR));
     }
     let want = u32::from_le_bytes(ctx.cpu.read_mem(pmmt, 4)?.try_into().unwrap_or([0; 4]));
-    let fmt = ctx.kernel.wave_out.devices.get(&h).map(|d| d.format).unwrap_or(ctx.kernel.wave_out_format);
+    let fmt = ctx
+        .kernel
+        .wave_out
+        .devices
+        .get(&h)
+        .map(|d| d.format)
+        .unwrap_or(ctx.kernel.wave_out_format);
     let channels = u64::from(fmt.channels.max(1));
     let rate = u64::from(fmt.sample_rate.max(1));
     let played = ctx.kernel.audio.wave_playback_cursor(h);
@@ -16478,7 +18026,9 @@ fn wave_out_unprepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     if p_hdr != 0 {
         let cur = ctx.cpu.read_mem(p_hdr + 16, 4)?;
         let mut flags = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
-        if flags & WHDR_INQUEUE != 0 { return Ok(DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING)); }
+        if flags & WHDR_INQUEUE != 0 {
+            return Ok(DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING));
+        }
         flags &= !0x2;
         ctx.cpu.write_mem(p_hdr + 16, &flags.to_le_bytes())?;
     }
@@ -16487,7 +18037,10 @@ fn wave_out_unprepare_header(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
 
 fn wave_pcm_samples(bytes: &[u8], bits: u16) -> Vec<i16> {
     match bits {
-        16 => bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect(),
+        16 => bytes
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect(),
         8 => bytes.iter().map(|&b| ((b as i16) - 128) << 8).collect(),
         _ => Vec::new(),
     }
@@ -16496,13 +18049,21 @@ fn wave_pcm_samples(bytes: &[u8], bits: u16) -> Vec<i16> {
 /// Copy live mixer memory only on the emulator thread. cpal/Android render
 /// host-owned PCM and never touch Cpu or guest pointers from their threads.
 fn refresh_wave_loops(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
-    let sources: Vec<_> = ctx.kernel.wave_out.live_loops.iter().map(|(&h, &v)| (h, v)).collect();
+    let sources: Vec<_> = ctx
+        .kernel
+        .wave_out
+        .live_loops
+        .iter()
+        .map(|(&h, &v)| (h, v))
+        .collect();
     for (handle, source) in sources {
-        let Some(device) = ctx.kernel.wave_out.devices.get(&handle) else { continue; };
+        let Some(device) = ctx.kernel.wave_out.devices.get(&handle) else {
+            continue;
+        };
         let bits = device.format.bits_per_sample;
         let bytes = ctx.cpu.read_mem(source.data, source.bytes)?;
         let samples = wave_pcm_samples(&bytes, bits);
-        
+
         ctx.kernel.audio.update_wave_loop(handle, samples);
     }
     Ok(())
@@ -16530,25 +18091,48 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let p_data = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
     let n_bytes = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
     let mut flags = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
-    if flags & WHDR_INQUEUE != 0 { return Ok(DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING)); }
+    if flags & WHDR_INQUEUE != 0 {
+        return Ok(DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING));
+    }
     let looped = flags & (WHDR_BEGINLOOP | WHDR_ENDLOOP) == (WHDR_BEGINLOOP | WHDR_ENDLOOP);
     let repeats = if looped && cb >= 24 {
-        u32::from_le_bytes(ctx.cpu.read_mem(p_hdr + 20, 4)?.try_into().unwrap_or([0; 4])).max(1)
-    } else { 1 };
+        u32::from_le_bytes(
+            ctx.cpu
+                .read_mem(p_hdr + 20, 4)?
+                .try_into()
+                .unwrap_or([0; 4]),
+        )
+        .max(1)
+    } else {
+        1
+    };
     if p_data != 0 && n_bytes > 0 {
         let bytes = ctx.cpu.read_mem(p_data, n_bytes)?;
-        let fmt = ctx.kernel.wave_out.devices.get(&h).map(|d| d.format).unwrap_or(ctx.kernel.wave_out_format);
+        let fmt = ctx
+            .kernel
+            .wave_out
+            .devices
+            .get(&h)
+            .map(|d| d.format)
+            .unwrap_or(ctx.kernel.wave_out_format);
         let samples = wave_pcm_samples(&bytes, fmt.bits_per_sample);
         if looped {
             if !ctx.kernel.audio.queue_wave_loop(h, samples, repeats) {
                 return Ok(DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING));
             }
-            ctx.kernel.wave_out.live_loops.insert(h, pocket_kernel::LiveWaveLoop { hdr: p_hdr, data: p_data, bytes: n_bytes });
+            ctx.kernel.wave_out.live_loops.insert(
+                h,
+                pocket_kernel::LiveWaveLoop {
+                    hdr: p_hdr,
+                    data: p_data,
+                    bytes: n_bytes,
+                },
+            );
         } else {
             ctx.kernel.audio.push_wave_samples(h, &samples);
         }
     }
-    
+
     // The buffer is now queued, not finished. It is retired once the
     // playback cursor reaches the end of the samples we just pushed —
     // see `service_wave_out`.
@@ -16574,8 +18158,13 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// Mark `hdr` as played and tell the guest about it the way it asked
 /// at `waveOutOpen` time.
 fn retire_wave_buffer(ctx: &mut CallCtx<'_>, handle: u32, hdr: u32) -> Result<(), KernelError> {
-    let Some(device) = ctx.kernel.wave_out.devices.get(&handle).copied() else { return Ok(()); };
-    log::debug!("retire h=0x{handle:08x} hdr=0x{hdr:08x} kind={:?}", device.callback_kind);
+    let Some(device) = ctx.kernel.wave_out.devices.get(&handle).copied() else {
+        return Ok(());
+    };
+    log::debug!(
+        "retire h=0x{handle:08x} hdr=0x{hdr:08x} kind={:?}",
+        device.callback_kind
+    );
     if hdr != 0 {
         let cur = ctx.cpu.read_mem(hdr + 16, 4)?;
         let flags = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
@@ -16606,11 +18195,23 @@ fn retire_completed_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelErro
     // A paused or long-running handle must not block completion on another.
     let mut keep = VecDeque::new();
     while let Some(buffer) = ctx.kernel.wave_out.pending.pop_front() {
-        let paused = ctx.kernel.wave_out.devices.get(&buffer.handle)
-            .map(|d| d.paused).unwrap_or(false);
+        let paused = ctx
+            .kernel
+            .wave_out
+            .devices
+            .get(&buffer.handle)
+            .map(|d| d.paused)
+            .unwrap_or(false);
         let cursor = ctx.kernel.audio.wave_playback_cursor(buffer.handle);
         if !paused && buffer.end_cursor <= cursor {
-            if ctx.kernel.wave_out.live_loops.get(&buffer.handle).map(|v| v.hdr) == Some(buffer.hdr) {
+            if ctx
+                .kernel
+                .wave_out
+                .live_loops
+                .get(&buffer.handle)
+                .map(|v| v.hdr)
+                == Some(buffer.hdr)
+            {
                 ctx.kernel.wave_out.live_loops.remove(&buffer.handle);
             }
             retire_wave_buffer(ctx, buffer.handle, buffer.hdr)?;
@@ -16625,7 +18226,9 @@ fn retire_completed_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelErro
 fn deliver_wave_event_completions(kernel: &mut KernelState) {
     let mut keep = VecDeque::new();
     while let Some(handle) = kernel.wave_out.event_done.pop_front() {
-        let Some(device) = kernel.wave_out.devices.get(&handle) else { continue; };
+        let Some(device) = kernel.wave_out.devices.get(&handle) else {
+            continue;
+        };
         let key = event_key(kernel, device.callback_target);
         if let Some(mut event) = kernel.events.get_mut(&key) {
             if !event.signalled {
@@ -16643,7 +18246,11 @@ fn deliver_wave_event_completions(kernel: &mut KernelState) {
 fn retire_wave_buffers_for(ctx: &mut CallCtx<'_>, handle: u32) -> Result<(), KernelError> {
     let mut keep = VecDeque::new();
     while let Some(front) = ctx.kernel.wave_out.pending.pop_front() {
-        if front.handle == handle { retire_wave_buffer(ctx, handle, front.hdr)?; } else { keep.push_back(front); }
+        if front.handle == handle {
+            retire_wave_buffer(ctx, handle, front.hdr)?;
+        } else {
+            keep.push_back(front);
+        }
     }
     ctx.kernel.wave_out.pending = keep;
     Ok(())
@@ -17087,7 +18694,9 @@ const TIMERR_NOCANDO: u32 = 97;
 
 fn switch_guest_fp(ctx: &mut CallCtx<'_>, next: usize) -> Result<(), KernelError> {
     let value = ctx.cpu.read_fpscr()?;
-    ctx.kernel.guest_fpscr.insert(ctx.kernel.current_thread, value);
+    ctx.kernel
+        .guest_fpscr
+        .insert(ctx.kernel.current_thread, value);
     let next_value = ctx.kernel.guest_fpscr.get(&next).copied().unwrap_or(0);
     ctx.cpu.write_fpscr(next_value)?;
     Ok(())
@@ -17097,10 +18706,19 @@ fn crt_fp_word(fpscr: u32) -> u32 {
     let masks = [0x10, 0x08, 0x04, 0x02, 0x01, 0x80000];
     let mut word = 0;
     for (bit, mask) in [8, 9, 10, 11, 12, 15].into_iter().zip(masks) {
-        if fpscr & (1 << bit) == 0 { word |= mask; }
+        if fpscr & (1 << bit) == 0 {
+            word |= mask;
+        }
     }
-    word |= match (fpscr >> 22) & 3 { 1 => 0x200, 2 => 0x100, 3 => 0x300, _ => 0 };
-    if fpscr & (1 << 24) != 0 { word |= 0x0100_0000; }
+    word |= match (fpscr >> 22) & 3 {
+        1 => 0x200,
+        2 => 0x100,
+        3 => 0x300,
+        _ => 0,
+    };
+    if fpscr & (1 << 24) != 0 {
+        word |= 0x0100_0000;
+    }
     word
 }
 
@@ -17116,24 +18734,46 @@ fn control_fp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     for (bit, crt_mask) in [0x10, 0x08, 0x04, 0x02, 0x01].into_iter().enumerate() {
         if mask & crt_mask != 0 {
             let arm_mask = 1 << (8 + bit);
-            if value & crt_mask == 0 { fpscr |= arm_mask; } else { fpscr &= !arm_mask; }
+            if value & crt_mask == 0 {
+                fpscr |= arm_mask;
+            } else {
+                fpscr &= !arm_mask;
+            }
         }
     }
     if mask & FP_ROUND_MASK != 0 {
-        let rounding = match value & FP_ROUND_MASK { 0x100 => 2, 0x200 => 1, 0x300 => 3, _ => 0 };
+        let rounding = match value & FP_ROUND_MASK {
+            0x100 => 2,
+            0x200 => 1,
+            0x300 => 3,
+            _ => 0,
+        };
         fpscr = (fpscr & !(3 << 22)) | (rounding << 22);
     }
     if mask & FP_DENORMAL_MASK != 0 {
-        if value & FP_DENORMAL_MASK == 0 { fpscr &= !(1 << 24); }
-        else { fpscr |= 1 << 24; }
+        if value & FP_DENORMAL_MASK == 0 {
+            fpscr &= !(1 << 24);
+        } else {
+            fpscr |= 1 << 24;
+        }
     }
     ctx.cpu.write_fpscr(fpscr)?;
-    ctx.kernel.guest_fpscr.insert(ctx.kernel.current_thread, fpscr);
+    ctx.kernel
+        .guest_fpscr
+        .insert(ctx.kernel.current_thread, fpscr);
     Ok(DispatchOutcome::ReturnedR0(crt_fp_word(fpscr)))
 }
 
 fn timer_poll_interval(kernel: &KernelState) -> u64 {
-    u64::from(kernel.timer_period_requests.keys().next().copied().unwrap_or(2).min(2))
+    u64::from(
+        kernel
+            .timer_period_requests
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(2)
+            .min(2),
+    )
 }
 fn time_begin_period(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let period = ctx.arg_u32(0)?;
@@ -17151,14 +18791,19 @@ fn time_end_period(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         return Ok(DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
     };
     *count -= 1;
-    if *count == 0 { ctx.kernel.timer_period_requests.remove(&period); }
+    if *count == 0 {
+        ctx.kernel.timer_period_requests.remove(&period);
+    }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn time_get_dev_caps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let output = ctx.arg_u32(0)?;
-    if output == 0 || ctx.arg_u32(1)? < 8 { return Ok(DispatchOutcome::ReturnedR0(TIMERR_NOCANDO)); }
+    if output == 0 || ctx.arg_u32(1)? < 8 {
+        return Ok(DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+    }
     ctx.cpu.write_mem(output, &TIMER_MIN_PERIOD.to_le_bytes())?;
-    ctx.cpu.write_mem(output + 4, &TIMER_MAX_PERIOD.to_le_bytes())?;
+    ctx.cpu
+        .write_mem(output + 4, &TIMER_MAX_PERIOD.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -17519,8 +19164,17 @@ fn write_find_data(
 /// ever drawing a frame.
 fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(1)?;
-    let pattern=match vfs_api_path(ctx,0){Ok(p)=>p,Err(e)=>{set_thread_error(ctx,e);return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));}};
-    if !vfs_probe_output(ctx,out,FIND_DATA_BYTES as u32){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));}
+    let pattern = match vfs_api_path(ctx, 0) {
+        Ok(p) => p,
+        Err(e) => {
+            set_thread_error(ctx, e);
+            return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
+        }
+    };
+    if !vfs_probe_output(ctx, out, FIND_DATA_BYTES as u32) {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
+    }
     if !pattern.contains('*') && !pattern.contains('?') {
         if let Some(host) = ctx.kernel.vfs.resolve(&pattern) {
             if let Ok(meta) = std::fs::metadata(&host) {
@@ -17530,7 +19184,11 @@ fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                     .filter(|name| !name.is_empty())
                     .unwrap_or(".")
                     .to_string();
-                let attrs=ctx.kernel.vfs.attributes(&pattern).unwrap_or(if meta.is_dir(){0x10}else{0x80});
+                let attrs = ctx
+                    .kernel
+                    .vfs
+                    .attributes(&pattern)
+                    .unwrap_or(if meta.is_dir() { 0x10 } else { 0x80 });
                 let entry = (name, meta.len(), meta.is_dir(), attrs);
                 write_find_data(ctx, out, &entry)?;
                 let handle = FIND_HANDLE_BASE.saturating_add(ctx.kernel.next_find_handle);
@@ -17543,14 +19201,27 @@ fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         }
     }
     let (dir, mask) = split_search_pattern(&pattern);
-    let entries=match ctx.kernel.vfs.list_dir(&dir){Some(v)=>v,None=>{set_thread_error(ctx,3);return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));}};
+    let entries = match ctx.kernel.vfs.list_dir(&dir) {
+        Some(v) => v,
+        None => {
+            set_thread_error(ctx, 3);
+            return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
+        }
+    };
     let mut matches: std::collections::VecDeque<(String, u64, bool, u32)> = entries
         .into_iter()
         .filter(|(name, _, _)| wildcard_match(&mask, name))
-        .map(|(name,size,is_dir)|{let attrs=ctx.kernel.vfs.attributes(&format!("{dir}\\{name}")).unwrap_or(if is_dir{0x10}else{0x80});(name,size,is_dir,attrs)})
+        .map(|(name, size, is_dir)| {
+            let attrs = ctx
+                .kernel
+                .vfs
+                .attributes(&format!("{dir}\\{name}"))
+                .unwrap_or(if is_dir { 0x10 } else { 0x80 });
+            (name, size, is_dir, attrs)
+        })
         .collect();
     let Some(first) = matches.pop_front() else {
-        set_thread_error(ctx,2);
+        set_thread_error(ctx, 2);
         log::debug!("FindFirstFileW({pattern:?}) -> INVALID_HANDLE_VALUE");
         return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
     };
@@ -17570,8 +19241,14 @@ fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn find_next_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
-    if !ctx.kernel.find_handles.contains_key(&handle){set_thread_error(ctx,6);return Ok(DispatchOutcome::ReturnedR0(0));}
-    if !vfs_probe_output(ctx,out,FIND_DATA_BYTES as u32){set_thread_error(ctx,87);return Ok(DispatchOutcome::ReturnedR0(0));}
+    if !ctx.kernel.find_handles.contains_key(&handle) {
+        set_thread_error(ctx, 6);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if !vfs_probe_output(ctx, out, FIND_DATA_BYTES as u32) {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let next = ctx
         .kernel
         .find_handles
@@ -17582,14 +19259,22 @@ fn find_next_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
             write_find_data(ctx, out, &entry)?;
             Ok(DispatchOutcome::ReturnedR0(1))
         }
-        None => {set_thread_error(ctx,18);Ok(DispatchOutcome::ReturnedR0(0))},
+        None => {
+            set_thread_error(ctx, 18);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
     }
 }
 
 /// `BOOL FindClose(HANDLE hFindFile)`
 fn find_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h=ctx.arg_u32(0)?;if ctx.kernel.find_handles.remove(&h).is_some(){Ok(DispatchOutcome::ReturnedR0(1))}
-    else{set_thread_error(ctx,6);Ok(DispatchOutcome::ReturnedR0(0))}
+    let h = ctx.arg_u32(0)?;
+    if ctx.kernel.find_handles.remove(&h).is_some() {
+        Ok(DispatchOutcome::ReturnedR0(1))
+    } else {
+        set_thread_error(ctx, 6);
+        Ok(DispatchOutcome::ReturnedR0(0))
+    }
 }
 
 /// `HANDLE FindFirstChangeNotificationW(LPCWSTR path, BOOL subtree,
@@ -17629,9 +19314,12 @@ fn find_first_change_notification_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOut
         return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
     }
     let Some(handle) = ctx.kernel.object_handles.reserve() else {
-        set_thread_error(ctx, 8); return Ok(DispatchOutcome::ReturnedR0(0));
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    ctx.kernel.object_handles.bind(handle, HandleObject::Event(handle));
+    ctx.kernel
+        .object_handles
+        .bind(handle, HandleObject::Event(handle));
     ctx.kernel.events.insert(
         handle,
         pocket_kernel::EventObject {
@@ -17664,7 +19352,10 @@ mod tests {
         use pocket_kernel::internet;
         struct Host;
         impl internet::Backend for Host {
-            fn open(&self, _: &internet::SessionSpec) -> internet::Result<std::sync::Arc<dyn internet::Client>> {
+            fn open(
+                &self,
+                _: &internet::SessionSpec,
+            ) -> internet::Result<std::sync::Arc<dyn internet::Client>> {
                 Err(12004) // This test exercises shell messages, without network I/O.
             }
         }
@@ -17680,26 +19371,49 @@ mod tests {
             (true, 1, (0xffff, status, 0x1f9c, 1)),
             (true, 0, (0xffff, status, 0x1f9d, 0)),
         ] {
-            if gizmondo { kernel.internet.set_gprs_enabled(true); }
-            for (reg, value) in [(ArmReg::R0, 0xffff), (ArmReg::R1, connect),
-                (ArmReg::R2, request), (ArmReg::R3, 0)] {
+            if gizmondo {
+                kernel.internet.set_gprs_enabled(true);
+            }
+            for (reg, value) in [
+                (ArmReg::R0, 0xffff),
+                (ArmReg::R1, connect),
+                (ArmReg::R2, request),
+                (ArmReg::R3, 0),
+            ] {
                 cpu.write_reg(reg, value).unwrap();
             }
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-            assert_eq!(post_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                post_message_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
             assert_eq!(ctx.kernel.posted_messages.pop_front(), Some(expected));
             assert!(ctx.kernel.posted_messages.is_empty());
         }
         // Local window messages with the same ID do not request shell service.
         cpu.write_reg(ArmReg::R0, 123).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         post_message_w(&mut ctx).unwrap();
-        assert_eq!(ctx.kernel.posted_messages.pop_front(), Some((123, connect, 0, 0)));
+        assert_eq!(
+            ctx.kernel.posted_messages.pop_front(),
+            Some((123, connect, 0, 0))
+        );
         ctx.kernel.internet.set_gprs_enabled(false);
         ctx.cpu.write_reg(ArmReg::R0, 0xffff).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
         post_message_w(&mut ctx).unwrap();
-        assert_eq!(ctx.kernel.posted_messages.pop_front(), Some((0xffff, status, 0x1f9d, 0)));
+        assert_eq!(
+            ctx.kernel.posted_messages.pop_front(),
+            Some((0xffff, status, 0x1f9d, 0))
+        );
     }
     use super::*;
     use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
@@ -17714,10 +19428,21 @@ mod tests {
         let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
         kernel.thread_last_errors.insert(kernel.current_thread, 123);
         for handle in [0, 1, 0xdead_0001, u32::MAX] {
-            assert_eq!(crate::bluetooth::tests::call(
-                &mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "mixerClose", &[handle]
-            ), DispatchOutcome::ReturnedR0(5));
-            assert_eq!(kernel.thread_last_errors.get(&kernel.current_thread), Some(&123));
+            assert_eq!(
+                crate::bluetooth::tests::call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "mixerClose",
+                    &[handle]
+                ),
+                DispatchOutcome::ReturnedR0(5)
+            );
+            assert_eq!(
+                kernel.thread_last_errors.get(&kernel.current_thread),
+                Some(&123)
+            );
         }
     }
 
@@ -17730,7 +19455,8 @@ mod tests {
         kernel.wnd_proc = 0x10200;
         write_synthetic_msg(&mut cpu, 0x1100, WM_PAINT, 7, 8).unwrap();
         write_synthetic_msg(&mut cpu, 0x1200, WM_KEYDOWN, 9, 10).unwrap();
-        let mut worker = GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17]);
+        let mut worker =
+            GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
         worker.worker_regs[13] = 0x1900;
@@ -17740,15 +19466,25 @@ mod tests {
         cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
         cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x10400).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &message_thunk };
-        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10200));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &message_thunk,
+        };
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10200)
+        );
         let main_frame = ctx.kernel.message_frames[&0];
         // Model an API invoked inside the main WndProc. Its callback frame
         // survives the handoff and must not globally block the audio worker.
         ctx.cpu.write_reg(ArmReg::Sp, 0x1700).unwrap();
         ctx.thunk = &inside_thunk;
         ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10300)));
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10300))
+        );
         assert_eq!(ctx.kernel.current_thread, 1);
         assert_eq!(ctx.kernel.message_frames[&0].sp, main_frame.sp);
         // The worker can dispatch its own message without taking main's frame.
@@ -17756,9 +19492,15 @@ mod tests {
         ctx.cpu.write_reg(ArmReg::R0, 0x1200).unwrap();
         ctx.cpu.write_reg(ArmReg::Sp, 0x1900).unwrap();
         ctx.cpu.write_reg(ArmReg::Lr, 0x10500).unwrap();
-        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10200));
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10200)
+        );
         assert_eq!(ctx.kernel.message_frames.len(), 2);
-        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1200);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1900);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10500);
@@ -17769,7 +19511,10 @@ mod tests {
         assert!(park_worker(&mut ctx, 0).unwrap().is_some());
         assert_eq!(ctx.kernel.current_thread, 0);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1700);
-        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1100);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1800);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10400);
@@ -17781,7 +19526,8 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = thunk_at(0x70000100);
-        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        let mut worker =
+            GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
         worker.started = false;
         worker.worker_saved = true;
         worker.worker_regs[13] = 0x8800;
@@ -17789,7 +19535,11 @@ mod tests {
         worker.worker_regs[15] = worker.entry;
         kernel.threads.push(worker);
         cpu.write_reg(ArmReg::R0, 0x12345678).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         // CREATE_SUSPENDED remains ineligible.
         assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
         ctx.kernel.threads[0].started = true;
@@ -17797,7 +19547,10 @@ mod tests {
         ctx.kernel.worker_preempt_after_ms = u64::MAX;
         assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
         ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10200)));
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10200))
+        );
         assert!(!ctx.kernel.threads[0].worker_saved);
         assert_eq!(ctx.kernel.threads[0].saved_regs[0], 0x12345678);
         assert_eq!(ctx.kernel.threads[0].saved_regs[15], thunk.thunk_va);
@@ -17807,7 +19560,10 @@ mod tests {
         ctx.kernel.worker_preempt_after_ms = u64::MAX;
         assert_eq!(wake_due_worker(&mut ctx).unwrap(), None);
         ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10300)));
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10300))
+        );
     }
 
     #[test]
@@ -17816,8 +19572,15 @@ mod tests {
         let mut kernel = fresh_kernel();
         let main_thunk = thunk_at(0x70000100);
         let event = 0xdead7b20;
-        kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: false, signalled: false });
-        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        kernel.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
+        let mut worker =
+            GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
         worker.parked_in_pump = true;
@@ -17829,11 +19592,25 @@ mod tests {
         worker.worker_regs[15] = 0x10300;
         kernel.threads.push(worker);
         kernel.worker_preempt_after_ms = 0;
-        assert!(wake_due_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap().is_none());
+        assert!(wake_due_worker(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &main_thunk
+        })
+        .unwrap()
+        .is_none());
         kernel.events.get_mut(&event).unwrap().signalled = true;
         kernel.worker_preempt_after_ms = 0;
         cpu.write_reg(ArmReg::R0, 0x12345678).unwrap();
-        assert_eq!(wake_due_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), Some(DispatchOutcome::JumpTo(0x10300)));
+        assert_eq!(
+            wake_due_worker(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &main_thunk
+            })
+            .unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10300))
+        );
         assert_eq!(kernel.current_thread, 1);
         assert_eq!(kernel.threads[0].saved_regs[0], 0x12345678);
         assert_eq!(kernel.threads[0].saved_regs[15], main_thunk.thunk_va);
@@ -17849,9 +19626,22 @@ mod tests {
         let worker_thunk = thunk_at(0x70000200);
         let ready = 0xdeade010;
         let request = 0xdeade011;
-        kernel.events.insert(ready, pocket_kernel::EventObject { manual_reset: false, signalled: false });
-        kernel.events.insert(request, pocket_kernel::EventObject { manual_reset: false, signalled: true });
-        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        kernel.events.insert(
+            ready,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
+        kernel.events.insert(
+            request,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: true,
+            },
+        );
+        let mut worker =
+            GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
         worker.parked_in_pump = true;
@@ -17867,22 +19657,62 @@ mod tests {
         cpu.write_reg(ArmReg::R7, 0x12345678).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x10180).unwrap();
         let key = (0, main_thunk.thunk_va, 0x9000);
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), DispatchOutcome::JumpTo(worker_thunk.thunk_va));
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &main_thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(worker_thunk.thunk_va)
+        );
         let deadline = kernel.wait_deadlines[&key];
         // Finishing the worker's request wait deliberately yields for fairness.
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &worker_thunk }).unwrap(), DispatchOutcome::JumpTo(main_thunk.thunk_va));
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &worker_thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(main_thunk.thunk_va)
+        );
         assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), ready);
         assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), 60000);
         assert_eq!(cpu.read_reg(ArmReg::R7).unwrap(), 0x12345678);
         assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x10180);
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), DispatchOutcome::JumpTo(0x10280));
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &main_thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(0x10280)
+        );
         assert_eq!(kernel.wait_deadlines[&key], deadline);
         // The acknowledgement only arrives on this second worker turn.
         kernel.events.get_mut(&ready).unwrap().signalled = true;
         cpu.write_reg(ArmReg::R0, request).unwrap();
         cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &worker_thunk }).unwrap(), DispatchOutcome::JumpTo(main_thunk.thunk_va));
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &main_thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &worker_thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(main_thunk.thunk_va)
+        );
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &main_thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(!kernel.events.get(&ready).unwrap().signalled);
         assert!(kernel.wait_deadlines.is_empty());
     }
@@ -17893,25 +19723,67 @@ mod tests {
         let mut kernel = fresh_kernel();
         let thunk = thunk_at(0x70000300);
         let event = 0xdeade010;
-        kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: true, signalled: false });
+        kernel.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: false,
+            },
+        );
         let mut main = [0; 17];
         main[13] = 0x8800;
         main[15] = 0x10100;
-        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0x10100, 0xdead7c00, main);
+        let mut worker = GuestThread::new(
+            0x10200, 0, 0x9000, 0x1000, 0x10300, 0x10100, 0xdead7c00, main,
+        );
         worker.started = true;
         kernel.threads.push(worker);
         kernel.current_thread = 1;
         cpu.write_reg(ArmReg::R0, event).unwrap();
         cpu.write_reg(ArmReg::R1, 60000).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x10280).unwrap();
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x10100));
-        assert!(!worker_is_ready(&kernel, 0, &kernel.threads[0], monotonic_ms()));
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(0x10100)
+        );
+        assert!(!worker_is_ready(
+            &kernel,
+            0,
+            &kernel.threads[0],
+            monotonic_ms()
+        ));
         let key = (1, thunk.thunk_va, 0x9000);
         *kernel.wait_deadlines.get_mut(&key).unwrap() = 0;
-        assert!(worker_is_ready(&kernel, 0, &kernel.threads[0], monotonic_ms()));
+        assert!(worker_is_ready(
+            &kernel,
+            0,
+            &kernel.threads[0],
+            monotonic_ms()
+        ));
         kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), Some(DispatchOutcome::JumpTo(thunk.thunk_va)));
-        assert_eq!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            wake_due_worker(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            Some(DispatchOutcome::JumpTo(thunk.thunk_va))
+        );
+        assert_eq!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         assert_eq!(kernel.threads[0].worker_regs[0], 0x102);
         assert_eq!(kernel.threads[0].worker_regs[15], 0x10280);
         assert!(!kernel.events.get(&event).unwrap().signalled);
@@ -17924,23 +19796,48 @@ mod tests {
         let mut kernel = fresh_kernel();
         let thunk = thunk_at(0x70000400);
         let event = 0xdeade010;
-        kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: true, signalled: false });
+        kernel.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: false,
+            },
+        );
         cpu.write_reg(ArmReg::R0, event).unwrap();
         cpu.write_reg(ArmReg::R1, 0).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x102));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x102)
+        );
         assert!(ctx.kernel.wait_deadlines.is_empty());
         ctx.cpu.write_reg(ArmReg::R1, 60000).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         let key = (0, thunk.thunk_va, 0x9000);
         let deadline = ctx.kernel.wait_deadlines[&key];
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         assert_eq!(ctx.kernel.wait_deadlines[&key], deadline);
         *ctx.kernel.wait_deadlines.get_mut(&key).unwrap() = 0;
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x102));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x102)
+        );
         assert!(ctx.kernel.wait_deadlines.is_empty());
         ctx.cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         assert!(ctx.kernel.wait_deadlines.is_empty());
     }
 
@@ -17952,7 +19849,13 @@ mod tests {
         let first = 0xdeade010;
         let second = 0xdeade011;
         for event in [first, second] {
-            kernel.events.insert(event, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+            kernel.events.insert(
+                event,
+                pocket_kernel::EventObject {
+                    manual_reset: false,
+                    signalled: false,
+                },
+            );
         }
         cpu.write_mem(0x2000, &first.to_le_bytes()).unwrap();
         cpu.write_mem(0x2004, &second.to_le_bytes()).unwrap();
@@ -17960,22 +19863,47 @@ mod tests {
         cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
         cpu.write_reg(ArmReg::R2, 0).unwrap();
         cpu.write_reg(ArmReg::R3, 60000).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
-        *ctx.kernel.wait_deadlines.get_mut(&(0, thunk.thunk_va, 0x9000)).unwrap() = 0;
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x102));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
+        *ctx.kernel
+            .wait_deadlines
+            .get_mut(&(0, thunk.thunk_va, 0x9000))
+            .unwrap() = 0;
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x102)
+        );
         assert!(ctx.kernel.wait_deadlines.is_empty());
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         ctx.kernel.events.get_mut(&second).unwrap().signalled = true;
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
         ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
         ctx.kernel.events.get_mut(&first).unwrap().signalled = true;
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         assert!(ctx.kernel.events.get(&first).unwrap().signalled);
         ctx.kernel.events.get_mut(&second).unwrap().signalled = true;
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(!ctx.kernel.events.get(&first).unwrap().signalled);
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
@@ -17989,12 +19917,22 @@ mod tests {
         std::fs::write(dir.path().join("records.dat"), raw).unwrap();
         let mut kernel = fresh_kernel();
         kernel.vfs.mount("\\Data\\", dir.path());
-        let text = kernel.vfs.open("\\Data\\records.dat", Access::Read, false).unwrap();
-        let binary = kernel.vfs.open("\\Data\\records.dat", Access::Read, false).unwrap();
+        let text = kernel
+            .vfs
+            .open("\\Data\\records.dat", Access::Read, false)
+            .unwrap();
+        let binary = kernel
+            .vfs
+            .open("\\Data\\records.dat", Access::Read, false)
+            .unwrap();
         kernel.vfs.mark_text_mode(text);
         let mut cpu = scanf_cpu();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
@@ -18002,7 +19940,10 @@ mod tests {
         assert_eq!(crt_fread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
         assert_eq!(ctx.cpu.read_mem(0x1000, 1).unwrap(), b"A");
         ctx.cpu.write_reg(ArmReg::R0, text).unwrap();
-        assert_eq!(crt_fgetc(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(10));
+        assert_eq!(
+            crt_fgetc(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(10)
+        );
         assert_eq!(ctx.kernel.vfs.seek(text, 0, SeekKind::Current), Some(3));
         let mut output = [0u8; 16];
         let count = read_stdio_bytes(&mut ctx, text, &mut output[..3]);
@@ -18017,7 +19958,11 @@ mod tests {
         let mut boundary = vec![b'x'; 4095];
         boundary.extend_from_slice(b"\r\nY\rZ");
         std::fs::write(dir.path().join("boundary.dat"), &boundary).unwrap();
-        let handle = ctx.kernel.vfs.open("\\Data\\boundary.dat", Access::Read, false).unwrap();
+        let handle = ctx
+            .kernel
+            .vfs
+            .open("\\Data\\boundary.dat", Access::Read, false)
+            .unwrap();
         ctx.kernel.vfs.mark_text_mode(handle);
         let mut output = vec![0u8; boundary.len()];
         let count = read_stdio_bytes(&mut ctx, handle, &mut output);
@@ -18030,7 +19975,11 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         for (format, args, expected) in [
             ("image_%.2d_%d", [3u32, 1], "image_03_1"),
             ("[%08.3d]", [(-7i32) as u32, 0], "[    -007]"),
@@ -18040,17 +19989,32 @@ mod tests {
         ] {
             ctx.cpu.write_reg(ArmReg::R2, args[0]).unwrap();
             ctx.cpu.write_reg(ArmReg::R3, args[1]).unwrap();
-            ctx.cpu.write_mem(0x2000, &args.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>()).unwrap();
+            ctx.cpu
+                .write_mem(
+                    0x2000,
+                    &args
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
             for wide in [false, true] {
                 assert_eq!(render_printf(&mut ctx, format, wide, 2).unwrap(), expected);
-                assert_eq!(render_printf_va(&mut ctx, format, wide, 0x2000).unwrap(), expected);
+                assert_eq!(
+                    render_printf_va(&mut ctx, format, wide, 0x2000).unwrap(),
+                    expected
+                );
             }
         }
     }
 
     fn passive_test_dll() -> Vec<u8> {
-        fn put16(dst: &mut [u8], value: u16) { dst[..2].copy_from_slice(&value.to_le_bytes()); }
-        fn put32(dst: &mut [u8], value: u32) { dst[..4].copy_from_slice(&value.to_le_bytes()); }
+        fn put16(dst: &mut [u8], value: u16) {
+            dst[..2].copy_from_slice(&value.to_le_bytes());
+        }
+        fn put32(dst: &mut [u8], value: u32) {
+            dst[..4].copy_from_slice(&value.to_le_bytes());
+        }
         // A two-section ARM PE with no executable entry/imports. This exercises
         // the real parser and mapper without relying on a shipped game.
         let mut bytes = vec![0u8; 0x600];
@@ -18063,16 +20027,27 @@ mod tests {
         put16(&mut bytes[0x96..], 0x2102);
         let opt = 0x98;
         put16(&mut bytes[opt..], 0x10b);
-        for (offset, value) in [(28, 0x10000000), (32, 0x1000), (36, 0x200),
-            (56, 0x3000), (60, 0x200), (92, 16)] {
+        for (offset, value) in [
+            (28, 0x10000000),
+            (32, 0x1000),
+            (36, 0x200),
+            (56, 0x3000),
+            (60, 0x200),
+            (92, 16),
+        ] {
             put32(&mut bytes[opt + offset..], value);
         }
         put16(&mut bytes[opt + 68..], 9);
         for index in 0..2 {
             let header = 0x178 + index * 40;
             bytes[header..header + 5].copy_from_slice(b".data");
-            for (offset, value) in [(8, 0x1000), (12, (index as u32 + 1) * 0x1000),
-                (16, 0x200), (20, (index as u32 + 1) * 0x200), (36, 0x40000040)] {
+            for (offset, value) in [
+                (8, 0x1000),
+                (12, (index as u32 + 1) * 0x1000),
+                (16, 0x200),
+                (20, (index as u32 + 1) * 0x200),
+                (36, 0x40000040),
+            ] {
                 put32(&mut bytes[header + offset..], value);
             }
             bytes[(index + 1) * 0x200] = 17 + index as u8;
@@ -18081,9 +20056,19 @@ mod tests {
     }
 
     fn lifecycle_test_module(base: u32, entry: u32) -> pocket_kernel::LoadedModule {
-        pocket_kernel::LoadedModule { dependencies: vec![], attached: true, satellites: vec![], resident_regions: vec![],
-            handle: base, name: format!("{base:x}.dll"), base, image_size: 4096,
-            image_entry: entry, resources: vec![], refcount: 2 }
+        pocket_kernel::LoadedModule {
+            dependencies: vec![],
+            attached: true,
+            satellites: vec![],
+            resident_regions: vec![],
+            handle: base,
+            name: format!("{base:x}.dll"),
+            base,
+            image_size: 4096,
+            image_entry: entry,
+            resources: vec![],
+            refcount: 2,
+        }
     }
 
     #[test]
@@ -18103,9 +20088,15 @@ mod tests {
         assert_eq!(kernel.unreachable_runtime_modules(), vec![0x31000000]);
         kernel.modules[2].refcount = 0;
         kernel.modules[0].refcount = 1; // explicit LoadLibrary of the dependency
-        assert_eq!(kernel.unreachable_runtime_modules(), vec![0x31000000, 0x32000000]);
+        assert_eq!(
+            kernel.unreachable_runtime_modules(),
+            vec![0x31000000, 0x32000000]
+        );
         kernel.modules[0].refcount = 0;
-        assert_eq!(kernel.unreachable_runtime_modules(), vec![0x30000000, 0x31000000, 0x32000000]);
+        assert_eq!(
+            kernel.unreachable_runtime_modules(),
+            vec![0x30000000, 0x31000000, 0x32000000]
+        );
     }
 
     #[test]
@@ -18120,39 +20111,58 @@ mod tests {
         kernel.modules = vec![second, first]; // dependency initialization order
         assert!(kernel.unreachable_runtime_modules().is_empty());
         kernel.modules[1].refcount = 0;
-        assert_eq!(kernel.unreachable_runtime_modules(), vec![0x31000000, 0x30000000]);
+        assert_eq!(
+            kernel.unreachable_runtime_modules(),
+            vec![0x31000000, 0x30000000]
+        );
     }
 
     #[test]
     fn dll_thread_callbacks_restore_context_and_reverse_detach_order() {
         use pocket_kernel::dll_lifecycle::DllContinuation;
         for reason in [2, 3] {
-            let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
-            kernel.modules.push(lifecycle_test_module(0x30000000, 0x30001000));
-            kernel.modules.push(lifecycle_test_module(0x31000000, 0x31001000));
+            let mut cpu = scanf_cpu();
+            let mut kernel = fresh_kernel();
+            kernel
+                .modules
+                .push(lifecycle_test_module(0x30000000, 0x30001000));
+            kernel
+                .modules
+                .push(lifecycle_test_module(0x31000000, 0x31001000));
             kernel.modules.push(lifecycle_test_module(0x32000000, 0)); // passive resources
             cpu.write_reg(ArmReg::R0, 77).unwrap();
             cpu.write_reg(ArmReg::R4, 123).unwrap();
             cpu.write_fpscr(0x400000).unwrap();
             kernel.thread_last_errors.insert(0, 42);
-            let first = if reason==2 { 0x30001000 } else { 0x31001000 };
-            let second = if reason==2 { 0x31001000 } else { 0x30001000 };
-            assert_eq!(kernel.begin_dll_notifications(&mut cpu, reason, DllContinuation::Resume(0x11000)).unwrap(), Some(first));
+            let first = if reason == 2 { 0x30001000 } else { 0x31001000 };
+            let second = if reason == 2 { 0x31001000 } else { 0x30001000 };
+            assert_eq!(
+                kernel
+                    .begin_dll_notifications(&mut cpu, reason, DllContinuation::Resume(0x11000))
+                    .unwrap(),
+                Some(first)
+            );
             assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), reason);
             assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(), 0);
-            let sp=cpu.read_reg(ArmReg::Sp).unwrap();
-            cpu.write_reg(ArmReg::Sp, sp-4).unwrap();
+            let sp = cpu.read_reg(ArmReg::Sp).unwrap();
+            cpu.write_reg(ArmReg::Sp, sp - 4).unwrap();
             assert!(kernel.next_dll_notification(&mut cpu).is_err());
             cpu.write_reg(ArmReg::Sp, sp).unwrap();
-            kernel.current_thread=1;
+            kernel.current_thread = 1;
             assert!(kernel.next_dll_notification(&mut cpu).is_err());
-            kernel.current_thread=0;
+            kernel.current_thread = 0;
             cpu.write_reg(ArmReg::R0, 0).unwrap(); // ignored callback return
             cpu.write_reg(ArmReg::R4, 999).unwrap();
             cpu.write_fpscr(0).unwrap();
             kernel.thread_last_errors.insert(0, 999);
-            assert_eq!(kernel.next_dll_notification(&mut cpu).unwrap(), Some(second));
-            assert_eq!(kernel.next_dll_notification(&mut cpu).unwrap(), Some(0x11000));
+            assert_eq!(
+                kernel.next_dll_notification(&mut cpu).unwrap(),
+                Some(second)
+            );
+            assert_eq!(
+                kernel.next_dll_notification(&mut cpu).unwrap(),
+                Some(0x11000)
+            );
             assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 77);
             assert_eq!(cpu.read_reg(ArmReg::R4).unwrap(), 123);
             assert_eq!(cpu.read_fpscr().unwrap(), 0x400000);
@@ -18165,20 +20175,31 @@ mod tests {
     #[test]
     fn process_detach_keeps_all_modules_resident_until_final_callback() {
         use pocket_kernel::dll_lifecycle::DllContinuation;
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
         let ram = pocket_kernel::memory_division::MemoryDivision::new(256 * 4096, 16).unwrap();
         kernel.heap.attach_ram(Some(ram.clone()));
         for base in [0x30000000, 0x31000000] {
-            cpu.map_region(base, 4096, Prot::READ | Prot::WRITE).unwrap();
+            cpu.map_region(base, 4096, Prot::READ | Prot::WRITE)
+                .unwrap();
             kernel.heap.retain_resident(base, 4096);
-            let mut module=lifecycle_test_module(base, base+0x100);
-            module.resident_regions.push((base,4096));kernel.modules.push(module);
+            let mut module = lifecycle_test_module(base, base + 0x100);
+            module.resident_regions.push((base, 4096));
+            kernel.modules.push(module);
         }
-        assert_eq!(kernel.begin_dll_notifications(&mut cpu, 0, DllContinuation::ExitProcess(77)).unwrap(), Some(0x31000100));
+        assert_eq!(
+            kernel
+                .begin_dll_notifications(&mut cpu, 0, DllContinuation::ExitProcess(77))
+                .unwrap(),
+            Some(0x31000100)
+        );
         assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(), 1);
         assert_eq!(ram.snapshot().program_used, 2);
         assert!(cpu.read_mem(0x30000000, 1).is_ok());
-        assert_eq!(kernel.next_dll_notification(&mut cpu).unwrap(), Some(0x30000100));
+        assert_eq!(
+            kernel.next_dll_notification(&mut cpu).unwrap(),
+            Some(0x30000100)
+        );
         assert_eq!(ram.snapshot().program_used, 2);
         assert!(cpu.read_mem(0x31000000, 1).is_ok());
         assert_eq!(kernel.next_dll_notification(&mut cpu).unwrap(), None);
@@ -18191,11 +20212,24 @@ mod tests {
 
     #[test]
     fn forced_process_termination_does_not_enter_dll_callbacks() {
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();let thunk=dummy_thunk();
-        kernel.modules.push(lifecycle_test_module(0x30000000, 0x30001000));
-        cpu.write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x30000000, 0x30001000));
+        cpu.write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         cpu.write_reg(ArmReg::R1, 77).unwrap();
-        assert_eq!(terminate_process(&mut CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk}).unwrap(), DispatchOutcome::Halt);
+        assert_eq!(
+            terminate_process(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::Halt
+        );
         assert_eq!(kernel.process_exit_code, Some(77));
         assert!(kernel.dll_notification_frame.is_none());
     }
@@ -18204,19 +20238,33 @@ mod tests {
     fn invalid_runtime_image_sets_error_without_consuming_module_slot_or_ram() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("broken.dll"), b"not a PE").unwrap();
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
         kernel.module_search_dirs.push(dir.path().into());
         let ram = pocket_kernel::memory_division::MemoryDivision::new(256 * 4096, 16).unwrap();
         kernel.heap.attach_ram(Some(ram.clone()));
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         assert_eq!(load_resource_module(&mut ctx, "broken.dll").unwrap(), None);
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(193));
-        assert_eq!(ctx.kernel.next_module_base, pocket_kernel::MODULE_REGION_BASE);
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(193)
+        );
+        assert_eq!(
+            ctx.kernel.next_module_base,
+            pocket_kernel::MODULE_REGION_BASE
+        );
         assert!(ctx.kernel.modules.is_empty());
         assert_eq!(ram.snapshot().program_used, 0);
         assert_eq!(load_resource_module(&mut ctx, "absent.dll").unwrap(), None);
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(126));
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(126)
+        );
     }
 
     #[test]
@@ -18225,12 +20273,17 @@ mod tests {
         for name in ["test.dll", "test.dll.0409.mui"] {
             std::fs::write(dir.path().join(name), passive_test_dll()).unwrap();
         }
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
         kernel.module_search_dirs.push(dir.path().into());
         let ram = pocket_kernel::memory_division::MemoryDivision::new(256 * 4096, 16).unwrap();
         kernel.heap.attach_ram(Some(ram.clone()));
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         for _ in 0..40 {
             let base = load_resource_module(&mut ctx, "test.dll").unwrap().unwrap();
             assert_eq!(base, pocket_kernel::MODULE_REGION_BASE);
@@ -18239,11 +20292,17 @@ mod tests {
             assert_eq!(ctx.cpu.read_mem(base + 0x1000, 1).unwrap(), vec![17]);
             assert_eq!(ram.snapshot().program_used, 1);
             ctx.cpu.write_reg(ArmReg::R0, base).unwrap();
-            assert_eq!(free_library(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(
+                free_library(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
             assert!(ctx.kernel.modules.is_empty());
             assert_eq!(ram.snapshot().program_used, 0);
             assert!(ctx.cpu.read_mem(base + 0x1000, 1).is_err());
-            assert_eq!(ctx.kernel.next_module_base, pocket_kernel::MODULE_REGION_BASE + 2 * MODULE_REGION_STRIDE);
+            assert_eq!(
+                ctx.kernel.next_module_base,
+                pocket_kernel::MODULE_REGION_BASE + 2 * MODULE_REGION_STRIDE
+            );
         }
     }
 
@@ -18251,52 +20310,114 @@ mod tests {
     fn mapping_failure_unmaps_partial_image_and_refunds_its_full_reservation() {
         struct FailSecondSection(StubCpu);
         impl Cpu for FailSecondSection {
-            fn arch(&self) -> pocket_cpu::Arch { self.0.arch() }
-            fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), pocket_cpu::CpuError> {
+            fn arch(&self) -> pocket_cpu::Arch {
+                self.0.arch()
+            }
+            fn map_region(
+                &mut self,
+                va: u32,
+                size: u32,
+                prot: Prot,
+            ) -> Result<(), pocket_cpu::CpuError> {
                 if va == pocket_kernel::MODULE_REGION_BASE + 0x2000 {
                     return Err(pocket_cpu::CpuError::BadMemory { va, size });
                 }
                 self.0.map_region(va, size, prot)
             }
-            fn unmap_region(&mut self, va: u32, size: u32) -> Result<(), pocket_cpu::CpuError> { self.0.unmap_region(va, size) }
-            fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), pocket_cpu::CpuError> { self.0.write_mem(va, data) }
-            fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, pocket_cpu::CpuError> { self.0.read_mem(va, len) }
-            fn read_reg(&mut self, reg: ArmReg) -> Result<u32, pocket_cpu::CpuError> { self.0.read_reg(reg) }
-            fn write_reg(&mut self, reg: ArmReg, value: u32) -> Result<(), pocket_cpu::CpuError> { self.0.write_reg(reg, value) }
-            fn add_code_hook(&mut self, va: u32) -> Result<(), pocket_cpu::CpuError> { self.0.add_code_hook(va) }
-            fn add_instruction_hook(&mut self, va: u32) -> Result<(), pocket_cpu::CpuError> { self.0.add_instruction_hook(va) }
-            fn add_code_hook_range(&mut self, lo: u32, hi: u32) -> Result<(), pocket_cpu::CpuError> { self.0.add_code_hook_range(lo, hi) }
-            fn run_until_hook(&mut self, va: u32, limit: u64) -> Result<pocket_cpu::StopReason, pocket_cpu::CpuError> { self.0.run_until_hook(va, limit) }
-            fn request_stop(&mut self) { self.0.request_stop(); }
+            fn unmap_region(&mut self, va: u32, size: u32) -> Result<(), pocket_cpu::CpuError> {
+                self.0.unmap_region(va, size)
+            }
+            fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), pocket_cpu::CpuError> {
+                self.0.write_mem(va, data)
+            }
+            fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, pocket_cpu::CpuError> {
+                self.0.read_mem(va, len)
+            }
+            fn read_reg(&mut self, reg: ArmReg) -> Result<u32, pocket_cpu::CpuError> {
+                self.0.read_reg(reg)
+            }
+            fn write_reg(&mut self, reg: ArmReg, value: u32) -> Result<(), pocket_cpu::CpuError> {
+                self.0.write_reg(reg, value)
+            }
+            fn add_code_hook(&mut self, va: u32) -> Result<(), pocket_cpu::CpuError> {
+                self.0.add_code_hook(va)
+            }
+            fn add_instruction_hook(&mut self, va: u32) -> Result<(), pocket_cpu::CpuError> {
+                self.0.add_instruction_hook(va)
+            }
+            fn add_code_hook_range(
+                &mut self,
+                lo: u32,
+                hi: u32,
+            ) -> Result<(), pocket_cpu::CpuError> {
+                self.0.add_code_hook_range(lo, hi)
+            }
+            fn run_until_hook(
+                &mut self,
+                va: u32,
+                limit: u64,
+            ) -> Result<pocket_cpu::StopReason, pocket_cpu::CpuError> {
+                self.0.run_until_hook(va, limit)
+            }
+            fn request_stop(&mut self) {
+                self.0.request_stop();
+            }
         }
-        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("test.dll");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.dll");
         std::fs::write(&path, passive_test_dll()).unwrap();
-        let mut cpu = FailSecondSection(StubCpu::new()); let mut kernel = fresh_kernel();
+        let mut cpu = FailSecondSection(StubCpu::new());
+        let mut kernel = fresh_kernel();
         let ram = pocket_kernel::memory_division::MemoryDivision::new(256 * 4096, 16).unwrap();
         kernel.heap.attach_ram(Some(ram.clone()));
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         assert!(map_resource_module(&mut ctx, &path, "test.dll").is_err());
         assert_eq!(ram.snapshot().program_used, 0);
         assert!(ctx.kernel.modules.is_empty());
-        assert_eq!(ctx.kernel.next_module_base, pocket_kernel::MODULE_REGION_BASE);
-        assert!(ctx.cpu.read_mem(pocket_kernel::MODULE_REGION_BASE + 0x1000, 1).is_err());
+        assert_eq!(
+            ctx.kernel.next_module_base,
+            pocket_kernel::MODULE_REGION_BASE
+        );
+        assert!(ctx
+            .cpu
+            .read_mem(pocket_kernel::MODULE_REGION_BASE + 0x1000, 1)
+            .is_err());
     }
 
     #[test]
     fn external_stack_is_unmapped_and_its_address_is_reused_after_termination() {
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
-        let thunk = dummy_thunk(); let mut first = None;
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut first = None;
         for index in 0..40 {
-            cpu.write_reg(ArmReg::R0, 0).unwrap(); cpu.write_reg(ArmReg::R1, 0x100000).unwrap();
-            cpu.write_reg(ArmReg::R2, 0x11000).unwrap(); cpu.write_reg(ArmReg::R3, 0).unwrap();
+            cpu.write_reg(ArmReg::R0, 0).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x100000).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x11000).unwrap();
+            cpu.write_reg(ArmReg::R3, 0).unwrap();
             cpu.write_mem(0x9000, &[0; 8]).unwrap();
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-            let DispatchOutcome::ReturnedR0(handle) = create_thread(&mut ctx).unwrap() else { panic!() };
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let DispatchOutcome::ReturnedR0(handle) = create_thread(&mut ctx).unwrap() else {
+                panic!()
+            };
             let region = ctx.kernel.threads[index].stack_region.unwrap();
             assert!(!region.2);
-            if index == 0 { first = Some(region); } else { assert_eq!(Some(region), first); }
-            ctx.cpu.write_reg(ArmReg::R0, handle).unwrap(); ctx.cpu.write_reg(ArmReg::R1, 3).unwrap();
+            if index == 0 {
+                first = Some(region);
+            } else {
+                assert_eq!(Some(region), first);
+            }
+            ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 3).unwrap();
             terminate_thread(&mut ctx).unwrap();
             assert!(ctx.cpu.read_mem(region.0, 1).is_err());
         }
@@ -18304,14 +20425,26 @@ mod tests {
 
     #[test]
     fn main_thread_exit_releases_stack_while_workers_remain_alive() {
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
-        cpu.map_region(0x60000000, 0x2000, Prot::READ | Prot::WRITE).unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x60000000, 0x2000, Prot::READ | Prot::WRITE)
+            .unwrap();
         kernel.heap.retain_resident(0x60000000, 0x2000);
         kernel.main_thread.stack_region = Some((0x60000000, 0x2000));
-        kernel.threads.push(GuestThread::new(0x11000, 0, 0x61000000, 0x40000, 0xf000fe00, 0x12000, 0xdead7c00, [0;17]));
-        let initial = kernel.heap.program_pages(); let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(finish_main_thread(&mut ctx, 7).unwrap(), DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA));
+        kernel.threads.push(GuestThread::new(
+            0x11000, 0, 0x61000000, 0x40000, 0xf000fe00, 0x12000, 0xdead7c00, [0; 17],
+        ));
+        let initial = kernel.heap.program_pages();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            finish_main_thread(&mut ctx, 7).unwrap(),
+            DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA)
+        );
         assert_eq!(ctx.kernel.heap.program_pages(), initial - 2);
         assert_eq!(ctx.kernel.main_thread.exit_code, Some(7));
         assert!(!ctx.kernel.threads[0].finished);
@@ -18328,26 +20461,54 @@ mod tests {
             let base = pocket_kernel::MODULE_REGION_BASE;
             cpu.map_region(base, 0x2000, Prot::ALL).unwrap();
             kernel.heap.retain_resident(base, 0x2000);
-            kernel.modules.push(LoadedModule { dependencies: vec![], attached: accept_attach, satellites: Vec::new(), resident_regions: vec![(base, 0x2000)],
-                handle: base, base, name: "test.dll".into(), image_size: 0x2000,
-                image_entry: base + 0x1000, resources: vec![], refcount: 2 });
-            kernel.dynamic_exports.insert(base, [("Run".into(), base + 0x1100)].into_iter().collect());
+            kernel.modules.push(LoadedModule {
+                dependencies: vec![],
+                attached: accept_attach,
+                satellites: Vec::new(),
+                resident_regions: vec![(base, 0x2000)],
+                handle: base,
+                base,
+                name: "test.dll".into(),
+                image_size: 0x2000,
+                image_entry: base + 0x1000,
+                resources: vec![],
+                refcount: 2,
+            });
+            kernel
+                .dynamic_exports
+                .insert(base, [("Run".into(), base + 0x1100)].into_iter().collect());
             let thunk = thunk_at(0x70000900);
             cpu.write_reg(ArmReg::Lr, 0x12340).unwrap();
             cpu.write_reg(ArmReg::R0, base).unwrap();
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
             if accept_attach {
-                assert_eq!(free_library(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+                assert_eq!(
+                    free_library(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(1)
+                );
                 assert_eq!(ctx.kernel.modules[0].refcount, 1);
                 assert_eq!(ram.snapshot().program_used, 2);
-                assert_eq!(free_library(&mut ctx).unwrap(), DispatchOutcome::JumpTo(base + 0x1000));
+                assert_eq!(
+                    free_library(&mut ctx).unwrap(),
+                    DispatchOutcome::JumpTo(base + 0x1000)
+                );
                 assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0);
             } else {
-                assert_eq!(begin_module_attach(&mut ctx, base).unwrap(), DispatchOutcome::JumpTo(base + 0x1000));
+                assert_eq!(
+                    begin_module_attach(&mut ctx, base).unwrap(),
+                    DispatchOutcome::JumpTo(base + 0x1000)
+                );
                 assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 1);
             }
             ctx.cpu.write_reg(ArmReg::R0, 0).unwrap(); // detach return is ignored; attach fails
-            assert_eq!(finish_module_attach(&mut ctx).unwrap(), Some(DispatchOutcome::ReturnedR0(u32::from(accept_attach))));
+            assert_eq!(
+                finish_module_attach(&mut ctx).unwrap(),
+                Some(DispatchOutcome::ReturnedR0(u32::from(accept_attach)))
+            );
             assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x12340);
             assert!(ctx.cpu.read_mem(base, 1).is_err());
             assert_eq!(ram.snapshot().program_used, 0);
@@ -18355,7 +20516,10 @@ mod tests {
             assert!(!ctx.kernel.dynamic_exports.contains_key(&base));
             assert_eq!(ctx.kernel.free_module_bases, vec![base]);
             ctx.cpu.write_reg(ArmReg::R0, base).unwrap();
-            assert_eq!(free_library(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+            assert_eq!(
+                free_library(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
         }
     }
 
@@ -18364,44 +20528,72 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         kernel.heap = Heap::new(0x100000, 0x100000);
-        cpu.map_region(0x100000, 0x100000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x100000, 0x100000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let ram = pocket_kernel::memory_division::MemoryDivision::new(512 * 4096, 16).unwrap();
         kernel.heap.attach_ram(Some(ram.clone()));
         let thunk = dummy_thunk();
         let initial = kernel.heap.free_bytes();
         let mut first_region = None;
         for n in 0..100 {
-            cpu.write_reg(ArmReg::R0, 0).unwrap(); cpu.write_reg(ArmReg::R1, 0).unwrap();
-            cpu.write_reg(ArmReg::R2, 0x11000).unwrap(); cpu.write_reg(ArmReg::R3, 0).unwrap();
+            cpu.write_reg(ArmReg::R0, 0).unwrap();
+            cpu.write_reg(ArmReg::R1, 0).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x11000).unwrap();
+            cpu.write_reg(ArmReg::R3, 0).unwrap();
             cpu.write_reg(ArmReg::Sp, 0x9000).unwrap();
             cpu.write_mem(0x9000, &[0; 8]).unwrap();
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-            let DispatchOutcome::ReturnedR0(handle) = create_thread(&mut ctx).unwrap() else { panic!() };
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let DispatchOutcome::ReturnedR0(handle) = create_thread(&mut ctx).unwrap() else {
+                panic!()
+            };
             let region = ctx.kernel.threads[n].stack_region.unwrap();
             assert!(region.2);
-            if n == 0 { first_region = Some(region); } else { assert_eq!(Some(region), first_region); }
+            if n == 0 {
+                first_region = Some(region);
+            } else {
+                assert_eq!(Some(region), first_region);
+            }
             assert_eq!(ram.snapshot().program_used, region.1 / 4096);
-            ctx.cpu.write_reg(ArmReg::R0, handle).unwrap(); ctx.cpu.write_reg(ArmReg::R1, 42).unwrap();
-            assert_eq!(terminate_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 42).unwrap();
+            assert_eq!(
+                terminate_thread(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
             assert_eq!(ram.snapshot().program_used, 0);
             assert_eq!(ctx.kernel.heap.free_bytes(), initial);
             assert!(ctx.kernel.threads[n].stack_region.is_none());
             ctx.cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
-            assert_eq!(get_exit_code_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-            assert_eq!(u32::from_le_bytes(ctx.cpu.read_mem(0x2000, 4).unwrap().try_into().unwrap()), 42);
+            assert_eq!(
+                get_exit_code_thread(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(
+                u32::from_le_bytes(ctx.cpu.read_mem(0x2000, 4).unwrap().try_into().unwrap()),
+                42
+            );
         }
     }
 
     #[test]
     fn failed_thread_creation_returns_its_reserved_pages() {
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
         let ram = pocket_kernel::memory_division::MemoryDivision::new(256 * 4096, 16).unwrap();
         kernel.heap.attach_ram(Some(ram.clone()));
         cpu.write_reg(ArmReg::R2, 0x11000).unwrap();
         cpu.write_mem(0x9000, &0u32.to_le_bytes()).unwrap();
         cpu.write_mem(0x9004, &0x12345678u32.to_le_bytes()).unwrap();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         assert!(create_thread(&mut ctx).is_err());
         assert_eq!(ram.snapshot().program_used, 0);
         assert!(ctx.kernel.threads.is_empty());
@@ -18412,15 +20604,22 @@ mod tests {
     fn image_entry_page_oom_rolls_back_loader_reservations() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
-        let ram = pocket_kernel::memory_division::MemoryDivision::new(9*4096, 8).unwrap();
+        let ram = pocket_kernel::memory_division::MemoryDivision::new(9 * 4096, 8).unwrap();
         assert!(kernel.heap.attach_ram(Some(ram.clone())));
         let allocation = kernel.heap.alloc(1).unwrap(); // all program RAM is occupied
         let thunk = dummy_thunk();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/ramtest/dist/GZRT999999/pageprobe.dll");
         let next = kernel.next_module_base;
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(map_resource_module(&mut ctx, &fixture, "pageprobe.dll").unwrap(), None);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            map_resource_module(&mut ctx, &fixture, "pageprobe.dll").unwrap(),
+            None
+        );
         assert_eq!(ctx.kernel.thread_last_errors[&0], 8);
         assert_eq!(ctx.kernel.next_module_base, next);
         assert!(ctx.kernel.free_module_bases.is_empty());
@@ -18430,10 +20629,14 @@ mod tests {
         assert_eq!(ram.snapshot().program_used, 1);
         ctx.kernel.heap.free(allocation);
         // The full image is 35 pages, but the loader needs only its entry page.
-        let base = map_resource_module(&mut ctx, &fixture, "pageprobe.dll").unwrap().unwrap();
+        let base = map_resource_module(&mut ctx, &fixture, "pageprobe.dll")
+            .unwrap()
+            .unwrap();
         assert_eq!(ram.snapshot().program_used, 1);
-        assert!(matches!(ctx.cpu.read_mem(base + 0x3000, 1),
-            Err(pocket_cpu::CpuError::ImageOutOfMemory { .. })));
+        assert!(matches!(
+            ctx.cpu.read_mem(base + 0x3000, 1),
+            Err(pocket_cpu::CpuError::ImageOutOfMemory { .. })
+        ));
         unload_module(&mut ctx, base).unwrap();
         assert_eq!(ram.snapshot().program_used, 0);
     }
@@ -18445,9 +20648,14 @@ mod tests {
         let thunk = dummy_thunk();
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/ramtest/dist/GZRT999999");
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let leaf = map_resource_module(&mut ctx, &fixture.join("depleaf.dll"), "depleaf.dll")
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         ctx.kernel.modules[0].attached = true;
         ctx.cpu.read_mem(leaf + 0x1000, 1).unwrap();
         let pages = ctx.kernel.heap.program_pages();
@@ -18456,7 +20664,10 @@ mod tests {
         let exports = ctx.kernel.dynamic_exports[&leaf].clone();
         let hooks = ctx.kernel.runtime_thunks.len();
         for (name, error) in [("depmissing.dll", 126), ("depbadexport.dll", 127)] {
-            assert_eq!(map_resource_module(&mut ctx, &fixture.join(name), name).unwrap(), None);
+            assert_eq!(
+                map_resource_module(&mut ctx, &fixture.join(name), name).unwrap(),
+                None
+            );
             assert_eq!(ctx.kernel.modules.len(), 1);
             assert_eq!(ctx.kernel.modules[0].refcount, 1);
             assert!(ctx.kernel.modules[0].attached);
@@ -18482,10 +20693,20 @@ mod tests {
         importer.dependencies.push(leaf.base);
         kernel.modules = vec![leaf, importer];
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(begin_module_attach(&mut ctx, 0x31000000).unwrap(), DispatchOutcome::JumpTo(0x31001000));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            begin_module_attach(&mut ctx, 0x31000000).unwrap(),
+            DispatchOutcome::JumpTo(0x31001000)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
-        assert_eq!(finish_module_attach(&mut ctx).unwrap(), Some(DispatchOutcome::ReturnedR0(0)));
+        assert_eq!(
+            finish_module_attach(&mut ctx).unwrap(),
+            Some(DispatchOutcome::ReturnedR0(0))
+        );
         assert_eq!(ctx.kernel.modules.len(), 1);
         assert_eq!(ctx.kernel.modules[0].base, 0x30000000);
         assert_eq!(ctx.kernel.modules[0].refcount, 2);
@@ -18501,21 +20722,48 @@ mod tests {
             let mut kernel = fresh_kernel();
             let thunk = dummy_thunk();
             let base = 0x30000000;
-            kernel.modules.push(LoadedModule { dependencies: vec![], attached: false, satellites: Vec::new(), resident_regions: Vec::new(), handle: base, base, name: "audio.dll".into(),
-                image_size: 0x2000, image_entry: base + 0x1000,
-                resources: vec![], refcount: 1 });
-            kernel.dynamic_exports.insert(base, [("Start".into(), base + 0x1100),
-                ("#7".into(), base + 0x1100)].into_iter().collect());
+            kernel.modules.push(LoadedModule {
+                dependencies: vec![],
+                attached: false,
+                satellites: Vec::new(),
+                resident_regions: Vec::new(),
+                handle: base,
+                base,
+                name: "audio.dll".into(),
+                image_size: 0x2000,
+                image_entry: base + 0x1000,
+                resources: vec![],
+                refcount: 1,
+            });
+            kernel.dynamic_exports.insert(
+                base,
+                [
+                    ("Start".into(), base + 0x1100),
+                    ("#7".into(), base + 0x1100),
+                ]
+                .into_iter()
+                .collect(),
+            );
             cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
             cpu.write_reg(ArmReg::R1, 23).unwrap();
             cpu.write_reg(ArmReg::Lr, 0x12340).unwrap();
             cpu.write_reg(ArmReg::Sp, 0x50001000).unwrap();
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
             assert_eq!(resolve_dynamic_export(&ctx, base, "Start"), base + 0x1100);
             assert_eq!(resolve_dynamic_export(&ctx, base, "#7"), base + 0x1100);
             assert_eq!(resolve_dynamic_export(&ctx, base, "start"), 0);
-            assert_eq!(resolve_dynamic_export(&ctx, base, "InitCommonControlsEx"), 0);
-            assert_eq!(begin_module_attach(&mut ctx, base).unwrap(), DispatchOutcome::JumpTo(base + 0x1000));
+            assert_eq!(
+                resolve_dynamic_export(&ctx, base, "InitCommonControlsEx"),
+                0
+            );
+            assert_eq!(
+                begin_module_attach(&mut ctx, base).unwrap(),
+                DispatchOutcome::JumpTo(base + 0x1000)
+            );
             assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), base);
             assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 1);
             // A nested invocation at a lower SP must not consume the callback.
@@ -18523,7 +20771,10 @@ mod tests {
             assert_eq!(finish_module_attach(&mut ctx).unwrap(), None);
             ctx.cpu.write_reg(ArmReg::Sp, 0x50001000).unwrap();
             ctx.cpu.write_reg(ArmReg::R0, u32::from(success)).unwrap();
-            assert_eq!(finish_module_attach(&mut ctx).unwrap(), Some(DispatchOutcome::ReturnedR0(if success { base } else { 0 })));
+            assert_eq!(
+                finish_module_attach(&mut ctx).unwrap(),
+                Some(DispatchOutcome::ReturnedR0(if success { base } else { 0 }))
+            );
             assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x12340);
             assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 23);
             assert!(ctx.kernel.module_attach_frames.is_empty());
@@ -18538,9 +20789,18 @@ mod tests {
             let mut cpu = scanf_cpu();
             let mut kernel = fresh_kernel();
             let thunk = dummy_thunk();
-            let handle = kernel.vfs.open("MAS1:", pocket_kernel::vfs::Access::ReadWrite, false).unwrap();
+            let handle = kernel
+                .vfs
+                .open("MAS1:", pocket_kernel::vfs::Access::ReadWrite, false)
+                .unwrap();
             let callback = 0xdeade020u32;
-            kernel.events.insert(callback, pocket_kernel::EventObject { manual_reset, signalled: false });
+            kernel.events.insert(
+                callback,
+                pocket_kernel::EventObject {
+                    manual_reset,
+                    signalled: false,
+                },
+            );
             let count = kernel.events.len();
             cpu.write_mem(0x3000, &callback.to_le_bytes()).unwrap();
             cpu.write_reg(ArmReg::R0, handle).unwrap();
@@ -18548,19 +20808,36 @@ mod tests {
             cpu.write_reg(ArmReg::R2, 0x2000).unwrap();
             cpu.write_reg(ArmReg::R3, 4).unwrap();
             for (offset, value) in [(0, 0x3000u32), (4, 4), (8, 0x4000), (12, 0)] {
-                cpu.write_mem(0x9000 + offset, &value.to_le_bytes()).unwrap();
+                cpu.write_mem(0x9000 + offset, &value.to_le_bytes())
+                    .unwrap();
             }
-            assert_eq!(device_io_control(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(
+                device_io_control(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
             assert_eq!(kernel.vfs.mp3_callback_event(handle), callback);
             assert_eq!(cpu.read_u32_le(0x3000).unwrap(), callback);
             assert_eq!(kernel.events.len(), count);
-            assert_eq!(kernel.events.get(&callback).unwrap().manual_reset, manual_reset);
+            assert_eq!(
+                kernel.events.get(&callback).unwrap().manual_reset,
+                manual_reset
+            );
             // The stream still references the same event on restart.
             cpu.write_reg(ArmReg::R0, handle).unwrap();
             cpu.write_reg(ArmReg::R1, 0x001d0ff0).unwrap();
             cpu.write_reg(ArmReg::R2, 0x2000).unwrap();
             cpu.write_reg(ArmReg::R3, 4).unwrap();
-            let _ = device_io_control(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+            let _ = device_io_control(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap();
             assert_eq!(kernel.vfs.mp3_callback_event(handle), callback);
             assert_eq!(kernel.events.len(), count);
         }
@@ -18574,12 +20851,25 @@ mod tests {
         let mut main = [0; 17];
         main[15] = 0x10100;
         main[13] = 0x9000;
-        kernel.threads.push(GuestThread::new(0x10200, 0, 0x9000, 0x1000,
-            0x10300, 0x10100, 0xdead7c00, main));
+        kernel.threads.push(GuestThread::new(
+            0x10200, 0, 0x9000, 0x1000, 0x10300, 0x10100, 0xdead7c00, main,
+        ));
         kernel.threads[0].started = true;
         kernel.current_thread = 1;
-        kernel.events.insert(0xdeade010, pocket_kernel::EventObject { manual_reset: true, signalled: true });
-        kernel.events.insert(0xdeade011, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        kernel.events.insert(
+            0xdeade010,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: true,
+            },
+        );
+        kernel.events.insert(
+            0xdeade011,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
         cpu.write_mem(0x2000, &0xdeade011u32.to_le_bytes()).unwrap();
         cpu.write_mem(0x2004, &0xdeade010u32.to_le_bytes()).unwrap();
         cpu.write_reg(ArmReg::R0, 2).unwrap();
@@ -18587,27 +20877,55 @@ mod tests {
         cpu.write_reg(ArmReg::R2, 0).unwrap();
         cpu.write_reg(ArmReg::R3, u32::MAX).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x10280).unwrap();
-        assert_eq!(wait_for_multiple_objects(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x10100));
+        assert_eq!(
+            wait_for_multiple_objects(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(0x10100)
+        );
         assert_eq!(kernel.current_thread, 0);
         assert_eq!(kernel.threads[0].worker_regs[0], 1);
         assert_eq!(kernel.threads[0].worker_regs[15], 0x10280);
         assert!(!kernel.threads[0].parked_in_pump);
         assert!(kernel.events.get(&0xdeade010).unwrap().signalled);
         // The next eligible worker can run even though the first event stays set.
-        let mut audio = GuestThread::new(0x10400, 0, 0x9000, 0x1000,
-            0x10500, 0x10100, 0xdead7c01, main);
+        let mut audio = GuestThread::new(
+            0x10400, 0, 0x9000, 0x1000, 0x10500, 0x10100, 0xdead7c01, main,
+        );
         audio.started = true;
         audio.worker_saved = true;
         audio.worker_regs[15] = 0x10400;
         kernel.threads.push(audio);
         kernel.worker_schedule_cursor = 1;
-        assert_eq!(resume_worker(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }, 0).unwrap(), Some(DispatchOutcome::JumpTo(0x10400)));
+        assert_eq!(
+            resume_worker(
+                &mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                },
+                0
+            )
+            .unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10400))
+        );
         // Auto-reset events are consumed once, before the completed wait yields.
         kernel.events.get_mut(&0xdeade011).unwrap().signalled = true;
         cpu.write_reg(ArmReg::R0, 0xdeade011).unwrap();
         cpu.write_reg(ArmReg::R1, 0).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x10480).unwrap();
-        assert!(matches!(wait_for_single_object(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(_)));
+        assert!(matches!(
+            wait_for_single_object(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(_)
+        ));
         assert!(!kernel.events.get(&0xdeade011).unwrap().signalled);
         assert_eq!(kernel.threads[1].worker_regs[0], 0);
         assert_eq!(kernel.threads[1].worker_regs[15], 0x10480);
@@ -18624,29 +20942,64 @@ mod tests {
         kernel.threads[0].messages.push_back((0x3bc, 0, 0));
         let thunk = dummy_thunk();
         cpu.write_reg(ArmReg::R0, 7).unwrap();
-        post_quit_message(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        post_quit_message(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         assert_eq!(kernel.synthetic_message_budget, 0);
         assert_eq!(kernel.posted_messages.front(), Some(&(0, WM_QUIT, 7, 0)));
         kernel.current_thread = 1;
         cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
-        assert_eq!(get_message_w(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_message_w(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(cpu.read_u32_le(0x2004).unwrap(), 0x3bc);
         assert_eq!(kernel.posted_messages.len(), 1);
         cpu.write_reg(ArmReg::R0, 9).unwrap();
-        post_quit_message(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        post_quit_message(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
-        assert_eq!(get_message_w(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            get_message_w(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_u32_le(0x2004).unwrap(), WM_QUIT);
         assert_eq!(cpu.read_u32_le(0x2008).unwrap(), 9);
         kernel.current_thread = 0;
         cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
-        assert_eq!(get_message_w(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            get_message_w(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_u32_le(0x2008).unwrap(), 7);
     }
 
     #[test]
     fn crt_rooted_file_read_does_not_prepend_the_module_directory() {
-        let root = std::env::temp_dir().join(format!("pockethle-rooted-read-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("pockethle-rooted-read-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("Game/SD Card/Game")).unwrap();
         std::fs::write(root.join("Game/asset.bin"), b"right").unwrap();
@@ -18657,7 +21010,11 @@ mod tests {
         let mut cpu = StubCpu::new();
         let thunk = dummy_thunk();
         for path in ["\\SD Card\\Game\\asset.bin", "/SD Card/Game/asset.bin"] {
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
             let handle = open_cstr_path(&mut ctx, path, "rb");
             assert_ne!(handle, 0);
             let mut bytes = [0; 5];
@@ -18673,12 +21030,20 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        for (input, expected) in [(0.0_f32, 0_i64), (123.75, 123),
-            (-123.75, -123), (4294967296.0, 4294967296)] {
+        for (input, expected) in [
+            (0.0_f32, 0_i64),
+            (123.75, 123),
+            (-123.75, -123),
+            (4294967296.0, 4294967296),
+        ] {
             for unrelated_r1 in [0_u32, 0x7ff0_0000, 0xffff_ffff] {
                 cpu.write_reg(ArmReg::R0, input.to_bits()).unwrap();
                 cpu.write_reg(ArmReg::R1, unrelated_r1).unwrap();
-                let mut ctx = CallCtx { cpu: &mut cpu, thunk: &thunk, kernel: &mut kernel };
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    thunk: &thunk,
+                    kernel: &mut kernel,
+                };
                 assert_eq!(soft_stoi64(&mut ctx).unwrap(), ret_i64(expected));
             }
         }
@@ -18689,14 +21054,25 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        for (input, expected) in [(0.0_f32, 0_u64), (123.75, 123),
-            (4294967296.0, 4294967296), (-1.0, 0), (f32::NAN, 0)] {
+        for (input, expected) in [
+            (0.0_f32, 0_u64),
+            (123.75, 123),
+            (4294967296.0, 4294967296),
+            (-1.0, 0),
+            (f32::NAN, 0),
+        ] {
             for unrelated_r1 in [0_u32, 0x7ff0_0000, 0xffff_ffff] {
                 cpu.write_reg(ArmReg::R0, input.to_bits()).unwrap();
                 cpu.write_reg(ArmReg::R1, unrelated_r1).unwrap();
-                let mut ctx = CallCtx { cpu: &mut cpu, thunk: &thunk, kernel: &mut kernel };
-                assert_eq!(soft_stou64(&mut ctx).unwrap(),
-                    DispatchOutcome::ReturnedR0R1(expected as u32, (expected >> 32) as u32));
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    thunk: &thunk,
+                    kernel: &mut kernel,
+                };
+                assert_eq!(
+                    soft_stou64(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0R1(expected as u32, (expected >> 32) as u32)
+                );
             }
         }
     }
@@ -18706,16 +21082,28 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         cpu.map_region(0x3000, 0x1000, Prot::READ).unwrap();
         for update in [0, 1] {
-            for (extended, length, returned, written) in [(false, 0, 1, 24), (true, 56, 56, 56), (true, 64, 56, 56)] {
+            for (extended, length, returned, written) in
+                [(false, 0, 1, 24), (true, 56, 56, 56), (true, 64, 56, 56)]
+            {
                 cpu.write_mem(0x1100, &[0xa5; 64]).unwrap();
                 cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
-                cpu.write_reg(ArmReg::R1, if extended { length } else { update }).unwrap();
+                cpu.write_reg(ArmReg::R1, if extended { length } else { update })
+                    .unwrap();
                 cpu.write_reg(ArmReg::R2, update).unwrap();
-                let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-                let result = if extended { get_system_power_status_ex2(&mut ctx) } else { get_system_power_status_ex(&mut ctx) };
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                };
+                let result = if extended {
+                    get_system_power_status_ex2(&mut ctx)
+                } else {
+                    get_system_power_status_ex(&mut ctx)
+                };
                 assert_eq!(result.unwrap(), DispatchOutcome::ReturnedR0(returned));
                 let bytes = cpu.read_mem(0x1100, 64).unwrap();
                 assert_eq!(&bytes[..3], &[1, 1, 100]);
@@ -18724,13 +21112,29 @@ mod tests {
                 assert!(bytes[written..].iter().all(|byte| *byte == 0xa5));
             }
         }
-        for (pointer, length) in [(0, 56), (0x1100, 55), (0x1ff0, 56), (0x3000, 56), (u32::MAX - 8, 56)] {
+        for (pointer, length) in [
+            (0, 56),
+            (0x1100, 55),
+            (0x1ff0, 56),
+            (0x3000, 56),
+            (u32::MAX - 8, 56),
+        ] {
             cpu.write_mem(0x1100, &[0xa5; 64]).unwrap();
             cpu.write_reg(ArmReg::R0, pointer).unwrap();
             cpu.write_reg(ArmReg::R1, length).unwrap();
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-            assert_eq!(get_system_power_status_ex2(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-            assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(87));
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                get_system_power_status_ex2(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                get_last_error(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(87)
+            );
             assert_eq!(cpu.read_mem(0x1100, 64).unwrap(), vec![0xa5; 64]);
         }
     }
@@ -18740,44 +21144,97 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let handle = 0xdead4100;
-        let format = pocket_kernel::audio::GuestFormat { sample_rate: 44100, channels: 1, bits_per_sample: 16 };
-        kernel.wave_out.devices.insert(handle, pocket_kernel::WaveOutDevice {
-            format, callback_kind: WaveCallbackKind::None, callback_target: 0,
-            instance: 0, owner_thread: 0, paused: false,
-        });
+        let format = pocket_kernel::audio::GuestFormat {
+            sample_rate: 44100,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        kernel.wave_out.devices.insert(
+            handle,
+            pocket_kernel::WaveOutDevice {
+                format,
+                callback_kind: WaveCallbackKind::None,
+                callback_target: 0,
+                instance: 0,
+                owner_thread: 0,
+                paused: false,
+            },
+        );
         let tap = kernel.audio.tap();
         tap.drain_into(&mut []);
         kernel.audio.open_wave_stream(handle, format);
         assert!(kernel.audio.queue_wave_loop(handle, vec![10, 20, 30], 4));
         kernel.audio.push_wave_samples(handle, &[40]);
-        for (index, (h, end)) in [(handle, 12), (handle, 13), (123, 12)].into_iter().enumerate() {
+        for (index, (h, end)) in [(handle, 12), (handle, 13), (123, 12)]
+            .into_iter()
+            .enumerate()
+        {
             let hdr = 0x1100 + index as u32 * 32;
-            cpu.write_mem(hdr + 16, &WHDR_INQUEUE.to_le_bytes()).unwrap();
-            kernel.wave_out.pending.push_back(pocket_kernel::PendingWaveBuffer { handle: h, hdr, end_cursor: end });
+            cpu.write_mem(hdr + 16, &WHDR_INQUEUE.to_le_bytes())
+                .unwrap();
+            kernel
+                .wave_out
+                .pending
+                .push_back(pocket_kernel::PendingWaveBuffer {
+                    handle: h,
+                    hdr,
+                    end_cursor: end,
+                });
         }
         tap.drain_into(&mut [0; 4]);
         cpu.write_reg(ArmReg::R0, handle).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(wave_out_break_loop(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(ctx.kernel.wave_out.pending.iter().map(|v| v.end_cursor).collect::<Vec<_>>(), vec![6, 7, 12]);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            wave_out_break_loop(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            ctx.kernel
+                .wave_out
+                .pending
+                .iter()
+                .map(|v| v.end_cursor)
+                .collect::<Vec<_>>(),
+            vec![6, 7, 12]
+        );
         retire_completed_wave_buffers(&mut ctx).unwrap();
         assert_eq!(ctx.kernel.wave_out.pending.len(), 3);
-        assert_eq!(ctx.cpu.read_mem(0x1110, 4).unwrap(), WHDR_INQUEUE.to_le_bytes());
+        assert_eq!(
+            ctx.cpu.read_mem(0x1110, 4).unwrap(),
+            WHDR_INQUEUE.to_le_bytes()
+        );
         ctx.cpu.write_reg(ArmReg::R0, 123).unwrap();
-        assert_eq!(wave_out_break_loop(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(5));
+        assert_eq!(
+            wave_out_break_loop(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(5)
+        );
         let mut output = [0; 2];
         tap.drain_into(&mut output);
         assert_eq!(output, [20, 30]);
         retire_completed_wave_buffers(&mut ctx).unwrap();
-        assert_eq!(ctx.cpu.read_mem(0x1110, 4).unwrap(), WHDR_DONE.to_le_bytes());
-        assert_eq!(ctx.cpu.read_mem(0x1130, 4).unwrap(), WHDR_INQUEUE.to_le_bytes());
+        assert_eq!(
+            ctx.cpu.read_mem(0x1110, 4).unwrap(),
+            WHDR_DONE.to_le_bytes()
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x1130, 4).unwrap(),
+            WHDR_INQUEUE.to_le_bytes()
+        );
         let mut suffix = [0];
         tap.drain_into(&mut suffix);
         assert_eq!(suffix, [40]);
         retire_completed_wave_buffers(&mut ctx).unwrap();
-        assert_eq!(ctx.cpu.read_mem(0x1130, 4).unwrap(), WHDR_DONE.to_le_bytes());
+        assert_eq!(
+            ctx.cpu.read_mem(0x1130, 4).unwrap(),
+            WHDR_DONE.to_le_bytes()
+        );
         assert_eq!(ctx.kernel.wave_out.pending.len(), 1); // other handle unaffected
     }
 
@@ -18864,14 +21321,15 @@ mod tests {
             current_thread: 0,
             thread_last_errors: Default::default(),
             winsock_last_errors: Default::default(),
-                crt_new_handler:0, cpp_new_handler:0,
+            crt_new_handler: 0,
+            cpp_new_handler: 0,
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
-                worker_preempt_after_ms: 0,
-                wait_deadlines: std::collections::HashMap::new(),
-                guest_fpscr: std::collections::HashMap::new(),
-                timer_period_requests: std::collections::BTreeMap::new(),
-                critical_sections: std::collections::HashMap::new(),
+            worker_preempt_after_ms: 0,
+            wait_deadlines: std::collections::HashMap::new(),
+            guest_fpscr: std::collections::HashMap::new(),
+            timer_period_requests: std::collections::BTreeMap::new(),
+            critical_sections: std::collections::HashMap::new(),
             pressed_keys: [false; 256],
             held_keys: Vec::new(),
             key_repeat_next_ms: None,
@@ -19573,23 +22031,71 @@ mod tests {
 
     #[test]
     fn crt_large_map_strings_keep_the_xml_tail() {
-        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();
-        cpu.map_region(0x10000,0x40000,Prot::READ|Prot::WRITE).unwrap();
-        let mut xml=vec![b'A';100000];xml.extend_from_slice(b"</image-data></getmapview>");
-        let length=xml.len();xml.push(0);cpu.write_mem(0x10000,&xml).unwrap();
-        let t=dummy_thunk();
-        cpu.write_reg(ArmReg::R0,0x10000).unwrap();
-        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(strlen(&mut c).unwrap(),DispatchOutcome::ReturnedR0(length as u32));}
-        cpu.write_reg(ArmReg::R0,0x30000).unwrap();cpu.write_reg(ArmReg::R1,0x10000).unwrap();
-        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(strcpy(&mut c).unwrap(),DispatchOutcome::ReturnedR0(0x30000));}
-        assert_eq!(cpu.read_mem(0x30000,xml.len() as u32).unwrap(),xml);
-        cpu.write_reg(ArmReg::R0,0x30000).unwrap();cpu.write_reg(ArmReg::R1,0x10000).unwrap();cpu.write_reg(ArmReg::R2,0).unwrap();
-        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(vsprintf(&mut c).unwrap(),DispatchOutcome::ReturnedR0(length as u32));}
-        assert_eq!(cpu.read_mem(0x30000,xml.len() as u32).unwrap(),xml);
-        cpu.write_mem(0x4f000,b"</image-data>\0").unwrap();
-        cpu.write_reg(ArmReg::R0,0x10000).unwrap();cpu.write_reg(ArmReg::R1,0x4f000).unwrap();
-        {let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};assert_eq!(strstr(&mut c).unwrap(),DispatchOutcome::ReturnedR0(0x10000+100000));}
-
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x10000, 0x40000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut xml = vec![b'A'; 100000];
+        xml.extend_from_slice(b"</image-data></getmapview>");
+        let length = xml.len();
+        xml.push(0);
+        cpu.write_mem(0x10000, &xml).unwrap();
+        let t = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, 0x10000).unwrap();
+        {
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                strlen(&mut c).unwrap(),
+                DispatchOutcome::ReturnedR0(length as u32)
+            );
+        }
+        cpu.write_reg(ArmReg::R0, 0x30000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x10000).unwrap();
+        {
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                strcpy(&mut c).unwrap(),
+                DispatchOutcome::ReturnedR0(0x30000)
+            );
+        }
+        assert_eq!(cpu.read_mem(0x30000, xml.len() as u32).unwrap(), xml);
+        cpu.write_reg(ArmReg::R0, 0x30000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x10000).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        {
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                vsprintf(&mut c).unwrap(),
+                DispatchOutcome::ReturnedR0(length as u32)
+            );
+        }
+        assert_eq!(cpu.read_mem(0x30000, xml.len() as u32).unwrap(), xml);
+        cpu.write_mem(0x4f000, b"</image-data>\0").unwrap();
+        cpu.write_reg(ArmReg::R0, 0x10000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x4f000).unwrap();
+        {
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                strstr(&mut c).unwrap(),
+                DispatchOutcome::ReturnedR0(0x10000 + 100000)
+            );
+        }
     }
 
     #[test]
@@ -19647,37 +22153,62 @@ mod tests {
     fn wcsrev_reverses_utf16_units_and_preserves_terminator_and_guard() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let t = dummy_thunk();
-        for units in [vec![0x41,0xe9,0x4e2d],vec![0xd83d,0xde00],vec![0x78],vec![]] {
+        for units in [
+            vec![0x41, 0xe9, 0x4e2d],
+            vec![0xd83d, 0xde00],
+            vec![0x78],
+            vec![],
+        ] {
             let mut input: Vec<u8> = units.iter().copied().flat_map(u16::to_le_bytes).collect();
-            input.extend_from_slice(&[0,0,0xa5,0x5a]);
+            input.extend_from_slice(&[0, 0, 0xa5, 0x5a]);
             cpu.write_mem(0x1001, &input).unwrap();
             cpu.write_reg(ArmReg::R0, 0x1001).unwrap();
-            let mut c = CallCtx {cpu:&mut cpu,thunk:&t,kernel:&mut kernel};
-            assert_eq!(wcsrev(&mut c).unwrap(),DispatchOutcome::ReturnedR0(0x1001));
-            let mut expected: Vec<u8> = units.into_iter().rev().flat_map(u16::to_le_bytes).collect();
-            expected.extend_from_slice(&[0,0,0xa5,0x5a]);
-            let actual=c.cpu.read_mem(0x1001,expected.len() as u32).unwrap();
-            assert_eq!(actual,expected);
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(wcsrev(&mut c).unwrap(), DispatchOutcome::ReturnedR0(0x1001));
+            let mut expected: Vec<u8> =
+                units.into_iter().rev().flat_map(u16::to_le_bytes).collect();
+            expected.extend_from_slice(&[0, 0, 0xa5, 0x5a]);
+            let actual = c.cpu.read_mem(0x1001, expected.len() as u32).unwrap();
+            assert_eq!(actual, expected);
         }
     }
 
     #[test]
     fn wcsrev_empty_at_page_end_null_and_invalid_access() {
-        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();let t=dummy_thunk();
-        cpu.map_region(0x1000,0x1000,Prot::READ|Prot::WRITE).unwrap();
-        for address in [0,0x1ffe] {
-            cpu.write_reg(ArmReg::R0,address).unwrap();
-            let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};
-            assert_eq!(wcsrev(&mut c).unwrap(),DispatchOutcome::ReturnedR0(address));
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        for address in [0, 0x1ffe] {
+            cpu.write_reg(ArmReg::R0, address).unwrap();
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                wcsrev(&mut c).unwrap(),
+                DispatchOutcome::ReturnedR0(address)
+            );
         }
-        cpu.write_mem(0x1ffe,&[0x41,0]).unwrap();
-        cpu.write_reg(ArmReg::R0,0x1ffe).unwrap();
-        let mut c=CallCtx{cpu:&mut cpu,thunk:&t,kernel:&mut kernel};
+        cpu.write_mem(0x1ffe, &[0x41, 0]).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1ffe).unwrap();
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            thunk: &t,
+            kernel: &mut kernel,
+        };
         assert!(wcsrev(&mut c).is_err());
-        let actual=c.cpu.read_mem(0x1ffe,2).unwrap();
-        assert_eq!(actual,[0x41,0]);
+        let actual = c.cpu.read_mem(0x1ffe, 2).unwrap();
+        assert_eq!(actual, [0x41, 0]);
     }
 
     #[test]
@@ -19775,7 +22306,7 @@ mod tests {
         cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         cpu.write_reg(ArmReg::R1, 0x8000_0000).unwrap(); // GENERIC_READ
         cpu.write_reg(ArmReg::Sp, 0x2800).unwrap();
-        cpu.write_mem(0x2800,&3u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x2800, &3u32.to_le_bytes()).unwrap();
         let t = dummy_thunk();
         let mut c = CallCtx {
             cpu: &mut cpu,
@@ -20599,18 +23130,37 @@ mod tests {
             cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
             cpu.write_reg(ArmReg::R2, flags).unwrap();
             cpu.write_reg(ArmReg::R3, output).unwrap();
-            sd_create_process(&mut CallCtx { cpu: &mut cpu, kernel, thunk: &thunk })
+            sd_create_process(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel,
+                thunk: &thunk,
+            })
         };
-        assert_eq!(invoke(&mut kernel, 0, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            invoke(&mut kernel, 0, 0x2000).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         kernel.process_launch_enabled = true;
-        assert_eq!(invoke(&mut kernel, 4, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            invoke(&mut kernel, 4, 0x2000).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(kernel.pending_process_launch.is_none());
         assert!(invoke(&mut kernel, 0, 0xdead0000).is_err());
         assert!(kernel.pending_process_launch.is_none());
-        assert_eq!(invoke(&mut kernel, 0, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(kernel.pending_process_launch.take().unwrap().executable, executable.clone());
+        assert_eq!(
+            invoke(&mut kernel, 0, 0x2000).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            kernel.pending_process_launch.take().unwrap().executable,
+            executable.clone()
+        );
         std::fs::remove_file(executable).unwrap();
-        assert_eq!(invoke(&mut kernel, 0, 0x2000).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            invoke(&mut kernel, 0, 0x2000).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(kernel.pending_process_launch.is_none());
         drop(invoke);
         let handle = *kernel.child_processes.keys().next().unwrap();
@@ -20618,77 +23168,183 @@ mod tests {
         assert!(!kernel.events.get(&handle).unwrap().signalled);
         cpu.write_reg(ArmReg::R0, handle).unwrap();
         cpu.write_reg(ArmReg::R1, 0x2100).unwrap();
-        assert_eq!(get_exit_code_process(&mut CallCtx {
-            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
-        }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_exit_code_process(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(cpu.read_u32_le(0x2100).unwrap(), 259);
         kernel.child_processes.get_mut(&handle).unwrap().exit_code = Some(7);
         get_exit_code_process(&mut CallCtx {
-            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
-        }).unwrap();
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         assert_eq!(cpu.read_u32_le(0x2100).unwrap(), 7);
         close_handle(&mut CallCtx {
-            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
-        }).unwrap();
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         assert!(kernel.child_processes[&handle].process_handle_closed);
         assert!(!kernel.events.contains_key(&handle));
         assert!(kernel.events.contains_key(&thread_handle));
         cpu.write_reg(ArmReg::R0, thread_handle).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx {
-            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
-        }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_exit_code_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(cpu.read_u32_le(0x2100).unwrap(), 7);
-        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        close_handle(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         assert!(!kernel.events.contains_key(&thread_handle));
-        assert_eq!(get_exit_code_thread(&mut CallCtx {
-            cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk,
-        }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            get_exit_code_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn cross_duplicate_test_handle(cpu: &mut StubCpu, kernel: &mut KernelState,
-        source_process: u32, source: u32, target_process: u32, flags: u32) -> u32 {
+    fn cross_duplicate_test_handle(
+        cpu: &mut StubCpu,
+        kernel: &mut KernelState,
+        source_process: u32,
+        source: u32,
+        target_process: u32,
+        flags: u32,
+    ) -> u32 {
         let thunk = dummy_thunk();
-        cpu.write_reg(ArmReg::R0, source_process).unwrap(); cpu.write_reg(ArmReg::R1, source).unwrap();
-        cpu.write_reg(ArmReg::R2, target_process).unwrap(); cpu.write_reg(ArmReg::R3, 0x1100).unwrap();
+        cpu.write_reg(ArmReg::R0, source_process).unwrap();
+        cpu.write_reg(ArmReg::R1, source).unwrap();
+        cpu.write_reg(ArmReg::R2, target_process).unwrap();
+        cpu.write_reg(ArmReg::R3, 0x1100).unwrap();
         let sp = cpu.read_reg(ArmReg::Sp).unwrap();
-        cpu.write_mem(sp, &[0u32.to_le_bytes(), 0u32.to_le_bytes(), flags.to_le_bytes()].concat()).unwrap();
-        assert_eq!(duplicate_handle(&mut CallCtx { cpu, kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        cpu.write_mem(
+            sp,
+            &[0u32.to_le_bytes(), 0u32.to_le_bytes(), flags.to_le_bytes()].concat(),
+        )
+        .unwrap();
+        assert_eq!(
+            duplicate_handle(&mut CallCtx {
+                cpu,
+                kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         cpu.read_u32_le(0x1100).unwrap()
     }
     #[test]
     fn shared_handles_mutex_recursion_ownership_timeout_and_abandonment() {
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel(); let thunk = dummy_thunk();
-        cpu.write_reg(ArmReg::R1, 1).unwrap(); cpu.write_reg(ArmReg::R2, 0).unwrap();
-        let DispatchOutcome::ReturnedR0(handle) = create_mutex_w(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap() else { panic!() };
-        let alias = cross_duplicate_test_handle(&mut cpu, &mut kernel, FAKE_CURRENT_PROCESS_HANDLE, handle, FAKE_CURRENT_PROCESS_HANDLE, 2);
-        kernel.threads.push(GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0;17]));
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        ctx.cpu.write_reg(ArmReg::R0, alias).unwrap(); ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        let DispatchOutcome::ReturnedR0(handle) = create_mutex_w(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap() else {
+            panic!()
+        };
+        let alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut kernel,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            handle,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            2,
+        );
+        kernel.threads.push(GuestThread::new(
+            0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17],
+        ));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.kernel.mutexes.get(&handle).unwrap().depth, 2);
         ctx.kernel.current_thread = 1;
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0)
+        );
         assert_eq!(ctx.kernel.threads[0].worker_regs[0], 258);
         ctx.kernel.current_thread = 1;
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
-        assert_eq!(release_mutex(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(288));
+        assert_eq!(
+            release_mutex(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(288)
+        );
         ctx.kernel.current_thread = 0;
-        assert_eq!(release_mutex(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            release_mutex(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(!mutex_ready(ctx.kernel, handle, 1));
-        assert_eq!(release_mutex(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            release_mutex(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         ctx.kernel.current_thread = 1;
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0)
+        );
         assert_eq!(ctx.kernel.threads[0].worker_regs[0], 0);
-        ctx.kernel.threads[0].finished = true; ctx.kernel.threads[0].exit_code = Some(9); ctx.kernel.current_thread = 0;
+        ctx.kernel.threads[0].finished = true;
+        ctx.kernel.threads[0].exit_code = Some(9);
+        ctx.kernel.current_thread = 0;
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x80));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x80)
+        );
         assert_eq!(ctx.kernel.mutexes.get(&handle).unwrap().depth, 1);
-        assert_eq!(release_mutex(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            release_mutex(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(ctx.kernel.mutexes.contains_key(&handle));
-        ctx.cpu.write_reg(ArmReg::R0, handle).unwrap(); close_handle(&mut ctx).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
+        close_handle(&mut ctx).unwrap();
         assert!(!ctx.kernel.mutexes.contains_key(&handle));
     }
     #[test]
@@ -20696,115 +23352,325 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut parent = fresh_kernel();
         let (process, _) = parent.object_handles.new_child().unwrap();
-        parent.object_handles.bind(process, HandleObject::ChildProcess(process));
+        parent
+            .object_handles
+            .bind(process, HandleObject::ChildProcess(process));
         let event = parent.object_handles.reserve().unwrap();
-        parent.object_handles.bind(event, HandleObject::Event(event));
-        parent.events.insert(event, pocket_kernel::EventObject { manual_reset: true, signalled: true });
-        let alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, event, process, 2);
+        parent
+            .object_handles
+            .bind(event, HandleObject::Event(event));
+        parent.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: true,
+            },
+        );
+        let alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            event,
+            process,
+            2,
+        );
         let mut child = fresh_kernel();
         child.attach_handle_context(parent.child_handle_context(process).unwrap());
-        let second = cross_duplicate_test_handle(&mut cpu, &mut child, FAKE_CURRENT_PROCESS_HANDLE, alias, FAKE_CURRENT_PROCESS_HANDLE, 2);
+        let second = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut child,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            alias,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            2,
+        );
         let thunk = dummy_thunk();
         cpu.write_reg(ArmReg::R0, event).unwrap();
-        assert_eq!(close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut parent, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            close_handle(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut parent,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         drop(parent);
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut child, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut child,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(ctx.kernel.events.contains_key(&event));
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_HANDLE));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(ERROR_INVALID_HANDLE)
+        );
         ctx.cpu.write_reg(ArmReg::R0, second).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(!ctx.kernel.events.contains_key(&event));
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
     }
 
     #[test]
     fn shared_handles_cross_process_event_and_file_keep_state_after_parent_drop() {
-        let dir = tempfile::tempdir().unwrap(); std::fs::write(dir.path().join("data"), b"abcdef").unwrap();
-        let mut cpu = scanf_cpu(); let mut parent = fresh_kernel();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data"), b"abcdef").unwrap();
+        let mut cpu = scanf_cpu();
+        let mut parent = fresh_kernel();
         let (process, _) = parent.object_handles.new_child().unwrap();
-        parent.object_handles.bind(process, HandleObject::ChildProcess(process));
-        let event = parent.object_handles.reserve().unwrap(); parent.object_handles.bind(event, HandleObject::Event(event));
-        parent.events.insert(event, pocket_kernel::EventObject { manual_reset: false, signalled: true });
-        parent.vfs.mount("\\Data\\", dir.path()); let file = parent.vfs.open("\\Data\\data", Access::Read, false).unwrap();
-        let mut prefix = [0;2]; parent.vfs.read(file, &mut prefix).unwrap();
-        let event_alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, event, process, 2);
-        let file_alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, file, process, 3);
-        let mut child = fresh_kernel(); child.attach_handle_context(parent.child_handle_context(process).unwrap());
+        parent
+            .object_handles
+            .bind(process, HandleObject::ChildProcess(process));
+        let event = parent.object_handles.reserve().unwrap();
+        parent
+            .object_handles
+            .bind(event, HandleObject::Event(event));
+        parent.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: true,
+            },
+        );
+        parent.vfs.mount("\\Data\\", dir.path());
+        let file = parent
+            .vfs
+            .open("\\Data\\data", Access::Read, false)
+            .unwrap();
+        let mut prefix = [0; 2];
+        parent.vfs.read(file, &mut prefix).unwrap();
+        let event_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            event,
+            process,
+            2,
+        );
+        let file_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            file,
+            process,
+            3,
+        );
+        let mut child = fresh_kernel();
+        child.attach_handle_context(parent.child_handle_context(process).unwrap());
         child.vfs.mount("\\Data\\", dir.path());
         let local_file = child.vfs.open("\\Data\\data", Access::Read, false).unwrap();
         assert_eq!(local_file, file); // Equal integers in different namespaces.
-        assert_eq!(handle_object(&child, local_file), Some(HandleObject::File(local_file)));
+        assert_eq!(
+            handle_object(&child, local_file),
+            Some(HandleObject::File(local_file))
+        );
         assert_eq!(handle_object(&parent, event_alias), None);
         assert_eq!(handle_object(&child, event), None);
         assert!(parent.object_handles.is_closed(file));
         drop(parent);
-        let thunk = dummy_thunk(); let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut child, thunk: &thunk };
-        ctx.cpu.write_reg(ArmReg::R0, event_alias).unwrap(); ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(258));
-        let mut suffix = [0;2]; assert_eq!(ctx.kernel.vfs.read(file_alias, &mut suffix), Some(2)); assert_eq!(&suffix, b"cd");
-        close_handle(&mut ctx).unwrap(); assert!(!ctx.kernel.events.contains_key(&event));
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut child,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, event_alias).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(258)
+        );
+        let mut suffix = [0; 2];
+        assert_eq!(ctx.kernel.vfs.read(file_alias, &mut suffix), Some(2));
+        assert_eq!(&suffix, b"cd");
+        close_handle(&mut ctx).unwrap();
+        assert!(!ctx.kernel.events.contains_key(&event));
     }
     #[test]
     fn shared_handles_named_mutex_spans_processes_and_releases_on_exit() {
-        let mut cpu = scanf_cpu(); let mut parent = fresh_kernel(); let thunk = dummy_thunk();
+        let mut cpu = scanf_cpu();
+        let mut parent = fresh_kernel();
+        let thunk = dummy_thunk();
         write_wide_str(&mut cpu, 0x1200, 40, "shared-mutex").unwrap();
-        cpu.write_reg(ArmReg::R1, 1).unwrap(); cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
-        let DispatchOutcome::ReturnedR0(original) = create_mutex_w(&mut CallCtx { cpu: &mut cpu, kernel: &mut parent, thunk: &thunk }).unwrap() else { panic!() };
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
+        let DispatchOutcome::ReturnedR0(original) = create_mutex_w(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut parent,
+            thunk: &thunk,
+        })
+        .unwrap() else {
+            panic!()
+        };
         let (process, _) = parent.object_handles.new_child().unwrap();
-        let mut child = fresh_kernel(); child.attach_handle_context(parent.child_handle_context(process).unwrap());
-        let DispatchOutcome::ReturnedR0(alias) = create_mutex_w(&mut CallCtx { cpu: &mut cpu, kernel: &mut child, thunk: &thunk }).unwrap() else { panic!() };
+        let mut child = fresh_kernel();
+        child.attach_handle_context(parent.child_handle_context(process).unwrap());
+        let DispatchOutcome::ReturnedR0(alias) = create_mutex_w(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut child,
+            thunk: &thunk,
+        })
+        .unwrap() else {
+            panic!()
+        };
         assert_ne!(original, alias);
         assert_eq!(child.thread_last_errors.get(&0), Some(&183));
         assert!(!mutex_ready(&child, original, 0));
-        parent.record_process_exit(7); drop(parent);
-        cpu.write_reg(ArmReg::R0, alias).unwrap(); cpu.write_reg(ArmReg::R1, 0).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut child, thunk: &thunk };
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x80));
-        assert_eq!(release_mutex(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        parent.record_process_exit(7);
+        drop(parent);
+        cpu.write_reg(ArmReg::R0, alias).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut child,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x80)
+        );
+        assert_eq!(
+            release_mutex(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         close_handle(&mut ctx).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
-        assert_eq!(open_mutex_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            open_mutex_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
     #[test]
     fn shared_handles_remote_source_duplicates_back_and_signals_thread_exit() {
-        let mut cpu = scanf_cpu(); let mut parent = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut parent = fresh_kernel();
         let (process, _) = parent.object_handles.new_child().unwrap();
-        parent.object_handles.bind(process, HandleObject::ChildProcess(process));
-        let main_alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, FAKE_CURRENT_THREAD_HANDLE, process, 2);
-        let mut child = fresh_kernel(); child.attach_handle_context(parent.child_handle_context(process).unwrap());
+        parent
+            .object_handles
+            .bind(process, HandleObject::ChildProcess(process));
+        let main_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            FAKE_CURRENT_THREAD_HANDLE,
+            process,
+            2,
+        );
+        let mut child = fresh_kernel();
+        child.attach_handle_context(parent.child_handle_context(process).unwrap());
         let parent_pid = parent.object_handles.process_id();
-        let parent_process_handle = child.object_handles.duplicate(HandleObject::RemoteProcess(parent_pid)).unwrap();
-        let child_event = child.object_handles.reserve().unwrap(); child.object_handles.bind(child_event, HandleObject::Event(child_event));
-        child.events.insert(child_event, pocket_kernel::EventObject { manual_reset: true, signalled: true });
-        let remote_alias = cross_duplicate_test_handle(&mut cpu, &mut child, FAKE_CURRENT_PROCESS_HANDLE, child_event, parent_process_handle, 2);
-        let local_alias = cross_duplicate_test_handle(&mut cpu, &mut parent, process, child_event, FAKE_CURRENT_PROCESS_HANDLE, 3);
-        assert_eq!(handle_object(&parent, local_alias), Some(HandleObject::Event(child_event)));
-        assert_eq!(handle_object(&parent, remote_alias), Some(HandleObject::Event(child_event)));
+        let parent_process_handle = child
+            .object_handles
+            .duplicate(HandleObject::RemoteProcess(parent_pid))
+            .unwrap();
+        let child_event = child.object_handles.reserve().unwrap();
+        child
+            .object_handles
+            .bind(child_event, HandleObject::Event(child_event));
+        child.events.insert(
+            child_event,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: true,
+            },
+        );
+        let remote_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut child,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            child_event,
+            parent_process_handle,
+            2,
+        );
+        let local_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            process,
+            child_event,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            3,
+        );
+        assert_eq!(
+            handle_object(&parent, local_alias),
+            Some(HandleObject::Event(child_event))
+        );
+        assert_eq!(
+            handle_object(&parent, remote_alias),
+            Some(HandleObject::Event(child_event))
+        );
         assert!(child.object_handles.is_closed(child_event));
-        parent.main_thread.exit_code = Some(17); parent.sync_transferred_handles();
+        parent.main_thread.exit_code = Some(17);
+        parent.sync_transferred_handles();
         assert!(waitable_is_signalled(&child, main_alias));
-        let thunk = dummy_thunk(); cpu.write_reg(ArmReg::R0, main_alias).unwrap(); cpu.write_reg(ArmReg::R1, 0x1200).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut child, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, main_alias).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x1200).unwrap();
+        assert_eq!(
+            get_exit_code_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut child,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 17);
     }
     #[test]
     fn shared_handles_mas_alias_uses_original_stream_and_independent_close() {
-        let mut cpu = scanf_cpu(); let mut kernel = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
         let original = kernel.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
-        let alias = cross_duplicate_test_handle(&mut cpu, &mut kernel, FAKE_CURRENT_PROCESS_HANDLE, original, FAKE_CURRENT_PROCESS_HANDLE, 2);
+        let alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut kernel,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            original,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            2,
+        );
         kernel.vfs.set_mp3_decoder_volume(alias, 123);
-        assert_eq!(kernel.vfs.mp3_decoder_reply(original, 0x001d1020, 4), 123u32.to_le_bytes());
-        assert_eq!(kernel.vfs.mp3_stream_key(alias), kernel.vfs.mp3_stream_key(original));
+        assert_eq!(
+            kernel.vfs.mp3_decoder_reply(original, 0x001d1020, 4),
+            123u32.to_le_bytes()
+        );
+        assert_eq!(
+            kernel.vfs.mp3_stream_key(alias),
+            kernel.vfs.mp3_stream_key(original)
+        );
         let stream = kernel.vfs.mp3_stream_key(alias);
         assert_eq!(kernel.vfs.mp3_decoder_handles().len(), 1);
-        let format = pocket_kernel::audio::GuestFormat { sample_rate: 8000, channels: 1, bits_per_sample: 16 };
-        kernel.audio.queue_mas_samples(stream, format, &[1,2,3]);
+        let format = pocket_kernel::audio::GuestFormat {
+            sample_rate: 8000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        kernel.audio.queue_mas_samples(stream, format, &[1, 2, 3]);
         assert!(close_owned_handle(&mut kernel, original));
         assert_eq!(kernel.audio.mas_written_samples(stream), 3);
         assert!(kernel.vfs.is_mp3_decoder(alias));
@@ -20814,29 +23680,58 @@ mod tests {
 
     #[test]
     fn shared_handles_cross_process_mas_shares_pcm_pause_and_notification() {
-        let mut cpu = scanf_cpu(); let mut parent = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut parent = fresh_kernel();
         let (process, _) = parent.object_handles.new_child().unwrap();
-        parent.object_handles.bind(process, HandleObject::ChildProcess(process));
+        parent
+            .object_handles
+            .bind(process, HandleObject::ChildProcess(process));
         let device = parent.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
         let stream = parent.vfs.mp3_stream_key(device);
-        let event = parent.object_handles.reserve().unwrap(); parent.object_handles.bind(event, HandleObject::Event(event));
-        parent.events.insert(event, pocket_kernel::EventObject { manual_reset: false, signalled: false });
+        let event = parent.object_handles.reserve().unwrap();
+        parent
+            .object_handles
+            .bind(event, HandleObject::Event(event));
+        parent.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
         parent.vfs.start_mp3_decoder(device, event);
-        let format = pocket_kernel::audio::GuestFormat { sample_rate: 8000, channels: 1, bits_per_sample: 16 };
-        parent.audio.queue_mas_samples(stream, format, &[100;8]); parent.audio.pause_mas_stream(stream, true);
-        let alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, device, process, 2);
-        let mut child = fresh_kernel(); child.attach_handle_context(parent.child_handle_context(process).unwrap());
+        let format = pocket_kernel::audio::GuestFormat {
+            sample_rate: 8000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        parent.audio.queue_mas_samples(stream, format, &[100; 8]);
+        parent.audio.pause_mas_stream(stream, true);
+        let alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            device,
+            process,
+            2,
+        );
+        let mut child = fresh_kernel();
+        child.attach_handle_context(parent.child_handle_context(process).unwrap());
         assert_eq!(child.vfs.mp3_stream_key(alias), stream);
         assert_eq!(child.audio.mas_written_samples(stream), 8);
-        child.audio.queue_mas_samples(stream, format, &[200;2]);
+        child.audio.queue_mas_samples(stream, format, &[200; 2]);
         assert_eq!(parent.audio.mas_written_samples(stream), 10);
         child.vfs.set_mp3_decoder_volume(alias, 456);
-        assert_eq!(parent.vfs.mp3_decoder_reply(device, 0x001d1020, 4), 456u32.to_le_bytes());
+        assert_eq!(
+            parent.vfs.mp3_decoder_reply(device, 0x001d1020, 4),
+            456u32.to_le_bytes()
+        );
         child.vfs.queue_mp3_buffer(alias, 10);
-        assert_eq!(child.vfs.service_mp3_decoder(alias, 10), Some((event,1)));
+        assert_eq!(child.vfs.service_mp3_decoder(alias, 10), Some((event, 1)));
         child.events.get_mut(&event).unwrap().signalled = true;
         assert!(parent.events.get(&event).unwrap().signalled);
-        assert!(close_owned_handle(&mut parent, device)); drop(parent);
+        assert!(close_owned_handle(&mut parent, device));
+        drop(parent);
         assert_eq!(child.audio.mas_written_samples(stream), 10);
         assert!(close_owned_handle(&mut child, alias));
         assert_eq!(child.audio.mas_written_samples(stream), 0);
@@ -20844,34 +23739,85 @@ mod tests {
     #[test]
     fn shared_handles_cross_process_semaphore_and_volume_use_same_objects() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cpu = scanf_cpu(); let mut parent = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        let mut parent = fresh_kernel();
         let (process, _) = parent.object_handles.new_child().unwrap();
-        parent.object_handles.bind(process, HandleObject::ChildProcess(process));
-        let semaphore = parent.object_handles.reserve().unwrap(); parent.object_handles.bind(semaphore, HandleObject::Semaphore(semaphore));
-        parent.semaphores.insert(semaphore, pocket_kernel::SemaphoreObject { count: 0, max_count: 2 });
+        parent
+            .object_handles
+            .bind(process, HandleObject::ChildProcess(process));
+        let semaphore = parent.object_handles.reserve().unwrap();
+        parent
+            .object_handles
+            .bind(semaphore, HandleObject::Semaphore(semaphore));
+        parent.semaphores.insert(
+            semaphore,
+            pocket_kernel::SemaphoreObject {
+                count: 0,
+                max_count: 2,
+            },
+        );
         parent.vfs.mount("\\SD Card\\", dir.path());
-        let volume = parent.vfs.open("\\SD Card\\Vol:", Access::Read, false).unwrap();
-        let sem_alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, semaphore, process, 2);
-        let vol_alias = cross_duplicate_test_handle(&mut cpu, &mut parent, FAKE_CURRENT_PROCESS_HANDLE, volume, process, 3);
-        let mut child = fresh_kernel(); child.attach_handle_context(parent.child_handle_context(process).unwrap());
+        let volume = parent
+            .vfs
+            .open("\\SD Card\\Vol:", Access::Read, false)
+            .unwrap();
+        let sem_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            semaphore,
+            process,
+            2,
+        );
+        let vol_alias = cross_duplicate_test_handle(
+            &mut cpu,
+            &mut parent,
+            FAKE_CURRENT_PROCESS_HANDLE,
+            volume,
+            process,
+            3,
+        );
+        let mut child = fresh_kernel();
+        child.attach_handle_context(parent.child_handle_context(process).unwrap());
         assert_eq!(child.vfs.volume(vol_alias).unwrap().prefix, "/sd card/");
         assert!(parent.object_handles.is_closed(volume));
-        let thunk = dummy_thunk(); cpu.write_reg(ArmReg::R0, sem_alias).unwrap(); cpu.write_reg(ArmReg::R1, 1).unwrap(); cpu.write_reg(ArmReg::R2, 0).unwrap();
-        assert_eq!(release_semaphore(&mut CallCtx { cpu: &mut cpu, kernel: &mut child, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, sem_alias).unwrap();
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        assert_eq!(
+            release_semaphore(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut child,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(waitable_is_signalled(&parent, semaphore));
         acquire_wait_signal(&mut parent, semaphore);
         assert!(!waitable_is_signalled(&child, sem_alias));
-        assert!(close_owned_handle(&mut child, vol_alias)); assert!(child.vfs.volume(vol_alias).is_none());
+        assert!(close_owned_handle(&mut child, vol_alias));
+        assert!(child.vfs.volume(vol_alias).is_none());
     }
 
     fn duplicate_test_handle(ctx: &mut CallCtx<'_>, source: u32) -> u32 {
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R1, source).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R3, 0x1100).unwrap();
         let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
-        ctx.cpu.write_mem(sp, &[0,0,0,0, 0,0,0,0, 2,0,0,0]).unwrap();
-        assert_eq!(duplicate_handle(ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        ctx.cpu
+            .write_mem(sp, &[0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0])
+            .unwrap();
+        assert_eq!(
+            duplicate_handle(ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         u32::from_le_bytes(ctx.cpu.read_mem(0x1100, 4).unwrap().try_into().unwrap())
     }
 
@@ -20881,23 +23827,48 @@ mod tests {
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
         let original = 0xdeade001;
-        kernel.events.insert(original, pocket_kernel::EventObject { manual_reset: false, signalled: true });
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        kernel.events.insert(
+            original,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: true,
+            },
+        );
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let alias = duplicate_test_handle(&mut ctx, original);
         assert_ne!(alias, original);
         ctx.cpu.write_reg(ArmReg::R0, original).unwrap();
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(ctx.kernel.events.contains_key(&original));
         assert_eq!(set_event(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(258));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(258)
+        );
         assert_eq!(set_event(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
         assert!(waitable_is_signalled(ctx.kernel, alias));
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(!ctx.kernel.events.contains_key(&original));
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
     }
 
     #[test]
@@ -20905,28 +23876,58 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        kernel.events.insert(0xdeade001, pocket_kernel::EventObject { manual_reset: false, signalled: true });
-        kernel.semaphores.insert(0xdeade301, pocket_kernel::SemaphoreObject { count: 0, max_count: 2 });
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        kernel.events.insert(
+            0xdeade001,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: true,
+            },
+        );
+        kernel.semaphores.insert(
+            0xdeade301,
+            pocket_kernel::SemaphoreObject {
+                count: 0,
+                max_count: 2,
+            },
+        );
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let event = duplicate_test_handle(&mut ctx, 0xdeade001);
         let semaphore = duplicate_test_handle(&mut ctx, 0xdeade301);
         ctx.cpu.write_reg(ArmReg::R0, semaphore).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
-        assert_eq!(release_semaphore(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            release_semaphore(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(ctx.cpu.read_mem(0x1200, 4).unwrap(), 0u32.to_le_bytes());
-        ctx.cpu.write_mem(0x1200, &[event.to_le_bytes(), semaphore.to_le_bytes()].concat()).unwrap();
+        ctx.cpu
+            .write_mem(
+                0x1200,
+                &[event.to_le_bytes(), semaphore.to_le_bytes()].concat(),
+            )
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R0, 2).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0x1200).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
         ctx.cpu.write_reg(ArmReg::R3, 0).unwrap();
-        assert_eq!(wait_for_multiple_objects(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(!ctx.kernel.events.get(&0xdeade001).unwrap().signalled);
         assert_eq!(ctx.kernel.semaphores.get(&0xdeade301).unwrap().count, 0);
         ctx.cpu.write_reg(ArmReg::R0, semaphore).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 3).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
-        assert_eq!(release_semaphore(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            release_semaphore(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.kernel.semaphores.get(&0xdeade301).unwrap().count, 0);
     }
 
@@ -20937,27 +23938,56 @@ mod tests {
         let thunk = dummy_thunk();
         let process = 0xd1000002;
         let thread = process + 1;
-        kernel.child_processes.insert(process, pocket_kernel::ChildProcess {
-            thread_handle: thread, process_handle_closed: false, thread_handle_closed: false, exit_code: None,
-        });
+        kernel.child_processes.insert(
+            process,
+            pocket_kernel::ChildProcess {
+                thread_handle: thread,
+                process_handle_closed: false,
+                thread_handle_closed: false,
+                exit_code: None,
+            },
+        );
         for handle in [process, thread] {
-            kernel.events.insert(handle, pocket_kernel::EventObject { manual_reset: true, signalled: false });
+            kernel.events.insert(
+                handle,
+                pocket_kernel::EventObject {
+                    manual_reset: true,
+                    signalled: false,
+                },
+            );
         }
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let process_alias = duplicate_test_handle(&mut ctx, process);
         let thread_alias = duplicate_test_handle(&mut ctx, thread);
         assert!(!(0xd1000000..0xd2000000).contains(&process_alias));
         for handle in [process, thread] {
             ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
-            assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(
+                close_handle(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
         }
-        ctx.kernel.child_processes.get_mut(&process).unwrap().exit_code = Some(17);
+        ctx.kernel
+            .child_processes
+            .get_mut(&process)
+            .unwrap()
+            .exit_code = Some(17);
         ctx.cpu.write_reg(ArmReg::R0, process_alias).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
-        assert_eq!(get_exit_code_process(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_exit_code_process(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(ctx.cpu.read_mem(0x1100, 4).unwrap(), 17u32.to_le_bytes());
         ctx.cpu.write_reg(ArmReg::R0, thread_alias).unwrap();
-        assert_eq!(get_exit_code_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_exit_code_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(waitable_is_signalled(ctx.kernel, process_alias));
         assert!(waitable_is_signalled(ctx.kernel, thread_alias));
     }
@@ -20970,13 +24000,23 @@ mod tests {
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
         kernel.vfs.mount("\\Data\\", dir.path());
-        let original = kernel.vfs.open("\\Data\\stream.bin", Access::Read, false).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let original = kernel
+            .vfs
+            .open("\\Data\\stream.bin", Access::Read, false)
+            .unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let alias = duplicate_test_handle(&mut ctx, original);
         let mut prefix = [0; 2];
         assert_eq!(ctx.kernel.vfs.read(original, &mut prefix), Some(2));
         ctx.cpu.write_reg(ArmReg::R0, original).unwrap();
-        assert_eq!(crt_fclose(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            crt_fclose(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0x1200).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 2).unwrap();
@@ -20984,9 +24024,15 @@ mod tests {
         assert_eq!(read_file(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
         assert_eq!(ctx.cpu.read_mem(0x1200, 2).unwrap(), b"cd");
         assert_eq!(ctx.cpu.read_mem(0x1300, 4).unwrap(), 2u32.to_le_bytes());
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(get_file_size(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(
+            get_file_size(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
     }
 
     #[test]
@@ -20995,16 +24041,33 @@ mod tests {
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
         let original = 0xdeade001;
-        kernel.events.insert(original, pocket_kernel::EventObject { manual_reset: true, signalled: false });
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        kernel.events.insert(
+            original,
+            pocket_kernel::EventObject {
+                manual_reset: true,
+                signalled: false,
+            },
+        );
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let alias = duplicate_test_handle(&mut ctx, original);
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R1, original).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R3, 0xffff0000).unwrap();
         let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
         ctx.cpu.write_mem(sp + 8, &3u32.to_le_bytes()).unwrap();
-        assert_eq!(duplicate_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            duplicate_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(handle_object(ctx.kernel, original), None);
         assert!(handle_object(ctx.kernel, alias).is_some());
         assert!(ctx.kernel.events.contains_key(&original));
@@ -21015,23 +24078,40 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        ctx.cpu.write_mem(0x1200, &[b'E',0,0,0]).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_mem(0x1200, &[b'E', 0, 0, 0]).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 1).unwrap();
         ctx.cpu.write_reg(ArmReg::R3, 0x1200).unwrap();
-        let DispatchOutcome::ReturnedR0(original) = create_event_w(&mut ctx).unwrap() else { panic!() };
+        let DispatchOutcome::ReturnedR0(original) = create_event_w(&mut ctx).unwrap() else {
+            panic!()
+        };
         ctx.cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
-        let DispatchOutcome::ReturnedR0(alias) = open_event_w(&mut ctx).unwrap() else { panic!() };
+        let DispatchOutcome::ReturnedR0(alias) = open_event_w(&mut ctx).unwrap() else {
+            panic!()
+        };
         assert_ne!(original, alias);
-        assert_eq!(handle_object(ctx.kernel, original), handle_object(ctx.kernel, alias));
+        assert_eq!(
+            handle_object(ctx.kernel, original),
+            handle_object(ctx.kernel, alias)
+        );
         ctx.cpu.write_reg(ArmReg::R0, original).unwrap();
         close_handle(&mut ctx).unwrap();
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
-        assert_eq!(reset_event(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            reset_event(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         close_handle(&mut ctx).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
-        assert_eq!(open_event_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            open_event_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
 
     #[test]
@@ -21039,25 +24119,40 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut worker = GuestThread::new(0x10300, 0, 0x9000, 0x1000,
-            0x10600, 0, 0xdead7c00, [0; 17]);
+        let mut worker =
+            GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
         worker.worker_regs[15] = 0x10300;
         kernel.threads.push(worker);
-        kernel.object_handles.bind(0xd2000000, HandleObject::Thread(0));
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        kernel
+            .object_handles
+            .bind(0xd2000000, HandleObject::Thread(0));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::R0, 7).unwrap();
-        assert_eq!(exit_thread(&mut ctx).unwrap(),
-            DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA));
+        assert_eq!(
+            exit_thread(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA)
+        );
         assert_eq!(ctx.kernel.main_thread.exit_code, Some(7));
         assert_eq!(ctx.kernel.process_exit_code, None);
         assert!(!ctx.kernel.threads[0].finished);
         assert!(waitable_is_signalled(ctx.kernel, 0xd2000000));
-        assert_eq!(schedule_idle(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10300));
+        assert_eq!(
+            schedule_idle(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10300)
+        );
         ctx.cpu.write_reg(ArmReg::Lr, 0x10400).unwrap();
-        assert_eq!(park_worker(&mut ctx, 0).unwrap(),
-            Some(DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA)));
+        assert_eq!(
+            park_worker(&mut ctx, 0).unwrap(),
+            Some(DispatchOutcome::JumpTo(
+                pocket_kernel::THREAD_SCHEDULER_IDLE_VA
+            ))
+        );
         assert_eq!(ctx.kernel.threads[0].worker_regs[15], 0x10400);
         // Last-thread termination, rather than array order, chooses the process code.
         ctx.kernel.threads[0].finished = true;
@@ -21072,30 +24167,59 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut worker = GuestThread::new(0x10300, 0, 0x9000, 0x1000,
-            0x10600, 0, 0xdead7c00, [0; 17]);
+        let mut worker =
+            GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
         worker.worker_regs[15] = 0x10300;
         worker.worker_regs[14] = 0x10400;
         kernel.threads.push(worker);
-        kernel.object_handles.bind(0xd2000000, HandleObject::Thread(0));
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
+        kernel
+            .object_handles
+            .bind(0xd2000000, HandleObject::Thread(0));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R4, 0x12345678).unwrap();
         ctx.cpu.write_reg(ArmReg::Lr, 0x10500).unwrap();
-        assert_eq!(suspend_thread(&mut ctx).unwrap(),
-            DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA));
+        assert_eq!(
+            suspend_thread(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA)
+        );
         assert_eq!(ctx.kernel.main_thread.suspend_count, 1);
-        assert_eq!(schedule_idle(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10300));
+        assert_eq!(
+            schedule_idle(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10300)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 0xd2000000).unwrap();
-        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(2));
+        assert_eq!(
+            suspend_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(2)
+        );
         assert_eq!(ctx.kernel.main_thread.suspend_count, 1);
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(park_worker(&mut ctx, 0).unwrap(),
-            Some(DispatchOutcome::JumpTo(pocket_kernel::THREAD_SCHEDULER_IDLE_VA)));
-        assert_eq!(schedule_idle(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10500));
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            park_worker(&mut ctx, 0).unwrap(),
+            Some(DispatchOutcome::JumpTo(
+                pocket_kernel::THREAD_SCHEDULER_IDLE_VA
+            ))
+        );
+        assert_eq!(
+            schedule_idle(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10500)
+        );
         assert_eq!(ctx.cpu.read_reg(ArmReg::R4).unwrap(), 0x12345678);
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0);
         assert_eq!(ctx.kernel.current_thread, 0);
@@ -21107,21 +24231,42 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
-        ctx.cpu.write_reg(ArmReg::R1, FAKE_CURRENT_THREAD_HANDLE).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R1, FAKE_CURRENT_THREAD_HANDLE)
+            .unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R3, 0).unwrap();
         let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
-        ctx.cpu.write_mem(sp, &[0,0,0,0, 0,0,0,0, 2,0,0,0]).unwrap();
-        assert_eq!(duplicate_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        ctx.cpu
+            .write_mem(sp, &[0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0])
+            .unwrap();
+        assert_eq!(
+            duplicate_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(ctx.kernel.object_handles.is_empty());
         ctx.cpu.write_reg(ArmReg::R3, 0x1100).unwrap();
-        assert_eq!(duplicate_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            duplicate_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         let alias = u32::from_le_bytes(ctx.cpu.read_mem(0x1100, 4).unwrap().try_into().unwrap());
         ctx.kernel.current_thread = 1;
         assert_eq!(thread_object_index(ctx.kernel, alias), Some(0));
-        assert_eq!(thread_object_index(ctx.kernel, FAKE_CURRENT_THREAD_HANDLE), Some(1));
+        assert_eq!(
+            thread_object_index(ctx.kernel, FAKE_CURRENT_THREAD_HANDLE),
+            Some(1)
+        );
         ctx.kernel.current_thread = 0;
     }
 
@@ -21130,30 +24275,54 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let worker = GuestThread::new(0x10300, 0, 0x9000, 0x1000,
-            0x10600, 0, 0xdead7c00, [0; 17]);
+        let worker = GuestThread::new(0x10300, 0, 0x9000, 0x1000, 0x10600, 0, 0xdead7c00, [0; 17]);
         kernel.threads.push(worker);
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0xdead7c00).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R2, FAKE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R3, 0x1100).unwrap();
         let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
-        ctx.cpu.write_mem(sp, &[0,0,0,0, 0,0,0,0, 2,0,0,0]).unwrap();
-        assert_eq!(duplicate_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        ctx.cpu
+            .write_mem(sp, &[0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0])
+            .unwrap();
+        assert_eq!(
+            duplicate_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         let alias = u32::from_le_bytes(ctx.cpu.read_mem(0x1100, 4).unwrap().try_into().unwrap());
         ctx.cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(thread_object_index(ctx.kernel, alias), Some(1));
         ctx.kernel.threads[0].finished = true;
         ctx.kernel.threads[0].exit_code = Some(31);
         ctx.cpu.write_reg(ArmReg::R0, alias).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
-        assert_eq!(get_exit_code_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_exit_code_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(ctx.cpu.read_mem(0x1100, 4).unwrap(), 31u32.to_le_bytes());
         assert!(waitable_is_signalled(ctx.kernel, alias));
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(close_handle(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            close_handle(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(thread_handle_is_closed(ctx.kernel, alias));
         assert_eq!(thread_object_index(ctx.kernel, alias), None);
     }
@@ -21163,10 +24332,18 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        cpu.write_reg(ArmReg::R0, pocket_kernel::CE_CURRENT_PROCESS_HANDLE).unwrap();
+        cpu.write_reg(ArmReg::R0, pocket_kernel::CE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         cpu.write_reg(ArmReg::R1, 23).unwrap();
-        assert_eq!(terminate_process(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel,
-            thunk: &thunk }).unwrap(), DispatchOutcome::Halt);
+        assert_eq!(
+            terminate_process(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::Halt
+        );
         assert_eq!(kernel.process_exit_code, Some(23));
     }
 
@@ -21175,45 +24352,98 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut worker = GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, [0; 17]);
+        let mut worker = GuestThread::new(
+            0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, [0; 17],
+        );
         worker.started = true;
         kernel.threads.push(worker);
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::R0, 123).unwrap();
         set_last_error(&mut ctx).unwrap();
         ctx.kernel.current_thread = 1;
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 456).unwrap();
         set_last_error(&mut ctx).unwrap();
         ctx.kernel.current_thread = 0;
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(123));
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(123)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
-        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            suspend_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            suspend_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(ctx.kernel.threads[0].suspend_count, 2);
         assert!(!ctx.kernel.threads[0].started);
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(2));
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(2)
+        );
         assert!(!ctx.kernel.threads[0].started);
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(ctx.kernel.threads[0].started);
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(123));
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(123)
+        );
         ctx.kernel.threads[0].suspend_count = MAXIMUM_SUSPEND_COUNT;
         ctx.kernel.threads[0].started = false;
-        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(
+            suspend_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
         assert_eq!(ctx.kernel.threads[0].suspend_count, MAXIMUM_SUSPEND_COUNT);
         close_handle(&mut ctx).unwrap();
         assert!(!ctx.kernel.threads[0].finished); // Closing is not termination.
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_HANDLE));
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(ERROR_INVALID_HANDLE)
+        );
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
         ctx.kernel.current_thread = 1;
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(456));
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(456)
+        );
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(get_exit_code_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+        assert_eq!(
+            get_exit_code_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER)
+        );
     }
 
     #[test]
@@ -21224,26 +24454,42 @@ mod tests {
         let mut saved = [0u32; 17];
         saved[13] = 0x8800;
         saved[15] = 0x9100;
-        let mut worker = GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, saved);
+        let mut worker =
+            GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, saved);
         worker.started = true;
         worker.worker_saved = true;
         kernel.threads.push(worker);
         kernel.current_thread = 1;
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::Lr, 0x9200).unwrap();
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
-        assert_eq!(suspend_thread(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x9100));
+        ctx.cpu
+            .write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE)
+            .unwrap();
+        assert_eq!(
+            suspend_thread(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x9100)
+        );
         assert_eq!(ctx.kernel.current_thread, 0);
         assert_eq!(ctx.kernel.threads[0].worker_regs[0], 0);
         assert_eq!(ctx.kernel.threads[0].worker_regs[15], 0x9200);
         assert!(!waitable_is_signalled(ctx.kernel, 0xdead7c00));
         ctx.cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
-        assert_eq!(resume_thread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            resume_thread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         ctx.cpu.write_reg(ArmReg::R1, 23).unwrap();
         terminate_thread(&mut ctx).unwrap();
         assert!(waitable_is_signalled(ctx.kernel, 0xdead7c00));
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
 
     #[test]
@@ -21251,32 +24497,90 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut thread = GuestThread::new(0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, [0; 17]);
+        let mut thread = GuestThread::new(
+            0x1000, 0, 0x4000, 0x1000, 0x8000, 0x9000, 0xdead7c00, [0; 17],
+        );
         thread.started = false;
         kernel.threads.push(thread);
         cpu.write_reg(ArmReg::R0, 0xdead7c00).unwrap();
         cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_exit_code_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 259);
         cpu.write_reg(ArmReg::R1, 42).unwrap();
-        assert_eq!(terminate_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            terminate_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert!(kernel.threads[0].finished);
         cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
-        get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        get_exit_code_thread(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 42);
-        close_handle(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(0));
+        close_handle(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
+        assert_eq!(
+            get_exit_code_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 42);
-        cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE).unwrap();
-        assert_eq!(get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::ReturnedR0(1));
+        cpu.write_reg(ArmReg::R0, FAKE_CURRENT_THREAD_HANDLE)
+            .unwrap();
+        assert_eq!(
+            get_exit_code_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 259);
         kernel.current_thread = 1;
         // Pseudo-handle remains valid independently of the closed real handle.
-        get_exit_code_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap();
+        get_exit_code_thread(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 42);
         cpu.write_reg(ArmReg::R0, 17).unwrap();
         kernel.threads[0].finished = false;
-        assert_eq!(exit_thread(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(), DispatchOutcome::JumpTo(0x8000));
+        assert_eq!(
+            exit_thread(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::JumpTo(0x8000)
+        );
         assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 17);
     }
 
@@ -21285,20 +24589,35 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_mem(0x1100, &[0x55; 12]).unwrap();
-        for (reg, address) in [(ArmReg::R0, 0x1100), (ArmReg::R1, 0x1104), (ArmReg::R2, 0x1108)] {
+        for (reg, address) in [
+            (ArmReg::R0, 0x1100),
+            (ArmReg::R1, 0x1104),
+            (ArmReg::R2, 0x1108),
+        ] {
             ctx.cpu.write_reg(reg, address).unwrap();
         }
-        assert_eq!(get_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            get_system_memory_division(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.cpu.read_mem(0x1100, 12).unwrap(), vec![0x55; 12]);
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_NOT_SUPPORTED));
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(ERROR_NOT_SUPPORTED)
+        );
     }
 
     #[test]
     fn memory_division_local_alloc_trace_dispatches_real_allocation() {
         let mut cpu = scanf_cpu();
-        cpu.map_region(0x50000000, 0x40000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x50000000, 0x40000, Prot::READ | Prot::WRITE)
+            .unwrap();
         cpu.write_mem(0x50000000, &[0xaa; 4096]).unwrap();
         let mut kernel = fresh_kernel();
         kernel.heap = Heap::new(0x50000000, 0x40000);
@@ -21309,24 +24628,45 @@ mod tests {
         thunk.binding = ImportBinding::Name("LocalAllocTrace".into());
         thunk.friendly_name = Some("LocalAllocTrace".into());
         let mut dispatcher = crate::WinCeDispatcher::new();
-        for (reg, value) in [(ArmReg::R0, 0x40), (ArmReg::R1, 16),
-            (ArmReg::R2, 43), (ArmReg::R3, 0xf4a64)] {
+        for (reg, value) in [
+            (ArmReg::R0, 0x40),
+            (ArmReg::R1, 16),
+            (ArmReg::R2, 43),
+            (ArmReg::R3, 0xf4a64),
+        ] {
             cpu.write_reg(reg, value).unwrap();
         }
-        let outcome = pocket_kernel::Dispatcher::dispatch(&mut dispatcher, &mut cpu, &thunk, &mut kernel).unwrap();
-        let DispatchOutcome::ReturnedR0(address) = outcome else { panic!("allocation"); };
+        let outcome =
+            pocket_kernel::Dispatcher::dispatch(&mut dispatcher, &mut cpu, &thunk, &mut kernel)
+                .unwrap();
+        let DispatchOutcome::ReturnedR0(address) = outcome else {
+            panic!("allocation");
+        };
         assert_ne!(address, 0);
         assert_eq!(kernel.heap.msize(address), Some(16));
         assert_eq!(cpu.read_mem(address, 16).unwrap(), vec![0; 16]);
         assert_eq!(ram.snapshot().program_used, 1);
         cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
-        assert_eq!(pocket_kernel::Dispatcher::dispatch(&mut dispatcher, &mut cpu, &thunk, &mut kernel).unwrap(),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            pocket_kernel::Dispatcher::dispatch(&mut dispatcher, &mut cpu, &thunk, &mut kernel)
+                .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ram.snapshot().program_used, 1);
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(8));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(8)
+        );
         ctx.cpu.write_reg(ArmReg::R0, address).unwrap();
-        assert_eq!(local_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            local_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ram.snapshot().program_used, 0);
     }
 
@@ -21334,19 +24674,33 @@ mod tests {
     fn memory_division_reads_configured_profile() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
-        kernel.memory_division = pocket_kernel::memory_division::MemoryDivision::new(
-            16 * 1024 * 1024, 512);
+        kernel.memory_division =
+            pocket_kernel::memory_division::MemoryDivision::new(16 * 1024 * 1024, 512);
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         set_thread_error(&mut ctx, 123);
-        for (reg, address) in [(ArmReg::R0, 0x1100), (ArmReg::R1, 0x1104), (ArmReg::R2, 0x1108)] {
+        for (reg, address) in [
+            (ArmReg::R0, 0x1100),
+            (ArmReg::R1, 0x1104),
+            (ArmReg::R2, 0x1108),
+        ] {
             ctx.cpu.write_reg(reg, address).unwrap();
         }
-        assert_eq!(get_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            get_system_memory_division(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         for (address, expected) in [(0x1100, 512), (0x1104, 3584), (0x1108, 4096)] {
             assert_eq!(ctx.cpu.read_u32_le(address).unwrap(), expected);
         }
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(123));
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(123)
+        );
     }
 
     #[test]
@@ -21355,15 +24709,25 @@ mod tests {
         let mut kernel = fresh_kernel();
         kernel.memory_division = Some(pocket_kernel::memory_division::MemoryDivision::default());
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         for invalid in [0, 0x60000000] {
             ctx.cpu.write_mem(0x1100, &[0x55; 8]).unwrap();
             ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
             ctx.cpu.write_reg(ArmReg::R1, 0x1104).unwrap();
             ctx.cpu.write_reg(ArmReg::R2, invalid).unwrap();
-            assert_eq!(get_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+            assert_eq!(
+                get_system_memory_division(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
             assert_eq!(ctx.cpu.read_mem(0x1100, 8).unwrap(), vec![0x55; 8]);
-            assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+            assert_eq!(
+                get_last_error(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER)
+            );
         }
     }
 
@@ -21374,19 +24738,35 @@ mod tests {
         let initial = pocket_kernel::memory_division::MemoryDivision::default();
         assert!(kernel.configure_memory_division(Some(initial.clone())));
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let old = initial.store_pages();
         ctx.cpu.write_reg(ArmReg::R0, old + 100).unwrap();
-        assert_eq!(set_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            set_system_memory_division(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(initial.store_pages(), old + 100);
         ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
         global_memory_status(&mut ctx).unwrap();
-        assert_eq!(ctx.cpu.read_u32_le(0x1108).unwrap(), initial.ram_pages() * 4096);
+        assert_eq!(
+            ctx.cpu.read_u32_le(0x1108).unwrap(),
+            initial.ram_pages() * 4096
+        );
         assert_eq!(ctx.cpu.read_u32_le(0x1110).unwrap(), 0); // no swap
         assert_eq!(ctx.cpu.read_u32_le(0x1114).unwrap(), 0);
         ctx.cpu.write_reg(ArmReg::R0, u32::MAX).unwrap();
-        assert_eq!(set_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(3));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+        assert_eq!(
+            set_system_memory_division(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(3)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER)
+        );
         assert_eq!(initial.store_pages(), old + 100);
     }
 
@@ -21400,39 +24780,75 @@ mod tests {
         assert_eq!(ram.snapshot().program_used, 2);
         let before = ram.snapshot();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::R0, 63).unwrap();
-        assert_eq!(set_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(3));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(8));
+        assert_eq!(
+            set_system_memory_division(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(3)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(8)
+        );
         assert_eq!(ram.snapshot(), before);
         ctx.kernel.heap.free(allocation);
         ctx.cpu.write_reg(ArmReg::R0, 63).unwrap();
-        assert_eq!(set_system_memory_division(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            set_system_memory_division(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ram.ram_pages(), 1);
     }
 
     #[test]
     fn memory_division_api_allocation_status_and_virtual_release() {
         let mut cpu = scanf_cpu();
-        cpu.map_region(0x50000000, 0x40000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x50000000, 0x40000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let mut kernel = fresh_kernel();
         kernel.heap = Heap::new(0x50000000, 0x40000);
         let ram = pocket_kernel::memory_division::MemoryDivision::new(64 * 4096, 32).unwrap();
         assert!(kernel.configure_memory_division(Some(ram.clone())));
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        for (reg, value) in [(ArmReg::R0, 0), (ArmReg::R1, 0x10000), (ArmReg::R2, 0x2000), (ArmReg::R3, 4)] {
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (reg, value) in [
+            (ArmReg::R0, 0),
+            (ArmReg::R1, 0x10000),
+            (ArmReg::R2, 0x2000),
+            (ArmReg::R3, 4),
+        ] {
             ctx.cpu.write_reg(reg, value).unwrap();
         }
-        let DispatchOutcome::ReturnedR0(base) = virtual_alloc(&mut ctx).unwrap() else { panic!("reservation"); };
+        let DispatchOutcome::ReturnedR0(base) = virtual_alloc(&mut ctx).unwrap() else {
+            panic!("reservation");
+        };
         assert_ne!(base, 0);
         assert_eq!(ram.snapshot().program_used, 0);
-        for (reg, value) in [(ArmReg::R0, base), (ArmReg::R1, 4096), (ArmReg::R2, 0x1000), (ArmReg::R3, 4)] {
+        for (reg, value) in [
+            (ArmReg::R0, base),
+            (ArmReg::R1, 4096),
+            (ArmReg::R2, 0x1000),
+            (ArmReg::R3, 4),
+        ] {
             ctx.cpu.write_reg(reg, value).unwrap();
         }
-        assert_eq!(virtual_alloc(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(base));
+        assert_eq!(
+            virtual_alloc(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(base)
+        );
         ctx.cpu.write_mem(base, b"data").unwrap();
-        assert_eq!(virtual_alloc(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(base));
+        assert_eq!(
+            virtual_alloc(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(base)
+        );
         assert_eq!(ctx.cpu.read_mem(base, 4).unwrap(), b"data".to_vec());
         assert_eq!(ram.snapshot().program_used, 1);
         ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
@@ -21441,14 +24857,20 @@ mod tests {
         for (reg, value) in [(ArmReg::R0, base), (ArmReg::R1, 4096), (ArmReg::R2, 0x4000)] {
             ctx.cpu.write_reg(reg, value).unwrap();
         }
-        assert_eq!(virtual_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            virtual_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(ram.snapshot().program_used, 0);
         ctx.cpu.write_reg(ArmReg::R2, 0x1000).unwrap();
         virtual_alloc(&mut ctx).unwrap();
         assert_eq!(ctx.cpu.read_mem(base, 4).unwrap(), vec![0; 4]);
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 0x8000).unwrap();
-        assert_eq!(virtual_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            virtual_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         assert_eq!(ram.snapshot().program_used, 0);
         assert_eq!(ctx.kernel.heap.free_bytes(), 0x40000);
     }
@@ -21469,13 +24891,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("records.txt"), b"12,34,\r\nword tail").unwrap();
         let mut cpu = StubCpu::new();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let mut kernel = fresh_kernel();
         kernel.vfs.mount("\\", dir.path());
-        let handle = kernel.vfs.open("\\records.txt", Access::Read, false).unwrap();
+        let handle = kernel
+            .vfs
+            .open("\\records.txt", Access::Read, false)
+            .unwrap();
         kernel.vfs.mark_text_mode(handle);
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         for (expected, position) in [(12u32, 3i64), (34, 6)] {
             ctx.cpu.write_mem(0x1100, b"%d,\0").unwrap();
             ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
@@ -21483,7 +24913,10 @@ mod tests {
             ctx.cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
             assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
             assert_eq!(ctx.cpu.read_mem(0x1200, 4).unwrap(), expected.to_le_bytes());
-            assert_eq!(ctx.kernel.vfs.seek(handle, 0, SeekKind::Current), Some(position as u64));
+            assert_eq!(
+                ctx.kernel.vfs.seek(handle, 0, SeekKind::Current),
+                Some(position as u64)
+            );
         }
         ctx.cpu.write_mem(0x1100, b"%s%n\0").unwrap();
         ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
@@ -21501,7 +24934,10 @@ mod tests {
         ctx.kernel.vfs.seek(handle, 0, SeekKind::End);
         ctx.cpu.write_mem(0x1100, b"%d\0").unwrap();
         ctx.cpu.write_reg(ArmReg::R0, handle).unwrap();
-        assert_eq!(fscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(
+            fscanf(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
     }
 
     #[test]
@@ -21509,7 +24945,11 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         for (text, expected) in [
             ("11\r\nframerate 30", 11.0f64),
             ("  -2.75 texture", -2.75),
@@ -21528,8 +24968,11 @@ mod tests {
             ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
             ctx.cpu.write_reg(ArmReg::R1, 0xdead_beef).unwrap();
             let bits = expected.to_bits();
-            assert_eq!(atof_handler(&mut ctx).unwrap(),
-                DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32), "{text:?}");
+            assert_eq!(
+                atof_handler(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0R1(bits as u32, (bits >> 32) as u32),
+                "{text:?}"
+            );
             assert_eq!(ctx.cpu.read_mem(0x1100, bytes.len() as u32).unwrap(), bytes);
         }
     }
@@ -21697,12 +25140,29 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let t = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
-        for (value, upper, lower) in [(0x61,0x41,0x61),(0x5a,0x5a,0x7a),(0,0,0),(0xe9,0xe9,0xe9),(0xffff,0xffff,0xffff),(u32::MAX,u32::MAX,u32::MAX)] {
-            ctx.cpu.write_reg(ArmReg::R0,value).unwrap();
-            assert_eq!(towupper(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(upper));
-            ctx.cpu.write_reg(ArmReg::R0,value).unwrap();
-            assert_eq!(towlower(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(lower));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        for (value, upper, lower) in [
+            (0x61, 0x41, 0x61),
+            (0x5a, 0x5a, 0x7a),
+            (0, 0, 0),
+            (0xe9, 0xe9, 0xe9),
+            (0xffff, 0xffff, 0xffff),
+            (u32::MAX, u32::MAX, u32::MAX),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R0, value).unwrap();
+            assert_eq!(
+                towupper(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(upper)
+            );
+            ctx.cpu.write_reg(ArmReg::R0, value).unwrap();
+            assert_eq!(
+                towlower(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(lower)
+            );
         }
     }
 
@@ -21711,17 +25171,31 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let t = dummy_thunk();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let input = b"UI\\Menu_01.TGA\xC9\0TAIL";
         cpu.write_mem(0x1000, input).unwrap();
         cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
-        assert_eq!(strlwr(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x1000));
-        assert_eq!(ctx.cpu.read_mem(0x1000, input.len() as u32).unwrap(), b"ui\\menu_01.tga\xC9\0TAIL");
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        assert_eq!(
+            strlwr(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x1000)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x1000, input.len() as u32).unwrap(),
+            b"ui\\menu_01.tga\xC9\0TAIL"
+        );
         // Empty string at the final mapped byte: never read past its NUL.
         ctx.cpu.write_mem(0x1fff, &[0]).unwrap();
         ctx.cpu.write_reg(ArmReg::R0, 0x1fff).unwrap();
-        assert_eq!(strlwr(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x1fff));
+        assert_eq!(
+            strlwr(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x1fff)
+        );
     }
 
     #[test]
@@ -21729,30 +25203,70 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let p = ctx.kernel.heap.alloc(16).unwrap();
         ctx.cpu.write_mem(p, &[0x5a; 16]).unwrap();
         ctx.cpu.write_reg(ArmReg::R0, p + 1).unwrap();
-        assert_eq!(local_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(p + 1));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(6));
-        assert_eq!(local_size(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            local_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(p + 1)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(6)
+        );
+        assert_eq!(
+            local_size(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         ctx.cpu.write_reg(ArmReg::R2, p + 1).unwrap();
         assert_eq!(heap_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(heap_size(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(u32::MAX));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(87));
-        assert_eq!(do_realloc(&mut ctx, p + 1, 32).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(do_realloc(&mut ctx, p, 0x100000).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(get_last_error(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(8));
+        assert_eq!(
+            heap_size(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(87)
+        );
+        assert_eq!(
+            do_realloc(&mut ctx, p + 1, 32).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            do_realloc(&mut ctx, p, 0x100000).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(8)
+        );
         assert_eq!(ctx.kernel.heap.msize(p), Some(16));
         assert_eq!(ctx.cpu.read_mem(p, 16).unwrap(), vec![0x5a; 16]);
-        let DispatchOutcome::ReturnedR0(new_p) = do_realloc(&mut ctx, p, 32).unwrap() else { panic!("realloc"); };
+        let DispatchOutcome::ReturnedR0(new_p) = do_realloc(&mut ctx, p, 32).unwrap() else {
+            panic!("realloc");
+        };
         assert_ne!(new_p, 0);
         assert_eq!(ctx.kernel.heap.msize(p), None);
-        assert_eq!(ctx.cpu.read_mem(new_p, 32).unwrap(), [vec![0x5a; 16], vec![0; 16]].concat());
+        assert_eq!(
+            ctx.cpu.read_mem(new_p, 32).unwrap(),
+            [vec![0x5a; 16], vec![0; 16]].concat()
+        );
         ctx.cpu.write_reg(ArmReg::R0, new_p).unwrap();
-        assert_eq!(local_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(local_free(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(new_p));
+        assert_eq!(
+            local_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            local_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(new_p)
+        );
     }
 
     #[test]
@@ -21761,20 +25275,25 @@ mod tests {
         let mut kernel = fresh_kernel();
         let t = dummy_thunk();
         let base = SYNTHETIC_FRAMEBUFFER_BASE;
-        cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let before = kernel.framebuffer.frame_counter;
         kernel.framebuffer.directdraw.primary_locks.insert(base);
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
         for row in 0..3 {
             let dst = base + row * ctx.kernel.framebuffer.stride_bytes();
-            ctx.cpu.write_mem(dst, &[0xff,0xff]).unwrap();
-            sync_direct_framebuffer_write(&mut ctx,dst,2).unwrap();
+            ctx.cpu.write_mem(dst, &[0xff, 0xff]).unwrap();
+            sync_direct_framebuffer_write(&mut ctx, dst, 2).unwrap();
             assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
             assert_eq!(ctx.kernel.direct_fb_frames, 0);
         }
         ctx.kernel.framebuffer.directdraw.primary_locks.clear();
-        sync_direct_framebuffer_write(&mut ctx,base,2).unwrap();
-        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        sync_direct_framebuffer_write(&mut ctx, base, 2).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
         assert_eq!(ctx.kernel.direct_fb_frames, 1);
     }
 
@@ -21783,27 +25302,41 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let t = dummy_thunk();
-        let mut thread = GuestThread::new(0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0;17]);
+        let mut thread = GuestThread::new(
+            0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17],
+        );
         thread.started = true;
         kernel.threads.push(thread);
         kernel.current_thread = 1;
-        cpu.write_reg(ArmReg::R0,0xdeaddd01).unwrap();
-        cpu.write_reg(ArmReg::R1,1).unwrap();
-        cpu.write_reg(ArmReg::Sp,0x20500).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
-        let deadline = std::time::Instant::now()+std::time::Duration::from_secs(60);
-        assert!(wait_display_until(&mut ctx,deadline).unwrap().is_some());
-        assert_eq!(ctx.kernel.current_thread,0);
-        assert_eq!(ctx.kernel.threads[0].worker_regs[0],0xdeaddd01);
-        assert_eq!(ctx.kernel.threads[0].worker_regs[1],1);
+        cpu.write_reg(ArmReg::R0, 0xdeaddd01).unwrap();
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x20500).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(wait_display_until(&mut ctx, deadline).unwrap().is_some());
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[0], 0xdeaddd01);
+        assert_eq!(ctx.kernel.threads[0].worker_regs[1], 1);
         assert!(resume_worker_reenter(&mut ctx).unwrap().is_none());
         ctx.kernel.threads[0].sleep_until_ms = 0;
-        ctx.kernel.wait_deadlines.insert((1,t.thunk_va,0x20500),0);
-        assert_eq!(resume_worker_reenter(&mut ctx).unwrap(),Some(DispatchOutcome::JumpTo(t.thunk_va)));
-        assert_eq!(ctx.kernel.current_thread,1);
-        assert_eq!(wait_display_until(&mut ctx,std::time::Instant::now()).unwrap(),None);
+        ctx.kernel
+            .wait_deadlines
+            .insert((1, t.thunk_va, 0x20500), 0);
+        assert_eq!(
+            resume_worker_reenter(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(t.thunk_va))
+        );
+        assert_eq!(ctx.kernel.current_thread, 1);
+        assert_eq!(
+            wait_display_until(&mut ctx, std::time::Instant::now()).unwrap(),
+            None
+        );
         assert!(ctx.kernel.wait_deadlines.is_empty());
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(),0xdeaddd01);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0xdeaddd01);
     }
 
     #[test]
@@ -21813,13 +25346,26 @@ mod tests {
         let t = dummy_thunk();
         for index in 0..2u32 {
             let entry = 0x10000 + index * 0x100;
-            let mut thread = GuestThread::new(entry, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00 + index, [0; 17]);
+            let mut thread = GuestThread::new(
+                entry,
+                0,
+                0x20000,
+                0x1000,
+                0x30000,
+                0x40000,
+                0xdead7c00 + index,
+                [0; 17],
+            );
             thread.started = true;
             thread.worker_saved = true;
             thread.worker_regs[15] = entry;
             kernel.threads.push(thread);
         }
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
         assert!(resume_worker(&mut ctx, 0).unwrap().is_some());
         assert_eq!(ctx.kernel.current_thread, 1);
         ctx.cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
@@ -21835,7 +25381,10 @@ mod tests {
         assert!(resume_worker_reenter(&mut ctx).unwrap().is_none());
         // Simulate expiry without waiting in the test.
         ctx.kernel.threads[0].sleep_until_ms = 0;
-        assert_eq!(resume_worker(&mut ctx, 0).unwrap(), Some(DispatchOutcome::JumpTo(0x10040)));
+        assert_eq!(
+            resume_worker(&mut ctx, 0).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10040))
+        );
     }
 
     #[test]
@@ -21843,12 +25392,19 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_fpscr(0x11).unwrap(); // preserve accumulated exception flags
         for (crt, arm) in [(0x100u32, 2u32), (0x200, 1), (0x300, 3), (0, 0)] {
             ctx.cpu.write_reg(ArmReg::R0, crt).unwrap();
             ctx.cpu.write_reg(ArmReg::R1, FP_ROUND_MASK).unwrap();
-            assert_eq!(control_fp(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(FP_EXCEPTION_MASK | crt));
+            assert_eq!(
+                control_fp(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(FP_EXCEPTION_MASK | crt)
+            );
             assert_eq!((ctx.cpu.read_fpscr().unwrap() >> 22) & 3, arm);
             assert_eq!(ctx.cpu.read_fpscr().unwrap() & 0x1f, 0x11);
         }
@@ -21862,12 +25418,18 @@ mod tests {
         control_fp(&mut ctx).unwrap();
         switch_guest_fp(&mut ctx, 0).unwrap();
         ctx.kernel.current_thread = 0;
-        assert_eq!(crt_fp_word(ctx.cpu.read_fpscr().unwrap()) & FP_ROUND_MASK, 0x300);
+        assert_eq!(
+            crt_fp_word(ctx.cpu.read_fpscr().unwrap()) & FP_ROUND_MASK,
+            0x300
+        );
         // A query does not mutate state; DENORMAL exception cannot be unmasked
         // by _controlfp, and ARM ignores x87 precision-control requests.
         ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(control_fp(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(FP_EXCEPTION_MASK | 0x300));
+        assert_eq!(
+            control_fp(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(FP_EXCEPTION_MASK | 0x300)
+        );
         ctx.cpu.write_reg(ArmReg::R1, 0xb0000).unwrap();
         control_fp(&mut ctx).unwrap();
         assert_eq!(ctx.cpu.read_fpscr().unwrap() & (1 << 15), 0);
@@ -21878,15 +25440,26 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         for period in [0u32, 65536, u32::MAX] {
             ctx.cpu.write_reg(ArmReg::R0, period).unwrap();
-            assert_eq!(time_begin_period(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+            assert_eq!(
+                time_begin_period(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(TIMERR_NOCANDO)
+            );
         }
         for period in [1u32, 1, 10] {
             ctx.cpu.write_reg(ArmReg::R0, period).unwrap();
-            assert_eq!(time_begin_period(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+            assert_eq!(
+                time_begin_period(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
         }
         assert_eq!(timer_poll_interval(ctx.kernel), 1);
         ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
@@ -21894,11 +25467,20 @@ mod tests {
         assert_eq!(ctx.kernel.timer_period_requests[&1], 1);
         time_end_period(&mut ctx).unwrap();
         assert_eq!(timer_poll_interval(ctx.kernel), 2);
-        assert_eq!(time_end_period(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(TIMERR_NOCANDO));
+        assert_eq!(
+            time_end_period(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(TIMERR_NOCANDO)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 8).unwrap();
-        assert_eq!(time_get_dev_caps(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(ctx.cpu.read_mem(0x1000, 8).unwrap(), [1u32.to_le_bytes(), 65535u32.to_le_bytes()].concat());
+        assert_eq!(
+            time_get_dev_caps(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x1000, 8).unwrap(),
+            [1u32.to_le_bytes(), 65535u32.to_le_bytes()].concat()
+        );
     }
 
     #[test]
@@ -21906,7 +25488,8 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = thunk_at(0x70000100);
-        let mut worker = GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
+        let mut worker =
+            GuestThread::new(0x10200, 0, 0x9000, 0x1000, 0x10300, 0, 0xdead7c00, [0; 17]);
         worker.started = true;
         worker.worker_saved = true;
         worker.worker_regs[13] = 0x8800;
@@ -21917,21 +25500,34 @@ mod tests {
         let other = 0x123500;
         cpu.write_reg(ArmReg::R0, key).unwrap();
         cpu.write_reg(ArmReg::R1, 0x87654321).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         initialize_critical_section(&mut ctx).unwrap();
         enter_critical_section(&mut ctx).unwrap();
         enter_critical_section(&mut ctx).unwrap();
         ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10200)));
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10200))
+        );
         assert_eq!(ctx.kernel.critical_sections[&key], (0, 2));
         // The independent worker may own a different critical section.
         ctx.cpu.write_reg(ArmReg::R0, other).unwrap();
-        assert_eq!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            enter_critical_section(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.kernel.critical_sections[&other], (1, 1));
         leave_critical_section(&mut ctx).unwrap();
         // Attempting the actual main-owned lock must still park and retry.
         ctx.cpu.write_reg(ArmReg::R0, key).unwrap();
-        assert!(matches!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::JumpTo(_)));
+        assert!(matches!(
+            enter_critical_section(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(_)
+        ));
         assert_eq!(ctx.kernel.current_thread, 0);
         assert_eq!(ctx.kernel.threads[0].parked_wait_handles, [key]);
         assert_eq!(ctx.kernel.threads[0].worker_regs[0], key);
@@ -21946,8 +25542,14 @@ mod tests {
         leave_critical_section(&mut ctx).unwrap();
         ctx.kernel.threads[0].sleep_until_ms = 0;
         ctx.kernel.worker_preempt_after_ms = 0;
-        assert_eq!(wake_due_worker(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(thunk.thunk_va)));
-        assert_eq!(enter_critical_section(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(thunk.thunk_va))
+        );
+        assert_eq!(
+            enter_critical_section(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.kernel.critical_sections[&key], (1, 1));
     }
 
@@ -21958,7 +25560,16 @@ mod tests {
         let thunk = thunk_at(0x70000100);
         for index in 0..4u32 {
             let entry = 0x10000 + index * 0x100;
-            let mut thread = GuestThread::new(entry, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00 + index, [0; 17]);
+            let mut thread = GuestThread::new(
+                entry,
+                0,
+                0x20000,
+                0x1000,
+                0x30000,
+                0x40000,
+                0xdead7c00 + index,
+                [0; 17],
+            );
             thread.started = true;
             thread.worker_saved = true;
             thread.worker_regs[15] = entry;
@@ -21969,12 +25580,19 @@ mod tests {
         cpu.write_reg(ArmReg::R0, 0xdead1234).unwrap();
         cpu.write_reg(ArmReg::R4, 0x87654321).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         assert!(resume_worker_reenter(&mut ctx).unwrap().is_some());
         let main = ctx.kernel.threads[0].saved_regs;
         ctx.cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
         assert!(park_worker(&mut ctx, 0).unwrap().is_some());
-        assert_eq!(resume_ready_worker_after_sleep(&mut ctx).unwrap(), Some(DispatchOutcome::JumpTo(0x10100)));
+        assert_eq!(
+            resume_ready_worker_after_sleep(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x10100))
+        );
         assert_eq!(ctx.kernel.threads[1].saved_regs, main);
         ctx.cpu.write_reg(ArmReg::Lr, 0x10140).unwrap();
         assert!(park_worker(&mut ctx, 0).unwrap().is_some());
@@ -21995,7 +25613,16 @@ mod tests {
         let t = dummy_thunk();
         for index in 0..5u32 {
             let entry = 0x10000 + index * 0x100;
-            let mut thread = GuestThread::new(entry, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00 + index, [0; 17]);
+            let mut thread = GuestThread::new(
+                entry,
+                0,
+                0x20000,
+                0x1000,
+                0x30000,
+                0x40000,
+                0xdead7c00 + index,
+                [0; 17],
+            );
             thread.started = true;
             thread.worker_saved = true;
             thread.worker_regs[15] = entry;
@@ -22007,8 +25634,17 @@ mod tests {
         kernel.threads[4].finished = true;
         for (step, expected) in [2usize, 4, 2, 4].into_iter().enumerate() {
             cpu.write_reg(ArmReg::Lr, 0x40000).unwrap();
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
-            let outcome = if step % 2 == 0 { resume_worker(&mut ctx, 123) } else { resume_worker_reenter(&mut ctx) }.unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
+            let outcome = if step % 2 == 0 {
+                resume_worker(&mut ctx, 123)
+            } else {
+                resume_worker_reenter(&mut ctx)
+            }
+            .unwrap();
             assert_eq!(ctx.kernel.current_thread, expected);
             let entry = 0x10000 + (expected as u32 - 1) * 0x100;
             let resume_pc = if step < 2 { entry } else { entry + 0x40 };
@@ -22021,7 +25657,11 @@ mod tests {
         }
         // A newly runnable worker is included when the rotation wraps.
         kernel.threads[0].parked_in_pump = false;
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
         assert!(resume_worker(&mut ctx, 0).unwrap().is_some());
         assert_eq!(ctx.kernel.current_thread, 1);
     }
@@ -22151,10 +25791,17 @@ mod tests {
         );
         kernel.wave_out.callback_kind = WaveCallbackKind::Event;
         kernel.wave_out.callback_target = EVENT;
-        kernel.wave_out.devices.insert(FAKE_HWAVEOUT, pocket_kernel::WaveOutDevice {
-            callback_kind: WaveCallbackKind::Event, callback_target: EVENT, instance: 0,
-            owner_thread: 0, format: pocket_kernel::audio::GuestFormat::default(), paused: false,
-        });
+        kernel.wave_out.devices.insert(
+            FAKE_HWAVEOUT,
+            pocket_kernel::WaveOutDevice {
+                callback_kind: WaveCallbackKind::Event,
+                callback_target: EVENT,
+                instance: 0,
+                owner_thread: 0,
+                format: pocket_kernel::audio::GuestFormat::default(),
+                paused: false,
+            },
+        );
 
         let t = thunk_at(0x7000_0140);
         {
@@ -22164,9 +25811,15 @@ mod tests {
                 kernel: &mut kernel,
             };
             wave_out_notify(&mut c, FAKE_HWAVEOUT, MM_WOM_OPEN, 0, 0);
-            assert!(!c.kernel.events.get(&EVENT).unwrap().signalled, "OPEN must not advertise a completed buffer");
+            assert!(
+                !c.kernel.events.get(&EVENT).unwrap().signalled,
+                "OPEN must not advertise a completed buffer"
+            );
             wave_out_notify(&mut c, FAKE_HWAVEOUT, MM_WOM_CLOSE, 0, 0);
-            assert!(!c.kernel.events.get(&EVENT).unwrap().signalled, "CLOSE must not advertise a completed buffer");
+            assert!(
+                !c.kernel.events.get(&EVENT).unwrap().signalled,
+                "CLOSE must not advertise a completed buffer"
+            );
             retire_wave_buffer(&mut c, FAKE_HWAVEOUT, HDR).unwrap();
         }
 
@@ -22187,16 +25840,36 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         cpu.map_region(HDR, 4096, Prot::READ | Prot::WRITE).unwrap();
-        kernel.events.insert(EVENT, pocket_kernel::EventObject { manual_reset: false, signalled: false });
-        kernel.object_handles.bind(EVENT, HandleObject::Event(EVENT));
-        kernel.wave_out.devices.insert(FAKE_HWAVEOUT, pocket_kernel::WaveOutDevice {
-            callback_kind: WaveCallbackKind::Event, callback_target: EVENT, instance: 0,
-            owner_thread: 0, format: pocket_kernel::audio::GuestFormat::default(), paused: false,
-        });
+        kernel.events.insert(
+            EVENT,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
+        kernel
+            .object_handles
+            .bind(EVENT, HandleObject::Event(EVENT));
+        kernel.wave_out.devices.insert(
+            FAKE_HWAVEOUT,
+            pocket_kernel::WaveOutDevice {
+                callback_kind: WaveCallbackKind::Event,
+                callback_target: EVENT,
+                instance: 0,
+                owner_thread: 0,
+                format: pocket_kernel::audio::GuestFormat::default(),
+                paused: false,
+            },
+        );
         let t = thunk_at(0x7000_0140);
         for i in 0..3 {
-            cpu.write_mem(HDR + i * 32 + 16, &WHDR_INQUEUE.to_le_bytes()).unwrap();
-            let mut c = CallCtx { cpu: &mut cpu, thunk: &t, kernel: &mut kernel };
+            cpu.write_mem(HDR + i * 32 + 16, &WHDR_INQUEUE.to_le_bytes())
+                .unwrap();
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
             retire_wave_buffer(&mut c, FAKE_HWAVEOUT, HDR + i * 32).unwrap();
         }
         assert_eq!(kernel.wave_out.event_done.len(), 2);
@@ -22209,13 +25882,22 @@ mod tests {
         assert!(!kernel.events.get(&EVENT).unwrap().signalled);
         assert!(kernel.wave_out.event_done.is_empty());
         for i in 0..3 {
-            let flags = u32::from_le_bytes(cpu.read_mem(HDR + i * 32 + 16, 4).unwrap().try_into().unwrap());
+            let flags = u32::from_le_bytes(
+                cpu.read_mem(HDR + i * 32 + 16, 4)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            );
             assert_eq!(flags & (WHDR_DONE | WHDR_INQUEUE), WHDR_DONE);
         }
         // A manual-reset callback event keeps its normal coalescing behavior.
         kernel.events.get_mut(&EVENT).unwrap().manual_reset = true;
         for _ in 0..3 {
-            let mut c = CallCtx { cpu: &mut cpu, thunk: &t, kernel: &mut kernel };
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
             wave_out_notify(&mut c, FAKE_HWAVEOUT, MM_WOM_DONE, HDR, 0);
         }
         assert!(kernel.wave_out.event_done.is_empty());
@@ -22960,13 +26642,25 @@ mod tests {
         const POSITION: u32 = 0x1300;
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
-        let format = pocket_kernel::audio::GuestFormat { sample_rate: 48000, channels: 1, bits_per_sample: 16 };
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let format = pocket_kernel::audio::GuestFormat {
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         kernel.audio.open_wave_stream(H, format);
-        kernel.wave_out.devices.insert(H, pocket_kernel::WaveOutDevice {
-            format, callback_kind: WaveCallbackKind::None, callback_target: 0,
-            instance: 0, owner_thread: 0, paused: false,
-        });
+        kernel.wave_out.devices.insert(
+            H,
+            pocket_kernel::WaveOutDevice {
+                format,
+                callback_kind: WaveCallbackKind::None,
+                callback_target: 0,
+                instance: 0,
+                owner_thread: 0,
+                paused: false,
+            },
+        );
         let tap = kernel.audio.tap();
         tap.drain_into(&mut []);
         let mut hdr = [0u8; 32];
@@ -22977,29 +26671,55 @@ mod tests {
         cpu.write_mem(HDR, &hdr).unwrap();
         cpu.write_mem(DATA, &[0; 8]).unwrap();
         let t = dummy_thunk();
-        let run = |handler: fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>, args: [u32; 3], cpu: &mut StubCpu, kernel: &mut KernelState| {
+        let run = |handler: fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>,
+                   args: [u32; 3],
+                   cpu: &mut StubCpu,
+                   kernel: &mut KernelState| {
             cpu.write_reg(ArmReg::R0, args[0]).unwrap();
             cpu.write_reg(ArmReg::R1, args[1]).unwrap();
             cpu.write_reg(ArmReg::R2, args[2]).unwrap();
-            let mut ctx = CallCtx { cpu, kernel, thunk: &t };
+            let mut ctx = CallCtx {
+                cpu,
+                kernel,
+                thunk: &t,
+            };
             handler(&mut ctx).unwrap()
         };
-        assert_eq!(run(wave_out_write, [H, HDR, 32], &mut cpu, &mut kernel), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            run(wave_out_write, [H, HDR, 32], &mut cpu, &mut kernel),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_mem(HDR + 16, 4).unwrap(), 0x1eu32.to_le_bytes());
         let mut initial = [1; 4];
         tap.drain_into(&mut initial);
         assert_eq!(initial, [0; 4]);
-        let data: Vec<u8> = [1000i16, 2000, 3000, 4000].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let data: Vec<u8> = [1000i16, 2000, 3000, 4000]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         cpu.write_mem(DATA, &data).unwrap();
         cpu.write_mem(POSITION, &2u32.to_le_bytes()).unwrap();
-        run(wave_out_get_position, [H, POSITION, 12], &mut cpu, &mut kernel);
+        run(
+            wave_out_get_position,
+            [H, POSITION, 12],
+            &mut cpu,
+            &mut kernel,
+        );
         assert_eq!(cpu.read_mem(POSITION + 4, 4).unwrap(), 4u32.to_le_bytes());
         kernel.audio.queue_mas_samples(123, format, &[10; 8]);
         let mut out = [0; 2];
         tap.drain_into(&mut out);
         assert_eq!(out, [1010, 2010]);
         assert_eq!(kernel.wave_out.pending.len(), 1); // loop is not WHDR_DONE
-        assert_eq!(run(wave_out_unprepare_header, [H, HDR, 32], &mut cpu, &mut kernel), DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING));
+        assert_eq!(
+            run(
+                wave_out_unprepare_header,
+                [H, HDR, 32],
+                &mut cpu,
+                &mut kernel
+            ),
+            DispatchOutcome::ReturnedR0(WAVERR_STILLPLAYING)
+        );
         run(wave_out_reset, [H, 0, 0], &mut cpu, &mut kernel);
         assert!(kernel.wave_out.live_loops.is_empty());
         assert!(kernel.wave_out.pending.is_empty());
@@ -23017,7 +26737,8 @@ mod tests {
         const SP: u32 = 0x1800;
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let handle = kernel.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
         let thunk = dummy_thunk();
         for len in [0u32, 1, 2, 3, 4, 8] {
@@ -23032,12 +26753,22 @@ mod tests {
                 cpu.write_reg(ArmReg::Sp, SP).unwrap();
                 let base = SP + cpu.stack_arg_offset();
                 for (i, value) in [OUT, len, RETURNED, 0].iter().enumerate() {
-                    cpu.write_mem(base + i as u32 * 4, &value.to_le_bytes()).unwrap();
+                    cpu.write_mem(base + i as u32 * 4, &value.to_le_bytes())
+                        .unwrap();
                 }
-                let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-                assert!(matches!(device_io_control(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1)));
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                };
+                assert!(matches!(
+                    device_io_control(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(1)
+                ));
                 let mut expected = original;
-                if len == 4 { expected[..4].copy_from_slice(&1u32.to_le_bytes()); }
+                if len == 4 {
+                    expected[..4].copy_from_slice(&1u32.to_le_bytes());
+                }
                 assert_eq!(cpu.read_mem(OUT, 8).unwrap(), expected);
                 assert_eq!(cpu.read_mem(RETURNED, 4).unwrap(), 0u32.to_le_bytes());
             }
@@ -23058,7 +26789,8 @@ mod tests {
         let bytes = frame.repeat(128);
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
-        cpu.map_region(DATA, 0x20000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(DATA, 0x20000, Prot::READ | Prot::WRITE)
+            .unwrap();
         cpu.write_mem(DATA, &bytes).unwrap();
         let handle = kernel.vfs.open("MAS1:", Access::ReadWrite, false).unwrap();
         let tap = kernel.audio.tap();
@@ -23075,10 +26807,18 @@ mod tests {
             cpu.write_reg(ArmReg::Sp, SP).unwrap();
             let base = SP + cpu.stack_arg_offset();
             for (i, value) in [output, out_len, RETURNED, 0].iter().enumerate() {
-                cpu.write_mem(base + i as u32 * 4, &value.to_le_bytes()).unwrap();
+                cpu.write_mem(base + i as u32 * 4, &value.to_le_bytes())
+                    .unwrap();
             }
-            let mut ctx = CallCtx { cpu: &mut cpu, thunk: &t, kernel: &mut kernel };
-            assert_eq!(device_io_control(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                device_io_control(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
             if code == 0x001d0ff0 {
                 assert_eq!(cpu.read_mem(RETURNED, 4).unwrap(), 4u32.to_le_bytes());
             }
@@ -23096,17 +26836,33 @@ mod tests {
         tap.drain_into(&mut output);
         service_mas_audio(&mut kernel);
         assert!(kernel.events.get(&event).unwrap().signalled);
-        assert_eq!(kernel.vfs.mp3_decoder_reply(handle, 0x001d1010, 4), 4u32.to_le_bytes());
+        assert_eq!(
+            kernel.vfs.mp3_decoder_reply(handle, 0x001d1010, 4),
+            4u32.to_le_bytes()
+        );
         cpu.write_reg(ArmReg::R0, event).unwrap();
         cpu.write_reg(ArmReg::R1, 0).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, thunk: &t, kernel: &mut kernel };
-        assert_eq!(wait_for_single_object(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &t,
+            kernel: &mut kernel,
+        };
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(!kernel.events.get(&event).unwrap().signalled);
-        let remaining = kernel.audio.mas_written_samples(kernel.vfs.mp3_stream_key(handle)) - first as u64;
+        let remaining = kernel
+            .audio
+            .mas_written_samples(kernel.vfs.mp3_stream_key(handle))
+            - first as u64;
         tap.drain_into(&mut vec![0; remaining as usize]);
         service_mas_audio(&mut kernel);
         assert!(kernel.events.get(&event).unwrap().signalled);
-        assert_eq!(kernel.vfs.mp3_decoder_reply(handle, 0x001d1010, 4), 7u32.to_le_bytes());
+        assert_eq!(
+            kernel.vfs.mp3_decoder_reply(handle, 0x001d1010, 4),
+            7u32.to_le_bytes()
+        );
     }
 
     /// `MAS1:` is the Gizmondo's Micronas hardware MP3 decoder. Ball
@@ -23192,10 +26948,17 @@ mod tests {
         kernel.wave_out.callback_kind = pocket_kernel::WaveCallbackKind::Function;
         kernel.wave_out.callback_target = PROC;
         kernel.wave_out.instance = INSTANCE;
-        kernel.wave_out.devices.insert(FAKE_HWAVEOUT, pocket_kernel::WaveOutDevice {
-            callback_kind: pocket_kernel::WaveCallbackKind::Function, callback_target: PROC,
-            instance: INSTANCE, owner_thread: 0, format: pocket_kernel::audio::GuestFormat::default(), paused: false,
-        });
+        kernel.wave_out.devices.insert(
+            FAKE_HWAVEOUT,
+            pocket_kernel::WaveOutDevice {
+                callback_kind: pocket_kernel::WaveCallbackKind::Function,
+                callback_target: PROC,
+                instance: INSTANCE,
+                owner_thread: 0,
+                format: pocket_kernel::audio::GuestFormat::default(),
+                paused: false,
+            },
+        );
         // A buffer whose samples have already played: the host cursor
         // starts at zero, so this is due the moment anyone asks.
         kernel
@@ -23332,34 +27095,71 @@ mod tests {
 
     #[test]
     fn pending_key_releases_override_old_state_and_ignore_other_keys() {
-        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();let t=dummy_thunk();
-        let mut c=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&t};
-        c.kernel.pressed_keys[0x25]=true;
-        assert_eq!(key_state_value(&mut c,0x25),0x8000);
-        c.kernel.pending_input.push_back(InputEvent::KeyUp{vk:0x25});
-        assert_eq!(key_state_value(&mut c,0x25),0,"release wins before message delivery");
-        assert_eq!(key_state_value(&mut c,0x27),0,"release must not press an unrelated key");
-        c.kernel.pending_input.push_back(InputEvent::KeyDown{vk:0x25});
-        c.kernel.pending_input.push_back(InputEvent::KeyDown{vk:0x27});
-        assert_eq!(key_state_value(&mut c,0x25),0x8000,"another press must not hide this press");
-        c.kernel.pending_input.push_back(InputEvent::KeyUp{vk:0x27});
-        assert_eq!(key_state_value(&mut c,0x25),0x8000);
-        assert_eq!(key_state_value(&mut c,0x27),0);
-        c.kernel.pending_input.push_back(InputEvent::KeyDown{vk:0xc1});
-        assert_eq!(key_state_value(&mut c,0xd1),0x8000);
-        c.kernel.pending_input.push_back(InputEvent::KeyUp{vk:0xd1});
-        assert_eq!(key_state_value(&mut c,0xc1),0);
-        assert_eq!(key_state_value(&mut c,u32::MAX),0);
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        c.kernel.pressed_keys[0x25] = true;
+        assert_eq!(key_state_value(&mut c, 0x25), 0x8000);
+        c.kernel
+            .pending_input
+            .push_back(InputEvent::KeyUp { vk: 0x25 });
+        assert_eq!(
+            key_state_value(&mut c, 0x25),
+            0,
+            "release wins before message delivery"
+        );
+        assert_eq!(
+            key_state_value(&mut c, 0x27),
+            0,
+            "release must not press an unrelated key"
+        );
+        c.kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: 0x25 });
+        c.kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: 0x27 });
+        assert_eq!(
+            key_state_value(&mut c, 0x25),
+            0x8000,
+            "another press must not hide this press"
+        );
+        c.kernel
+            .pending_input
+            .push_back(InputEvent::KeyUp { vk: 0x27 });
+        assert_eq!(key_state_value(&mut c, 0x25), 0x8000);
+        assert_eq!(key_state_value(&mut c, 0x27), 0);
+        c.kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: 0xc1 });
+        assert_eq!(key_state_value(&mut c, 0xd1), 0x8000);
+        c.kernel
+            .pending_input
+            .push_back(InputEvent::KeyUp { vk: 0xd1 });
+        assert_eq!(key_state_value(&mut c, 0xc1), 0);
+        assert_eq!(key_state_value(&mut c, u32::MAX), 0);
     }
 
     #[test]
     fn delayed_keyboard_repeat_does_not_deliver_a_catchup_burst() {
-        let mut cpu=StubCpu::new();let mut kernel=fresh_kernel();let t=dummy_thunk();
-        let mut c=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&t};
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
         c.kernel.held_keys.push(0x25);
-        let now=monotonic_ms();c.kernel.key_repeat_next_ms=Some(now.saturating_sub(80));
+        let now = monotonic_ms();
+        c.kernel.key_repeat_next_ms = Some(now.saturating_sub(80));
         assert!(key_repeat_if_due(&mut c).is_some());
-        assert!(c.kernel.key_repeat_next_ms.unwrap()>=now.saturating_add(KEY_REPEAT_INTERVAL_MS));
+        assert!(c.kernel.key_repeat_next_ms.unwrap() >= now.saturating_add(KEY_REPEAT_INTERVAL_MS));
     }
 
     #[test]
@@ -23395,19 +27195,38 @@ mod tests {
         assert_eq!(c.kernel.key_repeat_cursor, 0);
         assert!(c.kernel.key_repeat_next_ms.unwrap() >= monotonic_ms());
     }
-    fn tls_test_call(cpu: &mut StubCpu, kernel: &mut KernelState,
-        handler: fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>, args: &[u32]) -> u32 {
+    fn tls_test_call(
+        cpu: &mut StubCpu,
+        kernel: &mut KernelState,
+        handler: fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>,
+        args: &[u32],
+    ) -> u32 {
         for (index, value) in args.iter().enumerate() {
-            cpu.write_reg([ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3][index], *value).unwrap();
+            cpu.write_reg(
+                [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3][index],
+                *value,
+            )
+            .unwrap();
         }
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu, kernel, thunk: &thunk };
-        let DispatchOutcome::ReturnedR0(value) = handler(&mut ctx).unwrap() else { panic!() };
+        let mut ctx = CallCtx {
+            cpu,
+            kernel,
+            thunk: &thunk,
+        };
+        let DispatchOutcome::ReturnedR0(value) = handler(&mut ctx).unwrap() else {
+            panic!()
+        };
         value
     }
     fn tls_test_cpu() -> StubCpu {
         let mut cpu = StubCpu::new();
-        cpu.map_region(pocket_kernel::USER_KDATA_PAGE_BASE, 4096, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(
+            pocket_kernel::USER_KDATA_PAGE_BASE,
+            4096,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
         cpu
     }
 
@@ -23422,14 +27241,23 @@ mod tests {
         thunk.binding = ImportBinding::Name("CopyFileW".into());
         thunk.friendly_name = Some("CopyFileW".into());
         cpu.write_reg(ArmReg::R0, 0).unwrap();
-        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(kernel.thread_last_errors.get(&0), Some(&87));
         thunk.binding = ImportBinding::Name("RegFlushKey".into());
         thunk.friendly_name = Some("RegFlushKey".into());
-        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(), DispatchOutcome::ReturnedR0(6));
+        assert_eq!(
+            dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(6)
+        );
         assert_eq!(kernel.thread_last_errors.get(&0), Some(&87));
         cpu.write_reg(ArmReg::R0, 0x80000001).unwrap();
-        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
 
     #[test]
@@ -23438,30 +27266,49 @@ mod tests {
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
         for (hwnd, id) in [(FAKE_HWND, 12), (0, 12), (FAKE_HWND, 13)] {
-            assert_eq!(tls_test_call(&mut cpu, &mut kernel, set_timer, &[hwnd, id, 100, 0]), id);
+            assert_eq!(
+                tls_test_call(&mut cpu, &mut kernel, set_timer, &[hwnd, id, 100, 0]),
+                id
+            );
         }
         kernel.current_thread = 1;
         tls_test_call(&mut cpu, &mut kernel, set_timer, &[0, 12, 100, 0]);
         assert_eq!(kernel.timers.len(), 4);
         kernel.current_thread = 0;
-        assert_eq!(tls_test_call(&mut cpu, &mut kernel, kill_timer, &[0, 12]), 1);
-        assert_eq!(tls_test_call(&mut cpu, &mut kernel, kill_timer, &[0, 12]), 0);
+        assert_eq!(
+            tls_test_call(&mut cpu, &mut kernel, kill_timer, &[0, 12]),
+            1
+        );
+        assert_eq!(
+            tls_test_call(&mut cpu, &mut kernel, kill_timer, &[0, 12]),
+            0
+        );
         assert!(kernel.timers.contains_key(&(1, 0, 12)));
-        for timer in kernel.timers.values_mut() { timer.1 = 0; }
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        for timer in kernel.timers.values_mut() {
+            timer.1 = 0;
+        }
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         assert!(timer_message_if_due(&mut ctx, false).is_some());
         assert!(timer_message_if_due(&mut ctx, false).is_some());
         assert!(timer_message_if_due(&mut ctx, true).is_some());
         assert!(timer_message_if_due(&mut ctx, true).is_some());
         assert!(timer_message_if_due(&mut ctx, true).is_none());
         ctx.kernel.current_thread = 1;
-        assert_eq!(timer_message_if_due(&mut ctx, true), Some((0, WM_TIMER, 12, 0)));
+        assert_eq!(
+            timer_message_if_due(&mut ctx, true),
+            Some((0, WM_TIMER, 12, 0))
+        );
     }
 
     #[test]
     fn timer_callback_dispatch_receives_timestamp_and_restores_call_frame() {
         let mut cpu = StubCpu::new();
-        cpu.map_region(0x1000, 4096, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
         write_synthetic_msg_for_hwnd(&mut cpu, 0x1000, 0, WM_TIMER, 77, 0x4000).unwrap();
@@ -23469,13 +27316,23 @@ mod tests {
         cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x9000).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x4000));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x4000)
+        );
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0);
         assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_TIMER);
         assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 77);
         assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 1234);
-        assert_eq!(dispatch_message_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1000);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x9000);
         assert!(ctx.kernel.message_frames.is_empty());
@@ -23483,10 +27340,12 @@ mod tests {
 
     #[test]
     fn tls_switch_preserves_inline_writes_and_zero_initializes_new_threads() {
-        let mut cpu = tls_test_cpu(); let mut k = fresh_kernel();
+        let mut cpu = tls_test_cpu();
+        let mut k = fresh_kernel();
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_alloc, &[]), 0);
         // CRT can bypass TlsSetValue through KData.lpvTls.
-        cpu.write_mem(USER_KDATA_TLS_ARRAY_VA, &0xaabbccddu32.to_le_bytes()).unwrap();
+        cpu.write_mem(USER_KDATA_TLS_ARRAY_VA, &0xaabbccddu32.to_le_bytes())
+            .unwrap();
         k.current_thread = 1;
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_get_value, &[0]), 0);
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, 11]), 1);
@@ -23494,30 +27353,51 @@ mod tests {
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_get_value, &[0]), 0);
         tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, 22]);
         for (thread, expected) in [(0, 0xaabbccdd), (1, 11), (2, 22), (0, 0xaabbccdd)] {
-            k.current_thread = thread; k.sync_thread_tls(&mut cpu).unwrap();
-            assert_eq!(u32::from_le_bytes(cpu.read_mem(USER_KDATA_TLS_ARRAY_VA, 4).unwrap().try_into().unwrap()), expected);
+            k.current_thread = thread;
+            k.sync_thread_tls(&mut cpu).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(
+                    cpu.read_mem(USER_KDATA_TLS_ARRAY_VA, 4)
+                        .unwrap()
+                        .try_into()
+                        .unwrap()
+                ),
+                expected
+            );
         }
     }
 
     #[test]
     fn tls_free_and_reallocation_clear_values_in_every_thread() {
-        let mut cpu = tls_test_cpu(); let mut k = fresh_kernel();
+        let mut cpu = tls_test_cpu();
+        let mut k = fresh_kernel();
         tls_test_call(&mut cpu, &mut k, tls_alloc, &[]);
-        for thread in 0..3 { k.current_thread = thread; tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, 99]); }
+        for thread in 0..3 {
+            k.current_thread = thread;
+            tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, 99]);
+        }
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_free, &[0]), 1);
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_free, &[0]), 0);
         assert_eq!(k.thread_last_errors[&2], 87);
         // Even a range-valid write into a free slot cannot contaminate a new allocation.
-        k.current_thread = 1; tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, 88]);
-        k.current_thread = 0; assert_eq!(tls_test_call(&mut cpu, &mut k, tls_alloc, &[]), 0);
-        for thread in 0..3 { k.current_thread = thread; assert_eq!(tls_test_call(&mut cpu, &mut k, tls_get_value, &[0]), 0); }
+        k.current_thread = 1;
+        tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, 88]);
+        k.current_thread = 0;
+        assert_eq!(tls_test_call(&mut cpu, &mut k, tls_alloc, &[]), 0);
+        for thread in 0..3 {
+            k.current_thread = thread;
+            assert_eq!(tls_test_call(&mut cpu, &mut k, tls_get_value, &[0]), 0);
+        }
     }
 
     #[test]
     fn tls_exhaustion_range_errors_and_last_error_follow_ce() {
-        let mut cpu = tls_test_cpu(); let mut k = fresh_kernel();
+        let mut cpu = tls_test_cpu();
+        let mut k = fresh_kernel();
         k.thread_last_errors.insert(0, 123);
-        for slot in 0..64 { assert_eq!(tls_test_call(&mut cpu, &mut k, tls_alloc, &[]), slot); }
+        for slot in 0..64 {
+            assert_eq!(tls_test_call(&mut cpu, &mut k, tls_alloc, &[]), slot);
+        }
         assert_eq!(k.thread_last_errors[&0], 123);
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_alloc, &[]), u32::MAX);
         assert_eq!(k.thread_last_errors[&0], 8);
@@ -23527,12 +27407,15 @@ mod tests {
                 assert_eq!(k.thread_last_errors[&0], 87);
             }
         }
-        for slot in 0..64 { assert_eq!(tls_test_call(&mut cpu, &mut k, tls_free, &[slot]), 1); }
+        for slot in 0..64 {
+            assert_eq!(tls_test_call(&mut cpu, &mut k, tls_free, &[slot]), 1);
+        }
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_set_value, &[63, 77]), 1);
         assert_eq!(k.thread_last_errors[&0], 87); // Successful Set preserves the error.
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_get_value, &[63]), 77);
         assert_eq!(k.thread_last_errors[&0], 0);
-        k.current_thread = 1; k.thread_last_errors.insert(1, 91);
+        k.current_thread = 1;
+        k.thread_last_errors.insert(1, 91);
         assert_eq!(tls_test_call(&mut cpu, &mut k, tls_get_value, &[63]), 0);
         assert_eq!(k.thread_last_errors[&1], 0);
         assert_eq!(k.thread_last_errors[&0], 0);
@@ -23540,77 +27423,136 @@ mod tests {
 
     #[test]
     fn tls_failed_guest_write_does_not_consume_an_index() {
-        let mut cpu = StubCpu::new(); let mut k = fresh_kernel(); let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut k, thunk: &thunk };
+        let mut cpu = StubCpu::new();
+        let mut k = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut k,
+            thunk: &thunk,
+        };
         assert!(tls_alloc(&mut ctx).is_err());
         assert_eq!(ctx.kernel.tls_slots_used, 0);
     }
 
     #[test]
     fn tls_cleanup_drops_dead_snapshots_without_freeing_pointees() {
-        let mut cpu = tls_test_cpu(); let mut k = fresh_kernel();
+        let mut cpu = tls_test_cpu();
+        let mut k = fresh_kernel();
         tls_test_call(&mut cpu, &mut k, tls_alloc, &[]);
         let pointee = k.heap.alloc(16).unwrap();
         tls_test_call(&mut cpu, &mut k, tls_set_value, &[0, pointee]);
-        k.current_thread = 1; k.sync_thread_tls(&mut cpu).unwrap();
+        k.current_thread = 1;
+        k.sync_thread_tls(&mut cpu).unwrap();
         assert!(k.thread_tls.contains_key(&0));
-        k.main_thread.exit_code = Some(11); k.reclaim_finished_stacks(&mut cpu).unwrap();
+        k.main_thread.exit_code = Some(11);
+        k.reclaim_finished_stacks(&mut cpu).unwrap();
         assert!(!k.thread_tls.contains_key(&0));
         assert_eq!(k.heap.msize(pointee), Some(16));
         // A dead outgoing owner must not be saved again on the next switch.
-        k.current_thread = 0; k.sync_thread_tls(&mut cpu).unwrap();
-        k.current_thread = 1; k.sync_thread_tls(&mut cpu).unwrap();
+        k.current_thread = 0;
+        k.sync_thread_tls(&mut cpu).unwrap();
+        k.current_thread = 1;
+        k.sync_thread_tls(&mut cpu).unwrap();
         assert!(!k.thread_tls.contains_key(&0));
-        k.record_process_exit(0); assert!(k.thread_tls.is_empty()); assert_eq!(k.tls_slots_used, 0);
+        k.record_process_exit(0);
+        assert!(k.thread_tls.is_empty());
+        assert_eq!(k.tls_slots_used, 0);
     }
 
     #[test]
     fn wait_parameter_failures_set_error_without_consuming_signals() {
-        let mut cpu = StubCpu::new(); let mut k = fresh_kernel();
-        for args in [[0, 0x1000, 0, 0], [65, 0x1000, 0, 0], [1, 0, 0, 0], [1, 0x12345000, 0, 0]] {
-            assert_eq!(tls_test_call(&mut cpu, &mut k, wait_for_multiple_objects, &args), u32::MAX);
+        let mut cpu = StubCpu::new();
+        let mut k = fresh_kernel();
+        for args in [
+            [0, 0x1000, 0, 0],
+            [65, 0x1000, 0, 0],
+            [1, 0, 0, 0],
+            [1, 0x12345000, 0, 0],
+        ] {
+            assert_eq!(
+                tls_test_call(&mut cpu, &mut k, wait_for_multiple_objects, &args),
+                u32::MAX
+            );
             assert_eq!(k.thread_last_errors[&0], 87);
         }
-        cpu.map_region(0x1000, 4096, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
         for handle in [0u32, u32::MAX] {
             cpu.write_mem(0x1000, &handle.to_le_bytes()).unwrap();
-            assert_eq!(tls_test_call(&mut cpu, &mut k, wait_for_multiple_objects, &[1, 0x1000, 0, 0]), u32::MAX);
+            assert_eq!(
+                tls_test_call(
+                    &mut cpu,
+                    &mut k,
+                    wait_for_multiple_objects,
+                    &[1, 0x1000, 0, 0]
+                ),
+                u32::MAX
+            );
             assert_eq!(k.thread_last_errors[&0], 6);
-            assert_eq!(tls_test_call(&mut cpu, &mut k, wait_for_single_object, &[handle, 0]), u32::MAX);
+            assert_eq!(
+                tls_test_call(&mut cpu, &mut k, wait_for_single_object, &[handle, 0]),
+                u32::MAX
+            );
             assert_eq!(k.thread_last_errors[&0], 6);
         }
         k.current_thread = 1;
         tls_test_call(&mut cpu, &mut k, wait_for_multiple_objects, &[0, 0, 0, 0]);
-        assert_eq!(k.thread_last_errors[&1], 87); assert_eq!(k.thread_last_errors[&0], 6);
+        assert_eq!(k.thread_last_errors[&1], 87);
+        assert_eq!(k.thread_last_errors[&0], 6);
         struct NoRam;
         impl pocket_cpu::image_pages::ImagePageBudget for NoRam {
-            fn acquire(&self) -> bool { false }
-            fn release(&self) { panic!("an unacquired page must not be refunded"); }
+            fn acquire(&self) -> bool {
+                false
+            }
+            fn release(&self) {
+                panic!("an unacquired page must not be refunded");
+            }
         }
-        cpu.map_image_region(0x2000, 4096, Prot::READ, vec![0; 4], std::sync::Arc::new(NoRam)).unwrap();
-        cpu.write_reg(ArmReg::R0, 1).unwrap(); cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
-        cpu.write_reg(ArmReg::R2, 0).unwrap(); cpu.write_reg(ArmReg::R3, 0).unwrap();
-        let thunk = dummy_thunk(); let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut k, thunk: &thunk };
-        assert!(matches!(wait_for_multiple_objects(&mut ctx),
-            Err(KernelError::Cpu(pocket_cpu::CpuError::ImageOutOfMemory { va: 0x2000 }))));
+        cpu.map_image_region(
+            0x2000,
+            4096,
+            Prot::READ,
+            vec![0; 4],
+            std::sync::Arc::new(NoRam),
+        )
+        .unwrap();
+        cpu.write_reg(ArmReg::R0, 1).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        cpu.write_reg(ArmReg::R3, 0).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut k,
+            thunk: &thunk,
+        };
+        assert!(matches!(
+            wait_for_multiple_objects(&mut ctx),
+            Err(KernelError::Cpu(pocket_cpu::CpuError::ImageOutOfMemory {
+                va: 0x2000
+            }))
+        ));
         assert_eq!(ctx.kernel.thread_last_errors[&1], 87);
-
     }
-
 }
 
-fn set_file_attributes_w(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError>{
-    let flags=ctx.arg_u32(1)?;let result=vfs_api_path(ctx,0).and_then(|p|ctx.kernel.vfs.set_attributes(&p,flags));vfs_api_bool(ctx,result)
+fn set_file_attributes_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let flags = ctx.arg_u32(1)?;
+    let result = vfs_api_path(ctx, 0).and_then(|p| ctx.kernel.vfs.set_attributes(&p, flags));
+    vfs_api_bool(ctx, result)
 }
 
-fn crt_set_new_handler(ctx:&mut CallCtx<'_>) -> Result<DispatchOutcome,KernelError> {
-    let next=ctx.arg_u32(0)?; let previous=std::mem::replace(&mut ctx.kernel.crt_new_handler,next);
+fn crt_set_new_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let next = ctx.arg_u32(0)?;
+    let previous = std::mem::replace(&mut ctx.kernel.crt_new_handler, next);
     Ok(DispatchOutcome::ReturnedR0(previous))
 }
-fn cpp_set_new_handler(ctx:&mut CallCtx<'_>) -> Result<DispatchOutcome,KernelError> {
-    let next=ctx.arg_u32(0)?; let previous=std::mem::replace(&mut ctx.kernel.cpp_new_handler,next);
+fn cpp_set_new_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let next = ctx.arg_u32(0)?;
+    let previous = std::mem::replace(&mut ctx.kernel.cpp_new_handler, next);
     Ok(DispatchOutcome::ReturnedR0(previous))
 }
-fn crt_query_new_handler(ctx:&mut CallCtx<'_>) -> Result<DispatchOutcome,KernelError> {
+fn crt_query_new_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(ctx.kernel.crt_new_handler))
 }

@@ -63,42 +63,89 @@ const DDRAW_METHODS: [&str; 25] = [
 // Windows Mobile IDirectDraw table above: SetCooperativeLevel is slot 20,
 // not 17, and CreateSurface is slot 6, not 5.
 const IID_DDRAW4: [u8; 16] = [
-    0x9a, 0x50, 0x59, 0x9c, 0xbd, 0x39, 0xd1, 0x11,
-    0x8c, 0x4a, 0x00, 0xc0, 0x4f, 0xd9, 0x30, 0xc5,
+    0x9a, 0x50, 0x59, 0x9c, 0xbd, 0x39, 0xd1, 0x11, 0x8c, 0x4a, 0x00, 0xc0, 0x4f, 0xd9, 0x30, 0xc5,
 ];
 const IID_SURFACE4: [u8; 16] = [
-    0x30, 0x86, 0x2b, 0x0b, 0x35, 0xad, 0xd0, 0x11,
-    0x8e, 0xa6, 0x00, 0x60, 0x97, 0x97, 0xea, 0x5b,
+    0x30, 0x86, 0x2b, 0x0b, 0x35, 0xad, 0xd0, 0x11, 0x8e, 0xa6, 0x00, 0x60, 0x97, 0x97, 0xea, 0x5b,
 ];
 const IID_SURFACE_CE: [u8; 16] = [
-    0xe4, 0x83, 0x0e, 0x0b, 0x7f, 0xf3, 0xd2, 0x11,
-    0x8b, 0x15, 0x00, 0xc0, 0x4f, 0x68, 0x92, 0x92,
+    0xe4, 0x83, 0x0e, 0x0b, 0x7f, 0xf3, 0xd2, 0x11, 0x8b, 0x15, 0x00, 0xc0, 0x4f, 0x68, 0x92, 0x92,
 ];
 const DDRAW4_METHODS: [&str; 28] = [
-    "ddraw_qi", "ddraw_add_ref", "ddraw_release", "ddraw_compact",
-    "ddraw_create_clipper", "ddraw_create_palette", "ddraw4_create_surface",
-    "ddraw_duplicate_surface", "ddraw_enum_display_modes", "ddraw_enum_surfaces",
-    "ddraw_flip_to_gdi", "ddraw_get_caps", "ddraw_get_display_mode",
-    "ddraw_get_fourcc_codes", "ddraw_get_gdi_surface", "ddraw_get_monitor_frequency",
-    "ddraw_get_scan_line", "ddraw_get_vertical_blank_status", "ddraw_initialize",
-    "ddraw_restore_display_mode", "ddraw_set_cooperative_level", "ddraw_set_display_mode",
-    "ddraw_wait_for_vertical_blank", "ddraw_get_available_vid_mem",
-    "ddraw_get_surface_from_dc", "ddraw_restore_all_surfaces",
-    "ddraw_test_cooperative_level", "ddraw_get_device_identifier",
+    "ddraw_qi",
+    "ddraw_add_ref",
+    "ddraw_release",
+    "ddraw_compact",
+    "ddraw_create_clipper",
+    "ddraw_create_palette",
+    "ddraw4_create_surface",
+    "ddraw_duplicate_surface",
+    "ddraw_enum_display_modes",
+    "ddraw_enum_surfaces",
+    "ddraw_flip_to_gdi",
+    "ddraw_get_caps",
+    "ddraw_get_display_mode",
+    "ddraw_get_fourcc_codes",
+    "ddraw_get_gdi_surface",
+    "ddraw_get_monitor_frequency",
+    "ddraw_get_scan_line",
+    "ddraw_get_vertical_blank_status",
+    "ddraw_initialize",
+    "ddraw_restore_display_mode",
+    "ddraw_set_cooperative_level",
+    "ddraw_set_display_mode",
+    "ddraw_wait_for_vertical_blank",
+    "ddraw_get_available_vid_mem",
+    "ddraw_get_surface_from_dc",
+    "ddraw_restore_all_surfaces",
+    "ddraw_test_cooperative_level",
+    "ddraw_get_device_identifier",
 ];
 const SURFACE4_METHODS: [&str; 45] = [
-    "surface_qi", "surface_add_ref", "surface_release", "surface_add_attached",
-    "surface_add_overlay_dirty", "surface_blt", "surface_blt_batch", "surface_blt_fast",
-    "surface_delete_attached", "surface_enum_attached", "surface_enum_overlay", "surface_flip",
-    "surface_get_attached", "surface_get_blt_status", "surface_get_caps", "surface_get_clipper",
-    "surface_get_color_key", "surface_get_dc", "surface_get_flip_status",
-    "surface_get_overlay_position", "surface_get_palette", "surface_get_pixel_format",
-    "surface_get_surface_desc", "surface_initialize", "surface_is_lost", "surface_lock",
-    "surface_release_dc", "surface_restore", "surface_set_clipper", "surface_set_color_key",
-    "surface_set_overlay_position", "surface_set_palette", "surface_unlock", "surface_update_overlay",
-    "surface_update_overlay_display", "surface_update_overlay_z_order", "surface_get_dd_interface",
-    "surface_page_lock", "surface_page_unlock", "surface_set_surface_desc", "surface_set_private_data",
-    "surface_get_private_data", "surface_free_private_data", "surface_get_uniqueness_value",
+    "surface_qi",
+    "surface_add_ref",
+    "surface_release",
+    "surface_add_attached",
+    "surface_add_overlay_dirty",
+    "surface_blt",
+    "surface_blt_batch",
+    "surface_blt_fast",
+    "surface_delete_attached",
+    "surface_enum_attached",
+    "surface_enum_overlay",
+    "surface_flip",
+    "surface_get_attached",
+    "surface_get_blt_status",
+    "surface_get_caps",
+    "surface_get_clipper",
+    "surface_get_color_key",
+    "surface_get_dc",
+    "surface_get_flip_status",
+    "surface_get_overlay_position",
+    "surface_get_palette",
+    "surface_get_pixel_format",
+    "surface_get_surface_desc",
+    "surface_initialize",
+    "surface_is_lost",
+    "surface_lock",
+    "surface_release_dc",
+    "surface_restore",
+    "surface_set_clipper",
+    "surface_set_color_key",
+    "surface_set_overlay_position",
+    "surface_set_palette",
+    "surface_unlock",
+    "surface_update_overlay",
+    "surface_update_overlay_display",
+    "surface_update_overlay_z_order",
+    "surface_get_dd_interface",
+    "surface_page_lock",
+    "surface_page_unlock",
+    "surface_set_surface_desc",
+    "surface_set_private_data",
+    "surface_get_private_data",
+    "surface_free_private_data",
+    "surface_get_uniqueness_value",
     "surface_change_uniqueness_value",
 ];
 
@@ -183,13 +230,19 @@ const SURFACE_METHODS: [&str; 31] = [
 const SURFACE5_METHODS: [&str; 46] = {
     let mut names = ["surface_alpha_blt"; 46];
     let mut i = 0;
-    while i < SURFACE4_METHODS.len() { names[i] = SURFACE4_METHODS[i]; i += 1; }
+    while i < SURFACE4_METHODS.len() {
+        names[i] = SURFACE4_METHODS[i];
+        i += 1;
+    }
     names
 };
 const SURFACE_COMPAT_METHODS: [&str; 46] = {
     let mut names = SURFACE5_METHODS;
     let mut i = 0;
-    while i < SURFACE_METHODS.len() { names[i] = SURFACE_METHODS[i]; i += 1; }
+    while i < SURFACE_METHODS.len() {
+        names[i] = SURFACE_METHODS[i];
+        i += 1;
+    }
     names[25] = "surface_ce_palette_or_legacy_lock";
     names[7] = "surface_ce_flip_or_legacy_blt_fast";
     names
@@ -313,8 +366,12 @@ fn alloc_object_with(
         .alloc(4 + private.len() as u32 * 4)
         .unwrap_or(0);
     if table == 0 || object == 0 {
-        if table != 0 { ctx.kernel.heap.free(table); }
-        if object != 0 { ctx.kernel.heap.free(object); }
+        if table != 0 {
+            ctx.kernel.heap.free(table);
+        }
+        if object != 0 {
+            ctx.kernel.heap.free(object);
+        }
         return Ok(0);
     }
     write_vtable(ctx, table, vtable)?;
@@ -461,7 +518,9 @@ fn create_surface_described(
 ) -> Result<DispatchOutcome, KernelError> {
     ensure_framebuffer(ctx)?;
     let object = alloc_object_with(ctx, &SURFACE_METHODS, FAKE_SURFACE, &record.private_words())?;
-    if object == 0 && !record.primary { ctx.kernel.heap.free(record.pixels); }
+    if object == 0 && !record.primary {
+        ctx.kernel.heap.free(record.pixels);
+    }
     if out != 0 {
         ctx.cpu.write_mem(out, &object.to_le_bytes())?;
     }
@@ -497,7 +556,11 @@ fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> Result<SurfaceRecord, 
     } else {
         0
     };
-    let primary_cap = if size == 124 { 0x0000_0200 } else { 0x0000_0040 };
+    let primary_cap = if size == 124 {
+        0x0000_0200
+    } else {
+        0x0000_0040
+    };
     if caps & primary_cap != 0 {
         // DDSCAPS_PRIMARYSURFACE
         return Ok(panel);
@@ -526,7 +589,6 @@ fn surface_from_desc(ctx: &mut CallCtx<'_>, desc: u32) -> Result<SurfaceRecord, 
             primary: false,
         }),
         _ => Err(0x8007_000e), // E_OUTOFMEMORY: never alias an off-screen buffer.
-
     }
 }
 
@@ -536,7 +598,9 @@ fn ddraw_create_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     let record = match surface_from_desc(ctx, desc) {
         Ok(record) => record,
         Err(error) => {
-            if out != 0 { ctx.cpu.write_mem(out, &0u32.to_le_bytes())?; }
+            if out != 0 {
+                ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
+            }
             return Ok(DispatchOutcome::ReturnedR0(error));
         }
     };
@@ -560,16 +624,29 @@ fn ddraw4_create_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     let record = match surface_from_desc(ctx, desc) {
         Ok(record) => record,
         Err(error) => {
-            if out != 0 { ctx.cpu.write_mem(out, &0u32.to_le_bytes())?; }
+            if out != 0 {
+                ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
+            }
             return Ok(DispatchOutcome::ReturnedR0(error));
         }
     };
-    let object = alloc_object_with(ctx, &SURFACE4_METHODS, FAKE_SURFACE, &record.private_words())?;
+    let object = alloc_object_with(
+        ctx,
+        &SURFACE4_METHODS,
+        FAKE_SURFACE,
+        &record.private_words(),
+    )?;
     if out != 0 {
         ctx.cpu.write_mem(out, &object.to_le_bytes())?;
     }
-    if object == 0 && !record.primary { ctx.kernel.heap.free(record.pixels); }
-    Ok(DispatchOutcome::ReturnedR0(if object == 0 { 0x8007_000e } else { 0 }))
+    if object == 0 && !record.primary {
+        ctx.kernel.heap.free(record.pixels);
+    }
+    Ok(DispatchOutcome::ReturnedR0(if object == 0 {
+        0x8007_000e
+    } else {
+        0
+    }))
 }
 
 /// Slot 8 is `FlipToGDISurface`, which takes no arguments at all.
@@ -628,39 +705,79 @@ fn palette_ok(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 /// Keep the same deadline when the scheduler re-enters this thunk.
-fn wait_display(ctx: &mut CallCtx<'_>, blank: Option<bool>) -> Result<Option<DispatchOutcome>, KernelError> {
-    let key = (ctx.kernel.current_thread, ctx.thunk.thunk_va, ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Sp)?);
+fn wait_display(
+    ctx: &mut CallCtx<'_>,
+    blank: Option<bool>,
+) -> Result<Option<DispatchOutcome>, KernelError> {
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Sp)?,
+    );
     let now = std::time::Instant::now();
     let clock = &mut ctx.kernel.framebuffer.directdraw;
-    let deadline = if let Some(deadline) = clock.pending.get(&key) { *deadline } else {
+    let deadline = if let Some(deadline) = clock.pending.get(&key) {
+        *deadline
+    } else {
         let deadline = match blank {
             Some(end) => clock.blank_deadline(now, end),
-            None => if clock.recent_blank.get(&ctx.kernel.current_thread)
-                .is_some_and(|last| now.saturating_duration_since(*last) < pocket_kernel::framebuffer::DirectDrawTiming::PERIOD) {
-                now
-            } else { clock.present_deadline(now) },
+            None => {
+                if clock
+                    .recent_blank
+                    .get(&ctx.kernel.current_thread)
+                    .is_some_and(|last| {
+                        now.saturating_duration_since(*last)
+                            < pocket_kernel::framebuffer::DirectDrawTiming::PERIOD
+                    })
+                {
+                    now
+                } else {
+                    clock.present_deadline(now)
+                }
+            }
         };
         clock.pending.insert(key, deadline);
         deadline
     };
-    if let Some(outcome) = crate::coredll::wait_display_until(ctx, deadline)? { return Ok(Some(outcome)); }
+    if let Some(outcome) = crate::coredll::wait_display_until(ctx, deadline)? {
+        return Ok(Some(outcome));
+    }
     ctx.kernel.framebuffer.directdraw.pending.remove(&key);
-    if blank.is_none() { ctx.kernel.framebuffer.directdraw.recent_blank.remove(&ctx.kernel.current_thread); }
+    if blank.is_none() {
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .recent_blank
+            .remove(&ctx.kernel.current_thread);
+    }
     Ok(None)
 }
 
 fn ddraw_wait_for_vertical_blank(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let flags = ctx.arg_u32(1)?;
-    if flags != 1 && flags != 4 { return Ok(DispatchOutcome::ReturnedR0(0x8007_0057)); }
-    if let Some(outcome) = wait_display(ctx, Some(flags == 4))? { return Ok(outcome); }
-    ctx.kernel.framebuffer.directdraw.recent_blank.insert(ctx.kernel.current_thread, std::time::Instant::now());
+    if flags != 1 && flags != 4 {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    }
+    if let Some(outcome) = wait_display(ctx, Some(flags == 4))? {
+        return Ok(outcome);
+    }
+    ctx.kernel
+        .framebuffer
+        .directdraw
+        .recent_blank
+        .insert(ctx.kernel.current_thread, std::time::Instant::now());
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 fn ddraw_get_vertical_blank_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(1)?;
     if out != 0 {
-        let blank = u32::from(ctx.kernel.framebuffer.directdraw.in_blank(std::time::Instant::now()));
+        let blank = u32::from(
+            ctx.kernel
+                .framebuffer
+                .directdraw
+                .in_blank(std::time::Instant::now()),
+        );
         ctx.cpu.write_mem(out, &blank.to_le_bytes())?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
@@ -669,10 +786,13 @@ fn ddraw_get_vertical_blank_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutc
 fn ddraw_get_scan_line(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(1)?;
     let clock = &ctx.kernel.framebuffer.directdraw;
-    let phase = clock.epoch.elapsed().as_nanos() % pocket_kernel::framebuffer::DirectDrawTiming::PERIOD.as_nanos();
+    let phase = clock.epoch.elapsed().as_nanos()
+        % pocket_kernel::framebuffer::DirectDrawTiming::PERIOD.as_nanos();
     let line = (phase * u128::from(ctx.kernel.framebuffer.height)
         / pocket_kernel::framebuffer::DirectDrawTiming::PERIOD.as_nanos()) as u32;
-    if out != 0 { ctx.cpu.write_mem(out, &line.to_le_bytes())?; }
+    if out != 0 {
+        ctx.cpu.write_mem(out, &line.to_le_bytes())?;
+    }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -748,10 +868,19 @@ fn surface_qi(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         let this = ctx.arg_u32(0)?;
         let iid = requested_iid(ctx)?;
         let table = if iid == IID_SURFACE_CE {
-            let retained = ctx.cpu.read_u32_le(this).ok()
-                .and_then(|table|ctx.cpu.read_u32_le(table + 25 * 4).ok())
-                .is_some_and(|address|address != 0 && address == dynamic_address(ctx,"surface_lock"));
-            Some(if retained { SURFACE_COMPAT_METHODS.as_slice() } else { SURFACE_METHODS.as_slice() })
+            let retained = ctx
+                .cpu
+                .read_u32_le(this)
+                .ok()
+                .and_then(|table| ctx.cpu.read_u32_le(table + 25 * 4).ok())
+                .is_some_and(|address| {
+                    address != 0 && address == dynamic_address(ctx, "surface_lock")
+                });
+            Some(if retained {
+                SURFACE_COMPAT_METHODS.as_slice()
+            } else {
+                SURFACE_METHODS.as_slice()
+            })
         } else if iid == IID_SURFACE4 {
             Some(SURFACE4_METHODS.as_slice())
         } else {
@@ -823,11 +952,24 @@ fn surface_desc_bytes(width: u32, height: u32, pitch: u32, surface: u32) -> [u8;
 
 /// The retained DirectDraw4 ABI uses DDSURFACEDESC2 (124 bytes).
 /// Its pointer/pixel format/caps offsets differ from the 108-byte CE struct.
-fn surface_desc2_bytes(width: u32, height: u32, pitch: u32, surface: u32, primary: bool) -> [u8; 124] {
+fn surface_desc2_bytes(
+    width: u32,
+    height: u32,
+    pitch: u32,
+    surface: u32,
+    primary: bool,
+) -> [u8; 124] {
     let mut bytes = [0u8; 124];
     let flags = 0x1u32 | 0x2 | 0x4 | 0x8 | 0x800 | 0x1000;
-    for (offset, value) in [(0, 124u32), (4, flags), (8, height), (12, width),
-        (16, pitch), (36, surface), (104, if primary { 0x200 } else { 0x40 })] {
+    for (offset, value) in [
+        (0, 124u32),
+        (4, flags),
+        (8, height),
+        (12, width),
+        (16, pitch),
+        (36, surface),
+        (104, if primary { 0x200 } else { 0x40 }),
+    ] {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
     bytes[72..104].copy_from_slice(&pixel_format_bytes());
@@ -856,7 +998,13 @@ fn write_record_desc(
     }
     let size = ctx.cpu.read_u32_le(desc)?;
     if size == 124 {
-        let bytes = surface_desc2_bytes(record.width, record.height, record.pitch, record.pixels, record.primary);
+        let bytes = surface_desc2_bytes(
+            record.width,
+            record.height,
+            record.pitch,
+            record.pixels,
+            record.primary,
+        );
         ctx.cpu.write_mem(desc, &bytes)?;
     } else {
         let bytes = surface_desc_bytes(record.width, record.height, record.pitch, record.pixels);
@@ -932,11 +1080,11 @@ fn surface_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // A compact slot-19 Lock resolves the ambiguous view in the other
     // direction. Later SetPalette calls must not reclassify it from stale args.
     if let Ok(table) = ctx.cpu.read_u32_le(object) {
-        let ambiguous = dynamic_address(ctx,"surface_ce_palette_or_legacy_lock");
+        let ambiguous = dynamic_address(ctx, "surface_ce_palette_or_legacy_lock");
         if ambiguous != 0 && ctx.cpu.read_u32_le(table + 25 * 4).ok() == Some(ambiguous) {
-            write_vtable(ctx,table,&SURFACE_METHODS)?;
+            write_vtable(ctx, table, &SURFACE_METHODS)?;
         }
-        let lock = dynamic_address(ctx,"surface_lock");
+        let lock = dynamic_address(ctx, "surface_lock");
         retained = lock != 0 && ctx.cpu.read_u32_le(table + 25 * 4).ok() == Some(lock);
     }
     let desc = ctx.arg_u32(2)?;
@@ -946,36 +1094,55 @@ fn surface_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             // The retained interface returns DDSURFACEDESC2. Some DXPAK
             // callers pass an uninitialized output structure; its contents
             // must not select the compact header's different field offsets.
-            let bytes=surface_desc2_bytes(record.width,record.height,record.pitch,record.pixels,record.primary);
-            ctx.cpu.write_mem(desc,&bytes)?;
+            let bytes = surface_desc2_bytes(
+                record.width,
+                record.height,
+                record.pitch,
+                record.pixels,
+                record.primary,
+            );
+            ctx.cpu.write_mem(desc, &bytes)?;
         } else {
             write_record_desc(ctx, desc, record)?;
         }
     }
     if record.primary {
-        ctx.kernel.framebuffer.directdraw.primary_locks.insert(record.pixels);
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .primary_locks
+            .insert(record.pixels);
         // Full-frame writers use Unlock as their presentation boundary.
         // Readback and partial locks must not throttle every read or sprite.
         if ctx.arg_u32(1)? == 0 && ctx.arg_u32(3)? & 0x10 == 0 {
-            ctx.kernel.framebuffer.directdraw.paced_primary_locks.insert(record.pixels);
+            ctx.kernel
+                .framebuffer
+                .directdraw
+                .paced_primary_locks
+                .insert(record.pixels);
         }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
-fn surface_ce_palette_or_legacy_lock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+fn surface_ce_palette_or_legacy_lock(
+    ctx: &mut CallCtx<'_>,
+) -> Result<DispatchOutcome, KernelError> {
     let desc = ctx.arg_u32(2)?;
     let flags = ctx.arg_u32(3)?;
     let object = ctx.arg_u32(0)?;
     // SetPalette has no descriptor argument. A writable DDSURFACEDESC2
     // and supported lock flags identify the older header's slot 25.
-    let initialized=ctx.cpu.read_u32_le(desc).ok()==Some(124);
-    let write_only_output=!initialized && ctx.arg_u32(1)?==0 && flags & 0x20 != 0 && ctx.arg_u32(4)?==0;
-    if flags & !0x1fff == 0 && (initialized || write_only_output)
-        && ctx.cpu.check_guest_access(desc,124,Prot::WRITE).is_ok()
-        && surface_record(ctx,object).is_some() {
+    let initialized = ctx.cpu.read_u32_le(desc).ok() == Some(124);
+    let write_only_output =
+        !initialized && ctx.arg_u32(1)? == 0 && flags & 0x20 != 0 && ctx.arg_u32(4)? == 0;
+    if flags & !0x1fff == 0
+        && (initialized || write_only_output)
+        && ctx.cpu.check_guest_access(desc, 124, Prot::WRITE).is_ok()
+        && surface_record(ctx, object).is_some()
+    {
         let table = ctx.cpu.read_u32_le(object)?;
-        write_vtable(ctx,table,&SURFACE5_METHODS)?;
+        write_vtable(ctx, table, &SURFACE5_METHODS)?;
         return surface_lock(ctx);
     }
     surface_ok(ctx)
@@ -1002,15 +1169,26 @@ fn publish_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
 
 fn surface_unlock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if this_surface(ctx)?.is_none_or(|record| record.primary) {
-        let paced = ctx.kernel.framebuffer.directdraw.paced_primary_locks.contains(&SYNTHETIC_FRAMEBUFFER_BASE);
+        let paced = ctx
+            .kernel
+            .framebuffer
+            .directdraw
+            .paced_primary_locks
+            .contains(&SYNTHETIC_FRAMEBUFFER_BASE);
         if paced {
-            if let Some(outcome) = wait_display(ctx, None)? { return Ok(outcome); }
+            if let Some(outcome) = wait_display(ctx, None)? {
+                return Ok(outcome);
+            }
         }
         publish_framebuffer(ctx)?;
         let clock = &mut ctx.kernel.framebuffer.directdraw;
         clock.primary_locks.remove(&SYNTHETIC_FRAMEBUFFER_BASE);
-        clock.paced_primary_locks.remove(&SYNTHETIC_FRAMEBUFFER_BASE);
-        if paced { clock.last_present = Some(std::time::Instant::now()); }
+        clock
+            .paced_primary_locks
+            .remove(&SYNTHETIC_FRAMEBUFFER_BASE);
+        if paced {
+            clock.last_present = Some(std::time::Instant::now());
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -1117,7 +1295,9 @@ fn copy_rect(
 /// DDFLIP_NOVSYNC allows a caller to opt out of the presentation wait.
 fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.arg_u32(2)? & 8 == 0 {
-        if let Some(outcome) = wait_display(ctx, None)? { return Ok(outcome); }
+        if let Some(outcome) = wait_display(ctx, None)? {
+            return Ok(outcome);
+        }
     }
     if let (Some(dest), Some(src)) = (this_surface(ctx)?, {
         let other = ctx.arg_u32(1)?;
@@ -1131,14 +1311,20 @@ fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
-fn surface_ce_flip_or_legacy_blt_fast(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let source=ctx.arg_u32(3)?;
-    let dest=this_surface(ctx)?;
-    let x=ctx.arg_u32(1)?;let y=ctx.arg_u32(2)?;
-    if surface_record(ctx,source).is_some() && dest.is_some_and(|d|x<d.width && y<d.height)
-        && ctx.arg_u32(5)? & !0xf == 0 {
-        let object=ctx.arg_u32(0)?;let table=ctx.cpu.read_u32_le(object)?;
-        write_vtable(ctx,table,&SURFACE5_METHODS)?;
+fn surface_ce_flip_or_legacy_blt_fast(
+    ctx: &mut CallCtx<'_>,
+) -> Result<DispatchOutcome, KernelError> {
+    let source = ctx.arg_u32(3)?;
+    let dest = this_surface(ctx)?;
+    let x = ctx.arg_u32(1)?;
+    let y = ctx.arg_u32(2)?;
+    if surface_record(ctx, source).is_some()
+        && dest.is_some_and(|d| x < d.width && y < d.height)
+        && ctx.arg_u32(5)? & !0xf == 0
+    {
+        let object = ctx.arg_u32(0)?;
+        let table = ctx.cpu.read_u32_le(object)?;
+        write_vtable(ctx, table, &SURFACE5_METHODS)?;
         return surface_blt_fast(ctx);
     }
     surface_flip(ctx)
@@ -1147,16 +1333,30 @@ fn surface_ce_flip_or_legacy_blt_fast(ctx: &mut CallCtx<'_>) -> Result<DispatchO
 /// Retained BltFast uses DWORD x/y, source, source RECT and flags. Its
 /// slot 7 is the compact header's Flip; preserve the argument layouts.
 fn surface_blt_fast(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let Some(dest)=this_surface(ctx)? else {return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));};
-    let source=ctx.arg_u32(3)?;
-    let Some(src)=surface_record(ctx,source) else {return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));};
-    let x=ctx.arg_u32(1)?;let y=ctx.arg_u32(2)?;
-    let rect=ctx.arg_u32(4)?;let area=read_rect(ctx,rect,src);
-    let width=area.2-area.0;let height=area.3-area.1;
-    if x<dest.width && y<dest.height {
-        let target=(x,y,x.saturating_add(width).min(dest.width),y.saturating_add(height).min(dest.height));
-        copy_rect(ctx,src,area,dest,target)?;
-        if dest.primary {publish_framebuffer(ctx)?;}
+    let Some(dest) = this_surface(ctx)? else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    };
+    let source = ctx.arg_u32(3)?;
+    let Some(src) = surface_record(ctx, source) else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    };
+    let x = ctx.arg_u32(1)?;
+    let y = ctx.arg_u32(2)?;
+    let rect = ctx.arg_u32(4)?;
+    let area = read_rect(ctx, rect, src);
+    let width = area.2 - area.0;
+    let height = area.3 - area.1;
+    if x < dest.width && y < dest.height {
+        let target = (
+            x,
+            y,
+            x.saturating_add(width).min(dest.width),
+            y.saturating_add(height).min(dest.height),
+        );
+        copy_rect(ctx, src, area, dest, target)?;
+        if dest.primary {
+            publish_framebuffer(ctx)?;
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -1170,17 +1370,26 @@ mod tests {
 
     #[test]
     fn vertical_blank_retries_preserve_arguments_and_really_wait() {
+        use super::*;
         use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
         use pocket_kernel::Thunk;
         use pocket_pe::ImportBinding;
-        use super::*;
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();
-        let thunk = Thunk { thunk_va: 0x70001000, iat_va: 0,
-            dll: "ddraw.dll".into(), binding: ImportBinding::Name("ddraw_wait_for_vertical_blank".into()), friendly_name: None };
+        let thunk = Thunk {
+            thunk_va: 0x70001000,
+            iat_va: 0,
+            dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("ddraw_wait_for_vertical_blank".into()),
+            friendly_name: None,
+        };
         cpu.write_reg(ArmReg::R0, FAKE_DDRAW).unwrap();
         cpu.write_reg(ArmReg::R1, 1).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let started = std::time::Instant::now();
         for _ in 0..4 {
             loop {
@@ -1204,118 +1413,201 @@ mod tests {
         assert!(ctx.kernel.framebuffer.directdraw.recent_blank.is_empty());
         assert!(wait_display(&mut ctx, None).unwrap().is_some());
         ctx.cpu.write_reg(ArmReg::R1, 2).unwrap();
-        assert_eq!(ddraw_wait_for_vertical_blank(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0x80070057));
+        assert_eq!(
+            ddraw_wait_for_vertical_blank(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x80070057)
+        );
     }
 
     #[test]
     fn primary_unlock_defers_publication_until_the_display_deadline() {
+        use super::*;
         use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
         use pocket_kernel::Thunk;
         use pocket_pe::ImportBinding;
-        use super::*;
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();
-        let thunk = Thunk { thunk_va: 0x70002000, iat_va: 0,
-            dll: "ddraw.dll".into(), binding: ImportBinding::Name("surface_unlock".into()), friendly_name: None };
+        let thunk = Thunk {
+            thunk_va: 0x70002000,
+            iat_va: 0,
+            dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("surface_unlock".into()),
+            friendly_name: None,
+        };
         cpu.write_reg(ArmReg::R0, FAKE_SURFACE).unwrap();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         surface_lock(&mut ctx).unwrap();
-        ctx.cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &[0xff,0xff]).unwrap();
+        ctx.cpu
+            .write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &[0xff, 0xff])
+            .unwrap();
         ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
         let before = ctx.kernel.framebuffer.frame_counter;
-        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
+        assert_eq!(
+            surface_unlock(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
         assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
         assert!(!ctx.kernel.framebuffer.directdraw.primary_locks.is_empty());
-        let key = (0,thunk.thunk_va,0);
-        ctx.kernel.framebuffer.directdraw.pending.insert(key,std::time::Instant::now());
-        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        let key = (0, thunk.thunk_va, 0);
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .pending
+            .insert(key, std::time::Instant::now());
+        assert_eq!(
+            surface_unlock(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
         assert!(ctx.kernel.framebuffer.directdraw.primary_locks.is_empty());
         // Static menu presents remain paced; pixel equality is not a clock.
         surface_lock(&mut ctx).unwrap();
-        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::JumpTo(thunk.thunk_va));
-        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        assert_eq!(
+            surface_unlock(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
         // Readback locks are not full-frame presentations.
         ctx.kernel.framebuffer.directdraw.pending.clear();
         ctx.kernel.framebuffer.directdraw.primary_locks.clear();
-        ctx.kernel.framebuffer.directdraw.paced_primary_locks.clear();
-        ctx.cpu.write_reg(ArmReg::R3,0x10).unwrap();
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .paced_primary_locks
+            .clear();
+        ctx.cpu.write_reg(ArmReg::R3, 0x10).unwrap();
         surface_lock(&mut ctx).unwrap();
-        assert_eq!(surface_unlock(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        ctx.cpu.write_reg(ArmReg::R3,0).unwrap();
+        assert_eq!(
+            surface_unlock(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.cpu.write_reg(ArmReg::R3, 0).unwrap();
         let started = std::time::Instant::now();
         for _ in 0..4 {
             surface_lock(&mut ctx).unwrap();
             loop {
                 match surface_unlock(&mut ctx).unwrap() {
-                    DispatchOutcome::JumpTo(pc) => assert_eq!(pc,thunk.thunk_va),
+                    DispatchOutcome::JumpTo(pc) => assert_eq!(pc, thunk.thunk_va),
                     DispatchOutcome::ReturnedR0(0) => break,
                     other => panic!("unexpected {other:?}"),
                 }
             }
         }
         assert!(started.elapsed() >= pocket_kernel::framebuffer::DirectDrawTiming::PERIOD * 3);
-        assert_eq!(ctx.kernel.framebuffer.frame_counter, before+1);
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
     }
 
     #[test]
     fn offscreen_allocation_failure_returns_error_without_aliasing_panel() {
+        use super::*;
         use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
         use pocket_kernel::Thunk;
         use pocket_pe::ImportBinding;
-        use super::*;
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         cpu.write_mem(0x1000, &124u32.to_le_bytes()).unwrap();
         cpu.write_mem(0x1004, &6u32.to_le_bytes()).unwrap();
         cpu.write_mem(0x1008, &240u32.to_le_bytes()).unwrap();
         cpu.write_mem(0x100c, &320u32.to_le_bytes()).unwrap();
-        let thunk = Thunk { thunk_va: 0, iat_va: 0, dll: "ddraw.dll".into(),
-            binding: ImportBinding::Name("CreateSurface".into()), friendly_name: None };
-        for handler in [ddraw_create_surface as crate::Handler, ddraw4_create_surface] {
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("CreateSurface".into()),
+            friendly_name: None,
+        };
+        for handler in [
+            ddraw_create_surface as crate::Handler,
+            ddraw4_create_surface,
+        ] {
             cpu.write_mem(0x1100, &0x12345678u32.to_le_bytes()).unwrap();
             cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
             cpu.write_reg(ArmReg::R2, 0x1100).unwrap();
-            assert_eq!(handler(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(),
-                DispatchOutcome::ReturnedR0(0x8007_000e));
+            assert_eq!(
+                handler(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0x8007_000e)
+            );
             assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0);
         }
         cpu.write_mem(0x100c, &u32::MAX.to_le_bytes()).unwrap();
-        assert_eq!(ddraw_create_surface(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(),
-            DispatchOutcome::ReturnedR0(0x8007_0057));
+        assert_eq!(
+            ddraw_create_surface(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0x8007_0057)
+        );
     }
 
     #[test]
     fn directdraw4_startup_keeps_ce_interfaces_and_surface_storage_distinct() {
+        use super::*;
         use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
         use pocket_kernel::Thunk;
         use pocket_pe::ImportBinding;
-        use super::*;
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
-        cpu.map_region(0x5000_0000, 0x100000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(0x5000_0000, 0x100000, Prot::READ | Prot::WRITE)
+            .unwrap();
         kernel.heap = pocket_kernel::Heap::new(0x5000_0000, 0x100000);
-        let exports = kernel.dynamic_exports.entry(FAKE_MODULE_HANDLE).or_default();
+        let exports = kernel
+            .dynamic_exports
+            .entry(FAKE_MODULE_HANDLE)
+            .or_default();
         let mut address = 0x7000_1000u32;
-        for name in DDRAW_METHODS.iter().chain(DDRAW4_METHODS.iter())
-            .chain(SURFACE_METHODS.iter()).chain(SURFACE4_METHODS.iter()).chain(SURFACE_COMPAT_METHODS.iter()) {
+        for name in DDRAW_METHODS
+            .iter()
+            .chain(DDRAW4_METHODS.iter())
+            .chain(SURFACE_METHODS.iter())
+            .chain(SURFACE4_METHODS.iter())
+            .chain(SURFACE_COMPAT_METHODS.iter())
+        {
             if !exports.contains_key(*name) {
                 exports.insert((*name).into(), address);
                 address += 16;
             }
         }
-        let t = Thunk { thunk_va: 0x7000_0000, iat_va: 0x20000,
-            dll: "ddraw.dll".into(), binding: ImportBinding::Name("DirectDrawCreate".into()),
-            friendly_name: Some("DirectDrawCreate".into()) };
-        let call = |cpu: &mut StubCpu, kernel: &mut pocket_kernel::KernelState,
-            handler: crate::Handler, args: [u32; 4]| {
-            for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3].into_iter().zip(args) {
+        let t = Thunk {
+            thunk_va: 0x7000_0000,
+            iat_va: 0x20000,
+            dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("DirectDrawCreate".into()),
+            friendly_name: Some("DirectDrawCreate".into()),
+        };
+        let call = |cpu: &mut StubCpu,
+                    kernel: &mut pocket_kernel::KernelState,
+                    handler: crate::Handler,
+                    args: [u32; 4]| {
+            for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+                .into_iter()
+                .zip(args)
+            {
                 cpu.write_reg(reg, value).unwrap();
             }
-            assert_eq!(handler(&mut CallCtx { cpu, kernel, thunk: &t }).unwrap(),
-                DispatchOutcome::ReturnedR0(0));
+            assert_eq!(
+                handler(&mut CallCtx {
+                    cpu,
+                    kernel,
+                    thunk: &t
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
         };
         call(&mut cpu, &mut kernel, direct_draw_create, [0, 0x1000, 0, 0]);
         let ce = cpu.read_u32_le(0x1000).unwrap();
@@ -1324,103 +1616,207 @@ mod tests {
         call(&mut cpu, &mut kernel, ddraw_qi, [ce, 0x1100, 0x1004, 0]);
         let dd4 = cpu.read_u32_le(0x1004).unwrap();
         let dd4_table = cpu.read_u32_le(dd4).unwrap();
-        let cooperative = kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["ddraw_set_cooperative_level"];
+        let cooperative =
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["ddraw_set_cooperative_level"];
         assert_eq!(cpu.read_u32_le(ce_table + 17 * 4).unwrap(), cooperative);
         assert_eq!(cpu.read_u32_le(dd4_table + 20 * 4).unwrap(), cooperative);
-        assert_eq!(cpu.read_u32_le(dd4_table + 6 * 4).unwrap(),
-            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["ddraw4_create_surface"]);
+        assert_eq!(
+            cpu.read_u32_le(dd4_table + 6 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["ddraw4_create_surface"]
+        );
         // Replay SkyStriker's primary then 320x240 off-screen creation.
-        call(&mut cpu, &mut kernel, ddraw_set_cooperative_level, [dd4, 0xdead0001, 8, 0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            ddraw_set_cooperative_level,
+            [dd4, 0xdead0001, 8, 0],
+        );
         let primary_desc = surface_desc2_bytes(320, 240, 640, 0, true);
         cpu.write_mem(0x1200, &primary_desc).unwrap();
-        call(&mut cpu, &mut kernel, ddraw4_create_surface, [dd4, 0x1200, 0x1008, 0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            ddraw4_create_surface,
+            [dd4, 0x1200, 0x1008, 0],
+        );
         let primary = cpu.read_u32_le(0x1008).unwrap();
         let offscreen_desc = surface_desc2_bytes(320, 240, 640, 0, false);
         cpu.write_mem(0x1200, &offscreen_desc).unwrap();
-        call(&mut cpu, &mut kernel, ddraw4_create_surface, [dd4, 0x1200, 0x100c, 0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            ddraw4_create_surface,
+            [dd4, 0x1200, 0x100c, 0],
+        );
         let offscreen = cpu.read_u32_le(0x100c).unwrap();
         cpu.write_mem(0x1100, &IID_SURFACE_CE).unwrap();
-        call(&mut cpu, &mut kernel, surface_qi, [offscreen, 0x1100, 0x1010, 0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_qi,
+            [offscreen, 0x1100, 0x1010, 0],
+        );
         let ce_surface = cpu.read_u32_le(0x1010).unwrap();
         let (front, back, view) = {
-            let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &t };
-            (surface_record(&mut ctx, primary).unwrap(), surface_record(&mut ctx, offscreen).unwrap(),
-                surface_record(&mut ctx, ce_surface).unwrap())
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
+            (
+                surface_record(&mut ctx, primary).unwrap(),
+                surface_record(&mut ctx, offscreen).unwrap(),
+                surface_record(&mut ctx, ce_surface).unwrap(),
+            )
         };
         assert!(front.primary);
         assert!(!back.primary);
-        assert_eq!(back, view, "QueryInterface must share the off-screen pixels");
+        assert_eq!(
+            back, view,
+            "QueryInterface must share the off-screen pixels"
+        );
         assert_ne!(front.pixels, back.pixels);
         assert_eq!((back.width, back.height, back.pitch), (320, 240, 640));
         let ce_surface_table = cpu.read_u32_le(ce_surface).unwrap();
-        assert_eq!(cpu.read_u32_le(ce_surface_table + 19 * 4).unwrap(),
-            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_lock"]);
+        assert_eq!(
+            cpu.read_u32_le(ce_surface_table + 19 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_lock"]
+        );
         // Lock must respect both descriptor layouts and their buffer sizes.
         for (size, pointer_offset) in [(108u32, 32u32), (124, 36)] {
             cpu.write_mem(0x1300, &[0xa5; 128]).unwrap();
             cpu.write_mem(0x1300, &size.to_le_bytes()).unwrap();
-            call(&mut cpu, &mut kernel, surface_lock, [ce_surface, 0, 0x1300, 0]);
+            call(
+                &mut cpu,
+                &mut kernel,
+                surface_lock,
+                [ce_surface, 0, 0x1300, 0],
+            );
             assert_eq!(cpu.read_u32_le(0x1300).unwrap(), size);
-            assert_eq!(cpu.read_u32_le(0x1300 + pointer_offset).unwrap(), back.pixels);
+            assert_eq!(
+                cpu.read_u32_le(0x1300 + pointer_offset).unwrap(),
+                back.pixels
+            );
             assert_eq!(cpu.read_u32_le(0x1300 + size).unwrap(), 0xa5a5a5a5);
         }
-        assert_eq!(cpu.read_u32_le(ce_surface_table + 25 * 4).unwrap(),
-            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_set_palette"]);
+        assert_eq!(
+            cpu.read_u32_le(ce_surface_table + 25 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_set_palette"]
+        );
 
         // Replay the older DXPAK Surface5 path through the same IID.
         // A fresh view must select slot 25 Lock / slot 32 Unlock while
         // preserving pixels; the compact view above remains compact.
-        call(&mut cpu,&mut kernel,surface_qi,[primary,0x1100,0x1014,0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_qi,
+            [primary, 0x1100, 0x1014, 0],
+        );
         let legacy = cpu.read_u32_le(0x1014).unwrap();
         let legacy_table = cpu.read_u32_le(legacy).unwrap();
-        cpu.write_mem(0x1300,&surface_desc2_bytes(320,240,640,0,true)).unwrap();
-        call(&mut cpu,&mut kernel,surface_ce_palette_or_legacy_lock,[legacy,0,0x1300,0x21]);
-        assert_eq!(cpu.read_u32_le(legacy_table + 25 * 4).unwrap(),
-            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_lock"]);
-        assert_eq!(cpu.read_u32_le(legacy_table + 32 * 4).unwrap(),
-            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_unlock"]);
-        assert_eq!(cpu.read_u32_le(0x1324).unwrap(),front.pixels);
-        assert_eq!(cpu.read_u32_le(0x1368).unwrap(),0x200);
-        assert!(kernel.framebuffer.directdraw.primary_locks.contains(&front.pixels));
-        cpu.write_mem(front.pixels,&0xffffu16.to_le_bytes()).unwrap();
-        let before=kernel.framebuffer.frame_counter;
-        call(&mut cpu,&mut kernel,surface_unlock,[legacy,0,0,0]);
-        assert_eq!(kernel.framebuffer.frame_counter,before+1);
+        cpu.write_mem(0x1300, &surface_desc2_bytes(320, 240, 640, 0, true))
+            .unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_ce_palette_or_legacy_lock,
+            [legacy, 0, 0x1300, 0x21],
+        );
+        assert_eq!(
+            cpu.read_u32_le(legacy_table + 25 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_lock"]
+        );
+        assert_eq!(
+            cpu.read_u32_le(legacy_table + 32 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_unlock"]
+        );
+        assert_eq!(cpu.read_u32_le(0x1324).unwrap(), front.pixels);
+        assert_eq!(cpu.read_u32_le(0x1368).unwrap(), 0x200);
+        assert!(kernel
+            .framebuffer
+            .directdraw
+            .primary_locks
+            .contains(&front.pixels));
+        cpu.write_mem(front.pixels, &0xffffu16.to_le_bytes())
+            .unwrap();
+        let before = kernel.framebuffer.frame_counter;
+        call(&mut cpu, &mut kernel, surface_unlock, [legacy, 0, 0, 0]);
+        assert_eq!(kernel.framebuffer.frame_counter, before + 1);
         assert!(kernel.framebuffer.directdraw.primary_locks.is_empty());
-        assert_eq!(&kernel.framebuffer.pixels[..2],&0xffffu16.to_le_bytes());
+        assert_eq!(&kernel.framebuffer.pixels[..2], &0xffffu16.to_le_bytes());
 
         // DXPAK callers may leave the Lock output uninitialized, including
         // on their first call. Select its ABI from the write-only Lock
         // arguments, then keep returning the fixed retained layout.
-        call(&mut cpu,&mut kernel,surface_qi,[offscreen,0x1100,0x1018,0]);
-        let uninitialized=cpu.read_u32_le(0x1018).unwrap();
-        cpu.write_reg(ArmReg::Sp,0x1500).unwrap();
-        cpu.write_mem(0x1500,&0u32.to_le_bytes()).unwrap();
-        cpu.write_mem(0x1504,&0u32.to_le_bytes()).unwrap();
-        cpu.write_mem(0x1300,&[0xa5;128]).unwrap();
-        call(&mut cpu,&mut kernel,surface_ce_palette_or_legacy_lock,[uninitialized,0,0x1300,0x20]);
-        assert_eq!(cpu.read_u32_le(0x1300).unwrap(),124);
-        assert_eq!(cpu.read_u32_le(0x1324).unwrap(),back.pixels);
-        assert_eq!(cpu.read_u32_le(0x137c).unwrap(),0xa5a5a5a5);
-        cpu.write_mem(0x1300,&[0x5a;128]).unwrap();
-        call(&mut cpu,&mut kernel,surface_lock,[uninitialized,0,0x1300,0x20]);
-        assert_eq!(cpu.read_u32_le(0x1300).unwrap(),124);
-        assert_eq!(cpu.read_u32_le(0x1324).unwrap(),back.pixels);
-        assert_eq!(cpu.read_u32_le(0x137c).unwrap(),0x5a5a5a5a);
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_qi,
+            [offscreen, 0x1100, 0x1018, 0],
+        );
+        let uninitialized = cpu.read_u32_le(0x1018).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1500).unwrap();
+        cpu.write_mem(0x1500, &0u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1504, &0u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1300, &[0xa5; 128]).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_ce_palette_or_legacy_lock,
+            [uninitialized, 0, 0x1300, 0x20],
+        );
+        assert_eq!(cpu.read_u32_le(0x1300).unwrap(), 124);
+        assert_eq!(cpu.read_u32_le(0x1324).unwrap(), back.pixels);
+        assert_eq!(cpu.read_u32_le(0x137c).unwrap(), 0xa5a5a5a5);
+        cpu.write_mem(0x1300, &[0x5a; 128]).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_lock,
+            [uninitialized, 0, 0x1300, 0x20],
+        );
+        assert_eq!(cpu.read_u32_le(0x1300).unwrap(), 124);
+        assert_eq!(cpu.read_u32_le(0x1324).unwrap(), back.pixels);
+        assert_eq!(cpu.read_u32_le(0x137c).unwrap(), 0x5a5a5a5a);
 
-        call(&mut cpu,&mut kernel,surface_qi,[primary,0x1100,0x101c,0]);
-        let blit_view=cpu.read_u32_le(0x101c).unwrap();
-        cpu.write_mem(back.pixels,&0x07e0u16.to_le_bytes()).unwrap();
-        call(&mut cpu,&mut kernel,surface_ce_flip_or_legacy_blt_fast,[blit_view,0,0,offscreen]);
-        assert_eq!(&kernel.framebuffer.pixels[..2],&0x07e0u16.to_le_bytes());
-        let table=cpu.read_u32_le(blit_view).unwrap();
-        assert_eq!(cpu.read_u32_le(table+7*4).unwrap(),kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_blt_fast"]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_qi,
+            [primary, 0x1100, 0x101c, 0],
+        );
+        let blit_view = cpu.read_u32_le(0x101c).unwrap();
+        cpu.write_mem(back.pixels, &0x07e0u16.to_le_bytes())
+            .unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            surface_ce_flip_or_legacy_blt_fast,
+            [blit_view, 0, 0, offscreen],
+        );
+        assert_eq!(&kernel.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+        let table = cpu.read_u32_le(blit_view).unwrap();
+        assert_eq!(
+            cpu.read_u32_le(table + 7 * 4).unwrap(),
+            kernel.dynamic_exports[&FAKE_MODULE_HANDLE]["surface_blt_fast"]
+        );
 
-        kernel.window_procs.insert(0xdead0001,0x1000);
-        call(&mut cpu,&mut kernel,ddraw_get_available_vid_mem,[ce,0xdead0001,8,0x70001000]);
-        call(&mut cpu,&mut kernel,ddraw_get_available_vid_mem,[ce,0x1200,0x1400,0x1404]);
-        assert_eq!(cpu.read_u32_le(0x1400).unwrap(),320*240*2*4);
-        assert_eq!(cpu.read_u32_le(0x1404).unwrap(),320*240*2*4);
+        kernel.window_procs.insert(0xdead0001, 0x1000);
+        call(
+            &mut cpu,
+            &mut kernel,
+            ddraw_get_available_vid_mem,
+            [ce, 0xdead0001, 8, 0x70001000],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            ddraw_get_available_vid_mem,
+            [ce, 0x1200, 0x1400, 0x1404],
+        );
+        assert_eq!(cpu.read_u32_le(0x1400).unwrap(), 320 * 240 * 2 * 4);
+        assert_eq!(cpu.read_u32_le(0x1404).unwrap(), 320 * 240 * 2 * 4);
     }
 
     #[test]

@@ -83,7 +83,10 @@ impl Emulator {
     }
 
     /// Report only missing API handlers, without enabling the all-call trace.
-    pub fn set_unimplemented_api_sink(&mut self,sink:Box<dyn pocket_winceapi::UnimplementedApiSink>) {
+    pub fn set_unimplemented_api_sink(
+        &mut self,
+        sink: Box<dyn pocket_winceapi::UnimplementedApiSink>,
+    ) {
         self.dispatcher.set_unimplemented_api_sink(sink);
     }
 
@@ -146,12 +149,24 @@ impl Emulator {
     /// Configure CE WinMain's UTF-16 argument and GetCommandLine before execution.
     pub fn set_startup_command_line(&mut self, command: &str) -> Result<()> {
         let process = self.process.as_mut().context("no PE loaded")?;
-        let bytes: Vec<u8> = command.encode_utf16().chain(std::iter::once(0))
-            .flat_map(u16::to_le_bytes).collect();
+        let bytes: Vec<u8> = command
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let old = self.cpu.read_reg(pocket_cpu::regs::ArmReg::R2)?;
-        let address = process.state.heap.alloc(bytes.len() as u32).context("command line out of memory")?;
-        if let Err(error) = self.cpu.write_mem(address,&bytes).and_then(|_| self.cpu.write_reg(pocket_cpu::regs::ArmReg::R2,address)) {
-            process.state.heap.free(address); return Err(error.into());
+        let address = process
+            .state
+            .heap
+            .alloc(bytes.len() as u32)
+            .context("command line out of memory")?;
+        if let Err(error) = self
+            .cpu
+            .write_mem(address, &bytes)
+            .and_then(|_| self.cpu.write_reg(pocket_cpu::regs::ArmReg::R2, address))
+        {
+            process.state.heap.free(address);
+            return Err(error.into());
         }
         process.state.heap.free(old);
         process.state.command_line = Some(command.to_string());
@@ -199,6 +214,12 @@ impl Emulator {
     /// and halt cleanly.
     pub fn add_code_hook(&mut self, va: u32) -> Result<()> {
         self.cpu.add_code_hook(va).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub fn add_register_trace(&mut self, va: u32, label: &'static str) -> Result<()> {
+        self.cpu
+            .add_register_trace(va, label)
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Mount a host directory at a guest WinCE path. Useful for
@@ -344,8 +365,13 @@ impl Emulator {
 
     /// Configure the CE RAM partition after loading the process. A missing
     /// profile stays unsupported rather than borrowing another device's RAM.
-    pub fn set_memory_division(&mut self, division: Option<pocket_kernel::memory_division::MemoryDivision>) -> bool {
-        self.process.as_mut().is_some_and(|process| process.state.configure_memory_division(division))
+    pub fn set_memory_division(
+        &mut self,
+        division: Option<pocket_kernel::memory_division::MemoryDivision>,
+    ) -> bool {
+        self.process
+            .as_mut()
+            .is_some_and(|process| process.state.configure_memory_division(division))
     }
 
     /// Screen geometry the guest will see, once [`Self::load_pe`] has
@@ -408,7 +434,9 @@ mod tests {
 }
 
 impl Drop for Emulator {
-    fn drop(&mut self){pocket_winceapi::reset_media_backends();}
+    fn drop(&mut self) {
+        pocket_winceapi::reset_media_backends();
+    }
 }
 
 /// Temporarily detach host GLES/media state without unloading the CPU or

@@ -1241,7 +1241,10 @@ impl Context {
                     .fetch(mem, unit.texcoord_array, index, false)
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
                 // The texture matrix applies to incoming coordinates.
-                let m = matrix::transform(self.texture_matrix[stage.unit].current(), [t[0], t[1], 0.0, 1.0]);
+                let m = matrix::transform(
+                    self.texture_matrix[stage.unit].current(),
+                    [t[0], t[1], 0.0, 1.0],
+                );
                 [m[0], m[1]]
             } else {
                 unit.current_texcoord

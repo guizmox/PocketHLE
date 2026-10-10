@@ -24,13 +24,14 @@
 //!   and lets the user quit cleanly via Back. See [`runner`] for
 //!   the implementation rationale.
 
+mod bluetooth;
+mod camera;
+mod colors_trace;
+mod gps;
+mod internet;
 mod managed_game;
 mod runner;
 mod unimplemented_log;
-mod bluetooth;
-mod camera;
-mod gps;
-mod internet;
 
 use anyhow::Context;
 use std::path::Path;
@@ -585,10 +586,12 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
         return 0;
     }
     if let Err(e) = internet::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android HTTP bridge: {e}"); return 0;
+        log::error!("Cannot initialize Android HTTP bridge: {e}");
+        return 0;
     }
     if let Err(e) = gps::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android GPS bridge: {e}"); return 0;
+        log::error!("Cannot initialize Android GPS bridge: {e}");
+        return 0;
     }
     if let Err(e) = camera::install(&mut env, &_class) {
         log::error!("Cannot initialize Android camera bridge: {e}");
@@ -811,41 +814,72 @@ mod tests {
     }
 }
 
-
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_renameGame<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>, root: JString<'local>, id: JString<'local>, name: JString<'local>,
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root: JString<'local>,
+    id: JString<'local>,
+    name: JString<'local>,
 ) -> jstring {
     let result = (|| -> anyhow::Result<()> {
-        let root = jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        let root =
+            jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
         let id: String = env.get_string(&id)?.into();
         let name: String = env.get_string(&name)?.into();
         Library::open(root)?.rename_game(&id, &name)?;
         Ok(())
     })();
-    new_jstring(&env, match result { Ok(()) => "{\"ok\":true}".into(), Err(e) => error_json(&e.to_string()) })
+    new_jstring(
+        &env,
+        match result {
+            Ok(()) => "{\"ok\":true}".into(),
+            Err(e) => error_json(&e.to_string()),
+        },
+    )
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_isGizmondoGame<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>, root: JString<'local>, id: JString<'local>,
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root: JString<'local>,
+    id: JString<'local>,
 ) -> jni::sys::jboolean {
     let result = (|| -> anyhow::Result<bool> {
-        let root = jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        let root =
+            jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
         let id: String = env.get_string(&id)?.into();
         let lib = Library::open(&root)?;
-        Ok(lib.games().iter().find(|e| e.id == id).map(|e| pocket_library::is_gizmondo_game(e, &root)).unwrap_or(false))
+        Ok(lib
+            .games()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| pocket_library::is_gizmondo_game(e, &root))
+            .unwrap_or(false))
     })();
     u8::from(result.unwrap_or(false))
 }
 
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_upscaleXbrz<'local>(
-    env: JNIEnv<'local>, _class: JClass<'local>, rgba: jni::objects::JByteArray<'local>, width: jint, height: jint,
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    rgba: jni::objects::JByteArray<'local>,
+    width: jint,
+    height: jint,
 ) -> jbyteArray {
-    if width <= 0 || height <= 0 || width > 2048 || height > 2048 { return std::ptr::null_mut(); }
-    let Ok(bytes) = env.convert_byte_array(rgba) else { return std::ptr::null_mut(); };
-    if bytes.len() != width as usize * height as usize * 4 { return std::ptr::null_mut(); }
+    if width <= 0 || height <= 0 || width > 2048 || height > 2048 {
+        return std::ptr::null_mut();
+    }
+    let Ok(bytes) = env.convert_byte_array(rgba) else {
+        return std::ptr::null_mut();
+    };
+    if bytes.len() != width as usize * height as usize * 4 {
+        return std::ptr::null_mut();
+    }
     let scaled = xbrz::scale_rgba(&bytes, width as usize, height as usize, 3);
-    env.byte_array_from_slice(&scaled).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut())
+    env.byte_array_from_slice(&scaled)
+        .map(|a| a.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }

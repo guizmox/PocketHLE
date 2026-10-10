@@ -47,7 +47,8 @@ pub(crate) struct SuspendedGles {
 }
 
 pub(crate) fn suspend() -> SuspendedGles {
-    let context = CTX.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Context::new(240, 320)));
+    let context =
+        CTX.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Context::new(240, 320)));
     let error = EGL_ERROR.with(|slot| slot.replace(EGL_SUCCESS));
     SuspendedGles { context, error }
 }
@@ -1127,7 +1128,9 @@ const CONTEXT_HANDLE: u32 = 0x4547_0004;
 /// Sticky EGL error, independent of the GL one and scoped to the run.
 fn set_egl_error(code: u32) {
     EGL_ERROR.with(|error| {
-        if error.get() == EGL_SUCCESS { error.set(code); }
+        if error.get() == EGL_SUCCESS {
+            error.set(code);
+        }
     });
 }
 
@@ -1302,7 +1305,9 @@ fn egl_get_current_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
 }
 
 fn egl_get_error(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(EGL_ERROR.with(|error| error.replace(EGL_SUCCESS))))
+    Ok(DispatchOutcome::ReturnedR0(
+        EGL_ERROR.with(|error| error.replace(EGL_SUCCESS)),
+    ))
 }
 
 fn egl_query_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -1401,16 +1406,31 @@ fn egl_no_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 /// Resolve only known callable GLES thunks, without modifying ordinal tables.
 fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pointer = ctx.arg_u32(0)?;
-    if pointer == 0 { return Ok(DispatchOutcome::ReturnedR0(0)); }
+    if pointer == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let mut bytes = Vec::new();
     for index in 0..256u32 {
         let byte = ctx.cpu.read_u8(pointer + index)?;
-        if byte == 0 { break; }
+        if byte == 0 {
+            break;
+        }
         bytes.push(byte);
     }
     let name = String::from_utf8_lossy(&bytes);
-    let address = [pocket_kernel::GLES_CM_MODULE_HANDLE, pocket_kernel::GLES_CL_MODULE_HANDLE].into_iter()
-        .find_map(|module| ctx.kernel.dynamic_exports.get(&module).and_then(|exports| exports.get(name.as_ref())).copied()).unwrap_or(0);
+    let address = [
+        pocket_kernel::GLES_CM_MODULE_HANDLE,
+        pocket_kernel::GLES_CL_MODULE_HANDLE,
+    ]
+    .into_iter()
+    .find_map(|module| {
+        ctx.kernel
+            .dynamic_exports
+            .get(&module)
+            .and_then(|exports| exports.get(name.as_ref()))
+            .copied()
+    })
+    .unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(address))
 }
 
@@ -1419,8 +1439,13 @@ fn query_matrix_parts(values: &[f32]) -> ([i32; 16], [i32; 16], u32) {
     let mut exponent = [0; 16];
     let mut status = 0;
     for (index, &value) in values.iter().take(16).enumerate() {
-        if !value.is_finite() { status |= 1 << index; continue; }
-        if value == 0.0 { continue; }
+        if !value.is_finite() {
+            status |= 1 << index;
+            continue;
+        }
+        if value == 0.0 {
+            continue;
+        }
         let value = f64::from(value);
         let power = value.abs().log2().floor() as i32 + 1;
         mantissa[index] = (value * 2f64.powi(-power) * 65536.0).round() as i32;
@@ -1435,12 +1460,16 @@ fn gl_query_matrix_x_oes(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     let values = with_ctx(|c| match c.matrix_mode {
         pocket_gles::matrix::MatrixMode::Modelview => c.modelview.current().to_vec(),
         pocket_gles::matrix::MatrixMode::Projection => c.projection.current().to_vec(),
-        pocket_gles::matrix::MatrixMode::Texture => c.texture_matrix[c.active_texture as usize].current().to_vec(),
+        pocket_gles::matrix::MatrixMode::Texture => c.texture_matrix[c.active_texture as usize]
+            .current()
+            .to_vec(),
     });
     let (mantissa, exponent, status) = query_matrix_parts(&values);
     for index in 0..16 {
-        ctx.cpu.write_mem(output + index as u32 * 4, &mantissa[index].to_le_bytes())?;
-        ctx.cpu.write_mem(powers + index as u32 * 4, &exponent[index].to_le_bytes())?;
+        ctx.cpu
+            .write_mem(output + index as u32 * 4, &mantissa[index].to_le_bytes())?;
+        ctx.cpu
+            .write_mem(powers + index as u32 * 4, &exponent[index].to_le_bytes())?;
     }
     Ok(DispatchOutcome::ReturnedR0(status))
 }
@@ -1450,12 +1479,24 @@ mod query_matrix_tests {
     use super::*;
     #[test]
     fn query_matrix_reconstructs_finite_values_and_marks_invalid_components() {
-        let values = [1.0, -1.0, 0.0, 0.125, 123456.0, f32::from_bits(1), f32::INFINITY, f32::NAN];
+        let values = [
+            1.0,
+            -1.0,
+            0.0,
+            0.125,
+            123456.0,
+            f32::from_bits(1),
+            f32::INFINITY,
+            f32::NAN,
+        ];
         let (mantissa, exponent, status) = query_matrix_parts(&values);
         assert_eq!(status, (1 << 6) | (1 << 7));
         for index in 0..6 {
             let reconstructed = f64::from(mantissa[index]) / 65536.0 * 2f64.powi(exponent[index]);
-            assert!((reconstructed - f64::from(values[index])).abs() <= f64::from(values[index]).abs() / 32768.0);
+            assert!(
+                (reconstructed - f64::from(values[index])).abs()
+                    <= f64::from(values[index]).abs() / 32768.0
+            );
         }
     }
 }
@@ -1795,26 +1836,37 @@ mod tests {
     #[test]
     fn render_session_execution_threads_have_independent_gl_and_egl_state() {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let workers: Vec<_> = [13u32, 19].into_iter().map(|width| {
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                reset_for_test(width, 7);
-                with_ctx(|c| {
-                    c.gen_textures(width as usize);
-                    c.vertex_array.pointer = width * 0x1000;
-                });
-                let error = if width == 13 { EGL_BAD_DISPLAY } else { EGL_SUCCESS };
-                if error != EGL_SUCCESS { set_egl_error(error); }
-                barrier.wait();
-                with_ctx(|c| {
-                    assert_eq!(c.target.width, width);
-                    assert_eq!(c.textures.len(), width as usize);
-                    assert_eq!(c.vertex_array.pointer, width * 0x1000);
-                });
-                assert_eq!(EGL_ERROR.with(Cell::get), error);
+        let workers: Vec<_> = [13u32, 19]
+            .into_iter()
+            .map(|width| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    reset_for_test(width, 7);
+                    with_ctx(|c| {
+                        c.gen_textures(width as usize);
+                        c.vertex_array.pointer = width * 0x1000;
+                    });
+                    let error = if width == 13 {
+                        EGL_BAD_DISPLAY
+                    } else {
+                        EGL_SUCCESS
+                    };
+                    if error != EGL_SUCCESS {
+                        set_egl_error(error);
+                    }
+                    barrier.wait();
+                    with_ctx(|c| {
+                        assert_eq!(c.target.width, width);
+                        assert_eq!(c.textures.len(), width as usize);
+                        assert_eq!(c.vertex_array.pointer, width * 0x1000);
+                    });
+                    assert_eq!(EGL_ERROR.with(Cell::get), error);
+                })
             })
-        }).collect();
-        for worker in workers { worker.join().unwrap(); }
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 
     fn thunk() -> Thunk {
@@ -2281,7 +2333,10 @@ mod tests {
         let mut kernel = fresh_kernel();
         for (pname, want) in [
             (pocket_gles::GL_MAX_TEXTURE_SIZE, 1024u32),
-            (pocket_gles::GL_MAX_TEXTURE_UNITS, pocket_gles::raster::MAX_TEXTURE_STAGES as u32),
+            (
+                pocket_gles::GL_MAX_TEXTURE_UNITS,
+                pocket_gles::raster::MAX_TEXTURE_STAGES as u32,
+            ),
             (pocket_gles::GL_DEPTH_BITS, 16),
             (
                 pocket_gles::GL_NUM_COMPRESSED_TEXTURE_FORMATS,

@@ -36,25 +36,25 @@ use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry
 pub mod audio;
 pub mod bluetooth;
 pub mod camera;
-pub mod gps;
-pub mod internet;
 pub mod colors;
 pub mod controls;
+pub mod dll_lifecycle;
 pub mod font;
 pub mod framebuffer;
 pub mod gapi;
 pub mod gdi;
-pub mod handles;
-mod tls;
-mod process_control;
-pub mod shared_objects;
+pub mod gps;
 pub mod gz;
-pub mod msgbox;
-pub mod memory_division;
+pub mod handles;
 pub mod image_memory;
-pub mod dll_lifecycle;
+pub mod internet;
+pub mod memory_division;
+pub mod msgbox;
 pub mod native_thunks;
+mod process_control;
 pub mod registry;
+pub mod shared_objects;
+mod tls;
 pub mod tracker;
 pub mod vfs;
 
@@ -101,8 +101,8 @@ pub const KERNEL_TRAP_SIZE: u32 = 0x0001_0000;
 const CE_FIRST_METHOD: u32 = 0xF001_0000;
 const CE_PROCESS_API_SET: u32 = 2;
 const CE_PROCESS_TERMINATE_METHOD: u32 = 2;
-pub const CE_TERMINATE_PROCESS_TRAP: u32 = CE_FIRST_METHOD
-    - ((CE_PROCESS_API_SET << 8) | CE_PROCESS_TERMINATE_METHOD) * 4;
+pub const CE_TERMINATE_PROCESS_TRAP: u32 =
+    CE_FIRST_METHOD - ((CE_PROCESS_API_SET << 8) | CE_PROCESS_TERMINATE_METHOD) * 4;
 pub const CE_CURRENT_PROCESS_HANDLE: u32 = 64 + CE_PROCESS_API_SET;
 
 /// Synthetic "process exit" trampoline. We install this address as
@@ -395,7 +395,6 @@ pub struct PendingWaveBuffer {
     /// `waveOutOpen` / `waveOutReset`, at which this buffer is done.
     pub end_cursor: u64,
 }
-
 
 /// Guest memory behind a single-header waveOut loop. Interstellar Flames 2
 /// keeps its SFX mixer ring here and edits it after waveOutWrite returns.
@@ -758,8 +757,11 @@ pub enum DispatchOutcome {
 /// Trait an API layer registers with the kernel. Called every time
 /// emulated code reaches a thunk address.
 pub trait Dispatcher {
-    fn schedule_idle(&mut self, _cpu: &mut dyn Cpu, _kernel: &mut KernelState)
-        -> Result<DispatchOutcome, KernelError> {
+    fn schedule_idle(
+        &mut self,
+        _cpu: &mut dyn Cpu,
+        _kernel: &mut KernelState,
+    ) -> Result<DispatchOutcome, KernelError> {
         Ok(DispatchOutcome::JumpTo(THREAD_SCHEDULER_IDLE_VA))
     }
 
@@ -818,7 +820,7 @@ pub struct LoadedModule {
     /// Resource satellites retained on behalf of this module.
     pub satellites: Vec<u32>,
     /// Exact mapped ranges, including import thunks, for teardown and RAM accounting.
-    pub resident_regions: Vec<(u32,u32)>,
+    pub resident_regions: Vec<(u32, u32)>,
     /// `HMODULE` handed back to the guest. Equal to [`Self::base`],
     /// which is what the real CE loader returns.
     pub handle: u32,
@@ -897,7 +899,7 @@ pub struct KernelState {
     pub heap: Heap,
     pub memory_division: Option<memory_division::MemoryDivision>,
     pub vfs: vfs::Vfs,
-    pub internet:internet::State,
+    pub internet: internet::State,
     /// Guest path reported by `GetModuleFileName{A,W}`.
     ///
     /// Real Pocket PC games routinely derive their asset paths from
@@ -914,7 +916,7 @@ pub struct KernelState {
     pub pending_process_launch: Option<ProcessLaunch>,
     pub command_line_cache: Option<u32>,
     pub command_line: Option<String>,
-    pub process_launch_results: HashMap<(usize,u32,u32), Result<u32,u32>>,
+    pub process_launch_results: HashMap<(usize, u32, u32), Result<u32, u32>>,
     pub child_processes: HashMap<u32, ChildProcess>,
     pub next_process_id: u32,
     pub process_exit_code: Option<u32>,
@@ -1320,48 +1322,75 @@ pub struct MainThreadState {
 impl KernelState {
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {
         self.publish_handles();
-        Some(ProcessHandleContext { table: self.object_handles.child(handle)?,
-            vfs_shared: self.vfs.shared_context(), events: self.events.clone(), semaphores: self.semaphores.clone(), mutexes: self.mutexes.clone() })
+        Some(ProcessHandleContext {
+            table: self.object_handles.child(handle)?,
+            vfs_shared: self.vfs.shared_context(),
+            events: self.events.clone(),
+            semaphores: self.semaphores.clone(),
+            mutexes: self.mutexes.clone(),
+        })
     }
     pub fn reclaim_finished_stacks(&mut self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
         self.reclaim_finished_tls();
         let mut retired = Vec::new();
         if self.main_thread.exit_code.is_some() {
-            if let Some((base,size)) = self.main_thread.stack_region {
-                self.object_handles.set_exit(Some(0), self.main_thread.exit_code.unwrap());
+            if let Some((base, size)) = self.main_thread.stack_region {
+                self.object_handles
+                    .set_exit(Some(0), self.main_thread.exit_code.unwrap());
                 retired.push(0);
-                cpu.unmap_region(base,size)?;
-                self.heap.release_resident(base,size);
+                cpu.unmap_region(base, size)?;
+                self.heap.release_resident(base, size);
                 self.main_thread.stack_region = None;
             }
         }
         for (index, thread) in self.threads.iter_mut().enumerate() {
-            if !thread.finished { continue; }
-            if let Some((base,size,private)) = thread.stack_region {
-                self.object_handles.set_exit(Some(index + 1), thread.exit_code.unwrap_or(0));
+            if !thread.finished {
+                continue;
+            }
+            if let Some((base, size, private)) = thread.stack_region {
+                self.object_handles
+                    .set_exit(Some(index + 1), thread.exit_code.unwrap_or(0));
                 retired.push(index + 1);
-                if private { self.heap.release_stack(base,size); }
-                else { cpu.unmap_region(base,size)?; self.heap.release_resident(base,size); }
+                if private {
+                    self.heap.release_stack(base, size);
+                } else {
+                    cpu.unmap_region(base, size)?;
+                    self.heap.release_resident(base, size);
+                }
                 thread.stack_region = None;
             }
         }
         if !retired.is_empty() {
             let pid = self.object_handles.process_id();
             self.mutexes.retain(|_, mutex| {
-                if mutex.owner.is_some_and(|(owner,index)| owner == pid && retired.contains(&index)) {
-                    mutex.owner = None;mutex.depth = 0;mutex.abandoned = true;
+                if mutex
+                    .owner
+                    .is_some_and(|(owner, index)| owner == pid && retired.contains(&index))
+                {
+                    mutex.owner = None;
+                    mutex.depth = 0;
+                    mutex.abandoned = true;
                 }
                 true
             });
         }
-        let dead_calls: Vec<_> = self.process_launch_results.keys().copied().filter(|(thread,_,_)| {
-            if *thread == 0 { self.main_thread.exit_code.is_some() }
-            else { self.threads.get(*thread - 1).is_some_and(|t| t.finished) }
-        }).collect();
+        let dead_calls: Vec<_> = self
+            .process_launch_results
+            .keys()
+            .copied()
+            .filter(|(thread, _, _)| {
+                if *thread == 0 {
+                    self.main_thread.exit_code.is_some()
+                } else {
+                    self.threads.get(*thread - 1).is_some_and(|t| t.finished)
+                }
+            })
+            .collect();
         for key in dead_calls {
             if let Some(Ok(handle)) = self.process_launch_results.remove(&key) {
                 if let Some(table) = self.object_handles.child(handle) {
-                    table.terminate_remote_process(table.process_id(),0xc0000001);table.allow_start();
+                    table.terminate_remote_process(table.process_id(), 0xc0000001);
+                    table.allow_start();
                 }
             }
         }
@@ -1370,40 +1399,59 @@ impl KernelState {
     pub fn attach_handle_context(&mut self, context: ProcessHandleContext) {
         self.vfs.attach_shared_context(context.vfs_shared);
         self.object_handles = context.table;
-        self.events = context.events; self.semaphores = context.semaphores; self.mutexes = context.mutexes;
+        self.events = context.events;
+        self.semaphores = context.semaphores;
+        self.mutexes = context.mutexes;
         self.sync_transferred_handles();
     }
     /// Publish primary handles before the parent is suspended. Resources keep
     /// their open description; only the receiving process gets the new alias.
     pub fn publish_handles(&mut self) {
         for (index, thread) in self.threads.iter().enumerate() {
-            if !thread.handle_closed { self.object_handles.bind(thread.handle, handles::HandleObject::Thread(index + 1)); }
-            if let Some(code) = thread.exit_code { self.object_handles.set_exit(Some(index + 1), code); }
+            if !thread.handle_closed {
+                self.object_handles
+                    .bind(thread.handle, handles::HandleObject::Thread(index + 1));
+            }
+            if let Some(code) = thread.exit_code {
+                self.object_handles.set_exit(Some(index + 1), code);
+            }
         }
-        if let Some(code) = self.main_thread.exit_code { self.object_handles.set_exit(Some(0), code); }
+        if let Some(code) = self.main_thread.exit_code {
+            self.object_handles.set_exit(Some(0), code);
+        }
         for handle in self.vfs.open_handles() {
-            if self.object_handles.is_closed(handle) { continue; }
-            let object = if self.vfs.is_open(handle) { handles::HandleObject::File(handle) }
-                else { handles::HandleObject::Device(handle) };
+            if self.object_handles.is_closed(handle) {
+                continue;
+            }
+            let object = if self.vfs.is_open(handle) {
+                handles::HandleObject::File(handle)
+            } else {
+                handles::HandleObject::Device(handle)
+            };
             self.object_handles.bind(handle, object);
             if let Some(mut file) = self.vfs.export_handle(handle) {
                 if self.vfs.is_mp3_decoder(handle) {
                     let key = self.vfs.mp3_stream_key(handle);
                     file = file.with_mas(key, self.audio.export_mas_stream(key));
                 }
-                self.object_handles.export_file(self.object_handles.get(handle).unwrap(), file);
+                self.object_handles
+                    .export_file(self.object_handles.get(handle).unwrap(), file);
             }
         }
     }
     pub fn sync_transferred_handles(&mut self) {
         for (&handle, child) in &mut self.child_processes {
             if let Some(pid) = self.object_handles.child_id(handle) {
-                if let Some(code) = self.object_handles.exit_code(pid, None) { child.exit_code = Some(code); }
+                if let Some(code) = self.object_handles.exit_code(pid, None) {
+                    child.exit_code = Some(code);
+                }
             }
         }
 
         for (handle, object) in self.object_handles.take_files() {
-            if let Some((key, playback)) = object.mas() { self.audio.import_mas_stream(key, playback); }
+            if let Some((key, playback)) = object.mas() {
+                self.audio.import_mas_stream(key, playback);
+            }
             self.vfs.import_handle(handle, object);
         }
         for handle in self.vfs.open_handles() {
@@ -1411,30 +1459,56 @@ impl KernelState {
                 if self.vfs.is_mp3_decoder(handle) {
                     let key = self.vfs.mp3_stream_key(handle);
                     self.vfs.close(handle);
-                    if !self.vfs.mp3_decoder_handles().iter().any(|&h| self.vfs.mp3_stream_key(h) == key) { self.audio.detach_mas_stream(key); }
-                } else { self.vfs.close(handle); }
+                    if !self
+                        .vfs
+                        .mp3_decoder_handles()
+                        .iter()
+                        .any(|&h| self.vfs.mp3_stream_key(h) == key)
+                    {
+                        self.audio.detach_mas_stream(key);
+                    }
+                } else {
+                    self.vfs.close(handle);
+                }
             }
         }
-        if let Some(code) = self.main_thread.exit_code { self.object_handles.set_exit(Some(0), code); }
+        if let Some(code) = self.main_thread.exit_code {
+            self.object_handles.set_exit(Some(0), code);
+        }
         for (index, thread) in self.threads.iter().enumerate() {
-            if let Some(code) = thread.exit_code { self.object_handles.set_exit(Some(index + 1), code); }
+            if let Some(code) = thread.exit_code {
+                self.object_handles.set_exit(Some(index + 1), code);
+            }
         }
     }
     fn clean_object(&mut self, object: handles::HandleObject, last: bool) {
-        if !last { return; }
+        if !last {
+            return;
+        }
         match object {
-            handles::HandleObject::Event(key) => { self.events.remove(&key); }
-            handles::HandleObject::Semaphore(key) => { self.semaphores.remove(&key); }
-            handles::HandleObject::Mutex(key) => { self.mutexes.remove(&key); }
+            handles::HandleObject::Event(key) => {
+                self.events.remove(&key);
+            }
+            handles::HandleObject::Semaphore(key) => {
+                self.semaphores.remove(&key);
+            }
+            handles::HandleObject::Mutex(key) => {
+                self.mutexes.remove(&key);
+            }
             _ => {}
         }
     }
 
     /// Attach one device budget to every allocator before guest execution.
     /// A failed attachment leaves the previous profile intact.
-    pub fn configure_memory_division(&mut self, division: Option<memory_division::MemoryDivision>) -> bool {
+    pub fn configure_memory_division(
+        &mut self,
+        division: Option<memory_division::MemoryDivision>,
+    ) -> bool {
         let previous = self.memory_division.clone();
-        if !self.heap.attach_ram(division.clone()) { return false; }
+        if !self.heap.attach_ram(division.clone()) {
+            return false;
+        }
         if !self.registry.attach_ram(division.as_ref()) {
             self.heap.attach_ram(previous);
             return false;
@@ -1464,7 +1538,9 @@ impl KernelState {
         let pid = self.object_handles.process_id();
         self.mutexes.retain(|_, mutex| {
             if mutex.owner.is_some_and(|(owner, _)| owner == pid) {
-                mutex.owner = None; mutex.depth = 0; mutex.abandoned = true;
+                mutex.owner = None;
+                mutex.depth = 0;
+                mutex.abandoned = true;
             }
             true
         });
@@ -1805,15 +1881,23 @@ impl Thunk {
 /// slot. Leave room for the existing writable stack guard and honor PE's
 /// reservation. Higher-based/non-CE images retain the previous flat layout.
 fn private_process_layout(image: &LoadedImage) -> Option<(u32, u32, u32)> {
-    if image.subsystem != pocket_pe::subsystem::WINDOWS_CE_GUI || image.image_base < 0x10000 { return None; }
+    if image.subsystem != pocket_pe::subsystem::WINDOWS_CE_GUI || image.image_base < 0x10000 {
+        return None;
+    }
     let mut end = image.image_base.checked_add(image.size_of_image)?;
     for section in &image.sections {
-        let section_end = image.image_base.checked_add(section.virtual_address)?
+        let section_end = image
+            .image_base
+            .checked_add(section.virtual_address)?
             .checked_add(section.virtual_size.max(section.data.len() as u32))?;
         end = end.max(section_end);
     }
     let stack_base = end.checked_add(0x2000)?.checked_add(0xffff)? & !0xffff;
-    let reserve = if image.stack_reserve == 0 { DEFAULT_STACK_SIZE } else { image.stack_reserve };
+    let reserve = if image.stack_reserve == 0 {
+        DEFAULT_STACK_SIZE
+    } else {
+        image.stack_reserve
+    };
     let stack_size = reserve.max(0x10000).checked_add(0xffff)? & !0xffff;
     let heap_base = stack_base.checked_add(stack_size)?;
     (heap_base <= 0x01ff_0000).then_some((stack_base, stack_size, heap_base))
@@ -1847,7 +1931,9 @@ struct VirtualBlock {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        if let Some(ram) = &self.ram { ram.release_program(self.page_refs.len() as u32); }
+        if let Some(ram) = &self.ram {
+            ram.release_program(self.page_refs.len() as u32);
+        }
     }
 }
 
@@ -1873,7 +1959,10 @@ impl Heap {
     /// Add an independently mapped allocation arena, after existing regions.
     pub fn add_region(&mut self, base: u32, size: u32) {
         assert!(size > 0 && base.checked_add(size).is_some());
-        assert!(self.regions.iter().all(|&(start, len)| base >= start + len || base + size <= start));
+        assert!(self
+            .regions
+            .iter()
+            .all(|&(start, len)| base >= start + len || base + size <= start));
         self.regions.push((base, size));
         let at = self.free.partition_point(|&(start, _)| start < base);
         self.free.insert(at, (base, size));
@@ -1886,13 +1975,23 @@ impl Heap {
         for index in (0..self.free.len()).rev() {
             let (start, len) = self.free[index];
             let end = start.checked_add(len)? & !0xfff;
-            if end > 0x0200_0000 { continue; }
-            let Some(base) = end.checked_sub(size) else { continue; };
-            if base < start { continue; }
-            if !self.retain_pages(base, size) { return None; }
+            if end > 0x0200_0000 {
+                continue;
+            }
+            let Some(base) = end.checked_sub(size) else {
+                continue;
+            };
+            if base < start {
+                continue;
+            }
+            if !self.retain_pages(base, size) {
+                return None;
+            }
             self.resident.push((base, size));
             self.free[index].1 = base - start;
-            if self.free[index].1 == 0 { self.free.remove(index); }
+            if self.free[index].1 == 0 {
+                self.free.remove(index);
+            }
             return Some(base);
         }
         None
@@ -1900,15 +1999,21 @@ impl Heap {
 
     /// Return a private stack reservation to the normal allocation arena.
     pub fn release_stack(&mut self, base: u32, size: u32) {
-        if !self.resident.contains(&(base, size)) { return; }
+        if !self.resident.contains(&(base, size)) {
+            return;
+        }
         self.release_resident(base, size);
-        self.free.push((base, size)); self.free.sort_unstable_by_key(|r| r.0);
-        let mut merged: Vec<(u32,u32)> = Vec::new();
+        self.free.push((base, size));
+        self.free.sort_unstable_by_key(|r| r.0);
+        let mut merged: Vec<(u32, u32)> = Vec::new();
         for (start, len) in self.free.drain(..) {
             if let Some(last) = merged.last_mut() {
-                if last.0 + last.1 == start { last.1 += len; continue; }
+                if last.0 + last.1 == start {
+                    last.1 += len;
+                    continue;
+                }
             }
-            merged.push((start,len));
+            merged.push((start, len));
         }
         self.free = merged;
     }
@@ -1916,7 +2021,12 @@ impl Heap {
         self.base
     }
     pub fn contains_range(&self, address: u32, size: u32) -> bool {
-        self.regions.iter().any(|&(base, len)| address >= base && address.checked_add(size).is_some_and(|end| end <= base + len))
+        self.regions.iter().any(|&(base, len)| {
+            address >= base
+                && address
+                    .checked_add(size)
+                    .is_some_and(|end| end <= base + len)
+        })
     }
 
     pub fn size(&self) -> u32 {
@@ -1935,7 +2045,9 @@ impl Heap {
         for i in 0..self.free.len() {
             let (start, sz) = self.free[i];
             if sz >= need {
-                if !self.retain_pages(start, need) { continue; }
+                if !self.retain_pages(start, need) {
+                    continue;
+                }
                 if sz == need {
                     self.free.remove(i);
                 } else {
@@ -1972,7 +2084,12 @@ impl Heap {
         }
         let block_start = user_ptr - HEAP_HEADER_BYTES;
         let block_size = Self::align_up(user_size.max(1)) + HEAP_HEADER_BYTES;
-        if !self.regions.iter().any(|&(base, size)| block_start >= base && block_start.checked_add(block_size).is_some_and(|end| end <= base + size)) {
+        if !self.regions.iter().any(|&(base, size)| {
+            block_start >= base
+                && block_start
+                    .checked_add(block_size)
+                    .is_some_and(|end| end <= base + size)
+        }) {
             log::warn!("heap.free: chunk overflows heap; ignoring");
             return;
         }
@@ -1997,58 +2114,110 @@ impl Heap {
     /// Bind all allocations (including allocations made during loading) to
     /// one device. No virtual arena is charged merely because it is mapped.
     pub fn attach_ram(&mut self, ram: Option<memory_division::MemoryDivision>) -> bool {
-        if self.ram.as_ref().zip(ram.as_ref()).is_some_and(|(old, next)| old.same_device(next)) { return true; }
+        if self
+            .ram
+            .as_ref()
+            .zip(ram.as_ref())
+            .is_some_and(|(old, next)| old.same_device(next))
+        {
+            return true;
+        }
         if let Some(next) = &ram {
-            if !next.acquire_program(self.page_refs.len() as u32) { return false; }
+            if !next.acquire_program(self.page_refs.len() as u32) {
+                return false;
+            }
         }
         if !self.image_memory.attach_ram(ram.clone()) {
-            if let Some(next) = &ram { next.release_program(self.page_refs.len() as u32); }
+            if let Some(next) = &ram {
+                next.release_program(self.page_refs.len() as u32);
+            }
             return false;
         }
-        if let Some(old) = &self.ram { old.release_program(self.page_refs.len() as u32); }
+        if let Some(old) = &self.ram {
+            old.release_program(self.page_refs.len() as u32);
+        }
         self.ram = ram;
         true
     }
     fn page_range(start: u32, size: u32) -> Option<std::ops::RangeInclusive<u32>> {
-        if size == 0 { return None; }
+        if size == 0 {
+            return None;
+        }
         Some(start / 4096..=start.checked_add(size - 1)? / 4096)
     }
     fn retain_pages(&mut self, start: u32, size: u32) -> bool {
-        let Some(range) = Self::page_range(start, size) else { return size == 0; };
-        let added = range.clone().filter(|page| !self.page_refs.contains_key(page)).count() as u32;
-        if self.ram.as_ref().is_some_and(|ram| !ram.acquire_program(added)) { return false; }
-        for page in range { *self.page_refs.entry(page).or_default() += 1; }
+        let Some(range) = Self::page_range(start, size) else {
+            return size == 0;
+        };
+        let added = range
+            .clone()
+            .filter(|page| !self.page_refs.contains_key(page))
+            .count() as u32;
+        if self
+            .ram
+            .as_ref()
+            .is_some_and(|ram| !ram.acquire_program(added))
+        {
+            return false;
+        }
+        for page in range {
+            *self.page_refs.entry(page).or_default() += 1;
+        }
         true
     }
     fn release_pages(&mut self, start: u32, size: u32) {
-        let Some(range) = Self::page_range(start, size) else { return; };
+        let Some(range) = Self::page_range(start, size) else {
+            return;
+        };
         let mut released = 0;
         for page in range {
             if let Some(count) = self.page_refs.get_mut(&page) {
                 *count -= 1;
-                if *count == 0 { self.page_refs.remove(&page); released += 1; }
+                if *count == 0 {
+                    self.page_refs.remove(&page);
+                    released += 1;
+                }
             }
         }
-        if let Some(ram) = &self.ram { ram.release_program(released); }
+        if let Some(ram) = &self.ram {
+            ram.release_program(released);
+        }
     }
     /// Account resident mappings until their owner releases them.
     pub fn retain_resident(&mut self, start: u32, size: u32) -> bool {
-        if !self.retain_pages(start, size) { return false; }
+        if !self.retain_pages(start, size) {
+            return false;
+        }
         self.resident.push((start, size));
         true
     }
     pub fn retain_resident_batch(&mut self, regions: &[(u32, u32)]) -> bool {
         let mut unique = std::collections::HashSet::new();
         for &(start, size) in regions {
-            if size == 0 { continue; }
-            let Some(range) = Self::page_range(start, size) else { return false; };
+            if size == 0 {
+                continue;
+            }
+            let Some(range) = Self::page_range(start, size) else {
+                return false;
+            };
             unique.extend(range);
         }
-        let added = unique.iter().filter(|page| !self.page_refs.contains_key(*page)).count() as u32;
-        if self.ram.as_ref().is_some_and(|ram| !ram.acquire_program(added)) { return false; }
+        let added = unique
+            .iter()
+            .filter(|page| !self.page_refs.contains_key(*page))
+            .count() as u32;
+        if self
+            .ram
+            .as_ref()
+            .is_some_and(|ram| !ram.acquire_program(added))
+        {
+            return false;
+        }
         for &(start, size) in regions {
             if let Some(range) = Self::page_range(start, size) {
-                for page in range { *self.page_refs.entry(page).or_default() += 1; }
+                for page in range {
+                    *self.page_refs.entry(page).or_default() += 1;
+                }
             }
             self.resident.push((start, size));
         }
@@ -2060,7 +2229,9 @@ impl Heap {
             self.release_pages(start, size);
         }
     }
-    pub fn virtual_bytes(&self) -> u32 { self.regions.iter().map(|&(_, size)| size).sum() }
+    pub fn virtual_bytes(&self) -> u32 {
+        self.regions.iter().map(|&(_, size)| size).sum()
+    }
     /// CE 4.x reports its 32 MiB private process slot here; the extra
     /// shared allocation arena does not enlarge that private address space.
     pub fn private_virtual_free(&self) -> u32 {
@@ -2068,89 +2239,180 @@ impl Heap {
         for &(start, len) in &self.free {
             let first = ((start as u64 + 4095) / 4096) as u32;
             let end = start.saturating_add(len).min(0x02000000) / 4096;
-            if start >= 0x02000000 { continue; }
+            if start >= 0x02000000 {
+                continue;
+            }
             for page in first..end {
-                if !self.page_refs.contains_key(&page) { pages.insert(page); }
+                if !self.page_refs.contains_key(&page) {
+                    pages.insert(page);
+                }
             }
         }
         pages.len() as u32 * 4096
     }
-    pub fn program_pages(&self) -> u32 { self.page_refs.len() as u32 + self.image_memory.pages() }
-    pub fn image_page_budget(&self) -> std::sync::Arc<dyn pocket_cpu::image_pages::ImagePageBudget> {
+    pub fn program_pages(&self) -> u32 {
+        self.page_refs.len() as u32 + self.image_memory.pages()
+    }
+    pub fn image_page_budget(
+        &self,
+    ) -> std::sync::Arc<dyn pocket_cpu::image_pages::ImagePageBudget> {
         self.image_memory.clone()
     }
 
     /// Page-aligned reservations share the same virtual arenas as the heap,
     /// but consume physical pages only when committed.
-    pub fn virtual_alloc(&mut self, address: u32, size: u32, reserve: bool, commit: bool) -> Option<u32> {
-        if size == 0 || (!reserve && !commit) { return None; }
+    pub fn virtual_alloc(
+        &mut self,
+        address: u32,
+        size: u32,
+        reserve: bool,
+        commit: bool,
+    ) -> Option<u32> {
+        if size == 0 || (!reserve && !commit) {
+            return None;
+        }
         if address != 0 && !reserve {
-            let (&base, block) = self.virtual_blocks.iter().find(|&(base, block)|
-                address >= *base && address.checked_add(size).is_some_and(|end| end <= *base + block.size))?;
+            let (&base, block) = self.virtual_blocks.iter().find(|&(base, block)| {
+                address >= *base
+                    && address
+                        .checked_add(size)
+                        .is_some_and(|end| end <= *base + block.size)
+            })?;
             let start = address & !0xfff;
             let end = address.checked_add(size)?.checked_add(4095)? & !0xfff;
-            let needed: Vec<u32> = (start / 4096..end / 4096).filter(|p| !block.committed.contains(p)).collect();
+            let needed: Vec<u32> = (start / 4096..end / 4096)
+                .filter(|p| !block.committed.contains(p))
+                .collect();
             // One reservation cannot overlap another block, so all these
             // physical pages are new. Validate before changing any state.
-            if self.ram.as_ref().is_some_and(|ram| !ram.acquire_program(needed.len() as u32)) { return None; }
+            if self
+                .ram
+                .as_ref()
+                .is_some_and(|ram| !ram.acquire_program(needed.len() as u32))
+            {
+                return None;
+            }
             let block = self.virtual_blocks.get_mut(&base)?;
-            for page in needed { block.committed.insert(page); self.page_refs.insert(page, 1); }
+            for page in needed {
+                block.committed.insert(page);
+                self.page_refs.insert(page, 1);
+            }
             return Some(start);
         }
         let base_requested = if address == 0 { 0 } else { address & !0xffff };
-        let offset = if address == 0 { 0 } else { address - base_requested };
+        let offset = if address == 0 {
+            0
+        } else {
+            address - base_requested
+        };
         let commit_size = size.checked_add(address & 0xfff)?.checked_add(4095)? & !0xfff;
         let size = size.checked_add(offset)?.checked_add(0xffff)? & !0xffff;
         for i in 0..self.free.len() {
             let (start, len) = self.free[i];
-            let base = if address == 0 { start.checked_add(0xffff)? & !0xffff } else { base_requested };
+            let base = if address == 0 {
+                start.checked_add(0xffff)? & !0xffff
+            } else {
+                base_requested
+            };
             let end = base.checked_add(size)?;
-            if base < start || end > start.checked_add(len)? { continue; }
+            if base < start || end > start.checked_add(len)? {
+                continue;
+            }
             let commit_start = if address == 0 { base } else { address & !0xfff };
-            if commit && !self.retain_pages(commit_start, commit_size) { return None; }
+            if commit && !self.retain_pages(commit_start, commit_size) {
+                return None;
+            }
             self.free.remove(i);
-            if base > start { self.free.push((start, base - start)); }
-            if end < start + len { self.free.push((end, start + len - end)); }
+            if base > start {
+                self.free.push((start, base - start));
+            }
+            if end < start + len {
+                self.free.push((end, start + len - end));
+            }
             self.free.sort_unstable_by_key(|r| r.0);
-            self.virtual_blocks.insert(base, VirtualBlock { size, committed: if commit {
-                (commit_start / 4096..(commit_start + commit_size) / 4096).collect()
-            } else { Default::default() } });
+            self.virtual_blocks.insert(
+                base,
+                VirtualBlock {
+                    size,
+                    committed: if commit {
+                        (commit_start / 4096..(commit_start + commit_size) / 4096).collect()
+                    } else {
+                        Default::default()
+                    },
+                },
+            );
             return Some(base);
         }
         None
     }
-    pub fn virtual_block(&self, address: u32) -> Option<(u32, u32, std::collections::HashSet<u32>)> {
-        self.virtual_blocks.iter().find(|&(base, block)| address >= *base && address < *base + block.size)
+    pub fn virtual_block(
+        &self,
+        address: u32,
+    ) -> Option<(u32, u32, std::collections::HashSet<u32>)> {
+        self.virtual_blocks
+            .iter()
+            .find(|&(base, block)| address >= *base && address < *base + block.size)
             .map(|(&base, block)| (base, block.size, block.committed.clone()))
     }
     pub fn virtual_free(&mut self, address: u32, size: u32, release: bool) -> bool {
         if release {
-            if size != 0 { return false; }
-            let Some(block) = self.virtual_blocks.remove(&address) else { return false; };
-            for page in block.committed { self.release_pages(page * 4096, 4096); }
+            if size != 0 {
+                return false;
+            }
+            let Some(block) = self.virtual_blocks.remove(&address) else {
+                return false;
+            };
+            for page in block.committed {
+                self.release_pages(page * 4096, 4096);
+            }
             self.free.push((address, block.size));
             self.free.sort_unstable_by_key(|r| r.0);
             let mut merged: Vec<(u32, u32)> = Vec::new();
             for (start, len) in self.free.drain(..) {
                 if let Some(last) = merged.last_mut() {
-                    if last.0 + last.1 == start { last.1 += len; continue; }
+                    if last.0 + last.1 == start {
+                        last.1 += len;
+                        continue;
+                    }
                 }
                 merged.push((start, len));
             }
             self.free = merged;
             return true;
         }
-        let Some((&base, block)) = self.virtual_blocks.iter().find(|&(base, block)|
-            address >= *base && address < *base + block.size) else { return false; };
-        if size == 0 && address != base { return false; }
+        let Some((&base, block)) = self
+            .virtual_blocks
+            .iter()
+            .find(|&(base, block)| address >= *base && address < *base + block.size)
+        else {
+            return false;
+        };
+        if size == 0 && address != base {
+            return false;
+        }
         let start = address & !0xfff;
-        let Some(end) = (if size == 0 { Some(base + block.size) } else {
-            address.checked_add(size).and_then(|end| end.checked_add(4095)).map(|end| end & !0xfff)
-        }) else { return false; };
-        if end > base + block.size { return false; }
-        let removed: Vec<u32> = (start / 4096..end / 4096).filter(|p| block.committed.contains(p)).collect();
+        let Some(end) = (if size == 0 {
+            Some(base + block.size)
+        } else {
+            address
+                .checked_add(size)
+                .and_then(|end| end.checked_add(4095))
+                .map(|end| end & !0xfff)
+        }) else {
+            return false;
+        };
+        if end > base + block.size {
+            return false;
+        }
+        let removed: Vec<u32> = (start / 4096..end / 4096)
+            .filter(|p| block.committed.contains(p))
+            .collect();
         for page in removed {
-            self.virtual_blocks.get_mut(&base).unwrap().committed.remove(&page);
+            self.virtual_blocks
+                .get_mut(&base)
+                .unwrap()
+                .committed
+                .remove(&page);
             self.release_pages(page * 4096, 4096);
         }
         true
@@ -2164,7 +2426,7 @@ impl Heap {
 /// Fake `HMODULE` for the resident `ole32.dll` compatibility module.
 pub const SDLAUNCH_MODULE_HANDLE: u32 = 0x1000_0009;
 pub const OLE32_MODULE_HANDLE: u32 = 0x1000_0007;
-pub const WININET_MODULE_HANDLE:u32=0x1000_000b;
+pub const WININET_MODULE_HANDLE: u32 = 0x1000_000b;
 pub const WS2_MODULE_HANDLE: u32 = 0x1000_000a;
 /// Fake `HMODULE` for `libGLES_CM.dll`, the Common profile.
 pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
@@ -2226,14 +2488,23 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
                 table.insert(format!("#{ord}"), thunk.thunk_va);
             }
         } else if thunk.dll.eq_ignore_ascii_case("sdlaunch.dll") {
-            exports.entry(SDLAUNCH_MODULE_HANDLE).or_insert_with(HashMap::new)
+            exports
+                .entry(SDLAUNCH_MODULE_HANDLE)
+                .or_insert_with(HashMap::new)
                 .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("wininet.dll") {
-            exports.entry(WININET_MODULE_HANDLE).or_insert_with(HashMap::new).insert(name,thunk.thunk_va);
+            exports
+                .entry(WININET_MODULE_HANDLE)
+                .or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("ws2.dll") {
-            let table = exports.entry(WS2_MODULE_HANDLE).or_insert_with(HashMap::new);
+            let table = exports
+                .entry(WS2_MODULE_HANDLE)
+                .or_insert_with(HashMap::new);
             table.insert(name, thunk.thunk_va);
-            if let ImportBinding::Ordinal(ord) = &thunk.binding { table.insert(format!("#{ord}"), thunk.thunk_va); }
+            if let ImportBinding::Ordinal(ord) = &thunk.binding {
+                table.insert(format!("#{ord}"), thunk.thunk_va);
+            }
         } else if thunk.dll.eq_ignore_ascii_case("ole32.dll") {
             ole32.insert(name.clone(), thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("libgles_cm.dll")
@@ -2334,9 +2605,16 @@ impl Process {
                 prot |= Prot::EXEC;
             }
             let aligned = pocket_cpu::round_up_to_page(s.virtual_size.max(s.data.len() as u32));
-            if aligned == 0 { continue; }
-            if !cpu.map_image_region(image.image_base + s.virtual_address, aligned, prot,
-                s.data.clone(), image_memory.clone())? {
+            if aligned == 0 {
+                continue;
+            }
+            if !cpu.map_image_region(
+                image.image_base + s.virtual_address,
+                aligned,
+                prot,
+                s.data.clone(),
+                image_memory.clone(),
+            )? {
                 eager_images.push((image.image_base + s.virtual_address, aligned));
             }
             log::debug!(
@@ -2446,7 +2724,9 @@ impl Process {
                 };
             let fallback_offset = if native.is_some() {
                 native_name.and_then(|name| native_thunks::hybrid_fallback_offset(&imp.dll, name))
-            } else { None };
+            } else {
+                None
+            };
             // Build the thunk metadata up front so we can query the
             // dispatcher for a constant-return shortcut.
             let thunk = Thunk {
@@ -2533,9 +2813,12 @@ impl Process {
                 // as a static import; unrelated dynamic exports keep their
                 // existing dispatch behaviour.
                 let hybrid = if cpu.arch() == Arch::Arm {
-                    native_thunks::hybrid_fallback_offset(&dll, &name)
-                        .and_then(|offset| native_thunks::native_thunk_for(&dll, &name).map(|words| (offset, words)))
-                } else { None };
+                    native_thunks::hybrid_fallback_offset(&dll, &name).and_then(|offset| {
+                        native_thunks::native_thunk_for(&dll, &name).map(|words| (offset, words))
+                    })
+                } else {
+                    None
+                };
                 if let Some((offset, words)) = hybrid {
                     cpu.write_mem(thunk_va, &native_thunks::thunk_bytes(&words))?;
                     let fallback = thunk_va + offset;
@@ -2566,7 +2849,11 @@ impl Process {
         let private_layout = private_process_layout(&image);
         let (stack_base, stack_size, stack_top) = private_layout
             .map(|layout| (layout.0, layout.1, layout.0 + layout.1))
-            .unwrap_or((DEFAULT_STACK_TOP - DEFAULT_STACK_SIZE, DEFAULT_STACK_SIZE, DEFAULT_STACK_TOP));
+            .unwrap_or((
+                DEFAULT_STACK_TOP - DEFAULT_STACK_SIZE,
+                DEFAULT_STACK_SIZE,
+                DEFAULT_STACK_TOP,
+            ));
         let dynamic_exports = build_dynamic_exports(&thunks);
         // Keep one writable guard page below the nominal stack base.
         // ARM prologues may pre-decrement SP before the first store, and
@@ -2595,10 +2882,14 @@ impl Process {
             let mut heap = Heap::new(heap_base, heap_size);
             heap.add_region(HEAP_BASE, HEAP_SIZE);
             heap
-        } else { Heap::new(HEAP_BASE, HEAP_SIZE) };
+        } else {
+            Heap::new(HEAP_BASE, HEAP_SIZE)
+        };
 
         heap.image_memory = image_memory;
-        for (start, bytes) in eager_images { heap.retain_resident(start, bytes); }
+        for (start, bytes) in eager_images {
+            heap.retain_resident(start, bytes);
+        }
         heap.retain_resident(stack_base - 0x2000, stack_size + 0x2000);
         heap.retain_resident(THUNK_REGION_BASE, thunk_size);
 
@@ -2705,7 +2996,9 @@ impl Process {
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| vec![p.to_path_buf()])
             .unwrap_or_default();
-        for section in &mut image.sections { section.data = Vec::new(); }
+        for section in &mut image.sections {
+            section.data = Vec::new();
+        }
         Ok(Process {
             image,
             thunks,
@@ -2715,7 +3008,7 @@ impl Process {
             state: KernelState {
                 heap,
                 vfs: vfs::Vfs::new(),
-                internet:internet::State::default(),
+                internet: internet::State::default(),
                 module_path: DEFAULT_MODULE_PATH.to_string(),
                 process_launch_enabled: false,
                 pending_process_launch: None,
@@ -2726,7 +3019,10 @@ impl Process {
                 next_process_id: 1,
                 process_exit_code: None,
                 memory_division: None,
-                main_thread: MainThreadState { stack_region: Some((stack_base - 0x2000, stack_size + 0x2000)), ..MainThreadState::default() },
+                main_thread: MainThreadState {
+                    stack_region: Some((stack_base - 0x2000, stack_size + 0x2000)),
+                    ..MainThreadState::default()
+                },
                 object_handles: handles::HandleTable::default(),
                 random_seed: 0x1234_abcd,
                 framebuffer: Framebuffer::default(),
@@ -2790,11 +3086,12 @@ impl Process {
                 threads: Vec::new(),
                 events: Default::default(),
                 semaphores: Default::default(),
-            mutexes: Default::default(),
+                mutexes: Default::default(),
                 current_thread: 0,
                 thread_last_errors: HashMap::new(),
                 winsock_last_errors: HashMap::new(),
-                crt_new_handler:0, cpp_new_handler:0,
+                crt_new_handler: 0,
+                cpp_new_handler: 0,
                 worker_schedule_cursor: 0,
                 worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
@@ -2889,8 +3186,10 @@ impl<F: FnMut(&mut KernelState) -> FrameAction> FrameHook for F {
 }
 
 fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
-    if !state.fb_mapped || !state.framebuffer.directdraw.primary_locks.is_empty()
-        || state.framebuffer.frame_counter != state.gx_last_pushed_counter {
+    if !state.fb_mapped
+        || !state.framebuffer.directdraw.primary_locks.is_empty()
+        || state.framebuffer.frame_counter != state.gx_last_pushed_counter
+    {
         return;
     }
     let pitch = state.guest_fb_pitch.max(state.framebuffer.stride_bytes()) as usize;
@@ -3009,7 +3308,9 @@ pub fn run_main_loop_with_hook(
         slice = slice.saturating_add(1);
         {
             let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
-            if process.state.apply_process_controls(cpu, &mut pc)? { return Ok(()); }
+            if process.state.apply_process_controls(cpu, &mut pc)? {
+                return Ok(());
+            }
         }
         // Switch TLS before any guest code, including DllMain notifications.
         process.state.sync_thread_tls(cpu)?;
@@ -3022,8 +3323,11 @@ pub fn run_main_loop_with_hook(
         if pc == PROCESS_EXIT_TRAMPOLINE_VA {
             let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
             let code = cpu.read_reg(ArmReg::R0).unwrap_or(0);
-            if let Some(entry) = process.state.begin_dll_notifications(cpu, 0,
-                dll_lifecycle::DllContinuation::ExitProcess(code))? {
+            if let Some(entry) = process.state.begin_dll_notifications(
+                cpu,
+                0,
+                dll_lifecycle::DllContinuation::ExitProcess(code),
+            )? {
                 pc = entry;
             } else {
                 process.state.finish_dll_process_exit(cpu, code)?;
@@ -3033,8 +3337,13 @@ pub fn run_main_loop_with_hook(
         if let Some(index) = process.state.current_thread.checked_sub(1) {
             if !process.state.threads[index].dll_thread_attach_delivered {
                 process.state.threads[index].dll_thread_attach_delivered = true;
-                if let Some(entry) = process.state.begin_dll_notifications(cpu, 2,
-                    dll_lifecycle::DllContinuation::Resume(pc))? { pc = entry; }
+                if let Some(entry) = process.state.begin_dll_notifications(
+                    cpu,
+                    2,
+                    dll_lifecycle::DllContinuation::Resume(pc),
+                )? {
+                    pc = entry;
+                }
             }
         }
         if pc < 0x1000 {
@@ -3080,313 +3389,358 @@ pub fn run_main_loop_with_hook(
             }
         };
         {
-        let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
-        let mut boundary_pc = cpu.read_reg(ArmReg::Pc)?;
-        let old_thread = process.state.current_thread;
-        let old_boundary_pc = boundary_pc;
-        if process.state.apply_process_controls(cpu, &mut boundary_pc)? { return Ok(()); }
-        if boundary_pc != old_boundary_pc || old_thread != process.state.current_thread {
-            pc = boundary_pc;
-            // A remote request parked/killed the owner before dispatching its call.
-            continue;
-        }
-        match stop {
-            StopReason::InstructionLimit => {
-                pc = cpu.read_reg(ArmReg::Pc)?;
-                log::trace!("instruction slice exhausted; resuming at 0x{pc:08x}");
-                // Budget exhaustion is a normal slice boundary too. Do not
-                // bypass the throttled host input/presentation/stop hook.
-                // Native thunks and CPU-only loops may never dispatch an API.
+            let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
+            let mut boundary_pc = cpu.read_reg(ArmReg::Pc)?;
+            let old_thread = process.state.current_thread;
+            let old_boundary_pc = boundary_pc;
+            if process
+                .state
+                .apply_process_controls(cpu, &mut boundary_pc)?
+            {
+                return Ok(());
             }
-            StopReason::Hook(addr) => {
-                if addr == CE_TERMINATE_PROCESS_TRAP {
-                    let handle = cpu.read_reg(ArmReg::R0)?;
-                    if handle == CE_CURRENT_PROCESS_HANDLE || handle == FAKE_CURRENT_PROCESS_HANDLE
-                        || process.state.object_handles.get(handle) == Some(handles::HandleObject::CurrentProcess) {
-                        let code = cpu.read_reg(ArmReg::R1)?;
-                        process.state.record_process_exit(code);
-                        log::info!("WinCE implicit TerminateProcess -> exit code 0x{code:08x}");
-                        return Ok(());
-                    }
-                    // This API is not a WndProc-return trampoline. Even failure
-                    // must leave an in-flight message continuation untouched.
-                    process.state.thread_last_errors.insert(process.state.current_thread, 6);
-                    cpu.write_reg(ArmReg::R0, 0)?;
-                    pc = cpu.read_reg(ArmReg::Lr)?;
-                    continue;
+            if boundary_pc != old_boundary_pc || old_thread != process.state.current_thread {
+                pc = boundary_pc;
+                // A remote request parked/killed the owner before dispatching its call.
+                continue;
+            }
+            match stop {
+                StopReason::InstructionLimit => {
+                    pc = cpu.read_reg(ArmReg::Pc)?;
+                    log::trace!("instruction slice exhausted; resuming at 0x{pc:08x}");
+                    // Budget exhaustion is a normal slice boundary too. Do not
+                    // bypass the throttled host input/presentation/stop hook.
+                    // Native thunks and CPU-only loops may never dispatch an API.
                 }
-                // The synthetic process-exit trampoline is reached
-                // when the guest entry point's top-level frame
-                // returns and pops the seeded `LR` value into `PC`.
-                // Treat it as a clean shutdown — equivalent to the
-                // game calling `ExitProcess(0)` itself. Without this,
-                // every Pocket PC game looks like it crashes
-                // (pc=0x00000000) at the very end of execution.
-                if addr == PROCESS_EXIT_TRAMPOLINE_VA {
-                    pc = addr;
-                    continue;
-                }
-                if addr == dll_lifecycle::DLL_NOTIFICATION_RETURN_VA {
-                    match process.state.next_dll_notification(cpu)? {
-                        Some(next) => { pc = next; continue; }
-                        None => return Ok(()),
-                    }
-                }
-                if addr == KERNEL_TRAP_BASE {
-                    let owner = process.state.current_thread;
-                    if let Some(frame) = process.state.message_frames.remove(&owner) {
-                        for (index, value) in frame.args.iter().enumerate() {
-                            cpu.write_reg(
-                                match index {
-                                    0 => ArmReg::R0,
-                                    1 => ArmReg::R1,
-                                    2 => ArmReg::R2,
-                                    3 => ArmReg::R3,
-                                    _ => unreachable!(),
-                                },
-                                *value,
-                            )?;
+                StopReason::Hook(addr) => {
+                    if addr == CE_TERMINATE_PROCESS_TRAP {
+                        let handle = cpu.read_reg(ArmReg::R0)?;
+                        if handle == CE_CURRENT_PROCESS_HANDLE
+                            || handle == FAKE_CURRENT_PROCESS_HANDLE
+                            || process.state.object_handles.get(handle)
+                                == Some(handles::HandleObject::CurrentProcess)
+                        {
+                            let code = cpu.read_reg(ArmReg::R1)?;
+                            process.state.record_process_exit(code);
+                            log::info!("WinCE implicit TerminateProcess -> exit code 0x{code:08x}");
+                            return Ok(());
                         }
-                        cpu.write_reg(ArmReg::Sp, frame.sp)?;
-                        cpu.write_reg(ArmReg::Lr, frame.lr)?;
-                        pc = frame.lr;
+                        // This API is not a WndProc-return trampoline. Even failure
+                        // must leave an in-flight message continuation untouched.
+                        process
+                            .state
+                            .thread_last_errors
+                            .insert(process.state.current_thread, 6);
+                        cpu.write_reg(ArmReg::R0, 0)?;
+                        pc = cpu.read_reg(ArmReg::Lr)?;
                         continue;
                     }
-                }
-                if let Some(thread_index) = process
-                    .state
-                    .threads
-                    .iter()
-                    .position(|thread| thread.exit_va == addr && !thread.finished)
-                {
-                    let exit_code = cpu.read_reg(ArmReg::R0)?;
-                    if process.state.main_thread.exit_code.is_some()
-                        && process.state.threads.iter().enumerate().all(|(index, thread)| index == thread_index || thread.finished) {
-                        if let Some(entry) = process.state.begin_dll_notifications(cpu, 0,
-                            dll_lifecycle::DllContinuation::ExitProcess(exit_code))? {
-                            pc = entry;
-                            continue;
-                        }
-                        process.state.finish_dll_process_exit(cpu, exit_code)?;
-                        return Ok(());
-                    }
-                    if !process.state.threads[thread_index].dll_thread_detach_delivered {
-                        process.state.threads[thread_index].dll_thread_detach_delivered = true;
-                        if let Some(entry) = process.state.begin_dll_notifications(cpu, 3,
-                            dll_lifecycle::DllContinuation::Resume(addr))? {
-                            pc = entry;
-                            continue;
-                        }
-                    }
-                    process.state.main_thread.last_exit_code = Some(exit_code);
-                    process.state.threads[thread_index].exit_code = Some(exit_code);
-                    process.state.threads[thread_index].finished = true;
-                    process.state.reclaim_finished_stacks(cpu)?;
-                    process.state.message_frames.remove(&(thread_index + 1));
-                    if process.state.main_thread.exit_code.is_some()
-                        || process.state.main_thread.suspend_count != 0
-                        || process.state.main_thread.saved_regs.is_some() {
-                        let fpscr = cpu.read_fpscr()?;
-                        process.state.guest_fpscr.insert(thread_index + 1, fpscr);
-                        process.state.current_thread = 0;
-                        cpu.write_fpscr(process.state.guest_fpscr.get(&0).copied().unwrap_or(0))?;
-                        pc = THREAD_SCHEDULER_IDLE_VA;
+                    // The synthetic process-exit trampoline is reached
+                    // when the guest entry point's top-level frame
+                    // returns and pops the seeded `LR` value into `PC`.
+                    // Treat it as a clean shutdown — equivalent to the
+                    // game calling `ExitProcess(0)` itself. Without this,
+                    // every Pocket PC game looks like it crashes
+                    // (pc=0x00000000) at the very end of execution.
+                    if addr == PROCESS_EXIT_TRAMPOLINE_VA {
+                        pc = addr;
                         continue;
                     }
-                    let thread = process.state.threads[thread_index].clone();
-                    if thread.worker_saved {
-                        for (index, value) in thread.saved_regs.iter().enumerate() {
-                            cpu.write_reg(
-                                match index {
-                                    0 => ArmReg::R0,
-                                    1 => ArmReg::R1,
-                                    2 => ArmReg::R2,
-                                    3 => ArmReg::R3,
-                                    4 => ArmReg::R4,
-                                    5 => ArmReg::R5,
-                                    6 => ArmReg::R6,
-                                    7 => ArmReg::R7,
-                                    8 => ArmReg::R8,
-                                    9 => ArmReg::R9,
-                                    10 => ArmReg::R10,
-                                    11 => ArmReg::R11,
-                                    12 => ArmReg::R12,
-                                    13 => ArmReg::Sp,
-                                    14 => ArmReg::Lr,
-                                    15 => ArmReg::Pc,
-                                    _ => ArmReg::Cpsr,
-                                },
-                                *value,
-                            )?;
-                        }
-                        cpu.write_reg(ArmReg::R0, thread.handle)?;
-                        process.state.threads[thread_index].finished = true;
-                        let fpscr = cpu.read_fpscr()?;
-                        process.state.guest_fpscr.insert(process.state.current_thread, fpscr);
-                        cpu.write_fpscr(process.state.guest_fpscr.get(&0).copied().unwrap_or(0))?;
-                        process.state.current_thread = 0;
-                        pc = thread.resume_pc;
-                    } else {
-                        let values = thread.saved_regs;
-                        for (index, value) in values.iter().enumerate() {
-                            cpu.write_reg(
-                                match index {
-                                    0 => ArmReg::R0,
-                                    1 => ArmReg::R1,
-                                    2 => ArmReg::R2,
-                                    3 => ArmReg::R3,
-                                    4 => ArmReg::R4,
-                                    5 => ArmReg::R5,
-                                    6 => ArmReg::R6,
-                                    7 => ArmReg::R7,
-                                    8 => ArmReg::R8,
-                                    9 => ArmReg::R9,
-                                    10 => ArmReg::R10,
-                                    11 => ArmReg::R11,
-                                    12 => ArmReg::R12,
-                                    13 => ArmReg::Sp,
-                                    14 => ArmReg::Lr,
-                                    15 => ArmReg::Pc,
-                                    _ => ArmReg::Cpsr,
-                                },
-                                *value,
-                            )?;
-                        }
-                        let fpscr = cpu.read_fpscr()?;
-                        process.state.guest_fpscr.insert(process.state.current_thread, fpscr);
-                        cpu.write_fpscr(process.state.guest_fpscr.get(&0).copied().unwrap_or(0))?;
-                        process.state.current_thread = 0;
-                        pc = thread.resume_pc;
-                    }
-                    log::debug!(
-                        "guest thread {} returned; resuming main at 0x{:08x}",
-                        thread_index,
-                        pc
-                    );
-                    continue;
-                }
-
-                let is_wince_breakpoint = cpu
-                    .read_mem(addr, 4)
-                    .ok()
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .map(u32::from_le_bytes)
-                    == Some(WINCE_BREAKPOINT);
-                if is_wince_breakpoint {
-                    cpu.write_reg(ArmReg::Pc, addr + 4)?;
-                    pc = addr + 4;
-                    log::debug!("WinCE debugger breakpoint treated as a no-op at 0x{addr:08x}");
-                    continue;
-                }
-
-                let runtime_thunk = process.state.runtime_thunks.get(&addr).cloned();
-                let outcome = if addr == THREAD_SCHEDULER_IDLE_VA {
-                    dispatcher.schedule_idle(cpu, &mut process.state)?
-                } else { match process.find_thunk_and_state(addr) {
-                    Some((thunk, state)) => {
-                        // Split borrow: `thunk` borrows
-                        // `process.thunks` immutably and `state`
-                        // borrows `process.state` mutably. No clone,
-                        // and no per-call heap allocation — that
-                        // matters because this branch fires on every
-                        // single emulated WinCE API call.
-                        let dispatched = dispatcher.dispatch(cpu, thunk, state);
-                        let outcome = dispatched?;
-                        if matches!(outcome, DispatchOutcome::Halt)
-                            && log::log_enabled!(log::Level::Info)
-                        {
-                            log::info!("dispatcher requested halt at {}", thunk.label());
-                        }
-                        outcome
-                    }
-                    None if runtime_thunk.is_some() => {
-                        dispatcher.dispatch(cpu, runtime_thunk.as_ref().unwrap(), &mut process.state)?
-                    }
-                    None => {
-                        // A non-thunk code hook fired. The expected
-                        // case is the WinCE kernel-trap region
-                        // (0xF000_0000..) — every page there is
-                        // pre-filled with `bx lr`, so a real device
-                        // would just return straight to the caller.
-                        // Treat it that way: log once at debug level
-                        // and emulate `bx lr` ourselves (set PC to LR
-                        // & ~1, continue). The `pc < 0x1000` guard
-                        // at the top of the loop still catches the
-                        // genuine "poisoned LR after ExitProcess"
-                        // case where LR is 0.
-                        if (KERNEL_TRAP_BASE..KERNEL_TRAP_BASE.saturating_add(KERNEL_TRAP_SIZE))
-                            .contains(&addr)
-                        {
-                            let owner = process.state.current_thread;
-                            if let Some(frame) = process.state.message_frames.remove(&owner) {
-                                for (index, value) in frame.args.iter().enumerate() {
-                                    cpu.write_reg(
-                                        match index {
-                                            0 => ArmReg::R0,
-                                            1 => ArmReg::R1,
-                                            2 => ArmReg::R2,
-                                            _ => ArmReg::R3,
-                                        },
-                                        *value,
-                                    )?;
-                                }
-                                cpu.write_reg(ArmReg::Lr, frame.lr)?;
-                                cpu.write_reg(ArmReg::Sp, frame.sp)?;
-                                pc = frame.lr;
+                    if addr == dll_lifecycle::DLL_NOTIFICATION_RETURN_VA {
+                        match process.state.next_dll_notification(cpu)? {
+                            Some(next) => {
+                                pc = next;
                                 continue;
                             }
-                            log::debug!(
+                            None => return Ok(()),
+                        }
+                    }
+                    if addr == KERNEL_TRAP_BASE {
+                        let owner = process.state.current_thread;
+                        if let Some(frame) = process.state.message_frames.remove(&owner) {
+                            for (index, value) in frame.args.iter().enumerate() {
+                                cpu.write_reg(
+                                    match index {
+                                        0 => ArmReg::R0,
+                                        1 => ArmReg::R1,
+                                        2 => ArmReg::R2,
+                                        3 => ArmReg::R3,
+                                        _ => unreachable!(),
+                                    },
+                                    *value,
+                                )?;
+                            }
+                            cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                            cpu.write_reg(ArmReg::Lr, frame.lr)?;
+                            pc = frame.lr;
+                            continue;
+                        }
+                    }
+                    if let Some(thread_index) = process
+                        .state
+                        .threads
+                        .iter()
+                        .position(|thread| thread.exit_va == addr && !thread.finished)
+                    {
+                        let exit_code = cpu.read_reg(ArmReg::R0)?;
+                        if process.state.main_thread.exit_code.is_some()
+                            && process
+                                .state
+                                .threads
+                                .iter()
+                                .enumerate()
+                                .all(|(index, thread)| index == thread_index || thread.finished)
+                        {
+                            if let Some(entry) = process.state.begin_dll_notifications(
+                                cpu,
+                                0,
+                                dll_lifecycle::DllContinuation::ExitProcess(exit_code),
+                            )? {
+                                pc = entry;
+                                continue;
+                            }
+                            process.state.finish_dll_process_exit(cpu, exit_code)?;
+                            return Ok(());
+                        }
+                        if !process.state.threads[thread_index].dll_thread_detach_delivered {
+                            process.state.threads[thread_index].dll_thread_detach_delivered = true;
+                            if let Some(entry) = process.state.begin_dll_notifications(
+                                cpu,
+                                3,
+                                dll_lifecycle::DllContinuation::Resume(addr),
+                            )? {
+                                pc = entry;
+                                continue;
+                            }
+                        }
+                        process.state.main_thread.last_exit_code = Some(exit_code);
+                        process.state.threads[thread_index].exit_code = Some(exit_code);
+                        process.state.threads[thread_index].finished = true;
+                        process.state.reclaim_finished_stacks(cpu)?;
+                        process.state.message_frames.remove(&(thread_index + 1));
+                        if process.state.main_thread.exit_code.is_some()
+                            || process.state.main_thread.suspend_count != 0
+                            || process.state.main_thread.saved_regs.is_some()
+                        {
+                            let fpscr = cpu.read_fpscr()?;
+                            process.state.guest_fpscr.insert(thread_index + 1, fpscr);
+                            process.state.current_thread = 0;
+                            cpu.write_fpscr(
+                                process.state.guest_fpscr.get(&0).copied().unwrap_or(0),
+                            )?;
+                            pc = THREAD_SCHEDULER_IDLE_VA;
+                            continue;
+                        }
+                        let thread = process.state.threads[thread_index].clone();
+                        if thread.worker_saved {
+                            for (index, value) in thread.saved_regs.iter().enumerate() {
+                                cpu.write_reg(
+                                    match index {
+                                        0 => ArmReg::R0,
+                                        1 => ArmReg::R1,
+                                        2 => ArmReg::R2,
+                                        3 => ArmReg::R3,
+                                        4 => ArmReg::R4,
+                                        5 => ArmReg::R5,
+                                        6 => ArmReg::R6,
+                                        7 => ArmReg::R7,
+                                        8 => ArmReg::R8,
+                                        9 => ArmReg::R9,
+                                        10 => ArmReg::R10,
+                                        11 => ArmReg::R11,
+                                        12 => ArmReg::R12,
+                                        13 => ArmReg::Sp,
+                                        14 => ArmReg::Lr,
+                                        15 => ArmReg::Pc,
+                                        _ => ArmReg::Cpsr,
+                                    },
+                                    *value,
+                                )?;
+                            }
+                            cpu.write_reg(ArmReg::R0, thread.handle)?;
+                            process.state.threads[thread_index].finished = true;
+                            let fpscr = cpu.read_fpscr()?;
+                            process
+                                .state
+                                .guest_fpscr
+                                .insert(process.state.current_thread, fpscr);
+                            cpu.write_fpscr(
+                                process.state.guest_fpscr.get(&0).copied().unwrap_or(0),
+                            )?;
+                            process.state.current_thread = 0;
+                            pc = thread.resume_pc;
+                        } else {
+                            let values = thread.saved_regs;
+                            for (index, value) in values.iter().enumerate() {
+                                cpu.write_reg(
+                                    match index {
+                                        0 => ArmReg::R0,
+                                        1 => ArmReg::R1,
+                                        2 => ArmReg::R2,
+                                        3 => ArmReg::R3,
+                                        4 => ArmReg::R4,
+                                        5 => ArmReg::R5,
+                                        6 => ArmReg::R6,
+                                        7 => ArmReg::R7,
+                                        8 => ArmReg::R8,
+                                        9 => ArmReg::R9,
+                                        10 => ArmReg::R10,
+                                        11 => ArmReg::R11,
+                                        12 => ArmReg::R12,
+                                        13 => ArmReg::Sp,
+                                        14 => ArmReg::Lr,
+                                        15 => ArmReg::Pc,
+                                        _ => ArmReg::Cpsr,
+                                    },
+                                    *value,
+                                )?;
+                            }
+                            let fpscr = cpu.read_fpscr()?;
+                            process
+                                .state
+                                .guest_fpscr
+                                .insert(process.state.current_thread, fpscr);
+                            cpu.write_fpscr(
+                                process.state.guest_fpscr.get(&0).copied().unwrap_or(0),
+                            )?;
+                            process.state.current_thread = 0;
+                            pc = thread.resume_pc;
+                        }
+                        log::debug!(
+                            "guest thread {} returned; resuming main at 0x{:08x}",
+                            thread_index,
+                            pc
+                        );
+                        continue;
+                    }
+
+                    let is_wince_breakpoint = cpu
+                        .read_mem(addr, 4)
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .map(u32::from_le_bytes)
+                        == Some(WINCE_BREAKPOINT);
+                    if is_wince_breakpoint {
+                        cpu.write_reg(ArmReg::Pc, addr + 4)?;
+                        pc = addr + 4;
+                        log::debug!("WinCE debugger breakpoint treated as a no-op at 0x{addr:08x}");
+                        continue;
+                    }
+
+                    let runtime_thunk = process.state.runtime_thunks.get(&addr).cloned();
+                    let outcome = if addr == THREAD_SCHEDULER_IDLE_VA {
+                        dispatcher.schedule_idle(cpu, &mut process.state)?
+                    } else {
+                        match process.find_thunk_and_state(addr) {
+                            Some((thunk, state)) => {
+                                // Split borrow: `thunk` borrows
+                                // `process.thunks` immutably and `state`
+                                // borrows `process.state` mutably. No clone,
+                                // and no per-call heap allocation — that
+                                // matters because this branch fires on every
+                                // single emulated WinCE API call.
+                                let dispatched = dispatcher.dispatch(cpu, thunk, state);
+                                let outcome = dispatched?;
+                                if matches!(outcome, DispatchOutcome::Halt)
+                                    && log::log_enabled!(log::Level::Info)
+                                {
+                                    log::info!("dispatcher requested halt at {}", thunk.label());
+                                }
+                                outcome
+                            }
+                            None if runtime_thunk.is_some() => dispatcher.dispatch(
+                                cpu,
+                                runtime_thunk.as_ref().unwrap(),
+                                &mut process.state,
+                            )?,
+                            None => {
+                                // A non-thunk code hook fired. The expected
+                                // case is the WinCE kernel-trap region
+                                // (0xF000_0000..) — every page there is
+                                // pre-filled with `bx lr`, so a real device
+                                // would just return straight to the caller.
+                                // Treat it that way: log once at debug level
+                                // and emulate `bx lr` ourselves (set PC to LR
+                                // & ~1, continue). The `pc < 0x1000` guard
+                                // at the top of the loop still catches the
+                                // genuine "poisoned LR after ExitProcess"
+                                // case where LR is 0.
+                                if (KERNEL_TRAP_BASE
+                                    ..KERNEL_TRAP_BASE.saturating_add(KERNEL_TRAP_SIZE))
+                                    .contains(&addr)
+                                {
+                                    let owner = process.state.current_thread;
+                                    if let Some(frame) = process.state.message_frames.remove(&owner)
+                                    {
+                                        for (index, value) in frame.args.iter().enumerate() {
+                                            cpu.write_reg(
+                                                match index {
+                                                    0 => ArmReg::R0,
+                                                    1 => ArmReg::R1,
+                                                    2 => ArmReg::R2,
+                                                    _ => ArmReg::R3,
+                                                },
+                                                *value,
+                                            )?;
+                                        }
+                                        cpu.write_reg(ArmReg::Lr, frame.lr)?;
+                                        cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                                        pc = frame.lr;
+                                        continue;
+                                    }
+                                    log::debug!(
                                     "kernel-trap soft-return at 0x{addr:08x} (R0=0x{r0:08x}, LR=0x{lr:08x})",
                                     r0 = cpu.read_reg(ArmReg::R0).unwrap_or(0),
                                     lr = cpu.read_reg(ArmReg::Lr).unwrap_or(0),
                                 );
+                                    let lr = cpu.read_reg(ArmReg::Lr)?;
+                                    pc = lr;
+                                    // Skip the frame-hook for this slice —
+                                    // we did not actually advance the
+                                    // emulator, just bounced through a trap.
+                                    continue;
+                                }
+                                // Some other host-installed hook (e.g.
+                                // `--watch` from the CLI). Dump CPU state
+                                // and halt cleanly.
+                                log::warn!(
+                                    "watch hit at 0x{addr:08x}\n{regs}{mem}",
+                                    regs = dump_regs(cpu),
+                                    mem = dump_mem_around(cpu, addr, 64),
+                                );
+                                return Ok(());
+                            }
+                        }
+                    };
+                    match outcome {
+                        DispatchOutcome::Halt => {
+                            return Ok(());
+                        }
+                        DispatchOutcome::ReturnedR0(v) => {
+                            cpu.write_return(v)?;
                             let lr = cpu.read_reg(ArmReg::Lr)?;
                             pc = lr;
-                            // Skip the frame-hook for this slice —
-                            // we did not actually advance the
-                            // emulator, just bounced through a trap.
-                            continue;
                         }
-                        // Some other host-installed hook (e.g.
-                        // `--watch` from the CLI). Dump CPU state
-                        // and halt cleanly.
-                        log::warn!(
-                            "watch hit at 0x{addr:08x}\n{regs}{mem}",
-                            regs = dump_regs(cpu),
-                            mem = dump_mem_around(cpu, addr, 64),
-                        );
-                        return Ok(());
-                    }
-                }};
-                match outcome {
-                    DispatchOutcome::Halt => {
-                        return Ok(());
-                    }
-                    DispatchOutcome::ReturnedR0(v) => {
-                        cpu.write_return(v)?;
-                        let lr = cpu.read_reg(ArmReg::Lr)?;
-                        pc = lr;
-                    }
-                    DispatchOutcome::ReturnedR0R1(a, b) => {
-                        cpu.write_return_pair(a, b)?;
-                        let lr = cpu.read_reg(ArmReg::Lr)?;
-                        pc = lr;
-                    }
-                    DispatchOutcome::Unimplemented => {
-                        cpu.write_return(0)?;
-                        let lr = cpu.read_reg(ArmReg::Lr)?;
-                        pc = lr;
-                    }
-                    DispatchOutcome::JumpTo(target) => {
-                        // Trampoline into a guest function — `target` is
-                        // the new PC, the handler is responsible for
-                        // setting LR / R0..R3 / SP appropriately.
-                        pc = target;
+                        DispatchOutcome::ReturnedR0R1(a, b) => {
+                            cpu.write_return_pair(a, b)?;
+                            let lr = cpu.read_reg(ArmReg::Lr)?;
+                            pc = lr;
+                        }
+                        DispatchOutcome::Unimplemented => {
+                            cpu.write_return(0)?;
+                            let lr = cpu.read_reg(ArmReg::Lr)?;
+                            pc = lr;
+                        }
+                        DispatchOutcome::JumpTo(target) => {
+                            // Trampoline into a guest function — `target` is
+                            // the new PC, the handler is responsible for
+                            // setting LR / R0..R3 / SP appropriately.
+                            pc = target;
+                        }
                     }
                 }
+                StopReason::Requested | StopReason::OutOfBounds => return Ok(()),
             }
-            StopReason::Requested | StopReason::OutOfBounds => return Ok(()),
-        }
         } // Drop the shared API gate before frontend hooks or child startup.
         if let Some(hook) = frame_hook.as_deref_mut() {
             // Present immediately when the guest has already announced
@@ -3408,7 +3762,8 @@ pub fn run_main_loop_with_hook(
                 }
                 _ => PRESENT_POLL_INTERVAL,
             };
-            let due = process.state.pending_process_launch.is_some() || counter != last_presented_frame
+            let due = process.state.pending_process_launch.is_some()
+                || counter != last_presented_frame
                 || last_present.is_none_or(|then| now.duration_since(then) >= poll_interval);
             if due {
                 last_present = Some(now);
@@ -3418,8 +3773,8 @@ pub fn run_main_loop_with_hook(
             // The frontend also drains input and stop requests. Its polling
             // cadence must not inherit the expensive framebuffer readback
             // backoff, especially when a DirectDraw menu has static pixels.
-            let input_due = last_frontend_poll.is_none_or(|then|
-                now.duration_since(then) >= FRONTEND_POLL_INTERVAL);
+            let input_due = last_frontend_poll
+                .is_none_or(|then| now.duration_since(then) >= FRONTEND_POLL_INTERVAL);
             if due || input_due {
                 last_frontend_poll = Some(now);
                 let action = hook.on_frame(&mut process.state);
@@ -3498,7 +3853,9 @@ mod tests {
         assert_eq!(ram.snapshot().program_used, 2);
         heap.virtual_alloc(base + 1, 4096, false, true).unwrap();
         assert_eq!(ram.snapshot().program_used, 2);
-        assert!(heap.virtual_alloc(base + 0x10000, 4096, false, true).is_none());
+        assert!(heap
+            .virtual_alloc(base + 0x10000, 4096, false, true)
+            .is_none());
         assert!(!heap.virtual_free(base + 4096, 0, true));
         assert!(heap.virtual_free(base, 4096, false));
         assert_eq!(ram.snapshot().program_used, 1);
@@ -3552,9 +3909,15 @@ mod tests {
         let mut image = image_based_at(0x10000, 0x509000);
         image.subsystem = 9;
         image.stack_reserve = 0x10000;
-        assert_eq!(private_process_layout(&image), Some((0x520000, 0x10000, 0x530000)));
+        assert_eq!(
+            private_process_layout(&image),
+            Some((0x520000, 0x10000, 0x530000))
+        );
         image.stack_reserve = 0x30000;
-        assert_eq!(private_process_layout(&image), Some((0x520000, 0x30000, 0x550000)));
+        assert_eq!(
+            private_process_layout(&image),
+            Some((0x520000, 0x30000, 0x550000))
+        );
         image.image_base = 0x30000000;
         assert!(private_process_layout(&image).is_none());
         image.image_base = 0x10000;
@@ -3790,15 +4153,27 @@ mod tests {
     #[test]
     fn ce_implicit_process_termination_precedes_message_return() {
         let mut cpu = StubCpu::new();
-        let mut process = Process::map_into(image_based_at(0x10000, 0x1000),
-            &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
-        process.state.message_frames.insert(0, GuestCallFrame {
-            args: [0x1234, 2, 0, 0], sp: 0x2222, lr: 0x3333,
-        });
-        let worker = GuestThread::new(0x11000, 0, 0x50000, 0x1000,
-            0xf000fe00, 0x11000, 0xdead7c00, [0; 17]);
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        process.state.message_frames.insert(
+            0,
+            GuestCallFrame {
+                args: [0x1234, 2, 0, 0],
+                sp: 0x2222,
+                lr: 0x3333,
+            },
+        );
+        let worker = GuestThread::new(
+            0x11000, 0, 0x50000, 0x1000, 0xf000fe00, 0x11000, 0xdead7c00, [0; 17],
+        );
         process.state.threads.push(worker);
-        cpu.write_reg(ArmReg::R0, CE_CURRENT_PROCESS_HANDLE).unwrap();
+        cpu.write_reg(ArmReg::R0, CE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         cpu.write_reg(ArmReg::R1, 17).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x4444).unwrap();
         run_main_loop(&mut cpu, &mut process, &mut NullDispatcher, 100, 1).unwrap();
@@ -3814,11 +4189,21 @@ mod tests {
     #[test]
     fn ce_implicit_process_termination_failure_preserves_message_frame() {
         let mut cpu = StubCpu::new();
-        let mut process = Process::map_into(image_based_at(0x10000, 0x1000),
-            &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
-        process.state.message_frames.insert(0, GuestCallFrame {
-            args: [0x1234, 2, 0, 0], sp: 0x2222, lr: 0x3333,
-        });
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        process.state.message_frames.insert(
+            0,
+            GuestCallFrame {
+                args: [0x1234, 2, 0, 0],
+                sp: 0x2222,
+                lr: 0x3333,
+            },
+        );
         cpu.write_reg(ArmReg::R0, 0xdeadbeef).unwrap();
         cpu.write_reg(ArmReg::R1, 17).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x11000).unwrap();
@@ -3833,76 +4218,137 @@ mod tests {
     fn hybrid_byte_copy_hooks_only_the_host_fallback() {
         let mut cpu = StubCpu::new();
         let mut image = image_based_at(0x10000, 0x1000);
-        image.imports.push(pocket_pe::ImportSymbol { dll: "COREDLL.dll".into(),
-            binding: ImportBinding::Name("memcpy".into()), iat_va: 0x11080 });
+        image.imports.push(pocket_pe::ImportSymbol {
+            dll: "COREDLL.dll".into(),
+            binding: ImportBinding::Name("memcpy".into()),
+            iat_va: 0x11080,
+        });
         let process = Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
         let entry = cpu.read_u32_le(0x11080).unwrap();
         let fallback = entry + 28;
         assert_eq!(process.thunk_by_va[&entry], process.thunk_by_va[&fallback]);
         // StubCpu reports the first installed hook: it must be the tail,
         // not the native entry or a range swallowing the fast path.
-        assert_eq!(cpu.run_until_hook(entry, 100).unwrap(), StopReason::Hook(fallback));
+        assert_eq!(
+            cpu.run_until_hook(entry, 100).unwrap(),
+            StopReason::Hook(fallback)
+        );
         assert_eq!(cpu.read_u32_le(entry).unwrap(), 0xe3520001);
     }
 
     #[test]
     fn instruction_limit_still_services_host_hook() {
         let mut loader_cpu = StubCpu::new();
-        let mut process = Process::map_into(image_based_at(0x10000, 0x1000),
-            &mut loader_cpu, &|_, _| None, &NullDispatcher).unwrap();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut loader_cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
         // A hook-free stub exhausts its budget on every slice. The loader's
         // stub has exit hooks, so use a fresh CPU for this specific path.
         let mut cpu = StubCpu::new();
-        cpu.map_region(0x11000, 0x1000, Prot::READ | Prot::WRITE | Prot::EXEC).unwrap();
-        cpu.write_mem(0x11000, &0xeafffffeu32.to_le_bytes()).unwrap();
+        cpu.map_region(0x11000, 0x1000, Prot::READ | Prot::WRITE | Prot::EXEC)
+            .unwrap();
+        cpu.write_mem(0x11000, &0xeafffffeu32.to_le_bytes())
+            .unwrap();
         struct StopHook(usize);
         impl FrameHook for StopHook {
             fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
                 self.0 += 1;
-                state.pending_input.push_back(InputEvent::KeyDown { vk: 0x28 });
+                state
+                    .pending_input
+                    .push_back(InputEvent::KeyDown { vk: 0x28 });
                 FrameAction::Stop
             }
         }
         let mut hook = StopHook(0);
-        run_main_loop_with_hook(&mut cpu, &mut process, &mut NullDispatcher,
-            100, 2, Some(&mut hook)).unwrap();
+        run_main_loop_with_hook(
+            &mut cpu,
+            &mut process,
+            &mut NullDispatcher,
+            100,
+            2,
+            Some(&mut hook),
+        )
+        .unwrap();
         assert_eq!(hook.0, 1);
-        assert_eq!(process.state.pending_input.front(), Some(&InputEvent::KeyDown { vk: 0x28 }));
+        assert_eq!(
+            process.state.pending_input.front(),
+            Some(&InputEvent::KeyDown { vk: 0x28 })
+        );
     }
 
     #[test]
     fn static_directdraw_frames_do_not_delay_frontend_input_until_readback() {
         let mut loader_cpu = StubCpu::new();
-        let mut process = Process::map_into(image_based_at(0x10000,0x1000),
-            &mut loader_cpu,&|_,_| None,&NullDispatcher).unwrap();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut loader_cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
         let mut cpu = StubCpu::new();
-        cpu.map_region(0x11000,0x1000,Prot::READ|Prot::WRITE|Prot::EXEC).unwrap();
-        cpu.write_mem(0x11000,&0xeafffffeu32.to_le_bytes()).unwrap();
+        cpu.map_region(0x11000, 0x1000, Prot::READ | Prot::WRITE | Prot::EXEC)
+            .unwrap();
+        cpu.write_mem(0x11000, &0xeafffffeu32.to_le_bytes())
+            .unwrap();
         let started = Instant::now();
         let mut calls = 0;
         let before = process.state.framebuffer.frame_counter;
         let mut hook = |state: &mut KernelState| {
-            assert_eq!(state.framebuffer.frame_counter,before,"a static image is not an input clock");
-            assert!(started.elapsed() < Duration::from_millis(200),"frontend inherited the 250 ms readback backoff");
+            assert_eq!(
+                state.framebuffer.frame_counter, before,
+                "a static image is not an input clock"
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(200),
+                "frontend inherited the 250 ms readback backoff"
+            );
             let event = match calls {
-                0 => { state.direct_fb_frames += 1; InputEvent::KeyDown{vk:0x27} },
-                1 => InputEvent::KeyUp{vk:0x27},
-                2 => InputEvent::KeyDown{vk:0x27},
-                _ => InputEvent::KeyUp{vk:0x27},
+                0 => {
+                    state.direct_fb_frames += 1;
+                    InputEvent::KeyDown { vk: 0x27 }
+                }
+                1 => InputEvent::KeyUp { vk: 0x27 },
+                2 => InputEvent::KeyDown { vk: 0x27 },
+                _ => InputEvent::KeyUp { vk: 0x27 },
             };
             state.pending_input.push_back(event);
             calls += 1;
-            if calls == 4 { FrameAction::Stop } else {
+            if calls == 4 {
+                FrameAction::Stop
+            } else {
                 std::thread::sleep(Duration::from_millis(6));
                 FrameAction::Continue
             }
         };
-        run_main_loop_with_hook(&mut cpu,&mut process,&mut NullDispatcher,
-            100,0,Some(&mut hook)).unwrap();
-        assert_eq!(calls,4);
-        assert_eq!(process.state.pending_input.iter().copied().collect::<Vec<_>>(),
-            vec![InputEvent::KeyDown{vk:0x27},InputEvent::KeyUp{vk:0x27},
-                 InputEvent::KeyDown{vk:0x27},InputEvent::KeyUp{vk:0x27}]);
+        run_main_loop_with_hook(
+            &mut cpu,
+            &mut process,
+            &mut NullDispatcher,
+            100,
+            0,
+            Some(&mut hook),
+        )
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(
+            process
+                .state
+                .pending_input
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![
+                InputEvent::KeyDown { vk: 0x27 },
+                InputEvent::KeyUp { vk: 0x27 },
+                InputEvent::KeyDown { vk: 0x27 },
+                InputEvent::KeyUp { vk: 0x27 }
+            ]
+        );
     }
 
     /// Regression test for the slot-0 alias collision. A standard
@@ -3996,9 +4442,13 @@ impl Drop for KernelState {
     fn drop(&mut self) {
         let gate = self.object_handles.execution_gate();
         let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
-        if self.process_exit_code.is_none() { self.record_process_exit(0xc0000001); }
+        if self.process_exit_code.is_none() {
+            self.record_process_exit(0xc0000001);
+        }
         for (handle, _) in self.object_handles.owned() {
-            if let Some((object, last)) = self.object_handles.close(handle) { self.clean_object(object, last); }
+            if let Some((object, last)) = self.object_handles.close(handle) {
+                self.clean_object(object, last);
+            }
         }
         self.vfs.close_all();
         self.internet.close_all();

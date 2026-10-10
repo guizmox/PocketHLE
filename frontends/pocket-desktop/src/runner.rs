@@ -2,10 +2,10 @@
 //! desktop GUI.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use pocket_core::kernel::{FrameAction, FrameHook, InputEvent, KernelState};
@@ -29,15 +29,20 @@ pub struct Runner {
 }
 
 impl Default for Runner {
-    fn default()->Self {Self{inner:Default::default(),missing_api_logging:Arc::new(AtomicBool::new(true))}}
+    fn default() -> Self {
+        Self {
+            inner: Default::default(),
+            missing_api_logging: Arc::new(AtomicBool::new(true)),
+        }
+    }
 }
 impl Runner {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn set_missing_api_logging(&self,enabled:bool) {
-        self.missing_api_logging.store(enabled,Ordering::Relaxed);
+    pub fn set_missing_api_logging(&self, enabled: bool) {
+        self.missing_api_logging.store(enabled, Ordering::Relaxed);
     }
 
     pub fn run_game(
@@ -50,7 +55,17 @@ impl Runner {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
         let card_root = game.extracted_dir(&library_root);
-        self.run_process(&library_root, &game, &card_root, None, None, None, None, &mut hook).0
+        self.run_process(
+            &library_root,
+            &game,
+            &card_root,
+            None,
+            None,
+            None,
+            None,
+            &mut hook,
+        )
+        .0
     }
 
     fn run_process(
@@ -64,8 +79,11 @@ impl Runner {
         mut startup: Option<ProcessStartup>,
         hook: &mut RunHook,
     ) -> (RunOutcome, u32) {
-        let exe = if guest_path.is_some() { game.executable_path(library_root) }
-            else { game.launch_path(library_root) };
+        let exe = if guest_path.is_some() {
+            game.executable_path(library_root)
+        } else {
+            game.launch_path(library_root)
+        };
         let mut summary_lines = vec![format!("Game: {}", game.display_name)];
 
         let machine = pocket_core::pe::load_file(&exe)
@@ -114,18 +132,25 @@ impl Runner {
 
         emu.set_halt_on_unimplemented(game.settings.halt_on_unimplemented);
         emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
-            library_root.join("pockethle-unimplemented-apis.log"),game.display_name.clone(),
-            guest_path.map(str::to_owned).unwrap_or_else(||exe.display().to_string()),
-            Arc::clone(&self.missing_api_logging))));
+            library_root.join("pockethle-unimplemented-apis.log"),
+            game.display_name.clone(),
+            guest_path
+                .map(str::to_owned)
+                .unwrap_or_else(|| exe.display().to_string()),
+            Arc::clone(&self.missing_api_logging),
+        )));
         emu.max_slices = game.settings.max_slices;
         emu.instruction_budget_per_slice = game.settings.instructions_per_slice;
 
         if let Err(e) = emu.load_pe(&exe) {
             summary_lines.push(format!("load_pe failed: {e:#}"));
-            return (RunOutcome {
-                summary: summary_lines.join("\n"),
-                framebuffer: None,
-            }, 0xc0000135);
+            return (
+                RunOutcome {
+                    summary: summary_lines.join("\n"),
+                    framebuffer: None,
+                },
+                0xc0000135,
+            );
         }
 
         // The screen has to be sized before the game runs: a GAPI title
@@ -138,45 +163,111 @@ impl Runner {
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
         if let Some(context) = handle_context {
             context.table.defer_process_exit();
-            if let Some(process) = emu.process_mut() { process.state.attach_handle_context(context); }
+            if let Some(process) = emu.process_mut() {
+                process.state.attach_handle_context(context);
+            }
         }
-        let ram = inherited_ram.or_else(|| is_gizmondo.then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default));
+        let ram = inherited_ram.or_else(|| {
+            is_gizmondo
+                .then(pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default)
+        });
         if !emu.set_memory_division(ram) {
-            if let Some(startup) = startup.as_mut() { startup.error = 8; }
+            if let Some(startup) = startup.as_mut() {
+                startup.error = 8;
+            }
             summary_lines.push("Insufficient device RAM to load process".to_string());
-            return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 0xc0000017);
+            return (
+                RunOutcome {
+                    summary: summary_lines.join("\n"),
+                    framebuffer: None,
+                },
+                0xc0000017,
+            );
         }
-        let registry_path = library_root.join(if is_gizmondo { "registry-gizmondo.json" } else { "registry-pocketpc.json" });
-        let launcher_config = pocket_library::Library::open(library_root).map(|l| l.config().clone()).unwrap_or_default();
+        let registry_path = library_root.join(if is_gizmondo {
+            "registry-gizmondo.json"
+        } else {
+            "registry-pocketpc.json"
+        });
+        let launcher_config = pocket_library::Library::open(library_root)
+            .map(|l| l.config().clone())
+            .unwrap_or_default();
         log::info!("Gizmondo GPS configuration: gizmondo={} host_enabled={} fixed_enabled={} latitude={} longitude={}",is_gizmondo,launcher_config.gps_enabled,launcher_config.gps_fixed_enabled,launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude);
-        let hardware = (launcher_config.bluetooth_enabled, launcher_config.camera_enabled, launcher_config.gps_enabled);
+        let hardware = (
+            launcher_config.bluetooth_enabled,
+            launcher_config.camera_enabled,
+            launcher_config.gps_enabled,
+        );
         if let Some(process) = emu.process_mut() {
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
             process.state.vfs.camera_service().set_allowed(hardware.1);
             process.state.vfs.gps_service().set_allowed(hardware.2);
-            #[cfg(windows)] if is_gizmondo && launcher_config.gps_fixed_enabled {
-                let gps=process.state.vfs.gps_service();
-                if gps.set_fixed_position(Some((launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude))).is_err() {
-                    if let Some(startup)=startup.as_mut(){startup.error=87;}
-                    summary_lines.push("Invalid fixed GPS position: latitude -90..90, longitude -180..180".into());
-                    return (RunOutcome{summary:summary_lines.join("\n"),framebuffer:None},87);
+            #[cfg(windows)]
+            if is_gizmondo && launcher_config.gps_fixed_enabled {
+                let gps = process.state.vfs.gps_service();
+                if gps
+                    .set_fixed_position(Some((
+                        launcher_config.gps_fixed_latitude,
+                        launcher_config.gps_fixed_longitude,
+                    )))
+                    .is_err()
+                {
+                    if let Some(startup) = startup.as_mut() {
+                        startup.error = 87;
+                    }
+                    summary_lines.push(
+                        "Invalid fixed GPS position: latitude -90..90, longitude -180..180".into(),
+                    );
+                    return (
+                        RunOutcome {
+                            summary: summary_lines.join("\n"),
+                            framebuffer: None,
+                        },
+                        87,
+                    );
                 }
                 gps.set_allowed(true);
                 log::info!("GPS1 fixed simulation activated; Windows location is not used");
-                summary_lines.push(format!("GPS: simulated fixed position ({:.7}, {:.7})",launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude));
+                summary_lines.push(format!(
+                    "GPS: simulated fixed position ({:.7}, {:.7})",
+                    launcher_config.gps_fixed_latitude, launcher_config.gps_fixed_longitude
+                ));
             }
 
             if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
-                if let Some(startup) = startup.as_mut() { startup.error = 29; }
+                if let Some(startup) = startup.as_mut() {
+                    startup.error = 29;
+                }
                 summary_lines.push(format!("Cannot load device registry: {e}"));
-                return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 29);
+                return (
+                    RunOutcome {
+                        summary: summary_lines.join("\n"),
+                        framebuffer: None,
+                    },
+                    29,
+                );
             }
             if is_gizmondo {
-                process.state.internet.set_gprs_enabled(launcher_config.gprs_enabled);
-                if let Err(e) = pocket_core::kernel::colors::configure(&mut process.state, &launcher_config.colors_server_url, &launcher_config.colors_terminal_id) {
-                    if let Some(startup) = startup.as_mut() { startup.error = 87; }
+                process
+                    .state
+                    .internet
+                    .set_gprs_enabled(launcher_config.gprs_enabled);
+                if let Err(e) = pocket_core::kernel::colors::configure(
+                    &mut process.state,
+                    &launcher_config.colors_server_url,
+                    &launcher_config.colors_terminal_id,
+                ) {
+                    if let Some(startup) = startup.as_mut() {
+                        startup.error = 87;
+                    }
                     summary_lines.push(e);
-                    return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 87);
+                    return (
+                        RunOutcome {
+                            summary: summary_lines.join("\n"),
+                            framebuffer: None,
+                        },
+                        87,
+                    );
                 }
             }
         }
@@ -199,7 +290,9 @@ impl Runner {
             } else {
                 continue;
             };
-            let saved = emu.process().and_then(|p| p.state.registry.value(&value.key, &value.name));
+            let saved = emu
+                .process()
+                .and_then(|p| p.state.registry.value(&value.key, &value.name));
             if saved.is_none() || value.name.eq_ignore_ascii_case("InstallDir") {
                 emu.set_registry_value(&value.key, &value.name, registry_value);
             }
@@ -307,22 +400,34 @@ impl Runner {
             process.state.process_launch_enabled = true;
         }
         hook.launch_context = Some(LaunchContext {
-            runner: self.clone(), library_root: library_root.clone(),
-            game: game.clone(), card_root: card_root.clone(),
+            runner: self.clone(),
+            library_root: library_root.clone(),
+            game: game.clone(),
+            card_root: card_root.clone(),
         });
         hook.pid = emu.process().unwrap().state.object_handles.process_id();
         if let Some(startup) = startup.as_mut() {
             if let Err(error) = emu.set_startup_command_line(&startup.command_line) {
                 startup.error = 8;
                 summary_lines.push(format!("command line failed: {error:#}"));
-                return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None },0xc0000017);
+                return (
+                    RunOutcome {
+                        summary: summary_lines.join("\n"),
+                        framebuffer: None,
+                    },
+                    0xc0000017,
+                );
             }
-            if let Some(ack) = startup.ack.take() { let _ = ack.send(Ok(())); }
+            if let Some(ack) = startup.ack.take() {
+                let _ = ack.send(Ok(()));
+            }
             // The parent commits PROCESS_INFORMATION before releasing startup.
             while !startup.table.start_allowed() && !hook.stop_all.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(1));
             }
-            if hook.stop_all.load(Ordering::Acquire) { emu.process_mut().unwrap().state.should_stop = true; }
+            if hook.stop_all.load(Ordering::Acquire) {
+                emu.process_mut().unwrap().state.should_stop = true;
+            }
         }
         emu.start_audio();
         let run_result = emu.run_with_hook(hook);
@@ -344,14 +449,21 @@ impl Runner {
                 .then(|| FrameSnapshot::from_framebuffer(&p.state.framebuffer))
         });
         let exit_code = if run_result.is_ok() {
-            emu.process().and_then(|p| p.state.process_exit_code).unwrap_or(0)
-        } else { 0xc0000005 };
+            emu.process()
+                .and_then(|p| p.state.process_exit_code)
+                .unwrap_or(0)
+        } else {
+            0xc0000005
+        };
         drop(emu); // Refund the parent's private RAM while its children remain alive.
         hook.finish_children();
-        (RunOutcome {
-            summary: summary_lines.join("\n"),
-            framebuffer,
-        }, exit_code)
+        (
+            RunOutcome {
+                summary: summary_lines.join("\n"),
+                framebuffer,
+            },
+            exit_code,
+        )
     }
 }
 
@@ -436,17 +548,21 @@ struct LaunchContext {
 }
 
 struct ProcessStartup {
-    ack: Option<Sender<Result<(),u32>>>,
+    ack: Option<Sender<Result<(), u32>>>,
     table: pocket_core::kernel::handles::HandleTable,
     command_line: String,
     error: u32,
 }
 impl Drop for ProcessStartup {
-    fn drop(&mut self) { if let Some(ack) = self.ack.take() { let _ = ack.send(Err(self.error)); } }
+    fn drop(&mut self) {
+        if let Some(ack) = self.ack.take() {
+            let _ = ack.send(Err(self.error));
+        }
+    }
 }
 struct ChildJob {
     table: pocket_core::kernel::handles::HandleTable,
-    thread: std::thread::JoinHandle<(RunOutcome,u32)>,
+    thread: std::thread::JoinHandle<(RunOutcome, u32)>,
 }
 
 struct RunHook {
@@ -478,55 +594,112 @@ struct RunHook {
 
 impl RunHook {
     fn run_pending_child(&mut self, state: &mut KernelState) {
-        let Some(request) = state.pending_process_launch.take() else { return; };
+        let Some(request) = state.pending_process_launch.take() else {
+            return;
+        };
         let context = self.launch_context.clone();
         let relative = context.as_ref().and_then(|context| {
             let child = request.executable.canonicalize().ok()?;
             // CreateProcess uses a path already resolved through the guest VFS.
             // SDCreateProcess keeps its validated foreground card restriction.
-            if request.concurrent { return Some(child); }
+            if request.concurrent {
+                return Some(child);
+            }
             let root = context.card_root.canonicalize().ok()?;
-            if !child.starts_with(root) { return None; }
-            let game_dir = context.library_root.join(context.game.relative_dir()).canonicalize().ok()?;
+            if !child.starts_with(root) {
+                return None;
+            }
+            let game_dir = context
+                .library_root
+                .join(context.game.relative_dir())
+                .canonicalize()
+                .ok()?;
             child.strip_prefix(game_dir).ok().map(PathBuf::from)
         });
         if request.concurrent {
-            let result = if let (Some(context),Some(relative)) = (context,relative) {
-                let mut child_game = context.game.clone(); child_game.executable = relative;
+            let result = if let (Some(context), Some(relative)) = (context, relative) {
+                let mut child_game = context.game.clone();
+                child_game.executable = relative;
                 let handle_context = state.child_handle_context(request.process_handle).unwrap();
                 let table = handle_context.table.clone();
-                let child_table = table.clone(); let parent_pid = self.pid;
-                let foreground = self.foreground.clone(); let mut child_hook = self.child_hook();
-                let ram = state.memory_division.clone(); let command_line = request.command_line.clone();
+                let child_table = table.clone();
+                let parent_pid = self.pid;
+                let foreground = self.foreground.clone();
+                let mut child_hook = self.child_hook();
+                let ram = state.memory_division.clone();
+                let command_line = request.command_line.clone();
                 let guest_path = request.guest_path.clone();
-                let (ready_tx,ready_rx) = std::sync::mpsc::channel();
-                let startup = ProcessStartup { ack: Some(ready_tx), table: child_table.clone(), command_line, error: 193 };
-                let spawned = std::thread::Builder::new().name(format!("pockethle-process-{}",table.process_id())).spawn(move || {
-                    let result = context.runner.run_process(&context.library_root,&child_game,&context.card_root,
-                        Some(&guest_path),ram,Some(handle_context),Some(startup),&mut child_hook);
-                    child_table.complete_process_exit(result.1);
-                    if child_table.exit_code(child_table.process_id(),Some(0)).is_none() { child_table.set_exit(Some(0),result.1); }
-                    child_table.mark_inactive();
-                    let next = child_table.focus_after_exit(parent_pid);
-                    let _ = foreground.compare_exchange(child_table.process_id(),next,Ordering::AcqRel,Ordering::Acquire);
-                    result
-                });
+                let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+                let startup = ProcessStartup {
+                    ack: Some(ready_tx),
+                    table: child_table.clone(),
+                    command_line,
+                    error: 193,
+                };
+                let spawned = std::thread::Builder::new()
+                    .name(format!("pockethle-process-{}", table.process_id()))
+                    .spawn(move || {
+                        let result = context.runner.run_process(
+                            &context.library_root,
+                            &child_game,
+                            &context.card_root,
+                            Some(&guest_path),
+                            ram,
+                            Some(handle_context),
+                            Some(startup),
+                            &mut child_hook,
+                        );
+                        child_table.complete_process_exit(result.1);
+                        if child_table
+                            .exit_code(child_table.process_id(), Some(0))
+                            .is_none()
+                        {
+                            child_table.set_exit(Some(0), result.1);
+                        }
+                        child_table.mark_inactive();
+                        let next = child_table.focus_after_exit(parent_pid);
+                        let _ = foreground.compare_exchange(
+                            child_table.process_id(),
+                            next,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                        result
+                    });
                 match spawned {
                     Ok(thread) => {
-                        self.children.push(ChildJob { table: table.clone(),thread });
+                        self.children.push(ChildJob {
+                            table: table.clone(),
+                            thread,
+                        });
                         match ready_rx.recv_timeout(Duration::from_secs(30)) {
-                            Ok(Ok(())) => { self.foreground.store(table.process_id(),Ordering::Release); Ok(request.process_handle) }
+                            Ok(Ok(())) => {
+                                self.foreground.store(table.process_id(), Ordering::Release);
+                                Ok(request.process_handle)
+                            }
                             Ok(Err(error)) => Err(error),
-                            Err(_) => { table.terminate_remote_process(table.process_id(),0xc0000001);table.allow_start();Err(1460) }
+                            Err(_) => {
+                                table.terminate_remote_process(table.process_id(), 0xc0000001);
+                                table.allow_start();
+                                Err(1460)
+                            }
                         }
                     }
-                    Err(_) => { table.set_exit(None,0xc0000017);table.mark_inactive();Err(8) }
+                    Err(_) => {
+                        table.set_exit(None, 0xc0000017);
+                        table.mark_inactive();
+                        Err(8)
+                    }
                 }
             } else {
-                if let Some(table) = state.object_handles.child(request.process_handle) { table.mark_inactive(); }
+                if let Some(table) = state.object_handles.child(request.process_handle) {
+                    table.mark_inactive();
+                }
                 Err(5)
             };
-            state.process_launch_results.insert(request.call_key,result);
+            state
+                .process_launch_results
+                .insert(request.call_key, result);
             return;
         }
         let mut exit_code = 0xc0000135;
@@ -536,20 +709,33 @@ impl RunHook {
             state.audio.suspend_output();
             let saved = pocket_core::suspend_host_session();
             let mut child_hook = self.child_hook();
-            let child_pid = state.object_handles.child_id(request.process_handle).unwrap();
-            self.foreground.store(child_pid,Ordering::Release);
+            let child_pid = state
+                .object_handles
+                .child_id(request.process_handle)
+                .unwrap();
+            self.foreground.store(child_pid, Ordering::Release);
             log::info!("parent suspended; entering child {}", request.guest_path);
-            let (outcome, code) = context.runner.run_process(&context.library_root,
-                &child_game, &context.card_root, Some(&request.guest_path), state.memory_division.clone(), state.child_handle_context(request.process_handle), None, &mut child_hook);
+            let (outcome, code) = context.runner.run_process(
+                &context.library_root,
+                &child_game,
+                &context.card_root,
+                Some(&request.guest_path),
+                state.memory_division.clone(),
+                state.child_handle_context(request.process_handle),
+                None,
+                &mut child_hook,
+            );
             exit_code = code;
-            self.foreground.store(self.pid,Ordering::Release);
+            self.foreground.store(self.pid, Ordering::Release);
             self.input_disconnected = child_hook.input_disconnected;
             self.stopped_by_user |= child_hook.stopped_by_user;
             // run_process has dropped its child Emulator and its media first.
             drop(saved);
             state.audio.resume_output();
             log::info!("child finished with code 0x{exit_code:08x}; resuming preserved parent");
-            if exit_code != 0 { log::warn!("child outcome: {}", outcome.summary); }
+            if exit_code != 0 {
+                log::warn!("child outcome: {}", outcome.summary);
+            }
             self.reset_process();
             // Repaint the preserved parent frame even if its counter is static.
             state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
@@ -561,14 +747,18 @@ impl RunHook {
             log::warn!("child launch refused: path outside card or missing runner context");
         }
         if let Some(table) = state.object_handles.child(request.process_handle) {
-            table.complete_process_exit(exit_code); table.set_exit(Some(0), exit_code); table.mark_inactive();
+            table.complete_process_exit(exit_code);
+            table.set_exit(Some(0), exit_code);
+            table.mark_inactive();
         }
         state.sync_transferred_handles();
         if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
             child.exit_code = Some(exit_code);
         }
         for handle in [request.process_handle, request.thread_handle] {
-            if let Some(mut event) = state.events.get_mut(&handle) { event.signalled = true; }
+            if let Some(mut event) = state.events.get_mut(&handle) {
+                event.signalled = true;
+            }
         }
     }
 
@@ -591,21 +781,29 @@ impl RunHook {
             }
         }
         self.stopped_by_user |= stop_requested || self.input_disconnected;
-        if self.stopped_by_user { self.stop_all.store(true,Ordering::Release); }
+        if self.stopped_by_user {
+            self.stop_all.store(true, Ordering::Release);
+        }
         stop_requested || self.input_disconnected
     }
 
     fn child_hook(&self) -> Self {
-        let mut hook = Self::new(self.frame_tx.clone(),None);
-        hook.input_rx = self.input_rx.clone(); hook.stop_all = self.stop_all.clone();
-        hook.foreground = self.foreground.clone(); hook
+        let mut hook = Self::new(self.frame_tx.clone(), None);
+        hook.input_rx = self.input_rx.clone();
+        hook.stop_all = self.stop_all.clone();
+        hook.foreground = self.foreground.clone();
+        hook
     }
     fn finish_children(&mut self) {
         for job in self.children.drain(..) {
             if !job.table.start_allowed() {
-                job.table.terminate_remote_process(job.table.process_id(),0xc0000001); job.table.allow_start();
+                job.table
+                    .terminate_remote_process(job.table.process_id(), 0xc0000001);
+                job.table.allow_start();
             }
-            if let Err(_) = job.thread.join() { self.stop_all.store(true,Ordering::Release); }
+            if let Err(_) = job.thread.join() {
+                self.stop_all.store(true, Ordering::Release);
+            }
         }
     }
     fn reap_children(&mut self) {
@@ -614,9 +812,13 @@ impl RunHook {
             if self.children[index].thread.is_finished() {
                 let job = self.children.swap_remove(index);
                 if job.thread.join().is_err() {
-                    job.table.complete_process_exit(0xc0000005); job.table.set_exit(Some(0),0xc0000005);job.table.mark_inactive();
+                    job.table.complete_process_exit(0xc0000005);
+                    job.table.set_exit(Some(0), 0xc0000005);
+                    job.table.mark_inactive();
                 }
-            } else { index += 1; }
+            } else {
+                index += 1;
+            }
         }
     }
 
@@ -653,9 +855,14 @@ impl FrameHook for RunHook {
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
         self.reap_children();
         let active = self.foreground.load(Ordering::Acquire) == self.pid;
-        let mut stop_requested = if active { self.drain_input(&mut state.pending_input) }
-            else { self.stop_all.load(Ordering::Acquire) };
-        if !stop_requested { self.run_pending_child(state); }
+        let mut stop_requested = if active {
+            self.drain_input(&mut state.pending_input)
+        } else {
+            self.stop_all.load(Ordering::Acquire)
+        };
+        if !stop_requested {
+            self.run_pending_child(state);
+        }
         stop_requested |= self.stopped_by_user;
 
         // Stream the latest framebuffer up to the GUI, but at most
@@ -732,75 +939,166 @@ mod launcher_return_tests {
     #[cfg(feature = "unicorn")]
     #[test]
     fn desktop_runner_executes_parallel_children_and_surviving_orphan() {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("pockethle-runner-proc-{}-{nonce}",std::process::id()));
-        let card = root.join("games/probe/extracted");let dir = card.join("GZRT999999");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pockethle-runner-proc-{}-{nonce}",
+            std::process::id()
+        ));
+        let card = root.join("games/probe/extracted");
+        let dir = card.join("GZRT999999");
         std::fs::create_dir_all(&dir).unwrap();
-        for (name,bytes) in [
-            ("proctest.exe",include_bytes!("../../../tools/ramtest/dist/GZRT999999/proctest.exe").as_slice()),
-            ("procworker.exe",include_bytes!("../../../tools/ramtest/dist/GZRT999999/procworker.exe").as_slice()),
-            ("badproc.exe",include_bytes!("../../../tools/ramtest/dist/GZRT999999/badproc.exe").as_slice())] {
-            std::fs::write(dir.join(name),bytes).unwrap();
+        for (name, bytes) in [
+            (
+                "proctest.exe",
+                include_bytes!("../../../tools/ramtest/dist/GZRT999999/proctest.exe").as_slice(),
+            ),
+            (
+                "procworker.exe",
+                include_bytes!("../../../tools/ramtest/dist/GZRT999999/procworker.exe").as_slice(),
+            ),
+            (
+                "badproc.exe",
+                include_bytes!("../../../tools/ramtest/dist/GZRT999999/badproc.exe").as_slice(),
+            ),
+        ] {
+            std::fs::write(dir.join(name), bytes).unwrap();
         }
-        std::fs::write(dir.join("GZRT999999"),999999u32.to_le_bytes()).unwrap();
-        let mut settings=pocket_library::GameSettings::default();
-        settings.cpu_backend=CpuBackendPref::Unicorn;settings.max_slices=3_000_000;settings.halt_on_unimplemented=true;
-        let game=GameEntry { id:"probe".into(),display_name:"Process diagnostic".into(),provider:None,
-            executable:PathBuf::from("extracted/GZRT999999/proctest.exe"),source_cab:"diagnostic.zip".into(),
-            install_dir:None,install_dirs:vec![],save_prefix:None,registry:vec![],imported_at:0,settings,icon:None,companions:vec![] };
-        let mut hook=RunHook::new(None,None);
-        let (outcome,code)=Runner::new().run_process(&root,&game,&card,None,None,None,None,&mut hook);
-        assert_eq!(code,77,"{}",outcome.summary);
-        for (name,expected) in [("PROCTEST.TXT","PROCTEST_RESULT PASS"),("ORPHANTEST.TXT","ORPHANTEST_RESULT PASS")] {
-            let path=std::fs::read_dir(root.join("flash")).unwrap().map(|e|e.unwrap().path())
-                .find(|p|p.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case(name)).unwrap();
-            let report=std::fs::read_to_string(path).unwrap();println!("{report}");
-            assert!(report.contains(expected)&&!report.contains("FAIL"),"{report}");
+        std::fs::write(dir.join("GZRT999999"), 999999u32.to_le_bytes()).unwrap();
+        let mut settings = pocket_library::GameSettings::default();
+        settings.cpu_backend = CpuBackendPref::Unicorn;
+        settings.max_slices = 3_000_000;
+        settings.halt_on_unimplemented = true;
+        let game = GameEntry {
+            id: "probe".into(),
+            display_name: "Process diagnostic".into(),
+            provider: None,
+            executable: PathBuf::from("extracted/GZRT999999/proctest.exe"),
+            source_cab: "diagnostic.zip".into(),
+            install_dir: None,
+            install_dirs: vec![],
+            save_prefix: None,
+            registry: vec![],
+            imported_at: 0,
+            settings,
+            icon: None,
+            companions: vec![],
+        };
+        let mut hook = RunHook::new(None, None);
+        let (outcome, code) =
+            Runner::new().run_process(&root, &game, &card, None, None, None, None, &mut hook);
+        assert_eq!(code, 77, "{}", outcome.summary);
+        for (name, expected) in [
+            ("PROCTEST.TXT", "PROCTEST_RESULT PASS"),
+            ("ORPHANTEST.TXT", "ORPHANTEST_RESULT PASS"),
+        ] {
+            let path = std::fs::read_dir(root.join("flash"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(name)
+                })
+                .unwrap();
+            let report = std::fs::read_to_string(path).unwrap();
+            println!("{report}");
+            assert!(
+                report.contains(expected) && !report.contains("FAIL"),
+                "{report}"
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }
 
-
     #[cfg(feature = "unicorn")]
     #[test]
     fn desktop_runner_executes_vfs_diagnostic_and_cleans_probe_files() {
-        let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root=std::env::temp_dir().join(format!("pockethle-runner-vfs-{nonce}"));
-        let card=root.join("games/probe/extracted");let dir=card.join("GZVT999998");std::fs::create_dir_all(&dir).unwrap();
-        for (n,b) in [
-            ("AUTORUN.EXE",include_bytes!("../../../tools/vfstest/dist/GZVT999998/AUTORUN.EXE").as_slice()),
-            ("vfsworker.exe",include_bytes!("../../../tools/vfstest/dist/GZVT999998/vfsworker.exe").as_slice()),
-            ("asset.bin",include_bytes!("../../../tools/vfstest/dist/GZVT999998/asset.bin").as_slice())]{std::fs::write(dir.join(n),b).unwrap();}
-        std::fs::write(dir.join("GZVT999998"),999998u32.to_le_bytes()).unwrap();
-        let mut settings=pocket_library::GameSettings::default();settings.cpu_backend=CpuBackendPref::Unicorn;
-        settings.max_slices=3_000_000;settings.halt_on_unimplemented=true;
-        let game=GameEntry{id:"probe".into(),display_name:"VFS diagnostic".into(),provider:None,
-            executable:PathBuf::from("extracted/GZVT999998/AUTORUN.EXE"),source_cab:"diagnostic.zip".into(),
-            install_dir:None,install_dirs:vec![],save_prefix:None,registry:vec![],imported_at:0,settings,icon:None,companions:vec![]};
-        let (tx,rx)=std::sync::mpsc::channel();let completed=Arc::new(AtomicBool::new(false));let finished=completed.clone();
-        let input=std::thread::spawn(move||{
-            while !finished.load(Ordering::Acquire){
-                let _=tx.send(InputCommand::Input(InputEvent::KeyDown{vk:0x0d}));
-                let _=tx.send(InputCommand::Input(InputEvent::KeyUp{vk:0x0d}));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pockethle-runner-vfs-{nonce}"));
+        let card = root.join("games/probe/extracted");
+        let dir = card.join("GZVT999998");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (n, b) in [
+            (
+                "AUTORUN.EXE",
+                include_bytes!("../../../tools/vfstest/dist/GZVT999998/AUTORUN.EXE").as_slice(),
+            ),
+            (
+                "vfsworker.exe",
+                include_bytes!("../../../tools/vfstest/dist/GZVT999998/vfsworker.exe").as_slice(),
+            ),
+            (
+                "asset.bin",
+                include_bytes!("../../../tools/vfstest/dist/GZVT999998/asset.bin").as_slice(),
+            ),
+        ] {
+            std::fs::write(dir.join(n), b).unwrap();
+        }
+        std::fs::write(dir.join("GZVT999998"), 999998u32.to_le_bytes()).unwrap();
+        let mut settings = pocket_library::GameSettings::default();
+        settings.cpu_backend = CpuBackendPref::Unicorn;
+        settings.max_slices = 3_000_000;
+        settings.halt_on_unimplemented = true;
+        let game = GameEntry {
+            id: "probe".into(),
+            display_name: "VFS diagnostic".into(),
+            provider: None,
+            executable: PathBuf::from("extracted/GZVT999998/AUTORUN.EXE"),
+            source_cab: "diagnostic.zip".into(),
+            install_dir: None,
+            install_dirs: vec![],
+            save_prefix: None,
+            registry: vec![],
+            imported_at: 0,
+            settings,
+            icon: None,
+            companions: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let finished = completed.clone();
+        let input = std::thread::spawn(move || {
+            while !finished.load(Ordering::Acquire) {
+                let _ = tx.send(InputCommand::Input(InputEvent::KeyDown { vk: 0x0d }));
+                let _ = tx.send(InputCommand::Input(InputEvent::KeyUp { vk: 0x0d }));
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
-        let mut hook=RunHook::new(None,Some(rx));
-        let (outcome,code)=Runner::new().run_process(&root,&game,&card,None,None,None,None,&mut hook);
-        completed.store(true,Ordering::Release);input.join().unwrap();assert_eq!(code,0,"{}",outcome.summary);
-        let entries:Vec<_>=std::fs::read_dir(root.join("flash")).unwrap().map(|e|e.unwrap().path()).collect();
-        assert_eq!(entries.len(),1,"all fixture data must be removed");let report=std::fs::read_to_string(&entries[0]).unwrap();
-        assert!(report.contains("VFSTEST_RESULT PASS")&&!report.contains("FAIL "),"{report}");
+        let mut hook = RunHook::new(None, Some(rx));
+        let (outcome, code) =
+            Runner::new().run_process(&root, &game, &card, None, None, None, None, &mut hook);
+        completed.store(true, Ordering::Release);
+        input.join().unwrap();
+        assert_eq!(code, 0, "{}", outcome.summary);
+        let entries: Vec<_> = std::fs::read_dir(root.join("flash"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "all fixture data must be removed");
+        let report = std::fs::read_to_string(&entries[0]).unwrap();
+        assert!(
+            report.contains("VFSTEST_RESULT PASS") && !report.contains("FAIL "),
+            "{report}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn child_stop_cancels_background_parent_and_other_children() {
-        let (tx,rx)=std::sync::mpsc::channel();let parent=RunHook::new(None,Some(rx));
-        let mut child=parent.child_hook();let sibling=parent.child_hook();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let parent = RunHook::new(None, Some(rx));
+        let mut child = parent.child_hook();
+        let sibling = parent.child_hook();
         tx.send(InputCommand::Stop).unwrap();
         assert!(child.drain_input(&mut std::collections::VecDeque::new()));
-        assert!(parent.stop_all.load(Ordering::Acquire));assert!(sibling.stop_all.load(Ordering::Acquire));
+        assert!(parent.stop_all.load(Ordering::Acquire));
+        assert!(sibling.stop_all.load(Ordering::Acquire));
     }
-
 }

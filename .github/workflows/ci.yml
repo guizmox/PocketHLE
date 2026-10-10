@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,22 +17,22 @@ env:
 jobs:
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [fmt]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -41,14 +45,16 @@ jobs:
             libxcursor-dev libxdamage-dev libxext-dev libxfixes-dev \
             libasound2-dev \
             cmake build-essential libclang-dev
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: build static FFmpeg
+        run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     name: cargo test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
       - name: install build deps
         run: |
@@ -59,15 +65,17 @@ jobs:
             libxcursor-dev libxdamage-dev libxext-dev libxfixes-dev \
             libasound2-dev \
             cmake build-essential libclang-dev
-      - run: cargo build --workspace --release
-      - run: cargo test --workspace --release
+      - name: build static FFmpeg
+        run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
+      - run: cargo build --workspace --release --locked
+      - run: cargo test --workspace --release --locked
 
   build-unicorn:
     name: build with unicorn-engine
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
       - name: install native deps
         run: |
@@ -76,15 +84,15 @@ jobs:
             cmake build-essential pkg-config libclang-dev \
             libasound2-dev
       - name: build pocket-cli with unicorn feature
-        run: cargo build --release -p pocket-cli --features unicorn
+        run: cargo build --release --locked -p pocket-cli --features unicorn
 
   build-linux:
     name: build linux release artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [fmt]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
       - name: install build deps
         run: |
@@ -95,10 +103,12 @@ jobs:
             libxcursor-dev libxdamage-dev libxext-dev libxfixes-dev \
             libasound2-dev \
             cmake build-essential libclang-dev
+      - name: build static FFmpeg
+        run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
       - name: build CLI + desktop (with unicorn-engine)
         run: |
-          cargo build --release -p pocket-cli --features unicorn
-          cargo build --release -p pocket-desktop
+          cargo build --release --locked -p pocket-cli --features unicorn
+          cargo build --release --locked -p pocket-desktop
       - name: stage artifacts
         run: |
           mkdir -p dist/PocketHLE-linux
@@ -117,16 +127,33 @@ jobs:
     runs-on: windows-latest
     needs: [fmt]
     steps:
+      - run: git config --global core.autocrlf input
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: MSYS
+          install: make diffutils pkgconf
+          path-type: inherit
+      - name: build static FFmpeg with MSVC
+        shell: pwsh
+        env:
+          POCKETHLE_MSYS_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: ./tools/build-ffmpeg.ps1 -MsysRoot $env:POCKETHLE_MSYS_ROOT -Jobs 4
       - name: build CLI + desktop
-        shell: bash
+        shell: pwsh
         run: |
-          cargo build --release -p pocket-cli
-          cargo build --release -p pocket-desktop
+          cargo build --release --locked -p pocket-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked -p pocket-desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: stage artifacts
         shell: bash
         run: |
@@ -146,46 +173,37 @@ jobs:
 
   build-android:
     name: build android APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [fmt]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
-      - uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r26d
-          add-to-path: true
-      - name: install cargo-ndk
-        run: cargo install cargo-ndk --locked
-      - name: install cmake + ninja for unicorn-engine cross-compile
+      - uses: android-actions/setup-android@v3
+      - name: install matching Android SDK and NDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;28.2.13676358'
+      - name: install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build build-essential pkg-config libclang-dev
-      - name: cross-compile native lib (with unicorn-engine)
+          sudo apt-get install -y cmake ninja-build build-essential pkg-config libclang-dev curl unzip python3
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk --version 3.5.4 --locked
+      - name: cross-compile native libraries with Unicorn and static FFmpeg
+        run: bash tools/build-android-native.sh 4
         env:
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          cargo ndk \
-            -t arm64-v8a \
-            -t armeabi-v7a \
-            -o frontends/pocket-android/app/src/main/jniLibs \
-            build --release -p pocket-android-jni
-      - uses: gradle/actions/setup-gradle@v3
-      - name: build APK
-        working-directory: frontends/pocket-android
-        run: |
-          gradle wrapper --gradle-version 8.7
-          ./gradlew assembleDebug --no-daemon
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+      - name: build and verify APK
+        run: bash tools/build-android-apk.sh
       - uses: actions/upload-artifact@v4
         with:
           name: PocketHLE-android
-          path: frontends/pocket-android/app/build/outputs/apk/debug/*.apk
+          path: frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

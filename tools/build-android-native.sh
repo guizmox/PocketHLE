@@ -16,8 +16,10 @@ for android_pair in 'aarch64-linux-android:arm64-v8a' 'armv7-linux-androideabi:a
     android_envkey="CMAKE_TOOLCHAIN_FILE_${android_target//-/_}"
     android_rustflags="CARGO_TARGET_${android_target^^}_RUSTFLAGS"
     android_rustflags="${android_rustflags//-/_}"
-    env "$android_envkey=$android_root/build-support/cmake/$android_target.cmake" \
-        "$android_rustflags=-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384" \
+    # Global RUSTFLAGS takes precedence over target flags in Cargo. Merge it
+    # into the target flags, then unset it so CI's -D warnings keeps alignment.
+    env -u RUSTFLAGS "$android_envkey=$android_root/build-support/cmake/$android_target.cmake" \
+        "$android_rustflags=${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384" \
         POCKETHLE_FFMPEG_STATIC_DIR="$android_root/target/native/ffmpeg/$android_target" \
         cargo ndk -t "$android_abi" -p 24 -o frontends/pocket-android/app/src/main/jniLibs \
         build --release --locked -p pocket-android-jni

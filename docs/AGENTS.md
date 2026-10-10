@@ -1974,7 +1974,7 @@ fallback to the trace-only Stub. Build scripts use per-target NDK CMake wrappers
 pinned FFmpeg 8.0.1 (same codecs as desktop), compiler-rt builtins and 16 KiB ELF
 alignment. Never enable Unicorn arch_all. No global Cargo target configuration.
 Gradle preBuild rejects missing bridges; ELF and APK alignment/signature checks run
-in the build scripts. Workflow is manual only. See docs/ANDROID-BUILD.md.
+in the build scripts. The dedicated Android workflow is manual; CI also builds the APK on main pushes and pull requests. See docs/ANDROID-BUILD.md.
 
 Validation: all Kotlin sources type-checked against Android 14 framework and actual
 AndroidX dependencies/generated R; AAPT2 compiles/links resources; 240 display
@@ -2031,3 +2031,106 @@ process, orphan, DLL and dependency reports. These are actual ARM programs drive
 by the Android Rust runner on a Linux host, not Android APK/VM/device execution.
 Keep that validation distinction explicit. No shared Windows kernel/VFS behavior
 was changed to compensate for the Android launcher omission.
+
+### Temporary Android Colors registration probes
+
+The Android runner installs register-only observers when the loaded executable
+matches complete registration/user-parser signatures, the XML callback entry
+and the local TWPlayerValid branch from the supplied Colors image. Unknown
+images are untouched. These observers distinguish XML-result, profile-result,
+registration rejection, the TWPlayerValid setter and accepted completion.
+They do not set flags, skip instructions, alter registers or suppress errors.
+Remove these temporary Android probes after identifying the device failure.
+
+Cpu::add_register_trace is an optional non-stopping ARM diagnostic capability;
+Unicorn owns these hooks in the same list as other code hooks so unmapping
+removes them. No desktop caller installs them. Preserve --watch stop semantics.
+The CPU regression verifies that an observed ADD executes and retains its
+result, with only the subsequent ordinary hook stopping execution.
+
+The user's Android HTTP/server logs show getuserinfo ok, dissolvegang rejected
+for no membership, removeplayer ok, NoSuchUserException, and setuserinfo ok.
+All response bytes reach the guest. This establishes the reset loop, not why
+the registration callback fails. Replaying the original ARM setuserinfo
+callback with a generated server response reaches the TWPlayerValid setter;
+the test intercepts that setter, so it does not validate persistent config.cfg.
+Do not claim that local save failure is the immediate cause without the traces.
+
+The corrected matcher uses the runner's retained PE image, not Process.image:
+the kernel deliberately frees section data after mapping. The October 10 device
+trace reaches the accepted registration path (profile result 1). Follow-up
+observers distinguish the post-registration TWPlayerValid check at 0xdd930
+from the network error path, and observe SaveFile read/Character lookup/write
+and config-save calls. A write return is observed without asserting its ABI
+or persistent success. The local validation failure path selects
+TW_UNKNOWN_ERROR at 0xdd948; it has not yet been observed on the device.
+
+### Android on-screen control feedback
+
+GizmondoControls supplies independent StateListDrawable backgrounds: a blue
+highlight lasts until release/cancel. Clear platform background tint so themed
+buttons do not obscure that highlight. Virtual key ACTION_DOWN requests one
+VIRTUAL_KEY haptic per newly held key; do not repeat it during holds or on
+release. Respect Android's system haptic settings and preserve split multitouch
+and guest-key reference counting. Exit uses normal Android touch/click handling.
+releaseHeldInput clears child pressed states as well as held guest input.
+
+Android AudioTrack pulls use approximately 10 ms of whole PCM frames, with a
+requested effective output buffer of 20 ms (clamped by Android).
+Do not restore a fixed 4096-sample pull: Colors submits one 8192-byte mono
+16-bit live loop, so full-turn pulls hide progress from its circular mixer.
+The regression demonstrates unchanged modulo position for full-turn pulls,
+then intermediate positions and updated PCM with 220-sample pulls at 22050 Hz.
+This test validates the clock/refresh mechanism, not physical Android SFX.
+
+Android audio allocates at least getMinBufferSize, then calls setBufferSizeInFrames
+to limit the effective queue; log the actual frame count and requested/selected
+performance mode rather than claiming a guaranteed latency. Request LOW_LATENCY
+only on API 26+ (minSdk remains 24), and use audio thread priority. Keep the
+10 ms whole-frame pulls that preserve Colors live-loop cursor progress.
+
+Android AudioTrack uses AudioManager's reported output sample rate, falling back
+to getNativeOutputSampleRate, then the guest rate. AudioResampler converts PCM16
+with a rational source position and retained last frame across JNI pulls;
+never reset interpolation phase at each chunk. Preserve guest-format 10 ms
+pulls and guest playback cursors; only host PCM is converted. Silence lengths
+and AudioTrack buffers use output frames. Tests in tools/check-android-audio-resampler.kt
+cover known interpolation, stereo, bypass and whole-vs-chunked conversion/frame
+counts for 22050/44100/48000 Hz. Run with kotlinc against AudioResampler.kt.
+Device evidence before this change: 22050 Hz, 660 buffer frames, performance=0;
+physical low-latency acceptance and perceptual delay remain to be verified.
+
+The Android feeder must re-query nativeAudioFormat throughout playback. FIFA
+GZGA200024 launches AUTORUN.EXE through SDCreateProcess; foreground audio taps
+can therefore change independently of the Activity/session. Rebuild AudioTrack
+and the streaming resampler when the advertised format changes (including 0
+while the child is not ready). Flush old queued PCM. Verify format again after
+a JNI pull to discard a chunk received across a foreground-format transition.
+Do not configure output once from the launcher's first stream and keep using
+that format for every child. A compiled host harness executes the actual
+startAudio body against fake Android APIs and verifies 44100 stereo -> 22050
+mono reconfiguration, pull sizes, output, stale-chunk discard and release.
+The supplied FIFA log proves child launch + child 22050 mono open; it omits
+the initial AudioTrack format, so do not claim a measured pitch ratio from it.
+
+
+### CI build prerequisites (October 2026)
+
+CI pins Rust 1.90.0 so formatting and compilation use the same toolchain.
+Keep rustfmt checks and -D warnings: without video-static, DirectShow packets
+are only consumed, so Packet has a feature-specific dead_code allowance.
+The Unicorn CLI check reproduces that warning as an error before the fix.
+Linux workspace/desktop jobs must build pinned static FFmpeg before Cargo.
+Windows builds FFmpeg with the existing MSVC PowerShell script and the actual
+MSYS2 action output path; preserve LF checkout for Bash scripts. Do not use
+MinGW libraries with the MSVC Rust target. Android CI uses the existing native
+and APK scripts (NDK 28.2.13676358, API/build tools 35, cargo-ndk 3.5.4),
+including both ABIs, static video, ELF/APK alignment and signature checks.
+The YAML/dependency/shell checks and local core validation do not establish
+a successful GitHub-hosted Linux, Windows or Android workflow execution.
+Android native script merges global RUSTFLAGS into its target-specific linker
+flags and unsets the global variable for Cargo; otherwise CI's -D warnings
+overrides the 16 KiB ELF alignment arguments.
+Local checks: rustfmt and strict Unicorn CLI check pass; core/CPU/kernel library
+tests pass. The actual Kotlin feeder harness still rebuilds output across a
+44100 stereo -> 22050 mono transition with the requested buffer now 20 ms.

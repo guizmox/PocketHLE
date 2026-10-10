@@ -16,8 +16,8 @@
 
 use thiserror::Error;
 
-pub mod stub;
 pub mod image_pages;
+pub mod stub;
 #[cfg(feature = "unicorn")]
 pub mod unicorn;
 
@@ -140,16 +140,28 @@ pub trait Cpu {
     fn arch(&self) -> Arch;
 
     /// ARM floating-point control/status register (independent of GPRs).
-    fn read_fpscr(&mut self) -> Result<u32, CpuError> { Ok(0) }
-    fn write_fpscr(&mut self, _value: u32) -> Result<(), CpuError> { Ok(()) }
+    fn read_fpscr(&mut self) -> Result<u32, CpuError> {
+        Ok(0)
+    }
+    fn write_fpscr(&mut self, _value: u32) -> Result<(), CpuError> {
+        Ok(())
+    }
 
     fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError>;
-    fn supports_image_paging(&self) -> bool { false }
+    fn supports_image_paging(&self) -> bool {
+        false
+    }
 
     /// Reserve an image without committing its pages. Return true if the
     /// backend accounts page-ins through budget, false for an eager fallback.
-    fn map_image_region(&mut self, va: u32, size: u32, prot: Prot, bytes: Vec<u8>,
-        _budget: std::sync::Arc<dyn image_pages::ImagePageBudget>) -> Result<bool, CpuError> {
+    fn map_image_region(
+        &mut self,
+        va: u32,
+        size: u32,
+        prot: Prot,
+        bytes: Vec<u8>,
+        _budget: std::sync::Arc<dyn image_pages::ImagePageBudget>,
+    ) -> Result<bool, CpuError> {
         self.map_region(va, size, prot)?;
         if let Err(error) = self.write_mem(va, &bytes) {
             let _ = self.unmap_region(va, size);
@@ -168,7 +180,7 @@ pub trait Cpu {
     }
     /// Validate an API buffer against guest permissions without materializing pages.
     /// Host loader reads/writes intentionally bypass protection; guest API buffers do not.
-    fn check_guest_access(&self, _va:u32, _len:u32, _required:Prot)->Result<(),CpuError> {
+    fn check_guest_access(&self, _va: u32, _len: u32, _required: Prot) -> Result<(), CpuError> {
         Err(CpuError::Unsupported("guest buffer permissions"))
     }
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError>;
@@ -272,6 +284,12 @@ pub trait Cpu {
     /// emulation when the PC reaches it. Used to install IAT thunks
     /// for unimplemented imports.
     fn add_code_hook(&mut self, va: u32) -> Result<(), CpuError>;
+
+    /// Diagnostic observation only: log ARM registers without stopping or
+    /// changing the guest. Callers must validate the image before using VAs.
+    fn add_register_trace(&mut self, _va: u32, _label: &'static str) -> Result<(), CpuError> {
+        Err(CpuError::Unsupported("register trace"))
+    }
 
     /// Register a whole *inclusive* address range as stop-on-execute,
     /// as one hook rather than one per address.

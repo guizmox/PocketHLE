@@ -553,9 +553,15 @@ pub struct LauncherConfig {
     pub controls_opacity: f32,
 }
 
-fn default_log_unimplemented_apis()->bool {true}
-fn default_gprs_enabled()->bool {true}
-fn default_upscale_filter()->String { "reconstruction".into() }
+fn default_log_unimplemented_apis() -> bool {
+    true
+}
+fn default_gprs_enabled() -> bool {
+    true
+}
+fn default_upscale_filter() -> String {
+    "reconstruction".into()
+}
 
 fn default_show_fps() -> bool {
     true
@@ -1460,13 +1466,19 @@ impl Library {
     /// Commit both manifests before publishing the new in-memory entry.
     pub fn rename_game(&mut self, id: &str, name: &str) -> Result<(), LibraryError> {
         let name = name.trim();
-        if name.is_empty() { return Err(LibraryError::InvalidName); }
-        let original = self.get(id).ok_or_else(|| LibraryError::NotFound(id.into()))?.clone();
+        if name.is_empty() {
+            return Err(LibraryError::InvalidName);
+        }
+        let original = self
+            .get(id)
+            .ok_or_else(|| LibraryError::NotFound(id.into()))?
+            .clone();
         let mut next = self.library.clone();
         let game = next.games.iter_mut().find(|g| g.id == id).unwrap();
         game.display_name = name.into();
         let renamed = game.clone();
-        next.games.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        next.games
+            .sort_by(|a, b| a.display_name.cmp(&b.display_name));
         let manifest = self.root.join("games").join(id).join("game.json");
         write_json(&manifest, &renamed)?;
         if let Err(error) = write_json(&self.root.join("library.json"), &next) {
@@ -1985,22 +1997,29 @@ impl PeSniff {
 /// Match names case-insensitively, but require a supported executable and
 /// a sibling HOG; unrelated autorun programs retain the ordinary ZIP policy.
 fn demo_card_launcher(files: &[PathBuf]) -> Option<PathBuf> {
-    let mut candidates: Vec<&PathBuf> = files.iter().filter(|path| {
-        path.file_name().and_then(|name| name.to_str())
-            .is_some_and(|name| name.eq_ignore_ascii_case("autorun.exe"))
-            && is_guest_exe(path)
-            && files.iter().any(|hog| {
-                hog.parent() == path.parent()
-                    && hog.file_name().and_then(|name| name.to_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case("multiboot.hog"))
-                    && hog.is_file()
-            })
-    }).collect();
+    let mut candidates: Vec<&PathBuf> = files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("autorun.exe"))
+                && is_guest_exe(path)
+                && files.iter().any(|hog| {
+                    hog.parent() == path.parent()
+                        && hog
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case("multiboot.hog"))
+                        && hog.is_file()
+                })
+        })
+        .collect();
     candidates.sort_by_key(|path| path.components().count());
     let first = candidates.first()?;
-    if candidates.get(1).is_some_and(|second| {
-        second.components().count() == first.components().count()
-    }) {
+    if candidates
+        .get(1)
+        .is_some_and(|second| second.components().count() == first.components().count())
+    {
         return None;
     }
     Some((*first).clone())
@@ -2286,7 +2305,8 @@ mod tests {
         updated.gps_fixed_enabled = true;
         updated.gps_fixed_latitude = -33.1234567;
         updated.gps_fixed_longitude = 151.7654321;
-        let decoded: LauncherConfig = serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
+        let decoded: LauncherConfig =
+            serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert_eq!(decoded.colors_server_url, updated.colors_server_url);
         assert_eq!(decoded.colors_terminal_id, updated.colors_terminal_id);
         assert!(!decoded.gprs_enabled);
@@ -2470,13 +2490,21 @@ mod tests {
 
     #[test]
     fn missing_api_logging_defaults_on_for_old_configs_and_persists_off() {
-        let root=tmpdir("missing_api_log");let mut lib=Library::open(&root).unwrap();
+        let root = tmpdir("missing_api_log");
+        let mut lib = Library::open(&root).unwrap();
         assert!(lib.config().log_unimplemented_apis);
-        fs::write(root.join("config.json"),br#"{"schema_version":1}"#).unwrap();
-        lib=Library::open(&root).unwrap();assert!(lib.config().log_unimplemented_apis);
-        assert_eq!(lib.config().upscale_filter,"reconstruction");
-        lib.config_mut().log_unimplemented_apis=false;lib.save().unwrap();
-        assert!(!Library::open(&root).unwrap().config().log_unimplemented_apis);
+        fs::write(root.join("config.json"), br#"{"schema_version":1}"#).unwrap();
+        lib = Library::open(&root).unwrap();
+        assert!(lib.config().log_unimplemented_apis);
+        assert_eq!(lib.config().upscale_filter, "reconstruction");
+        lib.config_mut().log_unimplemented_apis = false;
+        lib.save().unwrap();
+        assert!(
+            !Library::open(&root)
+                .unwrap()
+                .config()
+                .log_unimplemented_apis
+        );
     }
 
     #[test]
@@ -2520,11 +2548,18 @@ mod tests {
         assert_eq!(game.id, original.id);
         assert_eq!(game.executable, original.executable);
         assert_eq!(game.install_dir, original.install_dir);
-        let manifest: GameEntry = serde_json::from_slice(&fs::read(root.join("games/spore/game.json")).unwrap()).unwrap();
+        let manifest: GameEntry =
+            serde_json::from_slice(&fs::read(root.join("games/spore/game.json")).unwrap()).unwrap();
         assert_eq!(manifest.display_name, game.display_name);
         let before = fs::read(root.join("library.json")).unwrap();
-        assert!(matches!(lib.rename_game(&original.id, "   "), Err(LibraryError::InvalidName)));
-        assert!(matches!(lib.rename_game("missing", "Name"), Err(LibraryError::NotFound(_))));
+        assert!(matches!(
+            lib.rename_game(&original.id, "   "),
+            Err(LibraryError::InvalidName)
+        ));
+        assert!(matches!(
+            lib.rename_game("missing", "Name"),
+            Err(LibraryError::NotFound(_))
+        ));
         assert_eq!(fs::read(root.join("library.json")).unwrap(), before);
         let _ = fs::remove_dir_all(root);
     }
@@ -2642,26 +2677,38 @@ mod tests {
                 ("MuLtIbOoT.HoG", b"WART3.00".as_slice()),
                 ("AuToRuN.ExE", bytes.as_slice()),
             ] {
-                archive.start_file(format!("{wrapper}{name}"), zip::write::FileOptions::default()).unwrap();
+                archive
+                    .start_file(
+                        format!("{wrapper}{name}"),
+                        zip::write::FileOptions::default(),
+                    )
+                    .unwrap();
                 archive.write_all(data).unwrap();
             }
             archive.finish().unwrap();
             let library_root = root.join("library");
             let mut library = Library::open(&library_root).unwrap();
             let entry = library.import_zip(&archive_path).unwrap().clone();
-            assert_eq!(entry.executable, PathBuf::from(format!("extracted/{wrapper}AuToRuN.ExE")));
+            assert_eq!(
+                entry.executable,
+                PathBuf::from(format!("extracted/{wrapper}AuToRuN.ExE"))
+            );
             assert!(entry.executable_path(&library_root).is_file());
             assert_eq!(entry.display_name, "Demo Card");
             let reopened = Library::open(&library_root).unwrap();
             assert_eq!(reopened.library.games[0].executable, entry.executable);
             assert_eq!(reopened.library.games[0].display_name, "Demo Card");
-            let manifest: GameEntry = serde_json::from_slice(&fs::read(
-                library_root.join("games").join(&entry.id).join("game.json")
-            ).unwrap()).unwrap();
+            let manifest: GameEntry = serde_json::from_slice(
+                &fs::read(library_root.join("games").join(&entry.id).join("game.json")).unwrap(),
+            )
+            .unwrap();
             assert_eq!(manifest.executable, entry.executable);
             assert_eq!(manifest.display_name, "Demo Card");
-            assert!(library_root.join("games").join(&entry.id)
-                .join(format!("extracted/{wrapper}GZGA200024/helper.cab")).is_file());
+            assert!(library_root
+                .join("games")
+                .join(&entry.id)
+                .join(format!("extracted/{wrapper}GZGA200024/helper.cab"))
+                .is_file());
             fs::remove_dir_all(root).unwrap();
         }
     }
@@ -2678,7 +2725,10 @@ mod tests {
         fs::create_dir_all(other.parent().unwrap()).unwrap();
         fs::write(&other, b"WART3.00").unwrap();
         assert!(demo_card_launcher(&[launcher.clone(), other]).is_none());
-        assert_eq!(demo_card_launcher(&[launcher.clone(), hog.clone()]), Some(launcher.clone()));
+        assert_eq!(
+            demo_card_launcher(&[launcher.clone(), hog.clone()]),
+            Some(launcher.clone())
+        );
         write_stub_pe(&launcher, MACHINE_X86, 0x0102);
         assert!(demo_card_launcher(&[launcher.clone(), hog.clone()]).is_none());
         write_stub_pe(&launcher, MACHINE_ARM, IMAGE_FILE_DLL | 0x0102);

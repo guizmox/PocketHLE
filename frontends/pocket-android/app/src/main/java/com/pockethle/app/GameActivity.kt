@@ -346,7 +346,7 @@ class GameActivity : AppCompatActivity() {
                     // Small pulls let live circular mixers observe intermediate playback positions.
                     // Colors uses a 4096-sample loop: a 4096-sample pull skips a full turn.
                     val pullSamples = maxOf(1, rate / 100) * channels
-                    val targetFrames = maxOf(1, outputRate / 100) * 3 // Approximately 30 ms.
+                    val targetFrames = maxOf(1, outputRate / 100) * 2 // Approximately 20 ms.
                     // Allocate enough for Android's minimum, then limit the effective queue.
                     val bufferSize = maxOf(minBuffer.takeIf { it > 0 } ?: 0, targetFrames * channels * 2)
                     val trackBuilder = AudioTrack.Builder()

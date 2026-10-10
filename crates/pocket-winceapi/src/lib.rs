@@ -21,25 +21,25 @@
 //! answered generically.
 
 pub mod aygshell;
+mod bluetooth;
+mod camera;
 pub mod commctrl;
 pub mod coredll;
 pub mod ddraw;
+mod directshow;
 pub mod dlgtemplate;
 pub mod game_dlls;
 pub mod gles;
+mod gps;
 pub mod gx;
 pub mod hss;
-pub mod ole32;
-mod directshow;
 #[cfg(feature = "video-static")]
 mod media_static;
-mod wavein;
-mod ws2;
-mod bluetooth;
-mod camera;
-mod gps;
-mod wininet;
+pub mod ole32;
 pub mod ordinals;
+mod wavein;
+mod wininet;
+mod ws2;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -172,9 +172,9 @@ pub type Handler = fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>;
 /// A missing-dispatch event; arguments are captured before the return convention changes them.
 pub struct UnimplementedApiCall<'a> {
     pub dll: &'a str,
-    pub api: std::borrow::Cow<'a,str>,
+    pub api: std::borrow::Cow<'a, str>,
     pub thunk_va: u32,
-    pub args: [u32;4],
+    pub args: [u32; 4],
     pub caller: u32,
     pub process_id: u32,
     pub thread_id: usize,
@@ -182,8 +182,8 @@ pub struct UnimplementedApiCall<'a> {
 }
 /// Optional targeted reporting, independent of the verbose all-API trace.
 pub trait UnimplementedApiSink: Send {
-    fn enabled(&self)->bool;
-    fn record(&mut self,call:UnimplementedApiCall<'_>);
+    fn enabled(&self) -> bool;
+    fn record(&mut self, call: UnimplementedApiCall<'_>);
 }
 
 /// Top-level dispatcher that owns per-DLL handler tables.
@@ -244,20 +244,20 @@ impl WinCeDispatcher {
         hss::register(&mut d);
         ole32::register(&mut d);
         for dll in ["coredll.dll", "ws2.dll"] {
-          for ordinal in 0..=4095u16 {
-            if let Some(name) = ordinals::lookup(dll, ordinal) {
-                let source = (dll.to_string(), name);
-                if let Some(handler) = d.by_name.get(&source).copied() {
-                    for alias in [format!("ord:{ordinal}"), format!("#{ordinal}")] {
-                        let key = (dll.to_string(), alias);
-                        d.by_name.insert(key.clone(), handler);
-                        if let Some(value) = d.by_name_constant.get(&source).copied() {
-                            d.by_name_constant.insert(key, value);
+            for ordinal in 0..=4095u16 {
+                if let Some(name) = ordinals::lookup(dll, ordinal) {
+                    let source = (dll.to_string(), name);
+                    if let Some(handler) = d.by_name.get(&source).copied() {
+                        for alias in [format!("ord:{ordinal}"), format!("#{ordinal}")] {
+                            let key = (dll.to_string(), alias);
+                            d.by_name.insert(key.clone(), handler);
+                            if let Some(value) = d.by_name_constant.get(&source).copied() {
+                                d.by_name_constant.insert(key, value);
+                            }
                         }
                     }
                 }
             }
-          }
         }
         d
     }
@@ -309,8 +309,8 @@ impl WinCeDispatcher {
         self.trace_sink = Some(sink);
     }
 
-    pub fn set_unimplemented_api_sink(&mut self,sink:Box<dyn UnimplementedApiSink>) {
-        self.unimplemented_sink=Some(sink);
+    pub fn set_unimplemented_api_sink(&mut self, sink: Box<dyn UnimplementedApiSink>) {
+        self.unimplemented_sink = Some(sink);
     }
 
     /// Resolve `thunk` to a handler, populating [`Self::by_thunk_va`]
@@ -321,8 +321,12 @@ impl WinCeDispatcher {
         if let Some((source, cached)) = self.by_thunk_va.get(&thunk.thunk_va) {
             // Module slots are reusable: a new DLL may bind another API at
             // the same address. Compare metadata without allocating on hits.
-            if source.dll == thunk.dll && source.binding == thunk.binding
-                && source.friendly_name == thunk.friendly_name { return *cached; }
+            if source.dll == thunk.dll
+                && source.binding == thunk.binding
+                && source.friendly_name == thunk.friendly_name
+            {
+                return *cached;
+            }
         }
         let dll_key = thunk.dll.to_ascii_lowercase();
         // The HashMap key is `(String, String)`, so we still have to
@@ -337,21 +341,31 @@ impl WinCeDispatcher {
             // wholesale and still have one or two entry points we
             // decided to emulate properly.
             .or_else(|| ignored_dll(&thunk.dll).map(|_| ignored_dll_stub as Handler));
-        self.by_thunk_va.insert(thunk.thunk_va, (thunk.clone(), resolved));
+        self.by_thunk_va
+            .insert(thunk.thunk_va, (thunk.clone(), resolved));
         resolved
     }
 }
 
 impl Dispatcher for WinCeDispatcher {
-    fn schedule_idle(&mut self, cpu: &mut dyn Cpu, kernel: &mut KernelState)
-        -> Result<DispatchOutcome, KernelError> {
+    fn schedule_idle(
+        &mut self,
+        cpu: &mut dyn Cpu,
+        kernel: &mut KernelState,
+    ) -> Result<DispatchOutcome, KernelError> {
         let thunk = Thunk {
-            thunk_va: pocket_kernel::THREAD_SCHEDULER_IDLE_VA, iat_va: 0,
-            dll: "coredll.dll".into(), binding: ImportBinding::Name("scheduler".into()),
+            thunk_va: pocket_kernel::THREAD_SCHEDULER_IDLE_VA,
+            iat_va: 0,
+            dll: "coredll.dll".into(),
+            binding: ImportBinding::Name("scheduler".into()),
             friendly_name: None,
         };
         kernel.sync_transferred_handles();
-        coredll::schedule_idle(&mut CallCtx { cpu, kernel, thunk: &thunk })
+        coredll::schedule_idle(&mut CallCtx {
+            cpu,
+            kernel,
+            thunk: &thunk,
+        })
     }
 
     fn constant_for(&self, thunk: &Thunk) -> Option<u32> {
@@ -381,7 +395,10 @@ impl Dispatcher for WinCeDispatcher {
             .filter(|(registered_dll, _)| registered_dll == &dll_key)
             .map(|(_, name)| name.clone())
             .collect();
-        if dll_key == "coredll.dll" || dll_key == "ws2.dll" || pocket_gles::ordinals::is_gles_dll(&dll_key) {
+        if dll_key == "coredll.dll"
+            || dll_key == "ws2.dll"
+            || pocket_gles::ordinals::is_gles_dll(&dll_key)
+        {
             for ordinal in 0..=4095u16 {
                 if ordinals::lookup(&dll_key, ordinal).is_some() {
                     names.push(format!("ord:{ordinal}"));
@@ -414,8 +431,12 @@ impl Dispatcher for WinCeDispatcher {
             return Ok(outcome);
         }
         let handler_opt = self.resolve_handler(thunk);
-        let report_missing=handler_opt.is_none() && self.unimplemented_sink.as_ref()
-            .map(|sink|sink.enabled()).unwrap_or(false);
+        let report_missing = handler_opt.is_none()
+            && self
+                .unimplemented_sink
+                .as_ref()
+                .map(|sink| sink.enabled())
+                .unwrap_or(false);
 
         // Capture args before the handler may mutate them. Skip the
         // four register reads entirely when nothing is going to log
@@ -470,10 +491,17 @@ impl Dispatcher for WinCeDispatcher {
         };
 
         if report_missing {
-            if let Some(sink)=self.unimplemented_sink.as_mut() {
-                sink.record(UnimplementedApiCall{dll:&thunk.dll,api:import_name(thunk),
-                    thunk_va:thunk.thunk_va,args,caller,process_id:kernel.object_handles.process_id(),
-                    thread_id:kernel.current_thread,halts:self.halt_on_unimplemented});
+            if let Some(sink) = self.unimplemented_sink.as_mut() {
+                sink.record(UnimplementedApiCall {
+                    dll: &thunk.dll,
+                    api: import_name(thunk),
+                    thunk_va: thunk.thunk_va,
+                    args,
+                    caller,
+                    process_id: kernel.object_handles.process_id(),
+                    thread_id: kernel.current_thread,
+                    halts: self.halt_on_unimplemented,
+                });
             }
         }
 
@@ -537,29 +565,58 @@ mod tests {
 
     #[test]
     fn targeted_missing_api_report_preserves_args_and_halt_and_skips_implemented_calls() {
-        use std::sync::{Arc,Mutex};
-        use pocket_cpu::{stub::StubCpu,Cpu,regs::ArmReg};
-        use pocket_kernel::{Dispatcher,DispatchOutcome};
-        struct Sink(Arc<Mutex<Vec<([u32;4],u32,bool,String)>>>);
+        use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
+        use pocket_kernel::{DispatchOutcome, Dispatcher};
+        use std::sync::{Arc, Mutex};
+        struct Sink(Arc<Mutex<Vec<([u32; 4], u32, bool, String)>>>);
         impl super::UnimplementedApiSink for Sink {
-            fn enabled(&self)->bool {true}
-            fn record(&mut self,c:super::UnimplementedApiCall<'_>) {
-                self.0.lock().unwrap().push((c.args,c.caller,c.halts,c.api.into_owned()));
+            fn enabled(&self) -> bool {
+                true
+            }
+            fn record(&mut self, c: super::UnimplementedApiCall<'_>) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((c.args, c.caller, c.halts, c.api.into_owned()));
             }
         }
-        let records=Arc::new(Mutex::new(Vec::new()));let mut d=WinCeDispatcher::new();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut d = WinCeDispatcher::new();
         d.set_unimplemented_api_sink(Box::new(Sink(records.clone())));
-        let mut cpu=StubCpu::new();let mut kernel=crate::gx::tests::fresh_kernel();
-        for (reg,value) in [(ArmReg::R0,11),(ArmReg::R1,22),(ArmReg::R2,33),(ArmReg::R3,44),(ArmReg::Lr,0x1235)] {
-            cpu.write_reg(reg,value).unwrap();
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        for (reg, value) in [
+            (ArmReg::R0, 11),
+            (ArmReg::R1, 22),
+            (ArmReg::R2, 33),
+            (ArmReg::R3, 44),
+            (ArmReg::Lr, 0x1235),
+        ] {
+            cpu.write_reg(reg, value).unwrap();
         }
-        let missing=fake_thunk("missing.dll","MissingTestAPI");
-        assert!(matches!(d.dispatch(&mut cpu,&missing,&mut kernel).unwrap(),DispatchOutcome::Unimplemented));
-        d.halt_on_unimplemented=true;
-        assert!(matches!(d.dispatch(&mut cpu,&missing,&mut kernel).unwrap(),DispatchOutcome::Halt));
-        d.dispatch(&mut cpu,&fake_thunk("coredll.dll","GetLastError"),&mut kernel).unwrap();
-        let entries=records.lock().unwrap();assert_eq!(entries.len(),2);
-        assert_eq!(entries[0],([11,22,33,44],0x1234,false,"MissingTestAPI".into()));assert!(entries[1].2);
+        let missing = fake_thunk("missing.dll", "MissingTestAPI");
+        assert!(matches!(
+            d.dispatch(&mut cpu, &missing, &mut kernel).unwrap(),
+            DispatchOutcome::Unimplemented
+        ));
+        d.halt_on_unimplemented = true;
+        assert!(matches!(
+            d.dispatch(&mut cpu, &missing, &mut kernel).unwrap(),
+            DispatchOutcome::Halt
+        ));
+        d.dispatch(
+            &mut cpu,
+            &fake_thunk("coredll.dll", "GetLastError"),
+            &mut kernel,
+        )
+        .unwrap();
+        let entries = records.lock().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            ([11, 22, 33, 44], 0x1234, false, "MissingTestAPI".into())
+        );
+        assert!(entries[1].2);
     }
 
     #[test]
@@ -693,7 +750,10 @@ mod tests {
 }
 
 /// Release host media backends when a guest process is replaced or closed.
-pub fn reset_media_backends(){directshow::reset();wavein::reset();}
+pub fn reset_media_backends() {
+    directshow::reset();
+    wavein::reset();
+}
 
 /// Owns the host-only state of a suspended parent. Keep this guard alive
 /// while running the child on the same host thread; drop the child first.

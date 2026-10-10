@@ -108,8 +108,17 @@ struct WaveStream {
 
 impl WaveStream {
     fn new(format: GuestFormat) -> Self {
-        Self { loop_buffer: None, samples: Default::default(), format, phase: 0, written: 0,
-            consumed: 0, paused: false, tick: Instant::now(), fraction: 0 }
+        Self {
+            loop_buffer: None,
+            samples: Default::default(),
+            format,
+            phase: 0,
+            written: 0,
+            consumed: 0,
+            paused: false,
+            tick: Instant::now(),
+            fraction: 0,
+        }
     }
 
     fn advance_virtual(&mut self, active: bool) {
@@ -119,15 +128,23 @@ impl WaveStream {
             let elapsed = now.duration_since(self.tick).as_nanos() * rate + self.fraction;
             let frames = elapsed / 1_000_000_000;
             self.fraction = elapsed % 1_000_000_000;
-            self.consume((frames * self.format.channels.max(1) as u128)
-                .min(usize::MAX as u128) as usize);
+            self.consume(
+                (frames * self.format.channels.max(1) as u128).min(usize::MAX as u128) as usize,
+            );
         }
         self.tick = now;
-        if self.samples.is_empty() && self.loop_buffer.is_none() { self.fraction = 0; }
+        if self.samples.is_empty() && self.loop_buffer.is_none() {
+            self.fraction = 0;
+        }
     }
 
     fn buffered_samples(&self) -> usize {
-        self.samples.len() + self.loop_buffer.as_ref().map(|v| v.samples.len()).unwrap_or(0)
+        self.samples.len()
+            + self
+                .loop_buffer
+                .as_ref()
+                .map(|v| v.samples.len())
+                .unwrap_or(0)
     }
 
     fn consume(&mut self, count: usize) {
@@ -143,13 +160,21 @@ impl WaveStream {
                     v.index = (position % length) as usize;
                     self.consumed = self.consumed.saturating_add(advance);
                     count -= advance;
-                    if v.remaining == 0 { self.loop_buffer = None; }
+                    if v.remaining == 0 {
+                        self.loop_buffer = None;
+                    }
                     continue;
                 }
             }
-            let before_loop = self.loop_buffer.as_ref().map(|v| v.start.saturating_sub(self.consumed)).unwrap_or(u64::MAX);
+            let before_loop = self
+                .loop_buffer
+                .as_ref()
+                .map(|v| v.start.saturating_sub(self.consumed))
+                .unwrap_or(u64::MAX);
             let advance = count.min(before_loop).min(self.samples.len() as u64) as usize;
-            if advance == 0 { break; }
+            if advance == 0 {
+                break;
+            }
             self.samples.drain(..advance);
             self.consumed = self.consumed.saturating_add(advance as u64);
             count -= advance as u64;
@@ -157,14 +182,26 @@ impl WaveStream {
     }
 
     fn frame(&mut self, rate: u32) -> (f32, f32) {
-        if self.paused { return (0.0, 0.0); }
+        if self.paused {
+            return (0.0, 0.0);
+        }
         let channels = self.format.channels.max(1) as usize;
-        let (left, right) = if let Some(v) = self.loop_buffer.as_ref().filter(|v| self.consumed >= v.start) {
+        let (left, right) = if let Some(v) = self
+            .loop_buffer
+            .as_ref()
+            .filter(|v| self.consumed >= v.start)
+        {
             let left = v.samples[v.index];
-            let right = if channels > 1 { v.samples[v.index + 1] } else { left };
+            let right = if channels > 1 {
+                v.samples[v.index + 1]
+            } else {
+                left
+            };
             (left, right)
         } else {
-            if self.samples.len() < channels { return (0.0, 0.0); }
+            if self.samples.len() < channels {
+                return (0.0, 0.0);
+            }
             let left = self.samples[0];
             let right = if channels > 1 { self.samples[1] } else { left };
             (left, right)
@@ -173,17 +210,24 @@ impl WaveStream {
         let frames = self.phase >> 16;
         self.phase &= 0xffff;
         self.consume((frames as usize).saturating_mul(channels));
-        if self.samples.is_empty() && self.loop_buffer.is_none() { self.phase = 0; }
+        if self.samples.is_empty() && self.loop_buffer.is_none() {
+            self.phase = 0;
+        }
         (left as f32 / 32768.0, right as f32 / 32768.0)
     }
-
 }
 
 /// PCM transport shared by aliases of one MAS device, including other processes.
 #[derive(Clone, Default)]
 pub struct MasPlayback(Arc<Mutex<Option<WaveStream>>>);
 impl MasPlayback {
-    fn buffered_samples(&self) -> usize { self.0.lock().unwrap().as_ref().map_or(0, |v| v.buffered_samples()) }
+    fn buffered_samples(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |v| v.buffered_samples())
+    }
 }
 
 /// Inner state shared between the emulator thread (which calls
@@ -418,46 +462,49 @@ impl Shared {
                 }
                 for transport in self.mas_streams.values() {
                     if let Some(stream) = transport.0.lock().unwrap().as_mut() {
-                        let (l, r) = stream.frame(output_rate); left += l; right += r;
+                        let (l, r) = stream.frame(output_rate);
+                        left += l;
+                        right += r;
                     }
                 }
 
                 #[cfg(feature = "audio-cpal")]
                 {
-                let mut index = 0;
-                while index < self.voices.len() {
-                    let voice = &mut self.voices[index];
-                    if voice.paused {
-                        index += 1;
-                        continue;
-                    }
-                    let voice_channels = voice.format.channels.max(1) as usize;
-                    let frame_count = voice.samples.len() / voice_channels;
-                    let source_frame = (voice.position_q16 >> 16) as usize;
-                    if frame_count == 0 || source_frame >= frame_count {
-                        if voice.looped && frame_count > 0 {
-                            voice.position_q16 %= (frame_count as u64) << 16;
-                        } else {
-                            self.voices.swap_remove(index);
+                    let mut index = 0;
+                    while index < self.voices.len() {
+                        let voice = &mut self.voices[index];
+                        if voice.paused {
+                            index += 1;
                             continue;
                         }
+                        let voice_channels = voice.format.channels.max(1) as usize;
+                        let frame_count = voice.samples.len() / voice_channels;
+                        let source_frame = (voice.position_q16 >> 16) as usize;
+                        if frame_count == 0 || source_frame >= frame_count {
+                            if voice.looped && frame_count > 0 {
+                                voice.position_q16 %= (frame_count as u64) << 16;
+                            } else {
+                                self.voices.swap_remove(index);
+                                continue;
+                            }
+                        }
+                        let source_frame = (voice.position_q16 >> 16) as usize;
+                        let sample_index = source_frame * voice_channels;
+                        let left_sample =
+                            voice.samples[sample_index] as f32 / 32768.0 * voice.volume;
+                        let right_sample = if voice_channels > 1 {
+                            voice.samples[sample_index + 1] as f32 / 32768.0 * voice.volume
+                        } else {
+                            left_sample
+                        };
+                        left += left_sample;
+                        right += right_sample;
+                        voice.position_q16 = voice.position_q16.saturating_add(
+                            ((voice.format.sample_rate.max(1) as u64) << 16)
+                                / output_rate.max(1) as u64,
+                        );
+                        index += 1;
                     }
-                    let source_frame = (voice.position_q16 >> 16) as usize;
-                    let sample_index = source_frame * voice_channels;
-                    let left_sample = voice.samples[sample_index] as f32 / 32768.0 * voice.volume;
-                    let right_sample = if voice_channels > 1 {
-                        voice.samples[sample_index + 1] as f32 / 32768.0 * voice.volume
-                    } else {
-                        left_sample
-                    };
-                    left += left_sample;
-                    right += right_sample;
-                    voice.position_q16 = voice.position_q16.saturating_add(
-                        ((voice.format.sample_rate.max(1) as u64) << 16)
-                            / output_rate.max(1) as u64,
-                    );
-                    index += 1;
-                }
                 }
             }
             left = left.clamp(-1.0, 1.0);
@@ -603,13 +650,17 @@ impl AudioEngine {
     /// Append decoded MAS1 buffers to one continuous per-device PCM queue.
     /// START/WRITE must never replace the previous buffer (Interstellar Flames 2).
     pub fn queue_mas_samples(&self, handle: u32, format: GuestFormat, samples: &[i16]) -> u64 {
-        let Ok(mut s) = self.shared.lock() else { return 0; };
+        let Ok(mut s) = self.shared.lock() else {
+            return 0;
+        };
         if !s.mix_format_ready {
             s.mix_format = format;
             s.mix_format_ready = true;
         }
         s.guest_format_ready = true;
-        if let Some(capture) = s.capture.as_mut() { capture.write(samples, format); }
+        if let Some(capture) = s.capture.as_mut() {
+            capture.write(samples, format);
+        }
         let active = s.device_active;
         let transport = s.mas_streams.entry(handle).or_default();
         let mut buffer = transport.0.lock().unwrap();
@@ -621,21 +672,39 @@ impl AudioEngine {
     }
 
     pub fn mas_written_samples(&self, handle: u32) -> u64 {
-        self.shared.lock().ok().and_then(|s| s.mas_streams.get(&handle).map(|v| v.0.lock().unwrap().as_ref().map_or(0, |v| v.written))).unwrap_or(0)
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.mas_streams
+                    .get(&handle)
+                    .map(|v| v.0.lock().unwrap().as_ref().map_or(0, |v| v.written))
+            })
+            .unwrap_or(0)
     }
 
     pub fn mas_playback_cursor(&self, handle: u32) -> u64 {
-        let Ok(s) = self.shared.lock() else { return 0; };
+        let Ok(s) = self.shared.lock() else {
+            return 0;
+        };
         let active = s.device_active;
-        s.mas_streams.get(&handle).map(|transport| {
-            let mut buffer = transport.0.lock().unwrap();
-            buffer.as_mut().map_or(0, |v| { v.advance_virtual(active); v.consumed })
-        }).unwrap_or(0)
+        s.mas_streams
+            .get(&handle)
+            .map(|transport| {
+                let mut buffer = transport.0.lock().unwrap();
+                buffer.as_mut().map_or(0, |v| {
+                    v.advance_virtual(active);
+                    v.consumed
+                })
+            })
+            .unwrap_or(0)
     }
 
     pub fn stop_mas_stream(&self, handle: u32) {
         if let Ok(s) = self.shared.lock() {
-            if let Some(transport) = s.mas_streams.get(&handle) { *transport.0.lock().unwrap() = None; }
+            if let Some(transport) = s.mas_streams.get(&handle) {
+                *transport.0.lock().unwrap() = None;
+            }
         }
     }
 
@@ -643,26 +712,40 @@ impl AudioEngine {
         if let Ok(s) = self.shared.lock() {
             let active = s.device_active;
             if let Some(transport) = s.mas_streams.get(&handle) {
-                if let Some(v) = transport.0.lock().unwrap().as_mut() { v.advance_virtual(active); v.paused = paused; }
+                if let Some(v) = transport.0.lock().unwrap().as_mut() {
+                    v.advance_virtual(active);
+                    v.paused = paused;
+                }
             }
         }
     }
 
     pub fn export_mas_stream(&self, key: u32) -> MasPlayback {
-        self.shared.lock().unwrap().mas_streams.entry(key).or_default().clone()
+        self.shared
+            .lock()
+            .unwrap()
+            .mas_streams
+            .entry(key)
+            .or_default()
+            .clone()
     }
     pub fn import_mas_stream(&self, key: u32, transport: MasPlayback) {
         let format = transport.0.lock().unwrap().as_ref().map(|v| v.format);
         let mut shared = self.shared.lock().unwrap();
         if let Some(format) = format {
-            if !shared.mix_format_ready { shared.mix_format = format; shared.mix_format_ready = true; }
+            if !shared.mix_format_ready {
+                shared.mix_format = format;
+                shared.mix_format_ready = true;
+            }
             shared.guest_format_ready = true;
         }
         shared.mas_streams.insert(key, transport);
     }
     /// Drop this session's output reference without resetting another owner's PCM.
     pub fn detach_mas_stream(&self, key: u32) {
-        if let Ok(mut shared) = self.shared.lock() { shared.mas_streams.remove(&key); }
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.mas_streams.remove(&key);
+        }
     }
 
     pub fn open_wave_stream(&self, handle: u32, format: GuestFormat) {
@@ -675,7 +758,9 @@ impl AudioEngine {
     pub fn push_wave_samples(&self, handle: u32, samples: &[i16]) {
         if let Ok(mut s) = self.shared.lock() {
             if let Some(format) = s.wave_streams.get(&handle).map(|v| v.format) {
-                if let Some(capture) = s.capture.as_mut() { capture.write(samples, format); }
+                if let Some(capture) = s.capture.as_mut() {
+                    capture.write(samples, format);
+                }
             }
             let active = s.device_active;
             if let Some(stream) = s.wave_streams.get_mut(&handle) {
@@ -687,31 +772,53 @@ impl AudioEngine {
     }
 
     pub fn wave_written_samples(&self, handle: u32) -> u64 {
-        self.shared.lock().ok().and_then(|s| s.wave_streams.get(&handle).map(|v| v.written)).unwrap_or(0)
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|s| s.wave_streams.get(&handle).map(|v| v.written))
+            .unwrap_or(0)
     }
 
     pub fn wave_playback_cursor(&self, handle: u32) -> u64 {
-        let Ok(mut s) = self.shared.lock() else { return 0; };
+        let Ok(mut s) = self.shared.lock() else {
+            return 0;
+        };
         let active = s.device_active;
-        s.wave_streams.get_mut(&handle).map(|v| {
-            v.advance_virtual(active);
-            v.consumed
-        }).unwrap_or(0)
+        s.wave_streams
+            .get_mut(&handle)
+            .map(|v| {
+                v.advance_virtual(active);
+                v.consumed
+            })
+            .unwrap_or(0)
     }
 
     /// Queue one WAVEHDR with BEGINLOOP|ENDLOOP. No repeated PCM copies.
     /// Emulator-side refreshes replace its data without resetting its position.
     pub fn queue_wave_loop(&self, handle: u32, samples: Vec<i16>, repeats: u32) -> bool {
-        let Ok(mut s) = self.shared.lock() else { return false; };
+        let Ok(mut s) = self.shared.lock() else {
+            return false;
+        };
         let active = s.device_active;
-        let Some(v) = s.wave_streams.get_mut(&handle) else { return false; };
+        let Some(v) = s.wave_streams.get_mut(&handle) else {
+            return false;
+        };
         let channels = v.format.channels.max(1) as usize;
-        if samples.is_empty() || samples.len() % channels != 0 || v.loop_buffer.is_some() { return false; }
+        if samples.is_empty() || samples.len() % channels != 0 || v.loop_buffer.is_some() {
+            return false;
+        }
         v.advance_virtual(active);
         let repeats = repeats.max(1);
         let start = v.written;
-        v.written = v.written.saturating_add((samples.len() as u64).saturating_mul(repeats as u64));
-        v.loop_buffer = Some(WaveLoop { samples, start, index: 0, remaining: repeats });
+        v.written = v
+            .written
+            .saturating_add((samples.len() as u64).saturating_mul(repeats as u64));
+        v.loop_buffer = Some(WaveLoop {
+            samples,
+            start,
+            index: 0,
+            remaining: repeats,
+        });
         true
     }
 
@@ -734,20 +841,30 @@ impl AudioEngine {
 
     pub fn update_wave_loop(&self, handle: u32, samples: Vec<i16>) {
         if let Ok(mut s) = self.shared.lock() {
-            if let Some(v) = s.wave_streams.get_mut(&handle).and_then(|v| v.loop_buffer.as_mut()) {
-                if samples.len() == v.samples.len() { v.samples = samples; }
+            if let Some(v) = s
+                .wave_streams
+                .get_mut(&handle)
+                .and_then(|v| v.loop_buffer.as_mut())
+            {
+                if samples.len() == v.samples.len() {
+                    v.samples = samples;
+                }
             }
         }
     }
 
     pub fn reset_wave_stream(&self, handle: u32) {
         if let Ok(mut s) = self.shared.lock() {
-            if let Some(v) = s.wave_streams.get_mut(&handle) { *v = WaveStream::new(v.format); }
+            if let Some(v) = s.wave_streams.get_mut(&handle) {
+                *v = WaveStream::new(v.format);
+            }
         }
     }
 
     pub fn close_wave_stream(&self, handle: u32) {
-        if let Ok(mut s) = self.shared.lock() { s.wave_streams.remove(&handle); }
+        if let Ok(mut s) = self.shared.lock() {
+            s.wave_streams.remove(&handle);
+        }
     }
 
     pub fn pause_wave_stream(&self, handle: u32, paused: bool) {
@@ -908,7 +1025,20 @@ impl AudioEngine {
 
     /// Number of samples currently queued.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.buffered_samples()).sum::<usize>() + s.mas_streams.values().map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
+        self.shared
+            .lock()
+            .map(|s| {
+                s.len
+                    + s.wave_streams
+                        .values()
+                        .map(|v| v.buffered_samples())
+                        .sum::<usize>()
+                    + s.mas_streams
+                        .values()
+                        .map(|v| v.buffered_samples())
+                        .sum::<usize>()
+            })
+            .unwrap_or(0)
     }
 
     /// Total guest samples submitted since the stream was opened (or
@@ -1001,11 +1131,16 @@ impl AudioEngine {
     pub fn suspend_output(&mut self) {
         #[cfg(feature = "audio-cpal")]
         {
-            self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
-            if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+            self.shutdown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
         }
         #[cfg(not(feature = "audio-cpal"))]
-        { self.worker = None; }
+        {
+            self.worker = None;
+        }
         self.init_attempted = false;
     }
 
@@ -1013,8 +1148,14 @@ impl AudioEngine {
         if let Ok(mut shared) = self.shared.lock() {
             shared.virtual_tick = None;
             let now = Instant::now();
-            for stream in shared.wave_streams.values_mut() { stream.tick = now; }
-            for transport in shared.mas_streams.values() { if let Some(stream) = transport.0.lock().unwrap().as_mut() { stream.tick = now; } }
+            for stream in shared.wave_streams.values_mut() {
+                stream.tick = now;
+            }
+            for transport in shared.mas_streams.values() {
+                if let Some(stream) = transport.0.lock().unwrap().as_mut() {
+                    stream.tick = now;
+                }
+            }
         }
         self.start();
     }
@@ -1115,17 +1256,30 @@ impl AudioTap {
     /// guest format; probing must not switch the engine to device-clock
     /// mode before AudioTrack has actually started.
     pub fn peek_into(&self, dst: &mut [i16]) -> usize {
-        let Ok(s) = self.shared.lock() else { return 0; };
+        let Ok(s) = self.shared.lock() else {
+            return 0;
+        };
         if !s.wave_streams.is_empty() || !s.mas_streams.is_empty() {
             let channels = s.mix_format.channels.max(1) as usize;
             let mut streams = s.wave_streams.clone();
-            let mut mas_streams: std::collections::BTreeMap<u32, WaveStream> = s.mas_streams.iter()
-                .filter_map(|(&key, transport)| transport.0.lock().unwrap().clone().map(|stream| (key, stream))).collect();
+            let mut mas_streams: std::collections::BTreeMap<u32, WaveStream> = s
+                .mas_streams
+                .iter()
+                .filter_map(|(&key, transport)| {
+                    transport
+                        .0
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .map(|stream| (key, stream))
+                })
+                .collect();
             for frame in dst.chunks_exact_mut(channels) {
                 let (mut left, mut right) = (0.0f32, 0.0f32);
                 for stream in streams.values_mut().chain(mas_streams.values_mut()) {
                     let (l, r) = stream.frame(s.mix_format.sample_rate);
-                    left += l; right += r;
+                    left += l;
+                    right += r;
                 }
                 for (ch, sample) in frame.iter_mut().enumerate() {
                     *sample = ((if ch == 0 { left } else { right }) * 32768.0)
@@ -1148,7 +1302,20 @@ impl AudioTap {
 
     /// How many samples are queued and ready to be drained.
     pub fn buffered_samples(&self) -> usize {
-        self.shared.lock().map(|s| s.len + s.wave_streams.values().map(|v| v.buffered_samples()).sum::<usize>() + s.mas_streams.values().map(|v| v.buffered_samples()).sum::<usize>()).unwrap_or(0)
+        self.shared
+            .lock()
+            .map(|s| {
+                s.len
+                    + s.wave_streams
+                        .values()
+                        .map(|v| v.buffered_samples())
+                        .sum::<usize>()
+                    + s.mas_streams
+                        .values()
+                        .map(|v| v.buffered_samples())
+                        .sum::<usize>()
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -1320,7 +1487,9 @@ mod tests {
             let tap = engine.tap();
             tap.drain_into(&mut []);
             engine.open_wave_stream(1, mono(44100));
-            if prefix { engine.push_wave_samples(1, &[10]); }
+            if prefix {
+                engine.push_wave_samples(1, &[10]);
+            }
             assert!(engine.queue_wave_loop(1, vec![20, 30, 40], 4));
             engine.push_wave_samples(1, &[50]);
             let old_end = if prefix { 13 } else { 12 };
@@ -1347,6 +1516,28 @@ mod tests {
             assert_eq!(engine.break_wave_loop(1), None);
             assert_eq!(engine.break_wave_loop(99), None);
         }
+    }
+
+    #[test]
+    fn android_short_pulls_expose_live_loop_cursor_and_updated_pcm() {
+        let engine = AudioEngine::new();
+        let tap = engine.tap();
+        tap.drain_into(&mut []);
+        engine.open_wave_stream(1, mono(22050));
+        assert!(engine.queue_wave_loop(1, vec![0; 4096], u32::MAX));
+        // Previous Android pull: the guest sees the same circular position.
+        tap.drain_into(&mut [0; 4096]);
+        assert_eq!(engine.wave_playback_cursor(1) % 4096, 0);
+        let mut output = [0; 220];
+        tap.drain_into(&mut output);
+        assert_eq!(engine.wave_playback_cursor(1) % 4096, 220);
+        // The emulator refreshes the ring after the guest fills the next region.
+        let mut pcm = vec![0; 4096];
+        pcm[220..440].fill(12000);
+        engine.update_wave_loop(1, pcm);
+        tap.drain_into(&mut output);
+        assert_eq!(output, [12000; 220]);
+        assert_eq!(engine.wave_playback_cursor(1) % 4096, 440);
     }
 
     #[test]
@@ -1402,7 +1593,11 @@ mod tests {
         let mut engine = AudioEngine::new();
         let tap = engine.tap();
         tap.drain_into(&mut []);
-        let format = GuestFormat { sample_rate: 44100, channels: 1, bits_per_sample: 16 };
+        let format = GuestFormat {
+            sample_rate: 44100,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         engine.open_wave_stream(1, format);
         engine.push_wave_samples(1, &[100, 100]);
         engine.queue_mas_samples(2, format, &[1000, 2000]);
@@ -1424,7 +1619,11 @@ mod tests {
         let e = AudioEngine::new();
         let tap = e.tap();
         tap.drain_into(&mut []);
-        let format = GuestFormat { sample_rate: 44100, channels: 1, bits_per_sample: 16 };
+        let format = GuestFormat {
+            sample_rate: 44100,
+            channels: 1,
+            bits_per_sample: 16,
+        };
         e.open_wave_stream(1, format);
         assert_eq!(e.queue_mas_samples(2, format, &[1000, 2000]), 2);
         assert_eq!(e.queue_mas_samples(2, format, &[3000, 4000]), 4);
@@ -1449,7 +1648,11 @@ mod tests {
     }
 
     fn mono(rate: u32) -> GuestFormat {
-        GuestFormat { sample_rate: rate, channels: 1, bits_per_sample: 16 }
+        GuestFormat {
+            sample_rate: rate,
+            channels: 1,
+            bits_per_sample: 16,
+        }
     }
 
     #[test]

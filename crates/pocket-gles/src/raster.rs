@@ -1381,5 +1381,4 @@ mod tests {
             "GL_DEPTH_TEST disabled must leave the depth buffer untouched"
         );
     }
-
 }

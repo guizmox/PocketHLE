@@ -122,18 +122,41 @@ impl Registry {
         use std::io::{Error, ErrorKind, Read};
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = &store.persistence {
-            return if existing == path { Ok(()) } else { Err(Error::new(ErrorKind::InvalidInput, "registry already attached to another device")) };
+            return if existing == path {
+                Ok(())
+            } else {
+                Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "registry already attached to another device",
+                ))
+            };
         }
         let snapshot = match std::fs::File::open(path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
                 file.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-                if bytes.len() > 64 * 1024 * 1024 { return Err(Error::new(ErrorKind::InvalidData, "registry snapshot too large")); }
+                if bytes.len() > 64 * 1024 * 1024 {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "registry snapshot too large",
+                    ));
+                }
                 let snapshot: RegistrySnapshot = serde_json::from_slice(&bytes)
                     .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-                if snapshot.version != 1 || snapshot.keys.keys().any(|k| canonical_key(k).to_ascii_lowercase() != *k)
-                    || snapshot.keys.values().any(|v| v.keys().any(|k| k.to_ascii_lowercase() != *k)) {
-                    return Err(Error::new(ErrorKind::InvalidData, "invalid registry snapshot version or key"));
+                if snapshot.version != 1
+                    || snapshot
+                        .keys
+                        .keys()
+                        .any(|k| canonical_key(k).to_ascii_lowercase() != *k)
+                    || snapshot
+                        .keys
+                        .values()
+                        .any(|v| v.keys().any(|k| k.to_ascii_lowercase() != *k))
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "invalid registry snapshot version or key",
+                    ));
                 }
                 Some(snapshot)
             }
@@ -142,8 +165,14 @@ impl Registry {
         };
         if let Some(snapshot) = snapshot {
             let mut keys = store.keys.clone();
-            for (key, values) in snapshot.keys { keys.insert(key, values); }
-            if store.charge.as_mut().is_some_and(|charge| !charge.resize(Self::stored_pages(&keys))) {
+            for (key, values) in snapshot.keys {
+                keys.insert(key, values);
+            }
+            if store
+                .charge
+                .as_mut()
+                .is_some_and(|charge| !charge.resize(Self::stored_pages(&keys)))
+            {
                 return Err(Error::other("insufficient device RAM for registry"));
             }
             store.keys = keys;
@@ -159,18 +188,33 @@ impl Registry {
         use std::io::Write;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(path) = &store.persistence else { return Ok(()); };
-        let snapshot = RegistrySnapshot { version: 1, keys: store.keys.clone(), display: store.display.clone() };
+        let Some(path) = &store.persistence else {
+            return Ok(());
+        };
+        let snapshot = RegistrySnapshot {
+            version: 1,
+            keys: store.keys.clone(),
+            display: store.display.clone(),
+        };
         let bytes = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
-        let temp = path.with_extension(format!("tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let temp = path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         let result = (|| {
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
             std::fs::rename(&temp, path)
         })();
-        if result.is_err() { let _ = std::fs::remove_file(&temp); }
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
         result
     }
 
@@ -266,7 +310,10 @@ impl Registry {
     }
 
     pub fn contains_key(&self, path: &str) -> bool {
-        self.store.lock().unwrap_or_else(|e| e.into_inner()).keys
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys
             .contains_key(&canonical_key(path).to_ascii_lowercase())
     }
 
@@ -275,7 +322,9 @@ impl Registry {
         for (key, values) in keys {
             bytes += (key.encode_utf16().count() as u64 + 1) * 2;
             for (name, value) in values {
-                bytes += (name.encode_utf16().count() as u64 + 1) * 2 + 4 + value.to_bytes().len() as u64;
+                bytes += (name.encode_utf16().count() as u64 + 1) * 2
+                    + 4
+                    + value.to_bytes().len() as u64;
             }
         }
         crate::memory_division::pages(bytes)
@@ -283,12 +332,19 @@ impl Registry {
     pub fn attach_ram(&mut self, ram: Option<&crate::memory_division::MemoryDivision>) -> bool {
         let Some(ram) = ram else {
             let current = self.store.lock().unwrap_or_else(|e| e.into_inner());
-            let store = RegistryStore { keys: current.keys.clone(), display: current.display.clone(), charge: None, persistence: current.persistence.clone() };
+            let store = RegistryStore {
+                keys: current.keys.clone(),
+                display: current.display.clone(),
+                charge: None,
+                persistence: current.persistence.clone(),
+            };
             drop(current);
             self.store = Arc::new(Mutex::new(store));
             return true;
         };
-        if Arc::ptr_eq(&self.store, &ram.registry) { return true; }
+        if Arc::ptr_eq(&self.store, &ram.registry) {
+            return true;
+        }
         let current = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let mut target = ram.registry.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys = target.keys.clone();
@@ -296,17 +352,28 @@ impl Registry {
         // registry. Explicit frontend settings are written after attachment.
         for (key, values) in &current.keys {
             let dest = keys.entry(key.clone()).or_default();
-            for (name, value) in values { dest.entry(name.clone()).or_insert_with(|| value.clone()); }
+            for (name, value) in values {
+                dest.entry(name.clone()).or_insert_with(|| value.clone());
+            }
         }
         let pages = Self::stored_pages(&keys);
         if let Some(charge) = &mut target.charge {
-            if !charge.resize(pages) { return false; }
+            if !charge.resize(pages) {
+                return false;
+            }
         } else {
-            let Some(charge) = ram.store_charge(pages) else { return false; };
+            let Some(charge) = ram.store_charge(pages) else {
+                return false;
+            };
             target.charge = Some(charge);
         }
         target.keys = keys;
-        for (key, name) in &current.display { target.display.entry(key.clone()).or_insert_with(|| name.clone()); }
+        for (key, name) in &current.display {
+            target
+                .display
+                .entry(key.clone())
+                .or_insert_with(|| name.clone());
+        }
         drop(target);
         drop(current);
         self.store = ram.registry.clone();
@@ -316,10 +383,18 @@ impl Registry {
         let canonical = canonical_key(path);
         let lower = canonical.to_ascii_lowercase();
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        if store.keys.contains_key(&lower) { return true; }
+        if store.keys.contains_key(&lower) {
+            return true;
+        }
         let mut keys = store.keys.clone();
         keys.insert(lower.clone(), HashMap::new());
-        if store.charge.as_mut().is_some_and(|charge| !charge.resize(Self::stored_pages(&keys))) { return false; }
+        if store
+            .charge
+            .as_mut()
+            .is_some_and(|charge| !charge.resize(Self::stored_pages(&keys)))
+        {
+            return false;
+        }
         store.display.entry(lower).or_insert(canonical);
         store.keys = keys;
         true
@@ -329,23 +404,41 @@ impl Registry {
         let lower = canonical.to_ascii_lowercase();
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys = store.keys.clone();
-        keys.entry(lower.clone()).or_default().insert(name.to_ascii_lowercase(), value);
-        if store.charge.as_mut().is_some_and(|charge| !charge.resize(Self::stored_pages(&keys))) { return false; }
+        keys.entry(lower.clone())
+            .or_default()
+            .insert(name.to_ascii_lowercase(), value);
+        if store
+            .charge
+            .as_mut()
+            .is_some_and(|charge| !charge.resize(Self::stored_pages(&keys)))
+        {
+            return false;
+        }
         store.display.entry(lower).or_insert(canonical);
         store.keys = keys;
         true
     }
     pub fn value(&self, path: &str, name: &str) -> Option<RegistryValue> {
-        self.store.lock().unwrap_or_else(|e| e.into_inner()).keys
-            .get(&canonical_key(path).to_ascii_lowercase())?.get(&name.to_ascii_lowercase()).cloned()
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys
+            .get(&canonical_key(path).to_ascii_lowercase())?
+            .get(&name.to_ascii_lowercase())
+            .cloned()
     }
     pub fn delete_value(&mut self, path: &str, name: &str) -> bool {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let removed = store.keys.get_mut(&canonical_key(path).to_ascii_lowercase())
-            .and_then(|values| values.remove(&name.to_ascii_lowercase())).is_some();
+        let removed = store
+            .keys
+            .get_mut(&canonical_key(path).to_ascii_lowercase())
+            .and_then(|values| values.remove(&name.to_ascii_lowercase()))
+            .is_some();
         if removed {
             let pages = Self::stored_pages(&store.keys);
-            if let Some(charge) = &mut store.charge { charge.resize(pages); }
+            if let Some(charge) = &mut store.charge {
+                charge.resize(pages);
+            }
         }
         removed
     }
@@ -356,7 +449,13 @@ impl Registry {
     pub fn open(&mut self, path: &str) -> Option<u32> {
         let canonical = canonical_key(path);
         let lower = canonical.to_ascii_lowercase();
-        if !self.store.lock().unwrap_or_else(|e| e.into_inner()).keys.contains_key(&lower) {
+        if !self
+            .store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys
+            .contains_key(&lower)
+        {
             return None;
         }
         let handle = self.next_handle;
@@ -367,7 +466,9 @@ impl Registry {
 
     /// Create the key if needed, then hand out a handle for it.
     pub fn create_and_open(&mut self, path: &str) -> u32 {
-        if !self.create_key(path) { return 0; }
+        if !self.create_key(path) {
+            return 0;
+        }
         self.open(path).unwrap_or(0)
     }
 
@@ -394,16 +495,26 @@ mod tests {
         assert!(registry.attach_ram(Some(&ram)));
         assert!(registry.set_value("HKCU\\Test", "value", RegistryValue::Binary(vec![9; 4096])));
         let used = ram.snapshot().store_used;
-        assert!(!registry.set_value("HKCU\\Test", "value", RegistryValue::Binary(vec![7; 8 * 4096])));
+        assert!(!registry.set_value(
+            "HKCU\\Test",
+            "value",
+            RegistryValue::Binary(vec![7; 8 * 4096])
+        ));
         assert_eq!(ram.snapshot().store_used, used);
-        assert_eq!(registry.value("HKCU\\Test", "value"), Some(RegistryValue::Binary(vec![9; 4096])));
+        assert_eq!(
+            registry.value("HKCU\\Test", "value"),
+            Some(RegistryValue::Binary(vec![9; 4096]))
+        );
         assert!(registry.delete_value("HKCU\\Test", "value"));
         assert!(ram.snapshot().store_used < used);
         let mut child = Registry::new();
         assert!(child.attach_ram(Some(&ram)));
         assert_eq!(ram.snapshot().store_used, 1);
         assert!(child.set_value("HKCU\\Test", "shared", RegistryValue::Dword(42)));
-        assert_eq!(registry.value("HKCU\\Test", "shared"), Some(RegistryValue::Dword(42)));
+        assert_eq!(
+            registry.value("HKCU\\Test", "shared"),
+            Some(RegistryValue::Dword(42))
+        );
         drop(registry);
         assert_eq!(ram.snapshot().store_used, 1); // object store outlives a process
     }
@@ -426,9 +537,18 @@ mod tests {
         child.flush().unwrap();
         let mut loaded = Registry::new();
         loaded.configure_persistence(&path).unwrap();
-        assert_eq!(loaded.value("HKCU\\Save", "text"), Some(RegistryValue::Sz("été".into())));
-        assert_eq!(loaded.value("HKCU\\Save", "number"), Some(RegistryValue::Dword(123)));
-        assert_eq!(loaded.value("HKCU\\Save", "blob"), Some(RegistryValue::Binary(vec![0, 255, 8])));
+        assert_eq!(
+            loaded.value("HKCU\\Save", "text"),
+            Some(RegistryValue::Sz("été".into()))
+        );
+        assert_eq!(
+            loaded.value("HKCU\\Save", "number"),
+            Some(RegistryValue::Dword(123))
+        );
+        assert_eq!(
+            loaded.value("HKCU\\Save", "blob"),
+            Some(RegistryValue::Binary(vec![0, 255, 8]))
+        );
         assert!(loaded.path_for(handle).is_none());
         assert!(loaded.delete_value("HKCU\\Save", "blob"));
         loaded.flush().unwrap();
@@ -445,7 +565,10 @@ mod tests {
         let mut reg = Registry::new();
         reg.set_value("HKCU\\Live", "value", RegistryValue::Dword(42));
         assert!(reg.configure_persistence(&path).is_err());
-        assert_eq!(reg.value("HKCU\\Live", "value"), Some(RegistryValue::Dword(42)));
+        assert_eq!(
+            reg.value("HKCU\\Live", "value"),
+            Some(RegistryValue::Dword(42))
+        );
         reg.flush().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"broken");
     }
