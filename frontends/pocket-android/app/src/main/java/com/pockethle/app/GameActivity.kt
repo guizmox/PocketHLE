@@ -181,6 +181,7 @@ class GameActivity : AppCompatActivity() {
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
         GpsHost.initialize(this)
+        VibrationHost.initialize(this)
         val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
             (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList()) +
             (if (config.gpsEnabled && !fixedGps) GpsHost.permissions().toList() else emptyList())
@@ -236,6 +237,7 @@ class GameActivity : AppCompatActivity() {
         if (::surface.isInitialized) surface.onResume()
         CameraHost.resume()
         GpsHost.resume()
+        VibrationHost.resume()
         val handle = session
         if (handle != 0L && !audioRunning) startAudio(handle)
     }
@@ -244,6 +246,7 @@ class GameActivity : AppCompatActivity() {
         if (::surface.isInitialized) surface.onPause()
         CameraHost.pause()
         GpsHost.pause()
+        VibrationHost.pause()
         releaseHeldInput()
         stopAudio()
         super.onPause()
@@ -274,6 +277,7 @@ class GameActivity : AppCompatActivity() {
     override fun onDestroy() {
         CameraHost.closeAll()
         GpsHost.closeAll()
+        VibrationHost.closeAll()
         finishSession()
         mainHandler.removeCallbacksAndMessages(null)
         surface.onPause()
@@ -290,6 +294,7 @@ class GameActivity : AppCompatActivity() {
         joiningSession = true
         CameraHost.closeAll()
         GpsHost.closeAll()
+        VibrationHost.closeAll()
         releaseHeldInput()
         session = 0
         stopAudio()
@@ -704,6 +709,7 @@ class GameActivity : AppCompatActivity() {
     /** A short, firmer pulse; still respect disabled system/view touch feedback. */
     @Suppress("DEPRECATION")
     private fun controlHaptic(view: View) {
+        if (VibrationHost.isGameVibrating()) return
         if (!view.isHapticFeedbackEnabled || android.provider.Settings.System.getInt(
                 contentResolver, android.provider.Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) return
         val vibrator = getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator

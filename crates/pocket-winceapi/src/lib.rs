@@ -37,6 +37,7 @@ pub mod hss;
 mod media_static;
 pub mod ole32;
 pub mod ordinals;
+mod vibration;
 mod wavein;
 mod wininet;
 mod ws2;
@@ -233,6 +234,7 @@ impl WinCeDispatcher {
         };
         coredll::register(&mut d);
         bluetooth::register(&mut d);
+        vibration::register(&mut d);
         wininet::register(&mut d);
         ws2::register(&mut d);
         ddraw::register(&mut d);

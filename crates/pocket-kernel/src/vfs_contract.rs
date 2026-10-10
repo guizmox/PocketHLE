@@ -10,6 +10,7 @@ struct Shared {
     bluetooth: crate::bluetooth::Service,
     camera: crate::camera::Service,
     gps: crate::gps::Service,
+    vibration: crate::vibration::Service,
 }
 #[derive(Debug)]
 pub(super) struct Lease {
@@ -127,6 +128,12 @@ impl Vfs {
         self.bluetooth.service = shared.0.lock().unwrap().bluetooth.clone();
         self.shared = shared;
     }
+    pub fn vibration_service(&self) -> crate::vibration::Service {
+        self.shared.0.lock().unwrap().vibration.clone()
+    }
+    pub fn set_vibration_service(&self, service: crate::vibration::Service) {
+        self.shared.0.lock().unwrap().vibration = service;
+    }
     pub fn gps_service(&self) -> crate::gps::Service {
         self.shared.0.lock().unwrap().gps.clone()
     }
@@ -231,6 +238,47 @@ impl Vfs {
             return Err(87);
         }
         let normal = self.normalise_guest_path(path);
+        if normal.rsplit('/').next() == Some("vib1:") {
+            if disposition != 3 {
+                return Err(87);
+            }
+            let mut state = self.shared.0.lock().unwrap();
+            let key = "vibration:VIB1";
+            busy(&mut state, key);
+            if state.leases.get(key).is_some_and(|leases| {
+                leases
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .any(|l| access & !l.share != 0 || l.access & !share != 0)
+            }) {
+                return Err(32);
+            }
+            let service = state.vibration.clone();
+            let lease = Arc::new(Lease {
+                access,
+                share,
+                volume: None,
+            });
+            let handle = self.next_handle;
+            self.next_handle = self.next_handle.checked_add(1).ok_or(8u32)?;
+            self.vibration_handles.insert(
+                handle,
+                Arc::new(VibrationOpen {
+                    service,
+                    access,
+                    _lease: lease.clone(),
+                }),
+            );
+            state
+                .leases
+                .entry(key.into())
+                .or_default()
+                .push(Arc::downgrade(&lease));
+            return Ok(OpenResult {
+                handle,
+                existed: true,
+            });
+        }
         if normal.rsplit('/').next() == Some("gps1:") {
             if disposition != 3 {
                 return Err(87);

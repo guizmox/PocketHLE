@@ -57,6 +57,7 @@ pub mod shared_objects;
 mod tls;
 pub mod tracker;
 pub mod vfs;
+pub mod vibration;
 
 pub use audio::{AudioEngine, AudioTap, GuestFormat, VoiceParams};
 pub use framebuffer::{Framebuffer, FB_BYTES, FB_HEIGHT, FB_WIDTH};

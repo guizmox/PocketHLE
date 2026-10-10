@@ -288,6 +288,7 @@ enum VfsObjectInner {
     Bluetooth(Arc<BluetoothOpen>),
     Camera(Arc<CameraOpen>),
     Gps(Arc<GpsOpen>),
+    Vibration(Arc<VibrationOpen>),
     File(Arc<Mutex<OpenFile>>),
     Ram(Arc<Mutex<OpenRamFile>>),
     Volume(OpenVolume),
@@ -305,6 +306,11 @@ impl VfsObject {
 }
 
 /// Mount-point + open-handle table.
+pub struct VibrationOpen {
+    pub service: crate::vibration::Service,
+    pub access: u32,
+    _lease: Arc<contracts::Lease>,
+}
 pub struct GpsOpen {
     pub device: Arc<Mutex<crate::gps::Device>>,
     pub access: u32,
@@ -327,6 +333,7 @@ pub struct Vfs {
     bluetooth_handles: HashMap<u32, Arc<BluetoothOpen>>,
     camera_handles: HashMap<u32, Arc<CameraOpen>>,
     gps_handles: HashMap<u32, Arc<GpsOpen>>,
+    vibration_handles: HashMap<u32, Arc<VibrationOpen>>,
     pub camera_deadlines: HashMap<(usize, u32, u32), std::time::Instant>,
     mounts: Vec<Mount>,
     shared: VfsShared,
@@ -366,6 +373,7 @@ impl Vfs {
             bluetooth_handles: HashMap::new(),
             camera_handles: HashMap::new(),
             gps_handles: HashMap::new(),
+            vibration_handles: HashMap::new(),
             camera_deadlines: HashMap::new(),
             mounts: Vec::new(),
             shared: VfsShared::default(),
@@ -1332,6 +1340,9 @@ impl Vfs {
 
     /// An opaque shared open description, retaining seek/access/device state.
     pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
+        if let Some(v) = self.vibration_handles.get(&handle) {
+            return Some(VfsObject(VfsObjectInner::Vibration(v.clone()), None));
+        }
         if let Some(gps) = self.gps_handles.get(&handle) {
             return Some(VfsObject(VfsObjectInner::Gps(gps.clone()), None));
         }
@@ -1362,6 +1373,9 @@ impl Vfs {
             return false;
         }
         match object.0 {
+            VfsObjectInner::Vibration(v) => {
+                self.vibration_handles.insert(handle, v);
+            }
             VfsObjectInner::Gps(gps) => {
                 self.gps_handles.insert(handle, gps);
             }
@@ -1390,13 +1404,17 @@ impl Vfs {
         true
     }
     pub fn is_handle(&self, handle: u32) -> bool {
-        self.gps_handles.contains_key(&handle)
+        self.vibration_handles.contains_key(&handle)
+            || self.gps_handles.contains_key(&handle)
             || self.camera_handles.contains_key(&handle)
             || self.bluetooth_handles.contains_key(&handle)
             || self.is_open(handle)
             || self.volumes.contains_key(&handle)
             || self.decoders.contains_key(&handle)
             || self.registration.contains(&handle)
+    }
+    pub fn vibration_open(&self, handle: u32) -> Option<Arc<VibrationOpen>> {
+        self.vibration_handles.get(&handle).cloned()
     }
     pub fn gps_open(&self, handle: u32) -> Option<Arc<GpsOpen>> {
         self.gps_handles.get(&handle).cloned()
@@ -1414,6 +1432,7 @@ impl Vfs {
     pub fn open_handles(&self) -> Vec<u32> {
         self.handles
             .keys()
+            .chain(self.vibration_handles.keys())
             .chain(self.gps_handles.keys())
             .chain(self.camera_handles.keys())
             .chain(self.bluetooth_handles.keys())
@@ -1432,7 +1451,8 @@ impl Vfs {
     }
 
     pub fn close(&mut self, handle: u32) -> bool {
-        self.gps_handles.remove(&handle).is_some()
+        self.vibration_handles.remove(&handle).is_some()
+            || self.gps_handles.remove(&handle).is_some()
             || self.camera_handles.remove(&handle).is_some()
             || self.bluetooth_handles.remove(&handle).is_some()
             || self.ram_handles.remove(&handle).is_some()
@@ -1464,6 +1484,7 @@ impl Vfs {
         self.bluetooth_handles.clear();
         self.camera_handles.clear();
         self.gps_handles.clear();
+        self.vibration_handles.clear();
         self.camera_deadlines.clear();
         self.bluetooth.lookups.clear();
         self.bluetooth.writes.clear();

@@ -16,6 +16,9 @@ package com.pockethle.app
  * encoding the framebuffer on every poll.
  */
 object NativeBridge {
+    @JvmStatic fun vibOpen(): Int = VibrationHost.open()
+    @JvmStatic fun vibApply(id: Int, timings: LongArray): Int = VibrationHost.apply(id, timings)
+    @JvmStatic fun vibClose(id: Int) = VibrationHost.close(id)
     @JvmStatic fun httpSessionOpen(spec: String): Int = InternetHost.openSession(spec)
     @JvmStatic fun httpSessionClose(id: Int) = InternetHost.closeSession(id)
     @JvmStatic fun httpStart(id: Int, spec: String, body: ByteArray): Int = InternetHost.start(id, spec, body)

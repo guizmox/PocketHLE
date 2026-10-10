@@ -32,6 +32,7 @@ mod internet;
 mod managed_game;
 mod runner;
 mod unimplemented_log;
+mod vibration;
 
 use anyhow::Context;
 use std::path::Path;
@@ -587,6 +588,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     }
     if let Err(e) = internet::install(&mut env, &_class) {
         log::error!("Cannot initialize Android HTTP bridge: {e}");
+        return 0;
+    }
+    if let Err(e) = vibration::install(&mut env, &_class) {
+        log::error!("Cannot initialize Android vibration bridge: {e}");
         return 0;
     }
     if let Err(e) = gps::install(&mut env, &_class) {

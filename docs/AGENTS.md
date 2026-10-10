@@ -1,5 +1,42 @@
 # PocketHLE — architecture reference for coding agents
 
+## Gizmondo VIB1 / NLED vibration bridge
+
+The SDK Vibrator and RingToneControl examples use VIB1: and NLED count (0),
+supports (1), settings (2) IOCTLs. COREDLL NLedGetDeviceInfo/NLedSetDevice share
+that same service. There is one virtual motor, LedNum 0. Settings are seven
+32-bit fields (28 bytes); blink times are microseconds, converted upward to
+Android's millisecond resolution. The count structure is 4 bytes, supports 28.
+Modes are off, continuous on and blink, with meta cycles. Oversized meta patterns
+(>1024 on cycles) return ERROR_NOT_SUPPORTED; malformed inputs return 87.
+Off/on do not require initialization of the blink-only fields. No intensity
+field exists in this ABI. Android uses amplitude 128/255 when supported, otherwise
+native fixed power on API24+; do not claim uniform physical strength across phones.
+
+VfsShared owns the Service; shared opens/leases support process duplication and
+access checks. Closing VIB1 MUST NOT cancel the motor: the SDK closes it before
+Sleep and reopens it to stop. Stop releases the native Motor immediately; last
+shared-device teardown also cancels and releases it. Failed first activation
+releases its newly opened native motor. The JNI bridge retains only JavaVM and
+GlobalRef to NativeBridge, never an Activity. Local JNI array references are scoped.
+VibrationHost retains application-derived Vibrator only, bounded session waveforms
+and no worker/timer thread. Android pause cancels output; resume restores the latest
+requested state. closeAll gates late native calls, clears waveforms and cancels;
+initialize reopens the gate for the next game, without reusing old session IDs.
+Virtual-button feedback is skipped while a game waveform is active so it cannot
+replace an indefinitely repeating game vibration. Hardware absence and native
+failures return real LastError (50/5/21), not false success. Successful APIs preserve
+LastError. Windows currently has a virtual NLED state, no physical motor backend.
+
+Rust regressions cover ABI, sharing/duplication, LastError, output sizes, waveform
+conversion and 100 activation/stop releases including failed starts and teardown.
+The actual Android host source is compiled against Android14 APIs and exercised
+on JVM against fake Android services for amplitude fallback, legacy API24, errors,
+pause/resume, stop and stale IDs. These are not physical Android vibration tests.
+VIBTEST is a freestanding ARM PE built without proprietary SDK code. Import its
+ZIP to hear/feel a short continuous buzz, regular pulses, then paired pulses;
+check VIBTEST.TXT and verify that Home/pause and Exit stop the motor.
+
 ## WinINet HTTP/HTTPS host bridge
 
 The nine WinINet imports used by Colors are implemented in `wininet.rs`.
