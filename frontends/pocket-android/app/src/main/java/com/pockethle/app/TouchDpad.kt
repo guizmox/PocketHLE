@@ -89,7 +89,13 @@ class TouchDpad(context: Context) : View(context) {
             cross.lineTo(79f, 31f); cross.close(); canvas.drawPath(cross, ink)
             canvas.restore()
         }
-        ink.color = 0xff172230.toInt(); canvas.drawCircle(70f, 70f, 11f, ink)
+        // Match the visible central disc to the actual neutral radius. Touch
+        // sectors still fill the square target, including gaps between arms.
+        ink.color = 0xff172230.toInt()
+        canvas.drawCircle(70f, 70f, 70f * DpadDirections.DEAD_ZONE_RADIUS, ink)
+        ink.style = Paint.Style.STROKE; ink.strokeWidth = 1.5f
+        ink.color = 0xff506078.toInt()
+        canvas.drawCircle(70f, 70f, 70f * DpadDirections.DEAD_ZONE_RADIUS, ink)
         canvas.restore()
     }
 }

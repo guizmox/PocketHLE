@@ -2299,7 +2299,7 @@ previously unavailable without pageprobe.dll/depleaf.dll.
 GizmondoControls uses one 140dp TouchDpad target instead of four independent
 arrow Buttons. DpadDirections maps eight equal angular sectors to the four
 existing guest directional keys: diagonals hold two contacts, never opposite
-contacts. The centre has a 16%-radius neutral zone; coordinates outside the
+contacts. The centre has a 45%-radius neutral zone (31.5dp at 140dp size); coordinates outside the
 view release directions. Sliding sends only changed key edges, with no repeat
 or per-frame polling. The first pointer owns the pad until release/cancel;
 additional fingers cannot take over. FrameLayout retains split multitouch so
@@ -2326,3 +2326,9 @@ a distinct orange 64dp Exit. Centre the entire 344dp toolbar so hardware
 functions shift left; scale only that toolbar to fit narrower landscape space.
 Actual measurement/layout bodies pass host checks across four landscape sizes
 and three densities for padding, shoulder sizes, ordering and no overlaps.
+
+The D-pad neutral disc is drawn with the same DEAD_ZONE_RADIUS constant as hit
+mapping. Its radius grew from 11.2dp to 31.5dp following device feedback about
+accidental contacts near the centre. Keep the complete square touch target,
+including areas between the drawn arms, available for directional/diagonal
+activation outside that disc. No additional debounce, delay or repeat is added.
