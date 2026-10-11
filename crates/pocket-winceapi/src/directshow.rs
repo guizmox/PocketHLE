@@ -78,6 +78,8 @@ struct Movie {
     stop: f64,
     cancel: Option<Arc<AtomicBool>>,
     visible: bool,
+    frame_ready_sent: bool,
+    frame_ready_pending: bool,
     presented: Option<(u64, [i32; 4], Option<[i32; 4]>, Option<[i32; 4]>, u64)>,
     window: [i32; 4],
     source: Option<[i32; 4]>,
@@ -115,6 +117,8 @@ impl Movie {
             cancel: None,
             presented: None,
             visible: true,
+            frame_ready_sent: false,
+            frame_ready_pending: false,
             window: [0; 4],
             source: None,
             destination: None,
@@ -452,6 +456,20 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
             }
             m.frame = Some(frame);
             m.frame_number += 1;
+            // WinCE's renderer announces readiness even if the owner has
+            // parked its window off-screen while waiting for this event.
+            if !m.frame_ready_sent {
+                m.frame_ready_sent = true;
+                m.frame_ready_pending = true;
+                if m.notify != 0 && m.notify_msg != 0 && m.notify_flags == 0 {
+                    ctx.kernel.posted_messages.push_back((
+                        m.notify,
+                        m.notify_msg,
+                        0,
+                        m.notify_param,
+                    ));
+                }
+            }
         }
         let packet = m.receiver.as_ref().and_then(|r| r.try_recv().ok());
         match packet {
@@ -663,6 +681,8 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
                     m.frame = None;
                     m.pending = None;
                     m.frame_number = 0;
+                    m.frame_ready_sent = false;
+                    m.frame_ready_pending = false;
                     m.ended = false;
                     m.completed = false;
                     m.completion_code = 1;
@@ -732,7 +752,18 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
         ("event", 8) => {
             update(ctx, id, m)?;
-            if m.completed {
+            if m.frame_ready_pending {
+                for (p, v) in [
+                    (ctx.arg_u32(1)?, 0x49u32),
+                    (ctx.arg_u32(2)?, 0),
+                    (ctx.arg_u32(3)?, 0),
+                ] {
+                    if p != 0 {
+                        ctx.cpu.write_mem(p, &v.to_le_bytes())?;
+                    }
+                }
+                m.frame_ready_pending = false;
+            } else if m.completed {
                 for (p, v) in [
                     (ctx.arg_u32(1)?, m.completion_code),
                     (
@@ -868,14 +899,29 @@ mod tests {
         movie.info.width = 2;
         movie.info.height = 2;
         // Exact miniature rectangle used by the attached launcher.
-        movie.window = [204, 40, 101, 82];
-        movie.frame = Some(vec![0xff; 8]);
+        movie.window = [844, 40, 101, 82];
+        movie.pending = Some(vec![0xff; 8]);
+        movie.notify = 10;
+        movie.notify_msg = 20;
         MOVIES.lock().unwrap().insert(1, movie);
         let mut ctx = CallCtx {
             cpu: &mut cpu,
             kernel: &mut kernel,
             thunk: &t,
         };
+        service(&mut ctx).unwrap();
+        {
+            let mut movies = MOVIES.lock().unwrap();
+            let movie = movies.get_mut(&1).unwrap();
+            assert!(
+                movie.frame_ready_pending,
+                "off-screen decoding must announce readiness"
+            );
+            assert_eq!(ctx.kernel.posted_messages.len(), 1);
+            // The launcher handles EC_VIDEOFRAMEREADY by moving its window.
+            movie.frame_ready_pending = false;
+            movie.window = [204, 40, 101, 82];
+        }
         for _ in 0..3 {
             // The message pump may already have presented this video frame.
             service(&mut ctx).unwrap();
@@ -1153,6 +1199,18 @@ mod tests {
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
         assert!(kernel.posted_messages.is_empty()); // NONOTIFY does not suppress polling.
         cpu.write_reg(ArmReg::R3, 0x1300).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                "ds_event_8",
+                [object, 0x1200, 0x1240]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0x49);
+        assert_eq!(cpu.read_u32_le(0x1240).unwrap(), 0);
+        assert_eq!(cpu.read_u32_le(0x1300).unwrap(), 0);
         assert_eq!(
             call(
                 &mut cpu,

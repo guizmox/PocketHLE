@@ -2548,3 +2548,5 @@ are not a native Windows release build or an Android APK/device validation.
 
 ### Host device status and launcher DirectShow preview (2026-10-11)
 Android reads airplane/SIM/service state through application-context JNI snapshots cached one second; denial means unknown, no subscriptions/IDs. GT_STATUS carries airplane/radio only (no SIM bit). Windows defaults SIM ready/radio off/airplane off; ActiveSync stays disconnected. GSM/TAPI/RIL stack remains out of scope. GLES marks the replaced framebuffer dirty before DirectShow service so cached preview frames are recomposed after menu drawing. Regression rectangle matches attached launcher (204,40,101,82).
+
+Launcher startup preview also requires WinCE EC_VIDEOFRAMEREADY (0x49), as confirmed in SDK Movie and attached ARM binary (0x15934 comparison). Emit once on first decoded frame, even offscreen, reset per RenderFile, GetEvent consumes before completion without consuming WaitForCompletion. No event-owned memory; notification disabled flags still allow polling. Launcher initially parks window at (844,40,101,82) and moves it to (204,40,101,82) only upon readiness.
