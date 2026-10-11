@@ -515,12 +515,16 @@ impl CpuBackendPref {
     }
 }
 
+fn default_gpu_renderer() -> bool {
+    true
+}
+
 /// Persistent global configuration. Lives at
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
-    /// Default host GPU rasterization, overridable for each game.
-    #[serde(default)]
+    /// Host GPU rendering is enabled by default; games may override it.
+    #[serde(default = "default_gpu_renderer")]
     pub gpu_renderer: bool,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -639,7 +643,7 @@ fn default_fullscreen_mode() -> String {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
-            gpu_renderer: false,
+            gpu_renderer: true,
             schema_version: 1,
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,
@@ -2345,6 +2349,21 @@ mod tests {
     #[test]
     fn deadzone_defaults_and_per_game_json_roundtrip() {
         use super::*;
+        let default = LauncherConfig::default();
+        assert!(default.gpu_renderer);
+        let mut legacy = serde_json::to_value(&default).unwrap();
+        legacy.as_object_mut().unwrap().remove("gpu_renderer");
+        assert!(
+            serde_json::from_value::<LauncherConfig>(legacy.clone())
+                .unwrap()
+                .gpu_renderer
+        );
+        legacy["gpu_renderer"] = serde_json::json!(false);
+        assert!(
+            !serde_json::from_value::<LauncherConfig>(legacy)
+                .unwrap()
+                .gpu_renderer
+        );
         let settings: GameSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.dpad_deadzone, DpadDeadzone::Large);
         assert_eq!(settings.gpu_renderer, None);
@@ -2633,7 +2652,8 @@ mod tests {
                 lib.save().unwrap();
                 let mut settings = serde_json::to_value(&lib.get(&id).unwrap().settings).unwrap();
                 settings["gpu_renderer"] = serde_json::json!(game);
-                lib.update_settings(&id, serde_json::from_value(settings).unwrap()).unwrap();
+                lib.update_settings(&id, serde_json::from_value(settings).unwrap())
+                    .unwrap();
                 let reopened = Library::open(&root).unwrap();
                 assert_eq!(reopened.config().gpu_renderer, global);
                 assert_eq!(reopened.get(&id).unwrap().settings.gpu_renderer, game);

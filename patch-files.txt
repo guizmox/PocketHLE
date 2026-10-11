@@ -8,6 +8,7 @@ README-GPU-Lighting.txt
 README-GPU-Primitives.txt
 README-GPU-Vertices.txt
 crates/pocket-core/src/lib.rs
+crates/pocket-gles/src/consts.rs
 crates/pocket-gles/src/context.rs
 crates/pocket-gles/src/gpu/mod.rs
 crates/pocket-gles/src/gpu/platform.rs

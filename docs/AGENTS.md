@@ -2892,3 +2892,10 @@ parked and verifies the updated colour after returning to both images.
 
 The final complete pocket-winceapi no-default-features unit suite, including
 both native tests, passes all 284 tests on the available host.
+
+Global GPU rendering now defaults to true in LauncherConfig, including serde
+deserialization of old configs without this key and Android Kotlin defaults/JSON
+reading. Explicit saved false and per-game software overrides remain honored;
+per-game null still inherits the global setting. Startup GPU initialization
+failure retains the existing software fallback. The experimental English label
+is unchanged.

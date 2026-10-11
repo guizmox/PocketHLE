@@ -23,16 +23,18 @@ or Android APK was built in this environment. No temporary profiling/log spam.
 
 Apply all files in this ZIP over the same PocketHLE checkout as the preceding
 cumulative patch. patch-files.txt lists every delivered file. Do not apply it
-as a standalone project. Existing settings and opt-in experimental GPU remain.
+as a standalone project. GPU is enabled by default on Windows and Android for new/missing global settings.
+Explicit saved software choices and per-game overrides remain honored.
+The experimental label and startup software fallback remain.
 
 Windows CMD:
 cd /d C:\Users\gtristant\source\repos\PocketHLE
-powershell -NoProfile -Command "Expand-Archive -LiteralPath (Join-Path $env:USERPROFILE 'Downloads\PocketHLE-GPU-Four-Games.zip') -DestinationPath '.' -Force"
+powershell -NoProfile -Command "Expand-Archive -LiteralPath (Join-Path $env:USERPROFILE 'Downloads\PocketHLE-GPU-Four-Games-Default.zip') -DestinationPath '.' -Force"
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 cargo build --release -p pocket-desktop
 
 Android from CMD:
-wsl bash -lc "cd /home/gtristant/projects/PocketHLE && unzip -o /mnt/c/Users/gtristant/Downloads/PocketHLE-GPU-Four-Games.zip && bash tools/build-android-native.sh 4 && bash tools/build-android-apk.sh"
+wsl bash -lc "cd /home/gtristant/projects/PocketHLE && unzip -o /mnt/c/Users/gtristant/Downloads/PocketHLE-GPU-Four-Games-Default.zip && bash tools/build-android-native.sh 4 && bash tools/build-android-apk.sh"
 
 Test with GPU enabled: menus, gameplay, HUD/fonts/textures, transitions and exit
 for all four games. RBR/Chicane RGB capture paths and Hit offscreen engine branches
