@@ -2919,3 +2919,16 @@ unit tests including native tests, ARM64/ARMv7 Rust GLES checks with warnings
 denied. Native route tests cover optional-function absence, compressed upload,
 deferred materialization, authored mip preservation and actual driver refusal.
 Full Windows/APK builds and game visual/FPS regressions require target devices.
+
+## GPU depth precision (2026-10-11)
+
+RBR Android reports moving dark terrain patches absent in software. Native FBOs
+previously forced 16-bit depth whereas software stores f32. Prefer 24-bit depth
+on desktop/GLES3/GLES2 OES_depth24, retaining 16-bit for unsupported GLES2 or
+advertised-but-refused/incomplete 24-bit attachments. Allocation failures still
+propagate. No new renderbuffer is created; existing resize/drop ownership applies
+to both window and offscreen targets. Native regression demonstrates two nearby
+layers collapse with 16-bit and separate with 24-bit, matching software after
+attachment resizing. 151 GLES tests, 284 WinCE tests and both Android Rust GLES
+checks pass. RBR root cause and visible improvement need target-device confirmation.
+Filtering is unchanged; base-level software sampling and GPU mip filtering differ.

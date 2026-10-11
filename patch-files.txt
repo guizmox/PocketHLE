@@ -6,6 +6,7 @@ README-GPU-Experimental.txt
 README-GPU-Four-Games.txt
 README-GPU-Lighting.txt
 README-GPU-Primitives.txt
+README-GPU-Rally-Depth.txt
 README-GPU-Upload-Optimizations.txt
 README-GPU-Vertices.txt
 crates/pocket-core/src/lib.rs

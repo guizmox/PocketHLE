@@ -1011,6 +1011,7 @@ pub struct Renderer {
     fbo: u32,
     color: u32,
     depth: u32,
+    depth_format: u32,
     white: u32,
     width: u32,
     height: u32,
@@ -1062,6 +1063,23 @@ impl Renderer {
             } else {
                 true
             };
+            // Software retains float depth. A forced 16-bit attachment makes
+            // nearby terrain/decal layers collapse at distance (RBR Android).
+            let depth24 = if host.es {
+                let extensions = (gl.GetString)(0x1f03);
+                let version = (gl.GetString)(0x1f02);
+                (!extensions.is_null()
+                    && CStr::from_ptr(extensions.cast())
+                        .to_string_lossy()
+                        .split_whitespace()
+                        .any(|s| s == "GL_OES_depth24"))
+                    || (!version.is_null()
+                        && CStr::from_ptr(version.cast())
+                            .to_string_lossy()
+                            .starts_with("OpenGL ES 3."))
+            } else {
+                true
+            };
             let mut count = 0;
             (gl.GetIntegerv)(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &mut count);
             let mut formats = vec![0i32; count.clamp(0, 128) as usize];
@@ -1084,6 +1102,7 @@ impl Renderer {
                 fbo: 0,
                 color: 0,
                 depth: 0,
+                depth_format: if depth24 { 0x81a6 } else { 0x81a5 },
                 white: 0,
                 width: 0,
                 height: 0,
@@ -1375,13 +1394,24 @@ impl Renderer {
                 Wrap::ClampToEdge,
                 Wrap::ClampToEdge,
             );
+            self.check()?;
             (self.gl.BindRenderbuffer)(0x8d41, self.depth);
-            (self.gl.RenderbufferStorage)(0x8d41, 0x81a5, w as i32, h as i32);
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, self.color, 0);
             (self.gl.FramebufferRenderbuffer)(0x8d40, 0x8d00, 0x8d41, self.depth);
-            if (self.gl.CheckFramebufferStatus)(0x8d40) != 0x8cd5 {
-                return Err("GPU framebuffer incomplete".into());
+            loop {
+                (self.gl.RenderbufferStorage)(0x8d41, self.depth_format, w as i32, h as i32);
+                let error = upload_error(&self.gl)?;
+                let complete = (self.gl.CheckFramebufferStatus)(0x8d40) == 0x8cd5;
+                if error == 0 && complete {
+                    break;
+                }
+                if self.depth_format == 0x81a6 {
+                    // Keep ES2 drivers lacking a usable 24-bit attachment usable.
+                    self.depth_format = 0x81a5;
+                } else {
+                    return Err(format!("GPU depth attachment failed: 0x{error:04x}"));
+                }
             }
             self.pipeline = None;
             self.scissor(None);
@@ -2997,6 +3027,67 @@ mod tests {
             raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], far);
             let i = (16 * 32 + 16) * 4;
             assert_eq!(&cpu.color[i..i + 4], &native.color[i..i + 4], "es={es}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; closely spaced terrain depth layers"]
+    fn host_depth24_separates_layers_that_depth16_collapses() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            assert_eq!(gpu.depth_format, 0x81a6);
+            let state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                depth_test: true,
+                ..Default::default()
+            };
+            let mut native = RenderTarget::new(32, 32);
+            let mut cpu = RenderTarget::new(32, 32);
+            let far = triangle([1., 0., 0., 1.], 0.75);
+            let near = triangle([0., 1., 0., 1.], 0.75 - 0.000001);
+            for format in [0x81a5, 0x81a6] {
+                gpu.depth_format = format;
+                // Force a real attachment reallocation, as on orientation changes.
+                gpu.resize(16, 16).unwrap();
+                gpu.resize(32, 32).unwrap();
+                gpu.clear(
+                    32,
+                    32,
+                    &state,
+                    [0.; 4],
+                    1.,
+                    GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                )
+                .unwrap();
+                for vertices in [far, near] {
+                    gpu.draw(
+                        &native,
+                        &state,
+                        GL_TRIANGLES,
+                        &vertices,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                    )
+                    .unwrap();
+                }
+                gpu.read(&mut native).unwrap();
+                let i = (16 * 32 + 16) * 4;
+                if format == 0x81a5 {
+                    assert_eq!(&native.color[i..i + 4], &[255, 0, 0, 255]);
+                } else {
+                    for vertices in [far, near] {
+                        raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], vertices);
+                    }
+                    assert_eq!(&native.color[i..i + 4], &[0, 255, 0, 255]);
+                    assert_eq!(&native.color[i..i + 4], &cpu.color[i..i + 4]);
+                }
+            }
         }
     }
 
