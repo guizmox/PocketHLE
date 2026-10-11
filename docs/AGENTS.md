@@ -3058,3 +3058,22 @@ Validation: 290 WinCE unit tests passed, including native GPU and software EGL,
 finite/infinite/zero main sleeps, original deadlines and argument preservation,
 worker handoff and nested waveOut callbacks with positive/zero Sleep. The GLES
 implementation is unchanged from its previously validated 155-test version.
+
+## Default GLES texture object zero (2026-10-11)
+
+Battlestations binds simulation counter modulo six directly as texture names
+0..5 (0x23ee0). The previous Context rejected image uploads to zero and excluded
+zero from texture stages, leaving every sixth water frame untextured. Zero is
+the GLES1 default texture object; it is not an instruction to disable texturing.
+Allow ordinary/compressed/copy uploads and parameters on zero, lazily storing it
+in the existing canonical texture map. Complete enabled default textures use
+the same software/native stages as named textures. An undefined default image
+remains incomplete. GenTextures still never returns zero; DeleteTextures ignores
+zero in both canonical and native caches. Native guest zero maps to an allocated
+host texture name, and follows existing revision invalidation and renderer Drop.
+No additional thread, resource owner, game branch or instrumentation.
+
+Regression covers DXT1 names 0..5 over 18 draws on software, desktop GL and GLES2,
+including ignored zero deletion; ordinary default upload and named deletion
+returning to the default binding are checked too. Device confirmation of the
+Battlestations flash remains required.

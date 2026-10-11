@@ -1583,6 +1583,10 @@ impl Renderer {
             return;
         }
         for n in names {
+            // Guest name zero is the persistent default texture, not native GL zero.
+            if *n == 0 {
+                continue;
+            }
             if let Some((id, _)) = self.textures.remove(n) {
                 self.texture_params.remove(&id);
                 self.texture_anisotropy.remove(&id);

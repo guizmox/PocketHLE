@@ -896,10 +896,6 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        if self.texture_units[self.active_texture as usize].bound_texture == 0 {
-            self.set_error(GL_INVALID_OPERATION);
-            return;
-        }
         if level > 10 {
             self.set_error(GL_INVALID_VALUE);
             return;
@@ -965,7 +961,7 @@ impl Context {
             return;
         }
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS || self.texture_units[unit].bound_texture == 0 {
+        if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
@@ -1075,7 +1071,7 @@ impl Context {
             }
         }
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS || self.texture_units[unit].bound_texture == 0 {
+        if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
@@ -1238,9 +1234,7 @@ impl Context {
             return;
         }
         let name = self.texture_units[unit].bound_texture;
-        let Some(tex) = self.textures.get_mut(&name) else {
-            return;
-        };
+        let tex = self.textures.entry(name).or_default();
         if !tex.set_parameter(pname, value) {
             self.set_error(GL_INVALID_ENUM);
         }
@@ -1585,7 +1579,6 @@ impl Context {
         for u in 0..MAX_TEXTURE_UNITS {
             let unit = &self.texture_units[u];
             if unit.texture_enabled
-                && unit.bound_texture != 0
                 && self
                     .textures
                     .get(&unit.bound_texture)
@@ -3136,6 +3129,62 @@ mod tests {
         assert_eq!(pixel(&c, 32, 32), [0, 0, 255, 255]);
     }
 
+    fn six_texture_cycle(c: &mut Context) {
+        let mut bytes = quad_floats();
+        let uv_off = bytes.len() as u32;
+        bytes.extend(floats(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]));
+
+
+        let mut m = FakeMem { base: BASE, bytes };
+        for name in 0..6 {
+            c.bind_texture(GL_TEXTURE_2D, name);
+            c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            c.compressed_tex_image_2d(GL_TEXTURE_2D, 0, 4, 4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT, &[0xe0, 0x07, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+        c.set_capability(GL_TEXTURE_2D, true);
+        c.texture_units[0].tex_env = TexEnvMode::Replace;
+        c.vertex_array = ArrayPointer {
+            enabled: true,
+            size: 3,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: BASE,
+            buffer: 0,
+        };
+        c.texture_units[0].texcoord_array = ArrayPointer {
+            enabled: true,
+            size: 2,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: BASE + uv_off,
+            buffer: 0,
+        };
+        for name in (0..6).cycle().take(18) {
+            c.bind_texture(GL_TEXTURE_2D, name);
+            c.delete_textures(&[0]);
+            c.draw_arrays(&mut m, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255], "name={name}");
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+    }
+
+    #[test]
+    fn default_texture_compressed_cycle_software() {
+        six_texture_cycle(&mut ctx());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a native GL driver"]
+    fn default_texture_compressed_cycle_native() {
+        for es in [false, true] {
+            six_texture_cycle(&mut native_ctx(es));
+        }
+    }
+
     #[test]
     fn texture_coords_sample_the_bound_texture() {
         let mut bytes = quad_floats();
@@ -3435,7 +3484,7 @@ mod tests {
     }
 
     #[test]
-    fn tex_image_without_a_bound_texture_is_an_error() {
+    fn default_texture_accepts_uploads_and_is_not_deleted() {
         let mut c = ctx();
         c.bind_texture(GL_TEXTURE_2D, 0);
         c.tex_image_2d(
@@ -3447,7 +3496,16 @@ mod tests {
             GL_UNSIGNED_BYTE,
             &[1, 2, 3, 4],
         );
-        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].rgba, [1, 2, 3, 4]);
+        c.set_capability(GL_TEXTURE_2D, true);
+        assert_eq!(c.texture_stages().1, 1);
+        c.delete_textures(&[0]);
+        assert_eq!(c.textures[&0].rgba, [1, 2, 3, 4]);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        c.delete_textures(&[1]);
+        assert_eq!(c.bound_texture, 0);
+        assert_eq!(c.texture_stages().1, 1);
     }
 
     #[test]
