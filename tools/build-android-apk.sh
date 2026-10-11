@@ -2,6 +2,7 @@
 set -euo pipefail
 android_root="$(cd "$(dirname "$0")/.." && pwd)"
 : "${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK installed in Linux/WSL2 or macOS}"
+python3 "$android_root/tools/android-native-freshness.py" check
 android_gradle_version=8.10.2
 android_gradle_dir="$android_root/target/tools/gradle-$android_gradle_version"
 if [[ ! -x "$android_gradle_dir/bin/gradle" ]]; then
