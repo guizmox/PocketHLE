@@ -1077,7 +1077,9 @@ impl Renderer {
                 state.color_mask[2] as u8,
                 state.color_mask[3] as u8,
             );
-            (self.gl.DepthMask)(state.depth_write as u8);
+            // Match the software HLE contract: explicit depth clears reset depth
+            // even after a HUD pass left depth writes disabled. Keep draw masks intact.
+            (self.gl.DepthMask)(1);
             (self.gl.ClearColor)(color[0], color[1], color[2], color[3]);
             let p = self.host.load(if self.host.es {
                 c"glClearDepthf"
@@ -1095,6 +1097,7 @@ impl Renderer {
                 f(depth as f64);
             }
             (self.gl.Clear)(mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+            (self.gl.DepthMask)(state.depth_write as u8);
             self.dirty = true;
             self.check()
         }
@@ -1382,7 +1385,12 @@ impl Renderer {
                     7
                 },
             );
-            (self.gl.Uniform1f)(self.loc("alphaRef"), state.alpha_ref);
+            // The software pipeline compares alpha/ref at 8-bit fixed precision.
+            // Upload the rounded reference as an exactly representable integer.
+            (self.gl.Uniform1f)(
+                self.loc("alphaRef"),
+                (state.alpha_ref.clamp(0., 1.) * 255. + 0.5).floor(),
+            );
             (self.gl.Uniform1i)(
                 self.loc("fogMode"),
                 if state.fog {
@@ -1630,13 +1638,15 @@ uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2
 uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
 void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;c=stage(c,texture2D(sampler0,uv0),env0,envColor0);c=stage(c,texture2D(sampler1,uv1),env1,envColor1);c=stage(c,texture2D(sampler2,uv2),env2,envColor2);c=stage(c,texture2D(sampler3,uv3),env3,envColor3);
-if(alphaMode==0||(alphaMode==1&&c.a>=alphaRef)||(alphaMode==2&&c.a!=alphaRef)||(alphaMode==3&&c.a>alphaRef)||(alphaMode==4&&c.a<=alphaRef)||(alphaMode==5&&c.a==alphaRef)||(alphaMode==6&&c.a<alphaRef))discard;
+float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
+if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster;
     #[cfg(unix)]
     #[test]
     #[ignore = "requires host OpenGL; checks points and line modes with both shader dialects"]
@@ -1780,6 +1790,121 @@ mod tests {
                     assert_eq!(count(&native), 0);
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; strict alpha tests must match software precision"]
+    fn host_strict_alpha_equal_matches_software_quantization() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            let state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                alpha_test: true,
+                alpha_func: CompareFunc::Equal,
+                alpha_ref: 1.,
+                ..Default::default()
+            };
+            let vertices = triangle([0.8, 0.4, 0.2, 0.9999], 0.);
+            let mut cpu = RenderTarget::new(32, 32);
+            let mut native = RenderTarget::new(32, 32);
+            raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], vertices);
+            gpu.clear(32, 32, &state, [0.; 4], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            gpu.draw(
+                &native,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            gpu.read(&mut native).unwrap();
+            let i = (16 * 32 + 16) * 4;
+            assert!(cpu.color[i] > 0);
+            for c in 0..4 {
+                assert!(
+                    cpu.color[i + c].abs_diff(native.color[i + c]) <= 1,
+                    "es={es}, channel={c}: software {}, GPU {}",
+                    cpu.color[i + c],
+                    native.color[i + c]
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; HLE depth clear compatibility with writes disabled"]
+    fn host_depth_clear_matches_software_with_depth_writes_disabled() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            let mut state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                depth_test: true,
+                ..Default::default()
+            };
+            let mut cpu = RenderTarget::new(32, 32);
+            let mut native = RenderTarget::new(32, 32);
+            gpu.clear(
+                32,
+                32,
+                &state,
+                [0.; 4],
+                1.,
+                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+            )
+            .unwrap();
+            let near = triangle([1., 0., 0., 1.], 0.);
+            gpu.draw(
+                &native,
+                &state,
+                GL_TRIANGLES,
+                &near,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], near);
+            state.depth_write = false;
+            cpu.clear_color([0; 4], None);
+            cpu.clear_depth(1., None);
+            gpu.clear(
+                32,
+                32,
+                &state,
+                [0.; 4],
+                1.,
+                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+            )
+            .unwrap();
+            let far = triangle([0., 1., 0., 1.], 0.5);
+            gpu.draw(
+                &native,
+                &state,
+                GL_TRIANGLES,
+                &far,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            gpu.read(&mut native).unwrap();
+            raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], far);
+            let i = (16 * 32 + 16) * 4;
+            assert_eq!(&cpu.color[i..i + 4], &native.color[i..i + 4], "es={es}");
         }
     }
 

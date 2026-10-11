@@ -2694,3 +2694,27 @@ real desktop GL and GLES2 compare all four primitive modes, widths and triangle
 cull-state restoration. Wide-line coverage/interpolation is driver dependent;
 coverage comparisons allow edge variation and use constant colors for wide lines.
 Existing lighting/transform/triangle driver tests remain part of validation.
+
+
+### Native alpha/depth-clear parity (Carmageddon investigation)
+Carmageddon's attached executable imports glAlphaFuncx and sets GL_EQUAL with
+fixed reference 0x10000 (1.0) at 0x496bc. The native shader compared raw floating
+alpha, while software rounds fragment alpha and reference to 8-bit fixed precision.
+Native now rounds a clamped alpha to 0..255 for the test only and receives the
+rounded reference as an exact integer-valued float. Color/alpha used for output
+and blending remain unchanged. This is shared behavior, not a game-specific hack.
+
+The software HLE clear contract always resets depth for GL_DEPTH_BUFFER_BIT,
+even when a preceding HUD pass disabled depth writes. Native previously honored
+the write mask during clear, leaving old depth and rejecting subsequent geometry.
+Native now temporarily enables depth writes for clear and restores the guest mask;
+draws continue honoring the mask. This preserves the existing software compatibility
+contract, rather than changing software to strict OpenGL masked-clear behavior.
+Color-clear masks are outside this change.
+
+Both regression cases produce visible software output and black native output
+before the fix; both pass on real desktop GL and GLES2 afterward. Existing native
+lighting/matrices/points/lines/depth/blend/textures/context switching also pass.
+No new resources, workers, diagnostic logging or per-title detection. Software
+rendering is unchanged. The standalone executable establishes call-site evidence;
+the complete Carmageddon run still needs its game data and device testing.
