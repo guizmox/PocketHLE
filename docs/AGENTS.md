@@ -3024,3 +3024,37 @@ The unchanged GLES layer retains its 155-test validation from the vertex patch.
 Full Android WinCE cross-check was blocked by absent NDK compiler for rmp3;
 this is an environment limitation, not an APK build validation. Windows/APK
 builds and Battlestations speed/input/audio must be checked on user devices.
+
+## Main-thread Sleep duration and Battlestations water cadence (2026-10-11)
+
+Battlestations' timing block 0x268e4..0x2695c requests Sleep to fill a 50 ms
+update budget (20 Hz). Actual ARM execution with controlled timeGetTime gives
+50/40/20/1 ms sleeps for 0/10/30/49 ms elapsed, and no sleep when already late.
+Its simulation counter increments at 0x1fb90; water texture selection is counter
+modulo six at 0x23ee0. These are caustic_00000/04/08/12/16/20.tga. Water vertex
+heights and colors also depend on that counter. Rendering used to accidentally
+limit updates because positive Sleep durations were ignored on main, though
+workers already had real scheduler deadlines. EGL's 60 Hz maximum alone cannot
+restore a game's lower requested update rate.
+
+Positive main Sleep now owns one monotonic deadline in existing wait_deadlines,
+keyed by thread/thunk/SP. Yield to ready workers with resume_worker_reenter,
+preserving original arguments and continuation; otherwise sleep host at most
+1 ms and retry the same thunk. Do not restart or extend the deadline on retry.
+Remove the entry only when elapsed; INFINITE remains pending. Sleep(0), worker
+round-robin and worker sleeps retain their old yield behavior. Service waveOut
+before argument lookup so callback return restores the interrupted Sleep call;
+callbacks nested deeper on the stack cannot consume its deadline. Pending state
+belongs to KernelState and releases with process teardown. No new worker/native
+resource, clock scaling, title branch, texture edits or runtime instrumentation.
+
+Uploaded TGA textures decode consistently. The game's actual ARM DXT1 compressor
+0x1ea74 produces six 8192-byte images with no transparent pixels and mean RGB
+142.7..146.1. Consecutive image changes remain part of the original animation;
+this patch restores cadence, not temporal interpolation or wake/spray rendering.
+Full APK/Windows builds and visible flicker improvement need device validation.
+
+Validation: 290 WinCE unit tests passed, including native GPU and software EGL,
+finite/infinite/zero main sleeps, original deadlines and argument preservation,
+worker handoff and nested waveOut callbacks with positive/zero Sleep. The GLES
+implementation is unchanged from its previously validated 155-test version.

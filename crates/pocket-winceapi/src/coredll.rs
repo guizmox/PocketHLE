@@ -2543,15 +2543,15 @@ fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = wave_out_enter_callback(ctx, thunk_va)? {
         return Ok(outcome);
     }
-    let _ms = ctx.arg_u32(0)?;
+    let ms = ctx.arg_u32(0)?;
     if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
         if let Some(thread) = ctx.kernel.threads.get_mut(index) {
             // Sleep(0) yields immediately. Positive sleeps remain ineligible
             // until host monotonic time advances; no host thread is blocked.
-            thread.sleep_until_ms = if _ms == u32::MAX {
+            thread.sleep_until_ms = if ms == u32::MAX {
                 u64::MAX
             } else {
-                monotonic_ms().saturating_add(u64::from(_ms))
+                monotonic_ms().saturating_add(u64::from(ms))
             };
         }
     }
@@ -2560,6 +2560,31 @@ fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             return Ok(next);
         }
         return Ok(outcome);
+    }
+    if ms != 0 {
+        // Battlestations requests a 50 ms simulation cadence here. Returning
+        // immediately on main made its water animation/gameplay depend on the
+        // renderer's incidental CPU cost. Retain one deadline across retries,
+        // and give runnable workers/audio/input a chance without blocking the
+        // host execution thread for the entire guest sleep.
+        let key = (0, thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+        let now = monotonic_ms();
+        let deadline = *ctx.kernel.wait_deadlines.entry(key).or_insert_with(|| {
+            if ms == u32::MAX {
+                u64::MAX
+            } else {
+                now.saturating_add(u64::from(ms))
+            }
+        });
+        if now >= deadline {
+            ctx.kernel.wait_deadlines.remove(&key);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        if let Some(outcome) = resume_worker_reenter(ctx)? {
+            return Ok(outcome);
+        }
+        std::thread::sleep(std::time::Duration::from_millis((deadline - now).min(1)));
+        return Ok(DispatchOutcome::JumpTo(thunk_va));
     }
     if let Some(outcome) = resume_worker(ctx, 0)? {
         return Ok(outcome);
@@ -25783,6 +25808,115 @@ mod tests {
     }
 
     #[test]
+    fn main_sleep_honours_duration_without_extending_deadline_on_retry() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, 50).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x12345678).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        let start = std::time::Instant::now();
+        assert_eq!(
+            sleep(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(t.thunk_va)
+        );
+        let key = (0, t.thunk_va, ctx.cpu.read_reg(ArmReg::Sp).unwrap());
+        let deadline = ctx.kernel.wait_deadlines[&key];
+        loop {
+            match sleep(&mut ctx).unwrap() {
+                DispatchOutcome::JumpTo(pc) => {
+                    assert_eq!(pc, t.thunk_va);
+                    assert_eq!(ctx.kernel.wait_deadlines[&key], deadline);
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 50);
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0x12345678);
+                    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+                }
+                DispatchOutcome::ReturnedR0(0) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(start.elapsed() >= std::time::Duration::from_millis(49));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        // A new call at the same thunk/SP starts a new sleep, not an expired one.
+        assert_eq!(
+            sleep(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(t.thunk_va)
+        );
+        assert!(ctx.kernel.wait_deadlines[&key] > deadline);
+        ctx.kernel.wait_deadlines.insert(key, monotonic_ms());
+        assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn main_sleep_yields_to_worker_and_reenters_with_original_duration() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut worker = GuestThread::new(
+            0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17],
+        );
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.worker_regs[15] = 0x10000;
+        kernel.threads.push(worker);
+        cpu.write_reg(ArmReg::R0, 60000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0xabcdef01).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x40100).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::JumpTo(0x10000));
+        assert_eq!(ctx.kernel.current_thread, 1);
+        let key = (0, t.thunk_va, 0);
+        let deadline = ctx.kernel.wait_deadlines[&key];
+        assert_eq!(ctx.kernel.threads[0].saved_regs[0], 60000);
+        assert_eq!(ctx.kernel.threads[0].saved_regs[15], t.thunk_va);
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
+        assert_eq!(
+            sleep(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(t.thunk_va)
+        );
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 60000);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0xabcdef01);
+        assert_eq!(ctx.kernel.wait_deadlines[&key], deadline);
+        ctx.kernel.threads[0].finished = true;
+        ctx.kernel.wait_deadlines.insert(key, monotonic_ms());
+        assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn main_sleep_zero_yields_without_deadline_and_infinite_stays_pending() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(ctx.kernel.wait_deadlines.is_empty());
+        ctx.cpu.write_reg(ArmReg::R0, u32::MAX).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                sleep(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(t.thunk_va)
+            );
+            assert_eq!(ctx.kernel.wait_deadlines[&(0, t.thunk_va, 0)], u64::MAX);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), u32::MAX);
+        }
+    }
+    #[test]
     fn scheduler_sleep_round_is_bounded_and_preserves_main_reentry() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -27158,6 +27292,15 @@ mod tests {
     /// callback returned" would move SP out from under it.
     #[test]
     fn sleep_delivers_wave_out_callback_and_survives_a_nested_sleep() {
+        wave_callback_sleep_roundtrip(0);
+    }
+
+    #[test]
+    fn positive_main_sleep_preserves_duration_through_nested_wave_callback() {
+        wave_callback_sleep_roundtrip(20);
+    }
+
+    fn wave_callback_sleep_roundtrip(ms: u32) {
         const HDR: u32 = 0x1000;
         const PROC: u32 = 0x4000;
         const INSTANCE: u32 = 0x5001_0000;
@@ -27210,7 +27353,7 @@ mod tests {
         };
 
         // The guest sleeps inside its spin loop.
-        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        cpu.write_reg(ArmReg::R0, ms).unwrap();
         cpu.write_reg(ArmReg::Sp, CALL_SP).unwrap();
         cpu.write_reg(ArmReg::Lr, CALL_LR).unwrap();
         let outcome = call_sleep(&mut cpu, &mut kernel);
@@ -27258,12 +27401,26 @@ mod tests {
             cpu.write_reg(reg, 0xBADD_0000 + i as u32).unwrap();
         }
         let outcome = call_sleep(&mut cpu, &mut kernel);
-        assert_eq!(outcome, DispatchOutcome::ReturnedR0(0));
+        if ms == 0 {
+            assert_eq!(outcome, DispatchOutcome::ReturnedR0(0));
+        } else {
+            assert_eq!(outcome, DispatchOutcome::JumpTo(t.thunk_va));
+            let deadline = kernel.wait_deadlines[&(0, t.thunk_va, CALL_SP)];
+            assert!(deadline > monotonic_ms());
+            kernel
+                .wait_deadlines
+                .insert((0, t.thunk_va, CALL_SP), monotonic_ms());
+            assert_eq!(
+                call_sleep(&mut cpu, &mut kernel),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert!(kernel.wait_deadlines.is_empty());
+        }
         assert!(kernel.wave_out.function_frame.is_none());
         // The detour has to be invisible to the interrupted `Sleep`.
         assert_eq!(cpu.read_reg(ArmReg::Sp).unwrap(), CALL_SP);
         assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), CALL_LR);
-        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 0);
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), ms);
     }
 
     /// A frontend sends one `KeyDown` per press, so without the repeat

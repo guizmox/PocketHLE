@@ -1,4 +1,5 @@
 README-Android-FPS.txt
+README-Battlestations-Water-Cadence.txt
 README-GPU-Anisotropic-Filtering.txt
 README-GPU-Carmageddon-Optimizations.txt
 README-GPU-Carmageddon.txt
