@@ -480,7 +480,7 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
-    ImportFinished(Result<String, String>),
+    ImportFinished(Result<(String, String), String>),
     RunFinished(RunOutcome),
 }
 
@@ -619,13 +619,14 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
-                UiEvent::ImportFinished(Ok(name)) => {
+                UiEvent::ImportFinished(Ok((id, name))) => {
                     self.status = format!("Imported {name}.");
                     self.reload_library();
-                    if let Some(game) = self.library.games().iter().find(|g| g.display_name == name)
+                    if let Some(game) = self.library.games().iter().find(|g| g.id == id)
                     {
                         self.library_gizmondo = is_gizmondo_game(game, self.library.root());
                         self.selected_game = Some(game.id.clone());
+                        self.rename_draft = Some((id, name, true));
                     }
                 }
                 UiEvent::ImportFinished(Err(e)) => {
@@ -1214,7 +1215,7 @@ impl PocketLauncher {
         let mut save = false;
         let mut cancel = false;
         let mut open = true;
-        egui::Window::new("Rename game")
+        egui::Window::new("Game name")
             .id(egui::Id::new("rename_game"))
             .collapsible(false)
             .resizable(false)
@@ -2530,7 +2531,7 @@ impl PocketLauncher {
                 let _ = tx.send(UiEvent::ImportFinished(Err("cancelled".into())));
                 return;
             };
-            let result = (|| -> Result<String, String> {
+            let result = (|| -> Result<(String, String), String> {
                 let mut lib = Library::open(&library_root).map_err(|e| e.to_string())?;
                 let parent = path
                     .parent()
@@ -2553,7 +2554,7 @@ impl PocketLauncher {
                     _ => lib.import_exe(&path),
                 }
                 .map_err(|e| e.to_string())?;
-                Ok(entry.display_name.clone())
+                Ok((entry.id.clone(), entry.display_name.clone()))
             })();
             let _ = tx.send(UiEvent::ImportFinished(result));
         });

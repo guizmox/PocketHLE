@@ -1,5 +1,4 @@
-crates/pocket-gles/examples/raster_perf.rs
-crates/pocket-gles/src/context.rs
-crates/pocket-gles/src/raster.rs
-crates/pocket-winceapi/src/gles.rs
+crates/pocket-kernel/src/framebuffer.rs
 docs/AGENTS.md
+frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
+frontends/pocket-desktop/src/app.rs

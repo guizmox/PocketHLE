@@ -1,13 +1,10 @@
-PocketHLE - Software GLES allocation optimizations v1
-Base: f6475bf54fd043361984ac2b2320a87b4476ad4a, latest fetched main (Bluetooth implementation / Chicane).
+PocketHLE - Import name confirmation and brightness ceiling
+Base: f6475bf54fd043361984ac2b2320a87b4476ad4a (latest fetched GitHub main).
 
-1. Fully visible finite triangles with a projected bounding box at most 4x4 pixels skip polygon allocations and six clipping passes. Larger/intersecting/exceptional triangles keep the established path. The initial unrestricted shortcut benchmarked worse on larger primitives; this delivery deliberately restricts it to the case with measured benefit.
-2. Draw lists, strips and fans stream triangles directly from assembled vertices instead of allocating a second full triangle list. Order, alternating strip winding, provoking vertices and the existing per-draw shared-vertex cache are retained.
-3. GLES guest attribute reads fill the reusable scratch Vec via Cpu::read_mem_into, avoiding Unicorn read_mem's temporary allocation and additional copy. Failures clear scratch and abort the draw; no guest memory pointers are retained.
+Windows and Android: a successful import automatically opens the game-name editor with the detected name prefilled. Save persists the name by stable game ID. Empty names are rejected; cancel keeps the detected name and imported game. Applies to PPC and Gizmondo, all existing importer formats. Windows now identifies the imported entry by its ID rather than a possibly duplicated display name.
 
-Validation: 117 GLES tests and 263 WinCE API tests pass (380 total). One manual timing test is ignored by default. New checks compare exact color, depth and fragment counts against the old clipper, strips/fans against explicit triangles, and reusable memory reads including failures. git diff --check passes. No production tracing or instrumentation added. Optional benchmark code runs only when explicitly invoked.
+Brightness: Colors uses registry OnLevel 1/11/21/31. The visual upper limit is now the previous level 21; values 22..31 render identically to 21. The original neutral level 16 and darker range are unchanged. Registry values and the game's slider remain untouched, as do guest pixels. Works through the common framebuffer snapshots on both frontends.
 
-Release A/B microbenchmark: identical standalone example built against baseline and patched crates, median of 7 samples on this Linux environment. 100000 triangles in 2x2 target: 22.539 ms baseline / 10.248 ms patched. 100000 in 8x8: 88.511 / 84.223 ms. 3000 in 64x64: 123.143 / 121.055 ms. These are synthetic, untextured cases; NOT game FPS, NOT Android/Windows hardware validation, and no global emulator speedup is claimed. The 4x4 threshold is based on these measurements and should be profiled on target devices before extending it.
+Validation: the actual framebuffer module compiled with rustc 1.90 and the lockfile's bytemuck 1.25; all 8 existing framebuffer tests pass, with the ceiling equality added to the brightness check. git diff --check passes. Desktop event producers/consumers and Android import JSON/rename flow reviewed. No complete desktop build or Android APK/UI execution was performed here.
 
-Optional repeatable benchmark: cargo run --release -p pocket-gles --example raster_perf
-Rebuild desktop normally; rebuild Android native libraries and APK for phones. Test a GLES game with many small triangles and inspect geometry edges, HUD, transparency and textures. DirectDraw behavior is unchanged.
+This patch does not replace GLES source files from the previous performance delivery. Documentation retains that delivery's behavior. Rebuild desktop and Android native libraries/APK; test imports on both platforms (keep detected name, edit, cancel, empty name) and Colors' brightness slider (upper two settings should match).

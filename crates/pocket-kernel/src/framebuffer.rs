@@ -126,8 +126,10 @@ impl Framebuffer {
             // Minimum is 50%: an intentional low slider position stays visible.
             ((c * (14 + self.backlight_level) + 15) / 30) as u8
         } else {
-            // Upper half blends towards white by at most 50%, preserving contrast.
-            (c + (255 - c) * (self.backlight_level - 16) / 30) as u8
+            // Colors' slider writes 1/11/21/31. Its old penultimate level (21)
+            // is now the visual ceiling: preserve registry/slider values while
+            // avoiding the washed-out image at 31. Neutral level 16 is unchanged.
+            (c + (255 - c) * (self.backlight_level.min(21) - 16) / 30) as u8
         }
     }
 
@@ -449,7 +451,10 @@ mod tests {
         fb.set_backlight_level(1);
         assert_eq!(fb.backlight_channel(128), 64);
         fb.set_backlight_level(31);
-        assert_eq!(fb.backlight_channel(128), 191);
+        assert_eq!(fb.backlight_channel(128), 149);
+        let maximum = fb.snapshot_rgba8888();
+        fb.set_backlight_level(21);
+        assert_eq!(fb.snapshot_rgba8888(), maximum);
         fb.set_backlight_level(16);
         for channel in 0..=255u8 {
             assert_eq!(fb.backlight_channel(channel), channel);

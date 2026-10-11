@@ -468,18 +468,19 @@ Two rasterizer details that look like bugs and are not: an incomplete
 texture samples as opaque white (matching GL ES), and the software GL
 tests share a `TEST_LOCK` because the context is process-global.
 
-Software GLES allocation optimizations: fully inside finite clip-space
-triangles with a projected bounding box at most 4x4 pixels go directly to
-rasterization (the release benchmark found larger primitives faster through
-the established pixel path); larger/intersecting/exceptional primitives
-retain the six-plane clipper. Triangle lists, strips and fans stream from the
-assembled vertices in the original order, including alternating strip winding
-and the provoking vertex. CpuMem reads attributes with Cpu::read_mem_into into
-the reusable scratch allocation; failures clear the scratch and abort the
-draw. No guest memory references are retained, and the per-draw shared-vertex
-cache remains. Raster reference comparisons check exact colors, depth and
-fragment counts. The ignored release benchmark measures clipping overhead,
-not game FPS; no new production instrumentation or settings are introduced.
+Software GLES allocation optimizations (performance v1 delivery): fully inside
+finite triangles with projected bounds at most 4x4 pixels bypass polygon
+allocations/clipping; larger or intersecting primitives retain the clipper.
+Lists, strips and fans stream in original order from assembled vertices.
+CpuMem reads directly into reusable scratch with read_mem_into; failed reads
+abort the draw without retaining guest pointers. Benchmarks are synthetic,
+not game FPS, and run only when explicitly invoked.
+
+Desktop and Android successful imports automatically open the existing game
+name editor with the detected display name prefilled. Renaming persists by
+stable game ID (not display-name matching, which may collide). Empty names
+remain rejected; cancelling keeps the imported entry and detected name. This
+applies to both Pocket PC and Gizmondo archives and raw executables.
 
 **Texturing is a cascade, not one stage.** GL ES 1.1 multitexturing
 applies the enabled units in ascending order, each combiner taking the
@@ -2424,8 +2425,10 @@ VK_BACKLIGHT is F3. Do not intercept that key with a host brightness cycle: the
 game owns its menu. Registry defaults are Level/OnLevel 16, DimLevel 8 (the SDK
 hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
-channels over a 25%-75% brightness range: level 16 reproduces the unmodified
-image, 1 blends halfway to black, 31 halfway to white. All 31 SDK levels work.
+channels with level 16 reproducing the unmodified image and level 1 blending
+halfway to black. The visual ceiling is the former penultimate Colors setting,
+21 (one sixth white blend); levels 22..31 retain their actual registry/slider
+value but present identically to 21. This avoids the washed-out former maximum.
 Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 16 on every
 frontend sync, including after a previous dim setting. Device snapshot loading
 also repairs missing/invalid Level and OnLevel and missing DimLevel before

@@ -133,14 +133,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renameGame(entry: GameEntry) {
-        val input = android.widget.EditText(this).apply { setText(entry.displayName); selectAll(); isSingleLine = true }
-        val dialog = AlertDialog.Builder(this).setTitle("Rename game").setView(input)
+        editGameName(entry.id, entry.displayName, "Rename game")
+    }
+
+    private fun editGameName(id: String, detectedName: String, title: String) {
+        val input = android.widget.EditText(this).apply { setText(detectedName); selectAll(); isSingleLine = true }
+        val dialog = AlertDialog.Builder(this).setTitle(title).setView(input)
             .setNegativeButton(android.R.string.cancel,null).setPositiveButton("Enregistrer",null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val name=input.text.toString().trim()
                 if(name.isBlank()) { input.error="Le nom est obligatoire"; return@setOnClickListener }
-                val result=runCatching { JSONObject(NativeBridge.renameGame(rootDir,entry.id,name)) }.getOrNull()
+                val result=runCatching { JSONObject(NativeBridge.renameGame(rootDir,id,name)) }.getOrNull()
                 if(result?.optBoolean("ok",false)==true) { dialog.dismiss(); refreshLibrary() }
                 else input.error=result?.optString("error") ?: "Could not save settings"
             }
@@ -259,6 +263,8 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val name = obj.optString("display_name", obj.optString("id", "?"))
+            val id = obj.getString("id")
+            editGameName(id, name, "Confirm game name")
             Snackbar.make(
                 recycler,
                 getString(R.string.import_success, name),
