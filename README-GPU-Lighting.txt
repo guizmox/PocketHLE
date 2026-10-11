@@ -13,7 +13,7 @@ lighting state adds no workers or separately allocated native resources.
 
 This improves the appearance of 3D games that enable GL_LIGHTING. It is not an
 FPS promise; software computes lighting per unique indexed vertex on the CPU.
-Points/lines remain a separate unimplemented rasterization feature.
+Points/lines now render in both backends; see README-GPU-Primitives.txt.
 
 Brightness minimum now dims by 20%: gray 128 becomes 103. Neutral/default and
 higher positions remain unchanged. This is between the previous very dark

@@ -2554,7 +2554,7 @@ Launcher startup preview also requires WinCE EC_VIDEOFRAMEREADY (0x49), as confi
 ### Experimental native GLES rasterization (2026-10-11)
 Global config.gpu_renderer defaults false, shown in Emulator Settings / Emulator options. GameSettings.gpu_renderer is nullable: null/missing inherits, false forces software, true forces GPU. Both Kotlin JSON models preserve unknown fields. Configure on the emulation thread after creating the dispatcher; each child inherits the launcher configuration and per-game override.
 
-pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles object-space vertices; the vertex shader applies projection/modelview, texture matrices and eye-space fog depth before native rasterization. Shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines remain at their existing non-rasterized support level. Fixed lighting is now evaluated per vertex by both backends (see below). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
+pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles object-space vertices; the vertex shader applies projection/modelview, texture matrices and eye-space fog depth before native rasterization. Shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines now have software and native rasterization (see below). Fixed lighting is now evaluated per vertex by both backends (see below). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
 
 Native framebuffer RGBA+depth persists across draws. Readback runs only for EGL swap or glReadPixels, flips bottom-up rows to canonical top-down, then existing RGB565/GAPI/DirectShow/filter/screenshot paths consume the result. No zero-copy frontend integration yet. GPU stage allocations and GL resources release on EGL termination, emulator drop, context reset and child return. Contexts are !Send; every operation makes its own context current. EGL display leases count live private contexts, so child teardown cannot terminate parent; Android keeps one process-wide EGL library/display initialization lease because the Android UI shares DEFAULT_DISPLAY, while all game surfaces/contexts are destroyed.
 
@@ -2656,3 +2656,41 @@ Windows device performance still require user builds/tests.
 Brightness slider positions remain registry 1/11/21/31. Neutral/default is 11,
 unchanged pixels. Minimum 1 now blends 20% toward black (128 becomes 103), between
 the earlier 50% and 1/12 settings. Upper steps and ceiling remain unchanged.
+
+
+### Point and line rasterization (software and native GPU)
+GL_POINTS, GL_LINES, GL_LINE_STRIP and GL_LINE_LOOP now render. Context still
+validates guest arrays/VBOs, caches indexed vertices and performs common assembly.
+Float/fixed point-size and line-width setters reject nonfinite/nonpositive values
+with GL_INVALID_VALUE, retain the previous value on error, and default to 1.
+Queries expose requested sizes and aliased ranges; software supports 1..64 pixels,
+native ranges come from the driver capped at 64. Actual rasterization clamps to
+supported ranges without changing queried requested state.
+
+Software points clip their center against six homogeneous planes, expand as
+aliased window-space squares with odd/even snapping, and honor target/scissor.
+Lines clip endpoints/interpolate attributes, use diamond-exit coverage with the
+terminal pixel excluded, and replicate in the minor direction for wide lines.
+Attributes are perspective-correct; depth remains window-linear; flat lines keep
+the original terminal vertex color even when clipped. Zero-length and invalid
+coordinates are discarded. Loops close only when at least two vertices exist;
+incomplete independent endpoint pairs are ignored. Culling/two-sided back-face
+colors affect triangles only; lighting of points/lines uses their front normal.
+Texture combiners, alpha/depth tests, fog, blend/masks and depth writes share the
+existing triangle fragment operations. Loops and pixel work are bounded by target
+and scissor; no new workers/native handles/guest allocations.
+
+Native drawing reuses the existing program/VBO/FBO, emits independent line pairs
+for strips/loops and applies provoking attributes for flat lines. gl_PointSize is
+written by the shader (desktop program-point-size enabled only on its private
+context), native glLineWidth uses queried limits. All existing transforms,
+lighting, texture and fragment state apply. Triangle state is reset on each draw.
+No point sprites, point-size arrays/attenuation or POINT_SMOOTH/LINE_SMOOTH support
+is claimed by this change; those remain separate features.
+
+Tests cover software clipping, odd/even sizes, width, terminal blending, culling,
+scissor, flat colors, texture/fog/blend/masks/depth and actual guest/indexed modes;
+real desktop GL and GLES2 compare all four primitive modes, widths and triangle
+cull-state restoration. Wide-line coverage/interpolation is driver dependent;
+coverage comparisons allow edge variation and use constant colors for wide lines.
+Existing lighting/transform/triangle driver tests remain part of validation.

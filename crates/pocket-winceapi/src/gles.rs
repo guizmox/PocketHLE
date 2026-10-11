@@ -323,6 +323,27 @@ fn gl_disable_client_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
     Ok(VOID)
 }
 
+fn gl_point_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let value = argf(ctx, 0)?;
+    with_ctx(|c| c.set_point_size(value));
+    Ok(VOID)
+}
+fn gl_point_sizex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let value = argx(ctx, 0)?;
+    with_ctx(|c| c.set_point_size(value));
+    Ok(VOID)
+}
+fn gl_line_width(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let value = argf(ctx, 0)?;
+    with_ctx(|c| c.set_line_width(value));
+    Ok(VOID)
+}
+fn gl_line_widthx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let value = argx(ctx, 0)?;
+    with_ctx(|c| c.set_line_width(value));
+    Ok(VOID)
+}
+
 fn gl_depth_func(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let f = ctx.arg_u32(0)?;
     with_ctx(|c| c.set_depth_func(f));
@@ -1053,6 +1074,11 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         return Ok(VOID);
     }
     let values: Vec<i32> = match pname {
+        0x0b11 => vec![with_ctx(|c| c.state.point_size).round() as i32],
+        0x0b21 => vec![with_ctx(|c| c.state.line_width).round() as i32],
+        0x846d | 0x846e => with_ctx(|c| c.primitive_size_range(pname == 0x846d))
+            .map(|x| x.round() as i32)
+            .to_vec(),
         pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024],
         pocket_gles::GL_MAX_LIGHTS => vec![8],
         pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as i32],
@@ -1107,6 +1133,9 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         return Ok(VOID);
     }
     let values: Vec<f32> = match pname {
+        0x0b11 => vec![with_ctx(|c| c.state.point_size)],
+        0x0b21 => vec![with_ctx(|c| c.state.line_width)],
+        0x846d | 0x846e => with_ctx(|c| c.primitive_size_range(pname == 0x846d)).to_vec(),
         pocket_gles::GL_MODELVIEW_MATRIX => with_ctx(|c| c.modelview.current().to_vec()),
         pocket_gles::GL_PROJECTION_MATRIX => with_ctx(|c| c.projection.current().to_vec()),
         pocket_gles::GL_TEXTURE_MATRIX => with_ctx(|c| {
@@ -1825,11 +1854,16 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glGetMaterialfv" => gl_get_materialfv,
         "glGetMaterialxv" => gl_get_materialxv,
 
+        "glPointSize" => gl_point_size,
+        "glPointSizex" => gl_point_sizex,
+        "glLineWidth" => gl_line_width,
+        "glLineWidthx" => gl_line_widthx,
+
         // No stencil buffer, no logic op, no multisample, no polygon
-        // offset, no point/line rasterization, no mipmap hints.
+        // offset, no mipmap hints.
         "glStencilFunc" | "glStencilMask" | "glStencilOp" | "glClearStencil" | "glLogicOp"
         | "glSampleCoverage" | "glSampleCoveragex" | "glPolygonOffset" | "glPolygonOffsetx"
-        | "glPointSize" | "glPointSizex" | "glLineWidth" | "glLineWidthx" | "glHint"
+        | "glHint"
         | "glPixelStorei" | "glFinish" | "glFlush" => gl_ignored,
 
         // Compressed and copy-from-framebuffer texture paths.
@@ -2138,6 +2172,41 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn point_line_size_float_fixed_validation_and_queries() {
+        let _lock = guard();
+        reset_for_test(32, 32);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        call(&mut cpu, &mut kernel, gl_point_size, &[3.5f32.to_bits()]);
+        call(&mut cpu, &mut kernel, gl_line_widthx, &[2 << 16]);
+        call(&mut cpu, &mut kernel, gl_get_floatv, &[0x0b11, SCRATCH]);
+        assert_eq!(cpu.read_mem(SCRATCH, 4).unwrap(), 3.5f32.to_le_bytes());
+        call(&mut cpu, &mut kernel, gl_get_integerv, &[0x0b21, SCRATCH]);
+        assert_eq!(cpu.read_mem(SCRATCH, 4).unwrap(), 2i32.to_le_bytes());
+        call(&mut cpu, &mut kernel, gl_get_floatv, &[0x846d, SCRATCH]);
+        assert_eq!(
+            cpu.read_mem(SCRATCH, 8).unwrap(),
+            [1f32.to_le_bytes(), 64f32.to_le_bytes()].concat()
+        );
+        for (handler, arg) in [
+            (gl_point_size as crate::Handler, 0f32.to_bits()),
+            (gl_line_width, f32::NAN.to_bits()),
+            (gl_point_sizex, (-1i32) as u32),
+            (gl_line_widthx, 0),
+        ] {
+            call(&mut cpu, &mut kernel, handler, &[arg]);
+            assert_eq!(
+                call(&mut cpu, &mut kernel, gl_get_error, &[]),
+                pocket_gles::GL_INVALID_VALUE
+            );
+        }
+        assert_eq!(with_ctx(|c| c.state.point_size), 3.5);
+        assert_eq!(with_ctx(|c| c.state.line_width), 2.);
+        reset_for_test(32, 32);
+        assert_eq!(with_ctx(|c| c.state.point_size), 1.);
+        assert_eq!(with_ctx(|c| c.state.line_width), 1.);
+    }
 
     #[test]
     fn lighting_guest_float_fixed_setters_getters_errors_and_session_reset() {

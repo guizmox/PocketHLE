@@ -1,6 +1,7 @@
 README-Android-FPS.txt
 README-GPU-Experimental.txt
 README-GPU-Lighting.txt
+README-GPU-Primitives.txt
 README-GPU-Vertices.txt
 crates/pocket-core/src/lib.rs
 crates/pocket-gles/src/context.rs

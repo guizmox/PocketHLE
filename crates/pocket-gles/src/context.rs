@@ -1012,6 +1012,27 @@ impl Context {
 
     // ---- fragment state -------------------------------------------------
 
+    pub fn set_point_size(&mut self, size: f32) {
+        if !size.is_finite() || size <= 0. {
+            self.set_error(GL_INVALID_VALUE);
+        } else {
+            self.state.point_size = size;
+        }
+    }
+    pub fn set_line_width(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0. {
+            self.set_error(GL_INVALID_VALUE);
+        } else {
+            self.state.line_width = width;
+        }
+    }
+    pub fn primitive_size_range(&self, point: bool) -> [f32; 2] {
+        self.gpu.as_ref().map_or(
+            [1., 64.],
+            |g| if point { g.point_range } else { g.line_range },
+        )
+    }
+
     pub fn set_depth_func(&mut self, func: u32) {
         match CompareFunc::from_enum(func) {
             Some(f) => self.state.depth_func = f,
@@ -1500,9 +1521,8 @@ impl Context {
         }
 
         match mode {
-            GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN => {}
-            // Points and lines retain their existing non-rasterized behavior.
-            GL_POINTS | GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => return,
+            GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+            | GL_LINE_STRIP | GL_LINE_LOOP => {}
             _ => {
                 self.set_error(GL_INVALID_ENUM);
                 return;
@@ -1563,6 +1583,49 @@ impl Context {
             self.state.alpha_ref,
         );
         let sample = |unit: usize, s: f32, t: f32| texs[unit].map(|tx| tx.sample(s, t));
+
+        match mode {
+            GL_POINTS => {
+                for v in &verts {
+                    raster::draw_point(&mut self.target, &self.state, &sample, &stages, *v);
+                }
+                return;
+            }
+            GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => {
+                if mode == GL_LINES {
+                    for v in verts.chunks_exact(2) {
+                        raster::draw_line(
+                            &mut self.target,
+                            &self.state,
+                            &sample,
+                            &stages,
+                            [v[0], v[1]],
+                        );
+                    }
+                } else {
+                    for v in verts.windows(2) {
+                        raster::draw_line(
+                            &mut self.target,
+                            &self.state,
+                            &sample,
+                            &stages,
+                            [v[0], v[1]],
+                        );
+                    }
+                    if mode == GL_LINE_LOOP && verts.len() > 1 {
+                        raster::draw_line(
+                            &mut self.target,
+                            &self.state,
+                            &sample,
+                            &stages,
+                            [*verts.last().unwrap(), verts[0]],
+                        );
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
 
         // Stream primitives in their original order without allocating a triangle list.
         let mut draw = |tri| {
@@ -2564,7 +2627,67 @@ mod tests {
     }
 
     #[test]
-    fn points_and_lines_are_accepted_without_error() {
+    fn line_strip_loop_guest_arrays_match_explicit_indexed_segments() {
+        for mode in [GL_LINE_STRIP, GL_LINE_LOOP] {
+            let mut strip = ctx();
+            let mut explicit = ctx();
+            for c in [&mut strip, &mut explicit] {
+                c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+                c.set_client_state(GL_VERTEX_ARRAY, true);
+                c.current_color = [0.8, 0.4, 0.2, 0.5];
+                c.state.blend = true;
+                c.state.blend_src = BlendFactor::SrcAlpha;
+                c.state.blend_dst = BlendFactor::OneMinusSrcAlpha;
+            }
+            let bytes = floats(&[-0.65, 0.4, 0., 0.3, 0.4, 0., 0.3, -0.6, 0., -0.65, -0.6, 0.]);
+            strip.draw_arrays(
+                &mut FakeMem {
+                    base: BASE,
+                    bytes: bytes.clone(),
+                },
+                mode,
+                0,
+                4,
+            );
+            let indices = if mode == GL_LINE_LOOP {
+                vec![0, 1, 1, 2, 2, 3, 3, 0]
+            } else {
+                vec![0, 1, 1, 2, 2, 3]
+            };
+            explicit.draw_elements(&mut FakeMem { base: BASE, bytes }, GL_LINES, &indices);
+            assert!(covered(&strip) > 50);
+            assert_eq!(strip.target.color, explicit.target.color);
+            assert_eq!(strip.take_error(), GL_NO_ERROR);
+        }
+    }
+
+    #[test]
+    fn points_guest_arrays_render_and_size_errors_preserve_previous_values() {
+        let mut c = ctx();
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_point_size(3.);
+        c.set_line_width(2.);
+        c.draw_arrays(
+            &mut FakeMem {
+                base: BASE,
+                bytes: floats(&[-0.5, 0.25, 0., 0.25, -0.5, 0.]),
+            },
+            GL_POINTS,
+            0,
+            2,
+        );
+        assert_eq!(covered(&c), 18);
+        c.set_point_size(0.);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.state.point_size, 3.);
+        c.set_line_width(f32::INFINITY);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.state.line_width, 2.);
+    }
+
+    #[test]
+    fn points_and_lines_render_without_error() {
         let mut c = ctx();
         let mut m = FakeMem {
             base: BASE,
@@ -2580,6 +2703,7 @@ mod tests {
         };
         c.draw_arrays(&mut m, GL_LINES, 0, 4);
         c.draw_arrays(&mut m, GL_POINTS, 0, 4);
+        assert!(covered(&c) > 0);
         assert_eq!(c.take_error(), GL_NO_ERROR);
     }
 

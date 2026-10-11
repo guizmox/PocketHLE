@@ -35,6 +35,8 @@ struct Gl {
     GetString: unsafe extern "system" fn(u32) -> *const u8,
     GetError: unsafe extern "system" fn() -> u32,
     GetIntegerv: unsafe extern "system" fn(u32, *mut i32),
+    GetFloatv: unsafe extern "system" fn(u32, *mut f32),
+    LineWidth: unsafe extern "system" fn(f32),
     CreateShader: unsafe extern "system" fn(u32) -> u32,
     ShaderSource: unsafe extern "system" fn(u32, i32, *const *const c_char, *const i32),
     CompileShader: unsafe extern "system" fn(u32),
@@ -115,6 +117,20 @@ impl Gl {
                     return Err("driver lacks glGetError".into());
                 }
                 std::mem::transmute::<*mut c_void, unsafe extern "system" fn() -> u32>(p)
+            },
+            GetFloatv: {
+                let p = host.load(c"glGetFloatv");
+                if p.is_null() {
+                    return Err("driver lacks glGetFloatv".into());
+                }
+                std::mem::transmute::<*const c_void, unsafe extern "system" fn(u32, *mut f32)>(p)
+            },
+            LineWidth: {
+                let p = host.load(c"glLineWidth");
+                if p.is_null() {
+                    return Err("driver lacks glLineWidth".into());
+                }
+                std::mem::transmute::<*const c_void, unsafe extern "system" fn(f32)>(p)
             },
             GetIntegerv: {
                 let mut p = host.load(c"glGetIntegerv");
@@ -755,6 +771,8 @@ pub struct Renderer {
     scratch: Vec<f32>,
     readback: Vec<u8>,
     dirty: bool,
+    pub point_range: [f32; 2],
+    pub line_range: [f32; 2],
 }
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
@@ -769,6 +787,14 @@ impl Renderer {
             (gl.GetIntegerv)(0x8869, &mut attributes);
             if units < 4 || attributes < 8 {
                 return Err("OpenGL driver lacks required texture/attribute units".into());
+            }
+            let mut point_range = [1.; 2];
+            let mut line_range = [1.; 2];
+            (gl.GetFloatv)(0x846d, point_range.as_mut_ptr());
+            (gl.GetFloatv)(0x846e, line_range.as_mut_ptr());
+            for range in [&mut point_range, &mut line_range] {
+                range[0] = range[0].max(1.);
+                range[1] = range[1].clamp(range[0], 64.);
             }
             let mut r = Self {
                 host,
@@ -786,6 +812,8 @@ impl Renderer {
                 scratch: Vec::new(),
                 readback: Vec::new(),
                 dirty: true,
+                point_range,
+                line_range,
             };
             r.program = (r.gl.CreateProgram)();
             if r.program == 0 {
@@ -898,6 +926,7 @@ impl Renderer {
                 "textureMatrix2",
                 "textureMatrix3",
                 "depthRange",
+                "pointSize",
                 "alphaMode",
                 "alphaRef",
                 "fogMode",
@@ -1132,10 +1161,17 @@ impl Renderer {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
         self.scratch.clear();
-        let mut triangle = |v: [Vertex; 3]| {
-            for mut p in v {
+        let draw_mode = match mode {
+            GL_POINTS => GL_POINTS,
+            GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => GL_LINES,
+            _ => GL_TRIANGLES,
+        };
+        let mut primitive = |v: &[Vertex]| {
+            let provoking = *v.last().unwrap();
+            for &mut_p in v {
+                let mut p = mut_p;
                 if !state.smooth_shading {
-                    p.color = v[2].color;
+                    p.color = provoking.color;
                 }
                 self.scratch.extend(p.pos);
                 self.scratch.extend(p.color);
@@ -1145,34 +1181,52 @@ impl Renderer {
                 self.scratch.extend(if state.smooth_shading {
                     p.normal
                 } else {
-                    v[2].normal
+                    provoking.normal
                 });
                 self.scratch.push(p.fog_depth);
                 self.scratch.extend(if state.smooth_shading {
                     p.pos
                 } else {
-                    v[2].pos
+                    provoking.pos
                 });
             }
         };
         match mode {
             GL_TRIANGLES => {
                 for v in vertices.chunks_exact(3) {
-                    triangle([v[0], v[1], v[2]]);
+                    primitive(&[v[0], v[1], v[2]]);
                 }
             }
             GL_TRIANGLE_FAN => {
                 for i in 2..vertices.len() {
-                    triangle([vertices[0], vertices[i - 1], vertices[i]]);
+                    primitive(&[vertices[0], vertices[i - 1], vertices[i]]);
                 }
             }
             GL_TRIANGLE_STRIP => {
                 for i in 2..vertices.len() {
-                    triangle(if i % 2 == 0 {
+                    primitive(&if i % 2 == 0 {
                         [vertices[i - 2], vertices[i - 1], vertices[i]]
                     } else {
                         [vertices[i - 1], vertices[i - 2], vertices[i]]
                     });
+                }
+            }
+            GL_POINTS => {
+                for v in vertices {
+                    primitive(&[*v]);
+                }
+            }
+            GL_LINES => {
+                for v in vertices.chunks_exact(2) {
+                    primitive(v);
+                }
+            }
+            GL_LINE_STRIP | GL_LINE_LOOP => {
+                for v in vertices.windows(2) {
+                    primitive(v);
+                }
+                if mode == GL_LINE_LOOP && vertices.len() > 1 {
+                    primitive(&[*vertices.last().unwrap(), vertices[0]]);
                 }
             }
             _ => return Err("unsupported GPU primitive".into()),
@@ -1180,6 +1234,20 @@ impl Renderer {
         unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.UseProgram)(self.program);
+            (self.gl.LineWidth)(
+                state
+                    .line_width
+                    .clamp(self.line_range[0], self.line_range[1]),
+            );
+            (self.gl.Uniform1f)(
+                self.loc("pointSize"),
+                state
+                    .point_size
+                    .clamp(self.point_range[0], self.point_range[1]),
+            );
+            if !self.host.es {
+                self.toggle(0x8642, true);
+            }
             let (x, y, w, h) = state.viewport;
             (self.gl.Viewport)(x, y, w, h);
             self.scissor(state.scissor);
@@ -1211,7 +1279,8 @@ impl Renderer {
             (self.gl.Uniform1i)(self.loc("lightingEnabled"), lighting.is_some() as i32);
             (self.gl.Uniform1i)(
                 self.loc("twoSided"),
-                lighting.is_some_and(|t| t.lighting.two_sided) as i32,
+                (draw_mode == GL_TRIANGLES && lighting.is_some_and(|t| t.lighting.two_sided))
+                    as i32,
             );
             if let Some(t) = lighting {
                 let l = &t.lighting;
@@ -1411,7 +1480,7 @@ impl Renderer {
                     offset as *const c_void,
                 );
             }
-            (self.gl.DrawArrays)(GL_TRIANGLES, 0, (self.scratch.len() / 24) as i32);
+            (self.gl.DrawArrays)(draw_mode, 0, (self.scratch.len() / 24) as i32);
             self.dirty = true;
             self.check()
         }
@@ -1512,7 +1581,7 @@ VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;u
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
 uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
 uniform mat4 normalMatrix;
-uniform float normalRescale,shininess;
+uniform float normalRescale,shininess,pointSize;
 uniform vec4 modelAmbient,materialAmbient,materialDiffuse,materialSpecular,materialEmission;
 uniform vec4 lightAmbient[8],lightDiffuse[8],lightSpecular[8],lightPositions[8],lightSpot[8],lightAttenuation[8];
 vec3 unit(vec3 v){float l=length(v);return l>0.0?v/l:vec3(0.0);}
@@ -1535,6 +1604,7 @@ vec4 illuminate(vec3 n,vec3 point){
  return vec4(clamp(result,0.0,1.0),clamp(md.a,0.0,1.0));
 }
 void main(){
+ gl_PointSize=pointSize;
  vec4 eye=modelviewMatrix*position;
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
@@ -1567,6 +1637,152 @@ float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host OpenGL; checks points and line modes with both shader dialects"]
+    fn host_points_lines_match_software_and_preserve_triangle_state() {
+        use crate::raster;
+        let vertices = [
+            Vertex {
+                pos: [-0.65, 0.4, 0., 1.],
+                color: [1., 0.2, 0.1, 0.5],
+                ..Default::default()
+            },
+            Vertex {
+                pos: [0.3, 0.4, 0., 1.],
+                color: [0.1, 1., 0.2, 0.5],
+                ..Default::default()
+            },
+            Vertex {
+                pos: [0.3, -0.6, 0., 1.],
+                color: [0.2, 0.1, 1., 0.5],
+                ..Default::default()
+            },
+        ];
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            for mode in [GL_POINTS, GL_LINES, GL_LINE_STRIP, GL_LINE_LOOP] {
+                for (size, smooth) in [1f32, 2., 3., 5.]
+                    .into_iter()
+                    .flat_map(|size| [(size, true), (size, false)])
+                {
+                    let mut state = PipelineState {
+                        viewport: (0, 0, 32, 32),
+                        smooth_shading: smooth,
+                        point_size: size,
+                        line_width: size.min(gpu.line_range[1]),
+                        cull: Some(CullMode::FrontAndBack),
+                        ..Default::default()
+                    };
+                    let mut draw_vertices = vertices;
+                    // Wide-line edge interpolation differs across conforming drivers.
+                    // Validate coverage/constant color for wide primitives and gradients at width 1.
+                    if size > 1. {
+                        for v in &mut draw_vertices {
+                            v.color = [0.8, 0.4, 0.2, 0.5];
+                        }
+                    }
+                    let mut cpu = RenderTarget::new(32, 32);
+                    let mut native = RenderTarget::new(32, 32);
+                    let sample = |_: usize, _: f32, _: f32| None;
+                    gpu.clear(
+                        32,
+                        32,
+                        &state,
+                        [0.; 4],
+                        1.,
+                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    )
+                    .unwrap();
+                    match mode {
+                        GL_POINTS => {
+                            for v in draw_vertices {
+                                raster::draw_point(&mut cpu, &state, &sample, &[], v);
+                            }
+                        }
+                        GL_LINES => {
+                            raster::draw_line(
+                                &mut cpu,
+                                &state,
+                                &sample,
+                                &[],
+                                [draw_vertices[0], draw_vertices[1]],
+                            );
+                        }
+                        _ => {
+                            for v in draw_vertices.windows(2) {
+                                raster::draw_line(&mut cpu, &state, &sample, &[], [v[0], v[1]]);
+                            }
+                            if mode == GL_LINE_LOOP {
+                                raster::draw_line(
+                                    &mut cpu,
+                                    &state,
+                                    &sample,
+                                    &[],
+                                    [draw_vertices[2], draw_vertices[0]],
+                                );
+                            }
+                        }
+                    }
+                    gpu.draw(
+                        &native,
+                        &state,
+                        mode,
+                        &draw_vertices,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                    )
+                    .unwrap();
+                    gpu.read(&mut native).unwrap();
+                    let count =
+                        |t: &RenderTarget| t.color.chunks_exact(4).filter(|p| p[3] > 0).count();
+                    let a = count(&cpu);
+                    let b = count(&native);
+                    assert!(a > 0 && b > 0, "es={es}, mode={mode}, size={size}: {a}/{b}");
+                    assert!(
+                        a.abs_diff(b) <= vertices.len() * size as usize * 2,
+                        "es={es}, mode={mode}, size={size}: coverage {a}/{b}"
+                    );
+                    for (a, b) in cpu
+                        .color
+                        .chunks_exact(4)
+                        .zip(native.color.chunks_exact(4))
+                        .filter(|(a, b)| a[3] > 0 && b[3] > 0)
+                    {
+                        for (&a, &b) in a.iter().zip(b) {
+                            assert!(
+                                a.abs_diff(b) <= 4,
+                                "es={es},mode={mode},size={size}: color {a}/{b}"
+                            );
+                        }
+                    }
+                    // Point/line culling must not affect their drawing, while triangles still cull.
+                    state.point_size = 1.;
+                    state.line_width = 1.;
+                    gpu.clear(32, 32, &state, [0.; 4], 1., GL_COLOR_BUFFER_BIT)
+                        .unwrap();
+                    gpu.draw(
+                        &native,
+                        &state,
+                        GL_TRIANGLES,
+                        &draw_vertices,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                    )
+                    .unwrap();
+                    gpu.read(&mut native).unwrap();
+                    assert_eq!(count(&native), 0);
+                }
+            }
+        }
+    }
+
     fn triangle(color: [f32; 4], z: f32) -> [Vertex; 3] {
         [[-0.9, -0.9, z, 1.], [0.9, -0.9, z, 1.], [0., 0.9, z, 1.]].map(|pos| Vertex {
             pos,
