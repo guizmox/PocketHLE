@@ -6,9 +6,9 @@
 //! the memory bandwidth — Call of Duty 2 uploads 85 textures, most of
 //! them `GL_UNSIGNED_SHORT_5_6_5` or `GL_UNSIGNED_SHORT_4_4_4_4`.
 //!
-//! We decode everything to straight RGBA8888 at upload time so the
-//! rasterizer has a single format to sample, and so a future host-GL
-//! backend can hand the data to `glTexImage2D` unchanged.
+//! The software rasterizer samples RGBA8888. GPU-supported block formats
+//! retain their compressed payload and defer decoding until software sampling
+//! or a partial pixel update requires it. Unsupported formats decode at upload.
 
 use crate::consts::*;
 
@@ -36,6 +36,14 @@ pub enum Wrap {
     ClampToEdge,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompressedLevel {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub bytes: std::sync::Arc<[u8]>,
+}
+
 /// A single texture object, as created by `glGenTextures`.
 #[derive(Debug, Clone)]
 pub struct Texture {
@@ -44,10 +52,11 @@ pub struct Texture {
     pub width: u32,
     pub height: u32,
     /// Decoded RGBA8888 texels, row-major, `width * height * 4` bytes.
-    /// Empty until the first successful `glTexImage2D`.
+    /// Empty before upload or while a compressed native upload is deferred.
     pub rgba: Vec<u8>,
     /// Explicit guest levels; absent levels are derived at native upload time.
     pub mipmaps: std::collections::BTreeMap<u32, (u32, u32, Vec<u8>)>,
+    pub compressed: std::collections::BTreeMap<u32, CompressedLevel>,
     pub min_filter: Filter,
     pub mag_filter: Filter,
     pub wrap_s: Wrap,
@@ -64,6 +73,7 @@ impl Default for Texture {
             // Retain the legacy base-linear default; explicit mip filters
             // now preserve all four native level-selection modes.
             mipmaps: Default::default(),
+            compressed: Default::default(),
             min_filter: Filter::Linear,
             mag_filter: Filter::Linear,
             wrap_s: Wrap::Repeat,
@@ -73,19 +83,91 @@ impl Default for Texture {
 }
 
 impl Texture {
+    pub fn rgba_level(&self, level: u32) -> Option<std::borrow::Cow<'_, [u8]>> {
+        let pixels = if level == 0 {
+            Some(self.rgba.as_slice())
+        } else {
+            self.mipmaps.get(&level).map(|l| l.2.as_slice())
+        };
+        if let Some(p) = pixels.filter(|p| !p.is_empty()) {
+            return Some(std::borrow::Cow::Borrowed(p));
+        }
+        let c = self.compressed.get(&level)?;
+        decode_compressed_to_rgba(&c.bytes, c.width, c.height, c.format)
+            .map(std::borrow::Cow::Owned)
+    }
+    /// Decode deferred native uploads only when software/subimage needs RGBA.
+    pub fn ensure_rgba(&mut self) {
+        let levels: Vec<_> = self
+            .compressed
+            .keys()
+            .copied()
+            .filter(|l| {
+                if *l == 0 {
+                    self.rgba.is_empty()
+                } else {
+                    self.mipmaps.get(l).is_some_and(|m| m.2.is_empty())
+                }
+            })
+            .collect();
+        for level in levels {
+            let decoded = self.rgba_level(level).and_then(|p| match p {
+                std::borrow::Cow::Owned(v) => Some(v),
+                _ => None,
+            });
+            if let Some(v) = decoded {
+                if level == 0 {
+                    self.rgba = v;
+                } else if let Some(m) = self.mipmaps.get_mut(&level) {
+                    m.2 = v;
+                }
+            }
+        }
+    }
+    pub fn set_compressed(
+        &mut self,
+        level: u32,
+        width: u32,
+        height: u32,
+        format: u32,
+        bytes: &[u8],
+        rgba: Vec<u8>,
+    ) {
+        self.set_level(level, width, height, rgba);
+        self.compressed.insert(
+            level,
+            CompressedLevel {
+                width,
+                height,
+                format,
+                bytes: bytes.into(),
+            },
+        );
+    }
+
     /// Preserve explicit levels (RBR DXT3), deriving missing ones once per
     /// upload. This keeps legacy base-only assets usable with mip filters.
     pub fn upload_levels(&self) -> Vec<(u32, u32, Vec<u8>)> {
         if !self.is_complete() {
             return Vec::new();
         }
-        let mut levels = vec![(self.width, self.height, self.rgba.clone())];
+        let mut levels = vec![(
+            self.width,
+            self.height,
+            self.rgba_level(0).unwrap().into_owned(),
+        )];
         while levels.last().is_some_and(|(w, h, _)| *w > 1 || *h > 1) {
             let (w, h, src) = levels.last().unwrap();
             let (nw, nh) = ((*w / 2).max(1), (*h / 2).max(1));
             if let Some((ew, eh, pixels)) = self.mipmaps.get(&(levels.len() as u32)) {
-                if *ew == nw && *eh == nh && pixels.len() == (nw * nh * 4) as usize {
-                    levels.push((nw, nh, pixels.clone()));
+                if *ew == nw && *eh == nh {
+                    let pixels = self
+                        .rgba_level(levels.len() as u32)
+                        .unwrap_or(std::borrow::Cow::Borrowed(pixels));
+                    if pixels.len() != (nw * nh * 4) as usize {
+                        return Vec::new();
+                    }
+                    levels.push((nw, nh, pixels.into_owned()));
                     continue;
                 }
             }
@@ -111,10 +193,12 @@ impl Texture {
     }
 
     pub fn set_level(&mut self, level: u32, width: u32, height: u32, rgba: Vec<u8>) {
+        self.compressed.remove(&level);
         if level == 0 {
             // A resize cannot retain an unrelated previous mip chain.
             if self.width != width || self.height != height {
                 self.mipmaps.clear();
+                self.compressed.clear();
             }
             self.width = width;
             self.height = height;
@@ -129,7 +213,13 @@ impl Texture {
     pub fn is_complete(&self) -> bool {
         self.width > 0
             && self.height > 0
-            && self.rgba.len() >= (self.width * self.height * 4) as usize
+            && (self.rgba.len() >= (self.width * self.height * 4) as usize
+                || self.compressed.get(&0).is_some_and(|c| {
+                    c.width == self.width
+                        && c.height == self.height
+                        && compressed_image_size(c.format, c.width, c.height)
+                            .is_some_and(|n| c.bytes.len() >= n)
+                }))
     }
 
     /// Sample a texel with nearest-neighbour filtering.
@@ -144,14 +234,15 @@ impl Texture {
             // the surface black.
             return [255, 255, 255, 255];
         }
+        let pixels = self.rgba_level(0).unwrap();
         let x = Self::wrap_coord(s, self.width, self.wrap_s);
         let y = Self::wrap_coord(t, self.height, self.wrap_t);
         let idx = ((y * self.width + x) * 4) as usize;
         [
-            self.rgba[idx],
-            self.rgba[idx + 1],
-            self.rgba[idx + 2],
-            self.rgba[idx + 3],
+            pixels[idx],
+            pixels[idx + 1],
+            pixels[idx + 2],
+            pixels[idx + 3],
         ]
     }
 
@@ -166,6 +257,7 @@ impl Texture {
         if !self.is_complete() {
             return [255, 255, 255, 255];
         }
+        let pixels = self.rgba_level(0).unwrap();
         let fx = s * self.width as f32 - 0.5;
         let fy = t * self.height as f32 - 0.5;
         let (x0, y0) = (fx.floor(), fy.floor());
@@ -176,7 +268,7 @@ impl Texture {
             let x = Self::wrap_texel(x, self.width, self.wrap_s);
             let y = Self::wrap_texel(y, self.height, self.wrap_t);
             let i = ((y * self.width + x) * 4) as usize;
-            &self.rgba[i..i + 4]
+            &pixels[i..i + 4]
         };
         let (c00, c10) = (texel(x0, y0), texel(x0 + 1, y0));
         let (c01, c11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));

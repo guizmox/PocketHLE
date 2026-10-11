@@ -11,7 +11,7 @@ use crate::{
 };
 use platform::Host;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{c_char, c_void, CStr, CString},
 };
 pub struct VertexTransforms {
@@ -23,7 +23,7 @@ pub struct VertexTransforms {
 }
 /// Per-draw attribute layout. Disabled stages carry no payload. Smooth
 /// lighting aliases the position attribute instead of uploading it twice.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct VertexLayout {
     attributes: [Option<(i32, usize)>; 8],
     floats: usize,
@@ -96,6 +96,9 @@ const LOD_BIASES: [&str; 4] = ["lodBias0", "lodBias1", "lodBias2", "lodBias3"];
 const ENV_COLORS: [&str; 4] = ["envColor0", "envColor1", "envColor2", "envColor3"];
 #[allow(non_snake_case)]
 struct Gl {
+    CompressedTexImage2D:
+        Option<unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void)>,
+    GenerateMipmap: Option<unsafe extern "system" fn(u32)>,
     GetString: unsafe extern "system" fn(u32) -> *const u8,
     GetError: unsafe extern "system" fn() -> u32,
     GetIntegerv: unsafe extern "system" fn(u32, *mut i32),
@@ -165,6 +168,34 @@ struct Gl {
 impl Gl {
     unsafe fn load(host: &Host) -> Result<Self, String> {
         Ok(Self {
+            CompressedTexImage2D: {
+                let mut p = host.load(c"glCompressedTexImage2D");
+                if p.is_null() {
+                    p = host.load(c"glCompressedTexImage2DARB");
+                }
+                if p.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void),
+                    >(p))
+                }
+            },
+            GenerateMipmap: {
+                let mut p = host.load(c"glGenerateMipmap");
+                if p.is_null() {
+                    p = host.load(c"glGenerateMipmapEXT");
+                }
+                if p.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "system" fn(u32),
+                    >(p))
+                }
+            },
             GetString: {
                 let mut p = host.load(c"glGetString");
                 if p.is_null() {
@@ -846,6 +877,125 @@ impl Gl {
         })
     }
 }
+fn native_compressed_format(format: u32) -> u32 {
+    // Preserve the software HLE's DXT1 RGB selector-3 alpha contract.
+    if format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT {
+        GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+    } else {
+        format
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum UploadRoute {
+    Compressed,
+    Generated,
+    Rgba,
+}
+unsafe fn upload_error(gl: &Gl) -> Result<u32, String> {
+    let mut first = 0;
+    for _ in 0..16 {
+        let error = (gl.GetError)();
+        if error == 0 {
+            break;
+        }
+        if error == GL_OUT_OF_MEMORY {
+            return Err("native texture allocation failed".into());
+        }
+        if first == 0 {
+            first = error;
+        }
+    }
+    Ok(first)
+}
+unsafe fn upload_texture(
+    gl: &Gl,
+    formats: &HashSet<u32>,
+    tex: &Texture,
+    mips: bool,
+) -> Result<UploadRoute, String> {
+    let levels = tex.width.max(tex.height).ilog2() + 1;
+    let has_explicit = !tex.mipmaps.is_empty();
+    if let Some(base) = tex.compressed.get(&0) {
+        let format = native_compressed_format(base.format);
+        let complete = (0..if mips { levels } else { 1 }).all(|l| {
+            tex.compressed.get(&l).is_some_and(|c| {
+                c.width == (tex.width >> l).max(1)
+                    && c.height == (tex.height >> l).max(1)
+                    && native_compressed_format(c.format) == format
+            })
+        });
+        if formats.contains(&format) && (!mips || complete || !has_explicit) {
+            if let Some(upload) = gl.CompressedTexImage2D {
+                for l in 0..if mips && complete { levels } else { 1 } {
+                    let c = &tex.compressed[&l];
+                    upload(
+                        GL_TEXTURE_2D,
+                        l as i32,
+                        format,
+                        c.width as i32,
+                        c.height as i32,
+                        0,
+                        c.bytes.len() as i32,
+                        c.bytes.as_ptr().cast(),
+                    );
+                }
+                let mut ok = upload_error(gl)? == 0;
+                if ok && mips && !complete {
+                    if let Some(generate) = gl.GenerateMipmap {
+                        generate(GL_TEXTURE_2D);
+                        ok = upload_error(gl)? == 0;
+                    } else {
+                        ok = false;
+                    }
+                }
+                if ok {
+                    return Ok(UploadRoute::Compressed);
+                }
+            }
+        }
+    }
+    let base = tex.rgba_level(0).unwrap();
+    (gl.TexImage2D)(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA as i32,
+        tex.width as i32,
+        tex.height as i32,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        base.as_ptr().cast(),
+    );
+    let error = upload_error(gl)?;
+    if error != 0 {
+        return Err(format!("native RGBA texture upload failed: 0x{error:04x}"));
+    }
+    if mips && !has_explicit {
+        if let Some(generate) = gl.GenerateMipmap {
+            generate(GL_TEXTURE_2D);
+            if upload_error(gl)? == 0 {
+                return Ok(UploadRoute::Generated);
+            }
+        }
+    }
+    if mips {
+        for (l, (w, h, pixels)) in tex.upload_levels().iter().enumerate().skip(1) {
+            (gl.TexImage2D)(
+                GL_TEXTURE_2D,
+                l as i32,
+                GL_RGBA as i32,
+                *w as i32,
+                *h as i32,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+        }
+    }
+    Ok(UploadRoute::Rgba)
+}
+
 pub struct Renderer {
     host: Host,
     gl: Gl,
@@ -870,6 +1020,8 @@ pub struct Renderer {
     readback: Vec<u8>,
     dirty: bool,
     full_npot: bool,
+    compressed_formats: HashSet<u32>,
+    attribute_layout: Option<VertexLayout>,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
 }
@@ -910,6 +1062,13 @@ impl Renderer {
             } else {
                 true
             };
+            let mut count = 0;
+            (gl.GetIntegerv)(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &mut count);
+            let mut formats = vec![0i32; count.clamp(0, 128) as usize];
+            if count > 0 && count <= 128 {
+                (gl.GetIntegerv)(GL_COMPRESSED_TEXTURE_FORMATS, formats.as_mut_ptr());
+            }
+            let compressed_formats = formats.into_iter().map(|n| n as u32).collect();
             let mut r = Self {
                 host,
                 gl,
@@ -934,6 +1093,8 @@ impl Renderer {
                 readback: Vec::new(),
                 dirty: true,
                 full_npot,
+                compressed_formats,
+                attribute_layout: None,
                 point_range,
                 line_range,
             };
@@ -1110,7 +1271,9 @@ impl Renderer {
         {
             return false;
         }
-        self.uniform_values.insert(location, value.to_vec());
+        let cached = self.uniform_values.entry(location).or_default();
+        cached.clear();
+        cached.extend_from_slice(value);
         true
     }
     unsafe fn uniform_1i(&mut self, l: i32, v: i32) {
@@ -1277,6 +1440,10 @@ impl Renderer {
             self.dirty = true;
             self.check()
         }
+    }
+    pub fn supports_compressed(&self, format: u32) -> bool {
+        let format = native_compressed_format(format);
+        self.gl.CompressedTexImage2D.is_some() && self.compressed_formats.contains(&format)
     }
     pub fn delete_textures(&mut self, names: &[u32]) {
         if self.host.make_current().is_err() {
@@ -1709,37 +1876,7 @@ impl Renderer {
                                 .get(&id)
                                 .is_none_or(|p| !p.0.uses_mipmaps());
                         if item.1 != tex.revision || newly_mipped {
-                            if needs_mips {
-                                for (level, (w, h, pixels)) in
-                                    tex.upload_levels().iter().enumerate()
-                                {
-                                    (self.gl.TexImage2D)(
-                                        GL_TEXTURE_2D,
-                                        level as i32,
-                                        GL_RGBA as i32,
-                                        *w as i32,
-                                        *h as i32,
-                                        0,
-                                        GL_RGBA,
-                                        GL_UNSIGNED_BYTE,
-                                        pixels.as_ptr().cast(),
-                                    );
-                                }
-                            } else {
-                                // Video/dynamic HUD assets with base filtering must not
-                                // pay for unused mip generation or extra texture uploads.
-                                (self.gl.TexImage2D)(
-                                    GL_TEXTURE_2D,
-                                    0,
-                                    GL_RGBA as i32,
-                                    tex.width as i32,
-                                    tex.height as i32,
-                                    0,
-                                    GL_RGBA,
-                                    GL_UNSIGNED_BYTE,
-                                    tex.rgba.as_ptr().cast(),
-                                );
-                            }
+                            upload_texture(&self.gl, &self.compressed_formats, tex, needs_mips)?;
                             item.1 = tex.revision;
                         }
                         let params = if !self.full_npot
@@ -1789,20 +1926,23 @@ impl Renderer {
                 self.scratch.as_ptr().cast(),
                 0x88e0,
             );
-            for (i, attribute) in layout.attributes.iter().enumerate() {
-                if let Some((size, offset)) = attribute {
-                    (self.gl.EnableVertexAttribArray)(i as u32);
-                    (self.gl.VertexAttribPointer)(
-                        i as u32,
-                        *size,
-                        GL_FLOAT,
-                        0,
-                        (layout.floats * 4) as i32,
-                        (*offset * 4) as *const c_void,
-                    );
-                } else {
-                    (self.gl.DisableVertexAttribArray)(i as u32);
+            if self.attribute_layout != Some(layout) {
+                for (i, attribute) in layout.attributes.iter().enumerate() {
+                    if let Some((size, offset)) = attribute {
+                        (self.gl.EnableVertexAttribArray)(i as u32);
+                        (self.gl.VertexAttribPointer)(
+                            i as u32,
+                            *size,
+                            GL_FLOAT,
+                            0,
+                            (layout.floats * 4) as i32,
+                            (*offset * 4) as *const c_void,
+                        );
+                    } else {
+                        (self.gl.DisableVertexAttribArray)(i as u32);
+                    }
                 }
+                self.attribute_layout = Some(layout);
             }
             if indexed {
                 (self.gl.BindBuffer)(GL_ELEMENT_ARRAY_BUFFER, self.index_buffer);
@@ -2035,6 +2175,87 @@ float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMo
 mod tests {
     use super::*;
     use crate::raster;
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2; upload routes and driver fallbacks"]
+    fn host_upload_routes_and_fallbacks() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            gpu.host.make_current().unwrap();
+            unsafe {
+                let mut name = 0;
+                (gpu.gl.GenTextures)(1, &mut name);
+                (gpu.gl.BindTexture)(GL_TEXTURE_2D, name);
+                let mut tex = Texture::default();
+                tex.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
+                assert!(matches!(
+                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
+                    UploadRoute::Generated
+                ));
+                let generate = gpu.gl.GenerateMipmap.take();
+                assert!(matches!(
+                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
+                    UploadRoute::Rgba
+                ));
+                gpu.gl.GenerateMipmap = generate;
+                tex.set_level(1, 2, 2, [0, 255, 0, 255].repeat(4));
+                assert!(matches!(
+                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
+                    UploadRoute::Rgba
+                ));
+                let bytes = [0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0];
+                tex = Texture::default();
+                tex.set_compressed(
+                    0,
+                    4,
+                    4,
+                    GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                    &bytes,
+                    Vec::new(),
+                );
+                assert!(tex.rgba.is_empty());
+                assert_eq!(&*tex.rgba_level(0).unwrap(), &[255, 0, 0, 255].repeat(16));
+                if gpu.supports_compressed(GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) {
+                    assert!(matches!(
+                        upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, false).unwrap(),
+                        UploadRoute::Compressed
+                    ));
+                }
+                assert!(matches!(
+                    upload_texture(&gpu.gl, &HashSet::new(), &tex, false).unwrap(),
+                    UploadRoute::Rgba
+                ));
+                let upload = gpu.gl.CompressedTexImage2D.take();
+                assert!(matches!(
+                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, false).unwrap(),
+                    UploadRoute::Rgba
+                ));
+                gpu.gl.CompressedTexImage2D = upload;
+                // Force an advertised format the driver does not actually accept.
+                // A refused upload must fall back without leaving a GL error.
+                if !gpu.supports_compressed(GL_ATC_RGB_AMD) {
+                    let mut refused = Texture::default();
+                    refused.set_compressed(0, 4, 4, GL_ATC_RGB_AMD, &bytes, Vec::new());
+                    let formats = HashSet::from([GL_ATC_RGB_AMD]);
+                    assert!(matches!(
+                        upload_texture(&gpu.gl, &formats, &refused, false).unwrap(),
+                        UploadRoute::Rgba
+                    ));
+                    assert_eq!((gpu.gl.GetError)(), 0);
+                }
+                tex.ensure_rgba();
+                assert_eq!(tex.rgba, [255, 0, 0, 255].repeat(16));
+                tex.set_level(0, 4, 4, [0, 0, 255, 255].repeat(16));
+                assert!(tex.compressed.is_empty());
+                assert_eq!((gpu.gl.GetError)(), 0);
+                (gpu.gl.DeleteTextures)(1, &name);
+            }
+        }
+    }
     fn identity_transforms() -> VertexTransforms {
         VertexTransforms {
             lighting: Default::default(),

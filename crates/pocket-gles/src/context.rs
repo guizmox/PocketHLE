@@ -382,6 +382,9 @@ impl Context {
     }
     pub fn disable_gpu(&mut self) {
         self.sync_gpu();
+        for tex in self.textures.values_mut() {
+            tex.ensure_rgba();
+        }
         self.release_gpu();
         self.gpu_requested = false;
     }
@@ -1050,7 +1053,21 @@ impl Context {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
-        let rgba = if data.is_empty() {
+        let defer = !paletted
+            && !data.is_empty()
+            && self
+                .gpu
+                .as_ref()
+                .is_some_and(|g| g.supports_compressed(format));
+        if !data.is_empty()
+            && data.len() < texture::compressed_image_size(format, width, height).unwrap()
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        let rgba = if defer {
+            Vec::new()
+        } else if data.is_empty() {
             vec![0u8; (width as usize) * (height as usize) * 4]
         } else {
             match texture::decode_compressed_to_rgba(data, width, height, format) {
@@ -1066,7 +1083,19 @@ impl Context {
         };
         let name = self.texture_units[self.active_texture as usize].bound_texture;
         let tex = self.textures.entry(name).or_default();
-        tex.set_level(level.max(0) as u32, width, height, rgba);
+        if defer {
+            let needed = texture::compressed_image_size(format, width, height).unwrap();
+            tex.set_compressed(
+                level.max(0) as u32,
+                width,
+                height,
+                format,
+                &data[..needed],
+                rgba,
+            );
+        } else {
+            tex.set_level(level.max(0) as u32, width, height, rgba);
+        }
         if level < 0 && !data.is_empty() {
             let entries = if format >= GL_PALETTE8_RGB8_OES {
                 256
@@ -1143,6 +1172,7 @@ impl Context {
             self.set_error(GL_INVALID_OPERATION);
             return;
         };
+        tex.ensure_rgba();
         let (tw, th, pixels) = if level == 0 {
             (tex.width, tex.height, &mut tex.rgba)
         } else if let Some((w, h, p)) = tex.mipmaps.get_mut(&(level as u32)) {
@@ -1157,6 +1187,7 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
+        tex.compressed.remove(&(level as u32));
         tex.revision = tex.revision.wrapping_add(1);
         for row in 0..height {
             let src = (row * width * 4) as usize;
@@ -1506,24 +1537,33 @@ impl Context {
     /// texturing were off for that unit, and a stage bound to a
     /// just-generated name must not shadow a later stage that has real
     /// pixels.
-    fn texture_stages(&self) -> Vec<raster::TextureStage> {
-        (0..MAX_TEXTURE_UNITS)
-            .filter(|&u| {
-                let unit = &self.texture_units[u];
-                unit.texture_enabled
-                    && unit.bound_texture != 0
-                    && self
-                        .textures
-                        .get(&unit.bound_texture)
-                        .is_some_and(Texture::is_complete)
-            })
-            .map(|u| raster::TextureStage {
-                unit: u,
-                env: self.texture_units[u].tex_env,
-                env_color: self.texture_units[u].tex_env_color,
-                lod_bias: self.texture_units[u].lod_bias,
-            })
-            .collect()
+    fn texture_stages(&self) -> ([raster::TextureStage; MAX_TEXTURE_UNITS], usize) {
+        let mut stages = [raster::TextureStage {
+            unit: 0,
+            env: TexEnvMode::Modulate,
+            env_color: [0.; 4],
+            lod_bias: 0.,
+        }; MAX_TEXTURE_UNITS];
+        let mut count = 0;
+        for u in 0..MAX_TEXTURE_UNITS {
+            let unit = &self.texture_units[u];
+            if unit.texture_enabled
+                && unit.bound_texture != 0
+                && self
+                    .textures
+                    .get(&unit.bound_texture)
+                    .is_some_and(Texture::is_complete)
+            {
+                stages[count] = raster::TextureStage {
+                    unit: u,
+                    env: unit.tex_env,
+                    env_color: unit.tex_env_color,
+                    lod_bias: unit.lod_bias,
+                };
+                count += 1;
+            }
+        }
+        (stages, count)
     }
 
     /// Assemble one vertex from the enabled client arrays. `stages` are
@@ -1724,6 +1764,11 @@ impl Context {
         if self.gpu_failed {
             return;
         }
+        if self.gpu.is_none() {
+            for tex in self.textures.values_mut() {
+                tex.ensure_rgba();
+            }
+        }
         let mvp = if self.gpu.is_some() {
             matrix::IDENTITY
         } else {
@@ -1737,23 +1782,29 @@ impl Context {
             matrix::IDENTITY
         };
         self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
-        let stages = self.texture_stages();
+        let (stage_storage, stage_count) = self.texture_stages();
+        let stages = &stage_storage[..stage_count];
         self.prepared_arrays.clear();
         if let (Some(lo), Some(hi)) = (indices.clone().min(), indices.clone().max()) {
-            let mut arrays = vec![self.vertex_array];
+            let mut arrays = [ArrayPointer::default(); MAX_TEXTURE_UNITS + 3];
+            arrays[0] = self.vertex_array;
+            let mut array_count = 1;
             if self.color_array.enabled {
-                arrays.push(self.color_array);
+                arrays[array_count] = self.color_array;
+                array_count += 1;
             }
             if self.lighting.enabled && self.normal_array.enabled {
-                arrays.push(self.normal_array);
+                arrays[array_count] = self.normal_array;
+                array_count += 1;
             }
-            for stage in &stages {
+            for stage in stages {
                 let array = self.texture_units[stage.unit].texcoord_array;
                 if array.enabled {
-                    arrays.push(array);
+                    arrays[array_count] = array;
+                    array_count += 1;
                 }
             }
-            for array in arrays {
+            for &array in &arrays[..array_count] {
                 if array.buffer != 0 {
                     continue;
                 }
@@ -1886,7 +1937,7 @@ impl Context {
         }
         // Resolve the bound textures once per draw, not per fragment.
         let mut texs: [Option<&Texture>; raster::MAX_TEXTURE_STAGES] = [None; _];
-        for stage in &stages {
+        for stage in stages {
             texs[stage.unit] = self
                 .textures
                 .get(&self.texture_units[stage.unit].bound_texture);

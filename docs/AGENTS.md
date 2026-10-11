@@ -2899,3 +2899,23 @@ reading. Explicit saved false and per-game software overrides remain honored;
 per-game null still inherits the global setting. Startup GPU initialization
 failure retains the existing software fallback. The experimental English label
 is unchanged.
+
+## GPU upload/state optimizations (2026-10-11)
+
+GPU texture uploads retain supported compressed block payloads and defer CPU
+RGBA decoding. Query driver formats once per renderer; optional compressed/mip
+entry points fall back safely. RGB DXT1 uses native RGBA DXT1 to retain the
+software compatibility alpha behavior. Software rendering, GPU disable and
+subimage updates materialize deferred levels. Successful pixel patches invalidate
+only the affected compressed level; resize/deletion releases owned payloads.
+Native mip generation is limited to textures without authored guest mip levels.
+Partial/complete authored levels remain preserved by the existing CPU chain path.
+Driver refusal drains its error and retries RGBA/CPU; native OOM propagates.
+Packed vertex layouts cache attribute pointers/enables per private GL context;
+uniform value storage is reused; texture stages and guest array descriptors use
+fixed-size per-draw arrays. No runtime instrumentation was added.
+Validation: 150 GLES tests (all native tests and benchmark included), 284 WinCE
+unit tests including native tests, ARM64/ARMv7 Rust GLES checks with warnings
+denied. Native route tests cover optional-function absence, compressed upload,
+deferred materialization, authored mip preservation and actual driver refusal.
+Full Windows/APK builds and game visual/FPS regressions require target devices.
