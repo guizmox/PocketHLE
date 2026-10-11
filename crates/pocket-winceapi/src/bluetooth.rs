@@ -278,6 +278,66 @@ pub(crate) fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+pub(crate) fn driver_unsupported_stream(
+    ctx: &mut CallCtx<'_>,
+) -> Result<DispatchOutcome, KernelError> {
+    let returned = ctx.arg_u32(3)?;
+    if returned != 0 {
+        if !output(ctx, returned, 4) {
+            return failed(ctx, 87);
+        }
+        ctx.cpu.write_mem(returned, &0u32.to_le_bytes())?;
+    }
+    failed(ctx, 50)
+}
+
+/// Chicane's actual BTH1 power controls, reconstructed from its ARM initializer.
+/// These start/stop the emulated driver, never forcibly change host radio power.
+pub(crate) fn driver_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let code = ctx.arg_u32(1)?;
+    let in_len = ctx.arg_u32(3)?;
+    let out_len = ctx.arg_u32(5)?;
+    let returned = ctx.arg_u32(6)?;
+    let driver = ctx.kernel.vfs.bluetooth_driver_open(handle).unwrap();
+    // These CTL_CODE values carry FILE_ANY_ACCESS; the hardware permission
+    // gate is enforced by Service::start_driver rather than file write access.
+    if returned != 0 && !output(ctx, returned, 4) {
+        return failed(ctx, 87);
+    }
+    if in_len != 0 || out_len != 0 {
+        return failed(ctx, 87);
+    }
+    match code {
+        0x0101_2120 => {
+            if let Err(e) = driver.service.start_driver() {
+                return failed(
+                    ctx,
+                    match e {
+                        10091 => 21,
+                        10013 => 5,
+                        _ => e,
+                    },
+                );
+            }
+        }
+        0x0101_2124 => driver.service.enable(false),
+        _ => return failed(ctx, 50),
+    }
+    if returned != 0 {
+        ctx.cpu.write_mem(returned, &0u32.to_le_bytes())?;
+    }
+    log::info!(
+        "BTH1 driver {}",
+        if code == 0x0101_2120 {
+            "started"
+        } else {
+            "stopped"
+        }
+    );
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 pub(crate) fn shell_message(ctx: &mut CallCtx<'_>, hwnd: u32, message: u32, value: u32) -> bool {
     let mut hash = 0x811c9dc5u32;
     for byte in b"BT_MSG" {
@@ -378,6 +438,150 @@ pub(crate) mod tests {
             panic!("unexpected retry")
         };
         v
+    }
+    #[test]
+    fn chicane_bth1_startup_shutdown_errors_and_shared_handle_lifetime() {
+        let (mut cpu, mut k, mut d) = setup();
+        let path: Vec<_> = "BTH1:"
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x1000, &path).unwrap();
+        let h = value(call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "CreateFileW",
+            &[0x1000, 0xc0000000, 0, 0, 3, 0, 0],
+        ));
+        assert_ne!(h, u32::MAX);
+        // Exact no-input/no-output IOCTL ABI in Chicane's ARM initializer.
+        k.vfs.bluetooth.service.enable(false);
+        k.thread_last_errors.insert(0, 0x1234);
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[h, 0x01012120, 0, 0, 0, 0, 0x1200, 0]
+            )),
+            1
+        );
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0);
+        assert_eq!(k.thread_last_errors[&0], 0x1234);
+        assert!(k.vfs.bluetooth.service.active_backend().is_ok());
+        let object = k.vfs.export_handle(h).unwrap();
+        let mut child = pocket_kernel::vfs::Vfs::new();
+        child.attach_shared_context(k.vfs.shared_context());
+        assert!(child.import_handle(0xdead0100, object));
+        assert!(k.vfs.close(h));
+        // CloseHandle alone must not power off Bluetooth. The SDK stops explicitly.
+        assert!(child
+            .bluetooth_driver_open(0xdead0100)
+            .unwrap()
+            .service
+            .active_backend()
+            .is_ok());
+        assert_eq!(k.vfs.open_file("BTH1:", 3, 0, 3, false, 0), Err(32));
+        assert!(child.close(0xdead0100));
+        let h = value(call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "CreateFileW",
+            &[0x1000, 0xc0000000, 0, 0, 3, 0, 0],
+        ));
+        assert_ne!(h, u32::MAX);
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[h, 0x01012124, 0, 0, 0, 0, 0x1200, 0]
+            )),
+            1
+        );
+        assert!(k.vfs.bluetooth.service.active_backend().is_err());
+        k.vfs.bluetooth.service.set_allowed(false);
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[h, 0x01012120, 0, 0, 0, 0, 0, 0]
+            )),
+            0
+        );
+        assert_eq!(k.thread_last_errors[&0], 5);
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[h, 0xffff, 0, 0, 0, 0, 0, 0]
+            )),
+            0
+        );
+        assert_eq!(k.thread_last_errors[&0], 50);
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[h, 0x01012120, 0, 0, 0, 0, 0x80000000, 0]
+            )),
+            0
+        );
+        assert_eq!(k.thread_last_errors[&0], 87);
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "ReadFile",
+                &[h, 0x1300, 4, 0x1200, 0]
+            )),
+            0
+        );
+        assert_eq!(k.thread_last_errors[&0], 50);
+        k.vfs.close_all();
+        child.close_all();
+        assert!(k.vfs.open_handles().is_empty());
+    }
+    #[test]
+    fn bth1_start_reports_backend_failure_instead_of_fake_success() {
+        let (mut cpu, mut k, mut d) = setup();
+        let s = Service::offline();
+        s.set_allowed(true);
+        k.vfs.set_bluetooth_service(s);
+        let h = k.vfs.open_file("BTH1:", 3, 0, 3, false, 0).unwrap().handle;
+        assert_eq!(
+            value(call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[h, 0x01012120, 0, 0, 0, 0, 0, 0]
+            )),
+            0
+        );
+        assert_eq!(k.thread_last_errors[&0], 21);
+        k.vfs.close_all();
     }
     #[test]
     fn sdk_com_sequence_preserves_pending_data_and_cancels_duplicate_handles() {

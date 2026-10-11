@@ -3634,6 +3634,9 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let out_len = ctx.arg_u32(5)?;
     let returned_p = ctx.arg_u32(6)?;
 
+    if ctx.kernel.vfs.bluetooth_driver_open(handle).is_some() {
+        return crate::bluetooth::driver_control(ctx);
+    }
     if ctx.kernel.vfs.vibration_open(handle).is_some() {
         return crate::vibration::control(ctx);
     }
@@ -7930,6 +7933,9 @@ fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 ///                LPOVERLAPPED ov)`
 fn read_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let bt_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.bluetooth_driver_open(bt_handle).is_some() {
+        return crate::bluetooth::driver_unsupported_stream(ctx);
+    }
     if ctx.kernel.vfs.vibration_open(bt_handle).is_some() {
         return crate::vibration::unsupported_stream(ctx);
     }
@@ -7998,6 +8004,10 @@ fn set_end_of_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let driver_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.bluetooth_driver_open(driver_handle).is_some() {
+        return crate::bluetooth::driver_unsupported_stream(ctx);
+    }
     let bt_handle = ctx.arg_u32(0)?;
     if ctx.kernel.vfs.vibration_open(bt_handle).is_some() {
         return crate::vibration::unsupported_stream(ctx);

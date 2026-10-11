@@ -72,6 +72,9 @@ pub struct GuestSocket {
     pub send_timeout_ms: u32,
 }
 pub trait Backend: Send + Sync {
+    fn ready(&self) -> BtResult<()> {
+        self.hostname().map(|_| ())
+    }
     fn socket(&self) -> BtResult<Box<dyn RfcommSocket>> {
         Err(10045)
     }
@@ -207,6 +210,24 @@ impl Service {
                 socket.lock().unwrap().take();
             }
         }
+    }
+    /// Chicane starts the CE BTH1 driver before opening Winsock sockets.
+    /// The guest cannot override the user's hardware permission gate.
+    pub fn start_driver(&self) -> BtResult<()> {
+        let backend = {
+            let s = self.0.lock().unwrap();
+            if !s.allowed {
+                return Err(5);
+            }
+            s.backend.clone().ok_or(NOT_READY)?
+        };
+        backend.ready()?;
+        let mut s = self.0.lock().unwrap();
+        if !s.allowed {
+            return Err(5);
+        }
+        s.enabled = true;
+        Ok(())
     }
     pub fn backend(&self) -> BtResult<Arc<dyn Backend>> {
         self.0.lock().unwrap().backend.clone().ok_or(NOT_READY)

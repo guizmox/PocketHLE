@@ -1,0 +1,11 @@
+PocketHLE Bluetooth Chicane v3 - cumulative patch
+Base: b9dac53b38669adb9f50d33261449d238ec43050 (brightness fixes).
+
+Fix: Chicane opens BTH1: and uses DeviceIoControl 0x01012120 before opening its Bluetooth sockets. Previously this initialization failed, leaving the contestant name Unknown and preventing host discovery from starting. The stop control is 0x01012124.
+BTH1 handles now support sharing and duplication, validated output pointers and Win32 errors. Closing a handle releases its lease; explicit driver stop closes shared transports. User Bluetooth permission is never bypassed. Backend readiness is checked on Android and Windows.
+Includes the previous Android RFCOMM and Windows SDP/discoverability changes. Keep Bluetooth (classic/RFCOMM) enabled. Rebuild native Android libraries AND APK, then reinstall on both phones. Windows must also be rebuilt.
+
+V3: WSALookupServiceNextW now preserves the input buffer capacity on success, as specified by Winsock. Only WSAEFAULT reports required bytes. The real Chicane ARM loop sets 1024 bytes once: shrinking capacity to the first short name previously caused a later longer name to abort enumeration. Regression covers three increasing names, untouched capacity, end-of-enumeration and existing insufficient-buffer handling. Controlled replay of actual ARM inquiry shows the old handler stops after the first connection attempt and the corrected handler continues to later devices. No arbitrary name/device filtering, no pairing or timeout workaround. Applies to Android and Windows.
+
+Validation: V3 WinCE API serial suite: 262 tests pass. V2 kernel (174) and JNI (6) checks remain applicable; their sources have not changed in V3. Actual Chicane ARM initializer replay with injected API results confirms failure leaves Unknown and successful initialization obtains the hostname; this is not a hardware multiplayer test. Android BluetoothHost/RfcommHost Kotlin compile against Android 14. Actual Windows Bluetooth module and tests cross type-check. No physical Android/Windows Bluetooth session verified here.
+The replay tool requires Python pefile and unicorn and the user's Chicane executable; no game executable/data is included.

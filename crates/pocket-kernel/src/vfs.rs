@@ -286,6 +286,7 @@ pub struct VfsObject(VfsObjectInner, Option<(u32, crate::audio::MasPlayback)>);
 #[derive(Clone)]
 enum VfsObjectInner {
     Bluetooth(Arc<BluetoothOpen>),
+    BluetoothDriver(Arc<BluetoothDriverOpen>),
     Camera(Arc<CameraOpen>),
     Gps(Arc<GpsOpen>),
     Vibration(Arc<VibrationOpen>),
@@ -321,6 +322,11 @@ pub struct CameraOpen {
     pub access: u32,
     _lease: Arc<contracts::Lease>,
 }
+pub struct BluetoothDriverOpen {
+    pub service: crate::bluetooth::Service,
+    pub access: u32,
+    _lease: Arc<contracts::Lease>,
+}
 pub struct BluetoothOpen {
     pub port: Arc<crate::bluetooth::Port>,
     pub access: u32,
@@ -331,6 +337,7 @@ pub struct BluetoothOpen {
 pub struct Vfs {
     pub bluetooth: crate::bluetooth::State,
     bluetooth_handles: HashMap<u32, Arc<BluetoothOpen>>,
+    bluetooth_driver_handles: HashMap<u32, Arc<BluetoothDriverOpen>>,
     camera_handles: HashMap<u32, Arc<CameraOpen>>,
     gps_handles: HashMap<u32, Arc<GpsOpen>>,
     vibration_handles: HashMap<u32, Arc<VibrationOpen>>,
@@ -371,6 +378,7 @@ impl Vfs {
         let mut vfs = Self {
             bluetooth: Default::default(),
             bluetooth_handles: HashMap::new(),
+            bluetooth_driver_handles: HashMap::new(),
             camera_handles: HashMap::new(),
             gps_handles: HashMap::new(),
             vibration_handles: HashMap::new(),
@@ -1340,6 +1348,12 @@ impl Vfs {
 
     /// An opaque shared open description, retaining seek/access/device state.
     pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
+        if let Some(driver) = self.bluetooth_driver_handles.get(&handle) {
+            return Some(VfsObject(
+                VfsObjectInner::BluetoothDriver(driver.clone()),
+                None,
+            ));
+        }
         if let Some(v) = self.vibration_handles.get(&handle) {
             return Some(VfsObject(VfsObjectInner::Vibration(v.clone()), None));
         }
@@ -1373,6 +1387,9 @@ impl Vfs {
             return false;
         }
         match object.0 {
+            VfsObjectInner::BluetoothDriver(driver) => {
+                self.bluetooth_driver_handles.insert(handle, driver);
+            }
             VfsObjectInner::Vibration(v) => {
                 self.vibration_handles.insert(handle, v);
             }
@@ -1408,6 +1425,7 @@ impl Vfs {
             || self.gps_handles.contains_key(&handle)
             || self.camera_handles.contains_key(&handle)
             || self.bluetooth_handles.contains_key(&handle)
+            || self.bluetooth_driver_handles.contains_key(&handle)
             || self.is_open(handle)
             || self.volumes.contains_key(&handle)
             || self.decoders.contains_key(&handle)
@@ -1421,6 +1439,9 @@ impl Vfs {
     }
     pub fn camera_open(&self, handle: u32) -> Option<Arc<CameraOpen>> {
         self.camera_handles.get(&handle).cloned()
+    }
+    pub fn bluetooth_driver_open(&self, handle: u32) -> Option<Arc<BluetoothDriverOpen>> {
+        self.bluetooth_driver_handles.get(&handle).cloned()
     }
     pub fn bluetooth_open(&self, handle: u32) -> Option<Arc<BluetoothOpen>> {
         self.bluetooth_handles.get(&handle).cloned()
@@ -1436,6 +1457,7 @@ impl Vfs {
             .chain(self.gps_handles.keys())
             .chain(self.camera_handles.keys())
             .chain(self.bluetooth_handles.keys())
+            .chain(self.bluetooth_driver_handles.keys())
             .chain(self.ram_handles.keys())
             .chain(self.volumes.keys())
             .chain(self.decoders.keys())
@@ -1455,6 +1477,7 @@ impl Vfs {
             || self.gps_handles.remove(&handle).is_some()
             || self.camera_handles.remove(&handle).is_some()
             || self.bluetooth_handles.remove(&handle).is_some()
+            || self.bluetooth_driver_handles.remove(&handle).is_some()
             || self.ram_handles.remove(&handle).is_some()
             || self.handles.remove(&handle).is_some()
             || self.volumes.remove(&handle).is_some()
@@ -1482,6 +1505,7 @@ impl Vfs {
         self.decoders.clear();
         self.registration.clear();
         self.bluetooth_handles.clear();
+        self.bluetooth_driver_handles.clear();
         self.camera_handles.clear();
         self.gps_handles.clear();
         self.vibration_handles.clear();

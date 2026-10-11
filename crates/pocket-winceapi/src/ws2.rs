@@ -192,8 +192,8 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return fail(ctx, 10055);
     };
     let capacity = ctx.cpu.read_u32_le(length)?;
-    ctx.cpu.write_mem(length, &required.to_le_bytes())?;
     if capacity < required || ptr == 0 {
+        ctx.cpu.write_mem(length, &required.to_le_bytes())?;
         return fail(ctx, 10014);
     }
     if ptr.checked_add(required).is_none()
@@ -202,6 +202,7 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             .check_guest_access(ptr, required, pocket_cpu::Prot::WRITE)
             .is_err()
     {
+        ctx.cpu.write_mem(length, &required.to_le_bytes())?;
         return fail(ctx, 10014);
     }
     let mut bytes = vec![0; required as usize];
@@ -267,6 +268,81 @@ mod tests {
     use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
     use pocket_kernel::{Dispatcher, Thunk};
     use pocket_pe::ImportBinding;
+
+    #[test]
+    fn chicane_inquiry_reuses_capacity_across_increasing_device_names() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_kernel::bluetooth::{Device, Lookup};
+        use std::sync::{Arc, Mutex};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.vfs.bluetooth.startups = 1;
+        kernel.vfs.bluetooth.lookups.insert(
+            1,
+            Lookup {
+                result: Arc::new(Mutex::new(Some(Ok(vec![
+                    Device {
+                        address: 1,
+                        name: "PLT_K100".into(),
+                    },
+                    Device {
+                        address: 2,
+                        name: "BlackBerry KEY2".into(),
+                    },
+                    Device {
+                        address: 3,
+                        name: "A much longer Bluetooth device name".into(),
+                    },
+                ])))),
+                index: 0,
+            },
+        );
+        // The actual ARM loop initializes this DWORD once, outside the loop.
+        cpu.write_mem(0x1204, &1024u32.to_le_bytes()).unwrap();
+        for (index, name) in [
+            "PLT_K100",
+            "BlackBerry KEY2",
+            "A much longer Bluetooth device name",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "ws2.dll",
+                    "WSALookupServiceNextW",
+                    &[1, 0x110, 0x1204, 0x2000]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1204).unwrap(), 1024);
+            assert_eq!(
+                cpu.read_mem(0x205c, 8).unwrap(),
+                ((index + 1) as u64).to_le_bytes()
+            );
+            let expected: Vec<u8> = name
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            assert_eq!(cpu.read_mem(0x207c, expected.len() as u32).unwrap(), expected);
+        }
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ws2.dll",
+                "WSALookupServiceNextW",
+                &[1, 0x110, 0x1204, 0x2000]
+            ),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(kernel.winsock_last_errors[&0], 10110);
+        assert_eq!(cpu.read_u32_le(0x1204).unwrap(), 1024);
+    }
 
     #[test]
     fn bluetooth_inquiry_reports_size_without_consuming_and_writes_guest_pointers() {

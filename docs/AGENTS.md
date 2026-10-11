@@ -1766,10 +1766,59 @@ Startup refcounts and WSA errors stay per process/thread. Final WSACleanup and
 process teardown drop sockets; disabling the shared Bluetooth service closes
 native sockets in all processes through weak registrations. No strong cycles.
 
-The new raw-socket backend is implemented on Windows. Android keeps its prior
-COM/RFCOMM transport; raw Winsock socket creation explicitly returns unsupported
-there (10045). General IP sockets, WSA event/async APIs and SDP service queries
-are outside this pass. Physical multiplayer tests remain required. The optional
+WSALookupServiceNextW preserves the caller's buffer capacity on success; it
+only reports the required size on WSAEFAULT. Chicane's ARM inquiry loop
+initializes its 1024-byte capacity once outside the loop. Shrinking that DWORD
+after a short device name makes the next longer result fail and prematurely
+ends inquiry. The Rust regression enumerates increasing names with one shared
+capacity; tools/bttest/chicane-inquiry-replay.py reproduces this branch with
+the supplied game executable and controlled API responses, without hardware.
+
+Chicane first opens BTH1: (CreateFileW, OPEN_EXISTING, share=0) and sends
+DeviceIoControl 0x01012120 with zero input/output sizes. Stop is 0x01012124.
+Both are FILE_ANY_ACCESS controls. Its actual ARM initializer at 0x2d264 returns
+false before gethostname if either CreateFile or the start IOCTL fails; the
+constructor's ASCII "Unknown" then remains the contestant name. BTH1 has a
+shared open description/lease, process duplication, sharing checks and ordinary
+CloseHandle/close_all cleanup. Closing the handle alone does not stop the driver;
+the explicit stop closes the shared service's ports/sockets. Start checks the
+user's allowed gate and backend readiness, then enables the emulated driver;
+it never forces the physical radio on. Success preserves LastError; disabled
+permission returns 5, absent/not-ready backend 21, invalid payload/output pointer
+87 and unsupported control/stream operations 50. Bytes returned is zero.
+
+Raw-socket providers exist on Windows and Android. Android's JNI JavaSocket
+uses RfcommHost, with nonblocking guest operations and worker-owned BluetoothSocket
+connect/accept/read/write. Chicane calls socket(AF_BTH=32, SOCK_STREAM=1,
+BTHPROTO_RFCOMM=3); its inquiry uses LUP_CONTAINERS and name/address results,
+so implementing only the SDK COM example does not cover it. Explicit guest
+GUIDs become Android service UUIDs; otherwise the stable PortParams UUID maps
+logical guest channels (including SDK channel 2) to Android SDP services. Windows
+raw listeners publish that UUID via WSASetService; clients resolve it with port=0,
+so Android's allocated physical channel is usable by Windows too. Listeners remove
+SDP registration on Drop. Both COM and raw Windows hosts acquire a shared radio
+visibility lease; its refcount is synchronized with restoration of prior radio
+states on last close. Radio handles and failed-start leases are released too.
+Original-console physical-channel interoperability is outside this mapping.
+Windows raw sockets require authentication, as Android's secure sockets do;
+Windows may require pairing in system settings before the game's connect. There are at most 64 registered endpoints, 8 unclaimed peers
+per listener, 64KiB receive and 16 x 4KiB transmit queues per active connection.
+MSG_PEEK and readiness do not consume input; SO_ERROR exposes asynchronous
+connect failure. Socket buffer size options are advisory, capped at 64KiB;
+TCP-only options report WSAENOPROTOOPT. Android has no Bluetooth half-close:
+shutdown gates the requested local direction; SD_BOTH closes the native socket.
+JNI global references belong to each endpoint and are released on Drop.
+closeAll gates late creation, removes endpoints before closing them to avoid
+lock inversion, closes unclaimed peers, interrupts workers and clears queues.
+GameActivity destruction also closes COM sockets and cancels inquiry. Retained
+context is application-only; the Activity used for discovery UI is weak.
+Android12+ requests BLUETOOTH_ADVERTISE alongside CONNECT/SCAN. Hosting opens
+Android's consent dialog for 300-second discoverability; no radio/consent bypass.
+Inquiry waits for ACTION_DISCOVERY_FINISHED (15-second cap), rather than checking
+isDiscovering immediately after asynchronous startDiscovery. Receivers are
+unregistered in finally and closeAll wakes an outstanding inquiry.
+General IP sockets, WSA event/async APIs and SDP service queries are outside
+this pass. Physical multiplayer tests remain required. The optional
 pockethle-bt-test socket-server/socket-client modes exercise real channel-2
 RFCOMM sockets and ping/pong on two Windows hosts without changing game behavior.
 
@@ -2020,8 +2069,8 @@ renders check seven GPU modes in all rotations, including all three SMAA passes.
 JNI Rust type-check (Linux, no native/default features) and 38 library tests pass.
 No Android ABI .so, full Gradle/D8 APK, physical phone or Android Turf Wars session
 was built/run in this environment. These remain required integration checks.
-Windows raw Winsock RFCOMM and a general CLR/.NET CF backend are not implemented
-on Android by this UI/build update; existing Android COM/RFCOMM adapters are kept.
+This UI/build update did not add a general CLR/.NET CF backend. Android raw
+Winsock RFCOMM was subsequently added for Chicane; see section 37.
 
 Android peripheral software checks: 4 kernel GPS + 1 GPS ABI, 6 kernel camera + 6 camera ABI and 3 Bluetooth serial tests passed. These do not validate Android physical sensors or Bluetooth radio.
 

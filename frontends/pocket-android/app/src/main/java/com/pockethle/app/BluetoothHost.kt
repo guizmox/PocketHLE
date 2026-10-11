@@ -1,5 +1,10 @@
 package com.pockethle.app
 
+import android.app.Activity
+import android.bluetooth.BluetoothAdapter
+import java.lang.ref.WeakReference
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
@@ -23,38 +28,82 @@ import java.util.concurrent.atomic.AtomicInteger
 @SuppressLint("MissingPermission")
 object BluetoothHost {
     private var context: Context? = null
+    private var activity = WeakReference<Activity>(null)
+    @Volatile private var lastDiscoverableRequest = 0L
+    @Volatile private var active = true
+    private val scanGate = Any()
+    @Volatile private var scanFinished: CountDownLatch? = null
     private val next = AtomicInteger(1)
     private val connections = ConcurrentHashMap<Int, Connection>()
-    fun initialize(context: Context) { this.context = context.applicationContext }
+    @Synchronized fun initialize(context: Context) {
+        this.context = context.applicationContext
+        activity = WeakReference(context as? Activity)
+        lastDiscoverableRequest = 0L
+        active = true
+        RfcommHost.initialize()
+    }
+    fun requestDiscoverable() {
+        val owner = activity.get() ?: return
+        owner.runOnUiThread {
+            if (owner.isFinishing || owner.isDestroyed || activity.get() !== owner ||
+                (lastDiscoverableRequest != 0L && System.nanoTime() - lastDiscoverableRequest < 15_000_000_000L)) return@runOnUiThread
+            runCatching {
+                if (adapter().scanMode == BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE) return@runCatching
+                lastDiscoverableRequest = System.nanoTime()
+                owner.startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300))
+            }.onFailure { lastDiscoverableRequest = 0L }
+        }
+    }
+    @Synchronized fun closeAll() {
+        active = false
+        scanFinished?.countDown()
+        runCatching { adapter().cancelDiscovery() }
+        activity.clear()
+        RfcommHost.closeAll()
+        connections.keys.toList().forEach { close(it) }
+    }
     fun permissions(): Array<String> = if (Build.VERSION.SDK_INT >= 31)
-        arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
+        arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_ADVERTISE)
     else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-    private fun adapter() = (context?.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+    internal fun adapter() = (context?.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
         ?: throw IllegalStateException("No Bluetooth adapter")
+    @JvmStatic fun ready(): Int = if (active && adapter().isEnabled) 0 else 10091
     @JvmStatic fun hostname(): String = adapter().name ?: "PocketHLE Android"
 
-    @JvmStatic fun scan(): String {
+    @JvmStatic fun scan(): String = synchronized(scanGate) {
         val ctx = context ?: throw IllegalStateException("Bluetooth not initialized")
         val adapter = adapter()
         if (!adapter.isEnabled) throw IllegalStateException("Bluetooth disabled")
         val devices = ConcurrentHashMap<String, BluetoothDevice>()
         adapter.bondedDevices.forEach { devices[it.address] = it }
+        val finished = CountDownLatch(1)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == BluetoothAdapter.ACTION_DISCOVERY_FINISHED) { finished.countDown(); return }
                 @Suppress("DEPRECATION")
                 val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                 if (device != null) devices[device.address] = device
             }
         }
+        val filter = IntentFilter(BluetoothDevice.ACTION_FOUND).apply { addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED) }
         // Bluetooth broadcasts come from another privileged system process.
-        if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(receiver, IntentFilter(BluetoothDevice.ACTION_FOUND), Context.RECEIVER_EXPORTED)
-        else ctx.registerReceiver(receiver, IntentFilter(BluetoothDevice.ACTION_FOUND))
+        if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        else ctx.registerReceiver(receiver, filter)
         try {
-            if (!adapter.startDiscovery()) throw IllegalStateException("Cannot start Bluetooth discovery")
-            val deadline = System.nanoTime() + 12_000_000_000L
-            while (System.nanoTime() < deadline && adapter.isDiscovering) Thread.sleep(100)
-        } finally { adapter.cancelDiscovery(); ctx.unregisterReceiver(receiver) }
-        return JSONArray().apply {
+            synchronized(this) {
+                if (!active) throw IllegalStateException("Bluetooth session closed")
+                scanFinished = finished
+                if (!adapter.startDiscovery()) throw IllegalStateException("Cannot start Bluetooth discovery")
+            }
+            // startDiscovery is asynchronous: isDiscovering can still be false here.
+            finished.await(15, TimeUnit.SECONDS)
+        } finally {
+            scanFinished = null
+            runCatching { adapter.cancelDiscovery() }
+            ctx.unregisterReceiver(receiver)
+        }
+        JSONArray().apply {
             devices.values.sortedBy { it.address }.forEach {
                 put(JSONObject().put("address", it.address.replace(":", "").toLong(16)).put("name", it.name ?: "<unnamed>"))
             }
@@ -77,16 +126,21 @@ object BluetoothHost {
             threads.forEach { it.interrupt() }; rx.clear(); tx.clear()
         }
     }
-    @JvmStatic fun open(server: Boolean, address: Long, uuid: String): Int {
+    @Synchronized @JvmStatic fun open(server: Boolean, address: Long, uuid: String): Int {
         val adapter = adapter()
         if (!adapter.isEnabled) return -10091
+        if (!active) return -10091
+        if (connections.size >= 64) return -10024
         val connection = Connection()
         val id = next.getAndIncrement()
         if (id <= 0) return -8
         val service = UUID.fromString(uuid)
         // Create sockets synchronously so permission and registration failures
         // return immediately. Blocking connect/accept starts on the worker.
-        if (server) connection.server = adapter.listenUsingRfcommWithServiceRecord("PocketHLE RFCOMM", service)
+        if (server) {
+            connection.server = adapter.listenUsingRfcommWithServiceRecord("PocketHLE RFCOMM", service)
+            requestDiscoverable()
+        }
         else {
             val mac = (5 downTo 0).joinToString(":") { "%02X".format((address ushr (it * 8)) and 255) }
             connection.socket = adapter.getRemoteDevice(mac).createRfcommSocketToServiceRecord(service)

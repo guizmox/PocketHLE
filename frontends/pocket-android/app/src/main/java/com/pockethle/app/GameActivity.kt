@@ -279,6 +279,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        BluetoothHost.closeAll()
         CameraHost.closeAll()
         GpsHost.closeAll()
         VibrationHost.closeAll()
