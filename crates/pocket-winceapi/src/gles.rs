@@ -909,6 +909,37 @@ fn texel_bytes(format: u32, ty: u32) -> Option<u32> {
     })
 }
 
+fn gl_polygon_offset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let factor = f32::from_bits(ctx.arg_u32(0)?);
+    let units = f32::from_bits(ctx.arg_u32(1)?);
+    with_ctx(|c| {
+        c.state.polygon_factor = factor;
+        c.state.polygon_units = units;
+    });
+    Ok(VOID)
+}
+fn gl_polygon_offsetx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let factor = ctx.arg_u32(0)? as i32 as f32 / 65536.;
+    let units = ctx.arg_u32(1)? as i32 as f32 / 65536.;
+    with_ctx(|c| {
+        c.state.polygon_factor = factor;
+        c.state.polygon_units = units;
+    });
+    Ok(VOID)
+}
+fn gl_copy_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let target = ctx.arg_u32(0)?;
+    let level = ctx.arg_u32(1)? as i32;
+    let format = ctx.arg_u32(2)?;
+    let x = ctx.arg_u32(3)? as i32;
+    let y = ctx.arg_u32(4)? as i32;
+    let width = ctx.arg_u32(5)? as i32;
+    let height = ctx.arg_u32(6)? as i32;
+    let border = ctx.arg_u32(7)? as i32;
+    with_ctx(|c| c.copy_tex_image_2d(target, level, format, x, y, width, height, border));
+    Ok(VOID)
+}
+
 fn gl_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // (target, level, internalformat, width, height, border, format,
     //  type, pixels) — nine arguments, five of them on the stack.
@@ -1074,6 +1105,9 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         return Ok(VOID);
     }
     let values: Vec<i32> = match pname {
+        0x8037 => vec![with_ctx(|c| c.state.polygon_offset) as i32],
+        0x8038 => vec![with_ctx(|c| c.state.polygon_factor).round() as i32],
+        0x2a00 => vec![with_ctx(|c| c.state.polygon_units).round() as i32],
         0x0b11 => vec![with_ctx(|c| c.state.point_size).round() as i32],
         0x0b21 => vec![with_ctx(|c| c.state.line_width).round() as i32],
         0x846d | 0x846e => with_ctx(|c| c.primitive_size_range(pname == 0x846d))
@@ -1133,6 +1167,9 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         return Ok(VOID);
     }
     let values: Vec<f32> = match pname {
+        0x8037 => vec![with_ctx(|c| c.state.polygon_offset) as u8 as f32],
+        0x8038 => vec![with_ctx(|c| c.state.polygon_factor)],
+        0x2a00 => vec![with_ctx(|c| c.state.polygon_units)],
         0x0b11 => vec![with_ctx(|c| c.state.point_size)],
         0x0b21 => vec![with_ctx(|c| c.state.line_width)],
         0x846d | 0x846e => with_ctx(|c| c.primitive_size_range(pname == 0x846d)).to_vec(),
@@ -1802,6 +1839,9 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glDeleteTextures" => gl_delete_textures,
         "glBindTexture" => gl_bind_texture,
         "glTexImage2D" => gl_tex_image_2d,
+        "glCopyTexImage2D" => gl_copy_tex_image_2d,
+        "glPolygonOffset" => gl_polygon_offset,
+        "glPolygonOffsetx" => gl_polygon_offsetx,
         "glTexSubImage2D" => gl_tex_sub_image_2d,
         "glTexParameterf" => gl_tex_parameterf,
         "glTexParameterx" => gl_tex_parameterx,
@@ -1859,16 +1899,15 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glLineWidth" => gl_line_width,
         "glLineWidthx" => gl_line_widthx,
 
-        // No stencil buffer, no logic op, no multisample, no polygon
-        // offset, no mipmap hints.
+        // No stencil buffer, no logic op, no multisample or mipmap hints.
         "glStencilFunc" | "glStencilMask" | "glStencilOp" | "glClearStencil" | "glLogicOp"
-        | "glSampleCoverage" | "glSampleCoveragex" | "glPolygonOffset" | "glPolygonOffsetx"
+        | "glSampleCoverage" | "glSampleCoveragex"
         | "glHint"
         | "glPixelStorei" | "glFinish" | "glFlush" => gl_ignored,
 
         // Compressed and copy-from-framebuffer texture paths.
         "glCompressedTexImage2D" => gl_compressed_tex_image_2d,
-        "glCompressedTexSubImage2D" | "glCopyTexImage2D" | "glCopyTexSubImage2D" => {
+        "glCompressedTexSubImage2D" | "glCopyTexSubImage2D" => {
             gl_unsupported_format
         }
 
@@ -2172,6 +2211,67 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn polygon_offset_fixed_queries_and_copy_texture_stack_arguments() {
+        let _g = guard();
+        reset_for_test(2, 2);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_polygon_offsetx,
+            &[98304, (-131072i32) as u32],
+        );
+        call(&mut cpu, &mut kernel, gl_get_floatv, &[0x8038, SCRATCH]);
+        assert_eq!(f32::from_bits(cpu.read_u32_le(SCRATCH).unwrap()), 1.5);
+        call(&mut cpu, &mut kernel, gl_get_floatv, &[0x2a00, SCRATCH]);
+        assert_eq!(f32::from_bits(cpu.read_u32_le(SCRATCH).unwrap()), -2.);
+        with_ctx(|c| {
+            c.bind_texture(pocket_gles::GL_TEXTURE_2D, 7);
+            c.target.color.fill(127);
+        });
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_copy_tex_image_2d,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                0,
+                pocket_gles::GL_RGBA,
+                0,
+                0,
+                2,
+                2,
+                0,
+            ],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_NO_ERROR
+        );
+        with_ctx(|c| assert_eq!(c.textures[&7].rgba, vec![127; 16]));
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_copy_tex_image_2d,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                0,
+                pocket_gles::GL_RGBA,
+                0,
+                0,
+                2,
+                2,
+                1,
+            ],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_VALUE
+        );
+    }
 
     #[test]
     fn point_line_size_float_fixed_validation_and_queries() {

@@ -29,7 +29,7 @@ pub trait GuestMemory {
 }
 
 /// A `gl*Pointer` client array binding.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArrayPointer {
     pub enabled: bool,
     /// Components per element (2, 3 or 4).
@@ -262,6 +262,7 @@ pub struct Context {
 
     /// Scratch buffer for guest array reads, reused across draws so a
     /// 60 fps render loop does not allocate per call.
+    prepared_arrays: Vec<(ArrayPointer, u32, Vec<u8>)>,
     scratch: Vec<u8>,
     /// Scratch for index buffer reads.
     index_scratch: Vec<u8>,
@@ -308,6 +309,7 @@ impl Context {
             cull_mode: CullMode::Back,
             target: RenderTarget::new(width, height),
             error: GL_NO_ERROR,
+            prepared_arrays: Vec::new(),
             scratch: Vec::new(),
             index_scratch: Vec::new(),
         }
@@ -486,7 +488,8 @@ impl Context {
             GL_NORMALIZE => self.lighting.normalize = on,
             GL_COLOR_MATERIAL => self.lighting.color_material = on,
             crate::lighting::RESCALE_NORMAL => self.lighting.rescale = on,
-            GL_DITHER | GL_STENCIL_TEST | GL_POLYGON_OFFSET_FILL => {}
+            GL_POLYGON_OFFSET_FILL => self.state.polygon_offset = on,
+            GL_DITHER | GL_STENCIL_TEST => {}
             0x4000..=0x4007 => self.lighting.lights[(cap - 0x4000) as usize].enabled = on,
             _ => self.set_error(GL_INVALID_ENUM),
         }
@@ -774,6 +777,82 @@ impl Context {
     // Bundling them into a struct would only move the unpacking to
     // every call site in the dispatch layer.
     #[allow(clippy::too_many_arguments)]
+    /// Copy framebuffer pixels into the canonical texture image. GL's source
+    /// origin is bottom-left, while the framebuffer cache is stored top-down.
+    pub fn copy_tex_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        format: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        border: i32,
+    ) {
+        if target != GL_TEXTURE_2D
+            || !matches!(
+                format,
+                GL_ALPHA | GL_RGB | GL_RGBA | GL_LUMINANCE | GL_LUMINANCE_ALPHA
+            )
+        {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
+        if level < 0 || width < 0 || height < 0 || width > 1024 || height > 1024 || border != 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if self.texture_units[self.active_texture as usize].bound_texture == 0 {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        // Other texture entry points likewise retain only level zero.
+        if level != 0 {
+            return;
+        }
+        self.sync_gpu();
+        if self.gpu_failed {
+            return;
+        }
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in 0..height {
+            for col in 0..width {
+                let sx = i64::from(x) + i64::from(col);
+                let sy = i64::from(y) + i64::from(row);
+                let mut pixel = [0; 4];
+                if sx >= 0
+                    && sy >= 0
+                    && sx < i64::from(self.target.width)
+                    && sy < i64::from(self.target.height)
+                {
+                    let offset = ((i64::from(self.target.height) - 1 - sy)
+                        * i64::from(self.target.width)
+                        + sx) as usize
+                        * 4;
+                    pixel.copy_from_slice(&self.target.color[offset..offset + 4]);
+                }
+                pixel = match format {
+                    GL_ALPHA => [255, 255, 255, pixel[3]],
+                    GL_RGB => [pixel[0], pixel[1], pixel[2], 255],
+                    GL_LUMINANCE => [pixel[0], pixel[0], pixel[0], 255],
+                    GL_LUMINANCE_ALPHA => [pixel[0], pixel[0], pixel[0], pixel[3]],
+                    _ => pixel,
+                };
+                rgba.extend(pixel);
+            }
+        }
+        self.tex_image_2d(
+            target,
+            0,
+            width as u32,
+            height as u32,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &rgba,
+        );
+    }
+
     pub fn tex_image_2d(
         &mut self,
         target: u32,
@@ -1217,6 +1296,16 @@ impl Context {
         let addr = array.pointer.checked_add(stride.checked_mul(index)?)?;
         let len = (comp * array.size) as usize;
 
+        if let Some((_, base, bytes)) = self.prepared_arrays.iter().find(|(a, _, _)| *a == array) {
+            let offset = addr.checked_sub(*base)? as usize;
+            let bytes = bytes.get(offset..offset.checked_add(len)?)?;
+            let mut out = [0., 0., 0., 1.];
+            for (c, slot) in out.iter_mut().enumerate().take(array.size as usize) {
+                *slot = decode_component(&bytes[c * comp as usize..], array.ty, normalize);
+            }
+            return Some(out);
+        }
+
         // A pointer captured while a VBO was bound is an offset into
         // that buffer's host-side copy, not a guest address. Reading it
         // as a guest address would dereference a small integer and, on
@@ -1499,6 +1588,47 @@ impl Context {
         };
         self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
         let stages = self.texture_stages();
+        self.prepared_arrays.clear();
+        if let (Some(&lo), Some(&hi)) = (indices.iter().min(), indices.iter().max()) {
+            let mut arrays = vec![self.vertex_array];
+            if self.color_array.enabled {
+                arrays.push(self.color_array);
+            }
+            if self.lighting.enabled && self.normal_array.enabled {
+                arrays.push(self.normal_array);
+            }
+            for stage in &stages {
+                let array = self.texture_units[stage.unit].texcoord_array;
+                if array.enabled {
+                    arrays.push(array);
+                }
+            }
+            for array in arrays {
+                if array.buffer != 0 {
+                    continue;
+                }
+                let span = (|| {
+                    let stride = array.element_stride()?;
+                    let start = array.pointer.checked_add(lo.checked_mul(stride)?)?;
+                    let len = hi
+                        .checked_sub(lo)?
+                        .checked_mul(stride)?
+                        .checked_add(array.component_bytes()?.checked_mul(array.size)?)?;
+                    start.checked_add(len)?;
+                    // Sparse indices and enormous strides keep the element-by-element path.
+                    if len > 1024 * 1024 || hi - lo > (indices.len() as u32).saturating_mul(4) {
+                        return None;
+                    }
+                    Some((start, len as usize))
+                })();
+                if let Some((start, len)) = span {
+                    let mut bytes = Vec::new();
+                    if mem.read(start, len, &mut bytes) && bytes.len() >= len {
+                        self.prepared_arrays.push((array, start, bytes));
+                    }
+                }
+            }
+        }
         // Assemble every referenced vertex once. A cache keyed on the
         // index means an indexed mesh transforms each shared vertex a
         // single time instead of once per triangle that uses it.
@@ -1511,6 +1641,7 @@ impl Context {
                     let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
                         // An unmapped array pointer aborts the draw
                         // rather than rendering garbage geometry.
+                        self.prepared_arrays.clear();
                         return;
                     };
                     cache.insert(i, v);
@@ -1519,6 +1650,7 @@ impl Context {
             };
             verts.push(v);
         }
+        self.prepared_arrays.clear();
 
         match mode {
             GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
@@ -1660,6 +1792,120 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires host OpenGL; framebuffer copy synchronizes native pixels"]
+    fn gpu_framebuffer_copy_reads_native_color() {
+        let mut c = Context::new(4, 4);
+        c.enable_gpu().unwrap();
+        c.clear_color = [1., 0.5, 0., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.bind_texture(GL_TEXTURE_2D, 3);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 2, 2, 0);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        for p in c.textures[&3].rgba.chunks_exact(4) {
+            assert_eq!(p[0], 255);
+            assert!((127..=128).contains(&p[1]));
+            assert_eq!(&p[2..], &[0, 255]);
+        }
+    }
+
+    struct CountMem {
+        inner: FakeMem,
+        reads: usize,
+        reject_bulk: bool,
+    }
+    impl GuestMemory for CountMem {
+        fn read(&mut self, addr: u32, len: usize, out: &mut Vec<u8>) -> bool {
+            self.reads += 1;
+            if self.reject_bulk && len > 16 {
+                return false;
+            }
+            self.inner.read(addr, len, out)
+        }
+    }
+    #[test]
+    fn colors_shared_vertices_use_two_bulk_reads_and_refresh_each_draw() {
+        let mut c = ctx();
+        let mut bytes = Vec::new();
+        for i in 0..8 {
+            bytes.extend(floats(&[
+                if i & 1 == 0 { -0.5 } else { 0.5 },
+                if i & 2 == 0 { -0.5 } else { 0.5 },
+                0.,
+            ]));
+        }
+        for _ in 0..8 {
+            bytes.extend(floats(&[1., 0., 0., 1.]));
+        }
+        let mut mem = CountMem {
+            inner: FakeMem { base: BASE, bytes },
+            reads: 0,
+            reject_bulk: false,
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_color_pointer(4, GL_FLOAT, 0, BASE + 96);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_client_state(GL_COLOR_ARRAY, true);
+        let indices = [
+            0, 2, 1, 2, 0, 3, 1, 5, 4, 5, 1, 2, 5, 3, 6, 3, 5, 2, 3, 7, 6, 7, 3, 0, 6, 4, 5, 4, 6,
+            7, 1, 7, 0, 7, 1, 4,
+        ];
+        c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+        assert_eq!(mem.reads, 2); // Previously eight positions plus eight colours.
+        for i in 0..8 {
+            mem.inner.bytes[96 + i * 16..112 + i * 16].copy_from_slice(&floats(&[0., 1., 0., 1.]));
+        }
+        c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+        assert_eq!(mem.reads, 4);
+        assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+        mem.reject_bulk = true;
+        c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+        assert_eq!(mem.reads, 22); // Two failed spans, sixteen valid elements.
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    #[test]
+    fn sparse_and_overflowing_arrays_do_not_prefetch_large_spans() {
+        let mut c = ctx();
+        let mut mem = CountMem {
+            inner: FakeMem {
+                base: BASE,
+                bytes: floats(&[0., 0., 0.]),
+            },
+            reads: 0,
+            reject_bulk: true,
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.draw_elements(&mut mem, GL_TRIANGLES, &[0, 65535, 0]);
+        assert_eq!(mem.reads, 2); // Only requested elements, no sparse-span read.
+        c.set_vertex_pointer(3, GL_FLOAT, 0, u32::MAX - 4);
+        c.draw_elements(&mut mem, GL_POINTS, &[1]);
+        assert_eq!(mem.reads, 2); // Checked offset overflow never reaches memory.
+        assert!(c.prepared_arrays.is_empty());
+    }
+
+    #[test]
+    fn framebuffer_copy_has_gl_origin_formats_and_errors() {
+        let mut c = Context::new(2, 2);
+        c.target.color = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        c.bind_texture(GL_TEXTURE_2D, 7);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, 2, 2, 0);
+        assert_eq!(
+            c.textures[&7].rgba,
+            [9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 1, 1, 0);
+        assert_eq!(c.textures[&7].rgba, [5, 6, 7, 255]);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, 0, 0, 1, 1, 0);
+        assert_eq!(c.textures[&7].rgba, [9, 9, 9, 12]);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, -1, 2, 0);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, 1, 2, 1);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, 0, 0, 0, 1, 2, 0);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+    }
 
     /// Guest memory backed by a flat buffer based at `base`.
     struct FakeMem {

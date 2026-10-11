@@ -63,6 +63,8 @@ struct Gl {
     BufferData: unsafe extern "system" fn(u32, isize, *const c_void, u32),
     EnableVertexAttribArray: unsafe extern "system" fn(u32),
     VertexAttribPointer: unsafe extern "system" fn(u32, i32, u32, u8, i32, *const c_void),
+    PolygonOffset: unsafe extern "system" fn(f32, f32),
+    DrawElements: unsafe extern "system" fn(u32, i32, u32, *const c_void),
     DrawArrays: unsafe extern "system" fn(u32, i32, i32),
     GenFramebuffers: unsafe extern "system" fn(i32, *mut u32),
     DeleteFramebuffers: unsafe extern "system" fn(i32, *const u32),
@@ -424,6 +426,23 @@ impl Gl {
                     unsafe extern "system" fn(u32, i32, u32, u8, i32, *const c_void),
                 >(p)
             },
+            PolygonOffset: {
+                let p = host.load(c"glPolygonOffset");
+                if p.is_null() {
+                    return Err("driver lacks glPolygonOffset".into());
+                }
+                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(f32, f32)>(p)
+            },
+            DrawElements: {
+                let p = host.load(c"glDrawElements");
+                if p.is_null() {
+                    return Err("driver lacks glDrawElements".into());
+                }
+                std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "system" fn(u32, i32, u32, *const c_void),
+                >(p)
+            },
             DrawArrays: {
                 let mut p = host.load(c"glDrawArrays");
                 if p.is_null() {
@@ -760,6 +779,13 @@ pub struct Renderer {
     gl: Gl,
     program: u32,
     buffer: u32,
+    index_buffer: u32,
+    indices: Vec<u16>,
+    packed_scratch: Vec<f32>,
+    vertex_keys: HashMap<[u32; 24], u16>,
+    uniform_values: HashMap<i32, Vec<u32>>,
+    pipeline: Option<PipelineState>,
+    texture_params: HashMap<u32, (Filter, Filter, Wrap, Wrap)>,
     fbo: u32,
     color: u32,
     depth: u32,
@@ -801,6 +827,13 @@ impl Renderer {
                 gl,
                 program: 0,
                 buffer: 0,
+                index_buffer: 0,
+                indices: Vec::new(),
+                packed_scratch: Vec::new(),
+                vertex_keys: HashMap::new(),
+                uniform_values: HashMap::new(),
+                pipeline: None,
+                texture_params: HashMap::new(),
                 fbo: 0,
                 color: 0,
                 depth: 0,
@@ -875,6 +908,7 @@ impl Renderer {
                 return Err(String::from_utf8_lossy(&msg).trim_end_matches('\0').into());
             }
             (r.gl.GenBuffers)(1, &mut r.buffer);
+            (r.gl.GenBuffers)(1, &mut r.index_buffer);
             (r.gl.GenFramebuffers)(1, &mut r.fbo);
             (r.gl.GenTextures)(1, &mut r.color);
             (r.gl.GenRenderbuffers)(1, &mut r.depth);
@@ -976,6 +1010,57 @@ impl Renderer {
         let l = (self.gl.GetUniformLocation)(self.program, CString::new(n).unwrap().as_ptr());
         self.uniforms.insert(n.into(), l);
     }
+    fn changed_uniform(&mut self, location: i32, value: &[u32]) -> bool {
+        if location < 0 {
+            return false;
+        }
+        if self
+            .uniform_values
+            .get(&location)
+            .is_some_and(|old| old == value)
+        {
+            return false;
+        }
+        self.uniform_values.insert(location, value.to_vec());
+        true
+    }
+    unsafe fn uniform_1i(&mut self, l: i32, v: i32) {
+        if self.changed_uniform(l, &[v as u32]) {
+            (self.gl.Uniform1i)(l, v);
+        }
+    }
+    unsafe fn uniform_1f(&mut self, l: i32, v: f32) {
+        if self.changed_uniform(l, &[v.to_bits()]) {
+            (self.gl.Uniform1f)(l, v);
+        }
+    }
+    unsafe fn uniform_2f(&mut self, l: i32, a: f32, b: f32) {
+        if self.changed_uniform(l, &[a.to_bits(), b.to_bits()]) {
+            (self.gl.Uniform2f)(l, a, b);
+        }
+    }
+    unsafe fn uniform_4fv(&mut self, l: i32, n: i32, p: *const f32) {
+        let mut bits = [0u32; 32];
+        let len = n as usize * 4;
+        for (dst, v) in bits[..len]
+            .iter_mut()
+            .zip(std::slice::from_raw_parts(p, len))
+        {
+            *dst = v.to_bits();
+        }
+        if self.changed_uniform(l, &bits[..len]) {
+            (self.gl.Uniform4fv)(l, n, p);
+        }
+    }
+    unsafe fn uniform_matrix4fv(&mut self, l: i32, n: i32, transpose: u8, p: *const f32) {
+        let mut bits = [0u32; 16];
+        for (dst, v) in bits.iter_mut().zip(std::slice::from_raw_parts(p, 16)) {
+            *dst = v.to_bits();
+        }
+        if self.changed_uniform(l, &bits) {
+            (self.gl.UniformMatrix4fv)(l, n, transpose, p);
+        }
+    }
     fn loc(&self, n: &str) -> i32 {
         self.uniforms[n]
     }
@@ -1046,6 +1131,7 @@ impl Renderer {
             if (self.gl.CheckFramebufferStatus)(0x8d40) != 0x8cd5 {
                 return Err("GPU framebuffer incomplete".into());
             }
+            self.pipeline = None;
             self.scissor(None);
             (self.gl.ColorMask)(1, 1, 1, 1);
             (self.gl.DepthMask)(1);
@@ -1068,6 +1154,7 @@ impl Renderer {
     ) -> Result<(), String> {
         self.resize(w, h)?;
         self.host.make_current()?;
+        self.pipeline = None;
         unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             self.scissor(state.scissor);
@@ -1108,6 +1195,7 @@ impl Renderer {
         }
         for n in names {
             if let Some((id, _)) = self.textures.remove(n) {
+                self.texture_params.remove(&id);
                 unsafe {
                     (self.gl.DeleteTextures)(1, &id);
                 }
@@ -1234,66 +1322,95 @@ impl Renderer {
             }
             _ => return Err("unsupported GPU primitive".into()),
         }
+        self.indices.clear();
+        let mut unique = std::mem::take(&mut self.vertex_keys);
+        unique.clear();
+        let mut packed = std::mem::take(&mut self.packed_scratch);
+        packed.clear();
+        let mut indexed = true;
+        for record in self.scratch.chunks_exact(24) {
+            let key = std::array::from_fn(|i| record[i].to_bits());
+            let index = if let Some(&index) = unique.get(&key) {
+                index
+            } else {
+                if unique.len() == 65536 {
+                    indexed = false;
+                    break;
+                }
+                let index = unique.len() as u16;
+                unique.insert(key, index);
+                packed.extend_from_slice(record);
+                index
+            };
+            self.indices.push(index);
+        }
+        // Do not increase transfer size for draws with little vertex reuse.
+        indexed &= packed.len() * 4 + self.indices.len() * 2 < self.scratch.len() * 4;
+        if indexed {
+            std::mem::swap(&mut self.scratch, &mut packed);
+        }
+        self.vertex_keys = unique;
+        self.packed_scratch = packed;
         unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.UseProgram)(self.program);
-            (self.gl.LineWidth)(
-                state
-                    .line_width
-                    .clamp(self.line_range[0], self.line_range[1]),
-            );
-            (self.gl.Uniform1f)(
+            self.uniform_1f(
                 self.loc("pointSize"),
                 state
                     .point_size
                     .clamp(self.point_range[0], self.point_range[1]),
             );
-            if !self.host.es {
-                self.toggle(0x8642, true);
-            }
-            let (x, y, w, h) = state.viewport;
-            (self.gl.Viewport)(x, y, w, h);
-            self.scissor(state.scissor);
-            self.toggle(GL_DEPTH_TEST, state.depth_test);
-            (self.gl.DepthFunc)(compare(state.depth_func));
-            (self.gl.DepthMask)(state.depth_write as u8);
-            self.toggle(GL_BLEND, state.blend);
-            (self.gl.BlendFunc)(blend(state.blend_src), blend(state.blend_dst));
-            self.toggle(GL_CULL_FACE, state.cull.is_some());
-            if let Some(c) = state.cull {
-                (self.gl.CullFace)(match c {
-                    CullMode::Front => GL_FRONT,
-                    CullMode::Back => GL_BACK,
-                    CullMode::FrontAndBack => GL_FRONT_AND_BACK,
+            if self.pipeline.as_ref() != Some(state) {
+                (self.gl.LineWidth)(
+                    state
+                        .line_width
+                        .clamp(self.line_range[0], self.line_range[1]),
+                );
+                if !self.host.es {
+                    self.toggle(0x8642, true);
+                }
+                let (x, y, w, h) = state.viewport;
+                (self.gl.Viewport)(x, y, w, h);
+                self.scissor(state.scissor);
+                self.toggle(GL_DEPTH_TEST, state.depth_test);
+                (self.gl.DepthFunc)(compare(state.depth_func));
+                (self.gl.DepthMask)(state.depth_write as u8);
+                self.toggle(GL_BLEND, state.blend);
+                (self.gl.BlendFunc)(blend(state.blend_src), blend(state.blend_dst));
+                self.toggle(GL_CULL_FACE, state.cull.is_some());
+                if let Some(c) = state.cull {
+                    (self.gl.CullFace)(match c {
+                        CullMode::Front => GL_FRONT,
+                        CullMode::Back => GL_BACK,
+                        CullMode::FrontAndBack => GL_FRONT_AND_BACK,
+                    });
+                }
+                (self.gl.FrontFace)(if state.front_face == FrontFace::Ccw {
+                    GL_CCW
+                } else {
+                    GL_CW
                 });
+                (self.gl.ColorMask)(
+                    state.color_mask[0] as u8,
+                    state.color_mask[1] as u8,
+                    state.color_mask[2] as u8,
+                    state.color_mask[3] as u8,
+                );
+                self.toggle(GL_POLYGON_OFFSET_FILL, state.polygon_offset);
+                (self.gl.PolygonOffset)(state.polygon_factor, state.polygon_units);
+                self.pipeline = Some(state.clone());
             }
-            (self.gl.FrontFace)(if state.front_face == FrontFace::Ccw {
-                GL_CCW
-            } else {
-                GL_CW
-            });
-            (self.gl.ColorMask)(
-                state.color_mask[0] as u8,
-                state.color_mask[1] as u8,
-                state.color_mask[2] as u8,
-                state.color_mask[3] as u8,
-            );
             let lighting = transforms.filter(|t| t.lighting.enabled);
-            (self.gl.Uniform1i)(self.loc("lightingEnabled"), lighting.is_some() as i32);
-            (self.gl.Uniform1i)(
+            self.uniform_1i(self.loc("lightingEnabled"), lighting.is_some() as i32);
+            self.uniform_1i(
                 self.loc("twoSided"),
                 (draw_mode == GL_TRIANGLES && lighting.is_some_and(|t| t.lighting.two_sided))
                     as i32,
             );
             if let Some(t) = lighting {
                 let l = &t.lighting;
-                (self.gl.UniformMatrix4fv)(
-                    self.loc("normalMatrix"),
-                    1,
-                    0,
-                    t.normal_matrix.as_ptr(),
-                );
-                (self.gl.Uniform1i)(
+                self.uniform_matrix4fv(self.loc("normalMatrix"), 1, 0, t.normal_matrix.as_ptr());
+                self.uniform_1i(
                     self.loc("normalMode"),
                     if l.normalize {
                         1
@@ -1307,12 +1424,12 @@ impl Renderer {
                     + t.normal_matrix[9] * t.normal_matrix[9]
                     + t.normal_matrix[10] * t.normal_matrix[10])
                     .sqrt();
-                (self.gl.Uniform1f)(
+                self.uniform_1f(
                     self.loc("normalRescale"),
                     if scale > 0. { 1. / scale } else { 1. },
                 );
-                (self.gl.Uniform1i)(self.loc("colorMaterial"), l.color_material as i32);
-                (self.gl.Uniform1f)(self.loc("shininess"), l.shininess);
+                self.uniform_1i(self.loc("colorMaterial"), l.color_material as i32);
+                self.uniform_1f(self.loc("shininess"), l.shininess);
                 for (name, value) in [
                     ("modelAmbient", l.model_ambient),
                     ("materialAmbient", l.ambient),
@@ -1320,7 +1437,7 @@ impl Renderer {
                     ("materialSpecular", l.specular),
                     ("materialEmission", l.emission),
                 ] {
-                    (self.gl.Uniform4fv)(self.loc(name), 1, value.as_ptr());
+                    self.uniform_4fv(self.loc(name), 1, value.as_ptr());
                 }
                 let ambient: [[f32; 4]; 8] = std::array::from_fn(|i| {
                     let mut c = l.lights[i].ambient;
@@ -1360,24 +1477,24 @@ impl Renderer {
                     ("lightSpot[0]", &spot),
                     ("lightAttenuation[0]", &attenuation),
                 ] {
-                    (self.gl.Uniform4fv)(self.loc(name), 8, values.as_ptr().cast());
+                    self.uniform_4fv(self.loc(name), 8, values.as_ptr().cast());
                 }
             }
-            (self.gl.Uniform1i)(self.loc("objectSpace"), transforms.is_some() as i32);
+            self.uniform_1i(self.loc("objectSpace"), transforms.is_some() as i32);
             let projection = transforms.map(|t| &t.projection).unwrap_or(&IDENTITY);
             let modelview = transforms.map(|t| &t.modelview).unwrap_or(&IDENTITY);
-            (self.gl.UniformMatrix4fv)(self.loc("projectionMatrix"), 1, 0, projection.as_ptr());
-            (self.gl.UniformMatrix4fv)(self.loc("modelviewMatrix"), 1, 0, modelview.as_ptr());
+            self.uniform_matrix4fv(self.loc("projectionMatrix"), 1, 0, projection.as_ptr());
+            self.uniform_matrix4fv(self.loc("modelviewMatrix"), 1, 0, modelview.as_ptr());
             for (i, name) in TEXTURE_MATRICES.iter().enumerate() {
                 let matrix = transforms.map(|t| &t.textures[i]).unwrap_or(&IDENTITY);
-                (self.gl.UniformMatrix4fv)(self.loc(name), 1, 0, matrix.as_ptr());
+                self.uniform_matrix4fv(self.loc(name), 1, 0, matrix.as_ptr());
             }
-            (self.gl.Uniform2f)(
+            self.uniform_2f(
                 self.loc("depthRange"),
                 state.depth_range.0,
                 state.depth_range.1,
             );
-            (self.gl.Uniform1i)(
+            self.uniform_1i(
                 self.loc("alphaMode"),
                 if state.alpha_test {
                     compare(state.alpha_func) as i32 - GL_NEVER as i32
@@ -1387,11 +1504,11 @@ impl Renderer {
             );
             // The software pipeline compares alpha/ref at 8-bit fixed precision.
             // Upload the rounded reference as an exactly representable integer.
-            (self.gl.Uniform1f)(
+            self.uniform_1f(
                 self.loc("alphaRef"),
                 (state.alpha_ref.clamp(0., 1.) * 255. + 0.5).floor(),
             );
-            (self.gl.Uniform1i)(
+            self.uniform_1i(
                 self.loc("fogMode"),
                 if state.fog {
                     match state.fog_mode {
@@ -1403,13 +1520,13 @@ impl Renderer {
                     0
                 },
             );
-            (self.gl.Uniform4fv)(self.loc("fogColor"), 1, state.fog_color.as_ptr());
+            self.uniform_4fv(self.loc("fogColor"), 1, state.fog_color.as_ptr());
             for (n, v) in [
                 ("fogStart", state.fog_start),
                 ("fogEnd", state.fog_end),
                 ("fogDensity", state.fog_density),
             ] {
-                (self.gl.Uniform1f)(self.loc(n), v);
+                self.uniform_1f(self.loc(n), v);
             }
             (self.gl.PixelStorei)(0x0cf5, 1);
             for (i, name) in names.into_iter().enumerate() {
@@ -1439,12 +1556,16 @@ impl Renderer {
                             );
                             item.1 = tex.revision;
                         }
-                        self.params(tex.min_filter, tex.mag_filter, tex.wrap_s, tex.wrap_t);
+                        let params = (tex.min_filter, tex.mag_filter, tex.wrap_s, tex.wrap_t);
+                        if self.texture_params.get(&id) != Some(&params) {
+                            self.params(params.0, params.1, params.2, params.3);
+                            self.texture_params.insert(id, params);
+                        }
                     }
                 }
                 (self.gl.BindTexture)(GL_TEXTURE_2D, id);
-                (self.gl.Uniform1i)(self.loc(SAMPLERS[i]), i as i32);
-                (self.gl.Uniform1i)(
+                self.uniform_1i(self.loc(SAMPLERS[i]), i as i32);
+                self.uniform_1i(
                     self.loc(ENVIRONMENTS[i]),
                     stage.map_or(-1, |s| match s.env {
                         TexEnvMode::Modulate => 0,
@@ -1455,7 +1576,7 @@ impl Renderer {
                     }),
                 );
                 if let Some(s) = stage {
-                    (self.gl.Uniform4fv)(self.loc(ENV_COLORS[i]), 1, s.env_color.as_ptr());
+                    self.uniform_4fv(self.loc(ENV_COLORS[i]), 1, s.env_color.as_ptr());
                 }
             }
             (self.gl.BindBuffer)(GL_ARRAY_BUFFER, self.buffer);
@@ -1488,7 +1609,23 @@ impl Renderer {
                     offset as *const c_void,
                 );
             }
-            (self.gl.DrawArrays)(draw_mode, 0, (self.scratch.len() / 24) as i32);
+            if indexed {
+                (self.gl.BindBuffer)(GL_ELEMENT_ARRAY_BUFFER, self.index_buffer);
+                (self.gl.BufferData)(
+                    GL_ELEMENT_ARRAY_BUFFER,
+                    (self.indices.len() * 2) as isize,
+                    self.indices.as_ptr().cast(),
+                    0x88e0,
+                );
+                (self.gl.DrawElements)(
+                    draw_mode,
+                    self.indices.len() as i32,
+                    GL_UNSIGNED_SHORT,
+                    std::ptr::null(),
+                );
+            } else {
+                (self.gl.DrawArrays)(draw_mode, 0, (self.scratch.len() / 24) as i32);
+            }
             self.dirty = true;
             self.check()
         }
@@ -1539,6 +1676,7 @@ impl Drop for Renderer {
             (self.gl.DeleteRenderbuffers)(1, &self.depth);
             (self.gl.DeleteFramebuffers)(1, &self.fbo);
             (self.gl.DeleteBuffers)(1, &self.buffer);
+            (self.gl.DeleteBuffers)(1, &self.index_buffer);
             (self.gl.DeleteProgram)(self.program);
         }
     }
@@ -1647,6 +1785,118 @@ float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMo
 mod tests {
     use super::*;
     use crate::raster;
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires desktop GL and GLES2; indexed transfers and cache invalidation"]
+    fn host_indexed_transfers_uniform_cache_and_polygon_offset() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            let mut target = RenderTarget::new(32, 32);
+            let mut state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                depth_test: true,
+                ..Default::default()
+            };
+            let tri = triangle([1., 0., 0., 1.], 0.);
+            let vertices: Vec<_> = tri.into_iter().cycle().take(36).collect();
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            assert_eq!(gpu.scratch.len(), 3 * 24);
+            assert_eq!(gpu.indices.len(), 36);
+            let colors_indices = [
+                0, 2, 1, 2, 0, 3, 1, 5, 4, 5, 1, 2, 5, 3, 6, 3, 5, 2, 3, 7, 6, 7, 3, 0, 6, 4, 5, 4,
+                6, 7, 1, 7, 0, 7, 1, 4,
+            ];
+            let cube: [Vertex; 8] = std::array::from_fn(|i| Vertex {
+                pos: [
+                    if i & 1 == 0 { -0.5 } else { 0.5 },
+                    if i & 2 == 0 { -0.5 } else { 0.5 },
+                    if i & 4 == 0 { -0.3 } else { 0.3 },
+                    1.,
+                ],
+                color: [1., 0., 0., 1.],
+                ..Default::default()
+            });
+            let mesh: Vec<_> = colors_indices.iter().map(|&i| cube[i]).collect();
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &mesh,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            assert_eq!(gpu.scratch.len() * 4 + gpu.indices.len() * 2, 840);
+            gpu.clear(32, 32, &state, [0.; 4], 1., GL_DEPTH_BUFFER_BIT)
+                .unwrap();
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            let uniforms = gpu.uniform_values.clone();
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            assert_eq!(gpu.uniform_values, uniforms);
+            assert!(!gpu.changed_uniform(gpu.loc("pointSize"), &[1f32.to_bits()]));
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                &[255, 0, 0, 255]
+            );
+            state.color_mask = [false; 4];
+            gpu.clear(32, 32, &state, [0.; 4], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            assert!(gpu.pipeline.is_none());
+            state.color_mask = [true; 4];
+            state.polygon_offset = true;
+            state.polygon_units = -2.;
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &triangle([0., 1., 0., 1.], 0.),
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                &[0, 255, 0, 255]
+            );
+            gpu.resize(16, 16).unwrap();
+            assert!(gpu.pipeline.is_none());
+        }
+    }
     #[cfg(unix)]
     #[test]
     #[ignore = "requires host OpenGL; checks points and line modes with both shader dialects"]

@@ -189,7 +189,7 @@ pub enum FogMode {
 
 /// Everything the per-fragment stage needs. Assembled by the state
 /// machine once per draw call rather than read through a lock per pixel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PipelineState {
     pub viewport: (i32, i32, i32, i32),
     pub depth_range: (f32, f32),
@@ -218,6 +218,9 @@ pub struct PipelineState {
     pub two_sided_lighting: bool,
     pub point_size: f32,
     pub line_width: f32,
+    pub polygon_offset: bool,
+    pub polygon_factor: f32,
+    pub polygon_units: f32,
 }
 
 impl Default for PipelineState {
@@ -248,6 +251,9 @@ impl Default for PipelineState {
             two_sided_lighting: false,
             point_size: 1.0,
             line_width: 1.0,
+            polygon_offset: false,
+            polygon_factor: 0.,
+            polygon_units: 0.,
         }
     }
 }
@@ -631,6 +637,17 @@ fn raster_clipped(
         return 0;
     }
 
+    let offset = if state.polygon_offset {
+        let dx = ((sv[1].z - sv[0].z) * (sv[2].y - sv[0].y)
+            - (sv[2].z - sv[0].z) * (sv[1].y - sv[0].y))
+            / area;
+        let dy = ((sv[1].x - sv[0].x) * (sv[2].z - sv[0].z)
+            - (sv[2].x - sv[0].x) * (sv[1].z - sv[0].z))
+            / area;
+        state.polygon_factor * dx.abs().max(dy.abs()) + state.polygon_units / 65535.
+    } else {
+        0.
+    };
     let inv_area = 1.0 / area;
     // Flat shading takes the provoking vertex, which for a triangle is
     // the last one.
@@ -664,7 +681,8 @@ fn raster_clipped(
             // Anchor at one vertex: equal endpoint depths must remain
             // exactly equal regardless of rounded barycentric weights.
             // Coplanar UI layers otherwise fail LEQUAL at scattered pixels.
-            let z = sv[2].z + w0 * (sv[0].z - sv[2].z) + w1 * (sv[1].z - sv[2].z);
+            let z = (sv[2].z + w0 * (sv[0].z - sv[2].z) + w1 * (sv[1].z - sv[2].z) + offset)
+                .clamp(0., 1.);
             if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
                 continue;
             }
@@ -1085,6 +1103,38 @@ mod tests {
             color,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn polygon_offset_moves_coplanar_triangle_depth() {
+        let mut target = RenderTarget::new(16, 16);
+        let mut state = PipelineState {
+            viewport: (0, 0, 16, 16),
+            depth_test: true,
+            ..Default::default()
+        };
+        let tri =
+            [[-0.8, -0.8, 0., 1.], [0.8, -0.8, 0., 1.], [0., 0.8, 0., 1.]].map(|pos| Vertex {
+                pos,
+                color: [1., 0., 0., 1.],
+                ..Default::default()
+            });
+        draw_triangle(&mut target, &state, &|_, _, _| None, &[], tri);
+        let green = tri.map(|v| Vertex {
+            color: [0., 1., 0., 1.],
+            ..v
+        });
+        assert_eq!(
+            draw_triangle(&mut target, &state, &|_, _, _| None, &[], green),
+            0
+        );
+        state.polygon_offset = true;
+        state.polygon_units = -2.;
+        assert!(draw_triangle(&mut target, &state, &|_, _, _| None, &[], green) > 0);
+        assert_eq!(
+            &target.color[(8 * 16 + 8) * 4..(8 * 16 + 8) * 4 + 4],
+            &[0, 255, 0, 255]
+        );
     }
 
     #[test]

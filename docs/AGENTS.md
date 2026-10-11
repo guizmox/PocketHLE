@@ -2718,3 +2718,48 @@ lighting/matrices/points/lines/depth/blend/textures/context switching also pass.
 No new resources, workers, diagnostic logging or per-title detection. Software
 rendering is unchanged. The standalone executable establishes call-site evidence;
 the complete Carmageddon run still needs its game data and device testing.
+
+### Colors: array reads, native indices and private-context state cache
+The attached Colors cube routine (0xd5b94) submits eight fixed position/colour
+vertices and 36 unsigned-byte triangle indices. Static call-site counts are not
+frame-frequency measurements. Dense guest client arrays are now read once per
+draw and decoded by stride; spans are capped at 1 MiB per array and four times
+the index-count range. Checked addresses, sparse spans or failed speculative
+reads keep the old per-element behavior. VBO data remains a host-copy offset.
+Prepared data is discarded after vertex assembly, including failed draws; do
+not persist it across calls without tracking guest writes.
+
+The native renderer deduplicates complete 24-float records by exact bits and
+uploads a reusable 16-bit index buffer if total transfer size decreases. Flat
+provoking color/normal/light-position attributes are part of the key, and all
+primitive expansion/winding rules are retained. More than 65,536 unique records
+or no transfer benefit uses DrawArrays. Packing/deduplication is still CPU work;
+this is not a claim that the complete guest draw path is GPU-only. Scratch vectors
+and the bounded vertex map are reused and freed with the renderer; its new native
+index buffer is deleted alongside the vertex buffer.
+
+Uniform values belong to the private program, cache exact bit patterns and skip
+unchanged uploads. Native pipeline snapshots are invalidated by resize/clear,
+which change masks/scissor independently of drawing. Each texture ID has cached
+filter/wrap parameters; deleting a texture removes its entry to permit native ID
+reuse. Texture bindings continue being restored at draw time, including after
+readback/resize. Parent/child renderers have separate programs, contexts and caches.
+
+GL_POLYGON_OFFSET_FILL and float/fixed setters now control triangles in both
+paths. Software slope is computed in window-depth coordinates, units use 1/65535
+consistent with the advertised depth precision. Native uses glPolygonOffset;
+physical offset precision remains driver dependent. Points/lines are unaffected.
+Queries expose enable, factor and units. glCopyTexImage2D synchronizes GPU colour,
+copies bottom-left framebuffer coordinates into canonical texture rows, supports
+the five base formats and validates target/dimensions/level/border. Out-of-bounds
+source pixels are deterministically zero before format conversion. Only level
+zero is stored, matching existing texImage semantics; copy subimages/mip storage
+remain unsupported. Copies still read back native pixels and are not advertised
+as a zero-copy performance improvement.
+
+The Colors index-sequence tests establish 16 -> 2 guest attribute reads and
+3456 -> 840 native transfer bytes (8 records plus 36 ushort indices). Host GL and
+GLES2 verify rendering, caches after clear/resize, polygon depth, existing lighting,
+alpha/depth, primitives, matrices and independent context resume. API tests cover
+fixed conversion, queries, stack tail and GL errors. Full-game FPS requires its
+assets and target-device testing; no temporary profiling is shipped.

@@ -1,5 +1,6 @@
 README-Android-FPS.txt
 README-GPU-Carmageddon.txt
+README-GPU-Colors-Optimizations.txt
 README-GPU-Experimental.txt
 README-GPU-Lighting.txt
 README-GPU-Primitives.txt
@@ -50,6 +51,7 @@ frontends/pocket-android/app/src/main/res/layout/activity_game.xml
 frontends/pocket-android/app/src/main/res/xml/preferences_game.xml
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs
+patch-files.txt
 third-party/ffmpeg/README.md
 tools/android-native-freshness.py
 tools/build-android-apk.sh
