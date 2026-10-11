@@ -2068,6 +2068,14 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         with_ctx(|c| c.sync_gpu());
         return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
     }
+    // Frontend snapshot throttling does not pace guest execution. Battlestations
+    // runs its simulation too quickly once GPU rendering removes the incidental
+    // software rasterization cost. Use the same modeled 60 Hz LCD as DirectDraw,
+    // including cooperative retries and one-shot credit for explicit blank waits.
+    // Offscreen swaps above are synchronization, not display presentations.
+    if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
+        return Ok(outcome);
+    }
     let fb_len = ctx.kernel.framebuffer.pixels.len();
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
     with_ctx(|c| {
@@ -2099,6 +2107,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         )?;
     }
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
+    ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     log::trace!(
         "eglSwapBuffers() -> frame {}",
         ctx.kernel.framebuffer.frame_counter
@@ -2106,8 +2115,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
-/// Entry points that succeed without doing anything: there is no
-/// asynchronous queue to wait on and no swap interval to honour.
+/// Synchronize rendering without presenting or advancing the display clock.
 fn egl_wait(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let surface = SURFACES.with(|s| s.borrow().draw);
     flush_pixmap(ctx, surface)?;
@@ -2440,8 +2448,8 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "eglCopyBuffers" => egl_copy_buffers,
         "eglSwapInterval"
         // The Gizmondo's GoForce driver exposed the swap interval under an
-        // NV name, and Sticky Balls calls that one. Nothing here is
-        // presented on a real vblank, so accepting it is the whole job.
+        // NV name, and Sticky Balls calls that one. Retain compatibility
+        // acceptance; window swaps always observe the emulator's 60 Hz cap.
         | "eglSwapIntervalNV"
         | "eglSurfaceAttrib" | "eglBindAPI" => egl_true,
         "eglReleaseThread" => egl_terminate,
@@ -2717,9 +2725,16 @@ mod tests {
             thunk: &t,
             kernel,
         };
-        match handler(&mut c).unwrap() {
-            DispatchOutcome::ReturnedR0(v) => v,
-            other => panic!("unexpected outcome: {other:?}"),
+        let started = std::time::Instant::now();
+        loop {
+            match handler(&mut c).unwrap() {
+                DispatchOutcome::ReturnedR0(v) => return v,
+                DispatchOutcome::JumpTo(pc) => {
+                    assert_eq!(pc, t.thunk_va);
+                    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
         }
     }
 
@@ -3062,6 +3077,8 @@ mod tests {
             c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
         });
         let counter = kernel.framebuffer.frame_counter;
+        let anchor = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        kernel.framebuffer.directdraw.last_present = Some(anchor);
         call(
             &mut cpu,
             &mut kernel,
@@ -3069,6 +3086,9 @@ mod tests {
             &[DISPLAY_HANDLE, off],
         );
         assert_eq!(kernel.framebuffer.frame_counter, counter);
+        assert_eq!(kernel.framebuffer.directdraw.last_present, Some(anchor));
+        assert!(kernel.framebuffer.directdraw.pending.is_empty());
+        kernel.framebuffer.directdraw.last_present = None;
         call(
             &mut cpu,
             &mut kernel,
@@ -3531,6 +3551,122 @@ mod tests {
             assert_eq!((c.target.width, c.target.height), (w, h));
             assert_eq!(c.state.viewport, (0, 0, w as i32, h as i32));
         });
+    }
+
+    fn window_swap_timing(gpu: bool) {
+        use pocket_kernel::framebuffer::DirectDrawTiming;
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        reset_for_test(kernel.framebuffer.width, kernel.framebuffer.height);
+        if gpu {
+            set_gpu_renderer(true);
+            assert!(with_ctx(|c| c.gpu_active()));
+        }
+        // First presentation has no artificial startup delay.
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_swap_buffers,
+            &[DISPLAY_HANDLE, SURFACE_HANDLE],
+        );
+        let previous = kernel.framebuffer.directdraw.last_present.unwrap();
+        with_ctx(|c| {
+            c.clear_color = [1., 0., 0., 1.];
+            c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
+        });
+        // Force a future anchor: even a slow CI runner must exercise retry.
+        let anchor = std::time::Instant::now() + std::time::Duration::from_millis(5);
+        kernel.framebuffer.directdraw.last_present = Some(anchor);
+        let before = kernel.framebuffer.pixels.clone();
+        let counter = kernel.framebuffer.frame_counter;
+        cpu.write_reg(ArmReg::R0, DISPLAY_HANDLE).unwrap();
+        cpu.write_reg(ArmReg::R1, SURFACE_HANDLE).unwrap();
+        let t = thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        assert_eq!(
+            egl_swap_buffers(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(t.thunk_va)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), DISPLAY_HANDLE);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), SURFACE_HANDLE);
+        assert_eq!(ctx.kernel.framebuffer.pixels, before);
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
+        let key = (0, t.thunk_va, ctx.cpu.read_reg(ArmReg::Sp).unwrap());
+        let deadline = ctx.kernel.framebuffer.directdraw.pending[&key];
+        assert_eq!(deadline, anchor + DirectDrawTiming::PERIOD);
+        // Each retry retains the same deadline and intact arguments.
+        loop {
+            match egl_swap_buffers(&mut ctx).unwrap() {
+                DispatchOutcome::JumpTo(pc) => {
+                    assert_eq!(pc, t.thunk_va);
+                    assert_eq!(ctx.kernel.framebuffer.directdraw.pending[&key], deadline);
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), DISPLAY_HANDLE);
+                }
+                DispatchOutcome::ReturnedR0(EGL_TRUE) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
+        assert!(ctx.kernel.framebuffer.directdraw.last_present.unwrap() >= deadline);
+        assert!(ctx.kernel.framebuffer.directdraw.last_present.unwrap() > previous);
+        assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0, 0xf8]);
+        // Identical frames are still paced; pixel changes cannot be the clock.
+        let first = ctx.kernel.framebuffer.directdraw.last_present.unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            match egl_swap_buffers(&mut ctx).unwrap() {
+                DispatchOutcome::ReturnedR0(EGL_TRUE) => break,
+                DispatchOutcome::JumpTo(pc) => {
+                    assert_eq!(pc, t.thunk_va);
+                    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(
+            ctx.kernel.framebuffer.directdraw.last_present.unwrap()
+                >= first + DirectDrawTiming::PERIOD
+        );
+        // Resuming a late process does not produce a catch-up burst.
+        ctx.kernel.framebuffer.directdraw.last_present =
+            Some(std::time::Instant::now() - DirectDrawTiming::PERIOD * 10);
+        assert_eq!(
+            egl_swap_buffers(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(EGL_TRUE)
+        );
+        assert_eq!(
+            egl_swap_buffers(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(t.thunk_va)
+        );
+        // Drain this final pending wait before ending the test.
+        let started = std::time::Instant::now();
+        loop {
+            match egl_swap_buffers(&mut ctx).unwrap() {
+                DispatchOutcome::ReturnedR0(EGL_TRUE) => break,
+                DispatchOutcome::JumpTo(pc) => {
+                    assert_eq!(pc, t.thunk_va);
+                    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn window_swaps_pace_software_and_preserve_retry_arguments() {
+        let _g = guard();
+        window_swap_timing(false);
+    }
+
+    #[test]
+    #[ignore = "requires host OpenGL; native swaps use the same modeled LCD clock"]
+    fn window_swaps_pace_native_gpu_and_preserve_retry_arguments() {
+        let _g = guard();
+        window_swap_timing(true);
     }
 
     #[test]

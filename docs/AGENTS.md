@@ -2991,3 +2991,36 @@ Validation: 155 GLES tests including real desktop GL/GLES drivers, mutable guest
 data, VBO capture/update, normalized colors, first/index offsets and path switches;
 284 WinCE tests passed; Android ARM64/ARMv7 checks with warnings denied. Full Windows/APK builds and actual
 Colors performance remain device validation tasks. No temporary instrumentation.
+
+## EGL display cadence (2026-10-11)
+
+Battlestations imports eglSwapBuffers (static call site 0x25b6c). Frontend
+snapshot throttling does not constrain the guest simulation; the old EGL
+handler completed as fast as rendering allowed. Window swaps now use the same
+60 Hz modeled display clock and cooperative wait_display helper as DirectDraw.
+This is a general presentation policy, not a game-name branch or guest clock
+scaling. Both software and GPU swaps follow it. First/late frames are immediate;
+following swaps cannot catch up in bursts. Identical images are paced too.
+
+Wait before conversion/publication/DirectShow/GAPI synchronization, preserving
+arguments and deadline across scheduler reentry. Main waits yield to ready
+workers or sleep at most 1 ms; worker waits use scheduler deadlines. Explicit
+DirectDraw blank credit is consumed once, avoiding double waits on mixed paths.
+Record completion in the shared clock after mapped framebuffer synchronization.
+Pbuffer/pixmap swaps and eglWaitGL/Native synchronize only, without presentation
+pacing or updating the display clock. Parent kernel state retains its own clock;
+expired waits complete normally after resume. Pending maps are owned by the
+framebuffer/kernel and drop with the process; no new worker/native resource.
+
+Existing eglSwapInterval/NV compatibility acceptance is retained; programmable
+intervals greater than one are not newly implemented. The 60 Hz cap is emulator
+policy and not a claim of exact original GoForce swap behavior. Native/resource
+paths and audio clocks remain unchanged. No temporary instrumentation.
+
+Validation: all 286 WinCE tests pass, including native GPU presentation, EGL
+retry arguments/deadline preservation, unchanged-image cadence, late-resume
+behavior, offscreen exemption and existing DirectDraw worker/blank credit tests.
+The unchanged GLES layer retains its 155-test validation from the vertex patch.
+Full Android WinCE cross-check was blocked by absent NDK compiler for rmp3;
+this is an environment limitation, not an APK build validation. Windows/APK
+builds and Battlestations speed/input/audio must be checked on user devices.

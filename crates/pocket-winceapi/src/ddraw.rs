@@ -705,7 +705,7 @@ fn palette_ok(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 /// Keep the same deadline when the scheduler re-enters this thunk.
-fn wait_display(
+pub(crate) fn wait_display(
     ctx: &mut CallCtx<'_>,
     blank: Option<bool>,
 ) -> Result<Option<DispatchOutcome>, KernelError> {

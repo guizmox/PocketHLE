@@ -3,6 +3,7 @@ README-GPU-Anisotropic-Filtering.txt
 README-GPU-Carmageddon-Optimizations.txt
 README-GPU-Carmageddon.txt
 README-GPU-Colors-Optimizations.txt
+README-GPU-EGL-Pacing.txt
 README-GPU-Experimental.txt
 README-GPU-Four-Games.txt
 README-GPU-Lighting.txt
@@ -32,6 +33,7 @@ crates/pocket-winceapi/native/media.c
 crates/pocket-winceapi/src/accelerators.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/datetime.rs
+crates/pocket-winceapi/src/ddraw.rs
 crates/pocket-winceapi/src/directshow.rs
 crates/pocket-winceapi/src/directshow_extended.rs
 crates/pocket-winceapi/src/gles.rs
