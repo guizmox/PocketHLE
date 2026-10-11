@@ -57,6 +57,7 @@ pub struct Texture {
     /// Explicit guest levels; absent levels are derived at native upload time.
     pub mipmaps: std::collections::BTreeMap<u32, (u32, u32, Vec<u8>)>,
     pub compressed: std::collections::BTreeMap<u32, CompressedLevel>,
+    pub max_level: u32,
     pub min_filter: Filter,
     pub mag_filter: Filter,
     pub wrap_s: Wrap,
@@ -74,6 +75,7 @@ impl Default for Texture {
             // now preserve all four native level-selection modes.
             mipmaps: Default::default(),
             compressed: Default::default(),
+            max_level: 1000,
             min_filter: Filter::Linear,
             mag_filter: Filter::Linear,
             wrap_s: Wrap::Repeat,
@@ -369,10 +371,16 @@ impl Texture {
                 }
                 None => false,
             },
+            GL_TEXTURE_MAX_LEVEL_SGIS => {
+                if self.max_level != value {
+                    self.max_level = value;
+                    self.revision = self.revision.wrapping_add(1);
+                }
+                true
+            }
             GL_TEXTURE_MIN_LOD_SGIS
             | GL_TEXTURE_MAX_LOD_SGIS
             | GL_TEXTURE_BASE_LEVEL_SGIS
-            | GL_TEXTURE_MAX_LEVEL_SGIS
             | GL_TEXTURE_LOD_BIAS_EXT => true,
             _ => false,
         }

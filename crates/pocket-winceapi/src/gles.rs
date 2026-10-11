@@ -1174,8 +1174,14 @@ fn gl_tex_parameterf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let (target, pname) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
     // The filters and wrap modes are enums even in the float entry
     // point, so the guest passes them as a float-encoded enum value.
-    let value = argf(ctx, 2)? as u32;
-    with_ctx(|c| c.tex_parameter(target, pname, value));
+    let value = argf(ctx, 2)?;
+    with_ctx(|c| {
+        if pname == pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS && (!value.is_finite() || value < 0.) {
+            c.set_error(pocket_gles::GL_INVALID_VALUE);
+        } else {
+            c.tex_parameter(target, pname, value as u32);
+        }
+    });
     Ok(VOID)
 }
 
@@ -2960,6 +2966,51 @@ mod tests {
             &[0x8500, pocket_gles::GL_TEXTURE_LOD_BIAS_EXT, 1f32.to_bits()],
         );
         assert_eq!(with_ctx(|c| c.texture_units[0].lod_bias), 1.);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_bind_texture,
+            &[pocket_gles::GL_TEXTURE_2D, 1],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_parameterf,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS,
+                2f32.to_bits(),
+            ],
+        );
+        assert_eq!(with_ctx(|c| c.textures[&1].max_level), 2);
+        for invalid in [-1f32, f32::NAN, f32::INFINITY] {
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_tex_parameterf,
+                &[
+                    pocket_gles::GL_TEXTURE_2D,
+                    pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS,
+                    invalid.to_bits(),
+                ],
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, gl_get_error, &[]),
+                pocket_gles::GL_INVALID_VALUE
+            );
+            assert_eq!(with_ctx(|c| c.textures[&1].max_level), 2);
+        }
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_parameterx,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS,
+                0,
+            ],
+        );
+        assert_eq!(with_ctx(|c| c.textures[&1].max_level), 0);
     }
 
     fn offscreen_roundtrip(gpu: bool) {

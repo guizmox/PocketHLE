@@ -1202,6 +1202,10 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
+        if pname == GL_TEXTURE_MAX_LEVEL_SGIS && (value as i32) < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
         let unit = self.active_texture as usize;
         if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_ENUM);
@@ -2077,6 +2081,14 @@ mod tests {
         assert_eq!(c.textures[&1].width, 4);
         c.tex_image_2d(GL_TEXTURE_2D, 11, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &[0; 4]);
         assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.textures[&1].max_level, 1000);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL_SGIS, 0);
+        assert_eq!(c.textures[&1].max_level, 0);
+        let revision = c.textures[&1].revision;
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL_SGIS, u32::MAX);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.textures[&1].revision, revision);
+        assert_eq!(c.textures[&1].max_level, 0);
         c.set_lod_bias(-0.5);
         assert_eq!(c.texture_units[0].lod_bias, -0.5);
         c.set_lod_bias(f32::NAN);

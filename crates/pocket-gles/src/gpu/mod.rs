@@ -92,6 +92,7 @@ const TEXTURE_MATRICES: [&str; 4] = [
 ];
 const SAMPLERS: [&str; 4] = ["sampler0", "sampler1", "sampler2", "sampler3"];
 const ENVIRONMENTS: [&str; 4] = ["env0", "env1", "env2", "env3"];
+const LOD_LIMITS: [&str; 4] = ["lodLimit0", "lodLimit1", "lodLimit2", "lodLimit3"];
 const LOD_BIASES: [&str; 4] = ["lodBias0", "lodBias1", "lodBias2", "lodBias3"];
 const ENV_COLORS: [&str; 4] = ["envColor0", "envColor1", "envColor2", "envColor3"];
 #[allow(non_snake_case)]
@@ -1021,6 +1022,8 @@ pub struct Renderer {
     readback: Vec<u8>,
     dirty: bool,
     full_npot: bool,
+    native_max_level: bool,
+    lod_derivatives: bool,
     compressed_formats: HashSet<u32>,
     attribute_layout: Option<VertexLayout>,
     pub point_range: [f32; 2],
@@ -1080,6 +1083,28 @@ impl Renderer {
             } else {
                 true
             };
+            let extensions_ptr = (gl.GetString)(0x1f03);
+            let extensions = if extensions_ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(extensions_ptr.cast())
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let version_ptr = (gl.GetString)(0x1f02);
+            let es3 = !version_ptr.is_null()
+                && CStr::from_ptr(version_ptr.cast())
+                    .to_string_lossy()
+                    .starts_with("OpenGL ES 3.");
+            let native_max_level = !host.es
+                || es3
+                || extensions
+                    .split_whitespace()
+                    .any(|e| e == "GL_APPLE_texture_max_level");
+            let lod_derivatives = !host.es
+                || extensions
+                    .split_whitespace()
+                    .any(|e| e == "GL_OES_standard_derivatives");
             let mut count = 0;
             (gl.GetIntegerv)(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &mut count);
             let mut formats = vec![0i32; count.clamp(0, 128) as usize];
@@ -1112,6 +1137,8 @@ impl Renderer {
                 readback: Vec::new(),
                 dirty: true,
                 full_npot,
+                native_max_level,
+                lod_derivatives,
                 compressed_formats,
                 attribute_layout: None,
                 point_range,
@@ -1133,7 +1160,16 @@ impl Renderer {
                     prefix.replace("precision mediump float", "precision highp float")
                 ),
             )?;
-            let fs = match r.shader(0x8b30, &format!("{prefix}{FRAGMENT}")) {
+            let fragment_prefix = if r.lod_derivatives {
+                if r.host.es {
+                    prefix.replace("#version 100\n", "#version 100\n#extension GL_OES_standard_derivatives : enable\n#define LOD_DERIVATIVES\n")
+                } else {
+                    format!("{prefix}#define LOD_DERIVATIVES\n")
+                }
+            } else {
+                prefix.to_owned()
+            };
+            let fs = match r.shader(0x8b30, &format!("{fragment_prefix}{FRAGMENT}")) {
                 Ok(s) => s,
                 Err(e) => {
                     (r.gl.DeleteShader)(vs);
@@ -1241,7 +1277,7 @@ impl Renderer {
                 r.cache_uniform(name);
             }
             for i in 0..4 {
-                for name in ["sampler", "env", "envColor", "lodBias"] {
+                for name in ["sampler", "env", "envColor", "lodBias", "lodLimit"] {
                     r.cache_uniform(&format!("{name}{i}"));
                 }
             }
@@ -1888,6 +1924,7 @@ impl Renderer {
                 (self.gl.ActiveTexture)(GL_TEXTURE0 + i as u32);
                 let stage = stages.iter().find(|s| s.unit == i);
                 let mut id = self.white;
+                let mut lod_limit = [1., 1., 0., 0.];
                 if stage.is_some() {
                     if let Some(tex) = textures.get(&name).filter(|t| t.is_complete()) {
                         let item = self.textures.entry(name).or_insert_with(|| {
@@ -1897,7 +1934,18 @@ impl Renderer {
                         });
                         id = item.0;
                         (self.gl.BindTexture)(GL_TEXTURE_2D, id);
-                        let needs_mips = tex.min_filter.uses_mipmaps()
+                        let last_level = tex.width.max(tex.height).ilog2();
+                        let restricted = tex.max_level < last_level;
+                        let base_only = tex.max_level == 0
+                            || (restricted && !self.native_max_level && !self.lod_derivatives);
+                        lod_limit = [
+                            tex.width as f32,
+                            tex.height as f32,
+                            tex.max_level.min(last_level) as f32,
+                            (restricted && !self.native_max_level && !base_only) as u8 as f32,
+                        ];
+                        let needs_mips = !base_only
+                            && tex.min_filter.uses_mipmaps()
                             && (self.full_npot
                                 || (tex.width.is_power_of_two() && tex.height.is_power_of_two()));
                         let newly_mipped = needs_mips
@@ -1906,10 +1954,29 @@ impl Renderer {
                                 .get(&id)
                                 .is_none_or(|p| !p.0.uses_mipmaps());
                         if item.1 != tex.revision || newly_mipped {
+                            if self.native_max_level {
+                                (self.gl.TexParameteri)(
+                                    GL_TEXTURE_2D,
+                                    GL_TEXTURE_MAX_LEVEL_SGIS,
+                                    tex.max_level.min(last_level) as i32,
+                                );
+                            }
                             upload_texture(&self.gl, &self.compressed_formats, tex, needs_mips)?;
                             item.1 = tex.revision;
                         }
-                        let params = if !self.full_npot
+                        let params = if base_only {
+                            (
+                                match tex.min_filter {
+                                    Filter::Nearest
+                                    | Filter::NearestMipmapNearest
+                                    | Filter::NearestMipmapLinear => Filter::Nearest,
+                                    _ => Filter::Linear,
+                                },
+                                tex.mag_filter,
+                                tex.wrap_s,
+                                tex.wrap_t,
+                            )
+                        } else if !self.full_npot
                             && (!tex.width.is_power_of_two() || !tex.height.is_power_of_two())
                         {
                             (
@@ -1944,6 +2011,7 @@ impl Renderer {
                         TexEnvMode::Add => 4,
                     }),
                 );
+                self.uniform_4fv(self.loc(LOD_LIMITS[i]), 1, lod_limit.as_ptr());
                 self.uniform_1f(self.loc(LOD_BIASES[i]), stage.map_or(0.0, |s| s.lod_bias));
                 if let Some(s) = stage {
                     self.uniform_4fv(self.loc(ENV_COLORS[i]), 1, s.env_color.as_ptr());
@@ -2192,10 +2260,22 @@ void main(){
 "#;
 const FRAGMENT: &str = r#"
 VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
+uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0,lodBias0),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1,lodBias1),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2,lodBias2),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3,lodBias3),env3,envColor3);
+float limitedBias(vec2 uv,float bias,vec4 limit){
+#ifdef LOD_DERIVATIVES
+ if(limit.w>0.5){
+  vec2 dx=dFdx(uv)*limit.xy;vec2 dy=dFdy(uv)*limit.xy;
+  float rho=max(length(dx),length(dy));
+  float lod=log2(max(rho,0.000001));
+  bias=min(bias,limit.z-lod);
+ }
+#endif
+ return bias;
+}
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0,limitedBias(uv0,lodBias0,lodLimit0)),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1,limitedBias(uv1,lodBias1,lodLimit1)),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2,limitedBias(uv2,lodBias2,lodLimit2)),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3,limitedBias(uv3,lodBias3,lodLimit3)),env3,envColor3);
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
@@ -2367,6 +2447,79 @@ mod tests {
                     "es={es} bias={bias}"
                 );
             }
+            // Native max-level and GLES2 derivative fallback must cap the
+            // selected authored level, and permit it again when the cap grows.
+            let native_max_level = gpu.native_max_level;
+            for native_cap in [true, false] {
+                gpu.native_max_level = native_cap;
+                if !native_cap {
+                    let id = gpu.textures[&1].0;
+                    unsafe {
+                        (gpu.gl.ActiveTexture)(GL_TEXTURE0);
+                        (gpu.gl.BindTexture)(GL_TEXTURE_2D, id);
+                        (gpu.gl.TexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL_SGIS, 1000);
+                    }
+                }
+                for min_filter in [Filter::NearestMipmapNearest, Filter::LinearMipmapLinear] {
+                    for (cap, expected) in [
+                        (0, [255, 0, 0, 255]),
+                        (1, [0, 255, 0, 255]),
+                        (1000, [0, 0, 255, 255]),
+                        (1, [0, 255, 0, 255]),
+                    ] {
+                        let texture = textures.get_mut(&1).unwrap();
+                        texture.min_filter = min_filter;
+                        texture.set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, cap);
+                        stage.lod_bias = 1.;
+                        gpu.draw_indexed_object_space(
+                            &target,
+                            &state,
+                            GL_TRIANGLE_STRIP,
+                            &vertices,
+                            &[0, 1, 2, 3],
+                            &[stage],
+                            &textures,
+                            [1, 0, 0, 0],
+                            &identity_transforms(),
+                        )
+                        .unwrap();
+                        gpu.read(&mut target).unwrap();
+                        let i = (16 * 32 + 16) * 4;
+                        for (actual, expected) in target.color[i..i + 4].iter().zip(expected) {
+                            assert!(
+                                actual.abs_diff(expected) <= 1,
+                                "es={es} native={native_cap} cap={cap} filter={min_filter:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            // Old ES2 without derivatives retains base filtering rather than
+            // sampling beyond a cap it cannot represent.
+            let derivatives = gpu.lod_derivatives;
+            gpu.lod_derivatives = false;
+            gpu.draw_indexed_object_space(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &[0, 1, 2, 3],
+                &[stage],
+                &textures,
+                [1, 0, 0, 0],
+                &identity_transforms(),
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            let i = (16 * 32 + 16) * 4;
+            assert_eq!(&target.color[i..i + 4], &[255, 0, 0, 255]);
+            gpu.lod_derivatives = derivatives;
+            gpu.native_max_level = native_max_level;
+            textures.get_mut(&1).unwrap().min_filter = Filter::NearestMipmapNearest;
+            textures
+                .get_mut(&1)
+                .unwrap()
+                .set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, 1000);
             textures
                 .get_mut(&1)
                 .unwrap()

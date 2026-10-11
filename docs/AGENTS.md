@@ -2932,3 +2932,20 @@ layers collapse with 16-bit and separate with 24-bit, matching software after
 attachment resizing. 151 GLES tests, 284 WinCE tests and both Android Rust GLES
 checks pass. RBR root cause and visible improvement need target-device confirmation.
 Filtering is unchanged; base-level software sampling and GPU mip filtering differ.
+
+## Guest maximum mip level (2026-10-11)
+
+RBR sets GL_TEXTURE_MAX_LEVEL_SGIS to authored count minus one; it was accepted
+and ignored. Texture now retains max_level (default 1000) and changes invalidate
+revision. Renderer applies native max-level on desktop/GLES3/APPLE extension;
+level zero uses matching base minification filtering. Core GLES2 fallback uses
+OES_standard_derivatives to estimate implicit LOD and cap texture2D bias. This
+estimate can differ from the driver's implementation. Without derivatives or
+native caps, restricted textures use base filtering (possible shimmering), not
+unsupported GL enums. Unrestricted filtering is unchanged. Shader derivative
+extension is enabled only when advertised; uniforms/layout caches remain reused.
+Reject negative and nonfinite float setters, preserving texture state on errors.
+Native regression covers caps 0/1/default, removing/restoring caps, nearest and
+trilinear modes, native/forced shader/no-derivative paths. 151 GLES tests, 284
+WinCE tests and Android ARM64/ARMv7 GLES checks pass. Full Windows/APK builds and
+RBR visual improvement still need target-device validation. No instrumentation.
