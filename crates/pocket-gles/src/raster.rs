@@ -396,6 +396,7 @@ pub struct TextureStage {
     pub env: TexEnvMode,
     /// This unit's `GL_TEXTURE_ENV_COLOR`; only `GL_BLEND` reads it.
     pub env_color: [f32; 4],
+    pub lod_bias: f32,
 }
 
 #[inline]
@@ -1093,6 +1094,7 @@ mod tests {
             unit: 0,
             env,
             env_color: [0.0; 4],
+            lod_bias: 0.0,
         }]
     }
 
@@ -1260,6 +1262,7 @@ mod tests {
             unit: 0,
             env: TexEnvMode::Modulate,
             env_color: [0.; 4],
+            lod_bias: 0.0,
         }];
         let mut v = primitive_vertex(0.1, 0.1, 0., [1.; 4]);
         v.fog_depth = 0.5;
@@ -1577,11 +1580,13 @@ mod tests {
                 unit: 0,
                 env: TexEnvMode::Replace,
                 env_color: [0.0; 4],
+                lod_bias: 0.0,
             },
             TextureStage {
                 unit: 1,
                 env: TexEnvMode::Modulate,
                 env_color: [0.0; 4],
+                lod_bias: 0.0,
             },
         ];
         draw_triangle(&mut t, &s, &layers, &stages, big_tri([1.0, 0.0, 0.0, 1.0]));

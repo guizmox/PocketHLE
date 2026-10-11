@@ -3,6 +3,7 @@ README-GPU-Carmageddon-Optimizations.txt
 README-GPU-Carmageddon.txt
 README-GPU-Colors-Optimizations.txt
 README-GPU-Experimental.txt
+README-GPU-Four-Games.txt
 README-GPU-Lighting.txt
 README-GPU-Primitives.txt
 README-GPU-Vertices.txt

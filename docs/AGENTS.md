@@ -2807,3 +2807,88 @@ alpha/depth, texture, point/line and parent-context tests remain relevant. Guest
 presentation tests also copy a texture after a swap before parent suspension.
 Upload-time paletted decoding is unchanged; performance benefit in a race requires
 actual target-device measurement. No transient profiling is shipped.
+
+### Four-game native GPU audit: RGB, DXT3, direct indices, mip/LOD and EGL images
+The attached executables were Hit and Myth, Richard Burns Rally, Chicane (the
+unnamed Autorun attachment identified by its own strings) and Trailblazer.
+Static imports/call sites establish possible use, not draw frequency or actual
+execution of every engine branch. These additions supersede the earlier notes
+about base-only mip storage and expanded native indexed preparation.
+
+RBR's 0x1290c uploads DXT3 (0x83f2), including separate positive mip levels.
+DXT3 uses explicit 4-bit alpha and ALWAYS four interpolated BC1 colours even
+when endpoint 0 <= endpoint 1; selector 3 must not become transparent. Decode
+once to canonical RGBA for both backends, crop partial edge blocks and reject
+short payloads. The supported-format query includes DXT3. Existing DXT1/ATC and
+palette decoding remains available.
+
+RBR 0x96204 and Chicane 0x1830c request RGB/unsigned-byte readback. RGB, RGBA
+and RGB565 now honor GL_PACK_ALIGNMENT (1/2/4/8, default 4), preserve guest
+padding bytes and retain bottom-left GL orientation. Large/negative dimensions
+are rejected before allocation. Texture upload honors GL_UNPACK_ALIGNMENT by
+removing row padding before canonical decode. Pixel-store state belongs to the
+execution session, is reset for new games and retained through parent suspension.
+
+Native smooth indexed triangles/strips/fans, points and independent lines remap
+validated guest indices to dense ushort indices during assembly. Each unique
+vertex is decoded once and packed directly into the compact native layout;
+there is no expanded vertex list or float-record hash on this path. Flat shading,
+line strips/loops and >65,536 unique vertices retain the established provoking-
+attribute/expansion fallback. Sparse arrays retain checked element reads. Existing
+sequential-draw optimization and private-context caches remain intact. A four-
+vertex textured strip transfers 160 vertex bytes + 8 index bytes. Guest indices
+are never treated as unchecked native offsets.
+
+Texture objects retain explicit levels 0..10 (maximum base size 1024), including
+mip subimages and framebuffer copies. Shared-palette negative-level uploads are
+validated in full before mutation and decoded per level. Base resizing discards
+an unrelated old chain. A texture revision invalidates all native levels; missing
+levels are derived by bounded box filtering at upload time to keep legacy base-
+only assets usable. Native retains all four mip min-filter modes. Per-unit float/
+fixed GL_TEXTURE_LOD_BIAS_EXT is passed to fragment texture2D's bias argument,
+so driver derivatives select real levels; RBR -0.5, Chicane -1 and Trailblazer +1
+are supported. Generate/upload mip chains only when a mip filter is active;
+base-only video/dynamic textures do not pay for unused mip generation. Switching
+from a base filter to a mip filter forces a complete upload even at the same
+image revision. GLES2 non-power-of-two textures
+retain full mip/repeat support when ES3 or GL_OES_texture_npot provides it;
+otherwise they use base filtering/clamp-to-edge, avoiding incomplete textures. Software still uses its existing base-level/magnification
+sampling; derivative-based software mip selection is not implemented here.
+
+Hit and Myth's 0x9069c/0x90708 engine branches create pixmap/pbuffer surfaces.
+These now own distinct colour/depth images and, when used, distinct native
+renderers. GL state and canonical texture objects stay in Context across surface
+switches. Native texture caches are private to each renderer; canonical updates
+are uploaded on its next draw. Draw/read surfaces can differ; readPixels and
+copyTexImage temporarily select the read surface, then restore the draw image.
+Only a window swap presents to the kernel/GAPI framebuffer. Pixmap synchronization
+uses GDI bitmap handles and the existing DIB encoding/writeback helper, including
+bottom-up/24-bit layouts; wait/swap/change-current/destroy synchronize its pixels.
+CopyBuffers also writes to a same-sized GDI bitmap. Unknown native pixmaps and
+invalid dimensions/configs report EGL errors. No fabricated alias to the window.
+
+Surface count is bounded to 32 and total target area to 4 Mi pixels; per-image
+size is at most 1024x1024. Destroying a current surface defers deletion until
+unbind; deleting parked images drops their buffers/native resources immediately.
+Session reset/termination/release and parent suspension cover every parked image,
+not just the current renderer. Unbinding parks live images and frees deleted ones.
+The existing single guest EGL context model remains: multiple independent guest
+contexts, bindTexImage/releaseTexImage and arbitrary client-buffer surfaces are
+not introduced. There is no proof that Hit's offscreen branch runs in gameplay.
+
+Validation: 134 GLES unit tests; 10 real desktop GL/GLES2 renderer tests (including
+explicit mip colours, positive/negative bias and direct native strips); 4 Context
+native tests; 28 WinCE GLES tests plus 2 native presentation/offscreen tests.
+Offscreen tests cover separate read/draw images, 64 create/destroy cycles, deferred
+current destruction, parent resume and bottom-up 24-bit DIB writeback. ARM64 and
+ARMv7 pocket-gles Rust checks pass with warnings denied. Complete Windows/APK
+builds and four-game FPS/visual regression testing still require target devices.
+No temporary game instrumentation or profiling is delivered.
+Texture deletion fans out to every parked surface's native cache as well as the
+current renderer. Otherwise reusing a guest name with the same revision can show
+an old image, and unused native texture objects survive until surface destruction.
+A software/native regression recreates the same name while the window renderer is
+parked and verifies the updated colour after returning to both images.
+
+The final complete pocket-winceapi no-default-features unit suite, including
+both native tests, passes all 284 tests on the available host.

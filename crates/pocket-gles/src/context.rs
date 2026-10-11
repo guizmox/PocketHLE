@@ -183,6 +183,7 @@ pub struct TextureUnitState {
     /// `GL_TEXTURE_ENV_COLOR`, per-unit for the same reason as the mode
     /// above. Only `GL_BLEND` reads it.
     pub tex_env_color: [f32; 4],
+    pub lod_bias: f32,
 }
 
 impl Default for TextureUnitState {
@@ -194,11 +195,46 @@ impl Default for TextureUnitState {
             current_texcoord: [0.0, 0.0],
             tex_env: TexEnvMode::Modulate,
             tex_env_color: [0.0; 4],
+            lod_bias: 0.0,
         }
     }
 }
 
 /// The full GL ES 1.1 context.
+/// Colour/depth and native renderer ownership for an EGL surface. GL state
+/// and guest texture objects remain in Context when switching surfaces.
+pub struct SurfaceBuffers {
+    pub target: RenderTarget,
+    gpu: Option<crate::gpu::Renderer>,
+    failed: bool,
+}
+impl SurfaceBuffers {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            target: RenderTarget::new(width, height),
+            gpu: None,
+            failed: false,
+        }
+    }
+    pub fn release_gpu(&mut self) {
+        self.gpu = None;
+        self.failed = false;
+    }
+    pub fn delete_textures(&mut self, names: &[u32]) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.delete_textures(names);
+        }
+    }
+    pub fn disable_gpu(&mut self) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.read(&mut self.target) {
+                log::warn!("GLES offscreen readback: {e}");
+            }
+        }
+        self.release_gpu();
+    }
+}
+
 pub struct Context {
     gpu: Option<crate::gpu::Renderer>,
     gpu_requested: bool,
@@ -312,6 +348,20 @@ impl Context {
             prepared_arrays: Vec::new(),
             scratch: Vec::new(),
             index_scratch: Vec::new(),
+        }
+    }
+
+    pub fn park_surface(&mut self, surface: &mut SurfaceBuffers) {
+        std::mem::swap(&mut self.target, &mut surface.target);
+        std::mem::swap(&mut self.gpu, &mut surface.gpu);
+        std::mem::swap(&mut self.gpu_failed, &mut surface.failed);
+    }
+    pub fn exchange_surface(&mut self, surface: &mut SurfaceBuffers) {
+        self.park_surface(surface);
+        if self.gpu_requested && self.gpu.is_none() {
+            if let Err(e) = self.enable_gpu() {
+                self.gpu_failure("surface", e);
+            }
         }
     }
 
@@ -821,8 +871,8 @@ impl Context {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
-        // Other texture entry points likewise retain only level zero.
-        if level != 0 {
+        if level > 10 {
+            self.set_error(GL_INVALID_VALUE);
             return;
         }
         self.sync_gpu();
@@ -858,7 +908,7 @@ impl Context {
         }
         self.tex_image_2d(
             target,
-            0,
+            level,
             width as u32,
             height as u32,
             GL_RGBA,
@@ -881,10 +931,8 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        // Only the base level is stored: we do not mipmap, and the
-        // min-filters collapse to their base filter, so uploading level
-        // 1+ would just overwrite level 0 with a half-size image.
-        if level != 0 {
+        if !(0..=10).contains(&level) || width > (1024u32 >> level) || height > (1024u32 >> level) {
+            self.set_error(GL_INVALID_VALUE);
             return;
         }
         let unit = self.active_texture as usize;
@@ -905,10 +953,7 @@ impl Context {
         };
         let name = self.texture_units[self.active_texture as usize].bound_texture;
         let tex = self.textures.entry(name).or_default();
-        tex.width = width;
-        tex.height = height;
-        tex.rgba = rgba;
-        tex.revision = tex.revision.wrapping_add(1);
+        tex.set_level(level as u32, width, height, rgba);
         log::debug!(
             "GLES tex image texture={} level={} {}x{} format=0x{format:04x} type=0x{ty:04x} bytes={} complete={} first={:02x?}",
             name,
@@ -942,12 +987,8 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        // OES_compressed_paletted_texture overloads a negative `level`:
-        // -level is the number of additional mip levels packed after level 0.
-        // The palette is stored once, followed by the level-0 indices and
-        // then the smaller mip levels.  Our software rasterizer currently
-        // samples only level 0, so accept such uploads and decode their base
-        // image.  Positive levels remain ordinary mip uploads and are ignored.
+        // Chicane packs a shared palette followed by base/mip index rows.
+        // Ordinary DDS levels (including RBR DXT3) are uploaded separately.
         let paletted = matches!(
             format,
             GL_PALETTE4_RGB8_OES
@@ -961,8 +1002,48 @@ impl Context {
                 | GL_PALETTE8_RGBA4_OES
                 | GL_PALETTE8_RGB5_A1_OES
         );
-        if level > 0 || (level < 0 && !paletted) {
+        if !(-10..=10).contains(&level)
+            || (level < 0 && !paletted)
+            || width > (1024u32 >> level.max(0))
+            || height > (1024u32 >> level.max(0))
+        {
+            self.set_error(GL_INVALID_VALUE);
             return;
+        }
+        if level < 0 {
+            if (-level) as u32 > width.max(height).max(1).ilog2() {
+                self.set_error(GL_INVALID_VALUE);
+                return;
+            }
+            if !data.is_empty() {
+                let entries = if format >= GL_PALETTE8_RGB8_OES {
+                    256
+                } else {
+                    16
+                };
+                let entry_bytes = if matches!(format, GL_PALETTE4_RGB8_OES | GL_PALETTE8_RGB8_OES) {
+                    3
+                } else if matches!(format, GL_PALETTE4_RGBA8_OES | GL_PALETTE8_RGBA8_OES) {
+                    4
+                } else {
+                    2
+                };
+                let palette_len = entries * entry_bytes;
+                let mut needed = palette_len;
+                for l in 0..=(-level) as u32 {
+                    needed += texture::compressed_image_size(
+                        format,
+                        (width >> l).max(1),
+                        (height >> l).max(1),
+                    )
+                    .unwrap()
+                        - palette_len;
+                }
+                if data.len() < needed {
+                    self.set_error(GL_INVALID_VALUE);
+                    return;
+                }
+            }
         }
         let unit = self.active_texture as usize;
         if unit >= MAX_TEXTURE_UNITS || self.texture_units[unit].bound_texture == 0 {
@@ -985,10 +1066,38 @@ impl Context {
         };
         let name = self.texture_units[self.active_texture as usize].bound_texture;
         let tex = self.textures.entry(name).or_default();
-        tex.width = width;
-        tex.height = height;
-        tex.rgba = rgba;
-        tex.revision = tex.revision.wrapping_add(1);
+        tex.set_level(level.max(0) as u32, width, height, rgba);
+        if level < 0 && !data.is_empty() {
+            let entries = if format >= GL_PALETTE8_RGB8_OES {
+                256
+            } else {
+                16
+            };
+            let entry_bytes = if matches!(format, GL_PALETTE4_RGB8_OES | GL_PALETTE8_RGB8_OES) {
+                3
+            } else if matches!(format, GL_PALETTE4_RGBA8_OES | GL_PALETTE8_RGBA8_OES) {
+                4
+            } else {
+                2
+            };
+            let palette_len = entries * entry_bytes;
+            let mut offset = texture::compressed_image_size(format, width, height).unwrap();
+            for l in 1..=(-level) as u32 {
+                let (w, h) = ((width >> l).max(1), (height >> l).max(1));
+                let size = texture::compressed_image_size(format, w, h).unwrap() - palette_len;
+                if offset + size > data.len() {
+                    self.set_error(GL_INVALID_VALUE);
+                    return;
+                }
+                let mut packed = data[..palette_len].to_vec();
+                packed.extend_from_slice(&data[offset..offset + size]);
+                if let Some(rgba) = texture::decode_compressed_to_rgba(&packed, w, h, format) {
+                    tex.set_level(l, w, h, rgba);
+                }
+                offset += size;
+            }
+        }
+
         log::debug!(
             "GLES compressed tex image texture={name} {width}x{height} \
              format=0x{format:04x} bytes={} complete={}",
@@ -1016,7 +1125,8 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        if level != 0 {
+        if !(0..=10).contains(&level) || width > 1024 || height > 1024 {
+            self.set_error(GL_INVALID_VALUE);
             return;
         }
         let Some(patch) = texture::decode_to_rgba(data, width, height, format, ty) else {
@@ -1033,16 +1143,26 @@ impl Context {
             self.set_error(GL_INVALID_OPERATION);
             return;
         };
-        if xoffset + width > tex.width || yoffset + height > tex.height {
+        let (tw, th, pixels) = if level == 0 {
+            (tex.width, tex.height, &mut tex.rgba)
+        } else if let Some((w, h, p)) = tex.mipmaps.get_mut(&(level as u32)) {
+            (*w, *h, p)
+        } else {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        };
+        if xoffset.checked_add(width).is_none_or(|v| v > tw)
+            || yoffset.checked_add(height).is_none_or(|v| v > th)
+        {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
         tex.revision = tex.revision.wrapping_add(1);
         for row in 0..height {
             let src = (row * width * 4) as usize;
-            let dst = (((yoffset + row) * tex.width + xoffset) * 4) as usize;
+            let dst = (((yoffset + row) * tw + xoffset) * 4) as usize;
             let len = (width * 4) as usize;
-            tex.rgba[dst..dst + len].copy_from_slice(&patch[src..src + len]);
+            pixels[dst..dst + len].copy_from_slice(&patch[src..src + len]);
         }
     }
 
@@ -1063,6 +1183,14 @@ impl Context {
         if !tex.set_parameter(pname, value) {
             self.set_error(GL_INVALID_ENUM);
         }
+    }
+
+    pub fn set_lod_bias(&mut self, value: f32) {
+        if !value.is_finite() {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        self.texture_units[self.active_texture as usize].lod_bias = value.clamp(-4., 4.);
     }
 
     pub fn tex_env(&mut self, pname: u32, value: u32) {
@@ -1393,6 +1521,7 @@ impl Context {
                 unit: u,
                 env: self.texture_units[u].tex_env,
                 env_color: self.texture_units[u].tex_env_color,
+                lod_bias: self.texture_units[u].lod_bias,
             })
             .collect()
     }
@@ -1650,34 +1779,48 @@ impl Context {
                 }
             }
         }
-        // Assemble every referenced vertex once. A cache keyed on the
-        // index means an indexed mesh transforms each shared vertex a
-        // single time instead of once per triangle that uses it.
-        let mut cache: HashMap<u32, Vertex> = HashMap::new();
-        let mut verts: Vec<Vertex> = Vec::with_capacity(count);
+        // Native smooth draws retain the topology and prepare each unique
+        // guest vertex directly, instead of expanding then hashing float records.
+        let native_indices = !sequential
+            && self.gpu.is_some()
+            && self.state.smooth_shading
+            && matches!(
+                mode,
+                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+            );
+        let mut remap: HashMap<u32, usize> = HashMap::new();
+        let mut verts: Vec<Vertex> = Vec::with_capacity(count.min(65536));
+        let mut dense = Vec::<u16>::new();
+        let mut expanded = Vec::<usize>::new();
         for i in indices {
-            let v = if sequential {
+            let index = if !sequential {
+                remap.get(&i).copied()
+            } else {
+                None
+            };
+            let index = if let Some(index) = index {
+                index
+            } else {
                 let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
                     self.prepared_arrays.clear();
                     return;
                 };
-                v
-            } else {
-                match cache.get(&i) {
-                    Some(v) => *v,
-                    None => {
-                        let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
-                            // An unmapped array pointer aborts the draw
-                            // rather than rendering garbage geometry.
-                            self.prepared_arrays.clear();
-                            return;
-                        };
-                        cache.insert(i, v);
-                        v
-                    }
+                let index = verts.len();
+                verts.push(v);
+                if !sequential {
+                    remap.insert(i, index);
                 }
+                index
             };
-            verts.push(v);
+            if !sequential {
+                expanded.push(index);
+            }
+        }
+        let direct_indexed = native_indices && verts.len() <= 65536;
+        if direct_indexed {
+            dense.extend(expanded.iter().map(|i| *i as u16));
+        } else if !sequential {
+            verts = expanded.iter().map(|i| verts[*i]).collect();
         }
         self.prepared_arrays.clear();
 
@@ -1706,22 +1849,37 @@ impl Context {
         };
         if let Some(gpu) = self.gpu.as_mut() {
             let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
-            let draw = if sequential {
-                crate::gpu::Renderer::draw_arrays_object_space
+            let result = if direct_indexed {
+                gpu.draw_indexed_object_space(
+                    &self.target,
+                    &self.state,
+                    mode,
+                    &verts,
+                    &dense,
+                    &stages,
+                    &self.textures,
+                    names,
+                    &transforms,
+                )
             } else {
-                crate::gpu::Renderer::draw_object_space
+                let draw = if sequential {
+                    crate::gpu::Renderer::draw_arrays_object_space
+                } else {
+                    crate::gpu::Renderer::draw_object_space
+                };
+                draw(
+                    gpu,
+                    &self.target,
+                    &self.state,
+                    mode,
+                    &verts,
+                    &stages,
+                    &self.textures,
+                    names,
+                    &transforms,
+                )
             };
-            if let Err(e) = draw(
-                gpu,
-                &self.target,
-                &self.state,
-                mode,
-                &verts,
-                &stages,
-                &self.textures,
-                names,
-                &transforms,
-            ) {
+            if let Err(e) = result {
                 self.gpu_failure("draw", e);
             }
             return;
@@ -1827,6 +1985,53 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_mip_upload_subimage_copy_and_bounds() {
+        let mut c = Context::new(4, 4);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            4,
+            4,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255].repeat(16),
+        );
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            2,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 255, 0, 255].repeat(4),
+        );
+        c.tex_sub_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            1,
+            1,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 0, 255, 255],
+        );
+        assert_eq!(&c.textures[&1].mipmaps[&1].2[12..], &[0, 0, 255, 255]);
+        c.target.color.fill(255);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 2, GL_RGBA, 0, 0, 1, 1, 0);
+        assert_eq!(c.textures[&1].mipmaps[&2].2, [255; 4]);
+        assert_eq!(c.textures[&1].width, 4);
+        c.tex_image_2d(GL_TEXTURE_2D, 11, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &[0; 4]);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.set_lod_bias(-0.5);
+        assert_eq!(c.texture_units[0].lod_bias, -0.5);
+        c.set_lod_bias(f32::NAN);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.texture_units[0].lod_bias, -0.5);
+    }
 
     #[test]
     #[ignore = "requires host OpenGL; framebuffer copy synchronizes native pixels"]

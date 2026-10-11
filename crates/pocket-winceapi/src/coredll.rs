@@ -12600,6 +12600,11 @@ fn sync_dst_dib_to_guest(ctx: &mut CallCtx<'_>, hdc: u32) -> Result<(), KernelEr
         Some(h) => h,
         None => return Ok(()),
     };
+    sync_bitmap_to_guest(ctx, bm_h)
+}
+
+/// EGL pixmaps share GDI's original DIB layout and writeback rules.
+pub(crate) fn sync_bitmap_to_guest(ctx: &mut CallCtx<'_>, bm_h: u32) -> Result<(), KernelError> {
     // Skip the encode + write_mem entirely when the host pixels
     // haven't been touched since the previous sync. Pocket Derby
     // and most other GDI-driven games hit this path: the same

@@ -92,6 +92,7 @@ const TEXTURE_MATRICES: [&str; 4] = [
 ];
 const SAMPLERS: [&str; 4] = ["sampler0", "sampler1", "sampler2", "sampler3"];
 const ENVIRONMENTS: [&str; 4] = ["env0", "env1", "env2", "env3"];
+const LOD_BIASES: [&str; 4] = ["lodBias0", "lodBias1", "lodBias2", "lodBias3"];
 const ENV_COLORS: [&str; 4] = ["envColor0", "envColor1", "envColor2", "envColor3"];
 #[allow(non_snake_case)]
 struct Gl {
@@ -868,6 +869,7 @@ pub struct Renderer {
     scratch: Vec<f32>,
     readback: Vec<u8>,
     dirty: bool,
+    full_npot: bool,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
 }
@@ -893,6 +895,21 @@ impl Renderer {
                 range[0] = range[0].max(1.);
                 range[1] = range[1].clamp(range[0], 64.);
             }
+            let full_npot = if host.es {
+                let extensions = (gl.GetString)(0x1f03);
+                let version = (gl.GetString)(0x1f02);
+                (!extensions.is_null()
+                    && CStr::from_ptr(extensions.cast())
+                        .to_string_lossy()
+                        .split_whitespace()
+                        .any(|s| s == "GL_OES_texture_npot"))
+                    || (!version.is_null()
+                        && CStr::from_ptr(version.cast())
+                            .to_string_lossy()
+                            .starts_with("OpenGL ES 3."))
+            } else {
+                true
+            };
             let mut r = Self {
                 host,
                 gl,
@@ -916,6 +933,7 @@ impl Renderer {
                 scratch: Vec::new(),
                 readback: Vec::new(),
                 dirty: true,
+                full_npot,
                 point_range,
                 line_range,
             };
@@ -1043,7 +1061,7 @@ impl Renderer {
                 r.cache_uniform(name);
             }
             for i in 0..4 {
-                for name in ["sampler", "env", "envColor"] {
+                for name in ["sampler", "env", "envColor", "lodBias"] {
                     r.cache_uniform(&format!("{name}{i}"));
                 }
             }
@@ -1284,7 +1302,7 @@ impl Renderer {
         names: [u32; 4],
     ) -> Result<(), String> {
         self.draw_inner(
-            target, state, mode, vertices, stages, textures, names, None, false,
+            target, state, mode, vertices, stages, textures, names, None, false, None,
         )
     }
 
@@ -1309,6 +1327,7 @@ impl Renderer {
             names,
             Some(transforms),
             false,
+            None,
         )
     }
 
@@ -1333,6 +1352,37 @@ impl Renderer {
             names,
             Some(transforms),
             true,
+            None,
+        )
+    }
+
+    /// Guest indices are already remapped to unique, validated vertices by Context.
+    pub fn draw_indexed_object_space(
+        &mut self,
+        target: &RenderTarget,
+        state: &PipelineState,
+        mode: u32,
+        vertices: &[Vertex],
+        indices: &[u16],
+        stages: &[TextureStage],
+        textures: &HashMap<u32, Texture>,
+        names: [u32; 4],
+        transforms: &VertexTransforms,
+    ) -> Result<(), String> {
+        if indices.iter().any(|i| *i as usize >= vertices.len()) {
+            return Err("invalid native index".into());
+        }
+        self.draw_inner(
+            target,
+            state,
+            mode,
+            vertices,
+            stages,
+            textures,
+            names,
+            Some(transforms),
+            true,
+            Some(indices),
         )
     }
 
@@ -1347,6 +1397,7 @@ impl Renderer {
         names: [u32; 4],
         transforms: Option<&VertexTransforms>,
         sequential: bool,
+        guest_indices: Option<&[u16]>,
     ) -> Result<(), String> {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
@@ -1424,6 +1475,10 @@ impl Renderer {
         let mut packed = std::mem::take(&mut self.packed_scratch);
         packed.clear();
         let mut indexed = !direct;
+        if let Some(indices) = guest_indices {
+            self.indices.extend_from_slice(indices);
+            indexed = true;
+        }
         if !direct {
             unique.clear();
             for record in self.scratch.chunks_exact(layout.floats) {
@@ -1444,8 +1499,10 @@ impl Renderer {
             }
         }
         // Do not increase transfer size for draws with little vertex reuse.
-        indexed &= packed.len() * 4 + self.indices.len() * 2 < self.scratch.len() * 4;
-        if indexed {
+        if guest_indices.is_none() {
+            indexed &= packed.len() * 4 + self.indices.len() * 2 < self.scratch.len() * 4;
+        }
+        if indexed && guest_indices.is_none() {
             std::mem::swap(&mut self.scratch, &mut packed);
         }
         self.vertex_keys = unique;
@@ -1643,21 +1700,65 @@ impl Renderer {
                         });
                         id = item.0;
                         (self.gl.BindTexture)(GL_TEXTURE_2D, id);
-                        if item.1 != tex.revision {
-                            (self.gl.TexImage2D)(
-                                GL_TEXTURE_2D,
-                                0,
-                                GL_RGBA as i32,
-                                tex.width as i32,
-                                tex.height as i32,
-                                0,
-                                GL_RGBA,
-                                GL_UNSIGNED_BYTE,
-                                tex.rgba.as_ptr().cast(),
-                            );
+                        let needs_mips = tex.min_filter.uses_mipmaps()
+                            && (self.full_npot
+                                || (tex.width.is_power_of_two() && tex.height.is_power_of_two()));
+                        let newly_mipped = needs_mips
+                            && self
+                                .texture_params
+                                .get(&id)
+                                .is_none_or(|p| !p.0.uses_mipmaps());
+                        if item.1 != tex.revision || newly_mipped {
+                            if needs_mips {
+                                for (level, (w, h, pixels)) in
+                                    tex.upload_levels().iter().enumerate()
+                                {
+                                    (self.gl.TexImage2D)(
+                                        GL_TEXTURE_2D,
+                                        level as i32,
+                                        GL_RGBA as i32,
+                                        *w as i32,
+                                        *h as i32,
+                                        0,
+                                        GL_RGBA,
+                                        GL_UNSIGNED_BYTE,
+                                        pixels.as_ptr().cast(),
+                                    );
+                                }
+                            } else {
+                                // Video/dynamic HUD assets with base filtering must not
+                                // pay for unused mip generation or extra texture uploads.
+                                (self.gl.TexImage2D)(
+                                    GL_TEXTURE_2D,
+                                    0,
+                                    GL_RGBA as i32,
+                                    tex.width as i32,
+                                    tex.height as i32,
+                                    0,
+                                    GL_RGBA,
+                                    GL_UNSIGNED_BYTE,
+                                    tex.rgba.as_ptr().cast(),
+                                );
+                            }
                             item.1 = tex.revision;
                         }
-                        let params = (tex.min_filter, tex.mag_filter, tex.wrap_s, tex.wrap_t);
+                        let params = if !self.full_npot
+                            && (!tex.width.is_power_of_two() || !tex.height.is_power_of_two())
+                        {
+                            (
+                                match tex.min_filter {
+                                    Filter::Nearest
+                                    | Filter::NearestMipmapNearest
+                                    | Filter::NearestMipmapLinear => Filter::Nearest,
+                                    _ => Filter::Linear,
+                                },
+                                tex.mag_filter,
+                                Wrap::ClampToEdge,
+                                Wrap::ClampToEdge,
+                            )
+                        } else {
+                            (tex.min_filter, tex.mag_filter, tex.wrap_s, tex.wrap_t)
+                        };
                         if self.texture_params.get(&id) != Some(&params) {
                             self.params(params.0, params.1, params.2, params.3);
                             self.texture_params.insert(id, params);
@@ -1676,6 +1777,7 @@ impl Renderer {
                         TexEnvMode::Add => 4,
                     }),
                 );
+                self.uniform_1f(self.loc(LOD_BIASES[i]), stage.map_or(0.0, |s| s.lod_bias));
                 if let Some(s) = stage {
                     self.uniform_4fv(self.loc(ENV_COLORS[i]), 1, s.env_color.as_ptr());
                 }
@@ -1857,6 +1959,10 @@ fn filter(v: Filter) -> u32 {
     match v {
         Filter::Nearest => GL_NEAREST,
         Filter::Linear => GL_LINEAR,
+        Filter::NearestMipmapNearest => GL_NEAREST_MIPMAP_NEAREST,
+        Filter::LinearMipmapNearest => GL_LINEAR_MIPMAP_NEAREST,
+        Filter::NearestMipmapLinear => GL_NEAREST_MIPMAP_LINEAR,
+        Filter::LinearMipmapLinear => GL_LINEAR_MIPMAP_LINEAR,
     }
 }
 fn wrap(v: Wrap) -> u32 {
@@ -1916,10 +2022,10 @@ void main(){
 "#;
 const FRAGMENT: &str = r#"
 VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
-uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
+uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3),env3,envColor3);
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0,lodBias0),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1,lodBias1),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2,lodBias2),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3,lodBias3),env3,envColor3);
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
@@ -1938,6 +2044,188 @@ mod tests {
             textures: [IDENTITY; 4],
         }
     }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2; mip/LOD and direct native indices"]
+    fn host_mips_lod_bias_and_direct_guest_indices() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            let mut target = RenderTarget::new(32, 32);
+            let state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                ..Default::default()
+            };
+            let positions = [
+                [-1., -1., 0., 1.],
+                [1., -1., 0., 1.],
+                [-1., 1., 0., 1.],
+                [1., 1., 0., 1.],
+            ];
+            let uv = [[0., 0.], [1., 0.], [0., 1.], [1., 1.]];
+            let vertices: Vec<_> = positions
+                .iter()
+                .zip(uv)
+                .map(|(p, t)| {
+                    let mut v = triangle([1.; 4], 0.)[0];
+                    v.pos = *p;
+                    v.texcoord[0] = t;
+                    v
+                })
+                .collect();
+            let mut texture = Texture::default();
+            texture.set_level(0, 64, 64, [255, 0, 0, 255].repeat(64 * 64));
+            texture.set_level(1, 32, 32, [0, 255, 0, 255].repeat(32 * 32));
+            texture.set_level(2, 16, 16, [0, 0, 255, 255].repeat(16 * 16));
+            texture.min_filter = Filter::NearestMipmapNearest;
+            texture.mag_filter = Filter::Nearest;
+            let mut textures = HashMap::from([(1, texture)]);
+            let mut stage = TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            };
+            for (bias, expected) in [
+                (0., [0, 255, 0, 255]),
+                (1., [0, 0, 255, 255]),
+                (-1., [255, 0, 0, 255]),
+            ] {
+                stage.lod_bias = bias;
+                gpu.draw_indexed_object_space(
+                    &target,
+                    &state,
+                    GL_TRIANGLE_STRIP,
+                    &vertices,
+                    &[0, 1, 2, 3],
+                    &[stage],
+                    &textures,
+                    [1, 0, 0, 0],
+                    &identity_transforms(),
+                )
+                .unwrap();
+                assert_eq!(gpu.scratch.len(), 4 * 10);
+                assert_eq!(gpu.indices, [0, 1, 2, 3]);
+                gpu.read(&mut target).unwrap();
+                assert_eq!(
+                    &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                    &expected,
+                    "es={es} bias={bias}"
+                );
+            }
+            textures
+                .get_mut(&1)
+                .unwrap()
+                .set_level(1, 32, 32, [255, 255, 0, 255].repeat(32 * 32));
+            stage.lod_bias = 0.;
+            gpu.draw_indexed_object_space(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &[0, 1, 2, 3],
+                &[stage],
+                &textures,
+                [1, 0, 0, 0],
+                &identity_transforms(),
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                &[255, 255, 0, 255]
+            );
+            let tex = textures.get_mut(&1).unwrap();
+            tex.min_filter = Filter::Nearest;
+            tex.set_level(1, 32, 32, [0, 255, 255, 255].repeat(32 * 32));
+            gpu.draw_indexed_object_space(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &[0, 1, 2, 3],
+                &[stage],
+                &textures,
+                [1, 0, 0, 0],
+                &identity_transforms(),
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                &[255, 0, 0, 255]
+            );
+            textures.get_mut(&1).unwrap().min_filter = Filter::NearestMipmapNearest;
+            gpu.draw_indexed_object_space(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &[0, 1, 2, 3],
+                &[stage],
+                &textures,
+                [1, 0, 0, 0],
+                &identity_transforms(),
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                &[0, 255, 255, 255]
+            );
+            if es {
+                gpu.full_npot = false; // Exercise core-ES2 fallback even on a capable Mesa driver.
+                textures
+                    .get_mut(&1)
+                    .unwrap()
+                    .set_level(0, 3, 5, [255, 0, 0, 255].repeat(15));
+                gpu.draw_indexed_object_space(
+                    &target,
+                    &state,
+                    GL_TRIANGLE_STRIP,
+                    &vertices,
+                    &[0, 1, 2, 3],
+                    &[stage],
+                    &textures,
+                    [1, 0, 0, 0],
+                    &identity_transforms(),
+                )
+                .unwrap();
+                let id = gpu.textures[&1].0;
+                assert_eq!(
+                    gpu.texture_params[&id],
+                    (
+                        Filter::Nearest,
+                        Filter::Nearest,
+                        Wrap::ClampToEdge,
+                        Wrap::ClampToEdge
+                    )
+                );
+                gpu.read(&mut target).unwrap();
+                assert_eq!(
+                    &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4],
+                    &[255, 0, 0, 255]
+                );
+            }
+            assert!(gpu
+                .draw_indexed_object_space(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &vertices,
+                    &[9],
+                    &[],
+                    &textures,
+                    [0; 4],
+                    &identity_transforms()
+                )
+                .is_err());
+        }
+    }
+
     #[test]
     fn compact_layout_keeps_only_active_attributes_and_flat_lighting_data() {
         let mut state = PipelineState::default();
@@ -1950,6 +2238,7 @@ mod tests {
             unit: 2,
             env: TexEnvMode::Modulate,
             env_color: [0.; 4],
+            lod_bias: 0.0,
         };
         let layout = VertexLayout::new(&state, &[stage], Some(&transforms));
         assert_eq!(layout.floats * 4, 40);
@@ -2072,6 +2361,7 @@ mod tests {
                 unit: 2,
                 env: TexEnvMode::Modulate,
                 env_color: [0.; 4],
+                lod_bias: 0.0,
             };
             gpu.draw_arrays_object_space(
                 &target,
@@ -2563,6 +2853,7 @@ mod tests {
                         unit,
                         env: TexEnvMode::Modulate,
                         env_color: [0.; 4],
+                        lod_bias: 0.0,
                     }];
                     let mut names = [0; 4];
                     names[unit] = 1;
@@ -2942,6 +3233,7 @@ mod tests {
             unit: 0,
             env: TexEnvMode::Replace,
             env_color: [0.; 4],
+            lod_bias: 0.0,
         }];
         gpu.draw(
             &target,
