@@ -3781,8 +3781,8 @@ pub fn run_main_loop_with_hook(
                 StopReason::Requested | StopReason::OutOfBounds => return Ok(()),
             }
         } // Drop the shared API gate before frontend hooks or child startup.
-        // An idle/suspended process must not sleep while owning the domain's
-        // API gate: its parent needs that gate to issue ResumeThread/Terminate.
+          // An idle/suspended process must not sleep while owning the domain's
+          // API gate: its parent needs that gate to issue ResumeThread/Terminate.
         if pc == THREAD_SCHEDULER_IDLE_VA {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
