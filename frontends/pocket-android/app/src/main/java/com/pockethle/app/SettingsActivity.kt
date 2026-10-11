@@ -217,7 +217,14 @@ class SettingsActivity : AppCompatActivity() {
             findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="gpu_renderer"; title="GPU rendering (experimental)"; isPersistent=false; isChecked=current.gpuRenderer
                 summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
-                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);writeConfig();true }
+                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("anisotropic_filtering")?.isEnabled=current.gpuRenderer;writeConfig();true }
+            })
+            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(ListPreference(requireContext()).apply {
+                key="anisotropic_filtering"; title="Anisotropic filtering (GPU only)"; isPersistent=false
+                entries=arrayOf("Off", "2×", "4×", "8×"); entryValues=arrayOf("0", "2", "4", "8")
+                value=current.anisotropicFiltering.toString(); isEnabled=current.gpuRenderer
+                summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, v -> current=current.copy(anisotropicFiltering=v.toString().toInt());writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "show_fps"; title = "Show FPS"; isPersistent = false; isChecked = current.showFps
@@ -331,7 +338,7 @@ class SettingsActivity : AppCompatActivity() {
         private fun writeConfig() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
             val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
-            val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer
+            val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering
             if (!gpuSaved) android.widget.Toast.makeText(context, "GPU setting was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             if(result?.optBoolean("ok",false)!=true) android.widget.Toast.makeText(context,result?.optString("error") ?: "Could not save settings",android.widget.Toast.LENGTH_LONG).show()
         }

@@ -423,6 +423,7 @@ fn run_process(
             .gpu_renderer
             .unwrap_or(launcher_config.gpu_renderer),
     );
+    emu.set_anisotropic_filtering(entry.settings.anisotropic_filtering.unwrap_or(launcher_config.anisotropic_filtering));
     emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
         library_root.join("pockethle-unimplemented.log"),
         entry.display_name.clone(),

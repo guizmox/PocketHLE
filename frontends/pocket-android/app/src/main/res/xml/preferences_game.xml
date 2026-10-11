@@ -50,6 +50,9 @@
 
     <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering (experimental)"
         android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
+    <ListPreference android:key="anisotropic_filtering" android:title="Anisotropic filtering (GPU only)"
+        android:summary="Sharper textures at oblique angles; limited by the GPU driver."
+        android:persistent="false" />
 
     <SwitchPreferenceCompat
         android:key="halt_on_unimplemented"

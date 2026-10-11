@@ -238,6 +238,7 @@ impl SurfaceBuffers {
 pub struct Context {
     gpu: Option<crate::gpu::Renderer>,
     gpu_requested: bool,
+    anisotropic_filtering: u8,
     gpu_failed: bool,
     // ---- transform state ----
     pub matrix_mode: MatrixMode,
@@ -316,6 +317,7 @@ impl Context {
         Self {
             gpu: None,
             gpu_requested: false,
+            anisotropic_filtering: 0,
             gpu_failed: false,
             matrix_mode: MatrixMode::Modelview,
             modelview: MatrixStack::new(16),
@@ -358,10 +360,24 @@ impl Context {
     }
     pub fn exchange_surface(&mut self, surface: &mut SurfaceBuffers) {
         self.park_surface(surface);
+        if let Some(gpu) = &mut self.gpu {
+            gpu.set_anisotropic_filtering(self.anisotropic_filtering);
+        }
         if self.gpu_requested && self.gpu.is_none() {
             if let Err(e) = self.enable_gpu() {
                 self.gpu_failure("surface", e);
             }
+        }
+    }
+
+    /// Configuration alone never initializes GPU rendering.
+    pub fn set_anisotropic_filtering(&mut self, level: u8) {
+        self.anisotropic_filtering = match level {
+            2 | 4 | 8 => level,
+            _ => 0,
+        };
+        if let Some(gpu) = &mut self.gpu {
+            gpu.set_anisotropic_filtering(self.anisotropic_filtering);
         }
     }
 
@@ -373,6 +389,10 @@ impl Context {
                 self.target.width,
                 self.target.height,
             )?);
+            self.gpu
+                .as_mut()
+                .unwrap()
+                .set_anisotropic_filtering(self.anisotropic_filtering);
         }
         Ok(())
     }
@@ -2039,6 +2059,17 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anisotropy_setting_does_not_enable_software_context_gpu() {
+        let mut c = Context::new(4, 4);
+        c.set_anisotropic_filtering(8);
+        assert_eq!(c.anisotropic_filtering, 8);
+        assert!(!c.gpu_requested());
+        assert!(!c.gpu_active());
+        c.set_anisotropic_filtering(3);
+        assert_eq!(c.anisotropic_filtering, 0);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
     use super::*;
 
     #[test]

@@ -59,11 +59,13 @@ data class GameSettings(
      */
     val rotation: String,
     val gpuRenderer: Boolean? = null,
+    val anisotropicFiltering: Int? = null,
     val dpadDeadzone: String = "large",
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
+        put("anisotropic_filtering", anisotropicFiltering ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
@@ -92,6 +94,7 @@ data class GameSettings(
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
+            anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
             originalJson = obj.toString(),
         )
     }
@@ -103,6 +106,7 @@ data class LauncherConfig(
     val verbosity: Int,
     val logUnimplementedApis: Boolean = true,
     val gpuRenderer: Boolean = true,
+    val anisotropicFiltering: Int = 0,
     val lastImportDir: String?,
     val showFps: Boolean,
     val fullscreen: Boolean,
@@ -144,6 +148,7 @@ data class LauncherConfig(
         put("verbosity", verbosity)
         put("log_unimplemented_apis", logUnimplementedApis)
         put("gpu_renderer", gpuRenderer)
+        put("anisotropic_filtering", anisotropicFiltering)
         if (lastImportDir != null) put("last_import_dir", lastImportDir) else put("last_import_dir", JSONObject.NULL)
         put("show_fps", showFps)
         put("fullscreen", fullscreen)
@@ -188,6 +193,7 @@ data class LauncherConfig(
             verbosity = obj.optInt("verbosity", 1),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
+            anisotropicFiltering = obj.optInt("anisotropic_filtering", 0),
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
             fullscreen = obj.optBoolean("fullscreen", false),

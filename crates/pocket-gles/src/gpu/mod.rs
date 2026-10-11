@@ -1009,6 +1009,9 @@ pub struct Renderer {
     uniform_values: HashMap<i32, Vec<u32>>,
     pipeline: Option<PipelineState>,
     texture_params: HashMap<u32, (Filter, Filter, Wrap, Wrap)>,
+    texture_anisotropy: HashMap<u32, u8>,
+    anisotropy: u8,
+    max_anisotropy: u8,
     fbo: u32,
     color: u32,
     depth: u32,
@@ -1105,6 +1108,20 @@ impl Renderer {
                 || extensions
                     .split_whitespace()
                     .any(|e| e == "GL_OES_standard_derivatives");
+            let mut max_anisotropy = 1f32;
+            if extensions.split_whitespace().any(|e| {
+                matches!(
+                    e,
+                    "GL_EXT_texture_filter_anisotropic" | "GL_ARB_texture_filter_anisotropic"
+                )
+            }) {
+                (gl.GetFloatv)(0x84ff, &mut max_anisotropy);
+            }
+            let max_anisotropy = if max_anisotropy.is_finite() {
+                max_anisotropy.clamp(1., 8.).floor() as u8
+            } else {
+                1
+            };
             let mut count = 0;
             (gl.GetIntegerv)(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &mut count);
             let mut formats = vec![0i32; count.clamp(0, 128) as usize];
@@ -1124,6 +1141,9 @@ impl Renderer {
                 uniform_values: HashMap::new(),
                 pipeline: None,
                 texture_params: HashMap::new(),
+                texture_anisotropy: HashMap::new(),
+                anisotropy: 1,
+                max_anisotropy,
                 fbo: 0,
                 color: 0,
                 depth: 0,
@@ -1507,6 +1527,14 @@ impl Renderer {
             self.check()
         }
     }
+    /// The choice is retained in Context; each native surface clamps independently.
+    pub fn set_anisotropic_filtering(&mut self, level: u8) {
+        self.anisotropy = match level {
+            2 | 4 | 8 => level,
+            _ => 1,
+        }
+        .min(self.max_anisotropy);
+    }
     pub fn supports_compressed(&self, format: u32) -> bool {
         let format = native_compressed_format(format);
         self.gl.CompressedTexImage2D.is_some() && self.compressed_formats.contains(&format)
@@ -1518,6 +1546,7 @@ impl Renderer {
         for n in names {
             if let Some((id, _)) = self.textures.remove(n) {
                 self.texture_params.remove(&id);
+                self.texture_anisotropy.remove(&id);
                 unsafe {
                     (self.gl.DeleteTextures)(1, &id);
                 }
@@ -1993,6 +2022,13 @@ impl Renderer {
                         } else {
                             (tex.min_filter, tex.mag_filter, tex.wrap_s, tex.wrap_t)
                         };
+                        if self.max_anisotropy > 1
+                            && self.texture_anisotropy.get(&id) != Some(&self.anisotropy)
+                        {
+                            // The EXT/ARB parameter accepts integer values too.
+                            (self.gl.TexParameteri)(GL_TEXTURE_2D, 0x84fe, self.anisotropy as i32);
+                            self.texture_anisotropy.insert(id, self.anisotropy);
+                        }
                         if self.texture_params.get(&id) != Some(&params) {
                             self.params(params.0, params.1, params.2, params.3);
                             self.texture_params.insert(id, params);
@@ -2364,6 +2400,86 @@ mod tests {
                 assert_eq!((gpu.gl.GetError)(), 0);
                 (gpu.gl.DeleteTextures)(1, &name);
             }
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; anisotropy cap, cache and reset"]
+    fn host_anisotropy_respects_driver_limit_and_returns_to_off() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let mut texture = Texture::default();
+            texture.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
+            let textures = HashMap::from([(1, texture)]);
+            let stage = TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            };
+            let target = RenderTarget::new(8, 8);
+            let state = PipelineState {
+                viewport: (0, 0, 8, 8),
+                ..Default::default()
+            };
+            for level in [0, 2, 4, 8, 0, 255] {
+                gpu.set_anisotropic_filtering(level);
+                let expected = match level {
+                    2 | 4 | 8 => level,
+                    _ => 1,
+                }
+                .min(gpu.max_anisotropy);
+                assert_eq!(gpu.anisotropy, expected);
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &triangle([1.; 4], 0.),
+                    &[stage],
+                    &textures,
+                    [1, 0, 0, 0],
+                )
+                .unwrap();
+                let id = gpu.textures[&1].0;
+                if gpu.max_anisotropy > 1 {
+                    assert_eq!(gpu.texture_anisotropy[&id], expected);
+                    unsafe {
+                        let ptr = gpu.host.load(c"glGetTexParameterfv");
+                        assert!(!ptr.is_null());
+                        let get: unsafe extern "system" fn(u32, u32, *mut f32) =
+                            std::mem::transmute(ptr);
+                        (gpu.gl.ActiveTexture)(GL_TEXTURE0);
+                        (gpu.gl.BindTexture)(GL_TEXTURE_2D, id);
+                        let mut actual = 0.;
+                        get(GL_TEXTURE_2D, 0x84fe, &mut actual);
+                        assert_eq!(actual, expected as f32);
+                        gpu.check().unwrap();
+                    }
+                } else {
+                    assert!(gpu.texture_anisotropy.is_empty());
+                }
+            }
+            gpu.delete_textures(&[1]);
+            assert!(gpu.texture_anisotropy.is_empty());
+            // Simulate an unsupported adapter: no extension parameter is emitted.
+            gpu.max_anisotropy = 1;
+            gpu.set_anisotropic_filtering(8);
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &triangle([1.; 4], 0.),
+                &[stage],
+                &textures,
+                [1, 0, 0, 0],
+            )
+            .unwrap();
+            assert_eq!(gpu.anisotropy, 1);
+            assert!(gpu.texture_anisotropy.is_empty());
         }
     }
     fn identity_transforms() -> VertexTransforms {

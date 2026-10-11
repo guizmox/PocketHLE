@@ -398,6 +398,7 @@ fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
                 .gpu_renderer
                 .unwrap_or(lib.config().gpu_renderer),
         );
+        emu.set_anisotropic_filtering(entry.settings.anisotropic_filtering.unwrap_or(lib.config().anisotropic_filtering));
         emu.set_halt_on_unimplemented(entry.settings.halt_on_unimplemented);
         emu.max_slices = entry.settings.max_slices;
         emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;

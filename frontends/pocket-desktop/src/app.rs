@@ -1368,6 +1368,17 @@ impl PocketLauncher {
                 ui.label("GPU rendering (experimental)");
                 ui.checkbox(&mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
                 ui.end_row();
+                ui.label("Anisotropic filtering (GPU only)");
+                ui.add_enabled_ui(draft.gpu_renderer, |ui| {
+                    egui::ComboBox::from_id_source("global_anisotropy")
+                        .selected_text(match draft.anisotropic_filtering { 2 => "2×", 4 => "4×", 8 => "8×", _ => "Off" })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [(0,"Off"),(2,"2×"),(4,"4×"),(8,"8×")] {
+                                ui.selectable_value(&mut draft.anisotropic_filtering, value, label);
+                            }
+                        });
+                }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
+                ui.end_row();
                 ui.label("Default CPU backend");
                 egui::ComboBox::from_id_source("cpu_backend")
                     .selected_text(draft.default_cpu_backend.label())
@@ -1761,6 +1772,18 @@ impl PocketLauncher {
                     ui.selectable_value(&mut draft.gpu_renderer, Some(false), "Software");
                     ui.selectable_value(&mut draft.gpu_renderer, Some(true), "GPU (experimental)");
                 });
+                ui.end_row();
+
+                ui.label("Anisotropic filtering (GPU only)");
+                ui.add_enabled_ui(draft.gpu_renderer.unwrap_or(self.library.config().gpu_renderer), |ui| {
+                    egui::ComboBox::from_id_source("game_anisotropy")
+                        .selected_text(match draft.anisotropic_filtering { None => "Emulator default", Some(2) => "2×", Some(4) => "4×", Some(8) => "8×", _ => "Off" })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [(None,"Emulator default"),(Some(0),"Off"),(Some(2),"2×"),(Some(4),"4×"),(Some(8),"8×")] {
+                                ui.selectable_value(&mut draft.anisotropic_filtering, value, label);
+                            }
+                        });
+                }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
                 ui.end_row();
 
                 ui.label("Halt on unimplemented API");

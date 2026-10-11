@@ -2949,3 +2949,22 @@ Native regression covers caps 0/1/default, removing/restoring caps, nearest and
 trilinear modes, native/forced shader/no-derivative paths. 151 GLES tests, 284
 WinCE tests and Android ARM64/ARMv7 GLES checks pass. Full Windows/APK builds and
 RBR visual improvement still need target-device validation. No instrumentation.
+
+## Configurable anisotropic filtering (2026-10-11)
+
+LauncherConfig.anisotropic_filtering is u8 (0=Off,2,4,8; default0). GameSettings
+uses Option<u8>, None inherits global. Android Kotlin mirrors JSON; no independent
+SharedPreferences storage. English Emulator options/per-game controls are disabled
+when effective GPU is false; GPU selection changes update availability without
+forgetting the saved level. All launch paths pass the resolved level to Context.
+Selection alone never enables GPU. Invalid runtime choices normalize to Off.
+Renderer queries advertised EXT/ARB capability once, caps to driver max (up to8),
+caches applied sampler values, restores1 when Off, removes cache entries on
+texture deletion. Context initializes new renderers with its selection and
+reapplies it when activating parked surfaces; parent context snapshots retain it.
+No extra native resource/worker. CPU software filtering is unchanged.
+Validation: 153 GLES tests,284 WinCE tests, Rust persistence matrix/reopen, Kotlin
+JSON defaults/modes/inheritance and unknown-field roundtrip, core check without
+default features, ARM64/ARMv7 Rust GLES checks with warnings denied, Android XML
+parse. Native tests read actual driver anisotropy and exercise reset/deletion/
+unsupported capability. Full Windows/APK and device UI/visual/FPS tests pending.

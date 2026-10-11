@@ -207,6 +207,7 @@ impl Runner {
             .map(|l| l.config().clone())
             .unwrap_or_default();
         emu.set_gpu_renderer(game.settings.gpu_renderer.unwrap_or(launcher_config.gpu_renderer));
+        emu.set_anisotropic_filtering(game.settings.anisotropic_filtering.unwrap_or(launcher_config.anisotropic_filtering));
         log::info!("Gizmondo GPS configuration: gizmondo={} host_enabled={} fixed_enabled={} latitude={} longitude={}",is_gizmondo,launcher_config.gps_enabled,launcher_config.gps_fixed_enabled,launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude);
         let hardware = (
             launcher_config.bluetooth_enabled,

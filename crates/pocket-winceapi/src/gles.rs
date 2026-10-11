@@ -149,6 +149,10 @@ fn flush_pixmap(ctx: &mut CallCtx<'_>, surface: u32) -> Result<(), KernelError> 
 }
 
 /// Opt-in host GPU renderer. Must be called on the emulation thread.
+pub fn set_anisotropic_filtering(level: u8) {
+    with_ctx(|c| c.set_anisotropic_filtering(level));
+}
+
 pub fn set_gpu_renderer(enabled: bool) {
     with_ctx(|c| {
         if enabled {
