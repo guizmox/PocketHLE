@@ -414,6 +414,29 @@ pub fn draw_triangle(
     stages: &[TextureStage],
     tri: [Vertex; 3],
 ) -> usize {
+    // Small primitives are dominated by clipping/allocation overhead. Keep the
+    // established path for larger triangles: its pixel loop benchmarks better.
+    if tri.iter().all(|v| {
+        let [x, y, z, w] = v.pos;
+        w.is_finite() && w >= 1e-9 && x.abs() <= w && y.abs() <= w && z.abs() <= w
+    }) {
+        let xs = tri.map(|v| v.pos[0] / v.pos[3]);
+        let ys = tri.map(|v| v.pos[1] / v.pos[3]);
+        let span = |v: [f32; 3]| v[0].max(v[1]).max(v[2]) - v[0].min(v[1]).min(v[2]);
+        if span(xs) * state.viewport.2 as f32 <= 8.0 && span(ys) * state.viewport.3 as f32 <= 8.0 {
+            return raster_clipped(target, state, sample, stages, tri);
+        }
+    }
+    draw_triangle_clipped(target, state, sample, stages, tri)
+}
+
+fn draw_triangle_clipped(
+    target: &mut RenderTarget,
+    state: &PipelineState,
+    sample: SampleFn<'_>,
+    stages: &[TextureStage],
+    tri: [Vertex; 3],
+) -> usize {
     // OpenGL clips primitives in homogeneous clip space before the
     // perspective divide and viewport transform.  Clipping only against
     // the framebuffer bounds is not equivalent: with a sub-viewport,
@@ -444,26 +467,27 @@ pub fn draw_triangle(
 
 /// Sutherland-Hodgman clipping against one canonical OpenGL clip plane.
 /// Inside is: -w <= x,y,z <= w.
+fn clip_distance(v: &Vertex, plane: usize) -> f32 {
+    match plane {
+        0 => v.pos[0] + v.pos[3],
+        1 => v.pos[3] - v.pos[0],
+        2 => v.pos[1] + v.pos[3],
+        3 => v.pos[3] - v.pos[1],
+        4 => v.pos[2] + v.pos[3],
+        5 => v.pos[3] - v.pos[2],
+        _ => unreachable!(),
+    }
+}
+
 fn clip_plane(input: &[Vertex], out: &mut Vec<Vertex>, plane: usize) {
     if input.is_empty() {
         return;
     }
-    let dist = |v: &Vertex| -> f32 {
-        match plane {
-            0 => v.pos[0] + v.pos[3], // left   x >= -w
-            1 => v.pos[3] - v.pos[0], // right  x <=  w
-            2 => v.pos[1] + v.pos[3], // bottom y >= -w
-            3 => v.pos[3] - v.pos[1], // top    y <=  w
-            4 => v.pos[2] + v.pos[3], // near   z >= -w
-            5 => v.pos[3] - v.pos[2], // far    z <=  w
-            _ => unreachable!(),
-        }
-    };
     for i in 0..input.len() {
         let a = &input[i];
         let b = &input[(i + 1) % input.len()];
-        let da = dist(a);
-        let db = dist(b);
+        let da = clip_distance(a, plane);
+        let db = clip_distance(b, plane);
         let a_in = da >= 0.0;
         let b_in = db >= 0.0;
         if a_in {
@@ -837,6 +861,98 @@ mod tests {
     fn pixel(t: &RenderTarget, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * t.width + x) * 4) as usize;
         [t.color[i], t.color[i + 1], t.color[i + 2], t.color[i + 3]]
+    }
+
+    #[test]
+    fn inside_fast_path_matches_reference_clipper_color_depth_and_count() {
+        let mut seed = 12345u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / 16777216.0
+        };
+        for case in 0..128 {
+            let mut tri = big_tri([0.8, 0.2, 0.6, 0.5]);
+            for v in &mut tri {
+                let w = 0.25 + random() * 2.0;
+                v.pos = [
+                    (random() * 2.0 - 1.0) * w,
+                    (random() * 2.0 - 1.0) * w,
+                    (random() * 2.0 - 1.0) * w,
+                    w,
+                ];
+                v.color = [random(), random(), random(), random()];
+            }
+            // Include exact clip-plane boundaries and an intersecting primitive.
+            if case % 4 == 0 {
+                tri = big_tri([0.8, 0.2, 0.6, 0.5]);
+            }
+            if case % 4 == 1 {
+                tri[0].pos[0] = -2.0 * tri[0].pos[3];
+            }
+            let mut fast = RenderTarget::new(
+                if case % 2 == 0 { 2 } else { 32 },
+                if case % 2 == 0 { 2 } else { 24 },
+            );
+            let mut reference = RenderTarget::new(
+                if case % 2 == 0 { 2 } else { 32 },
+                if case % 2 == 0 { 2 } else { 24 },
+            );
+            fast.color.fill(73);
+            reference.color.fill(73);
+            let mut state = full_viewport(&fast);
+            state.smooth_shading = case % 2 == 0;
+            state.depth_test = true;
+            state.blend = case % 3 == 0;
+            let a = draw_triangle(&mut fast, &state, &no_texture, &[], tri);
+            let b = draw_triangle_clipped(&mut reference, &state, &no_texture, &[], tri);
+            assert_eq!(a, b, "fragment count case {case}");
+            assert_eq!(fast.color, reference.color, "color case {case}");
+            assert_eq!(fast.depth, reference.depth, "depth case {case}");
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release benchmark; timing is not a pass/fail assertion"]
+    fn benchmark_inside_triangle_fast_path() {
+        use std::{hint::black_box, time::Instant};
+        for size in [2, 8, 64] {
+            let iterations = if size <= 8 { 100000 } else { 3000 };
+            let mut target = RenderTarget::new(size, size);
+            let state = full_viewport(&target);
+            let sample: SampleFn<'_> = black_box(&no_texture as SampleFn<'_>);
+            let stages: &[TextureStage] = black_box(&[] as &[TextureStage]);
+            let tri = big_tri([0.8, 0.2, 0.6, 1.0]);
+            let mut old = Vec::new();
+            let mut fast = Vec::new();
+            for _ in 0..5 {
+                for reference in [false, true] {
+                    let render = black_box(if reference {
+                        draw_triangle_clipped
+                    } else {
+                        draw_triangle
+                    });
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        black_box(render(
+                            black_box(&mut target),
+                            black_box(&state),
+                            sample,
+                            stages,
+                            black_box(tri),
+                        ));
+                    }
+                    if reference {
+                        old.push(start.elapsed());
+                    } else {
+                        fast.push(start.elapsed());
+                    }
+                }
+            }
+            old.sort();
+            fast.sort();
+            println!("{size}x{size}, {iterations} triangles: reference={:?}, optimized={:?}, speedup={:.3}x",
+                old[2], fast[2], old[2].as_secs_f64()/fast[2].as_secs_f64());
+        }
     }
 
     #[test]

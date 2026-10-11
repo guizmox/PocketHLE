@@ -1382,31 +1382,15 @@ impl Context {
             verts.push(v);
         }
 
-        let tris: Vec<[Vertex; 3]> = match mode {
-            GL_TRIANGLES => verts.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
-            GL_TRIANGLE_STRIP => (2..verts.len())
-                .map(|i| {
-                    // Every other triangle in a strip has reversed
-                    // winding; swap two vertices so face culling sees a
-                    // consistent orientation.
-                    if i % 2 == 0 {
-                        [verts[i - 2], verts[i - 1], verts[i]]
-                    } else {
-                        [verts[i - 1], verts[i - 2], verts[i]]
-                    }
-                })
-                .collect(),
-            GL_TRIANGLE_FAN => (2..verts.len())
-                .map(|i| [verts[0], verts[i - 1], verts[i]])
-                .collect(),
-            // Points and lines are not rasterized; accepting them
-            // silently keeps a game's HUD code from erroring out.
+        match mode {
+            GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN => {}
+            // Points and lines retain their existing non-rasterized behavior.
             GL_POINTS | GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => return,
             _ => {
                 self.set_error(GL_INVALID_ENUM);
                 return;
             }
-        };
+        }
 
         // Resolve the bound textures once per draw, not per fragment.
         let mut texs: [Option<&Texture>; raster::MAX_TEXTURE_STAGES] = [None; _];
@@ -1433,8 +1417,32 @@ impl Context {
         );
         let sample = |unit: usize, s: f32, t: f32| texs[unit].map(|tx| tx.sample(s, t));
 
-        for tri in tris {
+        // Stream primitives in their original order without allocating a triangle list.
+        let mut draw = |tri| {
             raster::draw_triangle(&mut self.target, &self.state, &sample, &stages, tri);
+        };
+        match mode {
+            GL_TRIANGLES => {
+                for c in verts.chunks_exact(3) {
+                    draw([c[0], c[1], c[2]]);
+                }
+            }
+            GL_TRIANGLE_STRIP => {
+                for i in 2..verts.len() {
+                    // Preserve alternating winding and the provoking vertex.
+                    if i % 2 == 0 {
+                        draw([verts[i - 2], verts[i - 1], verts[i]]);
+                    } else {
+                        draw([verts[i - 1], verts[i - 2], verts[i]]);
+                    }
+                }
+            }
+            GL_TRIANGLE_FAN => {
+                for i in 2..verts.len() {
+                    draw([verts[0], verts[i - 1], verts[i]]);
+                }
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -2158,6 +2166,51 @@ mod tests {
         flipped.set_capability(GL_CULL_FACE, true);
         flipped.draw_arrays(&mut m3, GL_TRIANGLE_STRIP, 0, 6);
         assert_eq!(covered(&flipped), 0, "strip was not uniformly wound");
+    }
+
+    #[test]
+    fn streamed_strip_and_fan_match_explicit_triangles() {
+        for (mode, indices) in [
+            (GL_TRIANGLE_STRIP, vec![0, 1, 2, 2, 1, 3]),
+            (GL_TRIANGLE_FAN, vec![0, 1, 2, 0, 2, 3]),
+        ] {
+            let bytes: Vec<u8> = [
+                [-0.8f32, -0.8, 0.0],
+                [0.8, -0.8, 0.0],
+                [-0.8, 0.8, 0.0],
+                [0.8, 0.8, 0.0],
+            ]
+            .iter()
+            .flat_map(|p| floats(p))
+            .collect();
+            let mut optimized = ctx();
+            let mut explicit = ctx();
+            let pointer = ArrayPointer {
+                enabled: true,
+                size: 3,
+                ty: GL_FLOAT,
+                stride: 0,
+                pointer: BASE,
+                buffer: 0,
+            };
+            optimized.vertex_array = pointer;
+            explicit.vertex_array = pointer;
+            // Blending makes primitive order and overlapping coverage observable.
+            optimized.set_capability(GL_BLEND, true);
+            explicit.set_capability(GL_BLEND, true);
+            optimized.draw_arrays(
+                &mut FakeMem {
+                    base: BASE,
+                    bytes: bytes.clone(),
+                },
+                mode,
+                0,
+                4,
+            );
+            explicit.draw_elements(&mut FakeMem { base: BASE, bytes }, GL_TRIANGLES, &indices);
+            assert_eq!(optimized.target.color, explicit.target.color);
+            assert_eq!(optimized.target.depth, explicit.target.depth);
+        }
     }
 
     #[test]

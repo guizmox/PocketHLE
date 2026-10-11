@@ -83,13 +83,15 @@ struct CpuMem<'a>(&'a mut dyn pocket_cpu::Cpu);
 
 impl GuestMemory for CpuMem<'_> {
     fn read(&mut self, addr: u32, len: usize, out: &mut Vec<u8>) -> bool {
-        match self.0.read_mem(addr, len as u32) {
-            Ok(v) => {
-                out.clear();
-                out.extend_from_slice(&v);
-                true
-            }
-            Err(_) => false,
+        if u32::try_from(len).is_err() {
+            return false;
+        }
+        out.resize(len, 0);
+        if self.0.read_mem_into(addr, out).is_ok() {
+            true
+        } else {
+            out.clear();
+            false
         }
     }
 }
@@ -1761,6 +1763,27 @@ mod tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    #[test]
+    fn guest_attribute_reads_reuse_buffer_and_clear_failed_reads() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x1000, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let mut bytes = Vec::with_capacity(64);
+        let allocation = bytes.as_ptr();
+        let mut mem = CpuMem(&mut cpu);
+        assert!(mem.read(0x1000, 8, &mut bytes));
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(mem.read(0x1004, 4, &mut bytes));
+        assert_eq!(bytes, [5, 6, 7, 8]);
+        assert_eq!(bytes.as_ptr(), allocation);
+        assert!(!mem.read(0x3000, 4, &mut bytes));
+        assert!(bytes.is_empty());
+        assert!(mem.read(0x1000, 4, &mut bytes));
+        assert_eq!(bytes, [1, 2, 3, 4]);
+        assert_eq!(bytes.as_ptr(), allocation);
     }
 
     #[test]

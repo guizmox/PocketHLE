@@ -468,6 +468,19 @@ Two rasterizer details that look like bugs and are not: an incomplete
 texture samples as opaque white (matching GL ES), and the software GL
 tests share a `TEST_LOCK` because the context is process-global.
 
+Software GLES allocation optimizations: fully inside finite clip-space
+triangles with a projected bounding box at most 4x4 pixels go directly to
+rasterization (the release benchmark found larger primitives faster through
+the established pixel path); larger/intersecting/exceptional primitives
+retain the six-plane clipper. Triangle lists, strips and fans stream from the
+assembled vertices in the original order, including alternating strip winding
+and the provoking vertex. CpuMem reads attributes with Cpu::read_mem_into into
+the reusable scratch allocation; failures clear the scratch and abort the
+draw. No guest memory references are retained, and the per-draw shared-vertex
+cache remains. Raster reference comparisons check exact colors, depth and
+fragment counts. The ignored release benchmark measures clipping overhead,
+not game FPS; no new production instrumentation or settings are introduced.
+
 **Texturing is a cascade, not one stage.** GL ES 1.1 multitexturing
 applies the enabled units in ascending order, each combiner taking the
 colour the previous unit produced, starting from the interpolated vertex
