@@ -3028,7 +3028,9 @@ pub(crate) fn schedule_idle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
     if let Some(outcome) = resume_worker_reenter(ctx)? {
         return Ok(outcome);
     }
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    // The kernel waits after releasing the process-domain API gate. Sleeping
+    // here lets a suspended child repeatedly retain the gate and starve its
+    // parent, which needs that same gate to resume it (Android RAMTEST).
     Ok(DispatchOutcome::JumpTo(
         pocket_kernel::THREAD_SCHEDULER_IDLE_VA,
     ))

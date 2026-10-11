@@ -3077,3 +3077,14 @@ Regression covers DXT1 names 0..5 over 18 draws on software, desktop GL and GLES
 including ignored zero deletion; ordinary default upload and named deletion
 returning to the default binding are checked too. Device confirmation of the
 Battlestations flash remains required.
+
+## Suspended-process idle gate fairness (2026-10-11)
+
+Android RAMTEST's intermittent CI timeout stops after remote_suspend_counts.
+All processes share the handle domain's API gate. schedule_idle previously slept
+1 ms inside dispatch while owning that gate, letting a suspended child repeatedly
+reacquire it and starve its parent's pending API calls. Move idle sleep to the
+kernel after releasing the gate, before frontend polling. Keep idle cadence,
+Sleep durations, suspension counts and control application unchanged. No timeout
+increase or skipped test. Native ARM runner reproduction requires Unicorn and
+libclang; local build lacks libclang, so full diagnostic confirmation is pending.
