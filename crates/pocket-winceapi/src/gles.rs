@@ -1340,9 +1340,8 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     Ok(VOID)
 }
 
-/// `glCompressedTexSubImage2D` and the two `glCopyTex*Image2D` entry
-/// points. We advertise no framebuffer-to-texture path and no partial
-/// compressed update; report the error GL specifies.
+/// Compressed subimages and framebuffer-copy subimages remain unsupported.
+/// Full framebuffer copies are handled by gl_copy_tex_image_2d.
 fn gl_unsupported_format(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
     Ok(VOID)
@@ -1608,9 +1607,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         if c.target.width != w || c.target.height != h {
             c.target.resize(w, h);
         }
-        c.sync_gpu();
-        c.target
-            .to_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
+        c.present_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
     });
     ctx.kernel.framebuffer.mark_dirty();
     // The conversion above replaces the framebuffer, including any video
@@ -3065,6 +3062,23 @@ mod tests {
             ],
         );
         assert_eq!(cpu.read_mem(SCRATCH + 256, 4).unwrap(), [255; 4]);
+        with_ctx(|c| c.bind_texture(pocket_gles::GL_TEXTURE_2D, 3));
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_copy_tex_image_2d,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                0,
+                pocket_gles::GL_RGBA,
+                16,
+                16,
+                1,
+                1,
+                0,
+            ],
+        );
+        with_ctx(|c| assert_eq!(c.textures[&3].rgba, [255; 4]));
         let parent = suspend();
         set_gpu_renderer(true);
         assert!(with_ctx(|c| c.gpu_active()));

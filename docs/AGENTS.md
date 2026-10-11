@@ -2763,3 +2763,47 @@ GLES2 verify rendering, caches after clear/resize, polygon depth, existing light
 alpha/depth, primitives, matrices and independent context resume. API tests cover
 fixed conversion, queries, stack tail and GL errors. Full-game FPS requires its
 assets and target-device testing; no temporary profiling is shipped.
+
+### Carmageddon: sequential draws, compact attributes, fused presentation
+Carmageddon has four-vertex smooth triangle-strip call sites (e.g. 0x1808c,
+0x49898, 0x49bac, 0x4d49c). Counts of static call sites do not establish frequency.
+DrawArrays now passes an iterator range instead of allocating indices and skips
+the guest-index vertex cache; indexed calls keep their existing cache. Dense array
+reads remain per-draw and checked. The native sequential/smooth path forwards
+triangles, strips, fans, points and independent lines directly and skips primitive
+expansion/deduplication. Flat shading and line strips/loops retain expansion to
+preserve provoking attributes and endpoint behavior. Two-sided lighting treats
+native strip/fan modes as triangle primitives too. No per-title detection.
+
+The previous fixed 24-float record is now a per-draw layout: position/colour always,
+UV pairs only for active stages, normal/fog only for lighting or pretransformed fog,
+separate provoking position only for flat lighting. Smooth lighting aliases the
+position attribute. Every draw restores enabled/disabled arrays and their offsets
+and stride, including transitions between sparse texture units and lighting modes.
+Vertex keys use only packed attributes (zero-padding their fixed-size hash key),
+retain exact bits and are rebuilt for indexed/expanded draws. Sequential calls skip
+that rebuild. Fragment sampling is conditional on the stage being enabled.
+All eight shader attributes still exist; disabled unused attributes are not relied
+upon for visible output. Unlit/untextured stride is 32 bytes, one texture 40 bytes,
+and full flat lighting/multitexture can still use 96. Resources/caches remain owned
+by the renderer and share its existing teardown; no new native handles or workers.
+
+Renderer read_present produces canonical RGBA and framebuffer RGB565 in a single
+readback traversal with the existing bottom-up/top-down flip and truncation masks.
+Both images remain current: glReadPixels/copyTexImage after swap must not see stale
+RGBA even though GPU dirty is cleared. A clean readback uses canonical RGBA; short
+output preserves the old converter's behavior and trailing odd byte. Context
+present_rgb565 selects the native fused path or the existing software converter,
+with the same native failure handling. eglSwapBuffers retains DirectShow servicing,
+framebuffer dirty marking and mapped GAPI synchronization in their previous order.
+Synchronous glReadPixels is retained; no zero-copy frontend claim or pacing change.
+
+Controlled assertions show a textured four-vertex strip at 160 bytes versus the
+previous indexed 396; the untextured Colors cube at 328 versus previous 840 bytes.
+Driver tests on desktop GL and GLES2 cover direct strips/fans against expanded
+reference, flat fallback, layout transitions, short/odd-width presentation buffers,
+readback orientation and canonical-cache reuse. Existing lighting, transforms,
+alpha/depth, texture, point/line and parent-context tests remain relevant. Guest
+presentation tests also copy a texture after a swap before parent suspension.
+Upload-time paletted decoding is unchanged; performance benefit in a race requires
+actual target-device measurement. No transient profiling is shipped.

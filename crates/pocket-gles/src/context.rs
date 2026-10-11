@@ -360,6 +360,20 @@ impl Context {
         }
     }
 
+    /// Preserve the RGBA readback cache and create the display framebuffer
+    /// in the same native-readback traversal. Software uses the existing converter.
+    pub fn present_rgb565(&mut self, out: &mut [u8]) {
+        if !self.gpu_failed {
+            if let Some(gpu) = self.gpu.as_mut() {
+                match gpu.read_present(&mut self.target, out) {
+                    Ok(()) => return,
+                    Err(e) => self.gpu_failure("readback", e),
+                }
+            }
+        }
+        self.target.to_rgb565(out);
+    }
+
     // ---- error handling -------------------------------------------------
 
     /// Record an error. GL keeps the *first* error until it is read, so
@@ -1489,8 +1503,8 @@ impl Context {
         if !self.vertex_source_ready() {
             return;
         }
-        let indices: Vec<u32> = (first..first.saturating_add(count)).collect();
-        self.draw_indexed(mem, mode, &indices);
+        let end = first.saturating_add(count);
+        self.draw_indexed(mem, mode, first..end, (end - first) as usize, true);
     }
 
     /// `glDrawElements`. `indices` has already been read out of guest
@@ -1499,7 +1513,7 @@ impl Context {
         if !self.vertex_source_ready() {
             return;
         }
-        self.draw_indexed(mem, mode, indices);
+        self.draw_indexed(mem, mode, indices.iter().copied(), indices.len(), false);
     }
 
     /// Read an index buffer out of guest memory and draw with it.
@@ -1570,7 +1584,14 @@ impl Context {
         self.draw_elements(mem, mode, &indices);
     }
 
-    fn draw_indexed(&mut self, mem: &mut dyn GuestMemory, mode: u32, indices: &[u32]) {
+    fn draw_indexed(
+        &mut self,
+        mem: &mut dyn GuestMemory,
+        mode: u32,
+        indices: impl Iterator<Item = u32> + Clone,
+        count: usize,
+        sequential: bool,
+    ) {
         if self.gpu_failed {
             return;
         }
@@ -1589,7 +1610,7 @@ impl Context {
         self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
         let stages = self.texture_stages();
         self.prepared_arrays.clear();
-        if let (Some(&lo), Some(&hi)) = (indices.iter().min(), indices.iter().max()) {
+        if let (Some(lo), Some(hi)) = (indices.clone().min(), indices.clone().max()) {
             let mut arrays = vec![self.vertex_array];
             if self.color_array.enabled {
                 arrays.push(self.color_array);
@@ -1616,7 +1637,7 @@ impl Context {
                         .checked_add(array.component_bytes()?.checked_mul(array.size)?)?;
                     start.checked_add(len)?;
                     // Sparse indices and enormous strides keep the element-by-element path.
-                    if len > 1024 * 1024 || hi - lo > (indices.len() as u32).saturating_mul(4) {
+                    if len > 1024 * 1024 || hi - lo > (count as u32).saturating_mul(4) {
                         return None;
                     }
                     Some((start, len as usize))
@@ -1633,19 +1654,27 @@ impl Context {
         // index means an indexed mesh transforms each shared vertex a
         // single time instead of once per triangle that uses it.
         let mut cache: HashMap<u32, Vertex> = HashMap::new();
-        let mut verts: Vec<Vertex> = Vec::with_capacity(indices.len());
-        for &i in indices {
-            let v = match cache.get(&i) {
-                Some(v) => *v,
-                None => {
-                    let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
-                        // An unmapped array pointer aborts the draw
-                        // rather than rendering garbage geometry.
-                        self.prepared_arrays.clear();
-                        return;
-                    };
-                    cache.insert(i, v);
-                    v
+        let mut verts: Vec<Vertex> = Vec::with_capacity(count);
+        for i in indices {
+            let v = if sequential {
+                let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
+                    self.prepared_arrays.clear();
+                    return;
+                };
+                v
+            } else {
+                match cache.get(&i) {
+                    Some(v) => *v,
+                    None => {
+                        let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
+                            // An unmapped array pointer aborts the draw
+                            // rather than rendering garbage geometry.
+                            self.prepared_arrays.clear();
+                            return;
+                        };
+                        cache.insert(i, v);
+                        v
+                    }
                 }
             };
             verts.push(v);
@@ -1677,7 +1706,13 @@ impl Context {
         };
         if let Some(gpu) = self.gpu.as_mut() {
             let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
-            if let Err(e) = gpu.draw_object_space(
+            let draw = if sequential {
+                crate::gpu::Renderer::draw_arrays_object_space
+            } else {
+                crate::gpu::Renderer::draw_object_space
+            };
+            if let Err(e) = draw(
+                gpu,
                 &self.target,
                 &self.state,
                 mode,
@@ -1700,7 +1735,7 @@ impl Context {
         }
         log::debug!(
             "GLES draw mode=0x{mode:04x} indices={} stages={:?} active_unit={} vertex_array={} blend={} src={:?} dst={:?} alpha_test={} func={:?} ref={}",
-            indices.len(),
+            count,
             stages
                 .iter()
                 .map(|s| (s.unit, self.texture_units[s.unit].bound_texture, s.env))

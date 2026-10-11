@@ -21,6 +21,69 @@ pub struct VertexTransforms {
     pub modelview: Matrix4,
     pub textures: [Matrix4; 4],
 }
+/// Per-draw attribute layout. Disabled stages carry no payload. Smooth
+/// lighting aliases the position attribute instead of uploading it twice.
+#[derive(Clone, Copy)]
+struct VertexLayout {
+    attributes: [Option<(i32, usize)>; 8],
+    floats: usize,
+}
+impl VertexLayout {
+    fn new(
+        state: &PipelineState,
+        stages: &[TextureStage],
+        transforms: Option<&VertexTransforms>,
+    ) -> Self {
+        let lighting = transforms.is_some_and(|t| t.lighting.enabled);
+        let mut layout = Self {
+            attributes: [None; 8],
+            floats: 8,
+        };
+        layout.attributes[0] = Some((4, 0));
+        layout.attributes[1] = Some((4, 4));
+        for stage in stages {
+            layout.attributes[stage.unit + 2] = Some((2, layout.floats));
+            layout.floats += 2;
+        }
+        if lighting || (transforms.is_none() && state.fog) {
+            layout.attributes[6] = Some((4, layout.floats));
+            layout.floats += 4;
+        }
+        if lighting {
+            if state.smooth_shading {
+                layout.attributes[7] = Some((4, 0));
+            } else {
+                layout.attributes[7] = Some((4, layout.floats));
+                layout.floats += 4;
+            }
+        }
+        layout
+    }
+    fn pack(&self, out: &mut Vec<f32>, vertex: Vertex, provoking: Vertex, smooth: bool) {
+        out.extend(vertex.pos);
+        out.extend(if smooth {
+            vertex.color
+        } else {
+            provoking.color
+        });
+        for unit in 0..4 {
+            if self.attributes[unit + 2].is_some() {
+                out.extend(vertex.texcoord[unit]);
+            }
+        }
+        if self.attributes[6].is_some() {
+            out.extend(if smooth {
+                vertex.normal
+            } else {
+                provoking.normal
+            });
+            out.push(vertex.fog_depth);
+        }
+        if self.attributes[7].is_some_and(|(_, offset)| offset != 0) {
+            out.extend(provoking.pos);
+        }
+    }
+}
 const TEXTURE_MATRICES: [&str; 4] = [
     "textureMatrix0",
     "textureMatrix1",
@@ -61,6 +124,7 @@ struct Gl {
     DeleteBuffers: unsafe extern "system" fn(i32, *const u32),
     BindBuffer: unsafe extern "system" fn(u32, u32),
     BufferData: unsafe extern "system" fn(u32, isize, *const c_void, u32),
+    DisableVertexAttribArray: unsafe extern "system" fn(u32),
     EnableVertexAttribArray: unsafe extern "system" fn(u32),
     VertexAttribPointer: unsafe extern "system" fn(u32, i32, u32, u8, i32, *const c_void),
     PolygonOffset: unsafe extern "system" fn(f32, f32),
@@ -402,6 +466,13 @@ impl Gl {
                     *mut c_void,
                     unsafe extern "system" fn(u32, isize, *const c_void, u32),
                 >(p)
+            },
+            DisableVertexAttribArray: {
+                let p = host.load(c"glDisableVertexAttribArray");
+                if p.is_null() {
+                    return Err("driver lacks glDisableVertexAttribArray".into());
+                }
+                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32)>(p)
             },
             EnableVertexAttribArray: {
                 let mut p = host.load(c"glEnableVertexAttribArray");
@@ -1212,7 +1283,9 @@ impl Renderer {
         textures: &HashMap<u32, Texture>,
         names: [u32; 4],
     ) -> Result<(), String> {
-        self.draw_inner(target, state, mode, vertices, stages, textures, names, None)
+        self.draw_inner(
+            target, state, mode, vertices, stages, textures, names, None, false,
+        )
     }
 
     pub fn draw_object_space(
@@ -1235,6 +1308,31 @@ impl Renderer {
             textures,
             names,
             Some(transforms),
+            false,
+        )
+    }
+
+    pub fn draw_arrays_object_space(
+        &mut self,
+        target: &RenderTarget,
+        state: &PipelineState,
+        mode: u32,
+        vertices: &[Vertex],
+        stages: &[TextureStage],
+        textures: &HashMap<u32, Texture>,
+        names: [u32; 4],
+        transforms: &VertexTransforms,
+    ) -> Result<(), String> {
+        self.draw_inner(
+            target,
+            state,
+            mode,
+            vertices,
+            stages,
+            textures,
+            names,
+            Some(transforms),
+            true,
         )
     }
 
@@ -1248,101 +1346,102 @@ impl Renderer {
         textures: &HashMap<u32, Texture>,
         names: [u32; 4],
         transforms: Option<&VertexTransforms>,
+        sequential: bool,
     ) -> Result<(), String> {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
         self.scratch.clear();
-        let draw_mode = match mode {
-            GL_POINTS => GL_POINTS,
-            GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => GL_LINES,
-            _ => GL_TRIANGLES,
+        let layout = VertexLayout::new(state, stages, transforms);
+        let direct = sequential
+            && state.smooth_shading
+            && matches!(
+                mode,
+                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+            );
+        let draw_mode = if direct {
+            mode
+        } else {
+            match mode {
+                GL_POINTS => GL_POINTS,
+                GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => GL_LINES,
+                _ => GL_TRIANGLES,
+            }
         };
         let mut primitive = |v: &[Vertex]| {
             let provoking = *v.last().unwrap();
-            for &mut_p in v {
-                let mut p = mut_p;
-                if !state.smooth_shading {
-                    p.color = provoking.color;
-                }
-                self.scratch.extend(p.pos);
-                self.scratch.extend(p.color);
-                for t in p.texcoord {
-                    self.scratch.extend(t);
-                }
-                self.scratch.extend(if state.smooth_shading {
-                    p.normal
-                } else {
-                    provoking.normal
-                });
-                self.scratch.push(p.fog_depth);
-                self.scratch.extend(if state.smooth_shading {
-                    p.pos
-                } else {
-                    provoking.pos
-                });
+            for &vertex in v {
+                layout.pack(&mut self.scratch, vertex, provoking, state.smooth_shading);
             }
         };
-        match mode {
-            GL_TRIANGLES => {
-                for v in vertices.chunks_exact(3) {
-                    primitive(&[v[0], v[1], v[2]]);
-                }
+        if direct {
+            for vertex in vertices {
+                primitive(&[*vertex]);
             }
-            GL_TRIANGLE_FAN => {
-                for i in 2..vertices.len() {
-                    primitive(&[vertices[0], vertices[i - 1], vertices[i]]);
+        } else {
+            match mode {
+                GL_TRIANGLES => {
+                    for v in vertices.chunks_exact(3) {
+                        primitive(&[v[0], v[1], v[2]]);
+                    }
                 }
+                GL_TRIANGLE_FAN => {
+                    for i in 2..vertices.len() {
+                        primitive(&[vertices[0], vertices[i - 1], vertices[i]]);
+                    }
+                }
+                GL_TRIANGLE_STRIP => {
+                    for i in 2..vertices.len() {
+                        primitive(&if i % 2 == 0 {
+                            [vertices[i - 2], vertices[i - 1], vertices[i]]
+                        } else {
+                            [vertices[i - 1], vertices[i - 2], vertices[i]]
+                        });
+                    }
+                }
+                GL_POINTS => {
+                    for v in vertices {
+                        primitive(&[*v]);
+                    }
+                }
+                GL_LINES => {
+                    for v in vertices.chunks_exact(2) {
+                        primitive(v);
+                    }
+                }
+                GL_LINE_STRIP | GL_LINE_LOOP => {
+                    for v in vertices.windows(2) {
+                        primitive(v);
+                    }
+                    if mode == GL_LINE_LOOP && vertices.len() > 1 {
+                        primitive(&[*vertices.last().unwrap(), vertices[0]]);
+                    }
+                }
+                _ => return Err("unsupported GPU primitive".into()),
             }
-            GL_TRIANGLE_STRIP => {
-                for i in 2..vertices.len() {
-                    primitive(&if i % 2 == 0 {
-                        [vertices[i - 2], vertices[i - 1], vertices[i]]
-                    } else {
-                        [vertices[i - 1], vertices[i - 2], vertices[i]]
-                    });
-                }
-            }
-            GL_POINTS => {
-                for v in vertices {
-                    primitive(&[*v]);
-                }
-            }
-            GL_LINES => {
-                for v in vertices.chunks_exact(2) {
-                    primitive(v);
-                }
-            }
-            GL_LINE_STRIP | GL_LINE_LOOP => {
-                for v in vertices.windows(2) {
-                    primitive(v);
-                }
-                if mode == GL_LINE_LOOP && vertices.len() > 1 {
-                    primitive(&[*vertices.last().unwrap(), vertices[0]]);
-                }
-            }
-            _ => return Err("unsupported GPU primitive".into()),
         }
         self.indices.clear();
         let mut unique = std::mem::take(&mut self.vertex_keys);
-        unique.clear();
         let mut packed = std::mem::take(&mut self.packed_scratch);
         packed.clear();
-        let mut indexed = true;
-        for record in self.scratch.chunks_exact(24) {
-            let key = std::array::from_fn(|i| record[i].to_bits());
-            let index = if let Some(&index) = unique.get(&key) {
-                index
-            } else {
-                if unique.len() == 65536 {
-                    indexed = false;
-                    break;
-                }
-                let index = unique.len() as u16;
-                unique.insert(key, index);
-                packed.extend_from_slice(record);
-                index
-            };
-            self.indices.push(index);
+        let mut indexed = !direct;
+        if !direct {
+            unique.clear();
+            for record in self.scratch.chunks_exact(layout.floats) {
+                let key = std::array::from_fn(|i| record.get(i).map_or(0, |v| v.to_bits()));
+                let index = if let Some(&index) = unique.get(&key) {
+                    index
+                } else {
+                    if unique.len() == 65536 {
+                        indexed = false;
+                        break;
+                    }
+                    let index = unique.len() as u16;
+                    unique.insert(key, index);
+                    packed.extend_from_slice(record);
+                    index
+                };
+                self.indices.push(index);
+            }
         }
         // Do not increase transfer size for draws with little vertex reuse.
         indexed &= packed.len() * 4 + self.indices.len() * 2 < self.scratch.len() * 4;
@@ -1404,8 +1503,10 @@ impl Renderer {
             self.uniform_1i(self.loc("lightingEnabled"), lighting.is_some() as i32);
             self.uniform_1i(
                 self.loc("twoSided"),
-                (draw_mode == GL_TRIANGLES && lighting.is_some_and(|t| t.lighting.two_sided))
-                    as i32,
+                (matches!(
+                    draw_mode,
+                    GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN
+                ) && lighting.is_some_and(|t| t.lighting.two_sided)) as i32,
             );
             if let Some(t) = lighting {
                 let l = &t.lighting;
@@ -1586,28 +1687,20 @@ impl Renderer {
                 self.scratch.as_ptr().cast(),
                 0x88e0,
             );
-            for (i, (size, offset)) in [
-                (4, 0),
-                (4, 16),
-                (2, 32),
-                (2, 40),
-                (2, 48),
-                (2, 56),
-                (4, 64),
-                (4, 80),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                (self.gl.EnableVertexAttribArray)(i as u32);
-                (self.gl.VertexAttribPointer)(
-                    i as u32,
-                    size,
-                    GL_FLOAT,
-                    0,
-                    96,
-                    offset as *const c_void,
-                );
+            for (i, attribute) in layout.attributes.iter().enumerate() {
+                if let Some((size, offset)) = attribute {
+                    (self.gl.EnableVertexAttribArray)(i as u32);
+                    (self.gl.VertexAttribPointer)(
+                        i as u32,
+                        *size,
+                        GL_FLOAT,
+                        0,
+                        (layout.floats * 4) as i32,
+                        (*offset * 4) as *const c_void,
+                    );
+                } else {
+                    (self.gl.DisableVertexAttribArray)(i as u32);
+                }
             }
             if indexed {
                 (self.gl.BindBuffer)(GL_ELEMENT_ARRAY_BUFFER, self.index_buffer);
@@ -1624,15 +1717,32 @@ impl Renderer {
                     std::ptr::null(),
                 );
             } else {
-                (self.gl.DrawArrays)(draw_mode, 0, (self.scratch.len() / 24) as i32);
+                (self.gl.DrawArrays)(draw_mode, 0, (self.scratch.len() / layout.floats) as i32);
             }
             self.dirty = true;
             self.check()
         }
     }
     pub fn read(&mut self, target: &mut RenderTarget) -> Result<(), String> {
+        self.read_inner(target, None)
+    }
+    pub fn read_present(
+        &mut self,
+        target: &mut RenderTarget,
+        rgb565: &mut [u8],
+    ) -> Result<(), String> {
+        self.read_inner(target, Some(rgb565))
+    }
+    fn read_inner(
+        &mut self,
+        target: &mut RenderTarget,
+        mut rgb565: Option<&mut [u8]>,
+    ) -> Result<(), String> {
         self.resize(target.width, target.height)?;
         if !self.dirty {
+            if let Some(out) = rgb565 {
+                target.to_rgb565(out);
+            }
             return Ok(());
         }
         self.host.make_current()?;
@@ -1654,7 +1764,41 @@ impl Renderer {
             let stride = self.width as usize * 4;
             for (row, out) in target.color.chunks_exact_mut(stride).enumerate() {
                 let start = (self.height as usize - 1 - row) * stride;
-                out.copy_from_slice(&self.readback[start..start + stride]);
+                let source = &self.readback[start..start + stride];
+                let rgb_row = rgb565.as_deref_mut().and_then(|pixels| {
+                    let offset = row * self.width as usize * 2;
+                    let end = (offset + self.width as usize * 2).min(pixels.len());
+                    pixels.get_mut(offset..end)
+                });
+                if let Some(rgb_row) = rgb_row.filter(|row| row.len() == stride / 2) {
+                    // One traversal produces both caches, preserving the RGBA image
+                    // needed by glReadPixels and copy-to-texture calls after a swap.
+                    for ((src, rgba), rgb) in source
+                        .chunks_exact(4)
+                        .zip(out.chunks_exact_mut(4))
+                        .zip(rgb_row.chunks_exact_mut(2))
+                    {
+                        rgba.copy_from_slice(src);
+                        let value = ((src[0] as u16 >> 3) << 11)
+                            | ((src[1] as u16 >> 2) << 5)
+                            | (src[2] as u16 >> 3);
+                        rgb.copy_from_slice(&value.to_le_bytes());
+                    }
+                } else {
+                    out.copy_from_slice(source);
+                    // Match the existing converter when a caller supplies a short output.
+                    if let Some(pixels) = rgb565.as_deref_mut() {
+                        let offset = row * self.width as usize * 2;
+                        if let Some(tail) = pixels.get_mut(offset..) {
+                            for (src, rgb) in source.chunks_exact(4).zip(tail.chunks_exact_mut(2)) {
+                                let value = ((src[0] as u16 >> 3) << 11)
+                                    | ((src[1] as u16 >> 2) << 5)
+                                    | (src[2] as u16 >> 3);
+                                rgb.copy_from_slice(&value.to_le_bytes());
+                            }
+                        }
+                    }
+                }
             }
             self.dirty = false;
             Ok(())
@@ -1775,7 +1919,7 @@ VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
 uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;c=stage(c,texture2D(sampler0,uv0),env0,envColor0);c=stage(c,texture2D(sampler1,uv1),env1,envColor1);c=stage(c,texture2D(sampler2,uv2),env2,envColor2);c=stage(c,texture2D(sampler3,uv3),env3,envColor3);
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3),env3,envColor3);
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
@@ -1785,6 +1929,193 @@ float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMo
 mod tests {
     use super::*;
     use crate::raster;
+    fn identity_transforms() -> VertexTransforms {
+        VertexTransforms {
+            lighting: Default::default(),
+            normal_matrix: IDENTITY,
+            projection: IDENTITY,
+            modelview: IDENTITY,
+            textures: [IDENTITY; 4],
+        }
+    }
+    #[test]
+    fn compact_layout_keeps_only_active_attributes_and_flat_lighting_data() {
+        let mut state = PipelineState::default();
+        let mut transforms = identity_transforms();
+        assert_eq!(
+            VertexLayout::new(&state, &[], Some(&transforms)).floats * 4,
+            32
+        );
+        let stage = TextureStage {
+            unit: 2,
+            env: TexEnvMode::Modulate,
+            env_color: [0.; 4],
+        };
+        let layout = VertexLayout::new(&state, &[stage], Some(&transforms));
+        assert_eq!(layout.floats * 4, 40);
+        assert!(layout.attributes[2].is_none());
+        assert_eq!(layout.attributes[4], Some((2, 8)));
+        transforms.lighting.enabled = true;
+        let layout = VertexLayout::new(&state, &[stage], Some(&transforms));
+        assert_eq!(layout.floats * 4, 56);
+        assert_eq!(layout.attributes[7], Some((4, 0)));
+        state.smooth_shading = false;
+        let layout = VertexLayout::new(&state, &[stage], Some(&transforms));
+        assert_eq!(layout.floats * 4, 72);
+        let vertex = Vertex {
+            pos: [1., 2., 3., 4.],
+            normal: [1., 0., 0.],
+            color: [1.; 4],
+            ..Default::default()
+        };
+        let provoking = Vertex {
+            pos: [5., 6., 7., 8.],
+            normal: [0., 1., 0.],
+            color: [0.5; 4],
+            ..vertex
+        };
+        let mut packed = Vec::new();
+        layout.pack(&mut packed, vertex, provoking, false);
+        assert_eq!(&packed[4..8], &provoking.color);
+        assert_eq!(&packed[10..13], &provoking.normal);
+        assert_eq!(&packed[14..18], &provoking.pos);
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host desktop GL and GLES2; direct strips/fans and fused display readback"]
+    fn host_direct_arrays_compact_layout_and_fused_present_match_reference() {
+        let transforms = identity_transforms();
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            let mut target = RenderTarget::new(32, 32);
+            let positions = [
+                [-0.75, -0.75, 0., 1.],
+                [0.75, -0.75, 0., 1.],
+                [-0.75, 0.75, 0., 1.],
+                [0.75, 0.75, 0., 1.],
+            ];
+            let colors = [
+                [1., 0., 0., 1.],
+                [0., 1., 0., 1.],
+                [0., 0., 1., 1.],
+                [1., 1., 0., 1.],
+            ];
+            let vertices: [Vertex; 4] = std::array::from_fn(|i| Vertex {
+                pos: positions[i],
+                color: colors[i],
+                ..Default::default()
+            });
+            let mut state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                ..Default::default()
+            };
+            for smooth in [true, false] {
+                state.smooth_shading = smooth;
+                for mode in [GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN] {
+                    let vertices = if mode == GL_TRIANGLE_FAN {
+                        [vertices[0], vertices[1], vertices[3], vertices[2]]
+                    } else {
+                        vertices
+                    };
+                    gpu.clear(32, 32, &state, [0.; 4], 1., GL_COLOR_BUFFER_BIT)
+                        .unwrap();
+                    gpu.draw_object_space(
+                        &target,
+                        &state,
+                        mode,
+                        &vertices,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                        &transforms,
+                    )
+                    .unwrap();
+                    gpu.read(&mut target).unwrap();
+                    let reference = target.color.clone();
+                    gpu.clear(32, 32, &state, [0.; 4], 1., GL_COLOR_BUFFER_BIT)
+                        .unwrap();
+                    gpu.draw_arrays_object_space(
+                        &target,
+                        &state,
+                        mode,
+                        &vertices,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                        &transforms,
+                    )
+                    .unwrap();
+                    if smooth {
+                        assert_eq!(gpu.scratch.len() * 4, 128);
+                        assert!(gpu.indices.is_empty());
+                    }
+                    let mut rgb = vec![0; 32 * 32 * 2];
+                    gpu.read_present(&mut target, &mut rgb).unwrap();
+                    for (a, b) in reference.iter().zip(&target.color) {
+                        assert!(a.abs_diff(*b) <= 1, "es={es} mode={mode} smooth={smooth}");
+                    }
+                    let mut expected = vec![0; rgb.len()];
+                    target.to_rgb565(&mut expected);
+                    assert_eq!(rgb, expected);
+                    rgb.fill(0);
+                    gpu.read_present(&mut target, &mut rgb).unwrap(); // Clean-cache path.
+                    assert_eq!(rgb, expected);
+                    gpu.read(&mut target).unwrap(); // Canonical cache remains valid.
+                }
+            }
+            state.smooth_shading = true;
+            let stage = TextureStage {
+                unit: 2,
+                env: TexEnvMode::Modulate,
+                env_color: [0.; 4],
+            };
+            gpu.draw_arrays_object_space(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &[stage],
+                &HashMap::new(),
+                [0; 4],
+                &transforms,
+            )
+            .unwrap();
+            assert_eq!(gpu.scratch.len() * 4, 160); // Four 40-byte records, no indices.
+            assert!(gpu.indices.is_empty());
+            gpu.draw_arrays_object_space(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+                &transforms,
+            )
+            .unwrap();
+            assert_eq!(gpu.scratch.len() * 4, 128); // Drop the texture attribute again.
+            state.viewport = (0, 0, 7, 5);
+            state.scissor = None;
+            gpu.clear(7, 5, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            state.scissor = Some((0, 0, 7, 2));
+            gpu.clear(7, 5, &state, [0., 0., 1., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            target.resize(7, 5);
+            let mut short = vec![0x55; 7 * 5 * 2 - 1];
+            gpu.read_present(&mut target, &mut short).unwrap();
+            let mut expected = vec![0x55; short.len()];
+            target.to_rgb565(&mut expected);
+            assert_eq!(short, expected);
+            assert_eq!(short.last(), Some(&0x55));
+            assert_eq!(&target.color[..4], &[255, 0, 0, 255]);
+            assert_eq!(&target.color[7 * 4 * 4..7 * 4 * 4 + 4], &[0, 0, 255, 255]);
+        }
+    }
     #[cfg(unix)]
     #[test]
     #[ignore = "requires desktop GL and GLES2; indexed transfers and cache invalidation"]
@@ -1813,7 +2144,7 @@ mod tests {
                 [0; 4],
             )
             .unwrap();
-            assert_eq!(gpu.scratch.len(), 3 * 24);
+            assert_eq!(gpu.scratch.len(), 3 * 8);
             assert_eq!(gpu.indices.len(), 36);
             let colors_indices = [
                 0, 2, 1, 2, 0, 3, 1, 5, 4, 5, 1, 2, 5, 3, 6, 3, 5, 2, 3, 7, 6, 7, 3, 0, 6, 4, 5, 4,
@@ -1840,7 +2171,7 @@ mod tests {
                 [0; 4],
             )
             .unwrap();
-            assert_eq!(gpu.scratch.len() * 4 + gpu.indices.len() * 2, 840);
+            assert_eq!(gpu.scratch.len() * 4 + gpu.indices.len() * 2, 328);
             gpu.clear(32, 32, &state, [0.; 4], 1., GL_DEPTH_BUFFER_BIT)
                 .unwrap();
             gpu.draw(
