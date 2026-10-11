@@ -2,6 +2,7 @@
 mod platform;
 use crate::{
     consts::*,
+    matrix::{Matrix4, IDENTITY},
     raster::{
         BlendFactor, CompareFunc, CullMode, FogMode, FrontFace, PipelineState, RenderTarget,
         TexEnvMode, TextureStage, Vertex,
@@ -13,6 +14,17 @@ use std::{
     collections::HashMap,
     ffi::{c_char, c_void, CStr, CString},
 };
+pub struct VertexTransforms {
+    pub projection: Matrix4,
+    pub modelview: Matrix4,
+    pub textures: [Matrix4; 4],
+}
+const TEXTURE_MATRICES: [&str; 4] = [
+    "textureMatrix0",
+    "textureMatrix1",
+    "textureMatrix2",
+    "textureMatrix3",
+];
 const SAMPLERS: [&str; 4] = ["sampler0", "sampler1", "sampler2", "sampler3"];
 const ENVIRONMENTS: [&str; 4] = ["env0", "env1", "env2", "env3"];
 const ENV_COLORS: [&str; 4] = ["envColor0", "envColor1", "envColor2", "envColor3"];
@@ -39,6 +51,7 @@ struct Gl {
     Uniform1i: unsafe extern "system" fn(i32, i32),
     Uniform1f: unsafe extern "system" fn(i32, f32),
     Uniform2f: unsafe extern "system" fn(i32, f32, f32),
+    UniformMatrix4fv: unsafe extern "system" fn(i32, i32, u8, *const f32),
     Uniform4fv: unsafe extern "system" fn(i32, i32, *const f32),
     GenBuffers: unsafe extern "system" fn(i32, *mut u32),
     DeleteBuffers: unsafe extern "system" fn(i32, *const u32),
@@ -270,9 +283,10 @@ impl Gl {
                 if p.is_null() {
                     return Err("driver lacks glGetUniformLocation".into());
                 }
-                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32, *const c_char) -> i32>(
-                    p,
-                )
+                std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "system" fn(u32, *const c_char) -> i32,
+                >(p)
             },
             Uniform1i: {
                 let mut p = host.load(c"glUniform1i");
@@ -303,6 +317,16 @@ impl Gl {
                     return Err("driver lacks glUniform2f".into());
                 }
                 std::mem::transmute::<*mut c_void, unsafe extern "system" fn(i32, f32, f32)>(p)
+            },
+            UniformMatrix4fv: {
+                let p = host.load(c"glUniformMatrix4fv");
+                if p.is_null() {
+                    return Err("driver lacks glUniformMatrix4fv".into());
+                }
+                std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "system" fn(i32, i32, u8, *const f32),
+                >(p)
             },
             Uniform4fv: {
                 let mut p = host.load(c"glUniform4fv");
@@ -833,6 +857,13 @@ impl Renderer {
             );
             r.resize(width, height)?;
             for name in [
+                "projectionMatrix",
+                "modelviewMatrix",
+                "objectSpace",
+                "textureMatrix0",
+                "textureMatrix1",
+                "textureMatrix2",
+                "textureMatrix3",
                 "depthRange",
                 "alphaMode",
                 "alphaRef",
@@ -1028,6 +1059,43 @@ impl Renderer {
         textures: &HashMap<u32, Texture>,
         names: [u32; 4],
     ) -> Result<(), String> {
+        self.draw_inner(target, state, mode, vertices, stages, textures, names, None)
+    }
+
+    pub fn draw_object_space(
+        &mut self,
+        target: &RenderTarget,
+        state: &PipelineState,
+        mode: u32,
+        vertices: &[Vertex],
+        stages: &[TextureStage],
+        textures: &HashMap<u32, Texture>,
+        names: [u32; 4],
+        transforms: &VertexTransforms,
+    ) -> Result<(), String> {
+        self.draw_inner(
+            target,
+            state,
+            mode,
+            vertices,
+            stages,
+            textures,
+            names,
+            Some(transforms),
+        )
+    }
+
+    fn draw_inner(
+        &mut self,
+        target: &RenderTarget,
+        state: &PipelineState,
+        mode: u32,
+        vertices: &[Vertex],
+        stages: &[TextureStage],
+        textures: &HashMap<u32, Texture>,
+        names: [u32; 4],
+        transforms: Option<&VertexTransforms>,
+    ) -> Result<(), String> {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
         self.scratch.clear();
@@ -1096,6 +1164,15 @@ impl Renderer {
                 state.color_mask[2] as u8,
                 state.color_mask[3] as u8,
             );
+            (self.gl.Uniform1i)(self.loc("objectSpace"), transforms.is_some() as i32);
+            let projection = transforms.map(|t| &t.projection).unwrap_or(&IDENTITY);
+            let modelview = transforms.map(|t| &t.modelview).unwrap_or(&IDENTITY);
+            (self.gl.UniformMatrix4fv)(self.loc("projectionMatrix"), 1, 0, projection.as_ptr());
+            (self.gl.UniformMatrix4fv)(self.loc("modelviewMatrix"), 1, 0, modelview.as_ptr());
+            for (i, name) in TEXTURE_MATRICES.iter().enumerate() {
+                let matrix = transforms.map(|t| &t.textures[i]).unwrap_or(&IDENTITY);
+                (self.gl.UniformMatrix4fv)(self.loc(name), 1, 0, matrix.as_ptr());
+            }
             (self.gl.Uniform2f)(
                 self.loc("depthRange"),
                 state.depth_range.0,
@@ -1297,7 +1374,20 @@ fn wrap(v: Wrap) -> u32 {
 const VERTEX: &str = r#"
 attribute vec4 position,color;attribute vec2 tex0,tex1,tex2,tex3;attribute float fogDepth;
 varying vec4 vColor;varying vec2 uv0,uv1,uv2,uv3;varying float vFog;uniform vec2 depthRange;
-void main(){gl_Position=position;gl_Position.z=(depthRange.y-depthRange.x)*position.z+(depthRange.x+depthRange.y-1.0)*position.w;vColor=color;uv0=tex0;uv1=tex1;uv2=tex2;uv3=tex3;vFog=fogDepth;}
+uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
+uniform int objectSpace;
+void main(){
+ vec4 eye=modelviewMatrix*position;
+ vec4 clip=projectionMatrix*eye;
+ gl_Position=clip;
+ gl_Position.z=(depthRange.y-depthRange.x)*clip.z+(depthRange.x+depthRange.y-1.0)*clip.w;
+ vColor=color;
+ uv0=(textureMatrix0*vec4(tex0,0.0,1.0)).xy;
+ uv1=(textureMatrix1*vec4(tex1,0.0,1.0)).xy;
+ uv2=(textureMatrix2*vec4(tex2,0.0,1.0)).xy;
+ uv3=(textureMatrix3*vec4(tex3,0.0,1.0)).xy;
+ vFog=objectSpace!=0?abs(eye.z):fogDepth;
+}
 "#;
 const FRAGMENT: &str = r#"
 varying vec4 vColor;varying vec2 uv0,uv1,uv2,uv3;varying float vFog;
@@ -1319,6 +1409,133 @@ mod tests {
             ..Vertex::default()
         })
     }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host OpenGL and GLES2 drivers"]
+    fn host_vertex_shader_matches_cpu_transforms() {
+        use crate::matrix;
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            for perspective in [false, true] {
+                let transforms = VertexTransforms {
+                    projection: if perspective {
+                        matrix::frustum(-1., 1., -1., 1., 1., 10.)
+                    } else {
+                        IDENTITY
+                    },
+                    modelview: matrix::multiply(
+                        &matrix::translate(0.125, -0.125, if perspective { -2. } else { -0.25 }),
+                        &matrix::multiply(
+                            &matrix::rotate(23., 0., 0., 1.),
+                            &matrix::scale(0.75, 0.625, 1.),
+                        ),
+                    ),
+                    textures: std::array::from_fn(|i| {
+                        matrix::multiply(
+                            &matrix::translate(0.125 * i as f32, 0.25, 0.),
+                            &matrix::scale(0.5, 0.75, 1.),
+                        )
+                    }),
+                };
+                let mut raw = triangle([0.9, 0.75, 0.5, 1.], 0.);
+                raw[0].texcoord = [[0.1, 0.1]; 4];
+                raw[1].texcoord = [[0.8, 0.1]; 4];
+                raw[2].texcoord = [[0.4, 0.9]; 4];
+                let mut cpu = raw;
+                let mvp = matrix::multiply(&transforms.projection, &transforms.modelview);
+                for vertex in &mut cpu {
+                    vertex.fog_depth =
+                        matrix::transform(&transforms.modelview, vertex.pos)[2].abs();
+                    vertex.pos = matrix::transform(&mvp, vertex.pos);
+                    for i in 0..4 {
+                        let uv = vertex.texcoord[i];
+                        let t = matrix::transform(&transforms.textures[i], [uv[0], uv[1], 0., 1.]);
+                        vertex.texcoord[i] = [t[0], t[1]];
+                    }
+                }
+                let texture = Texture {
+                    width: 4,
+                    height: 4,
+                    rgba: (0..16)
+                        .flat_map(|i| [(i % 4 * 64) as u8, (i / 4 * 64) as u8, 128, 255])
+                        .collect(),
+                    min_filter: Filter::Linear,
+                    mag_filter: Filter::Linear,
+                    revision: 1,
+                    ..Default::default()
+                };
+                let textures = HashMap::from([(1, texture)]);
+                for unit in 0..4 {
+                    let stages = [TextureStage {
+                        unit,
+                        env: TexEnvMode::Modulate,
+                        env_color: [0.; 4],
+                    }];
+                    let mut names = [0; 4];
+                    names[unit] = 1;
+                    for mode in [GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN] {
+                        let state = PipelineState {
+                            viewport: (0, 0, 32, 32),
+                            fog: true,
+                            fog_mode: FogMode::Linear,
+                            fog_start: 0.,
+                            fog_end: 5.,
+                            fog_color: [0.1, 0.2, 0.3, 1.],
+                            depth_test: true,
+                            ..Default::default()
+                        };
+                        let mut target = RenderTarget::new(32, 32);
+                        gpu.clear(
+                            32,
+                            32,
+                            &state,
+                            [0., 0., 0., 1.],
+                            1.,
+                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                        )
+                        .unwrap();
+                        gpu.draw(&target, &state, mode, &cpu, &stages, &textures, names)
+                            .unwrap();
+                        gpu.read(&mut target).unwrap();
+                        let expected = target.color.clone();
+                        gpu.clear(
+                            32,
+                            32,
+                            &state,
+                            [0., 0., 0., 1.],
+                            1.,
+                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                        )
+                        .unwrap();
+                        gpu.draw_object_space(
+                            &target,
+                            &state,
+                            mode,
+                            &raw,
+                            &stages,
+                            &textures,
+                            names,
+                            &transforms,
+                        )
+                        .unwrap();
+                        gpu.read(&mut target).unwrap();
+                        assert!(expected.chunks_exact(4).any(|p| p[0] != 0));
+                        let differences = expected
+                            .iter()
+                            .zip(&target.color)
+                            .filter(|(a, b)| a.abs_diff(**b) > 2)
+                            .count();
+                        assert!(differences <= 12, "es={es} perspective={perspective} unit={unit} mode={mode} differences={differences}");
+                    }
+                }
+            }
+        }
+    }
+
     fn center(t: &RenderTarget) -> [u8; 4] {
         t.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4]
             .try_into()

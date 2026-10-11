@@ -3,6 +3,11 @@
  <FrameLayout android:id="@+id/game_area" android:layout_width="match_parent" android:layout_height="match_parent" android:layout_marginLeft="148dp" android:layout_marginRight="148dp" android:layout_marginTop="60dp">
   <android.opengl.GLSurfaceView android:id="@+id/surface" android:layout_width="match_parent" android:layout_height="match_parent"/>
   <ProgressBar android:id="@+id/progress" android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="center"/>
+  <TextView android:id="@+id/fps_overlay" android:layout_width="wrap_content" android:layout_height="wrap_content"
+   android:layout_gravity="top|end" android:layout_margin="6dp" android:paddingLeft="5dp" android:paddingRight="5dp"
+   android:paddingTop="2dp" android:paddingBottom="2dp" android:textSize="11sp" android:textColor="#DDFFFFFF"
+   android:background="#60000000" android:visibility="gone" android:clickable="false" android:focusable="false"
+   android:importantForAccessibility="no"/>
   <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone"/>
  </FrameLayout>
  <com.pockethle.app.GizmondoControls android:id="@+id/game_controls" android:layout_width="match_parent" android:layout_height="match_parent"/>

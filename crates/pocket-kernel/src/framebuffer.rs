@@ -123,8 +123,9 @@ impl Framebuffer {
     fn backlight_channel(&self, channel: u8) -> u8 {
         let c = channel as u32;
         if self.backlight_level <= 11 {
-            // Minimum is 50%: an intentional low slider position stays visible.
-            ((c * (9 + self.backlight_level) + 10) / 20) as u8
+            // Mirror the neutral-to-third step: at the minimum, blend
+            // one twelfth toward black, matching one twelfth toward white.
+            (c - c * (11 - self.backlight_level) / 120) as u8
         } else {
             // Colors' four positions are 1/11/21/31: the second is neutral.
             // The third is halfway to the reduced maximum (one sixth white).
@@ -448,7 +449,7 @@ mod tests {
             assert!(fb.backlight_channel(255) > fb.backlight_channel(0));
         }
         fb.set_backlight_level(1);
-        assert_eq!(fb.backlight_channel(128), 64);
+        assert_eq!(fb.backlight_channel(128), 118);
         fb.set_backlight_level(31);
         assert_eq!(fb.backlight_channel(128), 149);
         let maximum = fb.snapshot_rgba8888();

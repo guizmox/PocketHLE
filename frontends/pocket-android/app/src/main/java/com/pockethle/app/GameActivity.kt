@@ -50,6 +50,10 @@ class GameActivity : AppCompatActivity() {
     private lateinit var surface: GLSurfaceView
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
+    private lateinit var fpsOverlay: TextView
+    private val fpsMeter = FrameRateMeter()
+    private var showFps = false
+    private var activityResumed = false
     private lateinit var gameControls: View
     private lateinit var glRenderer: AndroidFrameRenderer
     private var displayScale = 0
@@ -111,6 +115,7 @@ class GameActivity : AppCompatActivity() {
                     paintFrame(frame)
                 }
             }
+            updateFpsOverlay()
             if (NativeBridge.nativeIsRunning(session) == 0) {
                 // Worker exited on its own (game called ExitProcess
                 // / hit max_slices / errored out). Reap it so we
@@ -126,6 +131,7 @@ class GameActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         val config = readLauncherConfig()
         bindings = InputBindings(config)
+        showFps = config.showFps
         displayScale = config.displayScale
         controlsOpacity = config.controlsOpacity
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -139,12 +145,13 @@ class GameActivity : AppCompatActivity() {
         title = name
 
         surface = findViewById(R.id.surface)
-        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, displayScale)
+        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, displayScale, showFps)
         surface.setEGLContextClientVersion(3)
         surface.setRenderer(glRenderer)
         surface.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         progress = findViewById(R.id.progress)
         status = findViewById(R.id.status)
+        fpsOverlay = findViewById(R.id.fps_overlay)
 
         findViewById<View>(R.id.btn_stop_emulation).apply {
             setOnTouchListener { view, event ->
@@ -241,6 +248,8 @@ class GameActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        activityResumed = true
+        if (::glRenderer.isInitialized) fpsMeter.reset(glRenderer.presentedFrameCount, System.nanoTime())
         if (::surface.isInitialized) surface.onResume()
         CameraHost.resume()
         GpsHost.resume()
@@ -250,6 +259,8 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        activityResumed = false
+        if (::fpsOverlay.isInitialized) fpsOverlay.visibility = View.GONE
         if (::surface.isInitialized) surface.onPause()
         CameraHost.pause()
         GpsHost.pause()
@@ -300,6 +311,7 @@ class GameActivity : AppCompatActivity() {
         val handle = session
         if (handle == 0L) return
         joiningSession = true
+        fpsOverlay.visibility = View.GONE
         CameraHost.closeAll()
         GpsHost.closeAll()
         VibrationHost.closeAll()
@@ -466,6 +478,19 @@ class GameActivity : AppCompatActivity() {
         val pixelBytes = w * h * 4
         if (raw.size < 8 + pixelBytes) return null
         return FrameSnapshot(w, h, raw, 8)
+    }
+
+    private fun updateFpsOverlay() {
+        if (!showFps || !activityResumed) return
+        val total = glRenderer.presentedFrameCount
+        if (total == 0L) {
+            fpsMeter.reset(0L, System.nanoTime())
+            return
+        }
+        fpsMeter.sample(total, System.nanoTime())?.let { fps ->
+            fpsOverlay.text = String.format(java.util.Locale.US, "%.1f FPS", fps)
+            fpsOverlay.visibility = View.VISIBLE
+        }
     }
 
     private fun paintFrame(frame: FrameSnapshot) {

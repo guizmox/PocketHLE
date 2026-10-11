@@ -1,4 +1,6 @@
+README-Android-FPS.txt
 README-GPU-Experimental.txt
+README-GPU-Vertices.txt
 crates/pocket-core/src/lib.rs
 crates/pocket-gles/src/context.rs
 crates/pocket-gles/src/gpu/mod.rs
@@ -7,6 +9,7 @@ crates/pocket-gles/src/lib.rs
 crates/pocket-gles/src/texture.rs
 crates/pocket-kernel/src/bluetooth.rs
 crates/pocket-kernel/src/device_status.rs
+crates/pocket-kernel/src/framebuffer.rs
 crates/pocket-kernel/src/gps.rs
 crates/pocket-kernel/src/internet.rs
 crates/pocket-kernel/src/lib.rs
@@ -30,12 +33,15 @@ frontends/pocket-android-jni/src/lib.rs
 frontends/pocket-android-jni/src/power.rs
 frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android/app/src/main/AndroidManifest.xml
+frontends/pocket-android/app/src/main/java/com/pockethle/app/AndroidFrameRenderer.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/DeviceStatusHost.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/FrameRateMeter.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/SettingsActivity.kt
+frontends/pocket-android/app/src/main/res/layout/activity_game.xml
 frontends/pocket-android/app/src/main/res/xml/preferences_game.xml
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs

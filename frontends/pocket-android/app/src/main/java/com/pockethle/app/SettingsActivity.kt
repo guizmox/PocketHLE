@@ -219,6 +219,15 @@ class SettingsActivity : AppCompatActivity() {
                 summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
                 setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);writeConfig();true }
             })
+            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "show_fps"; title = "Show FPS"; isPersistent = false; isChecked = current.showFps
+                summary = "Shows a small counter of rendered frames on the game screen. Applies on the next launch."
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(showFps = value as Boolean)
+                    writeConfig()
+                    true
+                }
+            })
             findPreference<SeekBarPreference>("verbosity")?.apply {
                 value = current.verbosity
                 setOnPreferenceChangeListener { _, newValue ->

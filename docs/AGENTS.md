@@ -2451,7 +2451,7 @@ game owns its menu. Registry defaults are Level/OnLevel 11, DimLevel 0 (the SDK
 hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
 channels with level 11 reproducing the unmodified image and level 1 blending
-halfway to black. The visual ceiling is the former penultimate Colors setting,
+one twelfth toward black (matching the neutral-to-third white blend). The visual ceiling is the former penultimate Colors setting,
 21 (one sixth white blend), reached at slider 31. Levels above neutral 11
 are scaled across the entire upper range: slider 21 is halfway to slider 31. This avoids the washed-out former maximum and preserves distinct steps.
 Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 11 on every
@@ -2554,7 +2554,7 @@ Launcher startup preview also requires WinCE EC_VIDEOFRAMEREADY (0x49), as confi
 ### Experimental native GLES rasterization (2026-10-11)
 Global config.gpu_renderer defaults false, shown in Emulator Settings / Emulator options. GameSettings.gpu_renderer is nullable: null/missing inherits, false forces software, true forces GPU. Both Kotlin JSON models preserve unknown fields. Configure on the emulation thread after creating the dispatcher; each child inherits the launcher configuration and per-game override.
 
-pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles transformed vertices as before; shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines and fixed lighting remain at their existing support level (not implemented by this change). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
+pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles object-space vertices; the vertex shader applies projection/modelview, texture matrices and eye-space fog depth before native rasterization. Shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines and fixed lighting remain at their existing support level (not implemented by this change). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
 
 Native framebuffer RGBA+depth persists across draws. Readback runs only for EGL swap or glReadPixels, flips bottom-up rows to canonical top-down, then existing RGB565/GAPI/DirectShow/filter/screenshot paths consume the result. No zero-copy frontend integration yet. GPU stage allocations and GL resources release on EGL termination, emulator drop, context reset and child return. Contexts are !Send; every operation makes its own context current. EGL display leases count live private contexts, so child teardown cannot terminate parent; Android keeps one process-wide EGL library/display initialization lease because the Android UI shares DEFAULT_DISPLAY, while all game surfaces/contexts are destroyed.
 
@@ -2584,3 +2584,45 @@ publication advance on a fixed phase instead of restarting its interval at
 the delayed send time; missed slots are skipped without catch-up bursts.
 This is a targeted jitter reduction, not proof of stutter-free hardware output.
 No new frame logging, worker, persistent native resource or rendering buffer.
+
+
+### Native vertex transformations
+When a renderer exists, Context::assemble retains object positions and incoming
+texture coordinates instead of multiplying each referenced vertex on the CPU.
+Projection/modelview and four texture matrices are uploaded per draw, column
+major with transpose=false, valid on desktop GL and GLES2. The shader computes
+projection * (modelview * object) and abs(eye.z) for fog, then applies the existing
+depth-range conversion to clip coordinates. Client-array decoding, normalization,
+VBO bounds and guest-memory checks remain CPU-owned. Software uses the original
+MVP, eye-space and texture transform path. Constant texture coordinates retain
+the previous semantics (identity texture matrix when the unit array is disabled).
+Flat provoking colors and strip winding remain unchanged. No new native buffers,
+workers or object lifetimes; existing VBO and shader program own the resources.
+
+Native driver comparisons exercise desktop GLSL120 and GLES2 GLSL100 against
+CPU-pretransformed geometry: perspective/rotation/translation/nonuniform scale,
+all four texture coordinate units, linear fog and triangle/list/strip/fan.
+An actual Context/guest-array test checks object-space assembly, drawing and
+restoration of CPU transformation after disabling GPU. ARM64/ARMv7 backend
+checks and software unit tests accompany this change. Device performance remains
+unmeasured; this change does not remove framebuffer readback or CPU draw assembly.
+
+
+### Android FPS overlay
+Existing config.show_fps now controls an English Show FPS preference under
+Emulator Settings and a small noninteractive TextView in the game's top-right
+area. The renderer counts each newly drawn FrameSnapshot identity once on its
+GL thread, publishing a volatile total; repaint, rotation, screenshot and GL
+context recreation of the same snapshot do not increment it. This reports new
+frames drawn, not guest loop iterations or the physical compositor refresh.
+When disabled, counting and UI updates are skipped. The existing Activity poll
+updates the label at most once per second; no extra timer, thread or JNI call.
+Sample wall time is monotonic and resets at resume to exclude background time.
+Zero-frame startup stays hidden, static output becomes 0 FPS, pause and exit hide
+the overlay. It is not drawn into the emulated framebuffer or screenshots.
+
+Pure Kotlin checks cover frame identity, elapsed-time normalization, idle output,
+pause and counter resets. The actual renderer compiles against Android framework
+classes with only project neighbours stubbed; full APK/device remains validation.
+The cumulative delivery retains level-1 brightness's reduced one-twelfth black
+blend, with the second slider position neutral/default and the upper levels intact.

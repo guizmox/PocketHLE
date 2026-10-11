@@ -1294,7 +1294,11 @@ impl Context {
         stages: &[raster::TextureStage],
     ) -> Option<Vertex> {
         let obj = self.fetch(mem, self.vertex_array, index, false)?;
-        let clip = matrix::transform(mvp, obj);
+        let clip = if self.gpu.is_some() {
+            obj
+        } else {
+            matrix::transform(mvp, obj)
+        };
 
         let color = if self.color_array.enabled {
             // Colours from integer arrays are normalized to [0, 1];
@@ -1314,10 +1318,14 @@ impl Context {
                     .fetch(mem, unit.texcoord_array, index, false)
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
                 // The texture matrix applies to incoming coordinates.
-                let m = matrix::transform(
-                    self.texture_matrix[stage.unit].current(),
-                    [t[0], t[1], 0.0, 1.0],
-                );
+                let m = if self.gpu.is_some() {
+                    t
+                } else {
+                    matrix::transform(
+                        self.texture_matrix[stage.unit].current(),
+                        [t[0], t[1], 0.0, 1.0],
+                    )
+                };
                 [m[0], m[1]]
             } else {
                 unit.current_texcoord
@@ -1326,7 +1334,11 @@ impl Context {
 
         // Eye-space Z drives fog. The modelview alone takes us to eye
         // space; GL fogs on |z_eye|.
-        let eye = matrix::transform(self.modelview.current(), obj);
+        let eye = if self.gpu.is_some() {
+            [0.0; 4]
+        } else {
+            matrix::transform(self.modelview.current(), obj)
+        };
         Some(Vertex {
             pos: clip,
             color,
@@ -1433,7 +1445,11 @@ impl Context {
         if self.gpu_failed {
             return;
         }
-        let mvp = self.mvp();
+        let mvp = if self.gpu.is_some() {
+            matrix::IDENTITY
+        } else {
+            self.mvp()
+        };
         // The stages own the coordinate arrays to read, so they have to
         // be resolved before assembling vertices.
         let stages = self.texture_stages();
@@ -1468,9 +1484,21 @@ impl Context {
             }
         }
 
+        let transforms = crate::gpu::VertexTransforms {
+            projection: *self.projection.current(),
+            modelview: *self.modelview.current(),
+            // Constant texture coordinates retain the existing renderer semantics.
+            textures: std::array::from_fn(|i| {
+                if self.texture_units[i].texcoord_array.enabled {
+                    *self.texture_matrix[i].current()
+                } else {
+                    matrix::IDENTITY
+                }
+            }),
+        };
         if let Some(gpu) = self.gpu.as_mut() {
             let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
-            if let Err(e) = gpu.draw(
+            if let Err(e) = gpu.draw_object_space(
                 &self.target,
                 &self.state,
                 mode,
@@ -1478,6 +1506,7 @@ impl Context {
                 &stages,
                 &self.textures,
                 names,
+                &transforms,
             ) {
                 self.gpu_failure("draw", e);
             }
@@ -1564,6 +1593,78 @@ mod tests {
     }
 
     const BASE: u32 = 0x1000;
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host OpenGL; validates guest arrays through the vertex shader"]
+    fn gpu_guest_arrays_keep_object_coordinates_and_match_cpu_reference() {
+        let mut c = ctx();
+        c.modelview.load(matrix::multiply(
+            &matrix::translate(0.125, 0., -0.25),
+            &matrix::rotate(17., 0., 0., 1.),
+        ));
+        c.projection.load(matrix::scale(0.75, 0.625, 1.));
+        c.state.fog = true;
+        c.state.fog_start = 0.;
+        c.state.fog_end = 1.;
+        c.state.fog_color = [0.1, 0.2, 0.3, 1.];
+        c.current_color = [1., 0.5, 0.25, 1.];
+        let coordinates = [-0.75, -0.75, 0., 0.75, -0.75, 0., 0., 0.75, 0.];
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: floats(&coordinates),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        let mvp = c.mvp();
+        let reference: Vec<_> = (0..3)
+            .map(|i| c.assemble(&mut mem, i, &mvp, &[]).unwrap())
+            .collect();
+        let mut renderer = crate::gpu::Renderer::new(c.target.width, c.target.height).unwrap();
+        renderer
+            .clear(
+                c.target.width,
+                c.target.height,
+                &c.state,
+                [0., 0., 0., 1.],
+                1.,
+                GL_COLOR_BUFFER_BIT,
+            )
+            .unwrap();
+        renderer
+            .draw(
+                &c.target,
+                &c.state,
+                GL_TRIANGLES,
+                &reference,
+                &[],
+                &c.textures,
+                [0; 4],
+            )
+            .unwrap();
+        let mut expected = raster::RenderTarget::new(c.target.width, c.target.height);
+        renderer.read(&mut expected).unwrap();
+        c.enable_gpu().unwrap();
+        let raw = c.assemble(&mut mem, 0, &mvp, &[]).unwrap();
+        assert_eq!(raw.pos, [-0.75, -0.75, 0., 1.]);
+        assert_ne!(raw.pos, reference[0].pos);
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        let differences = expected
+            .color
+            .iter()
+            .zip(&c.target.color)
+            .filter(|(a, b)| a.abs_diff(**b) > 2)
+            .count();
+        assert!(
+            differences <= 12,
+            "guest draw differs in {differences} channels"
+        );
+        c.disable_gpu();
+        let restored = c.assemble(&mut mem, 0, &mvp, &[]).unwrap();
+        assert_eq!(restored.pos, reference[0].pos);
+    }
 
     fn floats(v: &[f32]) -> Vec<u8> {
         v.iter().flat_map(|f| f.to_le_bytes()).collect()

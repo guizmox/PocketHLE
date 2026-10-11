@@ -15,7 +15,9 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /** Desktop shaders, including reference three-pass SMAA; filtering never alters guest geometry. */
-internal class AndroidFrameRenderer(context: Context, private val filter: String, private val scale: Int) : GLSurfaceView.Renderer {
+internal class AndroidFrameRenderer(context: Context, private val filter: String, private val scale: Int, private val countFps: Boolean = false) : GLSurfaceView.Renderer {
+    private val frameCounter = PresentedFrameCounter()
+    val presentedFrameCount: Long get() = frameCounter.total
     private val app = context.applicationContext
     @Volatile private var pending: GameActivity.FrameSnapshot? = null
     @Volatile private var turn = 0
@@ -84,12 +86,13 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
             val uv = when(turn) { 90 -> floatArrayOf(0f,1f,0f,-1f,1f,0f);180 -> floatArrayOf(1f,1f,-1f,0f,0f,-1f);270 -> floatArrayOf(1f,0f,0f,1f,-1f,0f);else -> floatArrayOf(0f,0f,1f,0f,0f,1f) }
             listOf("u_origin","u_dx","u_dy").forEachIndexed { i,name -> glUniform2f(glGetUniformLocation(program,name),uv[i*2],uv[i*2+1]) }
             glDrawArrays(GL_TRIANGLES,0,3)
+            if (countFps) frameCounter.presented(frame)
             if (capture) { capture=false; saveScreenshot(x,y,drawnW,drawnH) }
         } catch (e: Exception) { fail(e) }
     }
     private fun fail(e: Exception) {
         failed=true;Log.e("PocketHLE","Android presentation failed ($filter)",e)
-        Handler(Looper.getMainLooper()).post { Toast.makeText(app,"Erreur du rendu $filter : ${e.message}",Toast.LENGTH_LONG).show() }
+        Handler(Looper.getMainLooper()).post { Toast.makeText(app,"Rendering failed ($filter): ${e.message}",Toast.LENGTH_LONG).show() }
     }
     private fun saveScreenshot(x: Int,y: Int,w: Int,h: Int) {
         val pixels=ByteBuffer.allocateDirect(w*h*4).order(ByteOrder.nativeOrder())
@@ -106,7 +109,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
                 val file=File(directory,"game-${System.currentTimeMillis()}.png")
                 val bitmap=Bitmap.createBitmap(colors,w,h,Bitmap.Config.ARGB_8888)
                 try { file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG,100,it)) } } finally { bitmap.recycle() }
-                Handler(Looper.getMainLooper()).post { Toast.makeText(app,"Capture : ${file.name}",Toast.LENGTH_SHORT).show() }
+                Handler(Looper.getMainLooper()).post { Toast.makeText(app,"Screenshot: ${file.name}",Toast.LENGTH_SHORT).show() }
             }.onFailure { Log.e("PocketHLE","Screenshot save failed",it) }
         }.start()
     }
