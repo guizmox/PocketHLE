@@ -857,6 +857,38 @@ pub(crate) fn reset() {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn launcher_preview_survives_swaps_between_video_frames() {
+        reset();
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let t = thunk("eglSwapBuffers");
+        kernel.framebuffer.resize(320, 240);
+        let mut movie = Movie::new();
+        movie.playing = true;
+        movie.info.width = 2;
+        movie.info.height = 2;
+        // Exact miniature rectangle used by the attached launcher.
+        movie.window = [204, 40, 101, 82];
+        movie.frame = Some(vec![0xff; 8]);
+        MOVIES.lock().unwrap().insert(1, movie);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        for _ in 0..3 {
+            // The message pump may already have presented this video frame.
+            service(&mut ctx).unwrap();
+            crate::gles::egl_swap_buffers(&mut ctx).unwrap();
+            let pixel = ((80 * ctx.kernel.framebuffer.width + 250) * 2) as usize;
+            assert_eq!(
+                &ctx.kernel.framebuffer.pixels[pixel..pixel + 2],
+                &[0xff, 0xff]
+            );
+        }
+        reset();
+    }
+    #[test]
     fn directshow_suspension_restores_graph_and_freezes_movie_clock() {
         reset();
         let mut movie = Movie::new();

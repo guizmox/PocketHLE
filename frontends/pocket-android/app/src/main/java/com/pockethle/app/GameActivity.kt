@@ -186,11 +186,13 @@ class GameActivity : AppCompatActivity() {
         CameraHost.initialize(this)
         GpsHost.initialize(this)
         BatteryHost.initialize(this)
+        DeviceStatusHost.initialize(this)
         VibrationHost.initialize(this)
         val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
             (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList()) +
-            (if (config.gpsEnabled && !fixedGps) GpsHost.permissions().toList() else emptyList())
-        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+            (if (config.gpsEnabled && !fixedGps) GpsHost.permissions().toList() else emptyList()) +
+            (if (isGizmondo) DeviceStatusHost.permissions().toList() else emptyList())
+        val missing = permissions.distinct().filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) {
             hardwareStart = { startSession(rootDir, id) }
             // Android12 requires coarse and fine in the same precise-location request.

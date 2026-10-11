@@ -1349,7 +1349,7 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// `eglSwapBuffers` — the only place GL output becomes visible.
 /// Converts the RGBA8888 render target down to the kernel
 /// framebuffer's RGB565 and marks it dirty so the frontend picks it up.
-fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let fb_len = ctx.kernel.framebuffer.pixels.len();
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
     with_ctx(|c| {
@@ -1362,8 +1362,11 @@ fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         c.target
             .to_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
     });
-    crate::directshow::service(ctx)?;
     ctx.kernel.framebuffer.mark_dirty();
+    // The conversion above replaces the framebuffer, including any video
+    // composed by the message pump. Invalidate that presentation before
+    // DirectShow checks its cached frame, even if no new video frame is due.
+    crate::directshow::service(ctx)?;
     // A guest can open GAPI for its input side alone: COD2 calls
     // GXOpenDisplay/GXOpenInput/GXGetDefaultKeys to pick up the device
     // key mapping and then renders exclusively through EGL. That maps

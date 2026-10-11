@@ -27,6 +27,7 @@ object NativeBridge {
     @JvmStatic fun httpRead(id: Int, size: Int): ByteArray = InternetHost.read(id, size)
     @JvmStatic fun httpClose(id: Int) = InternetHost.close(id)
     @JvmStatic fun batteryStatus(): Int = BatteryHost.read()
+    @JvmStatic fun deviceStatus(): Int = DeviceStatusHost.read()
     @JvmStatic fun gpsOpen(): Int = GpsHost.open()
     @JvmStatic fun gpsRead(id: Int): ByteArray = GpsHost.read(id)
     @JvmStatic fun gpsClose(id: Int) = GpsHost.close(id)

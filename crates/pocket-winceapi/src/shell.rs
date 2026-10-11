@@ -1,7 +1,8 @@
 //! Gizmondo shell messages without inventing SIM, GSM or ActiveSync hardware.
 use crate::CallCtx;
 pub(crate) fn status(ctx: &CallCtx<'_>) -> u32 {
-    (u32::from(ctx.kernel.vfs.gps_service().is_enabled()) << 1)
+    pocket_kernel::device_status::status().shell_bits()
+        | (u32::from(ctx.kernel.vfs.gps_service().is_enabled()) << 1)
         | (u32::from(ctx.kernel.vfs.bluetooth.service.is_enabled()) << 3)
         | (u32::from(
             ctx.kernel.internet.gprs_connected

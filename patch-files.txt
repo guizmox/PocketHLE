@@ -1,4 +1,5 @@
 crates/pocket-kernel/src/bluetooth.rs
+crates/pocket-kernel/src/device_status.rs
 crates/pocket-kernel/src/gps.rs
 crates/pocket-kernel/src/internet.rs
 crates/pocket-kernel/src/lib.rs
@@ -8,6 +9,7 @@ crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/datetime.rs
 crates/pocket-winceapi/src/directshow.rs
 crates/pocket-winceapi/src/directshow_extended.rs
+crates/pocket-winceapi/src/gles.rs
 crates/pocket-winceapi/src/gx.rs
 crates/pocket-winceapi/src/lib.rs
 crates/pocket-winceapi/src/media_static.rs
@@ -15,6 +17,11 @@ crates/pocket-winceapi/src/shell.rs
 crates/pocket-winceapi/tests/fixtures/README.md
 crates/pocket-winceapi/tests/fixtures/seeking.wmv
 docs/AGENTS.md
+frontends/pocket-android-jni/src/power.rs
+frontends/pocket-android/app/src/main/AndroidManifest.xml
+frontends/pocket-android/app/src/main/java/com/pockethle/app/DeviceStatusHost.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
 third-party/ffmpeg/README.md
 tools/ramtest/dist/GZRT999999/depbadexport.dll
 tools/ramtest/dist/GZRT999999/depleaf.dll
