@@ -2968,3 +2968,26 @@ JSON defaults/modes/inheritance and unknown-field roundtrip, core check without
 default features, ARM64/ARMv7 Rust GLES checks with warnings denied, Android XML
 parse. Native tests read actual driver anisotropy and exercise reset/deletion/
 unsupported capability. Full Windows/APK and device UI/visual/FPS tests pending.
+
+## Reusable typed vertex streams (2026-10-11)
+
+Context merges overlapping/adjacent enabled client-array spans (maximum 1 MiB
+per span) and pools owned read buffers across draws. Each draw rereads guest
+memory; failed bulk reads retain per-element fallback. Captured VBO bindings
+use current host buffer contents, including BufferSubData changes. Index widening
+reuses storage. Short reads, checked address overflow and invalid bounds never
+expose guest pointers to the driver.
+Smooth GPU draws with dense indices or sequential ranges pack native typed
+attributes into one reusable owned upload buffer. Position, normalized colors,
+normals and active texture coordinates preserve their formats; unsupported
+native FIXED or misaligned strides convert to float. Padding is omitted. Dense
+indices are rebased without a hash map; holes/sparse ranges, flat shading and
+unsupported topology retain the existing Vertex path. Attribute layouts reset
+correctly when alternating paths; disabled arrays use current constants. Matrices,
+lighting, texture state and synchronous framebuffer presentation are unchanged.
+All scratch/native resources remain owned by Context/Renderer and release on drop;
+no worker, persistent guest-address cache or new native buffer is introduced.
+Validation: 155 GLES tests including real desktop GL/GLES drivers, mutable guest
+data, VBO capture/update, normalized colors, first/index offsets and path switches;
+284 WinCE tests passed; Android ARM64/ARMv7 checks with warnings denied. Full Windows/APK builds and actual
+Colors performance remain device validation tasks. No temporary instrumentation.

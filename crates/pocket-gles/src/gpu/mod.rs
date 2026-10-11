@@ -21,6 +21,25 @@ pub struct VertexTransforms {
     pub modelview: Matrix4,
     pub textures: [Matrix4; 4],
 }
+/// Host-owned snapshots only. Guest addresses never reach the native driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StreamAttribute {
+    pub size: i32,
+    pub ty: u32,
+    pub normalized: u8,
+    pub stride: i32,
+    pub offset: usize,
+}
+#[derive(Default)]
+pub(crate) struct VertexStream {
+    pub bytes: Vec<u8>,
+    pub attributes: [Option<StreamAttribute>; 8],
+    pub constants: [[f32; 4]; 8],
+    pub count: usize,
+    pub indices: Vec<u16>,
+    pub coverage: Vec<u8>,
+}
+
 /// Per-draw attribute layout. Disabled stages carry no payload. Smooth
 /// lighting aliases the position attribute instead of uploading it twice.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,6 +150,7 @@ struct Gl {
     BufferData: unsafe extern "system" fn(u32, isize, *const c_void, u32),
     DisableVertexAttribArray: unsafe extern "system" fn(u32),
     EnableVertexAttribArray: unsafe extern "system" fn(u32),
+    VertexAttrib4fv: unsafe extern "system" fn(u32, *const f32),
     VertexAttribPointer: unsafe extern "system" fn(u32, i32, u32, u8, i32, *const c_void),
     PolygonOffset: unsafe extern "system" fn(f32, f32),
     DrawElements: unsafe extern "system" fn(u32, i32, u32, *const c_void),
@@ -516,6 +536,13 @@ impl Gl {
                     return Err("driver lacks glEnableVertexAttribArray".into());
                 }
                 std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32)>(p)
+            },
+            VertexAttrib4fv: {
+                let p = host.load(c"glVertexAttrib4fv");
+                if p.is_null() {
+                    return Err("driver lacks glVertexAttrib4fv".into());
+                }
+                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32, *const f32)>(p)
             },
             VertexAttribPointer: {
                 let mut p = host.load(c"glVertexAttribPointer");
@@ -1029,12 +1056,18 @@ pub struct Renderer {
     lod_derivatives: bool,
     compressed_formats: HashSet<u32>,
     attribute_layout: Option<VertexLayout>,
+    stream_layout: Option<[Option<StreamAttribute>; 8]>,
+    native_fixed: bool,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
 }
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
         Self::with_host(Host::new()?, width, height)
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn new_es_for_test(width: u32, height: u32) -> Result<Self, String> {
+        Self::with_host(Host::es_for_test()?, width, height)
     }
     fn with_host(host: Host, width: u32, height: u32) -> Result<Self, String> {
         unsafe {
@@ -1108,6 +1141,10 @@ impl Renderer {
                 || extensions
                     .split_whitespace()
                     .any(|e| e == "GL_OES_standard_derivatives");
+            let native_fixed = host.es
+                || extensions
+                    .split_whitespace()
+                    .any(|e| e == "GL_ARB_ES2_compatibility");
             let mut max_anisotropy = 1f32;
             if extensions.split_whitespace().any(|e| {
                 matches!(
@@ -1161,6 +1198,8 @@ impl Renderer {
                 lod_derivatives,
                 compressed_formats,
                 attribute_layout: None,
+                stream_layout: None,
+                native_fixed,
                 point_range,
                 line_range,
             };
@@ -1564,7 +1603,7 @@ impl Renderer {
         names: [u32; 4],
     ) -> Result<(), String> {
         self.draw_inner(
-            target, state, mode, vertices, stages, textures, names, None, false, None,
+            target, state, mode, vertices, stages, textures, names, None, false, None, None,
         )
     }
 
@@ -1590,6 +1629,7 @@ impl Renderer {
             Some(transforms),
             false,
             None,
+            None,
         )
     }
 
@@ -1614,6 +1654,7 @@ impl Renderer {
             names,
             Some(transforms),
             true,
+            None,
             None,
         )
     }
@@ -1645,6 +1686,72 @@ impl Renderer {
             Some(transforms),
             true,
             Some(indices),
+            None,
+        )
+    }
+
+    pub(crate) fn supports_fixed_vertices(&self) -> bool {
+        self.native_fixed
+    }
+
+    pub(crate) fn draw_stream_object_space(
+        &mut self,
+        target: &RenderTarget,
+        state: &PipelineState,
+        mode: u32,
+        stream: &VertexStream,
+        stages: &[TextureStage],
+        textures: &HashMap<u32, Texture>,
+        names: [u32; 4],
+        transforms: &VertexTransforms,
+    ) -> Result<(), String> {
+        if !state.smooth_shading
+            || stream.count == 0
+            || stream.count > 65536
+            || stream.indices.len() > i32::MAX as usize
+            || stream.indices.iter().any(|i| *i as usize >= stream.count)
+        {
+            return Err("invalid vertex stream".into());
+        }
+        for attr in stream.attributes.iter().flatten() {
+            let width = match attr.ty {
+                GL_BYTE | GL_UNSIGNED_BYTE => 1,
+                GL_SHORT | GL_UNSIGNED_SHORT => 2,
+                GL_FLOAT => 4,
+                GL_FIXED if self.native_fixed => 4,
+                _ => return Err("unsupported stream format".into()),
+            };
+            if !(1..=4).contains(&attr.size)
+                || attr.stride <= 0
+                || attr.normalized > 1
+                || attr.offset % width != 0
+                || attr.stride as usize % width != 0
+            {
+                return Err("invalid stream attribute".into());
+            }
+            let end = (stream.count - 1)
+                .checked_mul(attr.stride as usize)
+                .and_then(|n| n.checked_add(attr.offset))
+                .and_then(|n| n.checked_add(attr.size as usize * width));
+            if end.is_none_or(|n| n > stream.bytes.len()) {
+                return Err("stream attribute outside host snapshot".into());
+            }
+        }
+        if stream.attributes[0].is_none() {
+            return Err("missing stream positions".into());
+        }
+        self.draw_inner(
+            target,
+            state,
+            mode,
+            &[],
+            stages,
+            textures,
+            names,
+            Some(transforms),
+            true,
+            None,
+            Some(stream),
         )
     }
 
@@ -1660,6 +1767,7 @@ impl Renderer {
         transforms: Option<&VertexTransforms>,
         sequential: bool,
         guest_indices: Option<&[u16]>,
+        stream: Option<&VertexStream>,
     ) -> Result<(), String> {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
@@ -1680,95 +1788,98 @@ impl Renderer {
                 _ => GL_TRIANGLES,
             }
         };
-        let mut primitive = |v: &[Vertex]| {
-            let provoking = *v.last().unwrap();
-            for &vertex in v {
-                layout.pack(&mut self.scratch, vertex, provoking, state.smooth_shading);
+        let mut indexed = stream.is_some_and(|s| !s.indices.is_empty());
+        if stream.is_none() {
+            let mut primitive = |v: &[Vertex]| {
+                let provoking = *v.last().unwrap();
+                for &vertex in v {
+                    layout.pack(&mut self.scratch, vertex, provoking, state.smooth_shading);
+                }
+            };
+            if direct {
+                for vertex in vertices {
+                    primitive(&[*vertex]);
+                }
+            } else {
+                match mode {
+                    GL_TRIANGLES => {
+                        for v in vertices.chunks_exact(3) {
+                            primitive(&[v[0], v[1], v[2]]);
+                        }
+                    }
+                    GL_TRIANGLE_FAN => {
+                        for i in 2..vertices.len() {
+                            primitive(&[vertices[0], vertices[i - 1], vertices[i]]);
+                        }
+                    }
+                    GL_TRIANGLE_STRIP => {
+                        for i in 2..vertices.len() {
+                            primitive(&if i % 2 == 0 {
+                                [vertices[i - 2], vertices[i - 1], vertices[i]]
+                            } else {
+                                [vertices[i - 1], vertices[i - 2], vertices[i]]
+                            });
+                        }
+                    }
+                    GL_POINTS => {
+                        for v in vertices {
+                            primitive(&[*v]);
+                        }
+                    }
+                    GL_LINES => {
+                        for v in vertices.chunks_exact(2) {
+                            primitive(v);
+                        }
+                    }
+                    GL_LINE_STRIP | GL_LINE_LOOP => {
+                        for v in vertices.windows(2) {
+                            primitive(v);
+                        }
+                        if mode == GL_LINE_LOOP && vertices.len() > 1 {
+                            primitive(&[*vertices.last().unwrap(), vertices[0]]);
+                        }
+                    }
+                    _ => return Err("unsupported GPU primitive".into()),
+                }
             }
-        };
-        if direct {
-            for vertex in vertices {
-                primitive(&[*vertex]);
+            self.indices.clear();
+            let mut unique = std::mem::take(&mut self.vertex_keys);
+            let mut packed = std::mem::take(&mut self.packed_scratch);
+            packed.clear();
+            indexed = !direct;
+            if let Some(indices) = guest_indices {
+                self.indices.extend_from_slice(indices);
+                indexed = true;
             }
-        } else {
-            match mode {
-                GL_TRIANGLES => {
-                    for v in vertices.chunks_exact(3) {
-                        primitive(&[v[0], v[1], v[2]]);
-                    }
+            if !direct {
+                unique.clear();
+                for record in self.scratch.chunks_exact(layout.floats) {
+                    let key = std::array::from_fn(|i| record.get(i).map_or(0, |v| v.to_bits()));
+                    let index = if let Some(&index) = unique.get(&key) {
+                        index
+                    } else {
+                        if unique.len() == 65536 {
+                            indexed = false;
+                            break;
+                        }
+                        let index = unique.len() as u16;
+                        unique.insert(key, index);
+                        packed.extend_from_slice(record);
+                        index
+                    };
+                    self.indices.push(index);
                 }
-                GL_TRIANGLE_FAN => {
-                    for i in 2..vertices.len() {
-                        primitive(&[vertices[0], vertices[i - 1], vertices[i]]);
-                    }
-                }
-                GL_TRIANGLE_STRIP => {
-                    for i in 2..vertices.len() {
-                        primitive(&if i % 2 == 0 {
-                            [vertices[i - 2], vertices[i - 1], vertices[i]]
-                        } else {
-                            [vertices[i - 1], vertices[i - 2], vertices[i]]
-                        });
-                    }
-                }
-                GL_POINTS => {
-                    for v in vertices {
-                        primitive(&[*v]);
-                    }
-                }
-                GL_LINES => {
-                    for v in vertices.chunks_exact(2) {
-                        primitive(v);
-                    }
-                }
-                GL_LINE_STRIP | GL_LINE_LOOP => {
-                    for v in vertices.windows(2) {
-                        primitive(v);
-                    }
-                    if mode == GL_LINE_LOOP && vertices.len() > 1 {
-                        primitive(&[*vertices.last().unwrap(), vertices[0]]);
-                    }
-                }
-                _ => return Err("unsupported GPU primitive".into()),
             }
-        }
-        self.indices.clear();
-        let mut unique = std::mem::take(&mut self.vertex_keys);
-        let mut packed = std::mem::take(&mut self.packed_scratch);
-        packed.clear();
-        let mut indexed = !direct;
-        if let Some(indices) = guest_indices {
-            self.indices.extend_from_slice(indices);
-            indexed = true;
-        }
-        if !direct {
-            unique.clear();
-            for record in self.scratch.chunks_exact(layout.floats) {
-                let key = std::array::from_fn(|i| record.get(i).map_or(0, |v| v.to_bits()));
-                let index = if let Some(&index) = unique.get(&key) {
-                    index
-                } else {
-                    if unique.len() == 65536 {
-                        indexed = false;
-                        break;
-                    }
-                    let index = unique.len() as u16;
-                    unique.insert(key, index);
-                    packed.extend_from_slice(record);
-                    index
-                };
-                self.indices.push(index);
+            // Do not increase transfer size for draws with little vertex reuse.
+            if guest_indices.is_none() {
+                indexed &= packed.len() * 4 + self.indices.len() * 2 < self.scratch.len() * 4;
             }
+            if indexed && guest_indices.is_none() {
+                std::mem::swap(&mut self.scratch, &mut packed);
+            }
+            self.vertex_keys = unique;
+            self.packed_scratch = packed;
         }
-        // Do not increase transfer size for draws with little vertex reuse.
-        if guest_indices.is_none() {
-            indexed &= packed.len() * 4 + self.indices.len() * 2 < self.scratch.len() * 4;
-        }
-        if indexed && guest_indices.is_none() {
-            std::mem::swap(&mut self.scratch, &mut packed);
-        }
-        self.vertex_keys = unique;
-        self.packed_scratch = packed;
         unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.UseProgram)(self.program);
@@ -2054,46 +2165,79 @@ impl Renderer {
                 }
             }
             (self.gl.BindBuffer)(GL_ARRAY_BUFFER, self.buffer);
-            (self.gl.BufferData)(
-                GL_ARRAY_BUFFER,
-                (self.scratch.len() * 4) as isize,
-                self.scratch.as_ptr().cast(),
-                0x88e0,
-            );
-            if self.attribute_layout != Some(layout) {
-                for (i, attribute) in layout.attributes.iter().enumerate() {
-                    if let Some((size, offset)) = attribute {
-                        (self.gl.EnableVertexAttribArray)(i as u32);
-                        (self.gl.VertexAttribPointer)(
-                            i as u32,
-                            *size,
-                            GL_FLOAT,
-                            0,
-                            (layout.floats * 4) as i32,
-                            (*offset * 4) as *const c_void,
-                        );
-                    } else {
-                        (self.gl.DisableVertexAttribArray)(i as u32);
+            let (data, length) = stream
+                .map(|s| (s.bytes.as_ptr().cast::<c_void>(), s.bytes.len()))
+                .unwrap_or((self.scratch.as_ptr().cast(), self.scratch.len() * 4));
+            (self.gl.BufferData)(GL_ARRAY_BUFFER, length as isize, data, 0x88e0);
+            if let Some(stream) = stream {
+                if self.stream_layout != Some(stream.attributes) {
+                    for (i, attr) in stream.attributes.iter().enumerate() {
+                        if let Some(attr) = attr {
+                            (self.gl.EnableVertexAttribArray)(i as u32);
+                            (self.gl.VertexAttribPointer)(
+                                i as u32,
+                                attr.size,
+                                attr.ty,
+                                attr.normalized,
+                                attr.stride,
+                                attr.offset as *const c_void,
+                            );
+                        } else {
+                            (self.gl.DisableVertexAttribArray)(i as u32);
+                        }
+                    }
+                    self.stream_layout = Some(stream.attributes);
+                }
+                for (i, attr) in stream.attributes.iter().enumerate() {
+                    if attr.is_none() {
+                        (self.gl.VertexAttrib4fv)(i as u32, stream.constants[i].as_ptr());
                     }
                 }
-                self.attribute_layout = Some(layout);
+                self.attribute_layout = None;
+            } else {
+                if self.attribute_layout != Some(layout) {
+                    for (i, attribute) in layout.attributes.iter().enumerate() {
+                        if let Some((size, offset)) = attribute {
+                            (self.gl.EnableVertexAttribArray)(i as u32);
+                            (self.gl.VertexAttribPointer)(
+                                i as u32,
+                                *size,
+                                GL_FLOAT,
+                                0,
+                                (layout.floats * 4) as i32,
+                                (*offset * 4) as *const c_void,
+                            );
+                        } else {
+                            (self.gl.DisableVertexAttribArray)(i as u32);
+                        }
+                    }
+                    self.attribute_layout = Some(layout);
+                }
+                self.stream_layout = None;
             }
             if indexed {
+                let indices = stream
+                    .map(|s| s.indices.as_slice())
+                    .unwrap_or(&self.indices);
                 (self.gl.BindBuffer)(GL_ELEMENT_ARRAY_BUFFER, self.index_buffer);
                 (self.gl.BufferData)(
                     GL_ELEMENT_ARRAY_BUFFER,
-                    (self.indices.len() * 2) as isize,
-                    self.indices.as_ptr().cast(),
+                    (indices.len() * 2) as isize,
+                    indices.as_ptr().cast(),
                     0x88e0,
                 );
                 (self.gl.DrawElements)(
                     draw_mode,
-                    self.indices.len() as i32,
+                    indices.len() as i32,
                     GL_UNSIGNED_SHORT,
                     std::ptr::null(),
                 );
             } else {
-                (self.gl.DrawArrays)(draw_mode, 0, (self.scratch.len() / layout.floats) as i32);
+                (self.gl.DrawArrays)(
+                    draw_mode,
+                    0,
+                    stream.map_or(self.scratch.len() / layout.floats, |s| s.count) as i32,
+                );
             }
             self.dirty = true;
             self.check()

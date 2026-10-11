@@ -10,6 +10,7 @@ README-GPU-Primitives.txt
 README-GPU-Rally-Depth.txt
 README-GPU-Rally-Mip-Limit.txt
 README-GPU-Upload-Optimizations.txt
+README-GPU-Vertex-Streams.txt
 README-GPU-Vertices.txt
 crates/pocket-core/src/lib.rs
 crates/pocket-gles/src/consts.rs

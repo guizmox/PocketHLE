@@ -299,7 +299,10 @@ pub struct Context {
 
     /// Scratch buffer for guest array reads, reused across draws so a
     /// 60 fps render loop does not allocate per call.
-    prepared_arrays: Vec<(ArrayPointer, u32, Vec<u8>)>,
+    prepared_arrays: Vec<(u32, Vec<u8>)>,
+    array_read_pool: Vec<Vec<u8>>,
+    vertex_stream: crate::gpu::VertexStream,
+    decoded_indices: Vec<u32>,
     scratch: Vec<u8>,
     /// Scratch for index buffer reads.
     index_scratch: Vec<u8>,
@@ -348,6 +351,9 @@ impl Context {
             target: RenderTarget::new(width, height),
             error: GL_NO_ERROR,
             prepared_arrays: Vec::new(),
+            array_read_pool: Vec::new(),
+            vertex_stream: Default::default(),
+            decoded_indices: Vec::new(),
             scratch: Vec::new(),
             index_scratch: Vec::new(),
         }
@@ -1493,7 +1499,14 @@ impl Context {
         let addr = array.pointer.checked_add(stride.checked_mul(index)?)?;
         let len = (comp * array.size) as usize;
 
-        if let Some((_, base, bytes)) = self.prepared_arrays.iter().find(|(a, _, _)| *a == array) {
+        if let Some((base, bytes)) = self.prepared_arrays.iter().find(|(base, bytes)| {
+            array.buffer == 0
+                && addr.checked_sub(*base).is_some_and(|off| {
+                    (off as usize)
+                        .checked_add(len)
+                        .is_some_and(|end| end <= bytes.len())
+                })
+        }) {
             let offset = addr.checked_sub(*base)? as usize;
             let bytes = bytes.get(offset..offset.checked_add(len)?)?;
             let mut out = [0., 0., 0., 1.];
@@ -1519,7 +1532,7 @@ impl Context {
         }
 
         let mut buf = std::mem::take(&mut self.scratch);
-        let ok = mem.read(addr, len, &mut buf);
+        let ok = mem.read(addr, len, &mut buf) && buf.len() >= len;
         let mut out = [0.0, 0.0, 0.0, 1.0];
         if ok {
             for (c, slot) in out.iter_mut().enumerate().take(array.size as usize) {
@@ -1731,50 +1744,246 @@ impl Context {
             return;
         };
 
-        // With an element-array VBO bound, `pointer` is an offset into
-        // it. Unlike the vertex arrays, this binding is read at draw
-        // time rather than captured when the pointer was set.
+        let mut indices = std::mem::take(&mut self.decoded_indices);
+        indices.clear();
         if self.element_array_buffer != 0 {
-            let indices: Vec<u32> = {
-                let Some(buf) = self.buffers.get(&self.element_array_buffer) else {
-                    return;
-                };
-                let Some(bytes) = buf.slice(pointer, len) else {
-                    self.set_error(GL_INVALID_VALUE);
-                    return;
-                };
+            if let Some(bytes) = self
+                .buffers
+                .get(&self.element_array_buffer)
+                .and_then(|b| b.slice(pointer, len))
+            {
                 if width == 1 {
-                    bytes.iter().map(|&b| b as u32).collect()
+                    indices.extend(bytes.iter().map(|b| *b as u32));
                 } else {
-                    bytes
-                        .chunks_exact(2)
-                        .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
-                        .collect()
+                    indices.extend(
+                        bytes
+                            .chunks_exact(2)
+                            .map(|b| u16::from_le_bytes([b[0], b[1]]) as u32),
+                    );
                 }
-            };
-            if !indices.is_empty() {
-                self.draw_elements(mem, mode, &indices);
+            } else {
+                self.set_error(GL_INVALID_VALUE);
             }
-            return;
-        }
-
-        let mut buf = std::mem::take(&mut self.index_scratch);
-        let ok = mem.read(pointer, len, &mut buf);
-        let indices: Vec<u32> = if !ok {
-            Vec::new()
-        } else if width == 1 {
-            buf[..len].iter().map(|&b| b as u32).collect()
         } else {
-            buf[..len]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
-                .collect()
-        };
-        self.index_scratch = buf;
-        if indices.is_empty() {
-            return;
+            let mut bytes = std::mem::take(&mut self.index_scratch);
+            if mem.read(pointer, len, &mut bytes) && bytes.len() >= len {
+                if width == 1 {
+                    indices.extend(bytes[..len].iter().map(|b| *b as u32));
+                } else {
+                    indices.extend(
+                        bytes[..len]
+                            .chunks_exact(2)
+                            .map(|b| u16::from_le_bytes([b[0], b[1]]) as u32),
+                    );
+                }
+            }
+            self.index_scratch = bytes;
         }
-        self.draw_elements(mem, mode, &indices);
+        if !indices.is_empty() {
+            self.draw_elements(mem, mode, &indices);
+        }
+        self.decoded_indices = indices;
+    }
+
+    fn recycle_prepared_arrays(&mut self) {
+        for (_, mut bytes) in self.prepared_arrays.drain(..) {
+            bytes.clear();
+            self.array_read_pool.push(bytes);
+        }
+    }
+
+    fn stream_array(
+        &self,
+        stream: &mut crate::gpu::VertexStream,
+        slot: usize,
+        array: ArrayPointer,
+        lo: u32,
+        count: usize,
+        normalize: bool,
+        components: u32,
+        native_fixed: bool,
+    ) -> Option<()> {
+        let comp = array.component_bytes()?;
+        let stride = array.element_stride()?;
+        let start = array.pointer.checked_add(lo.checked_mul(stride)?)?;
+        let len = (count.checked_sub(1)? as u32)
+            .checked_mul(stride)?
+            .checked_add(array.size.checked_mul(comp)?)? as usize;
+        start.checked_add(len as u32)?;
+        if len > 1024 * 1024 {
+            return None;
+        }
+        let source = if array.buffer != 0 {
+            self.buffers.get(&array.buffer)?.slice(start, len)?
+        } else {
+            let (base, bytes) = self.prepared_arrays.iter().find(|(base, bytes)| {
+                start.checked_sub(*base).is_some_and(|off| {
+                    (off as usize)
+                        .checked_add(len)
+                        .is_some_and(|end| end <= bytes.len())
+                })
+            })?;
+            &bytes[(start - *base) as usize..(start - *base) as usize + len]
+        };
+        let size = array.size.min(components);
+        if size == 0 || size > 4 || stride > i32::MAX as u32 {
+            return None;
+        }
+        let offset = (stream.bytes.len() + 3) & !3;
+        stream.bytes.resize(offset, 0);
+        let convert = (array.ty == GL_FIXED && !native_fixed) || stride % comp != 0;
+        let (ty, output_stride, normalized) = if convert {
+            for i in 0..count {
+                for c in 0..size as usize {
+                    let at = i * stride as usize + c * comp as usize;
+                    stream.bytes.extend_from_slice(
+                        &decode_component(&source[at..], array.ty, normalize).to_le_bytes(),
+                    );
+                }
+            }
+            (GL_FLOAT, (size * 4) as i32, 0)
+        } else {
+            let packed = (size * comp) as usize;
+            if stride as usize == packed {
+                stream.bytes.extend_from_slice(&source[..count * packed]);
+            } else {
+                // Keep native formats, but omit interleaved padding/other attributes.
+                for i in 0..count {
+                    let start = i * stride as usize;
+                    stream
+                        .bytes
+                        .extend_from_slice(&source[start..start + packed]);
+                }
+            }
+            (
+                array.ty,
+                packed as i32,
+                (normalize && !matches!(array.ty, GL_FLOAT | GL_FIXED)) as u8,
+            )
+        };
+        stream.attributes[slot] = Some(crate::gpu::StreamAttribute {
+            size: size as i32,
+            ty,
+            normalized,
+            stride: output_stride,
+            offset,
+        });
+        Some(())
+    }
+
+    fn prepare_vertex_stream(
+        &self,
+        stream: &mut crate::gpu::VertexStream,
+        indices: impl Iterator<Item = u32> + Clone,
+        count: usize,
+        sequential: bool,
+        stages: &[raster::TextureStage],
+    ) -> bool {
+        stream.bytes.clear();
+        stream.indices.clear();
+        stream.attributes.fill(None);
+        stream.constants = [[0., 0., 0., 1.]; 8];
+        stream.constants[1] = self.current_color;
+        stream.constants[6] = [
+            self.current_normal[0],
+            self.current_normal[1],
+            self.current_normal[2],
+            0.,
+        ];
+        let Some(lo) = indices.clone().min() else {
+            return false;
+        };
+        let Some(hi) = indices.clone().max() else {
+            return false;
+        };
+        let span = hi - lo;
+        if span >= 65536 || span > (count as u32).saturating_mul(4) {
+            return false;
+        }
+        stream.count = span as usize + 1;
+        if !sequential {
+            stream.coverage.resize(stream.count, 0);
+            stream.coverage.fill(0);
+            for i in indices {
+                let relative = (i - lo) as u16;
+                stream.indices.push(relative);
+                stream.coverage[relative as usize] = 1;
+            }
+            // Hole-heavy draws keep the existing unique-vertex path rather than
+            // uploading unused vertices and inflating native transfer size.
+            if stream.coverage.contains(&0) {
+                stream.indices.clear();
+                return false;
+            }
+        }
+        let native_fixed = self
+            .gpu
+            .as_ref()
+            .is_some_and(|g| g.supports_fixed_vertices());
+        let ready = (|| {
+            self.stream_array(
+                stream,
+                0,
+                self.vertex_array,
+                lo,
+                stream.count,
+                false,
+                4,
+                native_fixed,
+            )?;
+            if self.color_array.enabled {
+                self.stream_array(
+                    stream,
+                    1,
+                    self.color_array,
+                    lo,
+                    stream.count,
+                    true,
+                    4,
+                    native_fixed,
+                )?;
+            }
+            for stage in stages {
+                let unit = self.texture_units[stage.unit];
+                if unit.texcoord_array.enabled {
+                    self.stream_array(
+                        stream,
+                        stage.unit + 2,
+                        unit.texcoord_array,
+                        lo,
+                        stream.count,
+                        false,
+                        2,
+                        native_fixed,
+                    )?;
+                } else {
+                    stream.constants[stage.unit + 2] =
+                        [unit.current_texcoord[0], unit.current_texcoord[1], 0., 1.];
+                }
+            }
+            if self.lighting.enabled {
+                if self.normal_array.enabled {
+                    self.stream_array(
+                        stream,
+                        6,
+                        self.normal_array,
+                        lo,
+                        stream.count,
+                        true,
+                        3,
+                        native_fixed,
+                    )?;
+                }
+                stream.attributes[7] = stream.attributes[0];
+            }
+            Some(())
+        })()
+        .is_some();
+        if !ready {
+            stream.bytes.clear();
+            stream.indices.clear();
+        }
+        ready
     }
 
     fn draw_indexed(
@@ -1808,7 +2017,7 @@ impl Context {
         self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
         let (stage_storage, stage_count) = self.texture_stages();
         let stages = &stage_storage[..stage_count];
-        self.prepared_arrays.clear();
+        self.recycle_prepared_arrays();
         if let (Some(lo), Some(hi)) = (indices.clone().min(), indices.clone().max()) {
             let mut arrays = [ArrayPointer::default(); MAX_TEXTURE_UNITS + 3];
             arrays[0] = self.vertex_array;
@@ -1828,6 +2037,8 @@ impl Context {
                     array_count += 1;
                 }
             }
+            let mut spans = [(0u32, 0u32); MAX_TEXTURE_UNITS + 3];
+            let mut span_count = 0;
             for &array in &arrays[..array_count] {
                 if array.buffer != 0 {
                     continue;
@@ -1847,12 +2058,81 @@ impl Context {
                     Some((start, len as usize))
                 })();
                 if let Some((start, len)) = span {
-                    let mut bytes = Vec::new();
-                    if mem.read(start, len, &mut bytes) && bytes.len() >= len {
-                        self.prepared_arrays.push((array, start, bytes));
-                    }
+                    spans[span_count] = (start, start + len as u32);
+                    span_count += 1;
                 }
             }
+            spans[..span_count].sort_unstable_by_key(|s| s.0);
+            let mut merged = 0;
+            for i in 0..span_count {
+                let (start, end) = spans[i];
+                if merged > 0
+                    && start <= spans[merged - 1].1
+                    && end.max(spans[merged - 1].1) - spans[merged - 1].0 <= 1024 * 1024
+                {
+                    spans[merged - 1].1 = end.max(spans[merged - 1].1);
+                } else {
+                    spans[merged] = (start, end);
+                    merged += 1;
+                }
+            }
+            for &(start, end) in &spans[..merged] {
+                let len = (end - start) as usize;
+                let mut bytes = self.array_read_pool.pop().unwrap_or_default();
+                bytes.clear();
+                if mem.read(start, len, &mut bytes) && bytes.len() >= len {
+                    bytes.truncate(len);
+                    self.prepared_arrays.push((start, bytes));
+                } else {
+                    bytes.clear();
+                    self.array_read_pool.push(bytes);
+                }
+            }
+        }
+
+        let transforms = crate::gpu::VertexTransforms {
+            lighting: self.lighting,
+            normal_matrix,
+            projection: *self.projection.current(),
+            modelview: *self.modelview.current(),
+            textures: std::array::from_fn(|i| {
+                if self.texture_units[i].texcoord_array.enabled {
+                    *self.texture_matrix[i].current()
+                } else {
+                    matrix::IDENTITY
+                }
+            }),
+        };
+        if self.gpu.is_some()
+            && self.state.smooth_shading
+            && matches!(
+                mode,
+                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+            )
+        {
+            let mut stream = std::mem::take(&mut self.vertex_stream);
+            let ready =
+                self.prepare_vertex_stream(&mut stream, indices.clone(), count, sequential, stages);
+            if ready {
+                let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
+                let result = self.gpu.as_mut().unwrap().draw_stream_object_space(
+                    &self.target,
+                    &self.state,
+                    mode,
+                    &stream,
+                    stages,
+                    &self.textures,
+                    names,
+                    &transforms,
+                );
+                self.vertex_stream = stream;
+                self.recycle_prepared_arrays();
+                if let Err(e) = result {
+                    self.gpu_failure("vertex stream", e);
+                }
+                return;
+            }
+            self.vertex_stream = stream;
         }
         // Native smooth draws retain the topology and prepare each unique
         // guest vertex directly, instead of expanding then hashing float records.
@@ -1877,7 +2157,7 @@ impl Context {
                 index
             } else {
                 let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
-                    self.prepared_arrays.clear();
+                    self.recycle_prepared_arrays();
                     return;
                 };
                 let index = verts.len();
@@ -1897,7 +2177,7 @@ impl Context {
         } else if !sequential {
             verts = expanded.iter().map(|i| verts[*i]).collect();
         }
-        self.prepared_arrays.clear();
+        self.recycle_prepared_arrays();
 
         match mode {
             GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
@@ -1908,20 +2188,6 @@ impl Context {
             }
         }
 
-        let transforms = crate::gpu::VertexTransforms {
-            lighting: self.lighting,
-            normal_matrix,
-            projection: *self.projection.current(),
-            modelview: *self.modelview.current(),
-            // Constant texture coordinates retain the existing renderer semantics.
-            textures: std::array::from_fn(|i| {
-                if self.texture_units[i].texcoord_array.enabled {
-                    *self.texture_matrix[i].current()
-                } else {
-                    matrix::IDENTITY
-                }
-            }),
-        };
         if let Some(gpu) = self.gpu.as_mut() {
             let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
             let result = if direct_indexed {
@@ -2144,6 +2410,162 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn native_ctx(es: bool) -> Context {
+        let mut c = ctx();
+        c.gpu = Some(if es {
+            crate::gpu::Renderer::new_es_for_test(64, 64).unwrap()
+        } else {
+            crate::gpu::Renderer::new(64, 64).unwrap()
+        });
+        c.gpu_requested = true;
+        c
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; Colors snapshots, indices and stream/fallback switching"]
+    fn gpu_colors_stream_refreshes_mutable_guest_data_and_reuses_storage() {
+        let indices = [
+            0, 2, 1, 2, 0, 3, 1, 5, 4, 5, 1, 2, 5, 3, 6, 3, 5, 2, 3, 7, 6, 7, 3, 0, 6, 4, 5, 4, 6,
+            7, 1, 7, 0, 7, 1, 4,
+        ];
+        for es in [false, true] {
+            let mut c = native_ctx(es);
+            let mut bytes = Vec::new();
+            for i in 0..8 {
+                bytes.extend(fixeds(&[
+                    if i & 1 == 0 { -0.5 } else { 0.5 },
+                    if i & 2 == 0 { -0.5 } else { 0.5 },
+                    0.,
+                ]));
+            }
+            for _ in 0..8 {
+                bytes.extend(fixeds(&[1., 0., 0.]));
+            }
+            let mut mem = CountMem {
+                inner: FakeMem { base: BASE, bytes },
+                reads: 0,
+                reject_bulk: false,
+            };
+            c.set_vertex_pointer(3, GL_FIXED, 0, BASE);
+            c.set_color_pointer(3, GL_FIXED, 0, BASE + 96);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            c.set_client_state(GL_COLOR_ARRAY, true);
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(mem.reads, 1);
+            assert_eq!(c.vertex_stream.bytes.len(), 192);
+            assert_eq!(c.vertex_stream.indices.len() * 2, 72);
+            assert_eq!(pixel(&c, 32, 32), [255, 0, 0, 255]);
+            let ptr = c.vertex_stream.bytes.as_ptr();
+            let pool_ptr = c.array_read_pool[0].as_ptr();
+            for i in 0..8 {
+                mem.inner.bytes[96 + i * 12..108 + i * 12].copy_from_slice(&fixeds(&[0., 1., 0.]));
+            }
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(mem.reads, 2);
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            assert_eq!(c.vertex_stream.bytes.as_ptr(), ptr);
+            assert_eq!(c.array_read_pool[0].as_ptr(), pool_ptr);
+            // Failed coalesced reads must retain the elementwise fallback.
+            mem.reject_bulk = true;
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(mem.reads, 19);
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            mem.reject_bulk = false;
+            // Alternate packed/flat and typed/smooth attribute layouts.
+            c.set_shade_model(GL_FLAT);
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            c.set_shade_model(GL_SMOOTH);
+            c.set_client_state(GL_COLOR_ARRAY, false);
+            c.current_color = [0., 0., 1., 1.];
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 0, 255, 255]);
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+            c.disable_gpu();
+            c.current_color = [1., 1., 0., 1.];
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            assert_eq!(pixel(&c, 32, 32), [255, 255, 0, 255]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; captured VBOs, strides, indices and update semantics"]
+    fn gpu_stream_preserves_vbo_capture_and_first_with_normalized_colours() {
+        for es in [false, true] {
+            let mut c = native_ctx(es);
+            let mut positions = Vec::new();
+            for pos in [[0i16, 0, 0], [-1, -1, 0], [1, -1, 0], [0, 1, 0]] {
+                for n in pos {
+                    positions.extend(n.to_le_bytes());
+                }
+                positions.extend([0x5a, 0x5a]);
+            }
+            let names = c.gen_buffers(3);
+            c.bind_buffer(GL_ARRAY_BUFFER, names[0]);
+            c.buffer_data(
+                GL_ARRAY_BUFFER,
+                positions.len(),
+                Some(&positions),
+                GL_DYNAMIC_DRAW,
+            );
+            c.set_vertex_pointer(3, GL_SHORT, 8, 0);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            c.bind_buffer(GL_ARRAY_BUFFER, names[1]);
+            c.buffer_data(
+                GL_ARRAY_BUFFER,
+                16,
+                Some(&[255, 0, 0, 255].repeat(4)),
+                GL_DYNAMIC_DRAW,
+            );
+            c.set_color_pointer(4, GL_UNSIGNED_BYTE, 4, 0);
+            c.set_client_state(GL_COLOR_ARRAY, true);
+            c.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, names[2]);
+            c.buffer_data(
+                GL_ELEMENT_ARRAY_BUFFER,
+                3,
+                Some(&[1, 2, 3]),
+                GL_DYNAMIC_DRAW,
+            );
+            let mut mem = NoMem;
+            c.draw_elements_from_guest(&mut mem, GL_TRIANGLES, 3, GL_UNSIGNED_BYTE, 0);
+            c.sync_gpu();
+            assert_eq!(c.vertex_stream.count, 3);
+            assert_eq!(c.vertex_stream.indices, [0, 1, 2]);
+            assert_eq!(c.vertex_stream.attributes[1].unwrap().normalized, 1);
+            assert_eq!(pixel(&c, 32, 32), [255, 0, 0, 255]);
+            let index_ptr = c.decoded_indices.as_ptr();
+            c.bind_buffer(GL_ARRAY_BUFFER, names[1]);
+            c.buffer_sub_data(GL_ARRAY_BUFFER, 0, &[0, 255, 0, 255].repeat(4));
+            // ARRAY_BUFFER at draw time must not replace the captured position binding.
+            c.draw_elements_from_guest(&mut mem, GL_TRIANGLES, 3, GL_UNSIGNED_BYTE, 0);
+            c.sync_gpu();
+            assert_eq!(c.decoded_indices.as_ptr(), index_ptr);
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            c.draw_arrays(&mut mem, GL_TRIANGLES, 1, 3);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            c.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, names[2]);
+            c.buffer_data(
+                GL_ELEMENT_ARRAY_BUFFER,
+                6,
+                Some(&[1, 0, 2, 0, 3, 0]),
+                GL_DYNAMIC_DRAW,
+            );
+            c.draw_elements_from_guest(&mut mem, GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, 0);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+    }
+
     struct CountMem {
         inner: FakeMem,
         reads: usize,
@@ -2159,7 +2581,7 @@ mod tests {
         }
     }
     #[test]
-    fn colors_shared_vertices_use_two_bulk_reads_and_refresh_each_draw() {
+    fn colors_shared_vertices_share_a_bulk_read_and_refresh_each_draw() {
         let mut c = ctx();
         let mut bytes = Vec::new();
         for i in 0..8 {
@@ -2186,16 +2608,16 @@ mod tests {
             7, 1, 7, 0, 7, 1, 4,
         ];
         c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
-        assert_eq!(mem.reads, 2); // Previously eight positions plus eight colours.
+        assert_eq!(mem.reads, 1); // Adjacent positions/colours share one snapshot.
         for i in 0..8 {
             mem.inner.bytes[96 + i * 16..112 + i * 16].copy_from_slice(&floats(&[0., 1., 0., 1.]));
         }
         c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
-        assert_eq!(mem.reads, 4);
+        assert_eq!(mem.reads, 2);
         assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
         mem.reject_bulk = true;
         c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
-        assert_eq!(mem.reads, 22); // Two failed spans, sixteen valid elements.
+        assert_eq!(mem.reads, 19); // One failed merged span, sixteen valid elements.
         assert_eq!(c.take_error(), GL_NO_ERROR);
     }
     #[test]
