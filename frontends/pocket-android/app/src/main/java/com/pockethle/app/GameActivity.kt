@@ -185,6 +185,7 @@ class GameActivity : AppCompatActivity() {
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
         GpsHost.initialize(this)
+        BatteryHost.initialize(this)
         VibrationHost.initialize(this)
         val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
             (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList()) +

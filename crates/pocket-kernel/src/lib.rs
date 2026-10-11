@@ -44,6 +44,7 @@ pub mod framebuffer;
 pub mod gapi;
 pub mod gdi;
 pub mod gps;
+pub mod power;
 pub mod gz;
 pub mod handles;
 pub mod image_memory;

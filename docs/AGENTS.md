@@ -1613,8 +1613,16 @@ GetSystemPowerStatusEx writes the 24-byte CE ARM structure, returning BOOL.
 Ex2 writes 56 bytes including ABI padding, returning 56; buffers larger than
 56 keep their extra bytes intact. Reject NULL, undersized, overflowing, unmapped
 and read-only outputs with zero and thread GetLastError=87 before writing.
-Status models a stable virtual mains supply/full main battery/no backup, with
-unknown lifetimes and optional telemetry. fUpdate does not change virtual state.
+Status projects the host battery through kernel::power. Windows calls
+GetSystemPowerStatus; Android reads the sticky ACTION_BATTERY_CHANGED Intent
+without registering a receiver or requiring permission. A shared one-second
+cache is used unless fUpdate requests a refresh. Failed reads report unknown,
+never an invented critical battery. No-battery hosts report flag 128/percent 255.
+Backup battery is absent, optional telemetry is unknown. Successful calls
+preserve GetLastError. Android retains only application context and one JNI
+class reference, with no timers, listeners, workers or per-game resources.
+These APIs expose state to games that poll; shell-specific registered battery
+notifications are not synthesized without a verified message ABI.
 
 ws2.dll implements an explicit offline boundary, not network/Bluetooth play.
 WSAStartup fails directly with WSASYSNOTREADY (10091), without writing WSADATA.
@@ -2427,8 +2435,9 @@ hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
 channels with level 16 reproducing the unmodified image and level 1 blending
 halfway to black. The visual ceiling is the former penultimate Colors setting,
-21 (one sixth white blend); levels 22..31 retain their actual registry/slider
-value but present identically to 21. This avoids the washed-out former maximum.
+21 (one sixth white blend), reached at slider 31. Levels above neutral 16
+are scaled across the entire upper range: slider 21 is intermediate, not equal
+to 31. This avoids the washed-out former maximum and preserves distinct steps.
 Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 16 on every
 frontend sync, including after a previous dim setting. Device snapshot loading
 also repairs missing/invalid Level and OnLevel and missing DimLevel before

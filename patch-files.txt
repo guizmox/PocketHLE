@@ -1,4 +1,11 @@
-crates/pocket-kernel/src/framebuffer.rs
+crates/pocket-kernel/Cargo.toml
+crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/power.rs
+crates/pocket-winceapi/src/coredll.rs
+frontends/pocket-android-jni/src/lib.rs
+frontends/pocket-android-jni/src/power.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/BatteryHost.kt
 docs/AGENTS.md
-frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
-frontends/pocket-desktop/src/app.rs
+crates/pocket-kernel/src/framebuffer.rs

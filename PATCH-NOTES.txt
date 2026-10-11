@@ -1,10 +1,28 @@
-PocketHLE - Import name confirmation and brightness ceiling
-Base: f6475bf54fd043361984ac2b2320a87b4476ad4a (latest fetched GitHub main).
+PocketHLE - Host battery (Windows + Android)
+Base: f6475bf54fd043361984ac2b2320a87b4476ad4a, no commit/push.
+GetSystemPowerStatusEx/Ex2 now report host battery, charging and mains.
+Windows native SYSTEM_POWER_STATUS; Android sticky battery broadcast snapshot.
+No permissions, receiver, timer, worker or hardware handles for battery.
+Cache one second; fUpdate refreshes. Unknown status on read failure.
+GetLastError=87 for invalid output, successful calls preserve caller error.
+No shell-specific battery message synthesis; Colors alert still needs in-game validation.
+GTShell postponed. No game binaries included.
+Validation: 3 Rust power tests (layout, zero percent, cache/refresh/failure/backend release),
+actual BatteryHost.kt compiled against Android API jar; git diff --check.
+Full desktop/JNI/APK builds not run in this environment.
 
-Windows and Android: a successful import automatically opens the game-name editor with the detected name prefilled. Save persists the name by stable game ID. Empty names are rejected; cancel keeps the detected name and imported game. Applies to PPC and Gizmondo, all existing importer formats. Windows now identifies the imported entry by its ID rather than a possibly duplicated display name.
+Windows:
+cargo test -p pocket-kernel --no-default-features power::tests
+cargo test -p pocket-winceapi power_status_writes_ce_layout_and_rejects_invalid_outputs
+cargo build --release -p pocket-desktop
+Android: use existing tools/build-android-native.sh and tools/build-android-apk.sh.
 
-Brightness: Colors uses registry OnLevel 1/11/21/31. The visual upper limit is now the previous level 21; values 22..31 render identically to 21. The original neutral level 16 and darker range are unchanged. Registry values and the game's slider remain untouched, as do guest pixels. Works through the common framebuffer snapshots on both frontends.
+Manual: start Colors with host unplugged then plugged in, compare battery indicator.
+Android simulator can inject low battery safely (do not drain physical battery):
+adb shell dumpsys battery unplug
+adb shell dumpsys battery set level 3
+Restore after test: adb shell dumpsys battery reset
+These commands simulate Android's battery state until reset.
 
-Validation: the actual framebuffer module compiled with rustc 1.90 and the lockfile's bytemuck 1.25; all 8 existing framebuffer tests pass, with the ceiling equality added to the brightness check. git diff --check passes. Desktop event producers/consumers and Android import JSON/rename flow reviewed. No complete desktop build or Android APK/UI execution was performed here.
-
-This patch does not replace GLES source files from the previous performance delivery. Documentation retains that delivery's behavior. Rebuild desktop and Android native libraries/APK; test imports on both platforms (keep detected name, edit, cancel, empty name) and Colors' brightness slider (upper two settings should match).
+Brightness correction: upper range compressed, slider 21 is distinct from 31.
+Neutral 16 unchanged; maximum remains former level 21. 8 framebuffer tests pass.

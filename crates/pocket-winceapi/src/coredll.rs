@@ -2578,55 +2578,34 @@ pub(crate) fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
         .insert(ctx.kernel.current_thread, error);
 }
 
-/// Stable virtual power source: mains connected, full main battery, no backup.
-/// CE ARM layout is 24 bytes for EX and 56 bytes (including padding) for EX2.
-fn virtual_power_status() -> [u8; 56] {
-    let mut bytes = [0; 56];
-    bytes[0] = 1; // AC_LINE_ONLINE
-    bytes[1] = 1; // BATTERY_FLAG_HIGH
-    bytes[2] = 100;
-    bytes[13] = 128; // BATTERY_FLAG_NO_BATTERY
-    bytes[14] = 255; // BATTERY_PERCENTAGE_UNKNOWN
-    for offset in [4, 8, 16, 20] {
-        bytes[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+/// CE ARM layout: EX 24 bytes, EX2 56 bytes. Validate before host access.
+fn write_power_status(ctx: &mut CallCtx<'_>, pointer: u32, size: usize, refresh: bool) -> bool {
+    if pointer == 0 || ctx.cpu.check_guest_access(pointer, size as u32, Prot::WRITE).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return false;
     }
-    // Optional telemetry and chemistry are unknown; reserved bytes stay zero.
-    bytes
-}
-
-fn write_power_status(ctx: &mut CallCtx<'_>, pointer: u32, size: usize) -> bool {
-    if pointer == 0
-        || ctx
-            .cpu
-            .check_guest_access(pointer, size as u32, Prot::WRITE)
-            .is_err()
-        || ctx
-            .cpu
-            .write_mem(pointer, &virtual_power_status()[..size])
-            .is_err()
-    {
+    let bytes = pocket_kernel::power::status(refresh).ce_bytes();
+    if ctx.cpu.write_mem(pointer, &bytes[..size]).is_err() {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return false;
     }
     true
 }
-
 fn get_system_power_status_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pointer = ctx.arg_u32(0)?;
-    let _update = ctx.arg_u32(1)?; // Cached and refreshed virtual status are identical.
-    let success = write_power_status(ctx, pointer, 24);
+    let refresh = ctx.arg_u32(1)? != 0;
+    let success = write_power_status(ctx, pointer, 24, refresh);
     Ok(DispatchOutcome::ReturnedR0(u32::from(success)))
 }
-
 fn get_system_power_status_ex2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pointer = ctx.arg_u32(0)?;
     let length = ctx.arg_u32(1)?;
-    let _update = ctx.arg_u32(2)?;
+    let refresh = ctx.arg_u32(2)? != 0;
     if length < 56 {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let success = write_power_status(ctx, pointer, 56);
+    let success = write_power_status(ctx, pointer, 56, refresh);
     Ok(DispatchOutcome::ReturnedR0(if success { 56 } else { 0 }))
 }
 
@@ -21229,8 +21208,9 @@ mod tests {
                 };
                 assert_eq!(result.unwrap(), DispatchOutcome::ReturnedR0(returned));
                 let bytes = cpu.read_mem(0x1100, 64).unwrap();
-                assert_eq!(&bytes[..3], &[1, 1, 100]);
-                assert_eq!(&bytes[4..12], &[255; 8]);
+                assert!(bytes[2] <= 100 || bytes[2] == 255);
+                assert_eq!(bytes[3], 0);
+                // Remaining/full lifetime may be available from the host.
                 assert_eq!(&bytes[13..15], &[128, 255]);
                 assert!(bytes[written..].iter().all(|byte| *byte == 0xa5));
             }

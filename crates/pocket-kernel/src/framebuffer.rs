@@ -127,9 +127,9 @@ impl Framebuffer {
             ((c * (14 + self.backlight_level) + 15) / 30) as u8
         } else {
             // Colors' slider writes 1/11/21/31. Its old penultimate level (21)
-            // is now the visual ceiling: preserve registry/slider values while
-            // avoiding the washed-out image at 31. Neutral level 16 is unchanged.
-            (c + (255 - c) * (self.backlight_level.min(21) - 16) / 30) as u8
+            // defines the new maximum at slider 31. Compress the whole upper
+            // range, keeping 21 intermediate and neutral 16 unchanged.
+            (c + (255 - c) * (self.backlight_level - 16) / 90) as u8
         }
     }
 
@@ -454,7 +454,12 @@ mod tests {
         assert_eq!(fb.backlight_channel(128), 149);
         let maximum = fb.snapshot_rgba8888();
         fb.set_backlight_level(21);
-        assert_eq!(fb.snapshot_rgba8888(), maximum);
+        assert_ne!(fb.snapshot_rgba8888(), maximum);
+        assert_eq!(fb.backlight_channel(128), 135);
+        let middle = fb.backlight_channel(128);
+        fb.set_backlight_level(11);
+        assert!(fb.backlight_channel(128) < middle);
+        assert!(middle < 149);
         fb.set_backlight_level(16);
         for channel in 0..=255u8 {
             assert_eq!(fb.backlight_channel(channel), channel);

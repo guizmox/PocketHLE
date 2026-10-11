@@ -28,6 +28,7 @@ mod bluetooth;
 mod camera;
 mod colors_trace;
 mod gps;
+mod power;
 mod internet;
 mod managed_game;
 mod runner;
@@ -592,6 +593,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     }
     if let Err(e) = vibration::install(&mut env, &_class) {
         log::error!("Cannot initialize Android vibration bridge: {e}");
+        return 0;
+    }
+    if let Err(e) = power::install(&mut env, &_class) {
+        log::error!("Cannot initialize Android battery bridge: {e}");
         return 0;
     }
     if let Err(e) = gps::install(&mut env, &_class) {
