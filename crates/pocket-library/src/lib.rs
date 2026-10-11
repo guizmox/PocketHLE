@@ -562,8 +562,11 @@ pub struct LauncherConfig {
     /// Bridge Gizmondo GPRS shell requests to the configured host transport.
     #[serde(default = "default_gprs_enabled")]
     pub gprs_enabled: bool,
-    /// Optional replacement origin for Colors Turf War; empty keeps original routing.
-    #[serde(default)]
+    /// Replacement origin for Colors Turf War; missing/blank values use the public server.
+    #[serde(
+        default = "default_colors_server_url",
+        deserialize_with = "deserialize_colors_server_url"
+    )]
     pub colors_server_url: String,
     /// Optional explicit device ID for separate multiplayer test installations.
     #[serde(default)]
@@ -620,6 +623,22 @@ pub struct LauncherConfig {
 fn default_log_unimplemented_apis() -> bool {
     true
 }
+fn default_colors_server_url() -> String {
+    "https://vps-50cdd0fc.vps.ovh.ca".to_owned()
+}
+
+fn deserialize_colors_server_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Ok(if value.trim().is_empty() {
+        default_colors_server_url()
+    } else {
+        value
+    })
+}
+
 fn default_gprs_enabled() -> bool {
     true
 }
@@ -663,7 +682,7 @@ impl Default for LauncherConfig {
             gps_fixed_latitude: 0.,
             gps_fixed_longitude: 0.,
             gprs_enabled: default_gprs_enabled(),
-            colors_server_url: String::new(),
+            colors_server_url: default_colors_server_url(),
             colors_terminal_id: String::new(),
             upscale_filter: default_upscale_filter(),
             android_display_scale: 0,
@@ -2402,9 +2421,18 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn colors_configuration_preserves_old_defaults_and_roundtrips_player_settings() {
+    fn colors_configuration_migrates_defaults_and_roundtrips_player_settings() {
         let old: LauncherConfig = serde_json::from_str("{}").unwrap();
-        assert!(old.colors_server_url.is_empty());
+        assert_eq!(old.colors_server_url, default_colors_server_url());
+        assert_eq!(
+            LauncherConfig::default().colors_server_url,
+            default_colors_server_url()
+        );
+        for value in ["", "   "] {
+            let config: LauncherConfig =
+                serde_json::from_value(serde_json::json!({"colors_server_url": value})).unwrap();
+            assert_eq!(config.colors_server_url, default_colors_server_url());
+        }
         assert!(old.colors_terminal_id.is_empty());
         assert!(old.gprs_enabled);
         assert!(!old.gps_fixed_enabled);

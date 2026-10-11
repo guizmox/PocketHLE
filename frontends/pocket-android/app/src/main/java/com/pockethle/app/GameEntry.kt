@@ -125,7 +125,7 @@ data class LauncherConfig(
     val displayScale: Int = 0,
     val originalJson: String = "{}",
     val gprsEnabled: Boolean = true,
-    val colorsServerUrl: String = "",
+    val colorsServerUrl: String = "https://vps-50cdd0fc.vps.ovh.ca",
     val colorsTerminalId: String = "",
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
@@ -210,7 +210,7 @@ data class LauncherConfig(
             displayScale = obj.optInt("android_display_scale", 0).coerceIn(0,4),
             originalJson = obj.toString(),
             gprsEnabled = obj.optBoolean("gprs_enabled", true),
-            colorsServerUrl = obj.optString("colors_server_url", ""),
+            colorsServerUrl = obj.optString("colors_server_url", "").ifBlank { "https://vps-50cdd0fc.vps.ovh.ca" },
             colorsTerminalId = obj.optString("colors_terminal_id", ""),
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),

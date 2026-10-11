@@ -1958,8 +1958,11 @@ all four preview corners and preserve left/right and capture orientation.
 
 Colors uses the historical host us.mygiz.gizmondo.com and POST route
 /applications/games/colors/open/command.do. LauncherConfig carries
-colors_server_url and colors_terminal_id, both empty by default; preserve
-serde defaults and the matching Android Kotlin JSON keys. Desktop and Android
+colors_server_url defaults to https://vps-50cdd0fc.vps.ovh.ca; missing or
+blank legacy values migrate to that origin on load, while custom origins are
+preserved. Android Kotlin uses the same default and blank migration. Clearing
+the field restores the public default on the next load. colors_terminal_id
+remains empty by default; preserve the matching Android Kotlin JSON keys. Desktop and Android
 apply configuration only for Gizmondo after registry persistence is attached.
 The URL is an HTTP(S) origin, without a path, credentials or query.
 

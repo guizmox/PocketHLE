@@ -1,5 +1,5 @@
-crates/pocket-kernel/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
+crates/pocket-library/src/lib.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
 docs/AGENTS.md
-README-CI-Idle-Gate.txt
+README-Colors-Public-URL.txt
 patch-files.txt
