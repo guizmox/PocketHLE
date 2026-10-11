@@ -104,13 +104,13 @@ impl Framebuffer {
             pixels: vec![0u8; (width * height * 2) as usize],
             frame_counter: 0,
             directdraw: DirectDrawTiming::default(),
-            backlight_level: 16,
+            backlight_level: 11,
         }
     }
 
     pub fn set_backlight_level(&mut self, level: u32) {
         // Zero/uninitialised and malformed registry values must stay readable.
-        let level = if (1..=31).contains(&level) { level } else { 16 };
+        let level = if (1..=31).contains(&level) { level } else { 11 };
         if self.backlight_level != level {
             self.backlight_level = level;
             // Publish even when a menu's native pixels have not changed.
@@ -122,14 +122,13 @@ impl Framebuffer {
     }
     fn backlight_channel(&self, channel: u8) -> u8 {
         let c = channel as u32;
-        if self.backlight_level <= 16 {
+        if self.backlight_level <= 11 {
             // Minimum is 50%: an intentional low slider position stays visible.
-            ((c * (14 + self.backlight_level) + 15) / 30) as u8
+            ((c * (9 + self.backlight_level) + 10) / 20) as u8
         } else {
-            // Colors' slider writes 1/11/21/31. Its old penultimate level (21)
-            // defines the new maximum at slider 31. Compress the whole upper
-            // range, keeping 21 intermediate and neutral 16 unchanged.
-            (c + (255 - c) * (self.backlight_level - 16) / 90) as u8
+            // Colors' four positions are 1/11/21/31: the second is neutral.
+            // The third is halfway to the reduced maximum (one sixth white).
+            (c + (255 - c) * (self.backlight_level - 11) / 120) as u8
         }
     }
 
@@ -321,7 +320,7 @@ impl Framebuffer {
         let dst: &mut [u32] = bytemuck::cast_slice_mut(out.as_mut_slice());
         for (s, d) in src.iter().zip(dst.iter_mut()) {
             let color = rgb565_to_rgba8888(u16::from_le(*s));
-            *d = if self.backlight_level == 16 {
+            *d = if self.backlight_level == 11 {
                 color
             } else {
                 let [red, green, blue, alpha] = color.to_le_bytes();
@@ -407,9 +406,9 @@ mod tests {
         let original = fb.pixels.clone();
         let normal = fb.snapshot_rgba8888();
         let counter = fb.frame_counter;
-        fb.set_backlight_level(16);
+        fb.set_backlight_level(11);
         assert_eq!(fb.frame_counter, counter);
-        fb.set_backlight_level(12);
+        fb.set_backlight_level(6);
         let dim = fb.snapshot_rgba8888();
         assert!(dim[0] < normal[0] && dim[1] < normal[1]);
         assert_eq!(dim[3], 255);
@@ -418,10 +417,10 @@ mod tests {
         fb.set_backlight_level(31);
         assert!(fb.snapshot_rgba8888()[0] > normal[0]);
         fb.set_backlight_level(0);
-        assert_eq!(fb.backlight_level(), 16);
+        assert_eq!(fb.backlight_level(), 11);
         fb.set_backlight_level(u32::MAX);
-        assert_eq!(fb.backlight_level(), 16);
-        fb.set_backlight_level(16);
+        assert_eq!(fb.backlight_level(), 11);
+        fb.set_backlight_level(11);
         assert_eq!(fb.snapshot_rgba8888(), normal);
     }
 
@@ -443,7 +442,7 @@ mod tests {
                 }
                 previous = shown;
             }
-            if level <= 16 {
+            if level <= 11 {
                 assert_eq!(fb.backlight_channel(0), 0);
             }
             assert!(fb.backlight_channel(255) > fb.backlight_channel(0));
@@ -455,12 +454,12 @@ mod tests {
         let maximum = fb.snapshot_rgba8888();
         fb.set_backlight_level(21);
         assert_ne!(fb.snapshot_rgba8888(), maximum);
-        assert_eq!(fb.backlight_channel(128), 135);
+        assert_eq!(fb.backlight_channel(128), 138);
         let middle = fb.backlight_channel(128);
         fb.set_backlight_level(11);
         assert!(fb.backlight_channel(128) < middle);
         assert!(middle < 149);
-        fb.set_backlight_level(16);
+        fb.set_backlight_level(11);
         for channel in 0..=255u8 {
             assert_eq!(fb.backlight_channel(channel), channel);
         }

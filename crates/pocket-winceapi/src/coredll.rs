@@ -2580,7 +2580,12 @@ pub(crate) fn set_thread_error(ctx: &mut CallCtx<'_>, error: u32) {
 
 /// CE ARM layout: EX 24 bytes, EX2 56 bytes. Validate before host access.
 fn write_power_status(ctx: &mut CallCtx<'_>, pointer: u32, size: usize, refresh: bool) -> bool {
-    if pointer == 0 || ctx.cpu.check_guest_access(pointer, size as u32, Prot::WRITE).is_err() {
+    if pointer == 0
+        || ctx
+            .cpu
+            .check_guest_access(pointer, size as u32, Prot::WRITE)
+            .is_err()
+    {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return false;
     }
@@ -7984,7 +7989,12 @@ fn set_end_of_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 
 fn write_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let driver_handle = ctx.arg_u32(0)?;
-    if ctx.kernel.vfs.bluetooth_driver_open(driver_handle).is_some() {
+    if ctx
+        .kernel
+        .vfs
+        .bluetooth_driver_open(driver_handle)
+        .is_some()
+    {
         return crate::bluetooth::driver_unsupported_stream(ctx);
     }
     let bt_handle = ctx.arg_u32(0)?;
@@ -9701,8 +9711,6 @@ fn post_thread_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-const WAIT_TIMEOUT_RESULT: u32 = 0x102;
-
 fn read_msg_queue_options(
     ctx: &mut CallCtx<'_>,
     ptr: u32,
@@ -9737,42 +9745,95 @@ fn create_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 }
 
 fn read_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.sync_power_notifications();
     let handle = ctx.arg_u32(0)?;
     let buffer = ctx.arg_u32(1)?;
     let buffer_size = ctx.arg_u32(2)?;
     let bytes_read = ctx.arg_u32(3)?;
     let timeout = ctx.arg_u32(4)?;
     let flags = ctx.arg_u32(5)?;
-    let Some(queue) = ctx.kernel.msg_queues.get_mut(&handle) else {
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(ArmReg::Sp)?,
+    );
+    let Some(queue) = ctx.kernel.msg_queues.get(&handle) else {
+        ctx.kernel.wait_deadlines.remove(&key);
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let Some(message) = queue.messages.pop_front() else {
-        if bytes_read != 0 {
-            ctx.cpu.write_mem(bytes_read, &0u32.to_le_bytes())?;
-        }
+    if !queue.read_access
+        || buffer == 0
+        || buffer_size == 0
+        || bytes_read == 0
+        || ctx
+            .cpu
+            .check_guest_access(buffer, buffer_size, Prot::WRITE)
+            .is_err()
+        || ctx
+            .cpu
+            .check_guest_access(bytes_read, 4, Prot::WRITE)
+            .is_err()
+        || (flags != 0 && ctx.cpu.check_guest_access(flags, 4, Prot::WRITE).is_err())
+    {
+        ctx.kernel.wait_deadlines.remove(&key);
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let Some(message) = queue.messages.front() else {
+        ctx.cpu.write_mem(bytes_read, &0u32.to_le_bytes())?;
         if flags != 0 {
             ctx.cpu.write_mem(flags, &0u32.to_le_bytes())?;
         }
-        if timeout != 0 && timeout != 0xFFFF_FFFF {
-            return Ok(DispatchOutcome::ReturnedR0(WAIT_TIMEOUT_RESULT));
+        let expired = if timeout == 0 {
+            true
+        } else if timeout == u32::MAX {
+            false
+        } else {
+            let now = monotonic_ms();
+            let deadline = *ctx
+                .kernel
+                .wait_deadlines
+                .entry(key)
+                .or_insert_with(|| now.saturating_add(u64::from(timeout)));
+            now >= deadline
+        };
+        if expired {
+            ctx.kernel.wait_deadlines.remove(&key);
+            set_thread_error(ctx, 1460); // ERROR_TIMEOUT; BOOL must be FALSE, not WAIT_TIMEOUT.
+            return Ok(DispatchOutcome::ReturnedR0(0));
         }
-        return Ok(DispatchOutcome::ReturnedR0(0));
+        if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
+            if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
+                ctx.kernel.threads[index].parked_wait_handles = vec![handle];
+                ctx.kernel.threads[index].parked_wait_all = false;
+                return Ok(outcome);
+            }
+        }
+        if let Some(outcome) = resume_worker_reenter(ctx)? {
+            return Ok(outcome);
+        }
+        return Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va));
     };
-    let n = message.len().min(buffer_size as usize);
-    if buffer != 0 && n != 0 {
-        ctx.cpu.write_mem(buffer, &message[..n])?;
+    if message.len() > buffer_size as usize {
+        ctx.kernel.wait_deadlines.remove(&key);
+        set_thread_error(ctx, 122); // ERROR_INSUFFICIENT_BUFFER; leave message queued.
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if bytes_read != 0 {
-        ctx.cpu.write_mem(bytes_read, &(n as u32).to_le_bytes())?;
-    }
+    ctx.cpu.write_mem(buffer, message)?;
+    ctx.cpu
+        .write_mem(bytes_read, &(message.len() as u32).to_le_bytes())?;
     if flags != 0 {
         ctx.cpu.write_mem(flags, &0u32.to_le_bytes())?;
     }
-    Ok(DispatchOutcome::ReturnedR0(if n == message.len() {
-        1
-    } else {
-        0
-    }))
+    ctx.kernel
+        .msg_queues
+        .get_mut(&handle)
+        .unwrap()
+        .messages
+        .pop_front();
+    ctx.kernel.wait_deadlines.remove(&key);
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 fn write_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -9796,25 +9857,39 @@ fn write_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-/// `HANDLE RequestPowerNotifications(HANDLE hMsgQ, DWORD dwFlags)`
-///
-/// The power manager would start pushing `POWER_BROADCAST` records into
-/// the caller's message queue. Nothing in the emulator suspends or
-/// changes power state, so the queue simply stays empty — but the call
-/// has to succeed: Spore Origins treats a NULL return as a fatal
-/// initialisation error.
+/// Register a process-owned CE power-manager subscription. Spore Origins
+/// requires registration to succeed even when no power change has occurred.
 fn request_power_notifications(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let queue = ctx.arg_u32(0)?;
     let flags = ctx.arg_u32(1)?;
-    log::debug!(
-        "RequestPowerNotifications(queue=0x{queue:08x}, flags=0x{flags:08x}) -> 0xdeade4f0"
-    );
-    Ok(DispatchOutcome::ReturnedR0(0xDEAD_E4F0))
+    let Some(q) = ctx.kernel.msg_queues.get(&queue) else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let required = if flags & 8 != 0 { 36 } else { 16 };
+    if flags == 0 || (flags != u32::MAX && flags & !15 != 0) || q.max_message_size < required {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    match ctx
+        .kernel
+        .power_notifications
+        .register(queue, flags, pocket_kernel::power::status(false))
+    {
+        Ok(handle) => Ok(DispatchOutcome::ReturnedR0(handle)),
+        Err(error) => {
+            set_thread_error(ctx, error);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
+    }
 }
-
-/// `BOOL StopPowerNotifications(HANDLE h)`
-fn stop_power_notifications(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(1))
+fn stop_power_notifications(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let stopped = ctx.kernel.power_notifications.stop(handle);
+    if !stopped {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+    }
+    Ok(DispatchOutcome::ReturnedR0(u32::from(stopped)))
 }
 
 /// `DWORD GetSystemPowerState(LPVOID pSystemPowerState, DWORD dwLen,
@@ -9859,6 +9934,7 @@ fn close_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     let handle = ctx.arg_u32(0)?;
     Ok(DispatchOutcome::ReturnedR0(
         if ctx.kernel.msg_queues.remove(&handle).is_some() {
+            ctx.kernel.power_notifications.close_queue(handle);
             1
         } else {
             0
@@ -11043,6 +11119,7 @@ fn get_message_pos(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 }
 
 fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.sync_power_notifications();
     // A real driver retires wave buffers on its own thread; the
     // message pump is our equivalent "time has passed" hook, so do it
     // before handing the guest its next message.
@@ -11145,6 +11222,7 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 }
 
 fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.sync_power_notifications();
     service_wave_out(ctx)?;
     let thunk_va = ctx.thunk.thunk_va;
     if let Some(outcome) = wave_out_enter_callback(ctx, thunk_va)? {
@@ -11336,6 +11414,7 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     const WAIT_FAILED: u32 = 0xffff_ffff;
 
     service_mas_audio(ctx.kernel);
+    ctx.kernel.sync_power_notifications();
     let count = ctx.arg_u32(0)?;
     let handles_ptr = ctx.arg_u32(1)?;
     let wait_all = ctx.arg_u32(2)? != 0;
@@ -14349,6 +14428,7 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     const WAIT_OBJECT_0: u32 = 0;
 
     service_mas_audio(ctx.kernel);
+    ctx.kernel.sync_power_notifications();
     let handle = ctx.arg_u32(0)?;
     let timeout = ctx.arg_u32(1)?;
 
@@ -16780,6 +16860,7 @@ fn register_window_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     // message names are compared case-sensitively by Windows, so hash
     // the string as given.
     let id = registered_window_message_id(&name);
+    ctx.kernel.battery_alerts.register(&name, id);
     log::debug!("RegisterWindowMessageW({name:?}) -> 0x{id:04x}");
     Ok(DispatchOutcome::ReturnedR0(id))
 }
@@ -21180,6 +21261,69 @@ mod tests {
     }
 
     #[test]
+    fn power_notifications_register_stop_and_close_queue() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        kernel.msg_queues.insert(
+            1,
+            pocket_kernel::MsgQueue {
+                max_messages: 4,
+                max_message_size: 36,
+                read_access: true,
+                ..Default::default()
+            },
+        );
+        cpu.write_reg(ArmReg::R0, 1).unwrap();
+        cpu.write_reg(ArmReg::R1, 8).unwrap();
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        set_thread_error(&mut c, 123);
+        let DispatchOutcome::ReturnedR0(h) = request_power_notifications(&mut c).unwrap() else {
+            panic!()
+        };
+        assert_ne!(h, 0);
+        assert_eq!(
+            get_last_error(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(123)
+        );
+        c.cpu.write_reg(ArmReg::R0, h).unwrap();
+        assert_eq!(
+            stop_power_notifications(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            stop_power_notifications(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(6)
+        );
+        c.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        c.cpu.write_reg(ArmReg::R1, 16).unwrap();
+        assert_eq!(
+            request_power_notifications(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(87)
+        );
+        c.cpu.write_reg(ArmReg::R1, 8).unwrap();
+        request_power_notifications(&mut c).unwrap();
+        assert!(!c.kernel.power_notifications.is_empty());
+        assert_eq!(
+            close_msg_queue(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(c.kernel.power_notifications.is_empty());
+    }
+
+    #[test]
     fn power_status_writes_ce_layout_and_rejects_invalid_outputs() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -21453,6 +21597,8 @@ mod tests {
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
+            power_notifications: Default::default(),
+            battery_alerts: Default::default(),
             menus: std::collections::HashMap::new(),
             next_menu_handle: 0xDEAD_2000,
             sub_menus: std::collections::HashMap::new(),

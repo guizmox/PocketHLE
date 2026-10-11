@@ -1621,8 +1621,25 @@ never an invented critical battery. No-battery hosts report flag 128/percent 255
 Backup battery is absent, optional telemetry is unknown. Successful calls
 preserve GetLastError. Android retains only application context and one JNI
 class reference, with no timers, listeners, workers or per-game resources.
-These APIs expose state to games that poll; shell-specific registered battery
-notifications are not synthesized without a verified message ABI.
+KernelState owns bounded power notification subscriptions. RequestPowerNotifications
+validates queue, filter and packet capacity and returns a unique process handle;
+StopPowerNotifications removes it (stale handles fail with GetLastError=6).
+PBT_POWERSTATUSCHANGE (4) tracks supply changes; PBT_POWERINFOCHANGE (8) sends
+POWER_BROADCAST with a 24-byte POWER_BROADCAST_POWER_INFO at offset 12.
+Only requested changes are queued. Full queues keep the latest change pending;
+CloseMsgQueue and process teardown release registrations. Existing frontend
+polling, message pumps and wait APIs service notifications; no new worker/timer.
+ReadMsgQueue now preserves messages on small/invalid buffers, returns BOOL FALSE
+with ERROR_TIMEOUT=1460, and cooperatively waits rather than inventing success.
+SDK Examples/SysMessages/SysMessages.h names LOWBATERY_MSG and CRITICALBATERY_MSG;
+the Developer Guide section 2.14 also spells BATTERY. Both spellings are accepted
+when registered, with one message ID chosen per severity to avoid duplicates.
+The existing HWND_BROADCAST message queue carries zero params, as the SDK sample
+uses only message IDs. Alert transitions are emitted once on entering low/critical,
+including low startup once a WndProc exists; recovery/charging rearms them. Unknown
+reads do not fabricate an alert or rearm. No forced shutdown is synthesized.
+CHARGERFAULT_MSG requires actual charger fault telemetry not exposed by the Windows
+power-status API; unknown AC status must not be mistaken for a charger failure.
 
 ws2.dll implements an explicit offline boundary, not network/Bluetooth play.
 WSAStartup fails directly with WSASYSNOTREADY (10091), without writing WSADATA.
@@ -2430,15 +2447,14 @@ Colors' brightness slider uses SDK OEMINC.H, HKCU ControlPanel\Backlight,
 OnLevel/DimLevel and BackLightChangeEvent (EventModify SET). Its ARM setter at
 0x135e0 writes OnLevel 1/11/21/31 and DimLevel 0/0/10/20; getter is 0x136cc.
 VK_BACKLIGHT is F3. Do not intercept that key with a host brightness cycle: the
-game owns its menu. Registry defaults are Level/OnLevel 16, DimLevel 8 (the SDK
+game owns its menu. Registry defaults are Level/OnLevel 11, DimLevel 0 (the SDK
 hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
-channels with level 16 reproducing the unmodified image and level 1 blending
+channels with level 11 reproducing the unmodified image and level 1 blending
 halfway to black. The visual ceiling is the former penultimate Colors setting,
-21 (one sixth white blend), reached at slider 31. Levels above neutral 16
-are scaled across the entire upper range: slider 21 is intermediate, not equal
-to 31. This avoids the washed-out former maximum and preserves distinct steps.
-Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 16 on every
+21 (one sixth white blend), reached at slider 31. Levels above neutral 11
+are scaled across the entire upper range: slider 21 is halfway to slider 31. This avoids the washed-out former maximum and preserves distinct steps.
+Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 11 on every
 frontend sync, including after a previous dim setting. Device snapshot loading
 also repairs missing/invalid Level and OnLevel and missing DimLevel before
 Colors reads its initial slider position; valid saved levels are preserved. The bounded blends

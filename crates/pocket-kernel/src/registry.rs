@@ -172,12 +172,12 @@ impl Registry {
                 if key == r"hkcu\controlpanel\backlight" && store.keys.contains_key(&key) {
                     for name in ["level", "onlevel"] {
                         if !matches!(values.get(name), Some(RegistryValue::Dword(1..=31))) {
-                            values.insert(name.into(), RegistryValue::Dword(16));
+                            values.insert(name.into(), RegistryValue::Dword(11));
                         }
                     }
                     values
                         .entry("dimlevel".into())
-                        .or_insert(RegistryValue::Dword(8));
+                        .or_insert(RegistryValue::Dword(0));
                 }
                 keys.insert(key, values);
             }
@@ -250,11 +250,11 @@ impl Registry {
     /// tends to give up and exit rather than fall back.
     pub fn with_device_defaults() -> Self {
         let mut reg = Self::new();
-        // Gizmondo OEMINC.H: range 1..31. Host neutral defaults to midpoint 16
-        // (SDK hardware default is 24); dim remains 8. Colors reads
+        // Gizmondo OEMINC.H: range 1..31. Neutral is Colors slider position 2,
+        // OnLevel 11 / DimLevel 0 (SDK hardware default is 24). Colors reads
         // OnLevel to initialise its own brightness slider, then writes both
         // OnLevel and DimLevel and signals BackLightChangeEvent.
-        for (name, value) in [("Level", 16), ("OnLevel", 16), ("DimLevel", 8)] {
+        for (name, value) in [("Level", 11), ("OnLevel", 11), ("DimLevel", 0)] {
             reg.set_value(
                 r"HKCU\ControlPanel\Backlight",
                 name,
@@ -511,15 +511,15 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn gizmondo_backlight_midpoint_defaults_are_queryable() {
+    fn gizmondo_backlight_second_position_defaults_are_queryable() {
         let registry = super::Registry::with_device_defaults();
         assert_eq!(
             registry.value(r"HKCU\ControlPanel\Backlight", "OnLevel"),
-            Some(super::RegistryValue::Dword(16))
+            Some(super::RegistryValue::Dword(11))
         );
         assert_eq!(
             registry.value(r"HKCU\ControlPanel\Backlight", "DimLevel"),
-            Some(super::RegistryValue::Dword(8))
+            Some(super::RegistryValue::Dword(0))
         );
     }
 
@@ -581,13 +581,13 @@ mod tests {
             loaded.configure_persistence(&path).unwrap();
             let expected = match saved {
                 Some(RegistryValue::Dword(level @ 1..=31)) => level,
-                _ => 16,
+                _ => 11,
             };
             assert_eq!(
                 loaded.value(key, "OnLevel"),
                 Some(RegistryValue::Dword(expected))
             );
-            assert_eq!(loaded.value(key, "DimLevel"), Some(RegistryValue::Dword(8)));
+            assert_eq!(loaded.value(key, "DimLevel"), Some(RegistryValue::Dword(0)));
             assert!(loaded.handles.is_empty());
         }
     }

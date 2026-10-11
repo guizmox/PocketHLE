@@ -1,28 +1,51 @@
-PocketHLE - Host battery (Windows + Android)
-Base: f6475bf54fd043361984ac2b2320a87b4476ad4a, no commit/push.
-GetSystemPowerStatusEx/Ex2 now report host battery, charging and mains.
-Windows native SYSTEM_POWER_STATUS; Android sticky battery broadcast snapshot.
-No permissions, receiver, timer, worker or hardware handles for battery.
-Cache one second; fUpdate refreshes. Unknown status on read failure.
-GetLastError=87 for invalid output, successful calls preserve caller error.
-No shell-specific battery message synthesis; Colors alert still needs in-game validation.
-GTShell postponed. No game binaries included.
-Validation: 3 Rust power tests (layout, zero percent, cache/refresh/failure/backend release),
-actual BatteryHost.kt compiled against Android API jar; git diff --check.
-Full desktop/JNI/APK builds not run in this environment.
+PocketHLE Host Battery v2 + Brightness
+Base: f6475bf54fd043361984ac2b2320a87b4476ad4a. Replaces Host Battery v1.
+Includes host battery queries (Windows/Android), CE subscriptions, SDK shell alerts,
+and corrected four-position brightness. No game/SDK binaries included.
 
-Windows:
-cargo test -p pocket-kernel --no-default-features power::tests
-cargo test -p pocket-winceapi power_status_writes_ce_layout_and_rejects_invalid_outputs
-cargo build --release -p pocket-desktop
-Android: use existing tools/build-android-native.sh and tools/build-android-apk.sh.
+Battery:
+- Windows GetSystemPowerStatus; Android sticky ACTION_BATTERY_CHANGED (no permission/receiver).
+- Shared one-second cache, fUpdate forces refresh. Failed read returns unknown state.
+- GetSystemPowerStatusEx/Ex2 retain CE ABI and validate output; successful reads preserve LastError.
+- RequestPowerNotifications/StopPowerNotifications now maintain bounded process registrations.
+- Filtered POWERSTATUSCHANGE/POWERINFOCHANGE records, pending retry when queue is full.
+- Queue close/process teardown release registrations. No additional host worker/timer.
+- ReadMsgQueue preserves records on invalid/small buffers, cooperatively waits and returns BOOL FALSE on timeout.
+- SDK SysMessages LOWBATERY_MSG/CRITICALBATERY_MSG are delivered on entering low/critical.
+  Correctly spelled BATTERY aliases are accepted too; one registered ID per severity.
+  No repeated alerts until recovery/charging. Unknown readings do not rearm/create alerts.
+  Payload is zero params; SDK sample acts on message IDs. No forced shutdown.
+- Charger-fault notification is not synthesized: Windows battery API exposes no reliable charger fault.
 
-Manual: start Colors with host unplugged then plugged in, compare battery indicator.
-Android simulator can inject low battery safely (do not drain physical battery):
+Brightness:
+- Four slider values 1/11/21/31 produce distinct ascending brightness.
+- SECOND position (11) is the original unmodified image, before fake brightness existed.
+- Empty, wrong-type, zero or out-of-range registry values fall back to 11.
+- Default Level/OnLevel 11, DimLevel 0; valid saved choices retained.
+- First: 50% darkening; third: 1/12 white blend; fourth: 1/6 white blend (previous reduced max).
+- Presentation only; guest framebuffer bytes remain unchanged.
+
+Validation:
+- 184 kernel tests PASS, including notifications, alerts and registry persistence repair.
+- WinCE suite: 261 PASS, 2 loader tests FAIL identically on untouched GitHub baseline.
+  Existing failures: image_entry_page_oom_rolls_back_loader_reservations;
+  failed_native_import_preserves_cached_dependency_and_slot_allocator.
+- cargo check pocket-winceapi --tests PASS, no warnings.
+- 13 extracted-handler/core tests PASS; 8 framebuffer tests PASS.
+- BatteryHost.kt compiled against Android API jar.
+- cargo check pocket-android-jni --no-default-features PASS on Linux.
+- Full Windows release / Android APK builds and physical Colors warning display not tested here.
+
+Build desktop: cargo build --release -p pocket-desktop
+Build Android: existing tools/build-android-native.sh + tools/build-android-apk.sh.
+Targeted tests: cargo test -p pocket-kernel --no-default-features power::
+cargo test -p pocket-winceapi power_notifications
+cargo test -p pocket-winceapi colors_slider_registry_and_event_drive_host_brightness
+
+Android manual test with Colors running (wait 2 seconds at each step):
 adb shell dumpsys battery unplug
+adb shell dumpsys battery set level 20
 adb shell dumpsys battery set level 3
-Restore after test: adb shell dumpsys battery reset
-These commands simulate Android's battery state until reset.
-
-Brightness correction: upper range compressed, slider 21 is distinct from 31.
-Neutral 16 unchanged; maximum remains former level 21. 8 framebuffer tests pass.
+Always restore real Android reporting afterwards:
+adb shell dumpsys battery reset
+GTShell remains postponed.

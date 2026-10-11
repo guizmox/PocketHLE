@@ -442,6 +442,8 @@ pub(crate) mod tests {
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
+            power_notifications: Default::default(),
+            battery_alerts: Default::default(),
             menus: std::collections::HashMap::new(),
             next_menu_handle: 0xDEAD_2000,
             sub_menus: std::collections::HashMap::new(),

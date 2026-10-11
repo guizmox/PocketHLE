@@ -44,7 +44,6 @@ pub mod framebuffer;
 pub mod gapi;
 pub mod gdi;
 pub mod gps;
-pub mod power;
 pub mod gz;
 pub mod handles;
 pub mod image_memory;
@@ -52,6 +51,7 @@ pub mod internet;
 pub mod memory_division;
 pub mod msgbox;
 pub mod native_thunks;
+pub mod power;
 mod process_control;
 pub mod registry;
 pub mod shared_objects;
@@ -1292,6 +1292,8 @@ pub struct KernelState {
     pub posted_messages: VecDeque<(u32, u32, u32, u32)>,
     pub msg_queues: HashMap<u32, MsgQueue>,
     pub next_msg_queue_handle: u32,
+    pub power_notifications: power::Notifications,
+    pub battery_alerts: power::GizmondoAlerts,
     /// Per-menu table of `(item_id -> flags)`. We track the flags so
     /// that `CheckMenuItem`/`GetMenuState` round-trip the previously
     /// set state instead of always returning the same constant —
@@ -1323,13 +1325,24 @@ pub struct MainThreadState {
 
 impl KernelState {
     /// Colors writes the shared device registry from its own brightness slider.
+    pub fn sync_power_notifications(&mut self) {
+        if !self.power_notifications.is_empty() || !self.battery_alerts.is_empty() {
+            let current = power::status(false);
+            self.power_notifications
+                .deliver(&mut self.msg_queues, current);
+            if self.wnd_proc != 0 {
+                self.battery_alerts
+                    .deliver(&mut self.posted_messages, current);
+            }
+        }
+    }
     pub fn sync_backlight(&mut self) {
         let level = match self
             .registry
             .value(r"HKCU\ControlPanel\Backlight", "OnLevel")
         {
             Some(crate::registry::RegistryValue::Dword(level)) => level,
-            _ => 16,
+            _ => 11,
         };
         self.framebuffer.set_backlight_level(level);
     }
@@ -3133,6 +3146,8 @@ impl Process {
                 posted_messages: Default::default(),
                 msg_queues: HashMap::new(),
                 next_msg_queue_handle: 0xDEAD_E500,
+                power_notifications: Default::default(),
+                battery_alerts: Default::default(),
                 menus: HashMap::new(),
                 next_menu_handle: 0xDEAD_2000,
                 sub_menus: HashMap::new(),
@@ -3792,6 +3807,7 @@ pub fn run_main_loop_with_hook(
             if due || input_due {
                 last_frontend_poll = Some(now);
                 process.state.sync_backlight();
+                process.state.sync_power_notifications();
                 let action = hook.on_frame(&mut process.state);
                 last_presented_frame = process.state.framebuffer.frame_counter;
                 if action == FrameAction::Stop {
