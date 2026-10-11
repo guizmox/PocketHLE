@@ -10,7 +10,7 @@ resets sampling. It does not intercept touch input or appear in screenshots.
 No new timer, worker, native resource or per-frame logging.
 
 Cumulative patch includes GPU vertex transforms, previous GPU/Android fixes and
-minimum brightness tuning (1/12 toward black; neutral/default unchanged).
+minimum brightness tuning (20% toward black; neutral/default unchanged).
 Validation: actual FPS Kotlin classes executed for identity/elapsed time/idle/
 pause/reset; real JSON model persistence checked; actual Android renderer
 compiled against framework classes with project neighbours stubbed; layout XML

@@ -1,11 +1,14 @@
 README-Android-FPS.txt
 README-GPU-Experimental.txt
+README-GPU-Lighting.txt
 README-GPU-Vertices.txt
 crates/pocket-core/src/lib.rs
 crates/pocket-gles/src/context.rs
 crates/pocket-gles/src/gpu/mod.rs
 crates/pocket-gles/src/gpu/platform.rs
 crates/pocket-gles/src/lib.rs
+crates/pocket-gles/src/lighting.rs
+crates/pocket-gles/src/raster.rs
 crates/pocket-gles/src/texture.rs
 crates/pocket-kernel/src/bluetooth.rs
 crates/pocket-kernel/src/device_status.rs

@@ -2451,7 +2451,7 @@ game owns its menu. Registry defaults are Level/OnLevel 11, DimLevel 0 (the SDK
 hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
 channels with level 11 reproducing the unmodified image and level 1 blending
-one twelfth toward black (matching the neutral-to-third white blend). The visual ceiling is the former penultimate Colors setting,
+one fifth toward black (20% dimming). The visual ceiling is the former penultimate Colors setting,
 21 (one sixth white blend), reached at slider 31. Levels above neutral 11
 are scaled across the entire upper range: slider 21 is halfway to slider 31. This avoids the washed-out former maximum and preserves distinct steps.
 Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 11 on every
@@ -2554,7 +2554,7 @@ Launcher startup preview also requires WinCE EC_VIDEOFRAMEREADY (0x49), as confi
 ### Experimental native GLES rasterization (2026-10-11)
 Global config.gpu_renderer defaults false, shown in Emulator Settings / Emulator options. GameSettings.gpu_renderer is nullable: null/missing inherits, false forces software, true forces GPU. Both Kotlin JSON models preserve unknown fields. Configure on the emulation thread after creating the dispatcher; each child inherits the launcher configuration and per-game override.
 
-pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles object-space vertices; the vertex shader applies projection/modelview, texture matrices and eye-space fog depth before native rasterization. Shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines and fixed lighting remain at their existing support level (not implemented by this change). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
+pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles object-space vertices; the vertex shader applies projection/modelview, texture matrices and eye-space fog depth before native rasterization. Shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines remain at their existing non-rasterized support level. Fixed lighting is now evaluated per vertex by both backends (see below). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
 
 Native framebuffer RGBA+depth persists across draws. Readback runs only for EGL swap or glReadPixels, flips bottom-up rows to canonical top-down, then existing RGB565/GAPI/DirectShow/filter/screenshot paths consume the result. No zero-copy frontend integration yet. GPU stage allocations and GL resources release on EGL termination, emulator drop, context reset and child return. Contexts are !Send; every operation makes its own context current. EGL display leases count live private contexts, so child teardown cannot terminate parent; Android keeps one process-wide EGL library/display initialization lease because the Android UI shares DEFAULT_DISPLAY, while all game surfaces/contexts are destroyed.
 
@@ -2624,5 +2624,35 @@ the overlay. It is not drawn into the emulated framebuffer or screenshots.
 Pure Kotlin checks cover frame identity, elapsed-time normalization, idle output,
 pause and counter resets. The actual renderer compiles against Android framework
 classes with only project neighbours stubbed; full APK/device remains validation.
-The cumulative delivery retains level-1 brightness's reduced one-twelfth black
+The cumulative delivery retains level-1 brightness's 20% black
 blend, with the second slider position neutral/default and the upper levels intact.
+
+
+### Shared fixed lighting (software and native GPU)
+LightingState owns eight lights, shared material, model ambient, two-sided,
+color-material, normalization and rescale settings. Light position and spot
+direction are captured in eye space at setter time. Float/fixed setters and
+light/material queries validate enum, range and bounded guest memory, reporting
+GL errors; queries are also exposed as named extensions. Session suspension
+retains lighting state; release/reset uses existing context ownership.
+
+Software assembly transforms normals with one inverse-transpose matrix per draw,
+evaluates ambient/emission/diffuse/specular and positional attenuation/spotlight
+per unique indexed vertex, and interpolates front/back colors. Rasterization
+selects back colors for two-sided back faces; flat shading uses the provoking
+vertex. The native shader evaluates the same equation with eight light uniforms,
+one additional normal/fog attribute and one provoking-position attribute.
+No extra workers, guest allocations or persistent resource handles. Disabled
+lighting keeps prior rendering. Lighting improves visual compatibility, not a
+promised speed increase; software adds CPU work when lighting is enabled.
+
+Tests cover guest signed normal arrays, analytical colors, normalization/rescale,
+front/back and flat/smooth shading, positional attenuation, spotlights,
+color-material, specular, light 7, validation and parent/session retention.
+Software/native driver samples agree within two 8-bit channel levels. Host GL
+and GLES2 shader driver checks and ARM64/ARMv7 Rust checks pass; complete APK and
+Windows device performance still require user builds/tests.
+
+Brightness slider positions remain registry 1/11/21/31. Neutral/default is 11,
+unchanged pixels. Minimum 1 now blends 20% toward black (128 becomes 103), between
+the earlier 50% and 1/12 settings. Upper steps and ceiling remain unchanged.

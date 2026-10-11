@@ -18,6 +18,7 @@ pub mod context;
 pub mod fixed;
 pub mod gpu;
 pub mod matrix;
+pub mod lighting;
 pub mod ordinals;
 pub mod raster;
 pub mod texture;

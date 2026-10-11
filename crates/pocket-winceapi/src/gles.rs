@@ -535,6 +535,147 @@ fn gl_color4x(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(VOID)
 }
 
+fn set_lighting(
+    ctx: &mut CallCtx<'_>,
+    family: u8,
+    fixed: bool,
+    vector: bool,
+) -> Result<DispatchOutcome, KernelError> {
+    use pocket_gles::lighting::{self, Target};
+    let target = match family {
+        0 => Target::Light(ctx.arg_u32(0)?),
+        1 => Target::Material(ctx.arg_u32(0)?),
+        _ => Target::Model,
+    };
+    let pindex = if family == 2 { 0 } else { 1 };
+    let pname = ctx.arg_u32(pindex)?;
+    let count = match lighting::parameter_count(target, pname, !vector) {
+        Ok(n) => n,
+        Err(e) => {
+            with_ctx(|c| c.set_error(e));
+            return Ok(VOID);
+        }
+    };
+    let words = if vector {
+        let ptr = ctx.arg_u32(pindex + 1)?;
+        match ctx.cpu.read_mem(ptr, (count * 4) as u32) {
+            Ok(bytes) => bytes
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_OPERATION));
+                return Ok(VOID);
+            }
+        }
+    } else {
+        vec![ctx.arg_u32(pindex + 1)?]
+    };
+    let values: Vec<f32> = words
+        .into_iter()
+        .map(|w| {
+            if fixed {
+                word_to_f32(w)
+            } else {
+                f32::from_bits(w)
+            }
+        })
+        .collect();
+    with_ctx(|c| {
+        if let Err(e) = c
+            .lighting
+            .set(target, pname, &values, c.modelview.current())
+        {
+            c.set_error(e);
+        }
+    });
+    Ok(VOID)
+}
+macro_rules! lighting_setter {
+    ($name:ident,$family:expr,$fixed:expr,$vector:expr) => {
+        fn $name(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+            set_lighting(ctx, $family, $fixed, $vector)
+        }
+    };
+}
+lighting_setter!(gl_lightf, 0, false, false);
+lighting_setter!(gl_lightfv, 0, false, true);
+lighting_setter!(gl_lightx, 0, true, false);
+lighting_setter!(gl_lightxv, 0, true, true);
+lighting_setter!(gl_materialf, 1, false, false);
+lighting_setter!(gl_materialfv, 1, false, true);
+lighting_setter!(gl_materialx, 1, true, false);
+lighting_setter!(gl_materialxv, 1, true, true);
+lighting_setter!(gl_light_modelf, 2, false, false);
+lighting_setter!(gl_light_modelfv, 2, false, true);
+lighting_setter!(gl_light_modelx, 2, true, false);
+lighting_setter!(gl_light_modelxv, 2, true, true);
+
+fn get_lighting(
+    ctx: &mut CallCtx<'_>,
+    material: bool,
+    fixed: bool,
+) -> Result<DispatchOutcome, KernelError> {
+    use pocket_gles::lighting::Target;
+    let id = ctx.arg_u32(0)?;
+    let pname = ctx.arg_u32(1)?;
+    let out = ctx.arg_u32(2)?;
+    let target = if material {
+        if id != 0x0404 && id != 0x0405 {
+            with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+            return Ok(VOID);
+        }
+        Target::Material(0x0408)
+    } else {
+        Target::Light(id)
+    };
+    let values = match with_ctx(|c| {
+        if material
+            && c.lighting.color_material
+            && matches!(
+                pname,
+                pocket_gles::lighting::AMBIENT | pocket_gles::lighting::DIFFUSE
+            )
+        {
+            Ok(c.current_color.to_vec())
+        } else {
+            c.lighting.get(target, pname)
+        }
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            with_ctx(|c| c.set_error(e));
+            return Ok(VOID);
+        }
+    };
+    let bytes: Vec<u8> = values
+        .into_iter()
+        .flat_map(|v| {
+            if fixed {
+                pocket_gles::fixed::from_f32(v).to_le_bytes()
+            } else {
+                v.to_bits().to_le_bytes()
+            }
+        })
+        .collect();
+    if ctx.cpu.write_mem(out, &bytes).is_err() {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_OPERATION));
+    }
+    Ok(VOID)
+}
+fn gl_get_lightfv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    get_lighting(ctx, false, false)
+}
+fn gl_get_lightxv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    get_lighting(ctx, false, true)
+}
+fn gl_get_materialfv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    get_lighting(ctx, true, false)
+}
+fn gl_get_materialxv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    get_lighting(ctx, true, true)
+}
+
 fn gl_normal3f(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let n = [argf(ctx, 0)?, argf(ctx, 1)?, argf(ctx, 2)?];
     with_ctx(|c| c.current_normal = n);
@@ -914,6 +1055,14 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     let values: Vec<i32> = match pname {
         pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024],
         pocket_gles::GL_MAX_LIGHTS => vec![8],
+        pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as i32],
+        pocket_gles::GL_NORMALIZE => vec![with_ctx(|c| c.lighting.normalize) as i32],
+        pocket_gles::GL_COLOR_MATERIAL => vec![with_ctx(|c| c.lighting.color_material) as i32],
+        pocket_gles::lighting::RESCALE_NORMAL => vec![with_ctx(|c| c.lighting.rescale) as i32],
+        pocket_gles::lighting::MODEL_TWO_SIDE => vec![with_ctx(|c| c.lighting.two_sided) as i32],
+        0x4000..=0x4007 => {
+            vec![with_ctx(|c| c.lighting.lights[(pname - 0x4000) as usize].enabled) as i32]
+        }
         pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as i32],
         pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH => vec![16],
         pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH => vec![16],
@@ -974,6 +1123,11 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         // GL converts. Only the few games actually ask for are listed.
         pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024.0],
         pocket_gles::GL_MAX_LIGHTS => vec![8.0],
+        pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as u8 as f32],
+        pocket_gles::lighting::MODEL_AMBIENT => with_ctx(|c| c.lighting.model_ambient.to_vec()),
+        pocket_gles::lighting::MODEL_TWO_SIDE => {
+            vec![with_ctx(|c| c.lighting.two_sided) as u8 as f32]
+        }
         pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as f32],
         pocket_gles::GL_VIEWPORT => {
             let vp = with_ctx(|c| c.state.viewport);
@@ -1654,12 +1808,22 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         | "glLoadPaletteFromModelViewMatrixOES"
         | "glPointSizePointerOES" => gl_ignored,
 
-        // Lighting is not evaluated: the rasterizer shades from the
-        // vertex colour alone. Games that light their geometry get flat
-        // colours rather than a black screen or a hard error.
-        "glLightf" | "glLightfv" | "glLightx" | "glLightxv" | "glLightModelf"
-        | "glLightModelfv" | "glLightModelx" | "glLightModelxv" | "glMaterialf"
-        | "glMaterialfv" | "glMaterialx" | "glMaterialxv" => gl_ignored,
+        "glLightf" => gl_lightf,
+        "glLightfv" => gl_lightfv,
+        "glLightx" => gl_lightx,
+        "glLightxv" => gl_lightxv,
+        "glMaterialf" => gl_materialf,
+        "glMaterialfv" => gl_materialfv,
+        "glMaterialx" => gl_materialx,
+        "glMaterialxv" => gl_materialxv,
+        "glLightModelf" => gl_light_modelf,
+        "glLightModelfv" => gl_light_modelfv,
+        "glLightModelx" => gl_light_modelx,
+        "glLightModelxv" => gl_light_modelxv,
+        "glGetLightfv" => gl_get_lightfv,
+        "glGetLightxv" => gl_get_lightxv,
+        "glGetMaterialfv" => gl_get_materialfv,
+        "glGetMaterialxv" => gl_get_materialxv,
 
         // No stencil buffer, no logic op, no multisample, no polygon
         // offset, no point/line rasterization, no mipmap hints.
@@ -1728,7 +1892,11 @@ fn reset_for_test(width: u32, height: u32) {
 /// not extensions — and a game that imports by name (Xtrakt does, with
 /// 73 named symbols) resolves them through the name path regardless of
 /// what the ordinal table says.
-const EXTRA_NAMED_EXPORTS: [&str; 13] = [
+const EXTRA_NAMED_EXPORTS: [&str; 17] = [
+    "glGetLightfv",
+    "glGetLightxv",
+    "glGetMaterialfv",
+    "glGetMaterialxv",
     "glQueryMatrixxOES",
     "glGenBuffers",
     "glDeleteBuffers",
@@ -1970,6 +2138,90 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn lighting_guest_float_fixed_setters_getters_errors_and_session_reset() {
+        use pocket_gles::lighting::*;
+        let _lock = guard();
+        reset_for_test(32, 32);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        let input = SCRATCH;
+        let output = SCRATCH + 0x100;
+        let values = [0.25f32, 0.5, 0.75, 1.];
+        cpu.write_mem(
+            input,
+            &values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        call(&mut cpu, &mut kernel, gl_lightfv, &[0x4000, DIFFUSE, input]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_lightxv,
+            &[0x4000, DIFFUSE, output],
+        );
+        let bytes = cpu.read_mem(output, 16).unwrap();
+        let fixed: Vec<_> = bytes
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(fixed, [16384, 32768, 49152, 65536]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_materialx,
+            &[0x0408, SHININESS, 32 * 65536],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_materialfv,
+            &[0x0404, SHININESS, output],
+        );
+        assert_eq!(cpu.read_mem(output, 4).unwrap(), 32f32.to_le_bytes());
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_lightf,
+            &[0x4000, SPOT_CUTOFF, 91f32.to_bits()],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_VALUE
+        );
+        call(&mut cpu, &mut kernel, gl_lightfv, &[0x4008, DIFFUSE, input]);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_ENUM
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_lightfv,
+            &[0x4000, DIFFUSE, 0xffff0000],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_OPERATION
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_light_modelx,
+            &[MODEL_TWO_SIDE, 65536],
+        );
+        assert!(with_ctx(|c| c.lighting.two_sided));
+        let saved = crate::suspend_session();
+        reset_for_session();
+        assert_eq!(with_ctx(|c| c.lighting.lights[0].diffuse), [1.; 4]);
+        assert!(!with_ctx(|c| c.lighting.two_sided));
+        drop(saved);
+        assert_eq!(with_ctx(|c| c.lighting.lights[0].diffuse), values);
+        assert!(with_ctx(|c| c.lighting.two_sided));
+    }
 
     fn fresh_cpu() -> StubCpu {
         let mut cpu = StubCpu::new();

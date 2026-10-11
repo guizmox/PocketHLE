@@ -25,8 +25,11 @@ pub const MAX_TEXTURE_STAGES: usize = 4;
 pub struct Vertex {
     /// Clip-space position, `w` not yet divided out.
     pub pos: [f32; 4],
+    /// Object-space normal consumed by the native lighting shader.
+    pub normal: [f32; 3],
     /// Straight (non-premultiplied) RGBA in `[0, 1]`.
     pub color: [f32; 4],
+    pub back_color: [f32; 4],
     /// Texture coordinates, one set per texture unit.
     pub texcoord: [[f32; 2]; MAX_TEXTURE_STAGES],
     /// Eye-space Z used for fog. OpenGL defines fog distance from the
@@ -38,7 +41,9 @@ impl Default for Vertex {
     fn default() -> Self {
         Self {
             pos: [0.0, 0.0, 0.0, 1.0],
+            normal: [0.0, 0.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
+            back_color: [1.0; 4],
             texcoord: [[0.0, 0.0]; MAX_TEXTURE_STAGES],
             fog_depth: 0.0,
         }
@@ -210,6 +215,7 @@ pub struct PipelineState {
     /// `false` selects flat shading, which uses the last vertex's colour
     /// across the whole triangle.
     pub smooth_shading: bool,
+    pub two_sided_lighting: bool,
 }
 
 impl Default for PipelineState {
@@ -237,6 +243,7 @@ impl Default for PipelineState {
             fog_end: 1.0,
             fog_density: 1.0,
             smooth_shading: true,
+            two_sided_lighting: false,
         }
     }
 }
@@ -524,6 +531,8 @@ fn lerp_vertex(a: &Vertex, b: &Vertex, t: f32) -> Vertex {
                 mix(a.texcoord[u][1], b.texcoord[u][1]),
             ]
         }),
+        back_color: std::array::from_fn(|i| mix(a.back_color[i], b.back_color[i])),
+        normal: std::array::from_fn(|i| mix(a.normal[i], b.normal[i])),
         fog_depth: mix(a.fog_depth, b.fog_depth),
     }
 }
@@ -593,6 +602,12 @@ fn raster_clipped(
         };
         if discard {
             return 0;
+        }
+    }
+
+    if state.two_sided_lighting && !is_front {
+        for i in 0..3 {
+            sv[i].color = tri[i].back_color;
         }
     }
 

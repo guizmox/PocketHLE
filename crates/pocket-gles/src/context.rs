@@ -214,6 +214,7 @@ pub struct Context {
     pub current_color: [f32; 4],
     pub current_texcoord: [f32; 2],
     pub current_normal: [f32; 3],
+    pub lighting: crate::lighting::LightingState,
 
     // ---- client arrays ----
     pub vertex_array: ArrayPointer,
@@ -286,6 +287,7 @@ impl Context {
             current_color: [1.0, 1.0, 1.0, 1.0],
             current_texcoord: [0.0, 0.0],
             current_normal: [0.0, 0.0, 1.0],
+            lighting: Default::default(),
             vertex_array: ArrayPointer::default(),
             color_array: ArrayPointer::default(),
             normal_array: ArrayPointer::default(),
@@ -480,24 +482,13 @@ impl Context {
                 // `texturing_unit` picks, which is not always stage 0.
             }
             GL_FOG => self.state.fog = on,
-            // Lighting, dither, normalize, stencil and the rest are
-            // accepted and ignored: the fixed-function lighting model
-            // is not implemented, and silently ignoring is far better
-            // than raising GL_INVALID_ENUM, which some engines treat as
-            // fatal.
-            GL_LIGHTING
-            | GL_DITHER
-            | GL_NORMALIZE
-            | GL_STENCIL_TEST
-            | GL_COLOR_MATERIAL
-            | GL_POLYGON_OFFSET_FILL => {}
-            _ => {
-                if !(0x4000..0x4010).contains(&cap) {
-                    // GL_LIGHT0..7 live at 0x4000; anything else
-                    // unknown is a genuine enum error.
-                    self.set_error(GL_INVALID_ENUM);
-                }
-            }
+            GL_LIGHTING => self.lighting.enabled = on,
+            GL_NORMALIZE => self.lighting.normalize = on,
+            GL_COLOR_MATERIAL => self.lighting.color_material = on,
+            crate::lighting::RESCALE_NORMAL => self.lighting.rescale = on,
+            GL_DITHER | GL_STENCIL_TEST | GL_POLYGON_OFFSET_FILL => {}
+            0x4000..=0x4007 => self.lighting.lights[(cap - 0x4000) as usize].enabled = on,
+            _ => self.set_error(GL_INVALID_ENUM),
         }
     }
 
@@ -1292,6 +1283,7 @@ impl Context {
         index: u32,
         mvp: &Matrix4,
         stages: &[raster::TextureStage],
+        normal_matrix: &Matrix4,
     ) -> Option<Vertex> {
         let obj = self.fetch(mem, self.vertex_array, index, false)?;
         let clip = if self.gpu.is_some() {
@@ -1339,7 +1331,34 @@ impl Context {
         } else {
             matrix::transform(self.modelview.current(), obj)
         };
+        let normal = if self.lighting.enabled && self.normal_array.enabled {
+            let n = self.fetch(mem, self.normal_array, index, true)?;
+            [n[0], n[1], n[2]]
+        } else {
+            self.current_normal
+        };
+        let (color, back_color) = if self.gpu.is_none() && self.lighting.enabled {
+            let n = self.lighting.transform_normal(normal_matrix, normal);
+            let point = std::array::from_fn(|i| {
+                if eye[3] == 0. {
+                    eye[i]
+                } else {
+                    eye[i] / eye[3]
+                }
+            });
+            let front = self.lighting.shade(n, point, color);
+            let back = if self.lighting.two_sided {
+                self.lighting.shade(n.map(|x| -x), point, color)
+            } else {
+                front
+            };
+            (front, back)
+        } else {
+            (color, color)
+        };
         Some(Vertex {
+            normal,
+            back_color,
             pos: clip,
             color,
             texcoord,
@@ -1452,6 +1471,12 @@ impl Context {
         };
         // The stages own the coordinate arrays to read, so they have to
         // be resolved before assembling vertices.
+        let normal_matrix = if self.lighting.enabled {
+            crate::lighting::normal_matrix(self.modelview.current())
+        } else {
+            matrix::IDENTITY
+        };
+        self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
         let stages = self.texture_stages();
         // Assemble every referenced vertex once. A cache keyed on the
         // index means an indexed mesh transforms each shared vertex a
@@ -1462,7 +1487,7 @@ impl Context {
             let v = match cache.get(&i) {
                 Some(v) => *v,
                 None => {
-                    let Some(v) = self.assemble(mem, i, &mvp, &stages) else {
+                    let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
                         // An unmapped array pointer aborts the draw
                         // rather than rendering garbage geometry.
                         return;
@@ -1485,6 +1510,8 @@ impl Context {
         }
 
         let transforms = crate::gpu::VertexTransforms {
+            lighting: self.lighting,
+            normal_matrix,
             projection: *self.projection.current(),
             modelview: *self.modelview.current(),
             // Constant texture coordinates retain the existing renderer semantics.
@@ -1593,6 +1620,130 @@ mod tests {
     }
 
     const BASE: u32 = 0x1000;
+    fn lighting_sample(gpu: bool, scenario: usize) -> [u8; 4] {
+        let mut c = ctx();
+        c.lighting.enabled = true;
+        c.lighting.lights[0].enabled = true;
+        c.lighting.model_ambient = [0.; 4];
+        c.lighting.diffuse = [0.8, 0.4, 0.2, 0.5];
+        c.lighting.normalize = true;
+        let mut bytes = floats(&[-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.]);
+        bytes.extend([0u8, 0, 127, 0, 0, 127, 0, 0, 127]);
+        match scenario {
+            1 => {
+                c.lighting.two_sided = true;
+                c.state.front_face = raster::FrontFace::Cw;
+                for i in [38, 41, 44] {
+                    bytes[i] = 128;
+                }
+            }
+            2 => {
+                c.state.smooth_shading = false;
+                bytes[44] = 128;
+            }
+            3 => {
+                c.modelview.load(matrix::scale(0.75, 0.5, 2.));
+                c.lighting.normalize = false;
+                c.lighting.rescale = true;
+            }
+            4 => {
+                c.lighting.lights[0].position = [0., 0., 2., 1.];
+                c.lighting.lights[0].attenuation = [1., 0.25, 0.1];
+            }
+            5 => {
+                c.lighting.lights[0].position = [0., 0., 2., 1.];
+                c.lighting.lights[0].spot_cutoff = 40.;
+                c.lighting.lights[0].spot_exponent = 4.;
+            }
+            6 => {
+                c.lighting.specular = [0.3, 0.2, 0.1, 1.];
+                c.lighting.shininess = 16.;
+            }
+            7 => {
+                c.lighting.color_material = true;
+                c.current_color = [0.2, 0.4, 0.8, 0.25];
+            }
+            _ => {}
+        }
+        let mut mem = FakeMem { base: BASE, bytes };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_normal_pointer(GL_BYTE, 0, BASE + 36);
+        c.set_client_state(GL_NORMAL_ARRAY, true);
+        if gpu {
+            c.enable_gpu().unwrap();
+        }
+        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        pixel(&c, 32, 32)
+    }
+
+    #[test]
+    fn software_lighting_reads_normals_two_sides_flat_and_rescale() {
+        for scenario in [0, 1, 3] {
+            let p = lighting_sample(false, scenario);
+            for (a, b) in p.into_iter().zip([204u8, 102, 51, 128]) {
+                assert!(a.abs_diff(b) <= 1, "scenario {scenario}: {p:?}");
+            }
+        }
+        assert_eq!(&lighting_sample(false, 2)[..3], &[0, 0, 0]);
+        assert!(lighting_sample(false, 4)[0] < 204);
+        assert!(lighting_sample(false, 5)[0] > 0);
+        assert!(lighting_sample(false, 6)[0] > 204);
+        assert_eq!(lighting_sample(false, 7), [51, 102, 204, 64]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host OpenGL; compares software and native fixed lighting"]
+    fn software_and_gpu_fixed_lighting_match() {
+        for scenario in 0..8 {
+            let cpu = lighting_sample(false, scenario);
+            let gpu = lighting_sample(true, scenario);
+            for (a, b) in cpu.into_iter().zip(gpu) {
+                assert!(
+                    a.abs_diff(b) <= 2,
+                    "scenario {scenario}: CPU {cpu:?}, GPU {gpu:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host OpenGL; signed guest normal arrays drive lighting"]
+    fn gpu_signed_normal_arrays_change_fixed_lighting() {
+        let mut c = ctx();
+        c.lighting.enabled = true;
+        c.lighting.lights[0].enabled = true;
+        c.lighting.model_ambient = [0.; 4];
+        c.lighting.diffuse = [0.8, 0.4, 0.2, 0.5];
+        let mut bytes = floats(&[-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.]);
+        bytes.extend([0u8, 0, 127, 0, 0, 127, 0, 0, 127]);
+        let mut mem = FakeMem { base: BASE, bytes };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_normal_pointer(GL_BYTE, 0, BASE + 36);
+        c.set_client_state(GL_NORMAL_ARRAY, true);
+        c.enable_gpu().unwrap();
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        let shown = pixel(&c, 32, 32);
+        for (actual, expected) in shown.into_iter().zip([204u8, 102, 51, 128]) {
+            assert!(actual.abs_diff(expected) <= 1);
+        }
+        for offset in [38, 41, 44] {
+            mem.bytes[offset] = 128;
+        }
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(&pixel(&c, 32, 32)[..3], &[0, 0, 0]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "requires host OpenGL; validates guest arrays through the vertex shader"]
@@ -1617,7 +1768,10 @@ mod tests {
         c.set_client_state(GL_VERTEX_ARRAY, true);
         let mvp = c.mvp();
         let reference: Vec<_> = (0..3)
-            .map(|i| c.assemble(&mut mem, i, &mvp, &[]).unwrap())
+            .map(|i| {
+                c.assemble(&mut mem, i, &mvp, &[], &matrix::IDENTITY)
+                    .unwrap()
+            })
             .collect();
         let mut renderer = crate::gpu::Renderer::new(c.target.width, c.target.height).unwrap();
         renderer
@@ -1644,7 +1798,9 @@ mod tests {
         let mut expected = raster::RenderTarget::new(c.target.width, c.target.height);
         renderer.read(&mut expected).unwrap();
         c.enable_gpu().unwrap();
-        let raw = c.assemble(&mut mem, 0, &mvp, &[]).unwrap();
+        let raw = c
+            .assemble(&mut mem, 0, &mvp, &[], &matrix::IDENTITY)
+            .unwrap();
         assert_eq!(raw.pos, [-0.75, -0.75, 0., 1.]);
         assert_ne!(raw.pos, reference[0].pos);
         c.clear(GL_COLOR_BUFFER_BIT);
@@ -1662,7 +1818,9 @@ mod tests {
             "guest draw differs in {differences} channels"
         );
         c.disable_gpu();
-        let restored = c.assemble(&mut mem, 0, &mvp, &[]).unwrap();
+        let restored = c
+            .assemble(&mut mem, 0, &mvp, &[], &matrix::IDENTITY)
+            .unwrap();
         assert_eq!(restored.pos, reference[0].pos);
     }
 
@@ -2445,12 +2603,13 @@ mod tests {
     }
 
     #[test]
-    fn lighting_enable_is_ignored_not_rejected() {
+    fn lighting_capabilities_are_retained_without_rejecting_existing_games() {
         // COD2 enables lighting; erroring here would make the game
         // think the driver is broken.
         let mut c = ctx();
         c.set_capability(GL_LIGHTING, true);
         c.set_capability(0x4000, true); // GL_LIGHT0
+        assert!(c.lighting.enabled && c.lighting.lights[0].enabled);
         assert_eq!(c.take_error(), GL_NO_ERROR);
     }
 

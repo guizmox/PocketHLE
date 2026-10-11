@@ -15,6 +15,8 @@ use std::{
     ffi::{c_char, c_void, CStr, CString},
 };
 pub struct VertexTransforms {
+    pub lighting: crate::lighting::LightingState,
+    pub normal_matrix: Matrix4,
     pub projection: Matrix4,
     pub modelview: Matrix4,
     pub textures: [Matrix4; 4],
@@ -765,7 +767,7 @@ impl Renderer {
             let mut attributes = 0;
             (gl.GetIntegerv)(0x8872, &mut units);
             (gl.GetIntegerv)(0x8869, &mut attributes);
-            if units < 4 || attributes < 7 {
+            if units < 4 || attributes < 8 {
                 return Err("OpenGL driver lacks required texture/attribute units".into());
             }
             let mut r = Self {
@@ -790,11 +792,17 @@ impl Renderer {
                 return Err("OpenGL program allocation failed".into());
             }
             let prefix = if r.host.es {
-                "#version 100\nprecision mediump float;\n"
+                "#version 100\nprecision mediump float;\nprecision mediump int;\n#define VARYING varying mediump\n"
             } else {
-                "#version 120\n"
+                "#version 120\n#define VARYING varying\n"
             };
-            let vs = r.shader(0x8b31, &format!("{prefix}{VERTEX}"))?;
+            let vs = r.shader(
+                0x8b31,
+                &format!(
+                    "{}{VERTEX}",
+                    prefix.replace("precision mediump float", "precision highp float")
+                ),
+            )?;
             let fs = match r.shader(0x8b30, &format!("{prefix}{FRAGMENT}")) {
                 Ok(s) => s,
                 Err(e) => {
@@ -805,7 +813,14 @@ impl Renderer {
             (r.gl.AttachShader)(r.program, vs);
             (r.gl.AttachShader)(r.program, fs);
             for (i, name) in [
-                "position", "color", "tex0", "tex1", "tex2", "tex3", "fogDepth",
+                "position",
+                "color",
+                "tex0",
+                "tex1",
+                "tex2",
+                "tex3",
+                "normalAndFog",
+                "lightPosition",
             ]
             .iter()
             .enumerate()
@@ -857,6 +872,24 @@ impl Renderer {
             );
             r.resize(width, height)?;
             for name in [
+                "lightingEnabled",
+                "normalMatrix",
+                "normalMode",
+                "normalRescale",
+                "colorMaterial",
+                "twoSided",
+                "modelAmbient",
+                "materialAmbient",
+                "materialDiffuse",
+                "materialSpecular",
+                "materialEmission",
+                "shininess",
+                "lightAmbient[0]",
+                "lightDiffuse[0]",
+                "lightSpecular[0]",
+                "lightPositions[0]",
+                "lightSpot[0]",
+                "lightAttenuation[0]",
                 "projectionMatrix",
                 "modelviewMatrix",
                 "objectSpace",
@@ -1109,7 +1142,17 @@ impl Renderer {
                 for t in p.texcoord {
                     self.scratch.extend(t);
                 }
+                self.scratch.extend(if state.smooth_shading {
+                    p.normal
+                } else {
+                    v[2].normal
+                });
                 self.scratch.push(p.fog_depth);
+                self.scratch.extend(if state.smooth_shading {
+                    p.pos
+                } else {
+                    v[2].pos
+                });
             }
         };
         match mode {
@@ -1164,6 +1207,90 @@ impl Renderer {
                 state.color_mask[2] as u8,
                 state.color_mask[3] as u8,
             );
+            let lighting = transforms.filter(|t| t.lighting.enabled);
+            (self.gl.Uniform1i)(self.loc("lightingEnabled"), lighting.is_some() as i32);
+            (self.gl.Uniform1i)(
+                self.loc("twoSided"),
+                lighting.is_some_and(|t| t.lighting.two_sided) as i32,
+            );
+            if let Some(t) = lighting {
+                let l = &t.lighting;
+                (self.gl.UniformMatrix4fv)(
+                    self.loc("normalMatrix"),
+                    1,
+                    0,
+                    t.normal_matrix.as_ptr(),
+                );
+                (self.gl.Uniform1i)(
+                    self.loc("normalMode"),
+                    if l.normalize {
+                        1
+                    } else if l.rescale {
+                        2
+                    } else {
+                        0
+                    },
+                );
+                let scale = (t.normal_matrix[8] * t.normal_matrix[8]
+                    + t.normal_matrix[9] * t.normal_matrix[9]
+                    + t.normal_matrix[10] * t.normal_matrix[10])
+                    .sqrt();
+                (self.gl.Uniform1f)(
+                    self.loc("normalRescale"),
+                    if scale > 0. { 1. / scale } else { 1. },
+                );
+                (self.gl.Uniform1i)(self.loc("colorMaterial"), l.color_material as i32);
+                (self.gl.Uniform1f)(self.loc("shininess"), l.shininess);
+                for (name, value) in [
+                    ("modelAmbient", l.model_ambient),
+                    ("materialAmbient", l.ambient),
+                    ("materialDiffuse", l.diffuse),
+                    ("materialSpecular", l.specular),
+                    ("materialEmission", l.emission),
+                ] {
+                    (self.gl.Uniform4fv)(self.loc(name), 1, value.as_ptr());
+                }
+                let ambient: [[f32; 4]; 8] = std::array::from_fn(|i| {
+                    let mut c = l.lights[i].ambient;
+                    c[3] = l.lights[i].enabled as u8 as f32;
+                    c
+                });
+                let diffuse: [[f32; 4]; 8] = std::array::from_fn(|i| l.lights[i].diffuse);
+                let specular: [[f32; 4]; 8] = std::array::from_fn(|i| l.lights[i].specular);
+                let positions: [[f32; 4]; 8] = std::array::from_fn(|i| l.lights[i].position);
+                let spot: [[f32; 4]; 8] = std::array::from_fn(|i| {
+                    let a = l.lights[i];
+                    [
+                        a.spot_direction[0],
+                        a.spot_direction[1],
+                        a.spot_direction[2],
+                        if a.spot_cutoff == 180. {
+                            -1.
+                        } else {
+                            a.spot_cutoff.to_radians().cos().max(0.)
+                        },
+                    ]
+                });
+                let attenuation: [[f32; 4]; 8] = std::array::from_fn(|i| {
+                    let a = l.lights[i];
+                    [
+                        a.attenuation[0],
+                        a.attenuation[1],
+                        a.attenuation[2],
+                        a.spot_exponent,
+                    ]
+                });
+                for (name, values) in [
+                    ("lightAmbient[0]", &ambient),
+                    ("lightDiffuse[0]", &diffuse),
+                    ("lightSpecular[0]", &specular),
+                    ("lightPositions[0]", &positions),
+                    ("lightSpot[0]", &spot),
+                    ("lightAttenuation[0]", &attenuation),
+                ] {
+                    (self.gl.Uniform4fv)(self.loc(name), 8, values.as_ptr().cast());
+                }
+            }
             (self.gl.Uniform1i)(self.loc("objectSpace"), transforms.is_some() as i32);
             let projection = transforms.map(|t| &t.projection).unwrap_or(&IDENTITY);
             let modelview = transforms.map(|t| &t.modelview).unwrap_or(&IDENTITY);
@@ -1261,10 +1388,18 @@ impl Renderer {
                 self.scratch.as_ptr().cast(),
                 0x88e0,
             );
-            for (i, (size, offset)) in
-                [(4, 0), (4, 16), (2, 32), (2, 40), (2, 48), (2, 56), (1, 64)]
-                    .into_iter()
-                    .enumerate()
+            for (i, (size, offset)) in [
+                (4, 0),
+                (4, 16),
+                (2, 32),
+                (2, 40),
+                (2, 48),
+                (2, 56),
+                (4, 64),
+                (4, 80),
+            ]
+            .into_iter()
+            .enumerate()
             {
                 (self.gl.EnableVertexAttribArray)(i as u32);
                 (self.gl.VertexAttribPointer)(
@@ -1272,11 +1407,11 @@ impl Renderer {
                     size,
                     GL_FLOAT,
                     0,
-                    68,
+                    96,
                     offset as *const c_void,
                 );
             }
-            (self.gl.DrawArrays)(GL_TRIANGLES, 0, (self.scratch.len() / 17) as i32);
+            (self.gl.DrawArrays)(GL_TRIANGLES, 0, (self.scratch.len() / 24) as i32);
             self.dirty = true;
             self.check()
         }
@@ -1372,29 +1507,59 @@ fn wrap(v: Wrap) -> u32 {
     }
 }
 const VERTEX: &str = r#"
-attribute vec4 position,color;attribute vec2 tex0,tex1,tex2,tex3;attribute float fogDepth;
-varying vec4 vColor;varying vec2 uv0,uv1,uv2,uv3;varying float vFog;uniform vec2 depthRange;
+attribute vec4 position,color;attribute vec2 tex0,tex1,tex2,tex3;attribute vec4 normalAndFog,lightPosition;
+VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
-uniform int objectSpace;
+uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
+uniform mat4 normalMatrix;
+uniform float normalRescale,shininess;
+uniform vec4 modelAmbient,materialAmbient,materialDiffuse,materialSpecular,materialEmission;
+uniform vec4 lightAmbient[8],lightDiffuse[8],lightSpecular[8],lightPositions[8],lightSpot[8],lightAttenuation[8];
+vec3 unit(vec3 v){float l=length(v);return l>0.0?v/l:vec3(0.0);}
+vec4 illuminate(vec3 n,vec3 point){
+ vec4 ma=colorMaterial!=0?color:materialAmbient;
+ vec4 md=colorMaterial!=0?color:materialDiffuse;
+ vec3 result=materialEmission.rgb+modelAmbient.rgb*ma.rgb;
+ for(int i=0;i<8;i++){
+  if(lightAmbient[i].a>0.5){
+   vec3 delta=lightPositions[i].w==0.0?lightPositions[i].xyz:lightPositions[i].xyz/lightPositions[i].w-point;
+   float distance=length(delta);vec3 l=unit(delta);float attenuation=1.0;
+   if(lightPositions[i].w!=0.0){vec3 k=lightAttenuation[i].xyz;attenuation=1.0/max(k.x+k.y*distance+k.z*distance*distance,0.000001);}
+   float spot=dot(unit(lightSpot[i].xyz),-l);
+   if(lightSpot[i].w>=0.0){if(spot<lightSpot[i].w){attenuation=0.0;}else if(lightAttenuation[i].w>0.0){attenuation*=pow(max(spot,0.0),lightAttenuation[i].w);}}
+   float diffuse=max(dot(n,l),0.0);float spec=0.0;
+   if(diffuse>0.0){float nh=max(dot(n,unit(l+vec3(0.0,0.0,1.0))),0.0);spec=shininess==0.0?1.0:pow(nh,shininess);}
+   result+=attenuation*(lightAmbient[i].rgb*ma.rgb+diffuse*lightDiffuse[i].rgb*md.rgb+spec*lightSpecular[i].rgb*materialSpecular.rgb);
+  }
+ }
+ return vec4(clamp(result,0.0,1.0),clamp(md.a,0.0,1.0));
+}
 void main(){
  vec4 eye=modelviewMatrix*position;
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
  gl_Position.z=(depthRange.y-depthRange.x)*clip.z+(depthRange.x+depthRange.y-1.0)*clip.w;
- vColor=color;
+ vColor=color;vBackColor=color;
+ if(lightingEnabled!=0){
+  vec3 n=(normalMatrix*vec4(normalAndFog.xyz,0.0)).xyz;
+  if(normalMode==1){n=unit(n);}else if(normalMode==2){n*=normalRescale;}
+  vec4 lightEye=modelviewMatrix*lightPosition;
+  vec3 point=lightEye.w==0.0?lightEye.xyz:lightEye.xyz/lightEye.w;
+  vColor=illuminate(n,point);vBackColor=twoSided!=0?illuminate(-n,point):vColor;
+ }
  uv0=(textureMatrix0*vec4(tex0,0.0,1.0)).xy;
  uv1=(textureMatrix1*vec4(tex1,0.0,1.0)).xy;
  uv2=(textureMatrix2*vec4(tex2,0.0,1.0)).xy;
  uv3=(textureMatrix3*vec4(tex3,0.0,1.0)).xy;
- vFog=objectSpace!=0?abs(eye.z):fogDepth;
+ vFog=objectSpace!=0?abs(eye.z):normalAndFog.w;
 }
 "#;
 const FRAGMENT: &str = r#"
-varying vec4 vColor;varying vec2 uv0,uv1,uv2,uv3;varying float vFog;
+VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
 uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
-uniform int alphaMode,fogMode;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
+uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
-void main(){vec4 c=vColor;c=stage(c,texture2D(sampler0,uv0),env0,envColor0);c=stage(c,texture2D(sampler1,uv1),env1,envColor1);c=stage(c,texture2D(sampler2,uv2),env2,envColor2);c=stage(c,texture2D(sampler3,uv3),env3,envColor3);
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;c=stage(c,texture2D(sampler0,uv0),env0,envColor0);c=stage(c,texture2D(sampler1,uv1),env1,envColor1);c=stage(c,texture2D(sampler2,uv2),env2,envColor2);c=stage(c,texture2D(sampler3,uv3),env3,envColor3);
 if(alphaMode==0||(alphaMode==1&&c.a>=alphaRef)||(alphaMode==2&&c.a!=alphaRef)||(alphaMode==3&&c.a>alphaRef)||(alphaMode==4&&c.a<=alphaRef)||(alphaMode==5&&c.a==alphaRef)||(alphaMode==6&&c.a<alphaRef))discard;
 float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
 "#;
@@ -1422,6 +1587,8 @@ mod tests {
             };
             for perspective in [false, true] {
                 let transforms = VertexTransforms {
+                    lighting: Default::default(),
+                    normal_matrix: IDENTITY,
                     projection: if perspective {
                         matrix::frustum(-1., 1., -1., 1., 1., 10.)
                     } else {
@@ -1533,6 +1700,137 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires host OpenGL and GLES2 lighting shaders"]
+    fn host_fixed_lighting_materials_normals_spots_and_flat_shading() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            let mut target = RenderTarget::new(32, 32);
+            let mut state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                ..Default::default()
+            };
+            let textures = HashMap::new();
+            let raw = triangle([1., 0., 0., 1.], 0.);
+            let mut transform = VertexTransforms {
+                projection: IDENTITY,
+                modelview: IDENTITY,
+                textures: [IDENTITY; 4],
+                normal_matrix: IDENTITY,
+                lighting: Default::default(),
+            };
+            transform.lighting.enabled = true;
+            transform.lighting.model_ambient = [0.; 4];
+            transform.lighting.ambient = [0.; 4];
+            transform.lighting.diffuse = [0.8, 0.4, 0.2, 0.7];
+            transform.lighting.lights[0].enabled = true;
+            let mut render = |state: &PipelineState, vertices: &[Vertex], t: &VertexTransforms| {
+                gpu.clear(
+                    32,
+                    32,
+                    state,
+                    [0., 0., 0., 1.],
+                    1.,
+                    GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                )
+                .unwrap();
+                gpu.draw_object_space(
+                    &target,
+                    state,
+                    GL_TRIANGLES,
+                    vertices,
+                    &[],
+                    &textures,
+                    [0; 4],
+                    t,
+                )
+                .unwrap();
+                gpu.read(&mut target).unwrap();
+                center(&target)
+            };
+            let lit = render(&state, &raw, &transform);
+            for (actual, expected) in lit.into_iter().zip([204u8, 102, 51, 178]) {
+                assert!(actual.abs_diff(expected) <= 1);
+            }
+            transform.lighting.lights[0].enabled = false;
+            transform.lighting.model_ambient = [0.2, 0.3, 0.4, 1.];
+            transform.lighting.ambient = [0.5, 0.25, 0.1, 1.];
+            transform.lighting.emission = [0.1, 0.2, 0.3, 1.];
+            for (actual, expected) in render(&state, &raw, &transform)
+                .into_iter()
+                .zip([51u8, 70, 87, 178])
+            {
+                assert!(actual.abs_diff(expected) <= 1);
+            }
+            transform.lighting.model_ambient = [0.; 4];
+            transform.lighting.ambient = [0.; 4];
+            transform.lighting.emission = [0.; 4];
+            transform.lighting.lights[0].enabled = true;
+            let mut away = raw;
+            for v in &mut away {
+                v.normal = [0., 0., -1.];
+            }
+            assert_eq!(&render(&state, &away, &transform)[..3], &[0, 0, 0]);
+            transform.normal_matrix =
+                crate::lighting::normal_matrix(&crate::matrix::scale(2., 2., 2.));
+            let dim = render(&state, &raw, &transform);
+            assert!(dim[0].abs_diff(102) <= 1);
+            transform.lighting.normalize = true;
+            assert_eq!(render(&state, &raw, &transform), lit);
+            transform.lighting.normalize = false;
+            transform.lighting.rescale = true;
+            assert_eq!(render(&state, &raw, &transform), lit);
+            transform.normal_matrix = IDENTITY;
+            transform.lighting.rescale = false;
+            transform.lighting.color_material = true;
+            assert_eq!(render(&state, &raw, &transform), [255, 0, 0, 255]);
+            transform.lighting.color_material = false;
+            transform.lighting.diffuse = [0., 0., 0., 0.7];
+            transform.lighting.specular = [0.5, 0.25, 0., 1.];
+            transform.lighting.shininess = 32.;
+            let spec = render(&state, &raw, &transform);
+            assert!(spec[0].abs_diff(128) <= 1 && spec[1].abs_diff(64) <= 1);
+            transform.lighting.specular = [0.; 4];
+            transform.lighting.diffuse = [0.8, 0.4, 0.2, 0.7];
+            transform.lighting.lights[0].enabled = false;
+            transform.lighting.lights[7].enabled = true;
+            transform.lighting.lights[7].diffuse = [1.; 4];
+            assert_eq!(render(&state, &raw, &transform), lit);
+            transform.lighting.lights[7].position = [0., 0., 2., 1.];
+            transform.lighting.lights[7].attenuation = [1., 0., 0.];
+            let near = render(&state, &raw, &transform);
+            transform.lighting.lights[7].attenuation = [1., 1., 0.];
+            let attenuated = render(&state, &raw, &transform);
+            assert!(near[0] > attenuated[0] && attenuated[0] > 0);
+            transform.lighting.lights[7].spot_cutoff = 30.;
+            transform.lighting.lights[7].spot_direction = [0., 0., 1.];
+            assert_eq!(&render(&state, &raw, &transform)[..3], &[0, 0, 0]);
+            transform.lighting.lights[7].spot_direction = [0., 0., -1.];
+            assert!(render(&state, &raw, &transform)[0] > 0);
+            transform.lighting.lights[7].spot_cutoff = 180.;
+            transform.lighting.lights[7].position = [0., 0., -1., 0.];
+            let back = [raw[1], raw[0], raw[2]];
+            assert_eq!(&render(&state, &back, &transform)[..3], &[0, 0, 0]);
+            transform.lighting.two_sided = true;
+            assert_eq!(render(&state, &back, &transform), lit);
+            transform.lighting.two_sided = false;
+            transform.lighting.lights[7].position = [0., 0., 1., 0.];
+            let mut mixed = raw;
+            mixed[2].normal = [0., 0., -1.];
+            state.smooth_shading = false;
+            assert_eq!(&render(&state, &mixed, &transform)[..3], &[0, 0, 0]);
+            state.smooth_shading = true;
+            assert!(render(&state, &mixed, &transform)[0] > 0);
+            transform.lighting.enabled = false;
+            assert_eq!(render(&state, &raw, &transform), [255, 0, 0, 255]);
         }
     }
 
