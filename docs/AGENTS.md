@@ -2550,3 +2550,37 @@ are not a native Windows release build or an Android APK/device validation.
 Android reads airplane/SIM/service state through application-context JNI snapshots cached one second; denial means unknown, no subscriptions/IDs. GT_STATUS carries airplane/radio only (no SIM bit). Windows defaults SIM ready/radio off/airplane off; ActiveSync stays disconnected. GSM/TAPI/RIL stack remains out of scope. GLES marks the replaced framebuffer dirty before DirectShow service so cached preview frames are recomposed after menu drawing. Regression rectangle matches attached launcher (204,40,101,82).
 
 Launcher startup preview also requires WinCE EC_VIDEOFRAMEREADY (0x49), as confirmed in SDK Movie and attached ARM binary (0x15934 comparison). Emit once on first decoded frame, even offscreen, reset per RenderFile, GetEvent consumes before completion without consuming WaitForCompletion. No event-owned memory; notification disabled flags still allow polling. Launcher initially parks window at (844,40,101,82) and moves it to (204,40,101,82) only upon readiness.
+
+### Experimental native GLES rasterization (2026-10-11)
+Global config.gpu_renderer defaults false, shown in Emulator Settings / Emulator options. GameSettings.gpu_renderer is nullable: null/missing inherits, false forces software, true forces GPU. Both Kotlin JSON models preserve unknown fields. Configure on the emulation thread after creating the dispatcher; each child inherits the launcher configuration and per-game override.
+
+pocket-gles::gpu owns private offscreen native contexts: Windows WGL hidden 1x1 window + OpenGL GLSL120, Android EGL GLES2 pbuffer + GLSL100, headless Linux EGL/OpenGL validation. No new dependencies. CPU validates guest memory and assembles transformed vertices as before; shaders/native rasterization handle 4 texture stages, fog, alpha test, blend, depth, culling, color mask, scissor. Guest points/lines and fixed lighting remain at their existing support level (not implemented by this change). Flat shading expands triangles and copies provoking color; ATC remains decoded by CPU and texture revisions invalidate GPU uploads.
+
+Native framebuffer RGBA+depth persists across draws. Readback runs only for EGL swap or glReadPixels, flips bottom-up rows to canonical top-down, then existing RGB565/GAPI/DirectShow/filter/screenshot paths consume the result. No zero-copy frontend integration yet. GPU stage allocations and GL resources release on EGL termination, emulator drop, context reset and child return. Contexts are !Send; every operation makes its own context current. EGL display leases count live private contexts, so child teardown cannot terminate parent; Android keeps one process-wide EGL library/display initialization lease because the Android UI shares DEFAULT_DISPLAY, while all game surfaces/contexts are destroyed.
+
+Initialization failure logs software fallback. Runtime GPU failure reports once, sets GL_OUT_OF_MEMORY and stops issuing draws until restart/termination; do not attempt partial software fallback with stale depth. Toggle software and restart for driver problems. Backend identification is a single normal info log, no per-frame instrumentation.
+
+Validation: software/core/library/API unit tests, real OpenGL and GLES2 Mesa driver tests (depth/blend/alpha/textures/revision update/fog/scissor/masks/readback), ten child renderer lifetimes, full guest GLES->RGB565/GAPI/glReadPixels pipeline plus parent resume/EGL termination/reinitialization. Host driver here is Mesa, so real Windows/Android GPU performance and visual game regressions require device tests.
+
+
+### GPU portability, settings and presentation follow-up
+All native GL/EGL/loader string signatures use std::ffi::c_char, including
+ShaderSource's pointer-to-pointer. Android ARM C char is unsigned; hard-coded
+i8 signatures compile on Windows/Linux but fail on Android. Keep every GL
+function-pointer declaration and transmute signature consistent.
+
+The GPU setting is saved by the existing JNI JSON writers. An older native
+library silently discards unknown fields even when it returns ok. Android
+settings now read back the renderer field after writes and report stale native
+libraries; the per-game renderer avoids a second SharedPreferences value.
+Native build failures explicitly stop. APK packaging requires a source and
+both-library hash stamp produced only after a successful complete native build;
+source changes, changed binaries or a failed native rebuild invalidate it.
+Rebuild native libraries and APK together after applying this patch.
+
+WGL checks the actual current context/DC and EGL checks context/display/draw/read surfaces before rebinding, avoiding redundant
+context transitions while retaining child/parent restoration. Desktop and Android frame
+publication advance on a fixed phase instead of restarting its interval at
+the delayed send time; missed slots are skipped without catch-up bursts.
+This is a targeted jitter reduction, not proof of stutter-free hardware output.
+No new frame logging, worker, persistent native resource or rendering buffer.

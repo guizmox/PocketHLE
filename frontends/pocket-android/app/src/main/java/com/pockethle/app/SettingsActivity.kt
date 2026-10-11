@@ -214,6 +214,11 @@ class SettingsActivity : AppCompatActivity() {
                 summary="Writes pockethle-unimplemented.log in the library folder."
                 setOnPreferenceChangeListener { _,v -> current=current.copy(logUnimplementedApis=v as Boolean);writeConfig();true }
             })
+            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key="gpu_renderer"; title="GPU rendering (experimental)"; isPersistent=false; isChecked=current.gpuRenderer
+                summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
+                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);writeConfig();true }
+            })
             findPreference<SeekBarPreference>("verbosity")?.apply {
                 value = current.verbosity
                 setOnPreferenceChangeListener { _, newValue ->
@@ -316,6 +321,9 @@ class SettingsActivity : AppCompatActivity() {
 
         private fun writeConfig() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
+            val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
+            val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer
+            if (!gpuSaved) android.widget.Toast.makeText(context, "GPU setting was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             if(result?.optBoolean("ok",false)!=true) android.widget.Toast.makeText(context,result?.optString("error") ?: "Could not save settings",android.widget.Toast.LENGTH_LONG).show()
         }
     }

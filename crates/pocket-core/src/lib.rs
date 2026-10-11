@@ -71,6 +71,11 @@ impl Emulator {
         })
     }
 
+    /// Experimental host GPU rasterizer, configured on the running thread.
+    pub fn set_gpu_renderer(&mut self, enabled: bool) {
+        pocket_winceapi::gles::set_gpu_renderer(enabled);
+    }
+
     /// Halt the emulator the first time an unimplemented API is hit.
     /// Useful for the tracing CLI mode.
     pub fn set_halt_on_unimplemented(&mut self, halt: bool) {

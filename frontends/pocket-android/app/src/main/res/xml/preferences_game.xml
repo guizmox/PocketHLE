@@ -48,6 +48,9 @@
         android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values"
         android:defaultValue="large" app:useSimpleSummaryProvider="true" />
 
+    <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering (experimental)"
+        android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
+
     <SwitchPreferenceCompat
         android:key="halt_on_unimplemented"
         android:title="@string/pref_halt_unimpl_title"

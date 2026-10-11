@@ -200,6 +200,9 @@ impl Default for TextureUnitState {
 
 /// The full GL ES 1.1 context.
 pub struct Context {
+    gpu: Option<crate::gpu::Renderer>,
+    gpu_requested: bool,
+    gpu_failed: bool,
     // ---- transform state ----
     pub matrix_mode: MatrixMode,
     pub modelview: MatrixStack,
@@ -273,6 +276,9 @@ impl Context {
         // the app enables it.
         state.depth_func = CompareFunc::Less;
         Self {
+            gpu: None,
+            gpu_requested: false,
+            gpu_failed: false,
             matrix_mode: MatrixMode::Modelview,
             modelview: MatrixStack::new(16),
             projection: MatrixStack::new(16),
@@ -302,6 +308,51 @@ impl Context {
             error: GL_NO_ERROR,
             scratch: Vec::new(),
             index_scratch: Vec::new(),
+        }
+    }
+
+    /// Select before guest rendering begins. Initialization failure keeps software.
+    pub fn enable_gpu(&mut self) -> Result<(), String> {
+        self.gpu_requested = true;
+        if self.gpu.is_none() {
+            self.gpu = Some(crate::gpu::Renderer::new(
+                self.target.width,
+                self.target.height,
+            )?);
+        }
+        Ok(())
+    }
+    pub fn release_gpu(&mut self) {
+        self.gpu = None;
+        self.gpu_failed = false;
+    }
+    pub fn disable_gpu(&mut self) {
+        self.sync_gpu();
+        self.release_gpu();
+        self.gpu_requested = false;
+    }
+    fn gpu_failure(&mut self, action: &str, error: String) {
+        if !self.gpu_failed {
+            log::error!("GLES GPU {action}: {error}; restart with software rendering if needed");
+        }
+        self.gpu_failed = true;
+        self.set_error(GL_OUT_OF_MEMORY);
+    }
+    pub fn gpu_requested(&self) -> bool {
+        self.gpu_requested
+    }
+    pub fn gpu_active(&self) -> bool {
+        self.gpu.is_some()
+    }
+    /// Read back only for presentation or glReadPixels, never per draw.
+    pub fn sync_gpu(&mut self) {
+        if self.gpu_failed {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.read(&mut self.target) {
+                self.gpu_failure("readback", e);
+            }
         }
     }
 
@@ -706,6 +757,9 @@ impl Context {
     }
 
     pub fn delete_textures(&mut self, names: &[u32]) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.delete_textures(names);
+        }
         for &name in names {
             if name == 0 {
                 continue;
@@ -770,6 +824,7 @@ impl Context {
         tex.width = width;
         tex.height = height;
         tex.rgba = rgba;
+        tex.revision = tex.revision.wrapping_add(1);
         log::debug!(
             "GLES tex image texture={} level={} {}x{} format=0x{format:04x} type=0x{ty:04x} bytes={} complete={} first={:02x?}",
             name,
@@ -849,6 +904,7 @@ impl Context {
         tex.width = width;
         tex.height = height;
         tex.rgba = rgba;
+        tex.revision = tex.revision.wrapping_add(1);
         log::debug!(
             "GLES compressed tex image texture={name} {width}x{height} \
              format=0x{format:04x} bytes={} complete={}",
@@ -897,6 +953,7 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
+        tex.revision = tex.revision.wrapping_add(1);
         for row in 0..height {
             let src = (row * width * 4) as usize;
             let dst = (((yoffset + row) * tex.width + xoffset) * 4) as usize;
@@ -1087,6 +1144,22 @@ impl Context {
     // ---- clearing -------------------------------------------------------
 
     pub fn clear(&mut self, mask: u32) {
+        if self.gpu_failed {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.clear(
+                self.target.width,
+                self.target.height,
+                &self.state,
+                self.clear_color,
+                self.clear_depth,
+                mask,
+            ) {
+                self.gpu_failure("clear", e);
+            }
+            return;
+        }
         // Ordering against the draws is the whole point: a frame that
         // clears *after* drawing looks exactly like a frame that never
         // drew, and only an interleaved log tells the two apart.
@@ -1357,6 +1430,9 @@ impl Context {
     }
 
     fn draw_indexed(&mut self, mem: &mut dyn GuestMemory, mode: u32, indices: &[u32]) {
+        if self.gpu_failed {
+            return;
+        }
         let mvp = self.mvp();
         // The stages own the coordinate arrays to read, so they have to
         // be resolved before assembling vertices.
@@ -1392,6 +1468,21 @@ impl Context {
             }
         }
 
+        if let Some(gpu) = self.gpu.as_mut() {
+            let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
+            if let Err(e) = gpu.draw(
+                &self.target,
+                &self.state,
+                mode,
+                &verts,
+                &stages,
+                &self.textures,
+                names,
+            ) {
+                self.gpu_failure("draw", e);
+            }
+            return;
+        }
         // Resolve the bound textures once per draw, not per fragment.
         let mut texs: [Option<&Texture>; raster::MAX_TEXTURE_STAGES] = [None; _];
         for stage in &stages {

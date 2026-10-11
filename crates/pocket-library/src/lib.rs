@@ -279,6 +279,9 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
+    /// Experimental OpenGL host rasterization; old libraries keep software.
+    #[serde(default)]
+    pub gpu_renderer: Option<bool>,
     /// Which CPU backend the user prefers for this game.
     #[serde(default)]
     pub cpu_backend: CpuBackendPref,
@@ -358,6 +361,7 @@ impl DpadDeadzone {
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
+            gpu_renderer: None,
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
             instructions_per_slice: default_instructions_per_slice(),
@@ -515,6 +519,9 @@ impl CpuBackendPref {
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    /// Default host GPU rasterization, overridable for each game.
+    #[serde(default)]
+    pub gpu_renderer: bool,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     /// Default CPU backend used when importing a new game.
@@ -632,6 +639,7 @@ fn default_fullscreen_mode() -> String {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            gpu_renderer: false,
             schema_version: 1,
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,
@@ -2339,6 +2347,14 @@ mod tests {
         use super::*;
         let settings: GameSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.dpad_deadzone, DpadDeadzone::Large);
+        assert_eq!(settings.gpu_renderer, None);
+        let gpu = GameSettings {
+            gpu_renderer: Some(true),
+            ..GameSettings::default()
+        };
+        let decoded: GameSettings =
+            serde_json::from_str(&serde_json::to_string(&gpu).unwrap()).unwrap();
+        assert_eq!(decoded.gpu_renderer, Some(true));
         for zone in DpadDeadzone::ALL {
             let settings = GameSettings {
                 dpad_deadzone: zone,
@@ -2597,6 +2613,33 @@ mod tests {
         .unwrap();
         let lib2 = Library::open(&root2).unwrap();
         assert!(lib2.config().show_fps);
+    }
+
+    #[test]
+    fn gpu_settings_survive_native_write_and_library_reopen() {
+        let root = tmpdir("gpu_persistence");
+        let mut lib = Library::open(&root).unwrap();
+        let entry = entry_with_install_dir(Some("\\Program Files\\Spore"));
+        let id = entry.id.clone();
+        lib.library.games.push(entry);
+        lib.save().unwrap();
+        for global in [true, false] {
+            for game in [Some(true), Some(false), None] {
+                let mut lib = Library::open(&root).unwrap();
+                // Same JSON boundaries as the Android JNI write methods.
+                let mut config = serde_json::to_value(lib.config()).unwrap();
+                config["gpu_renderer"] = serde_json::json!(global);
+                *lib.config_mut() = serde_json::from_value(config).unwrap();
+                lib.save().unwrap();
+                let mut settings = serde_json::to_value(&lib.get(&id).unwrap().settings).unwrap();
+                settings["gpu_renderer"] = serde_json::json!(game);
+                lib.update_settings(&id, serde_json::from_value(settings).unwrap()).unwrap();
+                let reopened = Library::open(&root).unwrap();
+                assert_eq!(reopened.config().gpu_renderer, global);
+                assert_eq!(reopened.get(&id).unwrap().settings.gpu_renderer, game);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

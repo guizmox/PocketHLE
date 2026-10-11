@@ -1365,6 +1365,9 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
+                ui.label("GPU rendering (experimental)");
+                ui.checkbox(&mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
+                ui.end_row();
                 ui.label("Default CPU backend");
                 egui::ComboBox::from_id_source("cpu_backend")
                     .selected_text(draft.default_cpu_backend.label())
@@ -1750,6 +1753,14 @@ impl PocketLauncher {
                             ui.selectable_value(&mut draft.rotation, choice, choice.label());
                         }
                     });
+                ui.end_row();
+
+                ui.label("GPU rendering (experimental)");
+                egui::ComboBox::from_id_source("game_gpu_renderer").selected_text(match draft.gpu_renderer { None => "Emulator default", Some(false) => "Software", Some(true) => "GPU (experimental)" }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut draft.gpu_renderer, None, "Emulator default");
+                    ui.selectable_value(&mut draft.gpu_renderer, Some(false), "Software");
+                    ui.selectable_value(&mut draft.gpu_renderer, Some(true), "GPU (experimental)");
+                });
                 ui.end_row();
 
                 ui.label("Halt on unimplemented API");

@@ -33,6 +33,23 @@ thread_local! {
     static EGL_ERROR: Cell<u32> = const { Cell::new(EGL_SUCCESS) };
 }
 
+/// Opt-in host GPU renderer. Must be called on the emulation thread.
+pub fn set_gpu_renderer(enabled: bool) {
+    with_ctx(|c| {
+        if enabled {
+            if let Err(e) = c.enable_gpu() {
+                log::warn!("GLES GPU unavailable; using software: {e}");
+            }
+        } else {
+            c.disable_gpu();
+        }
+    });
+}
+
+pub(crate) fn release_gpu() {
+    with_ctx(|c| c.release_gpu());
+}
+
 /// Called once for a new dispatcher/session, including sequential CLI
 /// runs reusing the same host thread. Dropping the old Context frees all
 /// host-side GL resources; guest memory belongs to the new kernel/CPU.
@@ -1036,6 +1053,7 @@ fn gl_read_pixels(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     };
 
     let buf = with_ctx(|c| {
+        c.sync_gpu();
         let mut buf = vec![0u8; (w as usize) * (h as usize) * bytes_per_pixel];
         for row in 0..h {
             // GL row 0 is the bottom of the image.
@@ -1158,11 +1176,22 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if minor != 0 {
         ctx.cpu.write_mem(minor, &1i32.to_le_bytes())?;
     }
-    log::info!("eglInitialize() -> EGL 1.1 (PocketHLE software)");
+    if with_ctx(|c| c.gpu_requested()) {
+        set_gpu_renderer(true);
+    }
+    log::info!(
+        "eglInitialize() -> EGL 1.1 (PocketHLE {})",
+        with_ctx(|c| if c.gpu_active() {
+            "host GPU"
+        } else {
+            "software"
+        })
+    );
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
 fn egl_terminate(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    release_gpu();
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
@@ -1359,6 +1388,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         if c.target.width != w || c.target.height != h {
             c.target.resize(w, h);
         }
+        c.sync_gpu();
         c.target
             .to_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
     });
@@ -2538,5 +2568,111 @@ mod tests {
             guest, presented,
             "the guest GAPI mapping must match what was presented"
         );
+    }
+    #[test]
+    #[ignore = "requires host OpenGL; exercises guest GLES and presentation"]
+    fn gpu_guest_draw_readpixels_gapi_and_parent_resume() {
+        let _lock = guard();
+        reset_for_test(32, 32);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.framebuffer.resize(32, 32);
+        cpu.map_region(
+            pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
+            kernel.framebuffer.pixels.len() as u32,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+        kernel.fb_mapped = true;
+        set_gpu_renderer(true);
+        assert!(with_ctx(|c| c.gpu_active()));
+        let vertices: [f32; 9] = [-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.];
+        let bytes: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();
+        cpu.write_mem(SCRATCH, &bytes).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_vertex_pointer,
+            &[3, pocket_gles::GL_FLOAT, 0, SCRATCH],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_enable_client_state,
+            &[pocket_gles::GL_VERTEX_ARRAY],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_clear,
+            &[pocket_gles::GL_COLOR_BUFFER_BIT | pocket_gles::GL_DEPTH_BUFFER_BIT],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_draw_arrays,
+            &[pocket_gles::GL_TRIANGLES, 0, 3],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_swap_buffers,
+            &[DISPLAY_HANDLE, 0],
+        );
+        let pixel = ((16 * 32 + 16) * 2) as usize;
+        assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[255, 255]);
+        assert_eq!(
+            cpu.read_mem(
+                pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
+                kernel.framebuffer.pixels.len() as u32
+            )
+            .unwrap(),
+            kernel.framebuffer.pixels
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_read_pixels,
+            &[
+                16,
+                16,
+                1,
+                1,
+                pocket_gles::GL_RGBA,
+                pocket_gles::GL_UNSIGNED_BYTE,
+                SCRATCH + 256,
+            ],
+        );
+        assert_eq!(cpu.read_mem(SCRATCH + 256, 4).unwrap(), [255; 4]);
+        let parent = suspend();
+        set_gpu_renderer(true);
+        assert!(with_ctx(|c| c.gpu_active()));
+        release_gpu();
+        resume(parent);
+        with_ctx(|c| c.current_color = [1., 0., 0., 1.]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_draw_arrays,
+            &[pocket_gles::GL_TRIANGLES, 0, 3],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_swap_buffers,
+            &[DISPLAY_HANDLE, 0],
+        );
+        assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[0, 248]);
+        call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]);
+        assert!(!with_ctx(|c| c.gpu_active()));
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_initialize,
+            &[DISPLAY_HANDLE, 0, 0],
+        );
+        assert!(with_ctx(|c| c.gpu_active()));
+        release_gpu();
+        reset_for_session();
     }
 }

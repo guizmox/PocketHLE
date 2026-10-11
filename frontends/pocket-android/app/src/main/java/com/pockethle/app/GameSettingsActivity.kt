@@ -104,6 +104,19 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
+            findPreference<ListPreference>("gpu_renderer_mode")?.apply {
+                // JSON is authoritative; do not maintain a second SharedPreferences value.
+                isPersistent = false
+                entries = arrayOf("Emulator default", "Software", "GPU (experimental)")
+                entryValues = arrayOf("inherit", "software", "gpu")
+                value = when (current.gpuRenderer) { null -> "inherit"; false -> "software"; true -> "gpu" }
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, newValue ->
+                    current = current.copy(gpuRenderer = when (newValue.toString()) { "gpu" -> true; "software" -> false; else -> null })
+                    writeGameSettings()
+                    true
+                }
+            }
             findPreference<SwitchPreferenceCompat>("halt_on_unimplemented")?.apply {
                 isChecked = current.haltOnUnimplemented
                 setOnPreferenceChangeListener { _, newValue ->
@@ -126,7 +139,13 @@ class GameSettingsActivity : AppCompatActivity() {
 
         private fun writeGameSettings() {
             if (gameId.isEmpty()) return
-            NativeBridge.writeGameSettings(rootDir, gameId, current.toJson().toString())
+            val result = runCatching { org.json.JSONObject(NativeBridge.writeGameSettings(rootDir, gameId, current.toJson().toString())) }.getOrNull()
+            val saved = runCatching { org.json.JSONObject(NativeBridge.readGameSettings(rootDir, gameId)) }.getOrNull()
+            val gpuSaved = saved != null && saved.has("gpu_renderer") &&
+                (if (saved.isNull("gpu_renderer")) null else saved.optBoolean("gpu_renderer")) == current.gpuRenderer
+            if (result?.optBoolean("ok", false) != true || !gpuSaved) {
+                android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 

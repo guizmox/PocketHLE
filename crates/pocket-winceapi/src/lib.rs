@@ -758,6 +758,7 @@ mod tests {
 
 /// Release host media backends when a guest process is replaced or closed.
 pub fn reset_media_backends() {
+    gles::release_gpu();
     directshow::reset();
     wavein::reset();
 }

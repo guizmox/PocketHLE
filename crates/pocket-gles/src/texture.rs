@@ -29,6 +29,8 @@ pub enum Wrap {
 /// A single texture object, as created by `glGenTextures`.
 #[derive(Debug, Clone)]
 pub struct Texture {
+    /// Incremented on pixel updates; used by the host GPU upload cache.
+    pub revision: u64,
     pub width: u32,
     pub height: u32,
     /// Decoded RGBA8888 texels, row-major, `width * height * 4` bytes.
@@ -43,6 +45,7 @@ pub struct Texture {
 impl Default for Texture {
     fn default() -> Self {
         Self {
+            revision: 0,
             width: 0,
             height: 0,
             rgba: Vec::new(),

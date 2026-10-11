@@ -60,6 +60,19 @@ use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry, Library};
 
 const FRAME_PUSH_INTERVAL: Duration = Duration::from_millis(16);
 
+fn presentation_phase(last: Option<Instant>, now: Instant) -> Option<Instant> {
+    let Some(last) = last else { return Some(now); };
+    let elapsed = now.saturating_duration_since(last);
+    if elapsed < FRAME_PUSH_INTERVAL {
+        return None;
+    }
+    // Skip missed slots after a pause; never send a burst of catch-up frames.
+    let remainder = Duration::from_nanos(
+        (elapsed.as_nanos() % FRAME_PUSH_INTERVAL.as_nanos()) as u64,
+    );
+    Some(now - remainder)
+}
+
 /// Snapshot of the guest framebuffer plus the dimensions Kotlin
 /// needs to paint it onto a `SurfaceView`.
 #[derive(Debug, Clone)]
@@ -404,6 +417,12 @@ fn run_process(
     let launcher_config = pocket_library::Library::open(library_root)
         .map(|l| l.config().clone())
         .unwrap_or_default();
+    emu.set_gpu_renderer(
+        entry
+            .settings
+            .gpu_renderer
+            .unwrap_or(launcher_config.gpu_renderer),
+    );
     emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
         library_root.join("pockethle-unimplemented.log"),
         entry.display_name.clone(),
@@ -937,13 +956,9 @@ impl FrameHook for SessionHook {
             }
             self.saw_non_black = !kernel.framebuffer.is_all_black();
             let now = Instant::now();
-            let due = self
-                .last_emit_at
-                .map(|t| now.duration_since(t) >= FRAME_PUSH_INTERVAL)
-                .unwrap_or(true);
-            if due {
+            if let Some(phase) = presentation_phase(self.last_emit_at, now) {
                 self.last_frame = counter;
-                self.last_emit_at = Some(now);
+                self.last_emit_at = Some(phase);
                 let frame =
                     FrameSnapshot::from_framebuffer_into(&kernel.framebuffer, &mut self.scratch);
                 push_frame(&self.state, frame);
@@ -962,3 +977,23 @@ impl FrameHook for SessionHook {
 #[cfg(all(test, feature = "unicorn"))]
 #[path = "runner_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod presentation_clock_tests {
+    use super::*;
+
+    #[test]
+    fn jitter_keeps_phase_and_pause_does_not_create_a_catchup_burst() {
+        let base = Instant::now();
+        let mut phase = None;
+        for ms in [0, 17, 33, 49, 66, 83, 99] {
+            phase = Some(presentation_phase(phase, base + Duration::from_millis(ms)).unwrap());
+        }
+        assert_eq!(phase.unwrap(), base + Duration::from_millis(96));
+        assert!(presentation_phase(phase, base + Duration::from_millis(100)).is_none());
+        let after_pause = base + Duration::from_millis(1001);
+        phase = presentation_phase(phase, after_pause);
+        assert!(phase.is_some());
+        assert!(presentation_phase(phase, after_pause).is_none());
+    }
+}

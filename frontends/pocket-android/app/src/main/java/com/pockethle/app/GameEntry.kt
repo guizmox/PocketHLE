@@ -58,10 +58,12 @@ data class GameSettings(
      * keep the guest portrait and turn the *picture* instead.
      */
     val rotation: String,
+    val gpuRenderer: Boolean? = null,
     val dpadDeadzone: String = "large",
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
@@ -89,6 +91,7 @@ data class GameSettings(
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
+            gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             originalJson = obj.toString(),
         )
     }
@@ -99,6 +102,7 @@ data class LauncherConfig(
     val defaultCpuBackend: String,
     val verbosity: Int,
     val logUnimplementedApis: Boolean = true,
+    val gpuRenderer: Boolean = false,
     val lastImportDir: String?,
     val showFps: Boolean,
     val fullscreen: Boolean,
@@ -139,6 +143,7 @@ data class LauncherConfig(
         put("default_cpu_backend", defaultCpuBackend)
         put("verbosity", verbosity)
         put("log_unimplemented_apis", logUnimplementedApis)
+        put("gpu_renderer", gpuRenderer)
         if (lastImportDir != null) put("last_import_dir", lastImportDir) else put("last_import_dir", JSONObject.NULL)
         put("show_fps", showFps)
         put("fullscreen", fullscreen)
@@ -182,6 +187,7 @@ data class LauncherConfig(
             defaultCpuBackend = obj.optString("default_cpu_backend", "unicorn"),
             verbosity = obj.optInt("verbosity", 1),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
+            gpuRenderer = obj.optBoolean("gpu_renderer", false),
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
             fullscreen = obj.optBoolean("fullscreen", false),

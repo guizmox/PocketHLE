@@ -327,7 +327,10 @@ mod tests {
                 .chain(Some(0))
                 .flat_map(u16::to_le_bytes)
                 .collect();
-            assert_eq!(cpu.read_mem(0x207c, expected.len() as u32).unwrap(), expected);
+            assert_eq!(
+                cpu.read_mem(0x207c, expected.len() as u32).unwrap(),
+                expected
+            );
         }
         assert_eq!(
             call(

@@ -392,6 +392,12 @@ fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
         let exe = entry.launch_path(root);
         summary_lines.push(format!("Executable: {}", exe.display()));
         let mut emu = build_unicorn().context("Unicorn unavailable")?;
+        emu.set_gpu_renderer(
+            entry
+                .settings
+                .gpu_renderer
+                .unwrap_or(lib.config().gpu_renderer),
+        );
         emu.set_halt_on_unimplemented(entry.settings.halt_on_unimplemented);
         emu.max_slices = entry.settings.max_slices;
         emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
