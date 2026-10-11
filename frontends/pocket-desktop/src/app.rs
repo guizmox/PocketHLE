@@ -622,8 +622,7 @@ impl PocketLauncher {
                 UiEvent::ImportFinished(Ok((id, name))) => {
                     self.status = format!("Imported {name}.");
                     self.reload_library();
-                    if let Some(game) = self.library.games().iter().find(|g| g.id == id)
-                    {
+                    if let Some(game) = self.library.games().iter().find(|g| g.id == id) {
                         self.library_gizmondo = is_gizmondo_game(game, self.library.root());
                         self.selected_game = Some(game.id.clone());
                         self.rename_draft = Some((id, name, true));

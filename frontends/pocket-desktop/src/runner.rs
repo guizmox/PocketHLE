@@ -23,18 +23,18 @@ use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry};
 const FRAME_PUSH_INTERVAL: Duration = Duration::from_millis(16);
 
 fn presentation_phase(last: Option<Instant>, now: Instant) -> Option<Instant> {
-    let Some(last) = last else { return Some(now); };
+    let Some(last) = last else {
+        return Some(now);
+    };
     let elapsed = now.saturating_duration_since(last);
     if elapsed < FRAME_PUSH_INTERVAL {
         return None;
     }
     // Skip missed slots after a pause; never send a burst of catch-up frames.
-    let remainder = Duration::from_nanos(
-        (elapsed.as_nanos() % FRAME_PUSH_INTERVAL.as_nanos()) as u64,
-    );
+    let remainder =
+        Duration::from_nanos((elapsed.as_nanos() % FRAME_PUSH_INTERVAL.as_nanos()) as u64);
     Some(now - remainder)
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Runner {
@@ -206,8 +206,16 @@ impl Runner {
         let launcher_config = pocket_library::Library::open(library_root)
             .map(|l| l.config().clone())
             .unwrap_or_default();
-        emu.set_gpu_renderer(game.settings.gpu_renderer.unwrap_or(launcher_config.gpu_renderer));
-        emu.set_anisotropic_filtering(game.settings.anisotropic_filtering.unwrap_or(launcher_config.anisotropic_filtering));
+        emu.set_gpu_renderer(
+            game.settings
+                .gpu_renderer
+                .unwrap_or(launcher_config.gpu_renderer),
+        );
+        emu.set_anisotropic_filtering(
+            game.settings
+                .anisotropic_filtering
+                .unwrap_or(launcher_config.anisotropic_filtering),
+        );
         log::info!("Gizmondo GPS configuration: gizmondo={} host_enabled={} fixed_enabled={} latitude={} longitude={}",is_gizmondo,launcher_config.gps_enabled,launcher_config.gps_fixed_enabled,launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude);
         let hardware = (
             launcher_config.bluetooth_enabled,

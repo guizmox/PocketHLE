@@ -61,15 +61,16 @@ use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry, Library};
 const FRAME_PUSH_INTERVAL: Duration = Duration::from_millis(16);
 
 fn presentation_phase(last: Option<Instant>, now: Instant) -> Option<Instant> {
-    let Some(last) = last else { return Some(now); };
+    let Some(last) = last else {
+        return Some(now);
+    };
     let elapsed = now.saturating_duration_since(last);
     if elapsed < FRAME_PUSH_INTERVAL {
         return None;
     }
     // Skip missed slots after a pause; never send a burst of catch-up frames.
-    let remainder = Duration::from_nanos(
-        (elapsed.as_nanos() % FRAME_PUSH_INTERVAL.as_nanos()) as u64,
-    );
+    let remainder =
+        Duration::from_nanos((elapsed.as_nanos() % FRAME_PUSH_INTERVAL.as_nanos()) as u64);
     Some(now - remainder)
 }
 
@@ -423,7 +424,12 @@ fn run_process(
             .gpu_renderer
             .unwrap_or(launcher_config.gpu_renderer),
     );
-    emu.set_anisotropic_filtering(entry.settings.anisotropic_filtering.unwrap_or(launcher_config.anisotropic_filtering));
+    emu.set_anisotropic_filtering(
+        entry
+            .settings
+            .anisotropic_filtering
+            .unwrap_or(launcher_config.anisotropic_filtering),
+    );
     emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
         library_root.join("pockethle-unimplemented.log"),
         entry.display_name.clone(),

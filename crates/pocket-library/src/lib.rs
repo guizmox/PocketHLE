@@ -2654,25 +2654,29 @@ mod tests {
         lib.save().unwrap();
         for global in [true, false] {
             for game in [Some(true), Some(false), None] {
-              for level in [None, Some(0), Some(2), Some(4), Some(8)] {
-                let mut lib = Library::open(&root).unwrap();
-                // Same JSON boundaries as the Android JNI write methods.
-                let mut config = serde_json::to_value(lib.config()).unwrap();
-                config["gpu_renderer"] = serde_json::json!(global);
-                config["anisotropic_filtering"] = serde_json::json!(8);
-                *lib.config_mut() = serde_json::from_value(config).unwrap();
-                lib.save().unwrap();
-                let mut settings = serde_json::to_value(&lib.get(&id).unwrap().settings).unwrap();
-                settings["gpu_renderer"] = serde_json::json!(game);
-                settings["anisotropic_filtering"] = serde_json::json!(level);
-                lib.update_settings(&id, serde_json::from_value(settings).unwrap())
-                    .unwrap();
-                let reopened = Library::open(&root).unwrap();
-                assert_eq!(reopened.config().gpu_renderer, global);
-                assert_eq!(reopened.config().anisotropic_filtering, 8);
-                assert_eq!(reopened.get(&id).unwrap().settings.anisotropic_filtering, level);
-                assert_eq!(reopened.get(&id).unwrap().settings.gpu_renderer, game);
-              }
+                for level in [None, Some(0), Some(2), Some(4), Some(8)] {
+                    let mut lib = Library::open(&root).unwrap();
+                    // Same JSON boundaries as the Android JNI write methods.
+                    let mut config = serde_json::to_value(lib.config()).unwrap();
+                    config["gpu_renderer"] = serde_json::json!(global);
+                    config["anisotropic_filtering"] = serde_json::json!(8);
+                    *lib.config_mut() = serde_json::from_value(config).unwrap();
+                    lib.save().unwrap();
+                    let mut settings =
+                        serde_json::to_value(&lib.get(&id).unwrap().settings).unwrap();
+                    settings["gpu_renderer"] = serde_json::json!(game);
+                    settings["anisotropic_filtering"] = serde_json::json!(level);
+                    lib.update_settings(&id, serde_json::from_value(settings).unwrap())
+                        .unwrap();
+                    let reopened = Library::open(&root).unwrap();
+                    assert_eq!(reopened.config().gpu_renderer, global);
+                    assert_eq!(reopened.config().anisotropic_filtering, 8);
+                    assert_eq!(
+                        reopened.get(&id).unwrap().settings.anisotropic_filtering,
+                        level
+                    );
+                    assert_eq!(reopened.get(&id).unwrap().settings.gpu_renderer, game);
+                }
             }
         }
         fs::remove_dir_all(root).unwrap();

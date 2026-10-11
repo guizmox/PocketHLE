@@ -3134,13 +3134,18 @@ mod tests {
         let uv_off = bytes.len() as u32;
         bytes.extend(floats(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]));
 
-
         let mut m = FakeMem { base: BASE, bytes };
         for name in 0..6 {
             c.bind_texture(GL_TEXTURE_2D, name);
             c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            c.compressed_tex_image_2d(GL_TEXTURE_2D, 0, 4, 4,
-                GL_COMPRESSED_RGB_S3TC_DXT1_EXT, &[0xe0, 0x07, 0, 0, 0, 0, 0, 0]);
+            c.compressed_tex_image_2d(
+                GL_TEXTURE_2D,
+                0,
+                4,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                &[0xe0, 0x07, 0, 0, 0, 0, 0, 0],
+            );
             assert_eq!(c.take_error(), GL_NO_ERROR);
         }
         c.set_capability(GL_TEXTURE_2D, true);
