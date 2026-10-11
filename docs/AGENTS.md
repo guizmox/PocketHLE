@@ -2478,3 +2478,70 @@ Desktop cargo check also passes on Linux without default features. The local
 SDL native check disables unused X11/Wayland/DBus support; the emulator's window
 and presentation remain owned by egui, not SDL. No repository build flags or
 platform dependencies were changed for this environment-only verification.
+
+### SDK date/time, shell status, accelerators and DirectShow completion
+
+The October 11 SDK audit compared all eleven example projects with registered
+handlers. GetDateFormatW/A and GetTimeFormatW/A now format validated SYSTEMTIME
+values, including NULL/current-time inputs, NUL-inclusive size queries and
+untouched buffers on insufficient capacity. Supported locales are virtual
+English-US/default and French-France. Invalid locales/parameters return 87,
+unsupported flags 1004, short output buffers 122; success preserves LastError.
+Custom quoted formats and the SDK's DATE_LONGDATE/time flags are supported.
+Alternate calendars and suppression flags with a custom time pattern are
+explicitly rejected, not silently accepted. The virtual local clock remains
+UTC. GetSystemTime/GetLocalTime now report the actual civil date instead of the
+previous fixed January 1 date.
+
+GT_GETSTATUS broadcasts queue GT_STATUS with GPS option (bit 1), shared Bluetooth
+power (bit 3), and the requested/available host HTTP data gate (bit 4). GSM/SIM,
+flight mode and ActiveSync are not fabricated. Subsequent message-pump/wait
+calls publish status transitions after a status request, without repeating
+unchanged states. Both SendMessageW and PostMessageW handle GPRS_CONNECT;
+transport availability is not proof of a reachable game server. Shell state
+and interrupted accelerator callbacks are process-owned and cleared at exit.
+
+LoadAcceleratorsW/A returns the address of a real RT_ACCELERATOR resource;
+there is no table allocation or fake universal handle. TranslateAcceleratorW/A
+matches virtual-key/character messages and exact Shift/Ctrl/Alt modifiers,
+then synchronously dispatches WM_COMMAND with notification code 1. Its callback
+round-trip restores the original LR and returns TRUE independently of the
+window procedure's return. Frames are bounded at 64, keyed by thread/thunk/SP,
+and retired with thread stacks. Loaded tables disappear with their module.
+Create/Copy/DestroyAcceleratorTable are outside this resource-only SDK scope.
+
+DirectShow exposes IMediaSeeking (its own IID tail), IMediaPosition and
+IBasicVideo, sharing the graph's COM identity/refcount. MEDIA_TIME is the
+supported seeking format (100 ns units); position interface values are seconds.
+Windows CE ARM doubles use aligned R2/R3; ConvertTimeFormat's 64-bit source is
+on the stack. The native single-owner FFmpeg wrapper supplies actual duration,
+native dimensions, frame interval and bitrate and supports av_seek_frame plus
+codec flushing. Seeking restarts a bounded producer and stops the old audio;
+audio is trimmed from decoded PCM to the requested interval. Rate 1 is supported;
+other rates, segments, no-flush seeking and other time formats return errors.
+The full IDispatch automation layer and caption BSTRs remain unsupported.
+
+Video-window position/visibility and BasicVideo source/destination rectangles
+control real RGB565 composition, clipped to the emulated video window. Default
+playback preserves aspect ratio and bilinear scaling. Unchanged frames are not
+recomposited on every service poll or published as new frames. GetCurrentImage
+returns a bottom-up 24-bit DIB with a size query and pointer/capacity validation.
+Audio-only RenderFile works for the SDK's RingTone example. Pause/resume keeps
+the clock; completion preserves the final position; Stop/Run can reopen a source.
+
+Last Release frees every guest interface and vtable. Movie Drop/Stop/replacement
+cancel the producer and close its receiver, releasing FFmpeg contexts on their
+owning worker, including a blocked channel send. Native dimensions are bounded
+at 8192 per axis; the PCM accumulation limit is 128 MiB; the video channel holds
+at most three packets. Decoder work observes cancellation between packets;
+there is no guest-memory access from producer threads. The synthetic WMV test
+fixture contains generated testsrc pixels and a sine wave, not proprietary data.
+
+Validation: all WinCE API tests with the actual pinned static FFmpeg and all
+kernel tests pass with Rust warnings denied. Tests cover real WMV metadata,
+seeking with bounded audio/video, five repeated native decodes, 100 COM graph
+creation/query/release cycles, DIB contents, date/time errors, accelerator
+callback return and shell transitions. Regenerate original RAMTEST DLL fixtures
+before testing a fresh clone; the delivered patch includes the four fixtures
+needed by the loader unit tests. Host JNI type checking passes. These checks
+are not a native Windows release build or an Android APK/device validation.

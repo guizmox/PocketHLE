@@ -14,6 +14,15 @@ extern "C" {
         error: *mut c_int,
     ) -> *mut c_void;
     fn pocket_media_close(media: *mut c_void);
+    fn pocket_media_info(
+        media: *mut c_void,
+        duration: *mut f64,
+        width: *mut c_int,
+        height: *mut c_int,
+        interval: *mut f64,
+        bitrate: *mut i64,
+    );
+    fn pocket_media_seek(media: *mut c_void, seconds: f64) -> c_int;
     fn pocket_media_next(
         media: *mut c_void,
         data: *mut *const u8,
@@ -38,6 +47,21 @@ fn error(code: i32) -> String {
 }
 
 impl Decoder {
+    pub(crate) fn info(&self) -> (f64, u32, u32, f64, i64) {
+        let (mut d, mut w, mut h, mut i, mut b) = (0.0, 0, 0, 0.0, 0);
+        unsafe {
+            pocket_media_info(self.0.as_ptr(), &mut d, &mut w, &mut h, &mut i, &mut b);
+        }
+        (d, w as u32, h as u32, i, b)
+    }
+    pub(crate) fn seek(&mut self, seconds: f64) -> Result<(), String> {
+        let code = unsafe { pocket_media_seek(self.0.as_ptr(), seconds) };
+        if code < 0 {
+            Err(error(code))
+        } else {
+            Ok(())
+        }
+    }
     pub(crate) fn open(
         path: &Path,
         video: bool,
@@ -58,7 +82,7 @@ impl Decoder {
         };
         if let Some(handle) = NonNull::new(handle) {
             Ok(Some(Self(handle)))
-        } else if code == 1 && !video {
+        } else if code == 1 {
             Ok(None)
         } else {
             Err(error(code))
@@ -123,8 +147,41 @@ mod tests {
             decoded.extend(bytes);
         }
         assert_eq!(decoded, pcm);
-        assert!(Decoder::open(&file, true, 320, 240).is_err());
+        assert!(Decoder::open(&file, true, 320, 240).unwrap().is_none());
         drop(decoder);
         std::fs::remove_file(file).unwrap();
+    }
+}
+#[cfg(test)]
+mod seeking_tests {
+    use super::*;
+    #[test]
+    fn real_wmv_metadata_and_keyframe_seek_keep_absolute_timestamps() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seeking.wmv");
+        let mut video = Decoder::open(&path, true, 0, 0).unwrap().unwrap();
+        let (duration, w, h, interval, bitrate) = video.info();
+        assert!((1.9..2.3).contains(&duration));
+        assert_eq!((w, h), (96, 64));
+        assert!((interval - 0.1).abs() < 0.001);
+        assert!(bitrate > 0);
+        let (first, seconds) = video.next().unwrap().unwrap();
+        assert_eq!(first.len(), 96 * 64 * 2);
+        assert!(seconds < 0.2);
+        video.seek(0.75).unwrap();
+        let mut found = false;
+        for _ in 0..20 {
+            if let Some((_, seconds)) = video.next().unwrap() {
+                if seconds >= 0.75 {
+                    assert!(seconds < 1.1);
+                    found = true;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        assert!(found);
+        video.seek(0.0).unwrap();
+        assert!(video.next().unwrap().unwrap().1 < 0.2);
     }
 }

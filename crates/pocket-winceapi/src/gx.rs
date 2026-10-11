@@ -400,6 +400,8 @@ pub(crate) mod tests {
             create_frame: None,
             create_stage: pocket_kernel::CreateStage::Idle,
             dialog_frame: None,
+            accelerator_frames: Vec::new(),
+            shell_status: None,
             status_bar: None,
             message_frames: Default::default(),
             controls: Default::default(),

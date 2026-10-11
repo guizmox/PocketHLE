@@ -192,6 +192,9 @@ impl Service {
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
         Self::with_optional_backend(Some(backend))
     }
+    pub fn is_enabled(&self) -> bool {
+        self.0.lock().unwrap().enabled
+    }
     pub fn set_allowed(&self, allowed: bool) {
         self.0.lock().unwrap().allowed = allowed;
         if !allowed {

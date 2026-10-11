@@ -20,6 +20,7 @@
 //! naming the start of the file name, and every call into them is
 //! answered generically.
 
+mod accelerators;
 pub mod aygshell;
 #[cfg(test)]
 mod backlight_tests;
@@ -27,6 +28,7 @@ mod bluetooth;
 mod camera;
 pub mod commctrl;
 pub mod coredll;
+mod datetime;
 pub mod ddraw;
 mod directshow;
 pub mod dlgtemplate;
@@ -39,6 +41,7 @@ pub mod hss;
 mod media_static;
 pub mod ole32;
 pub mod ordinals;
+mod shell;
 mod vibration;
 mod wavein;
 mod wininet;

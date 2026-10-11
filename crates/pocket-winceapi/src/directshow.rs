@@ -1,11 +1,17 @@
 //! DirectShow playback through statically linked FFmpeg. Guest memory is
 //! accessed only by the emulator thread; decoder workers own host buffers.
 use crate::{CallCtx, WinCeDispatcher};
+#[path = "directshow_extended.rs"]
+mod extended;
+use extended::{extended, present};
 use once_cell::sync::Lazy;
 use pocket_kernel::{audio::GuestFormat, DispatchOutcome, KernelError};
 use std::{
     collections::HashMap,
-    sync::{mpsc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 pub(crate) const CLASS: [u8; 16] = [
@@ -15,7 +21,7 @@ const UNKNOWN: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]
 const TAIL: [u8; 12] = [
     0xd4, 0x0a, 0xce, 0x11, 0xb0, 0x3a, 0, 0x20, 0xaf, 0x0b, 0xa7, 0x70,
 ];
-const KINDS: [(&str, u32, usize); 8] = [
+const KINDS: [(&str, u32, usize); 11] = [
     ("graph", 0x56a868a9, 18),
     ("control", 0x56a868b1, 16),
     ("event", 0x56a868b6, 13),
@@ -24,8 +30,19 @@ const KINDS: [(&str, u32, usize); 8] = [
     ("window", 0x56a868b4, 46),
     ("audio", 0x56a868b3, 11),
     ("filtergraph", 0x56a8689f, 11),
+    ("seeking", 0x36b73880, 20),
+    ("position", 0x56a868b2, 18),
+    ("video", 0x56a868b5, 39),
 ];
 fn kind(iid: &[u8]) -> Option<&'static str> {
+    if iid
+        == [
+            0x80, 0x38, 0xb7, 0x36, 0xc8, 0xc2, 0xcf, 0x11, 0x8b, 0x46, 0, 0x80, 0x5f, 0x6c, 0xef,
+            0x60,
+        ]
+    {
+        return Some("seeking");
+    }
     if iid == UNKNOWN {
         return Some("graph");
     }
@@ -33,7 +50,10 @@ fn kind(iid: &[u8]) -> Option<&'static str> {
         return None;
     }
     let id = u32::from_le_bytes(iid[..4].try_into().ok()?);
-    KINDS.iter().find(|(_, n, _)| *n == id).map(|(k, _, _)| *k)
+    KINDS
+        .iter()
+        .find(|(k, n, _)| *k != "seeking" && *n == id)
+        .map(|(k, _, _)| *k)
 }
 // Only the static FFmpeg worker constructs packets in production builds.
 #[cfg_attr(not(feature = "video-static"), allow(dead_code))]
@@ -43,7 +63,26 @@ enum Packet {
     End,
     Error(String),
 }
+#[derive(Clone, Copy, Default)]
+struct Info {
+    duration: f64,
+    width: u32,
+    height: u32,
+    interval: f64,
+    bitrate: i64,
+}
 struct Movie {
+    path: Option<std::path::PathBuf>,
+    info: Info,
+    offset: f64,
+    stop: f64,
+    cancel: Option<Arc<AtomicBool>>,
+    visible: bool,
+    presented: Option<(u64, [i32; 4], Option<[i32; 4]>, Option<[i32; 4]>, u64)>,
+    window: [i32; 4],
+    source: Option<[i32; 4]>,
+    destination: Option<[i32; 4]>,
+    window_properties: [u32; 46],
     objects: HashMap<String, (u32, u32)>,
     receiver: Option<mpsc::Receiver<Packet>>,
     playing: bool,
@@ -69,6 +108,22 @@ struct Movie {
 impl Movie {
     fn new() -> Self {
         Self {
+            path: None,
+            info: Info::default(),
+            offset: 0.0,
+            stop: 0.0,
+            cancel: None,
+            presented: None,
+            visible: true,
+            window: [0; 4],
+            source: None,
+            destination: None,
+            window_properties: {
+                let mut v = [0; 46];
+                v[13] = u32::MAX;
+                v[15] = 1;
+                v
+            },
             objects: HashMap::new(),
             receiver: None,
             playing: false,
@@ -144,6 +199,14 @@ pub(crate) fn create(
     iid: &[u8],
     out: u32,
 ) -> Result<DispatchOutcome, KernelError> {
+    if out == 0
+        || ctx
+            .cpu
+            .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)
+            .is_err()
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0x80004003));
+    }
     ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
     let Some(k) = kind(iid) else {
         return Ok(DispatchOutcome::ReturnedR0(0x80004002));
@@ -181,59 +244,94 @@ fn read_path(ctx: &mut CallCtx<'_>, pointer: u32) -> Result<String, KernelError>
     }
     Ok(String::from_utf16_lossy(&text))
 }
+type Decoded = (mpsc::Receiver<Packet>, Info, Arc<AtomicBool>);
 #[cfg(not(feature = "video-static"))]
-fn decode(
-    _path: std::path::PathBuf,
-    _width: u32,
-    _height: u32,
-) -> Result<mpsc::Receiver<Packet>, String> {
+fn decode(_path: std::path::PathBuf, _start: f64, _stop: f64) -> Result<Decoded, String> {
     Err("PocketHLE was compiled without the video-static feature".into())
 }
-
 #[cfg(feature = "video-static")]
-fn decode(
-    path: std::path::PathBuf,
-    width: u32,
-    height: u32,
-) -> Result<mpsc::Receiver<Packet>, String> {
+fn decode(path: std::path::PathBuf, start: f64, stop: f64) -> Result<Decoded, String> {
     use crate::media_static::Decoder;
-    let mut video = Decoder::open(&path, true, width, height)?.ok_or("Video stream missing")?;
+    let mut video = Decoder::open(&path, true, 0, 0)?;
+    let mut audio = Decoder::open(&path, false, 0, 0)?;
+    let (duration, width, height, interval, bitrate) = video
+        .as_ref()
+        .or(audio.as_ref())
+        .ok_or("Media contains no supported streams")?
+        .info();
+    if !duration.is_finite() || duration < 0.0 {
+        return Err("Invalid media duration".into());
+    }
+    let info = Info {
+        duration,
+        width,
+        height,
+        interval,
+        bitrate,
+    };
+    if start > 0.0 {
+        if let Some(video) = video.as_mut() {
+            video.seek(start)?;
+        }
+    }
     let (tx, rx) = mpsc::sync_channel(3);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let canceled = cancel.clone();
     std::thread::spawn(move || {
         let mut run = || -> Result<(), String> {
-            // Retain the validated finite PCM queue and independent audio
-            // stream. Only the producer changes; no host processes or DLLs.
-            if let Some(mut audio) = Decoder::open(&path, false, 0, 0)? {
+            if let Some(mut audio) = audio.take() {
                 let mut samples = Vec::new();
+                let mut cursor = 0usize;
+                let first = (start * 44100.0) as usize * 2;
+                let last = (stop.min(duration) * 44100.0) as usize * 2;
                 while let Some((bytes, _)) = audio.next()? {
-                    samples.extend(
-                        bytes
-                            .chunks_exact(2)
-                            .map(|v| i16::from_ne_bytes([v[0], v[1]])),
-                    );
+                    if canceled.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    for pair in bytes.chunks_exact(2) {
+                        if cursor >= first && cursor < last {
+                            samples.push(i16::from_ne_bytes([pair[0], pair[1]]));
+                        }
+                        cursor += 1;
+                    }
+                    if cursor >= last {
+                        break;
+                    }
+                    if samples.len() > 64 * 1024 * 1024 {
+                        return Err("DirectShow PCM exceeds 128 MiB limit".into());
+                    }
                 }
                 if tx.send(Packet::Audio(samples)).is_err() {
                     return Ok(());
                 }
             }
-            // Convert native timestamps to the existing 30-Hz presentation
-            // timeline, repeating/dropping frames for other input rates.
             let mut previous: Option<Vec<u8>> = None;
             let mut emitted = 0u64;
-            while let Some((frame, seconds)) = video.next()? {
-                if !seconds.is_finite() || seconds < 0.0 {
-                    return Err("Invalid video timestamp".into());
-                }
-                let due = (seconds * 30.0).round() as u64;
-                if let Some(held) = previous.as_ref() {
-                    while emitted < due {
-                        if tx.send(Packet::Frame(held.clone())).is_err() {
-                            return Ok(());
-                        }
-                        emitted += 1;
+            if let Some(video) = video.as_mut() {
+                while let Some((frame, seconds)) = video.next()? {
+                    if canceled.load(Ordering::Acquire) {
+                        return Ok(());
                     }
+                    if !seconds.is_finite() {
+                        return Err("Invalid video timestamp".into());
+                    }
+                    if seconds < start {
+                        continue;
+                    }
+                    if seconds >= stop {
+                        break;
+                    }
+                    let due = ((seconds - start) * 30.0).round() as u64;
+                    if let Some(held) = previous.as_ref() {
+                        while emitted < due {
+                            if tx.send(Packet::Frame(held.clone())).is_err() {
+                                return Ok(());
+                            }
+                            emitted += 1;
+                        }
+                    }
+                    previous = Some(frame);
                 }
-                previous = Some(frame);
             }
             if let Some(frame) = previous {
                 if tx.send(Packet::Frame(frame)).is_err() {
@@ -243,14 +341,90 @@ fn decode(
             let _ = tx.send(Packet::End);
             Ok(())
         };
-        if let Err(error) = run() {
-            let _ = tx.send(Packet::Error(error));
+        if let Err(e) = run() {
+            let _ = tx.send(Packet::Error(e));
         }
-        // Decoder Drop frees native contexts on every path, including when
-        // Stop/Release closes the receiver during a blocked send.
     });
-    Ok(rx)
+    Ok((rx, info, cancel))
 }
+impl Movie {
+    fn cancel_decode(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            c.store(true, Ordering::Release);
+        }
+        self.receiver = None;
+    }
+    fn position(&self) -> f64 {
+        (self.offset + elapsed(self).as_secs_f64()).min(self.stop)
+    }
+}
+impl Drop for Movie {
+    fn drop(&mut self) {
+        self.cancel_decode();
+    }
+}
+fn restart(
+    ctx: &mut CallCtx<'_>,
+    id: u32,
+    m: &mut Movie,
+    start: f64,
+    stop: f64,
+) -> Result<u32, KernelError> {
+    if !start.is_finite()
+        || !stop.is_finite()
+        || start < 0.0
+        || stop < start
+        || stop > m.info.duration
+    {
+        return Ok(0x80070057);
+    }
+    let Some(path) = m.path.clone() else {
+        return Ok(0x80040209);
+    };
+    let decoded = match decode(path, start, stop) {
+        Ok(d) => d,
+        Err(_) => return Ok(0x80004005),
+    };
+    m.cancel_decode();
+    ctx.kernel.audio.stop_mas_stream(id);
+    m.receiver = Some(decoded.0);
+    m.cancel = Some(decoded.2);
+    m.offset = start;
+    m.stop = stop;
+    m.presented = None;
+    m.frame = None;
+    m.pending = None;
+    m.frame_number = 0;
+    m.ended = false;
+    m.completed = false;
+    m.completion_code = 1;
+    m.start = None;
+    m.paused = Duration::ZERO;
+    m.audio = None;
+    m.audio_queued = false;
+    m.audio_end = 0;
+    m.completion_waits.clear();
+    Ok(0)
+}
+fn write_output(ctx: &mut CallCtx<'_>, pointer: u32, bytes: &[u8]) -> Result<u32, KernelError> {
+    if pointer == 0
+        || ctx
+            .cpu
+            .check_guest_access(pointer, bytes.len() as u32, pocket_cpu::Prot::WRITE)
+            .is_err()
+    {
+        return Ok(0x80004003);
+    }
+    ctx.cpu.write_mem(pointer, bytes)?;
+    Ok(0)
+}
+fn media_time(value: f64) -> i64 {
+    (value * 10_000_000.0).round() as i64
+}
+const TIME_FORMAT: [u8; 16] = [
+    0x74, 0x55, 0x78, 0x7b, 0x82, 0x8c, 0xcf, 0x11, 0xbc, 0x0c, 0, 0xaa, 0, 0xac, 0x74, 0xf6,
+];
+
 fn root(ctx: &mut CallCtx<'_>, this: u32) -> Result<u32, KernelError> {
     Ok(ctx.cpu.read_u32_le(this + 8)?)
 }
@@ -281,7 +455,12 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
         }
         let packet = m.receiver.as_ref().and_then(|r| r.try_recv().ok());
         match packet {
-            Some(Packet::Audio(audio)) => m.audio = Some(audio),
+            Some(Packet::Audio(audio)) => {
+                m.audio = Some(audio);
+                if m.info.width == 0 && m.start.is_none() {
+                    m.start = Some(Instant::now());
+                }
+            }
             Some(Packet::Frame(frame)) => m.pending = Some(frame),
             Some(Packet::End) => {
                 m.ended = true;
@@ -326,14 +505,24 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
         }
         m.audio_queued = true;
     }
-    if let Some(frame) = &m.frame {
-        if frame.len() == ctx.kernel.framebuffer.pixels.len() {
-            ctx.kernel.framebuffer.pixels.copy_from_slice(frame);
-            ctx.kernel.framebuffer.mark_dirty();
-            if ctx.kernel.fb_mapped {
-                ctx.cpu
-                    .write_mem(pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE, frame)?;
-                ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
+    if m.visible {
+        if let Some(frame) = &m.frame {
+            let key = (
+                m.frame_number,
+                m.window,
+                m.source,
+                m.destination,
+                ctx.kernel.framebuffer.frame_counter,
+            );
+            if m.presented != Some(key) {
+                present(ctx, m, frame)?;
+                m.presented = Some((
+                    key.0,
+                    key.1,
+                    key.2,
+                    key.3,
+                    ctx.kernel.framebuffer.frame_counter,
+                ));
             }
         }
     }
@@ -345,6 +534,7 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
     {
         m.completed = true;
         m.playing = false;
+        m.paused = elapsed(m);
         m.start = None;
         log::info!("DirectShow playback completed ({})", m.frame_number);
         if m.notify != 0 && m.notify_msg != 0 && m.notify_flags == 0 {
@@ -372,6 +562,14 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
     let this = ctx.arg_u32(0)?;
+    if this == 0
+        || ctx
+            .cpu
+            .check_guest_access(this, 12, pocket_cpu::Prot::READ)
+            .is_err()
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0x80004003));
+    }
     let id = root(ctx, this)?;
     let mut movies = MOVIES.lock().unwrap();
     let Some(m) = movies.get_mut(&id) else {
@@ -380,7 +578,16 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if slot == 0 {
         let iid = ctx.arg_u32(1)?;
         let out = ctx.arg_u32(2)?;
-        if out == 0 {
+        if out == 0
+            || ctx
+                .cpu
+                .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)
+                .is_err()
+            || ctx
+                .cpu
+                .check_guest_access(iid, 16, pocket_cpu::Prot::READ)
+                .is_err()
+        {
             return Ok(DispatchOutcome::ReturnedR0(0x80004003));
         }
         ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
@@ -413,9 +620,9 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         if refs == 0 {
             ctx.kernel.audio.stop_mas_stream(id);
             let m = movies.remove(&id).unwrap();
-            for (_, (object, table)) in m.objects {
-                ctx.kernel.heap.free(object);
-                ctx.kernel.heap.free(table);
+            for (_, (object, table)) in &m.objects {
+                ctx.kernel.heap.free(*object);
+                ctx.kernel.heap.free(*table);
             }
         }
         return Ok(DispatchOutcome::ReturnedR0(refs));
@@ -440,10 +647,14 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             if !host.is_file() {
                 return Ok(DispatchOutcome::ReturnedR0(0x80070002));
             }
-            let w = ctx.kernel.framebuffer.width;
-            let h = ctx.kernel.framebuffer.height;
-            match decode(host, w, h) {
-                Ok(rx) => {
+            match decode(host.clone(), 0.0, f64::MAX) {
+                Ok((rx, info, cancel)) => {
+                    m.cancel_decode();
+                    m.path = Some(host);
+                    m.info = info;
+                    m.offset = 0.0;
+                    m.stop = info.duration;
+                    m.cancel = Some(cancel);
                     ctx.kernel.audio.stop_mas_stream(id);
                     m.completion_waits.clear();
                     m.playing = false;
@@ -472,12 +683,15 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
         ("control", 7) | ("filter", 6) => {
             if m.receiver.is_none() {
-                return Ok(DispatchOutcome::ReturnedR0(0x80040209));
+                let code = restart(ctx, id, m, m.position(), m.stop)?;
+                if code != 0 {
+                    return Ok(DispatchOutcome::ReturnedR0(code));
+                }
             }
             m.playing = true;
             m.is_paused = false;
             ctx.kernel.audio.pause_mas_stream(id, false);
-            if m.frame.is_some() {
+            if m.frame.is_some() && m.start.is_none() {
                 m.start = Some(Instant::now());
             }
         }
@@ -493,7 +707,9 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             m.playing = false;
             m.is_paused = false;
             m.completed = false;
-            m.receiver = None;
+            m.paused = elapsed(m);
+            m.start = None;
+            m.cancel_decode();
             m.frame = None;
             m.pending = None;
             ctx.kernel.audio.stop_mas_stream(id);
@@ -601,14 +817,9 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             let p = ctx.arg_u32(1)?;
             ctx.cpu.write_mem(p, &m.volume.to_le_bytes())?;
         }
-        ("window", 8)
-        | ("window", 9)
-        | ("window", 19)
-        | ("window", 25)
-        | ("window", 29)
-        | ("window", 31)
-        | ("window", 36)
-        | ("window", 39) => {}
+        ("seeking", _) | ("position", _) | ("video", _) | ("window", _) => {
+            result = extended(ctx, id, m, k, slot)?;
+        }
         ("filter", 9) => {}
         _ => {
             log::debug!("DirectShow unsupported {k} slot {slot}");
@@ -942,5 +1153,131 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert!(!MOVIES.lock().unwrap().contains_key(&object));
+    }
+}
+#[cfg(all(test, feature = "video-static"))]
+mod decoder_tests {
+    use super::*;
+    #[test]
+    fn native_seek_bounds_audio_and_video_and_can_restart_repeatedly() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seeking.wmv");
+        for _ in 0..5 {
+            let (rx, info, cancel) = decode(path.clone(), 0.75, 1.25).unwrap();
+            assert_eq!((info.width, info.height), (96, 64));
+            let mut frames = 0;
+            let mut audio = 0;
+            loop {
+                match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    Packet::Audio(samples) => audio = samples.len(),
+                    Packet::Frame(frame) => {
+                        assert_eq!(frame.len(), 96 * 64 * 2);
+                        frames += 1;
+                    }
+                    Packet::End => break,
+                    Packet::Error(e) => panic!("{e}"),
+                }
+            }
+            assert!((12..=18).contains(&frames), "frames={frames}");
+            assert_eq!(audio, 44100);
+            cancel.store(true, Ordering::Release);
+            drop(rx);
+        }
+    }
+}
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+    use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
+    fn invoke(
+        cpu: &mut StubCpu,
+        k: &mut pocket_kernel::KernelState,
+        name: &str,
+        args: &[u32],
+    ) -> DispatchOutcome {
+        let mut d = WinCeDispatcher::new();
+        crate::bluetooth::tests::call(cpu, k, &mut d, "ole32.dll", name, args)
+    }
+    #[test]
+    fn all_sdk_interfaces_share_identity_and_release_across_100_graphs() {
+        reset();
+        let (mut cpu, mut k, mut d) = crate::bluetooth::tests::setup();
+        cpu.map_region(0x50000000, 65536, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let exports = k
+            .dynamic_exports
+            .entry(pocket_kernel::OLE32_MODULE_HANDLE)
+            .or_default();
+        let mut address = 0x70001000;
+        for (name, _, slots) in KINDS {
+            for slot in 0..slots {
+                exports.insert(format!("ds_{name}_{slot}"), address);
+                address += 16;
+            }
+        }
+        let mut iid = [0u8; 16];
+        iid[..4].copy_from_slice(&0x56a868a9u32.to_le_bytes());
+        iid[4..].copy_from_slice(&TAIL);
+        let t = pocket_kernel::Thunk {
+            thunk_va: 0x70000000,
+            iat_va: 0,
+            dll: "ole32.dll".into(),
+            binding: pocket_pe::ImportBinding::Name("CoCreateInstance".into()),
+            friendly_name: Some("CoCreateInstance".into()),
+        };
+        for _ in 0..100 {
+            assert_eq!(
+                create(
+                    &mut CallCtx {
+                        cpu: &mut cpu,
+                        kernel: &mut k,
+                        thunk: &t
+                    },
+                    &iid,
+                    0x1100
+                )
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let root = cpu.read_u32_le(0x1100).unwrap();
+            for (name, id, _) in KINDS {
+                let mut requested = iid;
+                requested[..4].copy_from_slice(&id.to_le_bytes());
+                if name == "seeking" {
+                    requested = [
+                        0x80, 0x38, 0xb7, 0x36, 0xc8, 0xc2, 0xcf, 0x11, 0x8b, 0x46, 0, 0x80, 0x5f,
+                        0x6c, 0xef, 0x60,
+                    ];
+                }
+                cpu.write_mem(0x1200, &requested).unwrap();
+                assert_eq!(
+                    crate::bluetooth::tests::call(
+                        &mut cpu,
+                        &mut k,
+                        &mut d,
+                        "ole32.dll",
+                        "ds_graph_0",
+                        &[root, 0x1200, 0x1300]
+                    ),
+                    DispatchOutcome::ReturnedR0(0)
+                );
+                let object = cpu.read_u32_le(0x1300).unwrap();
+                assert_eq!(cpu.read_u32_le(object + 8).unwrap(), root);
+                assert_eq!(
+                    invoke(&mut cpu, &mut k, &format!("ds_{name}_2"), &[object]),
+                    DispatchOutcome::ReturnedR0(1)
+                );
+            }
+            assert_eq!(
+                invoke(&mut cpu, &mut k, "ds_graph_2", &[root]),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert!(MOVIES.lock().unwrap().is_empty());
+        }
+        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        let mut bad = iid;
+        bad[..4].copy_from_slice(&0x36b73880u32.to_le_bytes());
+        assert_eq!(kind(&bad), None);
+        reset();
     }
 }

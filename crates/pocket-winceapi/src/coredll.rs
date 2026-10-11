@@ -586,8 +586,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "ScreenToClient", 1, one_returning);
     d.register_handler(dll, "LoadIconW", load_icon_w);
     d.register_handler(dll, "LoadCursorW", load_icon_w);
-    d.register_handler(dll, "LoadAcceleratorsW", load_accelerators_w);
-    d.register_constant(dll, "TranslateAcceleratorW", 0, zero_returning);
+    crate::accelerators::register(d);
+    crate::datetime::register(d);
     d.register_handler(dll, "DialogBoxIndirectParamW", dialog_box_indirect_param_w);
     d.register_handler(dll, "DialogBoxParamW", dialog_box_indirect_param_w);
     d.register_handler(dll, "EndDialog", end_dialog);
@@ -4881,7 +4881,7 @@ fn map_resource_module_inner(
 /// nominal scope is not fatal. Returns the entry (cloned, so no borrow
 /// of `ctx.kernel` outlives the lookup) together with the image base its
 /// `data_rva` is relative to.
-fn lookup_resource(
+pub(crate) fn lookup_resource(
     kernel: &KernelState,
     hmodule: u32,
     ty: &ResourceKey,
@@ -9648,23 +9648,8 @@ fn post_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let message = ctx.arg_u32(1)?;
     let wparam = ctx.arg_u32(2)?;
     let lparam = ctx.arg_u32(3)?;
-    // Colors waits for GTShell's GPRS_STATUS before InternetConnectW. There
-    // is no cellular shell in HLE: the Gizmondo data option supplies
-    // that gate, while HTTP still reports real connection/server failures.
-    if hwnd == 0xffff && message == registered_window_message_id("GPRS_CONNECT") {
-        if let Some(available) = ctx.kernel.internet.gprs_shell_network_available() {
-            let connected = available && wparam != 0;
-            if ctx.kernel.posted_messages.len() < 256 {
-                ctx.kernel.posted_messages.push_back((
-                    hwnd,
-                    registered_window_message_id("GPRS_STATUS"),
-                    if connected { 0x1f9c } else { 0x1f9d },
-                    u32::from(connected),
-                ));
-            }
-            log::debug!("Gizmondo GPRS shell gate: connected={connected}");
-            return Ok(DispatchOutcome::ReturnedR0(1));
-        }
+    if crate::shell::message(ctx, hwnd, message, wparam) {
+        return Ok(DispatchOutcome::ReturnedR0(1));
     }
     // Bound the queue: a guest that posts faster than it pumps would
     // otherwise grow it without limit.
@@ -9746,6 +9731,7 @@ fn create_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 
 fn read_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.sync_power_notifications();
+    crate::shell::service(ctx);
     let handle = ctx.arg_u32(0)?;
     let buffer = ctx.arg_u32(1)?;
     let buffer_size = ctx.arg_u32(2)?;
@@ -10192,11 +10178,13 @@ fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let message = ctx.arg_u32(1)?;
     let wparam = ctx.arg_u32(2)?;
     let lparam = ctx.arg_u32(3)?;
-    // The status bar is a control we implement ourselves — its messages
-    if crate::bluetooth::shell_message(ctx, hwnd, message, wparam) {
+    // Service Gizmondo shell requests before routing to guest windows.
+    if crate::shell::message(ctx, hwnd, message, wparam)
+        || crate::bluetooth::shell_message(ctx, hwnd, message, wparam)
+    {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    // must never trampoline into the application's WndProc.
+    // The emulated status bar must never trampoline into the application's WndProc.
     if hwnd == FAKE_STATUSBAR_HWND {
         if let Some(r) = status_bar_message(ctx, message, wparam, lparam)? {
             return Ok(DispatchOutcome::ReturnedR0(r));
@@ -11120,6 +11108,7 @@ fn get_message_pos(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 
 fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.sync_power_notifications();
+    crate::shell::service(ctx);
     // A real driver retires wave buffers on its own thread; the
     // message pump is our equivalent "time has passed" hook, so do it
     // before handing the guest its next message.
@@ -11223,6 +11212,7 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
 fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.sync_power_notifications();
+    crate::shell::service(ctx);
     service_wave_out(ctx)?;
     let thunk_va = ctx.thunk.thunk_va;
     if let Some(outcome) = wave_out_enter_callback(ctx, thunk_va)? {
@@ -11415,6 +11405,7 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
 
     service_mas_audio(ctx.kernel);
     ctx.kernel.sync_power_notifications();
+    crate::shell::service(ctx);
     let count = ctx.arg_u32(0)?;
     let handles_ptr = ctx.arg_u32(1)?;
     let wait_all = ctx.arg_u32(2)? != 0;
@@ -12807,7 +12798,10 @@ fn encode_pixels_to_dib(bm: &pocket_kernel::gdi::Bitmap, buf: &mut [u8]) {
 
 // ---------- Resources ----------
 
-fn read_wide_resource_key(ctx: &mut CallCtx<'_>, raw: u32) -> Result<ResourceKey, KernelError> {
+pub(crate) fn read_wide_resource_key(
+    ctx: &mut CallCtx<'_>,
+    raw: u32,
+) -> Result<ResourceKey, KernelError> {
     if raw < 0x1_0000 {
         // MAKEINTRESOURCE encoding — low 16 bits are an integer ID.
         Ok(ResourceKey::Id(raw))
@@ -13901,15 +13895,10 @@ fn get_window_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 const FAKE_ICON: u32 = 0xDEAD_1C01;
-const FAKE_ACCEL: u32 = 0xDEAD_AC01;
 const FAKE_TIMER_BASE: u32 = 0xDEAD_7100;
 
 fn load_icon_w(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(FAKE_ICON))
-}
-
-fn load_accelerators_w(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(FAKE_ACCEL))
 }
 
 /// `DialogBoxIndirectParamW(hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam)`
@@ -14429,6 +14418,7 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 
     service_mas_audio(ctx.kernel);
     ctx.kernel.sync_power_notifications();
+    crate::shell::service(ctx);
     let handle = ctx.arg_u32(0)?;
     let timeout = ctx.arg_u32(1)?;
 
@@ -15848,27 +15838,10 @@ fn get_system_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     if p == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let total_secs = now_ms / 1000;
-    let ms = (now_ms % 1000) as u16;
-    let secs = (total_secs % 60) as u16;
-    let mins = ((total_secs / 60) % 60) as u16;
-    let hours = ((total_secs / 3600) % 24) as u16;
-    // We don't bother with proper civil-calendar conversion: most
-    // games only care that the fields look plausible (non-zero year,
-    // month in 1..=12, day in 1..=31). 2026-01-01 is a fine fake.
-    let mut buf = [0u8; 16];
-    buf[0..2].copy_from_slice(&2026u16.to_le_bytes()); // wYear
-    buf[2..4].copy_from_slice(&1u16.to_le_bytes()); // wMonth
-    buf[4..6].copy_from_slice(&4u16.to_le_bytes()); // wDayOfWeek (Thu)
-    buf[6..8].copy_from_slice(&1u16.to_le_bytes()); // wDay
-    buf[8..10].copy_from_slice(&hours.to_le_bytes());
-    buf[10..12].copy_from_slice(&mins.to_le_bytes());
-    buf[12..14].copy_from_slice(&secs.to_le_bytes());
-    buf[14..16].copy_from_slice(&ms.to_le_bytes());
+    let buf: Vec<u8> = crate::datetime::now()
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     ctx.cpu.write_mem(p, &buf)?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -16865,7 +16838,7 @@ fn register_window_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     Ok(DispatchOutcome::ReturnedR0(id))
 }
 
-fn registered_window_message_id(name: &str) -> u32 {
+pub(crate) fn registered_window_message_id(name: &str) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in name.as_bytes() {
         hash ^= u32::from(*byte);
@@ -18970,7 +18943,7 @@ fn file_time_to_system_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
 
 /// Howard Hinnant's days_from_civil — `days since 1970-01-01` for
 /// any (y, m, d) in the proleptic Gregorian calendar.
-fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
+pub(crate) fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y } as i64;
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -18980,7 +18953,7 @@ fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
 }
 
 /// Inverse of [`days_from_civil`].
-fn civil_from_days(z: i64) -> (i32, i32, i32) {
+pub(crate) fn civil_from_days(z: i64) -> (i32, i32, i32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
@@ -21555,6 +21528,8 @@ mod tests {
             create_frame: None,
             create_stage: pocket_kernel::CreateStage::Idle,
             dialog_frame: None,
+            accelerator_frames: Vec::new(),
+            shell_status: None,
             status_bar: None,
             message_frames: Default::default(),
             controls: Default::default(),

@@ -98,6 +98,7 @@ pub struct State {
     backend: Option<Arc<dyn Backend>>,
     colors_endpoint: Option<ColorsEndpoint>,
     gprs_enabled: Option<bool>,
+    pub gprs_connected: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -112,6 +113,7 @@ impl State {
             backend,
             colors_endpoint: None,
             gprs_enabled: None,
+            gprs_connected: false,
         }
     }
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {

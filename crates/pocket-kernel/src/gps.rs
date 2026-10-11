@@ -62,6 +62,9 @@ impl Service {
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
         Self::new(Some(backend))
     }
+    pub fn is_enabled(&self) -> bool {
+        self.0.allowed.load(Ordering::Acquire)
+    }
     pub fn set_allowed(&self, allowed: bool) {
         self.0.allowed.store(allowed, Ordering::Release);
         if !allowed {

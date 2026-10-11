@@ -1098,6 +1098,8 @@ pub struct KernelState {
     /// dialog HWND is only returned to the caller once the callback
     /// unwinds, otherwise the caller stores the callback's `BOOL`.
     pub dialog_frame: Option<GuestCallFrame>,
+    pub accelerator_frames: Vec<(usize, u32, GuestCallFrame)>,
+    pub shell_status: Option<u32>,
     /// Per-thread DispatchMessageW continuations. A worker may run while
     /// another thread is inside WndProc; its callback return must restore
     /// only its own arguments/stack, never another thread's continuation.
@@ -1388,6 +1390,8 @@ impl KernelState {
             }
         }
         if !retired.is_empty() {
+            self.accelerator_frames
+                .retain(|(thread, _, _)| !retired.contains(thread));
             let pid = self.object_handles.process_id();
             self.mutexes.retain(|_, mutex| {
                 if mutex
@@ -1561,6 +1565,9 @@ impl KernelState {
             }
         }
         self.message_frames.clear();
+        self.accelerator_frames.clear();
+        self.shell_status = None;
+        self.internet.gprs_connected = false;
         self.sync_transferred_handles();
         let pid = self.object_handles.process_id();
         self.mutexes.retain(|_, mutex| {
@@ -3101,6 +3108,8 @@ impl Process {
                 create_frame: None,
                 create_stage: CreateStage::Idle,
                 dialog_frame: None,
+                accelerator_frames: Vec::new(),
+                shell_status: None,
                 message_frames: Default::default(),
                 status_bar: None,
                 controls: Default::default(),

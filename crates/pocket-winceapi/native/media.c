@@ -48,7 +48,7 @@ PocketMedia *pocket_media_open(const char *path, int video, int width, int heigh
     m->width = width;
     m->height = height;
     m->first_pts = AV_NOPTS_VALUE;
-    if (video && (width <= 0 || height <= 0 || width > 8192 || height > 8192)) {
+    if (video && (width < 0 || height < 0 || width > 8192 || height > 8192 || ((width == 0) != (height == 0)))) {
         ret = AVERROR(EINVAL); goto fail;
     }
     ret = avformat_open_input(&m->format, path, NULL, NULL);
@@ -57,9 +57,11 @@ PocketMedia *pocket_media_open(const char *path, int video, int width, int heigh
     if (ret < 0) goto fail;
     ret = av_find_best_stream(m->format, video ? AVMEDIA_TYPE_VIDEO : AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
     /* A movie without audio is valid. Distinguish it from decode failures. */
-    if (!video && ret == AVERROR_STREAM_NOT_FOUND) { ret = 1; goto fail; }
+    if (ret == AVERROR_STREAM_NOT_FOUND) { ret = 1; goto fail; }
     if (ret < 0) goto fail;
     m->stream = ret;
+    m->first_pts = m->format->streams[m->stream]->start_time;
+    if (m->first_pts == AV_NOPTS_VALUE) m->first_pts = 0;
     m->codec = avcodec_alloc_context3(codec);
     m->packet = av_packet_alloc();
     m->frame = av_frame_alloc();
@@ -68,6 +70,10 @@ PocketMedia *pocket_media_open(const char *path, int video, int width, int heigh
     if (ret < 0) goto fail;
     ret = avcodec_open2(m->codec, codec, NULL);
     if (ret < 0) goto fail;
+    if (video && width == 0) {
+        m->width = m->codec->width; m->height = m->codec->height;
+        if (m->width <= 0 || m->height <= 0 || m->width > 8192 || m->height > 8192) { ret = AVERROR(EINVAL); goto fail; }
+    }
     if (!video) {
         AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
         ret = swr_alloc_set_opts2(&m->resample, &stereo, AV_SAMPLE_FMT_S16, 44100,
@@ -82,6 +88,31 @@ fail:
     *error = ret;
     pocket_media_close(m);
     return NULL;
+}
+
+/* Metadata and seeking retain single-owner decoder semantics. */
+void pocket_media_info(PocketMedia *m, double *duration, int *width, int *height, double *interval, int64_t *bitrate) {
+    AVStream *stream = m->format->streams[m->stream];
+    AVRational rate = av_guess_frame_rate(m->format, stream, NULL);
+    *duration = m->format->duration != AV_NOPTS_VALUE ? (double)m->format->duration / AV_TIME_BASE :
+        (stream->duration != AV_NOPTS_VALUE ? stream->duration * av_q2d(stream->time_base) : 0);
+    *width = m->codec->width; *height = m->codec->height;
+    *interval = rate.num > 0 && rate.den > 0 ? av_q2d(av_inv_q(rate)) : 1.0 / 30.0;
+    *bitrate = m->format->bit_rate;
+}
+int pocket_media_seek(PocketMedia *m, double seconds) {
+    AVStream *stream = m->format->streams[m->stream];
+    int64_t target;
+    int ret;
+    if (seconds < 0 || seconds > (double)INT64_MAX / AV_TIME_BASE) return AVERROR(EINVAL);
+    target = av_rescale_q((int64_t)(seconds * AV_TIME_BASE), AV_TIME_BASE_Q, stream->time_base) + m->first_pts;
+    ret = av_seek_frame(m->format, m->stream, target, AVSEEK_FLAG_BACKWARD);
+    if (ret < 0) return ret;
+    avcodec_flush_buffers(m->codec);
+    av_packet_unref(m->packet); av_frame_unref(m->frame);
+    m->draining = 0; m->frame_count = (int64_t)(seconds * 30);
+    if (m->resample) { swr_close(m->resample); ret = swr_init(m->resample); }
+    return ret;
 }
 
 static int audio_output(PocketMedia *m, const uint8_t **input, int count, const uint8_t **data, int *length) {

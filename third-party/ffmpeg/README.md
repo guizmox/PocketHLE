@@ -75,3 +75,5 @@ The FFmpeg dependency is LGPL; do not describe the complete combined executable
 as containing only MIT/Apache code. See https://ffmpeg.org/legal.html and the
 license text for the full terms. The decoder does not introduce any FFmpeg DLL
 dependency; ordinary operating-system/runtime dependencies remain unchanged.
+
+DirectShow now reads native metadata and supports seeking through the same opaque C wrapper. The source archive and build configuration are unchanged; rebuild the frontend to recompile native/media.c.
