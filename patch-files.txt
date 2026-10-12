@@ -1,10 +1,14 @@
+Cargo.lock
 README-Feature-Delivery.txt
+crates/pocket-library/Cargo.toml
 crates/pocket-library/src/analysis.rs
 crates/pocket-library/src/lib.rs
 docs/AGENTS.md
 frontends/pocket-android-jni/src/runner.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameAdapter.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/SettingsActivity.kt
+frontends/pocket-android/app/src/main/res/layout/item_game_grid.xml
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs
 patch-files.txt

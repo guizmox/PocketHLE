@@ -1516,10 +1516,31 @@ impl Library {
         }
     }
 
+    fn is_demo_card_entry(&self, entry: &GameEntry) -> bool {
+        let exe = entry.executable_path(&self.root);
+        exe.parent()
+            .and_then(|p| fs::read_dir(p).ok())
+            .is_some_and(|files| {
+                files.flatten().any(|f| {
+                    f.file_name()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("multiboot.hog")
+                })
+            })
+    }
+
     /// Persist `entry` and return a stable reference. Replaces any
     /// existing game with the same id.
-    fn commit_entry(&mut self, id: &str, entry: GameEntry) -> Result<&GameEntry, LibraryError> {
+    fn commit_entry(&mut self, id: &str, mut entry: GameEntry) -> Result<&GameEntry, LibraryError> {
         let game_dir = self.root.join("games").join(id);
+        if is_gizmondo_game(&entry, &self.root) && !self.is_demo_card_entry(&entry) {
+            if let Some((name, icon)) =
+                cartridge_artwork(&game_dir, &entry.executable_path(&self.root))
+            {
+                entry.display_name = name;
+                entry.icon = Some(icon);
+            }
+        }
         // Persist a per-game manifest so the game directory is
         // self-describing.
         write_json(&game_dir.join("game.json"), &entry)?;
@@ -2894,6 +2915,23 @@ mod tests {
     }
 
     #[test]
+    fn real_cartridge_bmp_supplies_name_and_png_and_invalid_bmp_falls_back() {
+        let root = tmpdir("cartridge_bmp");
+        let card = root.join("GZGA200001");
+        fs::create_dir_all(&card).unwrap();
+        let exe = card.join("autorun.exe");
+        write_pe_importing(&exe, &[]);
+        image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30]))
+            .save_with_format(card.join("My Game.bmp"), image::ImageFormat::Bmp)
+            .unwrap();
+        assert_eq!(cartridge_artwork(&root, &exe).unwrap().0, "My Game");
+        assert!(root.join("cartridge.png").is_file());
+        fs::write(card.join("My Game.bmp"), b"bad bitmap").unwrap();
+        assert!(cartridge_artwork(&root, &exe).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn demo_card_detection_requires_supported_sibling_pair() {
         let root = tmpdir("demo_card_pair");
         let launcher = root.join("autorun.exe");
@@ -3278,4 +3316,49 @@ mod simulated_gps_tests {
         c.gps_fixed_longitude = 34.;
         assert_eq!(c.simulated_gps_position(), Some((12., 34.)));
     }
+}
+
+/// Use a real label BMP beside the game binary. Reject oversized inputs before decoding.
+fn cartridge_artwork(game_dir: &Path, exe: &Path) -> Option<(String, PathBuf)> {
+    let mut candidates: Vec<_> = fs::read_dir(exe.parent()?)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("bmp"))
+        })
+        .collect();
+    candidates.sort();
+    for path in candidates {
+        if fs::metadata(&path).ok()?.len() > 16 * 1024 * 1024 {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        if bytes.len() < 26 || &bytes[..2] != b"BM" {
+            continue;
+        }
+        let width = i32::from_le_bytes(bytes[18..22].try_into().ok()?).unsigned_abs();
+        let height = i32::from_le_bytes(bytes[22..26].try_into().ok()?).unsigned_abs();
+        if width == 0 || height == 0 || width > 2048 || height > 2048 {
+            continue;
+        }
+        let Ok(image) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Bmp) else {
+            continue;
+        };
+        if image
+            .save_with_format(game_dir.join("cartridge.png"), image::ImageFormat::Png)
+            .is_err()
+        {
+            continue;
+        }
+        let name = path.file_stem()?.to_string_lossy().trim().to_owned();
+        if !name.is_empty() {
+            return Some((name, PathBuf::from("cartridge.png")));
+        }
+    }
+    None
 }

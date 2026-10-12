@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="196dp" android:layout_margin="6dp" android:clickable="true" android:focusable="true" android:foreground="?attr/selectableItemBackground">
  <com.pockethle.app.SdCardTile android:layout_width="match_parent" android:layout_height="match_parent"/>
- <LinearLayout android:layout_width="match_parent" android:layout_height="88dp" android:layout_gravity="center" android:layout_marginHorizontal="16dp" android:layout_marginTop="12dp" android:padding="8dp" android:orientation="vertical" android:gravity="center" android:background="#e8eef7">
+ <ImageView android:id="@+id/game_artwork" android:layout_width="match_parent" android:layout_height="88dp" android:layout_gravity="center" android:layout_marginHorizontal="16dp" android:layout_marginTop="12dp" android:scaleType="fitCenter" android:visibility="gone" android:contentDescription="Game cartridge artwork"/>
+ <LinearLayout android:id="@+id/game_label" android:layout_width="match_parent" android:layout_height="88dp" android:layout_gravity="center" android:layout_marginHorizontal="16dp" android:layout_marginTop="12dp" android:padding="8dp" android:orientation="vertical" android:gravity="center" android:background="#e8eef7">
   <TextView android:id="@+id/game_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:textColor="#111a28" android:textSize="15sp" android:textStyle="bold" android:maxLines="3" android:ellipsize="end"/>
   <TextView android:id="@+id/game_publisher" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:textColor="#526176" android:textSize="10sp" android:layout_marginTop="6dp"/>
  </LinearLayout>

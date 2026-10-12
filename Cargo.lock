@@ -2963,6 +2963,7 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "directories",
+ "image 0.25.10",
  "log",
  "newtua-nsis",
  "png 0.17.16",

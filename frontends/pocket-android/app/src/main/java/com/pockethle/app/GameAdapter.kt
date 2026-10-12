@@ -51,6 +51,13 @@ class GameAdapter(
 
         fun bind(entry: GameEntry) {
             title.text = entry.displayName
+            val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
+            val label = itemView.findViewById<View>(R.id.game_label)
+            val bitmap = if (entry.icon == "cartridge.png") BitmapFactory.decodeFile(File(libraryRoot,"games/${entry.id}/cartridge.png").absolutePath) else null
+            artwork.setImageBitmap(bitmap)
+            artwork.visibility = if (bitmap != null) View.VISIBLE else View.GONE
+            label.visibility = if (bitmap != null) View.GONE else View.VISIBLE
+            itemView.contentDescription = entry.displayName
             publisherLabel.text = if (NativeBridge.isGizmondoGame(libraryRoot, entry.id)) "GIZMONDO" else "POCKET PC"
             itemView.setOnClickListener { onRun(entry) }
             moreBtn.setOnClickListener { anchor -> showOverflowMenu(anchor, entry) }

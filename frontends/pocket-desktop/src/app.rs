@@ -288,7 +288,13 @@ fn detail_section(ui: &mut egui::Ui, title: &str, rows: &[(String, String)]) {
     ui.add_space(5.0);
 }
 
-fn draw_gizmondo_sd(ui: &egui::Ui, area: Rect, title: &str, title_id: Option<&str>) {
+fn draw_gizmondo_sd(
+    ui: &egui::Ui,
+    area: Rect,
+    title: &str,
+    title_id: Option<&str>,
+    artwork: Option<egui::TextureId>,
+) {
     let p = ui.painter();
     let h = (area.height() - 8.0).min(118.0);
     let w = h * 0.72;
@@ -340,6 +346,15 @@ fn draw_gizmondo_sd(ui: &egui::Ui, area: Rect, title: &str, title_id: Option<&st
 
     let id = title_id.unwrap_or("");
     let content = Rect::from_min_max(label.left_top(), Pos2::new(label.right(), band.top()));
+    if let Some(texture) = artwork {
+        p.image(
+            texture,
+            content,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        return;
+    }
     let shown = if title.trim().is_empty() { id } else { title };
     let title_y = content.top() + content.height() * 0.38;
     // Keep the title strictly inside the white label. Multi-word titles use two
@@ -1102,7 +1117,38 @@ impl PocketLauncher {
         let giz = is_gizmondo_game(game, self.library.root());
         if giz {
             let title_id = detect_gizmondo_title_id(&game.extracted_dir(self.library.root()));
-            draw_gizmondo_sd(ui, icon_rect, &game.display_name, title_id.as_deref());
+            let artwork = if game.icon.as_deref() == Some(std::path::Path::new("cartridge.png")) {
+                if let Some(path) = game.icon_path(self.library.root()) {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        if let Ok(image) = load_image_bytes(&bytes) {
+                            let texture =
+                                self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
+                                    ui.ctx().load_texture(
+                                        format!("cartridge-{}", game.id),
+                                        image,
+                                        egui::TextureOptions::LINEAR,
+                                    )
+                                });
+                            Some(texture.id())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            draw_gizmondo_sd(
+                ui,
+                icon_rect,
+                &game.display_name,
+                title_id.as_deref(),
+                artwork,
+            );
         } else {
             let mut icon_ui = ui.child_ui(
                 icon_rect,
