@@ -1,7 +1,8 @@
 //! Static title suggestions from the maintainer's Liste_Jeux.xlsx (Builds/Temp),
 //! supplemented with exact GZGA200 identifiers from the supplied MultiBoot launcher.
-//! GZGA900056/900069 are user-requested local alternative-version IDs.
-//! IDs identify games, not individual E3/retail builds. No runtime network lookup.
+//! Local 800/900 IDs carry user-requested alternative-version labels.
+//! Official IDs identify titles; local 800/900 IDs distinguish supplied variants.
+//! No runtime network lookup.
 use std::{collections::BTreeMap, sync::OnceLock};
 static TITLES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
@@ -31,10 +32,19 @@ mod tests {
         assert_eq!(lookup("GZGA200099"), Some("Supernaturals"));
         assert_eq!(lookup("GZGA280045"), Some("Ball Busters"));
         assert_eq!(lookup("GZGA200069"), Some("Catapult"));
-        assert_eq!(lookup("GZGA900056"), Some("Agaju (alternative)"));
-        assert_eq!(lookup("GZGA900069"), Some("Catapult (alternative)"));
+        assert_eq!(lookup("GZGA900056"), Some("Agaju (E3 demo)"));
+        assert_eq!(lookup("GZGA900069"), Some("Catapult (may 2005)"));
+        assert_eq!(lookup("GZGA800056"), Some("Agaju (oct 2005)"));
+        assert_eq!(lookup("GZGA200098"), Some("Alien Hominid"));
+        assert_eq!(lookup("GZGA900016"), Some("Chicane (licensed cars)"));
+        assert_eq!(lookup("GZGA900015"), Some("Colors (early demo)"));
         assert_eq!(lookup("GZGA200030"), Some("Motocross 2005"));
         assert_eq!(lookup("GZGA200041"), Some("Furious Phil"));
+        assert_eq!(
+            lookup("GZGA900013"),
+            Some("Richard Burns Rally (april 2005)")
+        );
+        assert_eq!(lookup("GZGA900049"), Some("Hit & Myth (may 2005)"));
         assert_eq!(lookup("GZGA200007"), None);
         assert_eq!(lookup("GZGA222222"), None);
         assert_eq!(lookup("GZGA22222"), None);

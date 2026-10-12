@@ -257,7 +257,7 @@ fn run_game_to_completion(
     state: &Arc<SessionState>,
     input_rx: Receiver<InputCommand>,
 ) -> String {
-    let card_root = entry.extracted_dir(library_root);
+    let card_root = entry.gizmondo_card_root(library_root);
     let mut hook = SessionHook::new(Arc::clone(state), input_rx);
     run_process(
         library_root,

@@ -50,6 +50,7 @@
   "GZGA200058": "POD",
   "GZGA200060": "Alien Hominid",
   "GZGA200069": "Catapult",
+  "GZGA200098": "Alien Hominid",
   "GZGA200099": "Supernaturals",
   "GZGA270010": "Fathammer Classics",
   "GZGA270011": "Sega Classics Pack",
@@ -106,6 +107,11 @@
   "GZGA270065": "Bolox",
   "GZGA270069": "Catapult",
   "GZGA280045": "Ball Busters",
-  "GZGA900056": "Agaju (alternative)",
-  "GZGA900069": "Catapult (alternative)"
+  "GZGA800056": "Agaju (oct 2005)",
+  "GZGA900013": "Richard Burns Rally (april 2005)",
+  "GZGA900015": "Colors (early demo)",
+  "GZGA900016": "Chicane (licensed cars)",
+  "GZGA900049": "Hit & Myth (may 2005)",
+  "GZGA900056": "Agaju (E3 demo)",
+  "GZGA900069": "Catapult (may 2005)"
 }

@@ -222,6 +222,38 @@ impl GameEntry {
         library_root.join(self.relative_dir()).join("extracted")
     }
 
+    /// A wrapped MultiBoot ZIP keeps its launcher and GZGA directories inside
+    /// one wrapper. Mount that directory as the card, not the extraction root:
+    /// rooted multiboot.hog reads must not rely on cross-directory fallback.
+    pub fn gizmondo_card_root(&self, library_root: &Path) -> PathBuf {
+        let extracted = self.extracted_dir(library_root);
+        if self.source_cab.starts_with("demo-card:") {
+            return extracted;
+        }
+        let executable = self.executable_path(library_root);
+        let Some(parent) = executable.parent() else {
+            return extracted;
+        };
+        if parent.starts_with(&extracted)
+            && executable
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("autorun.exe"))
+            && fs::read_dir(parent).is_ok_and(|entries| {
+                entries.flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("multiboot.hog")
+                        && entry.file_type().is_ok_and(|kind| kind.is_file())
+                })
+            })
+        {
+            parent.to_path_buf()
+        } else {
+            extracted
+        }
+    }
+
     pub fn save_dir(&self, library_root: &Path) -> PathBuf {
         save_data::save_dir_for(library_root, &self.id)
     }
@@ -3029,6 +3061,50 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, &buf).unwrap();
+    }
+
+    #[test]
+    fn wrapped_launcher_card_root_preserves_shared_card_layout_and_split_titles() {
+        let root = tempfile::tempdir().unwrap();
+        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
+            "id":"card", "display_name":"Demo Card", "source_cab":"card.zip",
+            "executable":"extracted/14 - Complete Set of Games/autorun.exe", "imported_at":0
+        }))
+        .unwrap();
+        let card = game
+            .executable_path(root.path())
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::create_dir_all(card.join("GZGA900016")).unwrap();
+        fs::write(card.join("MULTIBOOT.HOG"), b"WART3.00").unwrap();
+        assert_eq!(game.gizmondo_card_root(root.path()), card);
+        assert!(game
+            .gizmondo_card_root(root.path())
+            .join("GZGA900016")
+            .is_dir());
+        fs::remove_file(card.join("MULTIBOOT.HOG")).unwrap();
+        assert_eq!(
+            game.gizmondo_card_root(root.path()),
+            game.extracted_dir(root.path())
+        );
+        fs::write(card.join("multiboot.hog"), b"WART3.00").unwrap();
+        game.source_cab = "demo-card:card.zip".into();
+        assert_eq!(
+            game.gizmondo_card_root(root.path()),
+            game.extracted_dir(root.path())
+        );
+        game.source_cab = "flat.zip".into();
+        game.executable = "extracted/autorun.exe".into();
+        fs::write(
+            game.extracted_dir(root.path()).join("multiboot.hog"),
+            b"WART3.00",
+        )
+        .unwrap();
+        assert_eq!(
+            game.gizmondo_card_root(root.path()),
+            game.extracted_dir(root.path())
+        );
     }
 
     #[test]

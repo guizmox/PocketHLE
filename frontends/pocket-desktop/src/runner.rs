@@ -68,7 +68,7 @@ impl Runner {
     ) -> RunOutcome {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
-        let card_root = game.extracted_dir(&library_root);
+        let card_root = game.gizmondo_card_root(&library_root);
         self.run_process(
             &library_root,
             &game,

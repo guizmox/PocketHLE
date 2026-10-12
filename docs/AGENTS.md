@@ -2697,7 +2697,7 @@ unchanged, including exact GZGA270 and GZGA280 entries; no prefix substitution
 is inferred. Both known Colors IDs enable the global text-language preference.
 
 User-requested local alternative-version catalogue IDs are GZGA900056 for
-Agaju (alternative) and GZGA900069 for Catapult (alternative). These are custom
+Agaju (E3 demo) and GZGA900069 for Catapult (may 2005). These are custom
 launcher labels, not inferred official title IDs or patches to game binaries.
 
 The maintainer confirms GZGA200069 as Catapult. That exact ID is registered;
@@ -2708,3 +2708,23 @@ Analysis uses the selected executable/card directory marker via the shared title
 ID helper. Binary metadata/hardware inspection remains available, but neither
 binary content nor BMP filenames supply a game title. Existing user-edited
 display names are retained; unknown IDs keep the ordinary import fallback.
+
+
+## Wrapped MultiBoot card mounts
+
+Desktop/Android initial sessions use GameEntry::gizmondo_card_root: for a selected
+non-split autorun.exe with sibling multiboot.hog inside the extraction tree, the
+launcher's own directory is the SD/Storage Card root. Rooted resource reads and
+root-level GZGA enumeration therefore see the real card even inside a ZIP wrapper.
+Children inherit that card root through the existing launch context. Split game
+entries retain their original extraction-root mapping. This fixes the reproduced
+localisation/english.loc NULL-file crash at 0x21db8 (LR 0x175c4) with the supplied
+launcher in a "14 - Complete Set of Games" wrapper, without relaxing VFS path
+isolation or adding a guest NULL-handle workaround.
+
+Catalogue additions: local GZGA800056 = Agaju (oct 2005), GZGA900016 = Chicane
+(alternative), GZGA900015 = Colors (early demo); maintainer GZGA200098 = Alien Hominid.
+
+Local GZGA900013 labels the user-supplied Richard Burns Rally (april 2005) variant.
+
+Local GZGA900049 labels the user-supplied Hit & Myth (may 2005) variant.
