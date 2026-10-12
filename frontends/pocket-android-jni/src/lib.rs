@@ -56,7 +56,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_banner<'local>(
     _class: JClass<'local>,
 ) -> jstring {
     init_logger();
-    let banner = format!("PocketHLE v{} (Android)", env!("CARGO_PKG_VERSION"));
+    let banner = format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE", env!("CARGO_PKG_VERSION"));
     new_jstring(&env, banner)
 }
 
@@ -68,7 +68,7 @@ pub extern "system" fn Java_com_pockethle_app_MainActivity_banner<'local>(
     init_logger();
     new_jstring(
         &env,
-        format!("PocketHLE v{} (Android)", env!("CARGO_PKG_VERSION")),
+        format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE", env!("CARGO_PKG_VERSION")),
     )
 }
 

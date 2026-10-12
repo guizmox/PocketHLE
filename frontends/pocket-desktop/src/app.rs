@@ -870,6 +870,12 @@ impl PocketLauncher {
                 }
             });
             ui.menu_button("Settings", |ui| self.ui_settings_menu(ui));
+            ui.menu_button("About", |ui| {
+                ui.label(format!("PocketHLE v{}",env!("CARGO_PKG_VERSION")));
+                ui.hyperlink_to("PocketHLE fork — guizmox", "https://github.com/guizmox/PocketHLE");
+                ui.hyperlink_to("Original project", "https://github.com/j92580498-max/PocketHLE");
+                ui.label("Windows and Linux share this desktop frontend.");
+            });
             let can_screenshot = self.screen==Screen::Run && self.last_frame_snapshot.is_some();
             if ui
                 .add_enabled(can_screenshot, egui::Button::new("Screenshot (F10)"))
@@ -1430,8 +1436,8 @@ impl PocketLauncher {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the host location service where available.");
         {
-            ui.checkbox(&mut draft.gps_fixed_enabled, "Fixed GPS position (simulated, next launch)")
-                .on_hover_text("Use this position instead of Windows location, even when location permission is unavailable.");
+            ui.checkbox(&mut draft.gps_fixed_enabled, "Simulated GPS position (next launch)")
+                .on_hover_text("Use a simulated position instead of host location.");
             ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
                 egui::ComboBox::from_id_source("simulated_gps_mode")
                     .selected_text(if draft.gps_fixed_random { "Near Eiffel Tower (within 1 km)" } else { "Manual coordinates" })
@@ -1449,14 +1455,14 @@ impl PocketLauncher {
                     ui.add(egui::DragValue::new(&mut draft.gps_fixed_longitude).speed(0.0001).clamp_range(-180.0..=180.0).max_decimals(7));
                 });
                 ui.label("Decimal coordinates: north/east positive, south/west negative.");
-                ui.label("The game will use this fixed position instead of Windows location.");
+                ui.label("The game will use this simulated position instead of host location.");
             });
         }
         ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
             .on_hover_text("Use the PC Internet connection for the Gizmondo data connection. Takes effect on the next launch.");
         ui.label("Colors multiplayer server (next launch)");
         ui.text_edit_singleline(&mut draft.colors_server_url)
-            .on_hover_text("Example: http://192.168.1.10:8080. Leave empty for the original server.");
+            .on_hover_text("Example: http://192.168.1.10:8080. Leave empty to restore the public Colors server on the next load.");
         ui.label("Colors player ID (optional)");
         ui.text_edit_singleline(&mut draft.colors_terminal_id)
             .on_hover_text("Leave empty to keep this installation's persistent device identity.");

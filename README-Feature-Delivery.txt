@@ -1,6 +1,6 @@
-PocketHLE cumulative delivery 07: Compatibility
+PocketHLE cumulative delivery 08: Credits
 Base: GitHub main c8e2d25 (2026-10-12).
-Includes deliveries 01 through 07. Full source files, not a git patch.
+Includes deliveries 01 through 08. Full source files, not a git patch.
 Apply in increasing order, or apply this cumulative ZIP directly to the base.
 R2 replaces the original 05 implementation and is cumulative with unchanged 01-04.
 If you already applied 06/07/08, apply the matching R2 or the latest 08-R2;
@@ -8,11 +8,11 @@ do not apply 05-R2 over a later feature delivery unless you intend to revert it.
 Do not apply an earlier ZIP after a later one: shared files would be reverted.
 
 New feature check:
-Review both compatibility tables. OK is maintainer-reported; historical captures in proof/ are unchanged. Add further collected titles when their binaries/tests are available.
+Check About on Windows/Linux and Android includes the guizmox fork URL and preserves original attribution.
 
 Windows CMD (replace NN with this delivery number):
 cd /d C:\Users\gtristant\source\repos\PocketHLE
-powershell -NoProfile -Command "Expand-Archive -LiteralPath (Join-Path $env:USERPROFILE 'Downloads\PocketHLE-07-Compatibility-R3.zip') -DestinationPath '.' -Force"
+powershell -NoProfile -Command "Expand-Archive -LiteralPath (Join-Path $env:USERPROFILE 'Downloads\PocketHLE-08-Credits-R3.zip') -DestinationPath '.' -Force"
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 powershell -NoProfile -Command "Get-Content 'removed-files.txt' | ForEach-Object { if (Test-Path -LiteralPath $_) { Remove-Item -LiteralPath $_ } }"
 cargo +1.90.0 fmt --all -- --check
