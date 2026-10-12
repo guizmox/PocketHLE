@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 # PocketHLE
 
 <p align="center">
-  <img src="./frontends/pocket-desktop/assets/pockethle-logo.png" width="25%" alt="PocketHLE logo" />
+  <img src="./frontends/pocket-desktop/assets/pockethle_logo.png" width="25%" alt="PocketHLE logo" />
 </p>
 
 <p align="center">

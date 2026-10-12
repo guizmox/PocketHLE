@@ -114,6 +114,7 @@ class GameActivity : AppCompatActivity() {
     private val pollTick = object : Runnable {
         override fun run() {
             if (session == 0L) return
+            updateCameraOrientation()
             val raw = NativeBridge.nativePollFrame(session)
             if (raw != null) {
                 decodeFrame(raw)?.let { frame ->
@@ -225,6 +226,7 @@ class GameActivity : AppCompatActivity() {
         }
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
+        updateCameraOrientation()
         GpsHost.initialize(this)
         BatteryHost.initialize(this)
         DeviceStatusHost.initialize(this)
@@ -267,8 +269,23 @@ class GameActivity : AppCompatActivity() {
      * pad the game area above the controls in portrait, let the picture
      * run full-height under them in landscape.
      */
+    @Suppress("DEPRECATION")
+    private fun updateCameraOrientation() {
+        // Configuration callbacks alone can miss 180-degree landscape changes.
+        // Reuse the existing UI poll; CameraHost stores degrees, never an Activity.
+        val rotation = windowManager.defaultDisplay.rotation
+        val degrees = when (rotation) {
+            android.view.Surface.ROTATION_90 -> 90
+            android.view.Surface.ROTATION_180 -> 180
+            android.view.Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        CameraHost.setDisplayRotation(if (gizmondoGame) degrees else null)
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        updateCameraOrientation()
         if (gizmondoGame) hideSystemBars() else updatePocketPcLayout()
         // Re-submit the last frame so the picture is re-letterboxed for
         // the new window shape even if the guest is between frames. This
@@ -285,6 +302,7 @@ class GameActivity : AppCompatActivity() {
         activityResumed = true
         if (::glRenderer.isInitialized) fpsMeter.reset(glRenderer.presentedFrameCount, System.nanoTime())
         if (::surface.isInitialized) surface.onResume()
+        updateCameraOrientation()
         CameraHost.resume()
         GpsHost.resume()
         VibrationHost.resume()

@@ -26,7 +26,8 @@ initialize reopens the gate for the next game, without reusing old session IDs.
 Virtual-button feedback is skipped while a game waveform is active so it cannot
 replace an indefinitely repeating game vibration. Hardware absence and native
 failures return real LastError (50/5/21), not false success. Successful APIs preserve
-LastError. Windows currently has a virtual NLED state, no physical motor backend.
+LastError. Desktop uses the SDL controller vibration backend when a supported controller
+is connected; unsupported hardware retains explicit errors.
 
 Rust regressions cover ABI, sharing/duplication, LastError, output sizes, waveform
 conversion and 100 activation/stop releases including failed starts and teardown.
@@ -206,7 +207,7 @@ frontends/  pocket-cli      pocket-desktop (egui)   pocket-android-jni
                    |            run loop)
                    |              |      \
             pocket-gles     pocket-cpu    pocket-pe --- pocket-cab
-            (software GL)   (Unicorn)     (PE32 loader)  (installers)
+            (GL backends)   (Unicorn)     (PE32 loader)  (installers)
 ```
 
 | Crate | Responsibility |
@@ -216,7 +217,7 @@ frontends/  pocket-cli      pocket-desktop (egui)   pocket-android-jni
 | `pocket-cpu` | `Cpu` trait over two backends: `stub` (trace-only) and `unicorn` (Unicorn Engine 2). |
 | `pocket-kernel` | The address space, `KernelState`, thunk/IAT machinery, the run loop, and host subsystems: VFS, registry, framebuffer, GDI, GAPI, audio, fonts, message boxes, native thunks. |
 | `pocket-winceapi` | The guest-facing API surface. One module per emulated DLL; registers handlers into `WinCeDispatcher`. |
-| `pocket-gles` | Software OpenGL ES 1.x: geometry, rasterizer, textures, fixed-point and matrix math. Host-side only — knows nothing about guest memory. |
+| `pocket-gles` | OpenGL ES 1.x emulation with software and native GPU backends: geometry, rasterization, textures, fixed-point and matrix math. Host-side only — knows nothing about guest memory. |
 | `pocket-core` | Wires loader + CPU + kernel + dispatcher into an `Emulator` the frontends drive. |
 | `pocket-library` | Game catalog: identifies titles, tracks install state and per-game metadata. |
 
@@ -2057,12 +2058,13 @@ to run; no claim of Windows UI or physical Synology execution.
 
 ## Android frontend and native packaging
 
-Android library/settings activities are portrait; gameplay is immersive sensor-landscape
-with no settings/FPS/backend panels. Stop waits for the native worker and audio readers
+Android library/settings activities are portrait. Gizmondo gameplay uses immersive
+sensor-landscape; PocketPC follows its rotated game dimensions. Settings remain
+outside gameplay, with an optional noninteractive FPS overlay. Stop waits for the native worker and audio readers
 before returning to the library, preserving registry/save flushes and JNI session lifetime.
 Audio generations prevent a paused reader from restarting alongside its replacement.
 The game surface occupies a separate center rectangle; independent multitouch child
-buttons live in side rails. Actions are LEFT, D-pad RIGHT, shoulders above each rail.
+buttons live in side rails. Actions are RIGHT, D-pad LEFT, shoulders above each rail.
 Five traced native function icons match the desktop skin; the fifth sends VK_F11.
 Physical keyboard/controller maps use the shared stable config names and are editable
 in a separate settings submenu. Explicitly empty bindings stay empty. F10 captures
@@ -2623,3 +2625,16 @@ GPU implementation details live in [GPU.md](GPU.md); the user-facing Gizmondo
 guide is [GIZMONDO.md](GIZMONDO.md). [README.md](README.md) indexes documentation.
 Release ZIP notices/manifests are transport metadata, not project documentation.
 Keep tool-local diagnostic READMEs and proof assets with their sources.
+
+## Android CAM1 orientation
+
+Gizmondo camera packets rotate their Y/U/V planes using Camera2 sensor orientation,
+lens facing and current display rotation before preview or tracking consumes them.
+The existing UI poll catches reverse-landscape 180-degree changes even when Android
+does not issue onConfigurationChanged. Each packet snapshots one rotation for all
+planes; mailbox clearing and stale-publication checks prevent old orientation reuse.
+No mirror is introduced and the existing CAM1 row convention is retained.
+Non-Gizmondo sessions retain raw camera orientation. No Activity is stored in
+CameraHost, no new listener/thread/timer or camera reopen is needed for a turn.
+
+Orientation reference: https://developer.android.com/media/camera/camera2/camera-preview

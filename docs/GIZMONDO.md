@@ -53,7 +53,9 @@ HTTP/HTTPS WinINet support is not general TCP/UDP, FTP or every WinCE option.
 Enable CAM1 and grant permission. Windows uses its webcam backend; Android
 prefers the rear camera. The game starts/stops capture through CAM1. Preview is
 RGB565 and capture is I420; unsupported controls report errors. This is separate
-from PocketPC DirectShow camera support. Pause/exit/last-close release capture.
+from PocketPC DirectShow camera support. Pause/exit/last-close release capture. Android Gizmondo camera frames follow
+the screen orientation, including reverse landscape, before the game performs
+tracking. This rotates pixels without adding a mirror.
 [CAMTEST](../tools/camtest/README.md) produces a BMP for checking a real image.
 
 ## Controls, vibration and brightness

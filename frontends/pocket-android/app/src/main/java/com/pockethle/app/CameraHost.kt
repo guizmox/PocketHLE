@@ -24,7 +24,18 @@ object CameraHost {
     private val ids = AtomicInteger(1)
     private val sessions = ConcurrentHashMap<Int, Session>()
     @Volatile private var foreground = false
-    fun initialize(ctx: Context) { context = ctx.applicationContext }
+    // Null preserves the previous raw CAM1 path for non-Gizmondo sessions.
+    private val orientationLock = Any()
+    @Volatile private var displayDegrees: Int? = null
+    fun initialize(ctx: Context) { context = ctx.applicationContext; displayDegrees = null }
+    fun setDisplayRotation(degrees: Int?) {
+        synchronized(orientationLock) {
+            if (displayDegrees == degrees) return
+            displayDegrees = degrees
+            // Serialize clearing with publication, not with the costly plane copy.
+            sessions.values.forEach { it.frame = null }
+        }
+    }
     fun permissions() = arrayOf(Manifest.permission.CAMERA)
     fun resume() { foreground = true; handler.post { sessions.values.forEach { it.start() } } }
     fun pause() { foreground = false; handler.post { sessions.values.forEach { it.release() } } }
@@ -77,7 +88,10 @@ object CameraHost {
                 val list = manager.cameraIdList
                 val id = list.firstOrNull { manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
                     ?: list.firstOrNull() ?: run { error = 2; opening = false; return }
-                val map = manager.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val characteristics = manager.getCameraCharacteristics(id)
+                val sensorDegrees = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+                val frontFacing = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+                val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)?.filter { it.width % 2 == 0 && it.height % 2 == 0 && it.width <= 1920 && it.height <= 1920 }
                 val size = sizes?.firstOrNull { it.width == 640 && it.height == 480 }
                     ?: sizes?.minByOrNull { kotlin.math.abs(it.width * it.height - 640 * 480) }
@@ -92,16 +106,20 @@ object CameraHost {
                                 val crop = image.cropRect
                                 val w = crop.width(); val h = crop.height()
                                 if (w % 2 != 0 || h % 2 != 0) { error = 13; return@setOnImageAvailableListener }
+                                val display = displayDegrees
+                                val turns = display?.let { CameraOrientation.turns(sensorDegrees, it, frontFacing) } ?: 0
                                 val packet = ByteBuffer.allocate(16 + w * h * 3 / 2).order(ByteOrder.LITTLE_ENDIAN)
-                                packet.putInt(w).putInt(h).putLong(++serial)
+                                packet.putInt(if (turns % 2 == 0) w else h)
+                                    .putInt(if (turns % 2 == 0) h else w).putLong(++serial)
                                 for (p in 0..2) {
                                     val plane = image.planes[p]; val divisor = if (p == 0) 1 else 2
-                                    val buffer = plane.buffer; val base = buffer.position()
-                                    for (y in 0 until h / divisor) for (x in 0 until w / divisor) {
-                                        packet.put(buffer.get(base + (crop.top / divisor + y) * plane.rowStride + (crop.left / divisor + x) * plane.pixelStride))
-                                    }
+                                    CameraOrientation.copyPlane(packet, plane.buffer, plane.rowStride,
+                                        plane.pixelStride, crop.left / divisor, crop.top / divisor,
+                                        w / divisor, h / divisor, turns)
                                 }
-                                frame = packet.array()
+                                synchronized(orientationLock) {
+                                    if (valid(gen) && displayDegrees == display) frame = packet.array()
+                                }
                             }
                         } finally { image.close() }
                     } catch (_: Exception) { if (valid(gen)) error = 13 }
