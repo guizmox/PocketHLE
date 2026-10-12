@@ -1322,7 +1322,7 @@ impl Library {
         self.get(id).ok_or(LibraryError::NoExecutable)
     }
 
-    /// ZIP collections without a root launcher/HOG become independent games.
+    /// Root launcher/HOG pairs are demo cards; otherwise import all GZGA games.
     /// Real demo cards retain the existing keep-launcher/split choice.
     pub fn import_zip_entries(
         &mut self,
@@ -1389,7 +1389,7 @@ impl Library {
             return Err(LibraryError::NoExecutable);
         }
 
-        let demo_launcher = demo_card_launcher(&written);
+        let demo_launcher = demo_card_launcher(&written, &extracted_dir);
 
         // ZIPs that are really just installer wrappers around a CAB —
         // recurse so we get the proper PocketPC display metadata
@@ -1639,13 +1639,20 @@ impl Library {
         for path in files.iter().filter(|p| {
             is_guest_exe(p) && Some(p.as_path()) != launcher && p.parent() != Some(card_root)
         }) {
-            let Some(relative) = path.strip_prefix(card_root).ok() else {
-                continue;
+            let parent = if launcher.is_none() {
+                let Some(directory) = gzga_game_directory(path, &extracted) else {
+                    continue;
+                };
+                directory
+            } else {
+                let Some(relative) = path.strip_prefix(card_root).ok() else {
+                    continue;
+                };
+                let Some(first) = relative.components().next() else {
+                    continue;
+                };
+                card_root.join(first.as_os_str())
             };
-            let Some(first) = relative.components().next() else {
-                continue;
-            };
-            let parent = card_root.join(first.as_os_str());
             let preferred = path
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("autorun.exe"));
@@ -1695,6 +1702,9 @@ impl Library {
                 entry.companions.clear();
                 prepared.push(entry);
                 for file in &files {
+                    if launcher.is_none() && is_guest_exe(file) && !file.starts_with(directory) {
+                        continue;
+                    }
                     if Some(file.as_path()) == launcher
                         || file.parent() == Some(card_root)
                             && file.file_name().is_some_and(|n| {
@@ -1741,6 +1751,13 @@ impl Library {
 
     fn is_demo_card_entry(&self, entry: &GameEntry) -> bool {
         let exe = entry.executable_path(&self.root);
+        if !exe
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("autorun.exe"))
+            || exe.parent() != Some(entry.extracted_dir(&self.root).as_path())
+        {
+            return false;
+        }
         exe.parent()
             .and_then(|p| fs::read_dir(p).ok())
             .is_some_and(|files| {
@@ -1748,6 +1765,7 @@ impl Library {
                     f.file_name()
                         .to_string_lossy()
                         .eq_ignore_ascii_case("multiboot.hog")
+                        && f.file_type().is_ok_and(|kind| kind.is_file())
                 })
             })
     }
@@ -2340,47 +2358,29 @@ impl PeSniff {
     }
 }
 
-/// Demo-card archives contain a launcher next to multiboot.hog. Prefer
-/// the unique outermost pair, even when ZIP publishers add a wrapper folder.
-/// Match names case-insensitively, but require a supported executable and
-/// a sibling HOG; unrelated autorun programs retain the ordinary ZIP policy.
-/// A collection root must contain several sibling GZGA executable trees.
-/// Directory names identify collections even when cartridge markers are absent.
-fn gzga_collection_root(files: &[PathBuf], extracted: &Path) -> Option<PathBuf> {
-    let executables: Vec<_> = files.iter().filter(|p| is_guest_exe(p)).collect();
-    let first = executables.first()?;
-    let directory = first
+/// Resolve an executable's nearest GZGA directory inside this extraction.
+fn gzga_game_directory(exe: &Path, extracted: &Path) -> Option<PathBuf> {
+    exe.parent()?
         .ancestors()
-        .skip(1)
         .take_while(|p| p.starts_with(extracted))
         .find(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                n.to_ascii_uppercase().starts_with("GZGA") && is_gizmondo_title_id(n)
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                name.to_ascii_uppercase().starts_with("GZGA") && is_gizmondo_title_id(name)
             })
-        })?;
-    let root = directory.parent()?;
-    if files.iter().any(|p| {
-        p.parent() == Some(root)
-            && p.file_name().is_some_and(|n| {
-                let n = n.to_string_lossy();
-                n.eq_ignore_ascii_case("autorun.exe") || n.eq_ignore_ascii_case("multiboot.hog")
-            })
-    }) {
-        return None;
-    }
-    let mut directories = std::collections::BTreeSet::new();
-    for exe in executables {
-        let relative = exe.strip_prefix(root).ok()?;
-        let name = relative.components().next()?.as_os_str().to_str()?;
-        if !name.to_ascii_uppercase().starts_with("GZGA") || !is_gizmondo_title_id(name) {
-            return None;
-        }
-        directories.insert(name.to_owned());
-    }
-    (directories.len() >= 2).then(|| root.to_path_buf())
+        })
+        .map(Path::to_path_buf)
 }
 
-fn demo_card_launcher(files: &[PathBuf]) -> Option<PathBuf> {
+fn gzga_collection_root(files: &[PathBuf], extracted: &Path) -> Option<PathBuf> {
+    files
+        .iter()
+        .any(|p| is_guest_exe(p) && gzga_game_directory(p, extracted).is_some())
+        .then(|| extracted.to_path_buf())
+}
+
+/// Only the supported autorun.exe/multiboot.hog pair at the ZIP root is
+/// a demo card. A pair inside a GZGA directory belongs to that game.
+fn demo_card_launcher(files: &[PathBuf], extracted: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<&PathBuf> = files
         .iter()
         .filter(|path| {
@@ -2388,6 +2388,7 @@ fn demo_card_launcher(files: &[PathBuf]) -> Option<PathBuf> {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.eq_ignore_ascii_case("autorun.exe"))
                 && is_guest_exe(path)
+                && path.parent() == Some(extracted)
                 && files.iter().any(|hog| {
                     hog.parent() == path.parent()
                         && hog
@@ -3199,7 +3200,7 @@ mod tests {
     #[test]
     fn demo_card_zip_keeps_launcher_over_larger_games_and_nested_cabs() {
         use std::io::Write;
-        for wrapper in ["", "Demo Card/"] {
+        for wrapper in [""] {
             let root = tmpdir("demo_card_zip");
             fs::create_dir_all(&root).unwrap();
             let launcher = root.join("fixture.exe");
@@ -3295,7 +3296,7 @@ mod tests {
         }
         archive.finish().unwrap();
         let entry = library.import_zip(&archive_path).unwrap();
-        assert_eq!(entry.display_name, "Archive Name");
+        assert_eq!(entry.display_name, "Gzga200001");
         assert_eq!(entry.icon, Some(PathBuf::from("cartridge.png")));
         fs::write(card.join("My Game.bmp"), b"bad bitmap").unwrap();
         assert!(cartridge_artwork(&root, &exe).is_none());
@@ -3317,6 +3318,7 @@ mod tests {
                 ("common/data.bin", b"shared".as_slice()),
                 ("GZGA900013/autorun.exe", pe.as_slice()),
                 ("GZGA900013/helper.cab", b"not an installer".as_slice()),
+                ("GZGA900013/multiboot.hog", b"WART3.00".as_slice()),
                 ("gzga900049/bin/game.exe", pe.as_slice()),
                 ("gzga900049/data.bin", b"game2".as_slice()),
             ] {
@@ -3361,7 +3363,7 @@ mod tests {
     }
 
     #[test]
-    fn gzga_collection_detection_does_not_split_root_controls_or_mixed_exes() {
+    fn gzga_collection_imports_games_with_unpaired_root_controls_or_foreign_exes() {
         use std::io::Write;
         for extra in ["autorun.exe", "MULTIBOOT.HOG", "Other/game.exe"] {
             let root = tmpdir("gzga_not_collection");
@@ -3379,8 +3381,8 @@ mod tests {
             }
             archive.finish().unwrap();
             let mut lib = Library::open(root.join("library")).unwrap();
-            assert_eq!(lib.import_zip_entries(&archive_path).unwrap().len(), 1);
-            assert_eq!(lib.games().len(), 1);
+            assert_eq!(lib.import_zip_entries(&archive_path).unwrap().len(), 2);
+            assert_eq!(lib.games().len(), 2);
             let _ = fs::remove_dir_all(root);
         }
     }
@@ -3396,13 +3398,13 @@ mod tests {
         let archive_path = root.join("Demo.zip");
         let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
         for (name, data) in [
-            ("Wrapper/autorun.exe", pe.as_slice()),
-            ("Wrapper/multiboot.hog", b"WART3.00".as_slice()),
-            ("Wrapper/common/data.bin", b"shared".as_slice()),
-            ("Wrapper/GZGA200001/autorun.exe", pe.as_slice()),
-            ("Wrapper/GZGA200001/GZGA200001", b"marker".as_slice()),
-            ("Wrapper/Agaju/autorun.exe", pe.as_slice()),
-            ("Wrapper/Agaju/data.bin", b"game2".as_slice()),
+            ("autorun.exe", pe.as_slice()),
+            ("multiboot.hog", b"WART3.00".as_slice()),
+            ("common/data.bin", b"shared".as_slice()),
+            ("GZGA200001/autorun.exe", pe.as_slice()),
+            ("GZGA200001/GZGA200001", b"marker".as_slice()),
+            ("Agaju/autorun.exe", pe.as_slice()),
+            ("Agaju/data.bin", b"game2".as_slice()),
         ] {
             archive
                 .start_file(name, zip::write::FileOptions::default())
@@ -3420,23 +3422,16 @@ mod tests {
             assert!(e.executable_path(lib.root()).is_file());
             assert!(e
                 .extracted_dir(lib.root())
-                .join("Wrapper/common/data.bin")
+                .join("common/data.bin")
                 .is_file());
-            assert!(!e
-                .extracted_dir(lib.root())
-                .join("Wrapper/autorun.exe")
-                .exists());
+            assert!(!e.extracted_dir(lib.root()).join("autorun.exe").exists());
             let own = e.executable.parent().unwrap().file_name().unwrap();
             let other = if own == "Agaju" {
                 "GZGA200001"
             } else {
                 "Agaju"
             };
-            assert!(!e
-                .extracted_dir(lib.root())
-                .join("Wrapper")
-                .join(other)
-                .exists());
+            assert!(!e.extracted_dir(lib.root()).join(other).exists());
         }
         assert_ne!(entries[0].id, entries[1].id);
         lib.remove(&entries[0].id).unwrap();
@@ -3479,20 +3474,20 @@ mod tests {
         let launcher = root.join("autorun.exe");
         write_stub_pe(&launcher, MACHINE_ARM, 0x0102);
         let hog = root.join("multiboot.hog");
-        assert!(demo_card_launcher(&[launcher.clone()]).is_none());
+        assert!(demo_card_launcher(&[launcher.clone()], &root).is_none());
         fs::write(&hog, b"WART3.00").unwrap();
         let other = root.join("Other/multiboot.hog");
         fs::create_dir_all(other.parent().unwrap()).unwrap();
         fs::write(&other, b"WART3.00").unwrap();
-        assert!(demo_card_launcher(&[launcher.clone(), other]).is_none());
+        assert!(demo_card_launcher(&[launcher.clone(), other], &root).is_none());
         assert_eq!(
-            demo_card_launcher(&[launcher.clone(), hog.clone()]),
+            demo_card_launcher(&[launcher.clone(), hog.clone()], &root),
             Some(launcher.clone())
         );
         write_stub_pe(&launcher, MACHINE_X86, 0x0102);
-        assert!(demo_card_launcher(&[launcher.clone(), hog.clone()]).is_none());
+        assert!(demo_card_launcher(&[launcher.clone(), hog.clone()], &root).is_none());
         write_stub_pe(&launcher, MACHINE_ARM, IMAGE_FILE_DLL | 0x0102);
-        assert!(demo_card_launcher(&[launcher, hog]).is_none());
+        assert!(demo_card_launcher(&[launcher, hog], &root).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 

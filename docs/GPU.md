@@ -554,3 +554,18 @@ including ignored zero deletion; ordinary default upload and named deletion
 returning to the default binding are checked too. Device confirmation of the
 Battlestations flash remains required.
 
+
+
+## Signed linear fog ranges (Carmageddon regression)
+
+Actual ARM execution of Carmageddon_539Pa_25102005 reproduces a visible HUD
+with the 3D scene replaced by almost-black fog in native GPU mode. The captured
+state uses linear fog start -100.5 and end -343.28522. Software preserves the
+negative end-start span; the fragment shader previously replaced it with a
+positive epsilon, producing a zero fog factor for the world.
+
+The shared native shader now divides by the signed span and uses factor 1 for
+a degenerate range, matching software. No game-name branch, renderer switch,
+texture edit or context-reset workaround is involved. A native regression checks
+Carmageddon's range, descending positive ranges, ordinary ascending ranges and
+equal endpoints against the software rasterizer on desktop GL and GLES2.

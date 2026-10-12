@@ -114,13 +114,19 @@ the label height. Artwork never stretches into the Gizmondo band.
 
 ## GZGA collection ZIP imports
 
-A ZIP containing several sibling `GZGA######` game directories, without
-`autorun.exe` or `multiboot.hog` at their shared root, imports each game as a
-separate library entry automatically. Wrapper directories are supported. Each
-entry receives its own files and copies of shared resources, with the static
-GZGA title (including ALT labels) where known. A single-game ZIP keeps the normal
-import flow. Demo cards containing their launcher and HOG retain the choice
-between keeping the launcher and separating the games.
+ZIP classification follows this priority:
+
+1. `autorun.exe` and `multiboot.hog` together at the ZIP root: demo card, with
+   the existing keep-launcher/separate-games choice.
+2. Otherwise, import every `GZGA######` directory containing a guest executable
+   as an independent game, even if there is only one, or other executables are
+   present. GZGA directories inside wrapper folders are supported. A launcher/HOG
+   pair inside a GZGA belongs to that game and does not classify the entire ZIP.
+3. Other layouts use the ordinary single-game import.
+
+Each GZGA entry gets its own game files and copies of shared resources. Known
+IDs use the static catalogue, including ALT labels. Data-only GZGA directories
+without an executable are resources rather than launchable games.
 
 Desktop and Android block library interaction while importing or splitting a
 card, then restore it on completion or error. The desktop also blocks the

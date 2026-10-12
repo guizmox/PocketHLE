@@ -2732,11 +2732,13 @@ Local GZGA900049 labels the user-supplied Hit & Myth (may 2005) variant.
 
 ## GZGA collection imports and library UI exclusion
 
-Library::import_zip_entries returns all imported entries. Multiple sibling
-GZGA###### executable directories with no root autorun.exe/multiboot.hog split
-through the same independent-tree copier as demo cards. Wrapper roots, shared
-resources and case-insensitive IDs are supported. Root control files or guest
-executables outside the sibling GZGA directories retain the ordinary import.
+Library::import_zip_entries returns all imported entries. ZIP-root supported
+`autorun.exe` plus sibling `multiboot.hog` takes priority as a demo card. Otherwise
+all GZGA###### executable directories are grouped by the executable's nearest
+GZGA ancestor, including one-game and mixed/wrapped archives. Non-GZGA executables
+do not prevent the collection import and are not copied into each game. Nested
+launcher/HOG pairs do not identify the outer ZIP as a demo card. Data-only GZGA
+folders without a guest executable retain their resource role in ordinary imports.
 import_zip remains a compatible single-reference API but imports the entire
 collection and returns its first entry. Collection entries carry source_cab
 prefix gzga-collection: so they remain Gizmondo even without marker files.

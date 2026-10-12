@@ -2462,7 +2462,9 @@ float limitedBias(vec2 uv,float bias,vec4 limit){
 void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0,limitedBias(uv0,lodBias0,lodLimit0)),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1,limitedBias(uv1,lodBias1,lodLimit1)),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2,limitedBias(uv2,lodBias2,lodLimit2)),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3,limitedBias(uv3,lodBias3,lodLimit3)),env3,envColor3);
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
-float f=1.0;if(fogMode==1)f=(fogEnd-vFog)/max(fogEnd-fogStart,0.000001);if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
+// Carmageddon uses decreasing negative linear-fog endpoints. Preserve the
+// signed span, and match software's unfogged result for a degenerate range.
+float f=1.0;if(fogMode==1){float span=fogEnd-fogStart;if(span!=0.0 && abs(span)>=0.000000001)f=(fogEnd-vFog)/span;}if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
 "#;
 
 #[cfg(test)]
@@ -3327,6 +3329,63 @@ mod tests {
                     .unwrap();
                     gpu.read(&mut native).unwrap();
                     assert_eq!(count(&native), 0);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL/GLES2; signed linear fog must match software"]
+    fn host_linear_fog_descending_and_degenerate_ranges_match_software() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            for (start, end, depth) in [
+                (-100.5, -343.28522, 100.0), // Carmageddon's actual range.
+                (10.0, 2.0, 6.0),
+                (10.0, 2.0, 0.0),
+                (10.0, 2.0, 20.0),
+                (0.0, 10.0, 5.0),
+                (2.0, 2.0, 6.0),
+            ] {
+                let state = PipelineState {
+                    viewport: (0, 0, 32, 32),
+                    fog: true,
+                    fog_mode: FogMode::Linear,
+                    fog_start: start,
+                    fog_end: end,
+                    fog_color: [0.0, 0.0, 0.8, 1.0],
+                    ..Default::default()
+                };
+                let mut vertices = triangle([1.0, 0.4, 0.2, 1.0], 0.0);
+                for v in &mut vertices {
+                    v.fog_depth = depth;
+                }
+                let mut cpu = RenderTarget::new(32, 32);
+                let mut native = RenderTarget::new(32, 32);
+                raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], vertices);
+                gpu.clear(32, 32, &state, [0.0; 4], 1.0, GL_COLOR_BUFFER_BIT)
+                    .unwrap();
+                gpu.draw(
+                    &native,
+                    &state,
+                    GL_TRIANGLES,
+                    &vertices,
+                    &[],
+                    &HashMap::new(),
+                    [0; 4],
+                )
+                .unwrap();
+                gpu.read(&mut native).unwrap();
+                for (a, b) in center(&cpu).into_iter().zip(center(&native)) {
+                    assert!(
+                        a.abs_diff(b) <= 2,
+                        "es={es}, fog={start}..{end}, depth={depth}: software={a}, GPU={b}"
+                    );
                 }
             }
         }
