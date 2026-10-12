@@ -99,9 +99,9 @@ regression checks are documented in [GPU.md](GPU.md).
 
 ## Colors language
 
-In Gizmondo options, **Colors language** selects English, French, German,
+At the bottom of Gizmondo options, **Colors language** selects English, French, German,
 Italian or Spanish for the next launch. The preference is global and becomes
-available when Colors (GZGA200015) is installed. If the chosen translation is
+available when Colors (GZGA200015 or GZGA270015) is installed. If the chosen translation is
 missing, Colors uses English. The installation must contain the translation
 beside `bstrings.eng`; no translation files are bundled and the game executable
 and original resources remain unchanged. Other titles keep their own language.

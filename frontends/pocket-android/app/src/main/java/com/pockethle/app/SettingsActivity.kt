@@ -58,17 +58,6 @@ class SettingsActivity : AppCompatActivity() {
                     setOnPreferenceChangeListener { _, value -> update(value as Boolean); writeConfig(); true }
                 })
             }
-            giz.addPreference(ListPreference(requireContext()).apply {
-                key = "colors_language"; title = "Colors language"; isPersistent = false
-                entries = arrayOf("English", "French", "German", "Italian", "Spanish")
-                entryValues = arrayOf("english", "french", "german", "italian", "spanish")
-                value = current.colorsLanguage
-                isEnabled = NativeBridge.hasColors(rootDir)
-                summary = if (isEnabled) "Applied on the next launch. Missing translations use English." else "Install Colors to choose its language."
-                setOnPreferenceChangeListener { _, value ->
-                    current = current.copy(colorsLanguage = value.toString()); writeConfig(); true
-                }
-            })
             toggle("gprs_enabled", "GPRS/data", current.gprsEnabled) { current = current.copy(gprsEnabled = it) }
             toggle("gps_fixed_enabled", "Fixed GPS position", current.gpsFixedEnabled) { current = current.copy(gpsFixedEnabled = it) }
             giz.addPreference(ListPreference(requireContext()).apply {
@@ -188,6 +177,17 @@ class SettingsActivity : AppCompatActivity() {
                     val identity=value.toString().trim()
                     if(identity.length>128 || !identity.matches(Regex("[A-Za-z0-9_.-]*"))) { android.widget.Toast.makeText(context,"ID: ASCII letters, digits, hyphen, dot or underscore (maximum 128 characters)",android.widget.Toast.LENGTH_LONG).show();false }
                     else { current=current.copy(colorsTerminalId=identity);writeConfig();true }
+                }
+            })
+            giz.addPreference(ListPreference(requireContext()).apply {
+                key = "colors_language"; title = "Colors language"; isPersistent = false
+                entries = arrayOf("English", "French", "German", "Italian", "Spanish")
+                entryValues = arrayOf("english", "french", "german", "italian", "spanish")
+                value = current.colorsLanguage
+                isEnabled = NativeBridge.hasColors(rootDir)
+                summary = if (isEnabled) "Applied on the next launch. Missing translations use English." else "Install Colors to choose its language."
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(colorsLanguage = value.toString()); writeConfig(); true
                 }
             })
             val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Keyboard and controllers" }

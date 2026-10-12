@@ -2599,7 +2599,7 @@ About/credits expose https://github.com/guizmox/PocketHLE on Windows/Linux and A
 
 Selected demo-card title IDs prefer the executable's GZxxNNNNNN ancestor directory. Shared launcher markers cannot supply a split game's ID. Desktop cartridge labels, bottom captions and shared game information use the same helper. Existing imports need no migration or reimport.
 
-Static game names come from the maintainer's Liste_Jeux.xlsx IDs/titles, with the explicit 200030 Motocross / 200041 Furious Phil correction. Known static titles precede BMP-derived names at import; BMP artwork is retained. Existing ID-shaped names migrate on library load, preserving custom names, IDs, settings and save paths. No release/build version is inferred from a shared title ID. Unknown codes use the previous fallback. The unclear GZGA22222 source row is retained literally, not expanded speculatively.
+Static game names come from the maintainer's Liste_Jeux.xlsx IDs/titles, with the explicit 200030 Motocross / 200041 Furious Phil correction. Known static titles precede BMP-derived names at import; BMP artwork is retained. Existing ID-shaped names migrate on library load, preserving custom names, IDs, settings and save paths. No release/build version is inferred from a shared title ID. Unknown codes use the previous fallback. The initially unclear GZGA22222 source row was later corrected by the maintainer to GZGA200069 (Catapult).
 
 ## Desktop PocketPC presentation restoration (2026-10-12)
 
@@ -2679,7 +2679,8 @@ is unchanged by this test gate.
 
 Desktop and Android Gizmondo options expose English UI for colors_language
 (english/french/german/italian/spanish), default English for existing configs.
-Eligibility and launch activation use game_gizmondo_title_id == GZGA200015,
+Colors preferences are grouped at the bottom of Gizmondo options.
+Eligibility and launch activation use game_gizmondo_title_id == GZGA200015 or GZGA270015,
 never a display-name match. At the next launch, Colors alone redirects read-side
 bstrings.eng resolution to a case-insensitive sibling bstrings.fre/ger/ita/spa
 (fra/deu/esp aliases accepted). Missing or ambiguous translations retain English.
@@ -2689,3 +2690,15 @@ so another game sharing device services does not inherit it. Translation files
 must already exist beside bstrings.eng; this does not supply translations or
 rewrite entries inside data.zcd. Original game archives are required for in-game
 validation and any version-specific missing string keys.
+
+The static title table includes the 26 previously missing GZGA200 IDs extracted
+from the supplied MultiBoot launcher. Existing maintainer titles and IDs stay
+unchanged, including exact GZGA270 and GZGA280 entries; no prefix substitution
+is inferred. Both known Colors IDs enable the global text-language preference.
+
+User-requested local alternative-version catalogue IDs are GZGA900056 for
+Agaju (alternative) and GZGA900069 for Catapult (alternative). These are custom
+launcher labels, not inferred official title IDs or patches to game binaries.
+
+The maintainer confirms GZGA200069 as Catapult. That exact ID is registered;
+the ambiguous GZGA22222 entry is removed rather than guessed or retained as an alias.

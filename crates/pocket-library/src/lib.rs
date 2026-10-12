@@ -637,7 +637,9 @@ fn default_colors_language() -> String {
 
 /// Colors is selected by card identity, never by a user-editable display name.
 pub fn is_colors_game(game: &GameEntry, root: &Path) -> bool {
-    game_gizmondo_title_id(game, root).is_some_and(|id| id.eq_ignore_ascii_case("GZGA200015"))
+    game_gizmondo_title_id(game, root).is_some_and(|id| {
+        id.eq_ignore_ascii_case("GZGA200015") || id.eq_ignore_ascii_case("GZGA270015")
+    })
 }
 
 fn default_colors_server_url() -> String {
@@ -2615,6 +2617,8 @@ mod tests {
             "executable": "extracted/GZGA200015/autorun.exe", "imported_at": 0
         }))
         .unwrap();
+        assert!(is_colors_game(&game, root.path()));
+        game.executable = "extracted/gzga270015/autorun.exe".into();
         assert!(is_colors_game(&game, root.path()));
         game.display_name = "Colors".into();
         game.executable = "extracted/GZGA200016/autorun.exe".into();

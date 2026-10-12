@@ -1460,6 +1460,16 @@ impl PocketLauncher {
         }
         ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
             .on_hover_text("Use the PC Internet connection for the Gizmondo data connection. Takes effect on the next launch.");
+        ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
+        ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
+            .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
+        ui.separator();
+        ui.label("Colors multiplayer server (next launch)");
+        ui.text_edit_singleline(&mut draft.colors_server_url)
+            .on_hover_text("Example: http://192.168.1.10:8080. Leave empty to restore the public Colors server on the next load.");
+        ui.label("Colors player ID (optional)");
+        ui.text_edit_singleline(&mut draft.colors_terminal_id)
+            .on_hover_text("Leave empty to keep this installation's persistent device identity.");
         let colors_installed = self.library.games().iter().any(|game| pocket_library::is_colors_game(game, self.library.root()));
         ui.add_enabled_ui(colors_installed, |ui| {
             ui.label("Colors language");
@@ -1475,15 +1485,6 @@ impl PocketLauncher {
             ui.label("Applied on the next launch. Missing translations use English.");
         });
         if !colors_installed { ui.label("Install Colors to choose its language."); }
-        ui.label("Colors multiplayer server (next launch)");
-        ui.text_edit_singleline(&mut draft.colors_server_url)
-            .on_hover_text("Example: http://192.168.1.10:8080. Leave empty to restore the public Colors server on the next load.");
-        ui.label("Colors player ID (optional)");
-        ui.text_edit_singleline(&mut draft.colors_terminal_id)
-            .on_hover_text("Leave empty to keep this installation's persistent device identity.");
-        ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
-        ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
-            .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
         } else {
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")
