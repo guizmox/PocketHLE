@@ -106,3 +106,7 @@ available when Colors (GZGA200015 or GZGA270015) is installed. If the chosen tra
 missing, Colors uses English. The installation must contain the translation
 beside `bstrings.eng`; no translation files are bundled and the game executable
 and original resources remain unchanged. Other titles keep their own language.
+
+Desktop cartridge BMP artwork preserves its aspect ratio, centred within the
+white SD-card label. Wide images fit its full width; tall images also respect
+the label height. Artwork never stretches into the Gizmondo band.

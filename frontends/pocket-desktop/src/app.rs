@@ -294,7 +294,7 @@ fn draw_gizmondo_sd(
     area: Rect,
     title: &str,
     title_id: Option<&str>,
-    artwork: Option<egui::TextureId>,
+    artwork: Option<(egui::TextureId, Vec2)>,
 ) {
     let p = ui.painter();
     let h = (area.height() - 8.0).min(118.0);
@@ -347,10 +347,14 @@ fn draw_gizmondo_sd(
 
     let id = title_id.unwrap_or("");
     let content = Rect::from_min_max(label.left_top(), Pos2::new(label.right(), band.top()));
-    if let Some(texture) = artwork {
-        p.image(
+    if let Some((texture, image_size)) = artwork {
+        // Preserve the BMP's proportions. Wide labels use the full available
+        // width; unusually tall images are bounded by the label height too.
+        let scale = (content.width() / image_size.x).min(content.height() / image_size.y);
+        let image_rect = Rect::from_center_size(content.center(), image_size * scale);
+        p.with_clip_rect(content).image(
             texture,
-            content,
+            image_rect,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
@@ -1158,7 +1162,7 @@ impl PocketLauncher {
                                         egui::TextureOptions::LINEAR,
                                     )
                                 });
-                            Some(texture.id())
+                            Some((texture.id(), texture.size_vec2()))
                         } else {
                             None
                         }
