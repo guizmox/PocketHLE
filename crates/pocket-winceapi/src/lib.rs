@@ -355,6 +355,14 @@ impl WinCeDispatcher {
 }
 
 impl Dispatcher for WinCeDispatcher {
+    fn schedule_cpu_slice(
+        &mut self,
+        cpu: &mut dyn Cpu,
+        kernel: &mut KernelState,
+    ) -> Result<Option<u32>, KernelError> {
+        coredll::schedule_audio_cpu_slice(cpu, kernel)
+    }
+
     fn schedule_idle(
         &mut self,
         cpu: &mut dyn Cpu,

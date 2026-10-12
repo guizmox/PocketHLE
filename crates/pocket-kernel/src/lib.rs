@@ -760,6 +760,17 @@ pub enum DispatchOutcome {
 /// Trait an API layer registers with the kernel. Called every time
 /// emulated code reaches a thunk address.
 pub trait Dispatcher {
+    /// Give time-sensitive workers a turn when guest code exhausts a CPU slice
+    /// without entering an API. Implementations must preserve the exact main
+    /// continuation, including its registers and ARM/Thumb state.
+    fn schedule_cpu_slice(
+        &mut self,
+        _cpu: &mut dyn Cpu,
+        _kernel: &mut KernelState,
+    ) -> Result<Option<u32>, KernelError> {
+        Ok(None)
+    }
+
     fn schedule_idle(
         &mut self,
         _cpu: &mut dyn Cpu,
@@ -3406,6 +3417,17 @@ pub fn run_main_loop_with_hook(
         // millisecond has not turned over yet, which is the common
         // case at ~280 slices per millisecond.
         native_thunks::refresh_tick_page(cpu, &mut tick_written);
+        // Live guest mixer rings must not depend on the main thread entering
+        // another API. Bound only those main-thread slices by elapsed host time;
+        // Unicorn retains translation-block chaining (no instruction counter).
+        let audio_worker_pending = process.state.current_thread == 0
+            && !process.state.wave_out.live_loops.is_empty()
+            && process
+                .state
+                .threads
+                .iter()
+                .any(|thread| thread.started && !thread.finished && thread.suspend_count == 0);
+        cpu.set_slice_timeout_us(if audio_worker_pending { 5_000 } else { 0 })?;
         let stop = if pc == THREAD_SCHEDULER_IDLE_VA {
             Ok(StopReason::Hook(pc))
         } else {
@@ -3446,6 +3468,11 @@ pub fn run_main_loop_with_hook(
             match stop {
                 StopReason::InstructionLimit => {
                     pc = cpu.read_reg(ArmReg::Pc)?;
+                    if let Some(worker_pc) =
+                        dispatcher.schedule_cpu_slice(cpu, &mut process.state)?
+                    {
+                        pc = worker_pc;
+                    }
                     log::trace!("instruction slice exhausted; resuming at 0x{pc:08x}");
                     // Budget exhaustion is a normal slice boundary too. Do not
                     // bypass the throttled host input/presentation/stop hook.

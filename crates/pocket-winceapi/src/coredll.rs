@@ -2445,6 +2445,38 @@ pub(crate) fn wake_due_worker(
     resume_worker_reenter(ctx)
 }
 
+/// FMOD-style live waveOut rings require their guest mixer to keep running
+/// while the main thread unloads resources in native thunks or CPU-only loops.
+/// Reuse the normal worker quantum and callback exclusions, but resume main at
+/// its interrupted instruction rather than at an API thunk.
+pub(crate) fn schedule_audio_cpu_slice(
+    cpu: &mut dyn pocket_cpu::Cpu,
+    kernel: &mut KernelState,
+) -> Result<Option<u32>, KernelError> {
+    if kernel.current_thread != 0
+        || kernel.wave_out.live_loops.is_empty()
+        || kernel.threads.is_empty()
+        || monotonic_ms() < kernel.worker_preempt_after_ms
+    {
+        return Ok(None);
+    }
+    let thunk = pocket_kernel::Thunk {
+        thunk_va: cpu.read_reg(ArmReg::Pc)?,
+        iat_va: 0,
+        dll: "coredll.dll".into(),
+        binding: pocket_pe::ImportBinding::Name("audio_cpu_slice".into()),
+        friendly_name: None,
+    };
+    match wake_due_worker(&mut CallCtx {
+        cpu,
+        kernel,
+        thunk: &thunk,
+    })? {
+        Some(DispatchOutcome::JumpTo(pc)) => Ok(Some(pc)),
+        _ => Ok(None),
+    }
+}
+
 fn initialize_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let key = ctx.arg_u32(0)?;
     ctx.kernel.critical_sections.insert(key, (usize::MAX, 0));
@@ -27027,6 +27059,146 @@ mod tests {
             call(find_close_change_notification, H, &mut cpu, &mut kernel),
             0,
             "closing twice fails"
+        );
+    }
+
+    #[test]
+    fn audio_cpu_slice_runs_mixer_and_preserves_arm_and_thumb_continuations() {
+        use pocket_kernel::{LiveWaveLoop, WaveOutDevice};
+        const H: u32 = 0xdead4100;
+        const DATA: u32 = 0x1200;
+        for cpsr in [0x10, 0x30] {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let format = pocket_kernel::audio::GuestFormat {
+                sample_rate: 48000,
+                channels: 1,
+                bits_per_sample: 16,
+            };
+            kernel.audio.open_wave_stream(H, format);
+            kernel.audio.queue_wave_loop(H, vec![1000; 4], u32::MAX);
+            cpu.write_mem(DATA, &[0xe8, 3, 0xe8, 3, 0xe8, 3, 0xe8, 3])
+                .unwrap();
+            kernel.wave_out.devices.insert(
+                H,
+                WaveOutDevice {
+                    format,
+                    callback_kind: WaveCallbackKind::None,
+                    callback_target: 0,
+                    instance: 0,
+                    owner_thread: 0,
+                    paused: false,
+                },
+            );
+            kernel.wave_out.live_loops.insert(
+                H,
+                LiveWaveLoop {
+                    hdr: 0x1100,
+                    data: DATA,
+                    bytes: 8,
+                },
+            );
+            let mut worker = GuestThread::new(
+                0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17],
+            );
+            worker.started = true;
+            worker.worker_saved = true;
+            worker.worker_regs[15] = 0x10000;
+            worker.worker_regs[16] = 0x10;
+            kernel.threads.push(worker);
+            let mut main = std::array::from_fn(|index| 0x5000 + index as u32 * 4);
+            main[15] = if cpsr == 0x10 { 0x5014 } else { 0x5012 };
+            main[16] = cpsr;
+            write_guest_regs(&mut cpu, &main).unwrap();
+            cpu.write_fpscr(0x00400011).unwrap();
+            let tap = kernel.audio.tap();
+            let mut out = [0; 4];
+            tap.drain_into(&mut out);
+            assert_eq!(out, [1000; 4]);
+
+            assert_eq!(
+                schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+                Some(0x10000)
+            );
+            assert_eq!(kernel.current_thread, 1);
+            assert_eq!(kernel.threads[0].saved_regs, main);
+            assert_eq!(cpu.read_fpscr().unwrap(), 0);
+            // The runnable mixer clears its ring and publishes it on Sleep.
+            cpu.write_mem(DATA, &[0; 8]).unwrap();
+            cpu.write_reg(ArmReg::R0, 1000).unwrap();
+            cpu.write_reg(ArmReg::Lr, 0x10040).unwrap();
+            let thunk = dummy_thunk();
+            assert_eq!(
+                sleep(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                })
+                .unwrap(),
+                DispatchOutcome::JumpTo(main[15])
+            );
+            assert_eq!(kernel.current_thread, 0);
+            assert_eq!(read_guest_regs(&mut cpu).unwrap(), main);
+            assert_eq!(cpu.read_fpscr().unwrap(), 0x00400011);
+            tap.drain_into(&mut out);
+            assert_eq!(out, [0; 4]);
+            // Keep the regular quantum and Sleep deadline after yielding.
+            assert_eq!(
+                schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+                None
+            );
+            kernel.worker_preempt_after_ms = 0;
+            assert_eq!(
+                schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn audio_cpu_slice_leaves_non_audio_and_blocked_workers_untouched() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let mut worker = GuestThread::new(
+            0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17],
+        );
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.worker_regs[15] = 0x10000;
+        kernel.threads.push(worker);
+        cpu.write_reg(ArmReg::Pc, 0x5010).unwrap();
+        assert_eq!(
+            schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+            None
+        );
+        kernel.wave_out.live_loops.insert(
+            1,
+            pocket_kernel::LiveWaveLoop {
+                hdr: 0,
+                data: 0,
+                bytes: 0,
+            },
+        );
+        kernel.threads[0].sleep_until_ms = u64::MAX;
+        assert_eq!(
+            schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+            None
+        );
+        assert_eq!(kernel.current_thread, 0);
+        assert_eq!(cpu.read_reg(ArmReg::Pc).unwrap(), 0x5010);
+        kernel.threads[0].sleep_until_ms = 0;
+        kernel.worker_preempt_after_ms = u64::MAX;
+        assert_eq!(
+            schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+            None
+        );
+        kernel.worker_preempt_after_ms = 0;
+        kernel.current_thread = 1;
+        assert_eq!(
+            schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+            None
         );
     }
 

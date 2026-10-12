@@ -14,6 +14,9 @@ use ::unicorn_engine::{RegisterARM, RegisterMIPS, UcHookId, Unicorn};
 
 use crate::{regs::ArmReg, Arch, Cpu, CpuError, Prot, StopReason};
 
+#[path = "slice_timer.rs"]
+mod slice_timer;
+
 /// Which guest pages exist, and which of them the CPU is allowed to
 /// fetch instructions from.
 ///
@@ -105,6 +108,8 @@ impl GuestMap {
 }
 
 pub struct UnicornCpu {
+    // Field drop order matters: join the stop timer before closing Unicorn.
+    scheduler_timer: Option<slice_timer::SliceTimer>,
     uc: Unicorn<'static, ()>,
     last_hook: Rc<RefCell<Option<u32>>>,
     /// Address of the last invalid memory access, recorded so crash
@@ -119,6 +124,7 @@ pub struct UnicornCpu {
     mips_status: u32,
     code_hooks: Vec<(u32, u32, UcHookId)>,
     images: Rc<RefCell<crate::image_pages::ImagePages>>,
+    scheduler_timeout_us: u64,
 }
 
 impl UnicornCpu {
@@ -179,6 +185,8 @@ impl UnicornCpu {
             mips_status: 0,
             code_hooks: Vec::new(),
             images,
+            scheduler_timeout_us: 0,
+            scheduler_timer: None,
         })
     }
 }
@@ -748,6 +756,20 @@ impl Cpu for UnicornCpu {
         Ok(())
     }
 
+    fn set_slice_timeout_us(&mut self, timeout_us: u64) -> Result<(), CpuError> {
+        if timeout_us != 0 && self.scheduler_timer.is_none() {
+            self.scheduler_timer = Some(
+                slice_timer::SliceTimer::new(self.uc.get_handle() as usize)
+                    .map_err(|e| CpuError::Backend(format!("CPU slice timer: {e}")))?,
+            );
+        }
+        self.scheduler_timeout_us = timeout_us;
+        if let Some(timer) = &self.scheduler_timer {
+            timer.set_enabled(timeout_us != 0);
+        }
+        Ok(())
+    }
+
     fn run_until_hook(
         &mut self,
         start_va: u32,
@@ -762,12 +784,20 @@ impl Cpu for UnicornCpu {
         // ended by the IAT-thunk code hooks (which call `emu_stop` on
         // every emulated API call) and, optionally, by a wall-clock
         // watchdog for pathological API-free loops.
+        if self.scheduler_timeout_us != 0 {
+            if let Some(timer) = &self.scheduler_timer {
+                timer.arm(self.scheduler_timeout_us);
+            }
+        }
         let r = self.uc.emu_start(
             start_va as u64,
             0,                   // until = 0 → run until stopped
-            slice_watchdog_us(), // timeout (us); 0 = no timeout
+            slice_watchdog_us(), // retain the explicit diagnostic watchdog
             0,                   // count = 0 → keep TB chaining (do NOT pass a limit)
         );
+        if let Some(timer) = &self.scheduler_timer {
+            timer.disarm();
+        }
         if let Some(addr) = *self.last_hook.borrow() {
             return Ok(StopReason::Hook(addr));
         }

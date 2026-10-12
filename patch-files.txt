@@ -1,2 +1,7 @@
+crates/pocket-cpu/src/lib.rs
+crates/pocket-cpu/src/unicorn.rs
+crates/pocket-cpu/src/slice_timer.rs
+crates/pocket-kernel/src/lib.rs
+crates/pocket-winceapi/src/lib.rs
 crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/camera.rs
+crates/pocket-core/tests/audio_guest.rs
