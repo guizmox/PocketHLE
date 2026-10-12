@@ -115,9 +115,9 @@ data class LauncherConfig(
     /** Mirrors `LauncherConfig::show_backend_log` — whether the
      * in-game status panel ("Backend: Unicorn (ARM)…") is drawn. */
     val showBackendLog: Boolean,
-    val bluetoothEnabled: Boolean = false,
-    val cameraEnabled: Boolean = false,
-    val gpsEnabled: Boolean = false,
+    val bluetoothEnabled: Boolean = true,
+    val cameraEnabled: Boolean = true,
+    val gpsEnabled: Boolean = true,
     val gpsFixedEnabled: Boolean = false,
     val gpsFixedRandom: Boolean = false,
     val gpsFixedLatitude: Double = 0.0,

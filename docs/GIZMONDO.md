@@ -156,3 +156,8 @@ Flattened serial marker files also supply the emulated SD-card volume serial.
 The SDK encoding is numeric title ID minus volume serial minus one, modulo
 2^32. Reading only nested markers regressed Toy Golf startup after flattening;
 the storage driver now decodes either direct files or original nested markers.
+
+New installations enable Camera, GPS and Bluetooth in Gizmondo options by
+default. Existing serialized preferences, including disabled values, are
+preserved. Host services are still acquired only when requested by the guest;
+platform permission handling is unchanged. Simulated GPS remains opt-in.
