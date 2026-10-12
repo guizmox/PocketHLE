@@ -127,6 +127,7 @@ pub struct PocketLauncher {
     library_gizmondo: bool,
     rename_draft: Option<(String, String, bool)>,
     demo_import: Option<(String, String)>,
+    library_busy: bool,
     pending_run: Option<GameEntry>,
     screen: Screen,
     runner: Runner,
@@ -500,7 +501,7 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
-    ImportFinished(Result<(String, String), String>),
+    ImportFinished(Result<Vec<GameEntry>, String>),
     DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
     RunFinished(RunOutcome),
 }
@@ -607,6 +608,7 @@ impl PocketLauncher {
             selected_game: None,
             rename_draft: None,
             demo_import: None,
+            library_busy: false,
             pending_run: None,
             screen: Screen::Library,
             runner,
@@ -641,23 +643,31 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
-                UiEvent::ImportFinished(Ok((id, name))) => {
-                    self.status = format!("Imported {name}.");
+                UiEvent::ImportFinished(Ok(entries)) => {
+                    self.library_busy = false;
+                    self.status = format!("Imported {} game(s).", entries.len());
                     self.reload_library();
-                    if let Some(game) = self.library.games().iter().find(|g| g.id == id) {
+                    self.icon_cache.clear();
+                    if let Some(game) = entries.first() {
+                        let (id, name) = (game.id.clone(), game.display_name.clone());
                         self.library_gizmondo = is_gizmondo_game(game, self.library.root());
-                        self.selected_game = Some(game.id.clone());
+                        self.selected_game = Some(id.clone());
                         if self.library.is_demo_card(&id) {
                             self.demo_import = Some((id, name));
-                        } else {
+                        } else if entries.len() == 1
+                            && !game.source_cab.starts_with("gzga-collection:")
+                        {
                             self.rename_draft = Some((id, name, true));
                         }
                     }
                 }
                 UiEvent::ImportFinished(Err(e)) => {
+                    self.library_busy = false;
                     self.status = format!("Import failed: {e}");
+                    self.reload_library();
                 }
                 UiEvent::DemoSplitFinished(id, result) => {
+                    self.library_busy = false;
                     self.reload_library();
                     self.icon_cache.clear();
                     match result {
@@ -1303,6 +1313,7 @@ impl PocketLauncher {
             self.rename_draft = Some((id, name, true));
         } else if split {
             self.demo_import = None;
+            self.library_busy = true;
             self.status = "Separating demo card games…".into();
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
@@ -2713,6 +2724,10 @@ impl PocketLauncher {
     }
 
     fn spawn_import_dialog(&mut self) {
+        if self.library_busy || self.demo_import.is_some() {
+            return;
+        }
+        self.library_busy = true;
         let library_root = self.library.root().to_path_buf();
         let last_dir = self.library.config().last_import_dir.clone();
         let tx = self.events_tx.clone();
@@ -2743,7 +2758,7 @@ impl PocketLauncher {
                 let _ = tx.send(UiEvent::ImportFinished(Err("cancelled".into())));
                 return;
             };
-            let result = (|| -> Result<(String, String), String> {
+            let result = (|| -> Result<Vec<GameEntry>, String> {
                 let mut lib = Library::open(&library_root).map_err(|e| e.to_string())?;
                 let parent = path
                     .parent()
@@ -2755,6 +2770,9 @@ impl PocketLauncher {
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(str::to_ascii_lowercase);
+                if ext.as_deref() == Some("zip") {
+                    return lib.import_zip_entries(&path).map_err(|e| e.to_string());
+                }
                 let entry = match ext.as_deref() {
                     Some("rar") => lib.import_rar(&path),
                     Some("cab") => lib.import_cab(&path),
@@ -2766,7 +2784,7 @@ impl PocketLauncher {
                     _ => lib.import_exe(&path),
                 }
                 .map_err(|e| e.to_string())?;
-                Ok((entry.id.clone(), entry.display_name.clone()))
+                Ok(vec![entry.clone()])
             })();
             let _ = tx.send(UiEvent::ImportFinished(result));
         });
@@ -2884,6 +2902,23 @@ impl eframe::App for PocketLauncher {
         }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_events(ctx);
+        if self.library_busy || self.demo_import.is_some() {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    if self.library_busy {
+                        ui.spinner();
+                        ui.label(&self.status);
+                    }
+                });
+            });
+            if !self.library_busy {
+                self.ui_demo_import(ctx);
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
         #[cfg(windows)]
         if self.library.config().gps_enabled
             && (!self.library.config().gps_fixed_enabled
@@ -2985,6 +3020,11 @@ impl eframe::App for PocketLauncher {
             central
         };
         central.show(ctx, |ui| {
+            if self.library_busy {
+                ui.spinner();
+                ui.label(&self.status);
+                return;
+            }
             if console_only {
                 self.ui_fullscreen_game(ui);
                 return;
@@ -2996,7 +3036,7 @@ impl eframe::App for PocketLauncher {
                 Screen::Run => self.ui_run(ui),
             }
         });
-        if !console_only {
+        if !console_only && !self.library_busy {
             self.ui_demo_import(ctx);
             self.ui_rename_game(ctx);
         }

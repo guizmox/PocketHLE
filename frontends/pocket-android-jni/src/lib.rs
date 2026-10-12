@@ -159,8 +159,12 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_importZip<'local>(
     };
     let result = (|| -> anyhow::Result<String> {
         let mut lib = Library::open(&root)?;
-        let entry = lib.import_zip(&zip)?;
-        Ok(serde_json::to_string(&entry)?)
+        let entries = lib.import_zip_entries(&zip)?;
+        if entries.len() == 1 && !entries[0].source_cab.starts_with("gzga-collection:") {
+            Ok(serde_json::to_string(&entries[0])?)
+        } else {
+            Ok(serde_json::to_string(&entries)?)
+        }
     })();
     match result {
         Ok(j) => new_jstring(&env, j),

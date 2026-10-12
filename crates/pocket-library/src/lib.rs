@@ -142,6 +142,7 @@ pub struct GameEntry {
 pub fn is_gizmondo_game(entry: &GameEntry, library_root: &Path) -> bool {
     let extracted = entry.extracted_dir(library_root);
     entry.source_cab.starts_with("demo-card:")
+        || entry.source_cab.starts_with("gzga-collection:")
         || has_gizmondo_marker(&extracted)
         || (entry
             .source_cab
@@ -1313,7 +1314,36 @@ impl Library {
     /// rather than a stem-derived placeholder. A demo card with sibling
     /// `autorun.exe` and `multiboot.hog` keeps its launcher and full tree;
     /// otherwise the largest guest executable is picked as the entry point.
+    /// Compatibility entry point: a GZGA collection imports every game and
+    /// returns its first entry. Frontends use import_zip_entries for the count.
     pub fn import_zip(&mut self, zip_path: impl AsRef<Path>) -> Result<&GameEntry, LibraryError> {
+        let entries = self.import_zip_entries(zip_path)?;
+        let id = &entries.first().ok_or(LibraryError::NoExecutable)?.id;
+        self.get(id).ok_or(LibraryError::NoExecutable)
+    }
+
+    /// ZIP collections without a root launcher/HOG become independent games.
+    /// Real demo cards retain the existing keep-launcher/split choice.
+    pub fn import_zip_entries(
+        &mut self,
+        zip_path: impl AsRef<Path>,
+    ) -> Result<Vec<GameEntry>, LibraryError> {
+        let entry = self.import_zip_single(zip_path)?.clone();
+        if self.is_demo_card_entry(&entry) {
+            return Ok(vec![entry]);
+        }
+        let extracted = entry.extracted_dir(&self.root);
+        let files = import_tree_files(&extracted)?;
+        match gzga_collection_root(&files, &extracted) {
+            Some(card_root) => self.split_game_collection(&entry.id, &card_root, None),
+            None => Ok(vec![entry]),
+        }
+    }
+
+    fn import_zip_single(
+        &mut self,
+        zip_path: impl AsRef<Path>,
+    ) -> Result<&GameEntry, LibraryError> {
         let zip_path = zip_path.as_ref();
         let source_name = zip_path
             .file_name()
@@ -1373,7 +1403,10 @@ impl Library {
             })
             .cloned()
             .collect();
-        if demo_launcher.is_none() && !nested_cabs.is_empty() {
+        if demo_launcher.is_none()
+            && gzga_collection_root(&written, &extracted_dir).is_none()
+            && !nested_cabs.is_empty()
+        {
             let main_cab = nested_cabs
                 .iter()
                 .find(|path| {
@@ -1585,15 +1618,27 @@ impl Library {
         if !self.is_demo_card_entry(&source) {
             return Err(LibraryError::NoExecutable);
         }
-        let extracted = source.extracted_dir(&self.root);
         let launcher = source.executable_path(&self.root);
         let card_root = launcher.parent().ok_or(LibraryError::NoExecutable)?;
+        self.split_game_collection(id, card_root, Some(&launcher))
+    }
+
+    fn split_game_collection(
+        &mut self,
+        id: &str,
+        card_root: &Path,
+        launcher: Option<&Path>,
+    ) -> Result<Vec<GameEntry>, LibraryError> {
+        let source = self
+            .get(id)
+            .cloned()
+            .ok_or_else(|| LibraryError::NotFound(id.into()))?;
+        let extracted = source.extracted_dir(&self.root);
         let files = import_tree_files(&extracted)?;
         let mut by_directory = std::collections::BTreeMap::new();
-        for path in files
-            .iter()
-            .filter(|p| is_guest_exe(p) && **p != launcher && p.parent() != launcher.parent())
-        {
+        for path in files.iter().filter(|p| {
+            is_guest_exe(p) && Some(p.as_path()) != launcher && p.parent() != Some(card_root)
+        }) {
             let Some(relative) = path.strip_prefix(card_root).ok() else {
                 continue;
             };
@@ -1632,7 +1677,15 @@ impl Library {
                 fs::create_dir_all(destination.join("extracted"))?;
                 let mut entry = source.clone();
                 entry.id = new_id.clone();
-                entry.source_cab = format!("demo-card:{}", source.source_cab);
+                entry.source_cab = format!(
+                    "{}:{}",
+                    if launcher.is_some() {
+                        "demo-card"
+                    } else {
+                        "gzga-collection"
+                    },
+                    source.source_cab
+                );
                 entry.display_name = pretty_id(&stem);
                 entry.executable = PathBuf::from("extracted").join(
                     exe.strip_prefix(&extracted)
@@ -1642,7 +1695,7 @@ impl Library {
                 entry.companions.clear();
                 prepared.push(entry);
                 for file in &files {
-                    if file == &launcher
+                    if Some(file.as_path()) == launcher
                         || file.parent() == Some(card_root)
                             && file.file_name().is_some_and(|n| {
                                 n.to_string_lossy().eq_ignore_ascii_case("multiboot.hog")
@@ -1681,7 +1734,7 @@ impl Library {
             let new_id = entry.id.clone();
             entries.push(self.commit_entry(&new_id, entry)?.clone());
         }
-        // Delete only the newly imported launcher after all titles are persisted.
+        // Delete the temporary card/collection entry only after all titles are persisted.
         self.remove(id)?;
         Ok(entries)
     }
@@ -2291,6 +2344,42 @@ impl PeSniff {
 /// the unique outermost pair, even when ZIP publishers add a wrapper folder.
 /// Match names case-insensitively, but require a supported executable and
 /// a sibling HOG; unrelated autorun programs retain the ordinary ZIP policy.
+/// A collection root must contain several sibling GZGA executable trees.
+/// Directory names identify collections even when cartridge markers are absent.
+fn gzga_collection_root(files: &[PathBuf], extracted: &Path) -> Option<PathBuf> {
+    let executables: Vec<_> = files.iter().filter(|p| is_guest_exe(p)).collect();
+    let first = executables.first()?;
+    let directory = first
+        .ancestors()
+        .skip(1)
+        .take_while(|p| p.starts_with(extracted))
+        .find(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.to_ascii_uppercase().starts_with("GZGA") && is_gizmondo_title_id(n)
+            })
+        })?;
+    let root = directory.parent()?;
+    if files.iter().any(|p| {
+        p.parent() == Some(root)
+            && p.file_name().is_some_and(|n| {
+                let n = n.to_string_lossy();
+                n.eq_ignore_ascii_case("autorun.exe") || n.eq_ignore_ascii_case("multiboot.hog")
+            })
+    }) {
+        return None;
+    }
+    let mut directories = std::collections::BTreeSet::new();
+    for exe in executables {
+        let relative = exe.strip_prefix(root).ok()?;
+        let name = relative.components().next()?.as_os_str().to_str()?;
+        if !name.to_ascii_uppercase().starts_with("GZGA") || !is_gizmondo_title_id(name) {
+            return None;
+        }
+        directories.insert(name.to_owned());
+    }
+    (directories.len() >= 2).then(|| root.to_path_buf())
+}
+
 fn demo_card_launcher(files: &[PathBuf]) -> Option<PathBuf> {
     let mut candidates: Vec<&PathBuf> = files
         .iter()
@@ -3211,6 +3300,89 @@ mod tests {
         fs::write(card.join("My Game.bmp"), b"bad bitmap").unwrap();
         assert!(cartridge_artwork(&root, &exe).is_none());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gzga_zip_collection_imports_all_titles_without_launcher_or_markers() {
+        use std::io::Write;
+        for wrapper in ["", "Wrapper/Nested/"] {
+            let root = tmpdir("gzga_collection");
+            fs::create_dir_all(&root).unwrap();
+            let fixture = root.join("fixture.exe");
+            write_pe_importing(&fixture, &[]);
+            let pe = fs::read(fixture).unwrap();
+            let archive_path = root.join("Collection.zip");
+            let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+            for (name, data) in [
+                ("common/data.bin", b"shared".as_slice()),
+                ("GZGA900013/autorun.exe", pe.as_slice()),
+                ("GZGA900013/helper.cab", b"not an installer".as_slice()),
+                ("gzga900049/bin/game.exe", pe.as_slice()),
+                ("gzga900049/data.bin", b"game2".as_slice()),
+            ] {
+                archive
+                    .start_file(
+                        format!("{wrapper}{name}"),
+                        zip::write::FileOptions::default(),
+                    )
+                    .unwrap();
+                archive.write_all(data).unwrap();
+            }
+            archive.finish().unwrap();
+            let mut lib = Library::open(root.join("library")).unwrap();
+            let entries = lib.import_zip_entries(&archive_path).unwrap();
+            assert_eq!(entries.len(), 2);
+            assert_eq!(lib.games().len(), 2);
+            assert!(lib.get("collection").is_none());
+            let names: Vec<_> = entries.iter().map(|e| e.display_name.as_str()).collect();
+            assert!(names.contains(&"Richard Burns Rally (april 2005)"));
+            assert!(names.contains(&"Hit & Myth (may 2005)"));
+            for entry in &entries {
+                assert!(is_gizmondo_game(entry, lib.root()));
+                assert!(!lib.is_demo_card(&entry.id));
+                assert!(entry.executable_path(lib.root()).is_file());
+                let extracted = entry.extracted_dir(lib.root());
+                assert_eq!(
+                    fs::read(extracted.join(format!("{wrapper}common/data.bin"))).unwrap(),
+                    b"shared"
+                );
+                let own = game_gizmondo_title_id(entry, lib.root()).unwrap();
+                let other = if own == "GZGA900013" {
+                    "gzga900049"
+                } else {
+                    "GZGA900013"
+                };
+                assert!(!extracted.join(format!("{wrapper}{other}")).exists());
+            }
+            lib.remove(&entries[0].id).unwrap();
+            assert!(entries[1].executable_path(lib.root()).is_file());
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn gzga_collection_detection_does_not_split_root_controls_or_mixed_exes() {
+        use std::io::Write;
+        for extra in ["autorun.exe", "MULTIBOOT.HOG", "Other/game.exe"] {
+            let root = tmpdir("gzga_not_collection");
+            fs::create_dir_all(&root).unwrap();
+            let fixture = root.join("fixture.exe");
+            write_pe_importing(&fixture, &[]);
+            let pe = fs::read(fixture).unwrap();
+            let archive_path = root.join("Mixed.zip");
+            let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+            for name in ["GZGA900013/autorun.exe", "GZGA900049/autorun.exe", extra] {
+                archive
+                    .start_file(name, zip::write::FileOptions::default())
+                    .unwrap();
+                archive.write_all(&pe).unwrap();
+            }
+            archive.finish().unwrap();
+            let mut lib = Library::open(root.join("library")).unwrap();
+            assert_eq!(lib.import_zip_entries(&archive_path).unwrap().len(), 1);
+            assert_eq!(lib.games().len(), 1);
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]

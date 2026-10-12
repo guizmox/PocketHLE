@@ -2728,3 +2728,30 @@ Catalogue additions: local GZGA800056 = Agaju (oct 2005), GZGA900016 = Chicane
 Local GZGA900013 labels the user-supplied Richard Burns Rally (april 2005) variant.
 
 Local GZGA900049 labels the user-supplied Hit & Myth (may 2005) variant.
+
+
+## GZGA collection imports and library UI exclusion
+
+Library::import_zip_entries returns all imported entries. Multiple sibling
+GZGA###### executable directories with no root autorun.exe/multiboot.hog split
+through the same independent-tree copier as demo cards. Wrapper roots, shared
+resources and case-insensitive IDs are supported. Root control files or guest
+executables outside the sibling GZGA directories retain the ordinary import.
+import_zip remains a compatible single-reference API but imports the entire
+collection and returns its first entry. Collection entries carry source_cab
+prefix gzga-collection: so they remain Gizmondo even without marker files.
+The common title helper resolves their selected executable's own GZGA ancestor.
+
+Desktop import completion carries Vec<GameEntry>; bulk imports skip the single
+rename prompt. library_busy gates all UI/input before drawing interactive
+controls during the worker operation and unlocks on success/error/cancellation.
+The demo-card choice also gates underlying UI. Android importZip returns an
+array for a collection and the existing object for ordinary imports/demo cards;
+MainActivity handles both. A noncancelable busy dialog covers import/copy and
+split, dismissed in coroutine finally blocks. No launcher binary or emulation
+rendering change is involved.
+
+The desktop VFSTEST runner cleanup assertion now permits exactly VFSTEST.TXT
+and PocketHLE-VFSTEST-PERSIST-v3.bin, verifies the 108-check PASS summary and
+validates the marker's 12 bytes (magic 0x56544633, version 1, first-run count 1).
+The marker is intentional persistent state, not a leaked temporary probe file.

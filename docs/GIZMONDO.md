@@ -110,3 +110,18 @@ and original resources remain unchanged. Other titles keep their own language.
 Desktop cartridge BMP artwork preserves its aspect ratio, centred within the
 white SD-card label. Wide images fit its full width; tall images also respect
 the label height. Artwork never stretches into the Gizmondo band.
+
+
+## GZGA collection ZIP imports
+
+A ZIP containing several sibling `GZGA######` game directories, without
+`autorun.exe` or `multiboot.hog` at their shared root, imports each game as a
+separate library entry automatically. Wrapper directories are supported. Each
+entry receives its own files and copies of shared resources, with the static
+GZGA title (including ALT labels) where known. A single-game ZIP keeps the normal
+import flow. Demo cards containing their launcher and HOG retain the choice
+between keeping the launcher and separating the games.
+
+Desktop and Android block library interaction while importing or splitting a
+card, then restore it on completion or error. The desktop also blocks the
+underlying interface while the demo-card choice is pending.

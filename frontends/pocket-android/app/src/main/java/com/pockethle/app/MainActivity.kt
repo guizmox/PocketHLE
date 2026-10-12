@@ -33,6 +33,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var adapter: GameAdapter
     private var gizmondoTab = true
+    private var libraryBusy = false
+    private var busyDialog: AlertDialog? = null
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
     private lateinit var rootDir: String
@@ -78,13 +80,13 @@ class MainActivity : AppCompatActivity() {
         })
 
         findViewById<FloatingActionButton>(R.id.fab_import).setOnClickListener {
-            importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
+            if (!libraryBusy) importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
         }
     }
 
     override fun onResume() {
         super.onResume()
-        refreshLibrary()
+        if (!libraryBusy) refreshLibrary()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -93,6 +95,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (libraryBusy) return true
         return when (item.itemId) {
             R.id.action_settings -> {
                 startActivity(Intent(this, SettingsActivity::class.java))
@@ -188,18 +191,41 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setLibraryBusy(message: String?) {
+        libraryBusy = message != null
+        busyDialog?.dismiss()
+        busyDialog = if (message == null) null else AlertDialog.Builder(this)
+            .setTitle("Please wait")
+            .setMessage(message)
+            .setCancelable(false)
+            .create().also { it.setCanceledOnTouchOutside(false); it.show() }
+    }
+
+    override fun onDestroy() {
+        busyDialog?.dismiss()
+        busyDialog = null
+        super.onDestroy()
+    }
+
     private fun handleImport(uri: Uri) {
+        if (libraryBusy) return
+        setLibraryBusy("Importing games…")
         val name = queryDisplayName(uri) ?: "import.cab"
         val snack = Snackbar.make(recycler, R.string.import_in_progress, Snackbar.LENGTH_INDEFINITE)
         snack.show()
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val cabFile = LibraryPaths.copyUriToCache(this@MainActivity, uri, name)
-                    importArchiveOrExe(cabFile)
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val cabFile = LibraryPaths.copyUriToCache(this@MainActivity, uri, name)
+                        importArchiveOrExe(cabFile)
+                    }
                 }
+            } finally {
+                setLibraryBusy(null)
+                snack.dismiss()
             }
-            snack.dismiss()
+
             result.fold(
                 onSuccess = { raw ->
                     handleImportResult(raw)
@@ -253,6 +279,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleImportResult(raw: String) {
         try {
+            if (raw.trimStart().startsWith("[")) {
+                val entries = GameEntry.listFromJson(raw)
+                gizmondoTab = true
+                findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs).getTabAt(0)?.select()
+                Snackbar.make(recycler, "Imported ${entries.size} separate games.", Snackbar.LENGTH_LONG).show()
+                return
+            }
             val obj = JSONObject(raw)
             if (!obj.optBoolean("ok", true)) {
                 Snackbar.make(
@@ -270,8 +303,15 @@ class MainActivity : AppCompatActivity() {
                     .setCancelable(false)
                     .setNegativeButton("Keep launcher") { _,_ -> editGameName(id,name,"Confirm game name") }
                     .setPositiveButton("Separate games") { _,_ ->
+                        setLibraryBusy("Separating demo card games…")
                         lifecycleScope.launch {
-                            val split=withContext(Dispatchers.IO) { runCatching { GameEntry.listFromJson(NativeBridge.splitDemoCard(rootDir,id)) } }
+                            val split = try {
+                                withContext(Dispatchers.IO) {
+                                    runCatching { GameEntry.listFromJson(NativeBridge.splitDemoCard(rootDir, id)) }
+                                }
+                            } finally {
+                                setLibraryBusy(null)
+                            }
                             split.fold(onSuccess={ entries ->
                                 refreshLibrary()
                                 Snackbar.make(recycler,"Imported ${entries.size} separate games. Names can be edited from each game menu.",Snackbar.LENGTH_LONG).show()

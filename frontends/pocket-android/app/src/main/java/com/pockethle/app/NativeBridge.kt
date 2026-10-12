@@ -62,9 +62,9 @@ object NativeBridge {
 
     /** Returns the freshly imported game as a JSON [GameEntry]. */
     @JvmStatic external fun importCab(libraryRoot: String, cabPath: String): String
-    /** Imports a ZIP archive containing a Pocket PC game. */
     @JvmStatic external fun isDemoCard(libraryRoot: String, id: String): Boolean
     @JvmStatic external fun splitDemoCard(libraryRoot: String, id: String): String
+    /** Returns one JSON GameEntry, or an array for an automatic GZGA collection import. */
     @JvmStatic external fun importZip(libraryRoot: String, zipPath: String): String
     /** Imports a RAR archive containing a Pocket PC game. */
     @JvmStatic external fun importRar(libraryRoot: String, rarPath: String): String

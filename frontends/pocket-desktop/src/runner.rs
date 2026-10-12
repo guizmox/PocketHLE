@@ -1106,11 +1106,53 @@ mod launcher_return_tests {
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
-        assert_eq!(entries.len(), 1, "all fixture data must be removed");
-        let report = std::fs::read_to_string(&entries[0]).unwrap();
+        let mut names: Vec<_> = entries
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["pockethle-vfstest-persist-v3.bin", "vfstest.txt"],
+            "only the report and versioned persistence marker may remain"
+        );
+        let report_path = entries
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("VFSTEST.TXT")
+            })
+            .unwrap();
+        let report = std::fs::read_to_string(report_path).unwrap();
         assert!(
-            report.contains("VFSTEST_RESULT PASS") && !report.contains("FAIL "),
+            report.contains("VFSTEST_RESULT PASS checks=0x0000006c failures=0x00000000")
+                && !report.lines().any(|line| line.starts_with("FAIL ")),
             "{report}"
+        );
+        let marker_path = entries
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("PocketHLE-VFSTEST-PERSIST-v3.bin")
+            })
+            .unwrap();
+        let marker = std::fs::read(marker_path).unwrap();
+        let expected: Vec<_> = [0x56544633u32, 1, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(
+            marker, expected,
+            "first successful run must persist its versioned marker"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
