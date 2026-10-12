@@ -128,6 +128,7 @@ data class LauncherConfig(
     val gprsEnabled: Boolean = true,
     val colorsServerUrl: String = "https://vps-50cdd0fc.vps.ovh.ca",
     val colorsTerminalId: String = "",
+    val colorsLanguage: String = "english",
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
     /**
@@ -168,6 +169,7 @@ data class LauncherConfig(
         put("gprs_enabled", gprsEnabled)
         put("colors_server_url", colorsServerUrl)
         put("colors_terminal_id", colorsTerminalId)
+        put("colors_language", colorsLanguage)
         put("controls_opacity", controlsOpacity.toDouble())
         if (keybindingsJson != null) {
             runCatching { put("keybindings", JSONArray(keybindingsJson)) }
@@ -215,6 +217,7 @@ data class LauncherConfig(
             gprsEnabled = obj.optBoolean("gprs_enabled", true),
             colorsServerUrl = obj.optString("colors_server_url", "").ifBlank { "https://vps-50cdd0fc.vps.ovh.ca" },
             colorsTerminalId = obj.optString("colors_terminal_id", ""),
+            colorsLanguage = obj.optString("colors_language", "english").takeIf { it in listOf("english", "french", "german", "italian", "spanish") } ?: "english",
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),
             keybindingsJson = obj.optJSONArray("keybindings")?.toString(),

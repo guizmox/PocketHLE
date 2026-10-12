@@ -2674,24 +2674,18 @@ unit fixtures share a test-only gate around their process-global graph registry
 so parallel tests cannot reset one another's graphs. Production graph behavior
 is unchanged by this test gate.
 
-## Immutable VFS fallback candidate index (Trailblazer)
 
-R3 retains preemption of resource workers while a live waveOut ring plays.
-The observed menu hitch spends almost all elapsed time inside synchronous
-worker fopen calls; scheduler turns cannot interrupt a host file handler.
-Read-only mounts already snapshot fallback file paths. Their snapshot now
-groups paths by ASCII-case-insensitive basename, so missing assets do not
-rank every unrelated file on every probe. The original trailing-component
-ranking and ambiguity rules run over the selected candidates, in original
-order. Exact paths still precede fallback and remain live; writable mounts
-still rescan. No successful/failed open result, handle, sharing or quota
-state is cached. The index belongs to Mount and is dropped with that mount;
-no background I/O thread or timer is introduced.
+## Global Colors language preference
 
-VFS regressions retain overlay precedence, live writable files, independent
-close/duplication and directory ambiguity coverage. Candidate tests compare
-indexed results with the original complete-list ranking, including ASCII
-case and distinct non-ASCII names. A synthetic large-mount repeated-miss
-measurement validates the optimization, not Trailblazer gameplay timing.
-Temporary SCHED-DIAG instrumentation is removed in the delivery. Actual
-Windows/Android menu transitions remain the runtime acceptance test.
+Desktop and Android Gizmondo options expose English UI for colors_language
+(english/french/german/italian/spanish), default English for existing configs.
+Eligibility and launch activation use game_gizmondo_title_id == GZGA200015,
+never a display-name match. At the next launch, Colors alone redirects read-side
+bstrings.eng resolution to a case-insensitive sibling bstrings.fre/ger/ita/spa
+(fra/deu/esp aliases accepted). Missing or ambiguous translations retain English.
+No executable or installed resource is rewritten. Write/create destinations stay
+on the original exact path. The alias is process-local, not part of VfsShared,
+so another game sharing device services does not inherit it. Translation files
+must already exist beside bstrings.eng; this does not supply translations or
+rewrite entries inside data.zcd. Original game archives are required for in-game
+validation and any version-specific missing string keys.

@@ -58,6 +58,7 @@ object NativeBridge {
 
     /** Returns a JSON array of [GameEntry]. */
     @JvmStatic external fun listGames(libraryRoot: String): String
+    @JvmStatic external fun hasColors(libraryRoot: String): Boolean
 
     /** Returns the freshly imported game as a JSON [GameEntry]. */
     @JvmStatic external fun importCab(libraryRoot: String, cabPath: String): String

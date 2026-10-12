@@ -223,6 +223,12 @@ impl Runner {
             launcher_config.gps_enabled,
         );
         if let Some(process) = emu.process_mut() {
+            if pocket_library::is_colors_game(&game, &library_root) {
+                process
+                    .state
+                    .vfs
+                    .set_colors_language(&launcher_config.colors_language);
+            }
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
             process.state.vfs.camera_service().set_allowed(hardware.1);
             process.state.vfs.gps_service().set_allowed(hardware.2);

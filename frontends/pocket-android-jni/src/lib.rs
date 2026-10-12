@@ -72,6 +72,26 @@ pub extern "system" fn Java_com_pockethle_app_MainActivity_banner<'local>(
     )
 }
 
+/// Settings eligibility uses the same title-ID helper as desktop and launch.
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_hasColors<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+) -> jni::sys::jboolean {
+    let Some(root) = jstring_to_path(&mut env, library_root) else {
+        return 0;
+    };
+    let Ok(lib) = Library::open(&root) else {
+        return 0;
+    };
+    u8::from(
+        lib.games()
+            .iter()
+            .any(|game| pocket_library::is_colors_game(game, &root)),
+    )
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_listGames<'local>(
     mut env: JNIEnv<'local>,

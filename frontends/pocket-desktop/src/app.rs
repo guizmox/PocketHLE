@@ -1460,6 +1460,21 @@ impl PocketLauncher {
         }
         ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
             .on_hover_text("Use the PC Internet connection for the Gizmondo data connection. Takes effect on the next launch.");
+        let colors_installed = self.library.games().iter().any(|game| pocket_library::is_colors_game(game, self.library.root()));
+        ui.add_enabled_ui(colors_installed, |ui| {
+            ui.label("Colors language");
+            egui::ComboBox::from_id_source("colors_language")
+                .selected_text(match draft.colors_language.as_str() {
+                    "french" => "French", "german" => "German", "italian" => "Italian", "spanish" => "Spanish", _ => "English",
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in [("english", "English"), ("french", "French"), ("german", "German"), ("italian", "Italian"), ("spanish", "Spanish")] {
+                        ui.selectable_value(&mut draft.colors_language, value.to_owned(), label);
+                    }
+                });
+            ui.label("Applied on the next launch. Missing translations use English.");
+        });
+        if !colors_installed { ui.label("Install Colors to choose its language."); }
         ui.label("Colors multiplayer server (next launch)");
         ui.text_edit_singleline(&mut draft.colors_server_url)
             .on_hover_text("Example: http://192.168.1.10:8080. Leave empty to restore the public Colors server on the next load.");

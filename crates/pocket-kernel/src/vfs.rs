@@ -27,8 +27,6 @@ use std::sync::{Arc, Mutex};
 
 #[path = "vfs_contract.rs"]
 mod contracts;
-#[path = "vfs_fallback_index.rs"]
-mod fallback_index;
 pub use contracts::{OpenResult, VfsShared};
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
@@ -231,10 +229,8 @@ struct Mount {
     host_dir: PathBuf,
     read_only: bool,
     /// Read-only mounts are a session snapshot for recursive fallback.
-    /// Group by basename so Trailblazer's repeated loose-asset probes do not
-    /// rank the entire demo card while its render/audio threads wait.
     /// Exact lookups remain live; writable mounts never use this index.
-    fallback_files: RefCell<Option<fallback_index::FallbackIndex>>,
+    fallback_files: RefCell<Option<Vec<PathBuf>>>,
 }
 
 /// The Gizmondo registration service device exposed as `REG1:`.
@@ -369,6 +365,8 @@ pub struct Vfs {
     /// `ExitProcess(0x42)` when the search comes up empty). Point this at
     /// the module's install directory so those lookups land there.
     default_dir: String,
+    /// Process-local opt-in: other games on a demo card must not inherit Colors aliases.
+    colors_language_extensions: &'static [&'static str],
 }
 
 impl Default for Vfs {
@@ -397,6 +395,7 @@ impl Vfs {
             next_handle: HANDLE_BASE,
             registration: std::collections::HashSet::new(),
             default_dir: "\\".to_string(),
+            colors_language_extensions: &[],
         };
         vfs.bluetooth.service = vfs.bluetooth_service();
         vfs
@@ -734,23 +733,106 @@ impl Vfs {
         files
     }
 
+    fn rank_fallback_files(
+        root: &Path,
+        wanted: &[&str],
+        files: &[PathBuf],
+    ) -> (usize, Vec<PathBuf>) {
+        let mut best = 0;
+        let mut found = Vec::new();
+        for path in files {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let score = relative
+                .components()
+                .rev()
+                .zip(wanted.iter().rev())
+                .take_while(|(component, expected)| {
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(expected)
+                })
+                .count();
+            if score > best {
+                best = score;
+                found.clear();
+            }
+            if score != 0 && score == best && found.len() < 2 {
+                found.push(path.clone());
+            }
+        }
+        (best, found)
+    }
+
     fn find_path_recursive(mount: &Mount, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
         if mount.read_only {
             let mut files = mount.fallback_files.borrow_mut();
-            let index = files.get_or_insert_with(|| {
-                fallback_index::FallbackIndex::new(Self::collect_fallback_files(&mount.host_dir))
-            });
-            fallback_index::rank(&mount.host_dir, wanted, index.candidates(wanted))
+            let files = files.get_or_insert_with(|| Self::collect_fallback_files(&mount.host_dir));
+            Self::rank_fallback_files(&mount.host_dir, wanted, files)
         } else {
             let files = Self::collect_fallback_files(&mount.host_dir);
-            fallback_index::rank(&mount.host_dir, wanted, &files)
+            Self::rank_fallback_files(&mount.host_dir, wanted, &files)
         }
     }
 
-    /// Translate a guest path to a host path. Existing files fall back
-    /// through broader mounts, allowing a writable save overlay to sit
-    /// above a read-only extracted game directory.
+    /// Colors only declares English in its binary. Redirect its read-side resource
+    /// lookup without editing card files; writes keep the exact guest destination.
+    /// Frontends enable this only for the GZGA200015 process, at the next launch.
+    pub fn set_colors_language(&mut self, language: &str) {
+        self.colors_language_extensions = match language {
+            "french" => &["fre", "fra"],
+            "german" => &["ger", "deu"],
+            "italian" => &["ita"],
+            "spanish" => &["spa", "esp"],
+            _ => &[],
+        };
+    }
+
+    /// Translate a guest path to a host path, including the Colors read alias.
     pub fn resolve(&self, guest_path: &str) -> Option<PathBuf> {
+        let english = self.resolve_original(guest_path)?;
+        if self.colors_language_extensions.is_empty()
+            || !english
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("bstrings.eng"))
+        {
+            return Some(english);
+        }
+        // Stay beside the resolved English resource. Never borrow a translation
+        // from another title or another Colors installation via basename fallback.
+        let Some(parent) = english.parent() else {
+            return Some(english);
+        };
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return Some(english);
+        };
+        let files: Vec<_> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .collect();
+        for extension in self.colors_language_extensions {
+            let name = format!("bstrings.{extension}");
+            let mut matches = files.iter().filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&name)
+            });
+            if let Some(found) = matches.next() {
+                // Case-colliding resources are ambiguous on case-sensitive hosts.
+                if matches.next().is_none() {
+                    return Some(found.path());
+                }
+            }
+        }
+        Some(english)
+    }
+
+    /// Existing files fall back through broader mounts, allowing a writable
+    /// save overlay to sit above a read-only extracted game directory.
+    fn resolve_original(&self, guest_path: &str) -> Option<PathBuf> {
         let normalised = self.normalise_guest_path(guest_path);
         let is_device_path = Path::new(&normalised)
             .file_name()
@@ -1787,6 +1869,91 @@ pub enum SeekKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_language_redirects_reads_and_preserves_original_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bstrings.eng"), b"english").unwrap();
+        for (language, extension) in [
+            ("french", "fre"),
+            ("german", "ger"),
+            ("italian", "ita"),
+            ("spanish", "spa"),
+        ] {
+            std::fs::write(dir.path().join(format!("BSTRINGS.{extension}")), language).unwrap();
+        }
+        let mut vfs = Vfs::new();
+        vfs.mount("/card/", dir.path());
+        vfs.set_default_dir("/card/");
+        for language in [
+            "french", "german", "italian", "spanish", "english", "unknown",
+        ] {
+            vfs.set_colors_language(language);
+            let h = vfs.open("BSTRINGS.ENG", Access::Read, false).unwrap();
+            let expected = if language == "unknown" {
+                "english"
+            } else {
+                language
+            };
+            assert_eq!(vfs.size(h), Some(expected.len() as u64));
+            let mut buffer = vec![0; expected.len()];
+            assert_eq!(vfs.read(h, &mut buffer), Some(expected.len()));
+            assert_eq!(buffer, expected.as_bytes());
+            assert!(vfs.close(h));
+        }
+        vfs.set_colors_language("french");
+        let h = vfs.open("bstrings.eng", Access::Write, false).unwrap();
+        assert_eq!(vfs.write(h, b"ENGLISH"), Some(7));
+        assert!(vfs.close(h));
+        assert_eq!(
+            std::fs::read(dir.path().join("bstrings.eng")).unwrap(),
+            b"ENGLISH"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("BSTRINGS.fre")).unwrap(),
+            b"french"
+        );
+    }
+
+    #[test]
+    fn colors_language_missing_translation_falls_back_without_crossing_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+        let english = dir.path().join("bstrings.eng");
+        std::fs::write(&english, b"english").unwrap();
+        std::fs::write(dir.path().join("other/bstrings.fre"), b"other").unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_read_only("/card/", dir.path());
+        vfs.set_colors_language("french");
+        assert_eq!(vfs.resolve("/card/bstrings.eng"), Some(english.clone()));
+        let h = vfs.open("/card/bstrings.eng", Access::Read, false).unwrap();
+        let mut buffer = [0; 7];
+        assert_eq!(vfs.read(h, &mut buffer), Some(7));
+        assert_eq!(&buffer, b"english");
+        assert!(vfs.close(h));
+        // Installing a translation becomes visible without changing the card's English file.
+        let french = dir.path().join("bstrings.fre");
+        std::fs::write(&french, b"french").unwrap();
+        assert_eq!(vfs.resolve("/card/bstrings.eng"), Some(french));
+        let mut other_game = Vfs::new();
+        other_game.mount_read_only("/card/", dir.path());
+        other_game.attach_shared_context(vfs.shared_context());
+        assert_eq!(other_game.resolve("/card/bstrings.eng"), Some(english));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn colors_language_ambiguous_case_falls_back_to_english() {
+        let dir = tempfile::tempdir().unwrap();
+        let english = dir.path().join("bstrings.eng");
+        std::fs::write(&english, b"english").unwrap();
+        std::fs::write(dir.path().join("bstrings.fre"), b"first").unwrap();
+        std::fs::write(dir.path().join("BSTRINGS.FRE"), b"second").unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_read_only("/card/", dir.path());
+        vfs.set_colors_language("french");
+        assert_eq!(vfs.resolve("/card/bstrings.eng"), Some(english));
+    }
 
     #[test]
     fn memory_division_ram_files_share_capacity_and_preserve_failed_writes() {

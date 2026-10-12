@@ -1,28 +1,48 @@
-PocketHLE Camera Handle Error Fix R2 — full-file overlay
+PocketHLE - Colors Language R1
 
-Base: guizmox/PocketHLE 4123cff2c98c10592bc44a3ac4d55fcbc7e924a5.
-Equivalent production fix and regression tests to Handle Error Fix R1.
-Extract into the PocketHLE checkout, replacing the two listed Rust files.
-No Python merger or git apply is needed. No source file is deleted.
-Other diagnostic tools and documentation are not replaced by this overlay.
+Overlay based on repository commit: 31bb2e4f45ffa81597297b9b43a1163db2718519
 
-DeviceIoControl rejects invalid/closed VFS handles with LastError 6 before
-reading other arguments. Live camera unsupported IOCTLs still return 50.
-Camera acquisition, orientation, pacing and memory allocation are unchanged.
-The dispatcher is shared by Windows and Android; rebuild the target to apply.
+Extract at the PocketHLE repository root, overwriting the listed source files.
+Close the emulator first. No files need deletion.
 
 Windows CMD:
-
-powershell -NoProfile -Command "Get-Content 'removed-files.txt' | ForEach-Object { if (Test-Path -LiteralPath $_) { Remove-Item -LiteralPath $_ -Force } }"
-powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
+powershell -NoProfile -Command "Get-Content 'removed-files.txt' | ForEach-Object { if (Test-Path -LiteralPath $_) { Remove-Item -LiteralPath $_ -Force } }; Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 cargo build --release -p pocket-desktop
-target\release\pockethle-gui.exe
+ target\release\pockethle-gui.exe
 
-Rerun your existing CAMTEST v3 and send CAMTEST.TXT. Expect aggregate PASS and
-LastError 6 on all invalid/closed-handle probes. Successful calls can preserve
-an earlier LastError; do not interpret a PASS line's old error as a failure.
+Android (with the existing documented build environment):
+bash tools/build-android-native.sh 4
+bash tools/build-android-apk.sh
+Rebuild both the JNI library and APK; the settings use a new hasColors JNI method.
 
-Validation: original dispatcher reproduced 50 instead of 6; after correction,
-289 WinCE API tests PASS, 3 native-GPU tests ignored. Includes eight controlled
-camera capture/stop/close/reopen cycles with exact capture drop counts. Rustfmt
-and whitespace checks PASS. Physical Windows follow-up remains to be run.
+Gizmondo options -> Colors language
+English / French / German / Italian / Spanish.
+This is a saved global launcher preference, applied on the next launch.
+The control is disabled unless a library entry identifies as GZGA200015.
+No display-name matching and no per-game language setting.
+
+Read-side bstrings.eng lookup redirects to its sibling bstrings.fre, .ger,
+.ita or .spa. Alternate .fra, .deu, .esp names are also accepted.
+Missing or case-ambiguous translation files fall back to English.
+English is the default when reading old configuration files.
+Other titles and write/create operations keep their original paths.
+No executable or original game resource is changed; translations are not bundled.
+Translation files must already be present beside bstrings.eng. This patch does
+not read/replace resources stored inside data.zcd, nor merge the three newer
+string keys into an older translation. The actual game archives are still needed
+to confirm its resource layout and validate both versions in gameplay.
+
+Validation performed:
+- 34 VFS unit tests passed, including the 3 new Colors resource tests.
+- 2 Colors library tests passed: config migration/roundtrip and title identity.
+- cargo check --locked -p pocket-android-jni --no-default-features passed on Linux.
+- New desktop settings block typechecked against egui 0.27.2 and pocket-library.
+- Rust formatting check and Rust/Kotlin syntax checks passed.
+No full Windows release build, Android APK build, or real Colors gameplay run.
+
+Suggested check:
+1. Without Colors installed, Colors language should be disabled.
+2. Install Colors and choose French; restart the game with bstrings.fre present.
+3. Choose a language whose file is absent; restart and confirm English.
+4. Restart PocketHLE and confirm the selected preference was saved.
+5. Launch another title and confirm its resources/language are unchanged.

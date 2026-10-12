@@ -95,3 +95,13 @@ and release the decoder's resources. Detailed contracts remain in
 exercise memory/process and filesystem contracts. Run hardware tests explicitly;
 they do not run automatically when importing a game. GPU differences and visual
 regression checks are documented in [GPU.md](GPU.md).
+
+
+## Colors language
+
+In Gizmondo options, **Colors language** selects English, French, German,
+Italian or Spanish for the next launch. The preference is global and becomes
+available when Colors (GZGA200015) is installed. If the chosen translation is
+missing, Colors uses English. The installation must contain the translation
+beside `bstrings.eng`; no translation files are bundled and the game executable
+and original resources remain unchanged. Other titles keep their own language.

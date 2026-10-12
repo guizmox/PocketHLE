@@ -576,6 +576,9 @@ pub struct LauncherConfig {
     /// Optional explicit device ID for separate multiplayer test installations.
     #[serde(default)]
     pub colors_terminal_id: String,
+    /// Global Colors text language; unavailable translations fall back to English.
+    #[serde(default = "default_colors_language")]
+    pub colors_language: String,
     /// Desktop smoothing filter, remembered across sessions.
     #[serde(default = "default_upscale_filter")]
     pub upscale_filter: String,
@@ -628,6 +631,15 @@ pub struct LauncherConfig {
 fn default_log_unimplemented_apis() -> bool {
     true
 }
+fn default_colors_language() -> String {
+    "english".into()
+}
+
+/// Colors is selected by card identity, never by a user-editable display name.
+pub fn is_colors_game(game: &GameEntry, root: &Path) -> bool {
+    game_gizmondo_title_id(game, root).is_some_and(|id| id.eq_ignore_ascii_case("GZGA200015"))
+}
+
 fn default_colors_server_url() -> String {
     "https://vps-50cdd0fc.vps.ovh.ca".to_owned()
 }
@@ -690,6 +702,7 @@ impl Default for LauncherConfig {
             gprs_enabled: default_gprs_enabled(),
             colors_server_url: default_colors_server_url(),
             colors_terminal_id: String::new(),
+            colors_language: default_colors_language(),
             upscale_filter: default_upscale_filter(),
             android_display_scale: 0,
             last_import_dir: None,
@@ -2595,6 +2608,20 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn colors_language_eligibility_uses_title_id_not_display_name() {
+        let root = tempfile::tempdir().unwrap();
+        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
+            "id": "test", "display_name": "Renamed game", "source_cab": "game.zip",
+            "executable": "extracted/GZGA200015/autorun.exe", "imported_at": 0
+        }))
+        .unwrap();
+        assert!(is_colors_game(&game, root.path()));
+        game.display_name = "Colors".into();
+        game.executable = "extracted/GZGA200016/autorun.exe".into();
+        assert!(!is_colors_game(&game, root.path()));
+    }
+
+    #[test]
     fn colors_configuration_migrates_defaults_and_roundtrips_player_settings() {
         let old: LauncherConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(old.colors_server_url, default_colors_server_url());
@@ -2607,12 +2634,14 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"colors_server_url": value})).unwrap();
             assert_eq!(config.colors_server_url, default_colors_server_url());
         }
+        assert_eq!(old.colors_language, "english");
         assert!(old.colors_terminal_id.is_empty());
         assert!(old.gprs_enabled);
         assert!(!old.gps_fixed_enabled);
         let mut updated = old;
         updated.colors_server_url = "https://colors.example.org".into();
         updated.colors_terminal_id = "Player-A".into();
+        updated.colors_language = "french".into();
         updated.gprs_enabled = false;
         updated.gps_fixed_enabled = true;
         updated.gps_fixed_latitude = -33.1234567;
@@ -2621,6 +2650,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&updated).unwrap()).unwrap();
         assert_eq!(decoded.colors_server_url, updated.colors_server_url);
         assert_eq!(decoded.colors_terminal_id, updated.colors_terminal_id);
+        assert_eq!(decoded.colors_language, "french");
         assert!(!decoded.gprs_enabled);
         assert!(decoded.gps_fixed_enabled);
         assert_eq!(decoded.gps_fixed_latitude, -33.1234567);
