@@ -3418,10 +3418,9 @@ pub fn run_main_loop_with_hook(
         // case at ~280 slices per millisecond.
         native_thunks::refresh_tick_page(cpu, &mut tick_written);
         // Live guest mixer rings must not depend on the main thread entering
-        // another API. Bound only those main-thread slices by elapsed host time;
+        // another API. Bound audio-active slices by elapsed host time;
         // Unicorn retains translation-block chaining (no instruction counter).
-        let audio_worker_pending = process.state.current_thread == 0
-            && !process.state.wave_out.live_loops.is_empty()
+        let audio_worker_pending = !process.state.wave_out.live_loops.is_empty()
             && process
                 .state
                 .threads

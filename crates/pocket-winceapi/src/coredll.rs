@@ -2342,8 +2342,8 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
     Ok(Some(DispatchOutcome::JumpTo(worker_regs[15] & !1)))
 }
 
-/// A worker's Sleep gives the remaining ready workers one turn before main
-/// resumes. Bound the round so Sleep(0) workers cannot starve the main thread.
+/// Sleep or an expired audio quantum gives the remaining ready workers one
+/// turn before main resumes. Bound the round so main cannot be starved.
 /// The CPU already holds the exact main continuation restored by park_worker;
 /// preserve it rather than rebuilding it from the worker's Sleep thunk/LR.
 fn resume_ready_worker_after_sleep(
@@ -2399,7 +2399,7 @@ fn resume_ready_worker_after_sleep(
 pub(crate) fn wake_due_worker(
     ctx: &mut CallCtx<'_>,
 ) -> Result<Option<DispatchOutcome>, KernelError> {
-    if ctx.kernel.current_thread != 0 {
+    if ctx.kernel.current_thread != 0 && ctx.kernel.wave_out.live_loops.is_empty() {
         return Ok(None);
     }
     let now = monotonic_ms();
@@ -2418,6 +2418,26 @@ pub(crate) fn wake_due_worker(
         || !ctx.kernel.module_attach_frames.is_empty()
     {
         return Ok(None);
+    }
+    // A resource/streaming worker can monopolize the guest CPU with slow host
+    // I/O, despite the mixer already being runnable (Trailblazer). Yield its
+    // expired quantum before executing this API; retry with all arguments and
+    // flags intact. Its existing saved_regs remain the main continuation.
+    if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
+        let outcome = park_worker_at(ctx, None, Some(ctx.thunk.thunk_va))?;
+        if let Some(thread) = ctx.kernel.threads.get_mut(index) {
+            // This is preemption, not an unsatisfied wait/message-pump call.
+            thread.parked_in_pump = false;
+        }
+        if !ctx.kernel.worker_round_seen.contains(&index) {
+            ctx.kernel.worker_round_seen.push(index);
+        }
+        if outcome.is_some() {
+            if let Some(next) = resume_ready_worker_after_sleep(ctx)? {
+                return Ok(Some(next));
+            }
+        }
+        return Ok(outcome);
     }
     // Host playback continues independently of the guest message pump.
     // Publish completed headers/events before deciding which blocked worker
@@ -2446,15 +2466,14 @@ pub(crate) fn wake_due_worker(
 }
 
 /// FMOD-style live waveOut rings require their guest mixer to keep running
-/// while the main thread unloads resources in native thunks or CPU-only loops.
-/// Reuse the normal worker quantum and callback exclusions, but resume main at
-/// its interrupted instruction rather than at an API thunk.
+/// while main or a resource worker unloads data in CPU-only loops. Reuse the
+/// normal quantum and callback exclusions, preserving the interrupted PC
+/// rather than retrying an API that did not run at this slice boundary.
 pub(crate) fn schedule_audio_cpu_slice(
     cpu: &mut dyn pocket_cpu::Cpu,
     kernel: &mut KernelState,
 ) -> Result<Option<u32>, KernelError> {
-    if kernel.current_thread != 0
-        || kernel.wave_out.live_loops.is_empty()
+    if kernel.wave_out.live_loops.is_empty()
         || kernel.threads.is_empty()
         || monotonic_ms() < kernel.worker_preempt_after_ms
     {
@@ -27194,12 +27213,66 @@ mod tests {
             schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
             None
         );
-        kernel.worker_preempt_after_ms = 0;
         kernel.current_thread = 1;
         assert_eq!(
             schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn audio_worker_preemption_retries_api_without_losing_args_flags_or_fp() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut main = std::array::from_fn(|i| 0x5000 + i as u32 * 4);
+        main[15] = 0x5010;
+        main[16] = 0x10;
+        let mut worker = GuestThread::new(
+            0x10000, 0, 0x20000, 0x1000, 0x30000, main[15], 0xdead7c00, main,
+        );
+        worker.started = true;
+        kernel.threads.push(worker);
+        kernel.wave_out.live_loops.insert(
+            1,
+            pocket_kernel::LiveWaveLoop {
+                hdr: 0,
+                data: 0,
+                bytes: 0,
+            },
+        );
+        write_guest_regs(&mut cpu, &main).unwrap();
+        cpu.write_fpscr(0x00400011).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        switch_guest_fp(&mut ctx, 1).unwrap();
+        ctx.kernel.current_thread = 1;
+        let mut interrupted = std::array::from_fn(|i| 0x6000 + i as u32 * 4);
+        interrupted[15] = thunk.thunk_va;
+        interrupted[16] = 0x80000010;
+        write_guest_regs(ctx.cpu, &interrupted).unwrap();
+        ctx.cpu.write_fpscr(0x00800012).unwrap();
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(main[15]))
+        );
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(read_guest_regs(ctx.cpu).unwrap(), main);
+        assert_eq!(ctx.cpu.read_fpscr().unwrap(), 0x00400011);
+        assert_eq!(ctx.kernel.threads[0].worker_regs, interrupted);
+        assert!(ctx.kernel.threads[0].worker_saved);
+        assert!(!ctx.kernel.threads[0].parked_in_pump);
+        assert!(wake_due_worker(&mut ctx).unwrap().is_none()); // main's quantum
+        ctx.kernel.worker_preempt_after_ms = 0;
+        assert_eq!(
+            wake_due_worker(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(thunk.thunk_va))
+        );
+        assert_eq!(read_guest_regs(ctx.cpu).unwrap(), interrupted);
+        assert_eq!(ctx.cpu.read_fpscr().unwrap(), 0x00800012);
     }
 
     #[test]
