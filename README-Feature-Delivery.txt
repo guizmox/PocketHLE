@@ -1,6 +1,6 @@
-PocketHLE cumulative delivery 05: Android-PocketPC
+PocketHLE cumulative delivery 06: Linux-Parity
 Base: GitHub main c8e2d25 (2026-10-12).
-Includes deliveries 01 through 05. Full source files, not a git patch.
+Includes deliveries 01 through 06. Full source files, not a git patch.
 Apply in increasing order, or apply this cumulative ZIP directly to the base.
 R2 replaces the original 05 implementation and is cumulative with unchanged 01-04.
 If you already applied 06/07/08, apply the matching R2 or the latest 08-R2;
@@ -8,11 +8,11 @@ do not apply 05-R2 over a later feature delivery unless you intend to revert it.
 Do not apply an earlier ZIP after a later one: shared files would be reverted.
 
 New feature check:
-On Android run COD2 and a portrait Pocket PC game. Existing COD2 imports: press Rotate once if needed; new imports default to CW90. Verify landscape/portrait remains correct when rotating the phone. Use Rotate for all four turns, test stylus hit locations, directions and release while held; restart and verify saved turn. Check Gizmondo layout is unchanged.
+Build Linux and Windows with the same default Cargo features. Compare library tabs, Gizmondo/Pocket PC layouts, import prompt, filters, GPU options, screenshots and simulated GPS controls. Native OS service availability differs; see docs/DESKTOP-PARITY.md.
 
 Windows CMD (replace NN with this delivery number):
 cd /d C:\Users\gtristant\source\repos\PocketHLE
-powershell -NoProfile -Command "Expand-Archive -LiteralPath (Join-Path $env:USERPROFILE 'Downloads\PocketHLE-05-Android-PocketPC-R3.zip') -DestinationPath '.' -Force"
+powershell -NoProfile -Command "Expand-Archive -LiteralPath (Join-Path $env:USERPROFILE 'Downloads\PocketHLE-06-Linux-Parity-R3.zip') -DestinationPath '.' -Force"
 powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 powershell -NoProfile -Command "Get-Content 'removed-files.txt' | ForEach-Object { if (Test-Path -LiteralPath $_) { Remove-Item -LiteralPath $_ } }"
 cargo +1.90.0 fmt --all -- --check
