@@ -170,3 +170,7 @@ four-byte marker file, while preserving flattened Toy Golf card paths.
 Sole-directory unwrapping stops at every exact GZxx###### SDK card boundary,
 including GZVT diagnostic cards, not just commercial GZGA directories. SDK
 volume checks require those card-relative paths to remain valid.
+
+Android library cards always display their catalogue/custom title below the
+card, including artwork-backed tiles. The desktop-style lower band shows the title, platform/resolution and
+exact card serial, distinguishing ALT versions even with identical artwork.

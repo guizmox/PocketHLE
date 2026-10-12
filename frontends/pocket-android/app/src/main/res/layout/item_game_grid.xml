@@ -1,10 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="196dp" android:layout_margin="6dp" android:clickable="true" android:focusable="true" android:foreground="?attr/selectableItemBackground">
- <com.pockethle.app.SdCardTile android:layout_width="match_parent" android:layout_height="match_parent"/>
- <ImageView android:id="@+id/game_artwork" android:layout_width="match_parent" android:layout_height="88dp" android:layout_gravity="center" android:layout_marginHorizontal="16dp" android:layout_marginTop="12dp" android:scaleType="fitCenter" android:visibility="gone" android:contentDescription="Game cartridge artwork"/>
- <LinearLayout android:id="@+id/game_label" android:layout_width="match_parent" android:layout_height="88dp" android:layout_gravity="center" android:layout_marginHorizontal="16dp" android:layout_marginTop="12dp" android:padding="8dp" android:orientation="vertical" android:gravity="center" android:background="#e8eef7">
-  <TextView android:id="@+id/game_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:textColor="#111a28" android:textSize="15sp" android:textStyle="bold" android:maxLines="3" android:ellipsize="end"/>
-  <TextView android:id="@+id/game_publisher" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:textColor="#526176" android:textSize="10sp" android:layout_marginTop="6dp"/>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+ android:layout_width="match_parent" android:layout_height="210dp"
+ android:layout_margin="6dp" android:orientation="vertical"
+ android:background="@drawable/game_tile_background" android:clipToOutline="true"
+ android:clickable="true" android:focusable="true" android:foreground="?attr/selectableItemBackground">
+ <FrameLayout android:layout_width="match_parent" android:layout_height="132dp">
+  <com.pockethle.app.SdCardTile android:id="@+id/game_card_fallback" android:layout_width="86dp" android:layout_height="118dp" android:layout_gravity="center"/>
+  <ImageView android:id="@+id/game_artwork" android:layout_width="match_parent" android:layout_height="118dp" android:layout_gravity="center" android:scaleType="fitCenter" android:visibility="gone" android:contentDescription="Game cartridge artwork"/>
+  <LinearLayout android:id="@+id/game_label" android:layout_width="70dp" android:layout_height="56dp" android:layout_gravity="center" android:padding="4dp" android:orientation="vertical" android:gravity="center" android:background="#e8eef7">
+   <TextView android:id="@+id/game_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:textColor="#111a28" android:textSize="10sp" android:maxLines="3" android:ellipsize="end"/>
+  </LinearLayout>
+  <ImageButton android:id="@+id/btn_more" android:layout_width="32dp" android:layout_height="32dp" android:layout_gravity="top|end" android:layout_margin="4dp" android:background="?attr/selectableItemBackgroundBorderless" android:padding="6dp" android:src="@drawable/ic_more_horiz" android:tint="#b9b9b9" android:contentDescription="@string/action_more"/>
+ </FrameLayout>
+ <LinearLayout android:layout_width="match_parent" android:layout_height="78dp" android:orientation="vertical" android:background="#1c1d20" android:paddingHorizontal="10dp" android:paddingTop="7dp">
+  <TextView android:id="@+id/game_caption" android:layout_width="match_parent" android:layout_height="wrap_content" android:textColor="#eeeeee" android:textSize="16sp" android:maxLines="1" android:ellipsize="end" android:includeFontPadding="false"/>
+  <TextView android:id="@+id/game_publisher" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:textColor="#b9b9b9" android:textSize="12sp" android:maxLines="1" android:includeFontPadding="false"/>
+  <TextView android:id="@+id/game_serial" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:textColor="#919191" android:textSize="11sp" android:fontFamily="monospace" android:maxLines="1" android:includeFontPadding="false"/>
  </LinearLayout>
- <ImageButton android:id="@+id/btn_more" android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="bottom|end" android:background="?attr/selectableItemBackgroundBorderless" android:padding="12dp" android:src="@drawable/ic_more_vert" android:tint="#ffffff" android:contentDescription="@string/action_more"/>
-</FrameLayout>
+</LinearLayout>

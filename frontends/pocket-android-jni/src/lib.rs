@@ -45,7 +45,7 @@ use jni::JNIEnv;
 
 use pocket_core::kernel::InputEvent;
 use pocket_core::Emulator;
-use pocket_library::{GameEntry, GameSettings, Library};
+use pocket_library::{GameSettings, Library};
 use serde::Serialize;
 
 use crate::runner::{InputCommand, Session};
@@ -105,7 +105,16 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_listGames<'local>(
     };
     let result = (|| -> anyhow::Result<String> {
         let lib = Library::open(&root)?;
-        let games: Vec<&GameEntry> = lib.games().iter().collect();
+        let games = lib
+            .games()
+            .iter()
+            .map(|game| {
+                let mut value = serde_json::to_value(game)?;
+                value["title_id"] =
+                    serde_json::to_value(pocket_library::game_gizmondo_title_id(game, &root))?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<serde_json::Value>, serde_json::Error>>()?;
         Ok(serde_json::to_string(&games)?)
     })();
     match result {

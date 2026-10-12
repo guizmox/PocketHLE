@@ -16,6 +16,7 @@ data class GameEntry(
     val importedAt: Long,
     val icon: String?,
     val settings: GameSettings,
+    val titleId: String? = null,
 ) {
     companion object {
         fun fromJson(obj: JSONObject): GameEntry {
@@ -23,6 +24,7 @@ data class GameEntry(
             return GameEntry(
                 id = obj.getString("id"),
                 displayName = obj.getString("display_name"),
+                titleId = obj.optString("title_id").takeIf { !obj.isNull("title_id") && it.isNotEmpty() },
                 provider = obj.optString("provider").takeIf { !obj.isNull("provider") && it.isNotEmpty() },
                 executable = obj.getString("executable"),
                 sourceCab = obj.getString("source_cab"),

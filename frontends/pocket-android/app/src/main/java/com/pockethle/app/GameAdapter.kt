@@ -46,19 +46,25 @@ class GameAdapter(
 
     inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         private val title: TextView = view.findViewById(R.id.game_title)
+        private val caption: TextView = view.findViewById(R.id.game_caption)
+        private val serial: TextView = view.findViewById(R.id.game_serial)
         private val publisherLabel: TextView = view.findViewById(R.id.game_publisher)
         private val moreBtn: ImageButton = view.findViewById(R.id.btn_more)
 
         fun bind(entry: GameEntry) {
             title.text = entry.displayName
+            caption.text = entry.displayName
             val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
             val label = itemView.findViewById<View>(R.id.game_label)
             val bitmap = if (entry.icon == "cartridge.png") BitmapFactory.decodeFile(File(libraryRoot,"games/${entry.id}/cartridge.png").absolutePath) else null
+            itemView.findViewById<View>(R.id.game_card_fallback).visibility = if (bitmap != null) View.GONE else View.VISIBLE
             artwork.setImageBitmap(bitmap)
             artwork.visibility = if (bitmap != null) View.VISIBLE else View.GONE
             label.visibility = if (bitmap != null) View.GONE else View.VISIBLE
             itemView.contentDescription = entry.displayName
-            publisherLabel.text = if (NativeBridge.isGizmondoGame(libraryRoot, entry.id)) "GIZMONDO" else "POCKET PC"
+            publisherLabel.text = if (NativeBridge.isGizmondoGame(libraryRoot, entry.id)) "GIZMONDO • 320×240" else "POCKET PC / WINCE"
+            serial.text = entry.titleId
+            serial.visibility = if (entry.titleId != null) View.VISIBLE else View.GONE
             itemView.setOnClickListener { onRun(entry) }
             moreBtn.setOnClickListener { anchor -> showOverflowMenu(anchor, entry) }
         }
