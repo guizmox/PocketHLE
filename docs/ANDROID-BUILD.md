@@ -1,10 +1,8 @@
-# PocketHLE — cumulative Android update
+# PocketHLE — Android build and packaging
 
-The source patch applies directly to `PocketHLE(3).zip`. It includes the initial
-Android implementation and subsequent changes, with only added/modified files
-listed in `patch-files.txt`; it contains no binaries or saves. Extract into the
-source root, preserve directories and replace existing files. Existing
-Colors/CRT/GPS fixes are retained.
+Build the current repository checkout using the pinned toolchain below. This is
+a build guide, not instructions for applying an old cumulative ZIP.
+See [Gizmondo options](GIZMONDO.md) and [GPU rendering](GPU.md).
 
 ## Interface and settings
 
@@ -14,13 +12,15 @@ Colors/CRT/GPS fixes are retained.
 - Main ⋮ → Settings: Emulator Settings, Display and controls, Gizmondo options,
   Keyboard and controllers. All settings remain outside gameplay. Interface text
   and project documentation are maintained in English.
-- Immersive landscape gameplay: central image, controls and Exit. Stop, Rewind,
+- Gizmondo immersive landscape gameplay: central image, controls and Exit. Stop, Rewind,
   Forward and Play are on the physical right; D-pad is on the physical left.
   L/R shoulders sit above their respective groups. The layout remains the same
   in both landscape orientations and is not mirrored for right-to-left locales.
 - Five function buttons use the desktop skin's Home, Volume, Brightness, Geofence
   and Power symbols, mapped to guest F1/F2/F3/F4/F11. Power is not guest F5.
   The default PC keyboard may use host F5 to produce guest VK_F11.
+- PocketPC uses its own restored controls, Rotate/Exit, and orientation based on
+  the rotated game dimensions; phone rotation does not override the game mode.
 - Gizmondo's native framebuffer remains 320×240, without rotation or stretching.
   Pocket PC retains its configured native dimensions and rotation.
 - Auto chooses the largest integer scale that fits the available game area,
@@ -54,10 +54,9 @@ NDK with Linux cargo. Initial installation requires network access. The scripts
 download pinned Gradle and FFmpeg versions when absent and verify their hashes.
 FFmpeg is linked statically; no ffmpeg.exe or DLL needs to be copied.
 
-From the source root in Windows CMD, refresh patched file timestamps:
+From Windows CMD, enter WSL2:
 
 ```cmd
-powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
 wsl
 ```
 

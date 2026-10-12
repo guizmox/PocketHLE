@@ -1,2 +1,0 @@
-frontends/pocket-android/app/src/main/java/com/pockethle/app/PocketPcControls.kt
-frontends/pocket-desktop/src/pocketpc_layout.rs

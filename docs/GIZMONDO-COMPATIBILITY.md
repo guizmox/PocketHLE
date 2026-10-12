@@ -43,6 +43,6 @@ game titles. Camera, Bluetooth, location and multiplayer depend on permissions,
 hardware and external services. Regression reports should specify platform,
 software/GPU mode, binary version and the failing action.
 
-See the existing proof subdirectories for recorded gameplay captures.
+See [proof captures](../proof/) for recorded gameplay evidence.
 
 Catalogue cross-check (names only): https://en.wikipedia.org/wiki/Gizmondo#Game_library

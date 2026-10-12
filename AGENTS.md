@@ -7,8 +7,8 @@ serviced by clean-room Rust. There is no emulated `coredll.dll`, no emulated
 kernel, no emulated drivers.
 
 **The full architecture reference is [`docs/AGENTS.md`](docs/AGENTS.md). Read it
-before changing anything.** It is the single source of truth, kept deliberately
-in one file so it cannot drift out of sync with itself. It documents the
+before changing anything.** It is the architecture entry point; GPU implementation contracts are consolidated
+in [`docs/GPU.md`](docs/GPU.md). Read both before changing rendering. It documents the
 invariants that are not recoverable from reading any single source file — the
 ones a plausible-looking refactor breaks — plus the address space, the three IAT
 strategies, the dispatch path, the two presentation paths, the MSVC / CeGCC

@@ -4,10 +4,13 @@ The Android app uses the real Unicorn ARM emulator and static FFmpeg. It imports
 Pocket PC CABs, standalone ARM EXEs, ZIP/RAR packages and Windows installers
 containing Pocket PC CABs into its private game library.
 
-The library and settings use portrait orientation. Gameplay uses immersive
+The library and settings use portrait orientation. Gizmondo gameplay uses immersive
 landscape: a centered game screen, action buttons on the right, D-pad on the left,
 L/R shoulders, the five Gizmondo function buttons and Exit. All interface text is
 in English. Settings remain in separate menus.
+
+PocketPC uses separate upstream controls, with Rotate/Exit and game-driven
+portrait/landscape orientation.
 
 Gizmondo renders at 320×240. Auto selects the largest integer scale that fits the
 available game area; explicit ×1/×2/×3/×4 choices are capped at an integer scale

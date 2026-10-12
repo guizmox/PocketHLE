@@ -23,7 +23,8 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
   <strong>Join our Discord for development updates, compatibility discussions, support and community chat.</strong>
 </p>
 
-Documentation is maintained in English.
+Documentation is maintained in English. See the [documentation index](docs/README.md),
+[GPU guide](docs/GPU.md) and [Gizmondo guide](docs/GIZMONDO.md).
 
 ---
 
@@ -156,14 +157,18 @@ The CLI also supports `.exe` and `.zip` inputs. Use `--cpu stub` for trace-only 
 ### Linux
 
 ```bash
-# Rust 1.85+ is recommended
-rustup default stable
+# Use Rust 1.90.0, matching the CI checks
+rustup toolchain install 1.90.0
+rustup default 1.90.0
 
 # Native dependencies for the desktop frontend
 sudo apt install -y cmake build-essential pkg-config libclang-dev \
   libgtk-3-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
   libxrandr-dev libxinerama-dev libxi-dev libxcursor-dev \
-  libxdamage-dev libxext-dev libxfixes-dev
+  libxdamage-dev libxext-dev libxfixes-dev libasound2-dev libssl-dev clang lld python3
+
+# Prepare the default static video dependency
+bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
 
 # Build and test the workspace
 cargo build --release --workspace
@@ -173,6 +178,11 @@ cargo test --workspace
 cargo build --release -p pocket-cli --features unicorn
 cargo build --release -p pocket-desktop --features unicorn
 ```
+
+If `glib-sys` reports missing `glib-2.0.pc`, install `pkg-config libgtk-3-dev`.
+The GTK dependency belongs to the desktop file picker; do not disable GPU or CPU
+features to hide it. For an Android-only build, use the Android scripts below,
+which select `pocket-android-jni` rather than the desktop workspace.
 
 The binaries are written to `target/release/`:
 
