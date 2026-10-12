@@ -435,6 +435,16 @@ fn root(ctx: &mut CallCtx<'_>, this: u32) -> Result<u32, KernelError> {
 fn elapsed(m: &Movie) -> Duration {
     m.paused + m.start.map(|v| v.elapsed()).unwrap_or_default()
 }
+// IVideoWindow::AutoShow defaults on: Colors hides the owner window while
+// preparing its graph, then relies on Run to reveal it. An explicit hide during
+// playback remains effective until the next actual graph state transition.
+fn auto_show(m: &mut Movie) {
+    if m.window_properties[13] != 0 {
+        m.visible = true;
+        m.presented = None;
+    }
+}
+
 fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelError> {
     if !m.playing {
         return Ok(());
@@ -708,6 +718,9 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
                     return Ok(DispatchOutcome::ReturnedR0(code));
                 }
             }
+            if !m.playing {
+                auto_show(m);
+            }
             m.playing = true;
             m.is_paused = false;
             ctx.kernel.audio.pause_mas_stream(id, false);
@@ -716,6 +729,9 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             }
         }
         ("control", 8) | ("filter", 5) => {
+            if !m.is_paused {
+                auto_show(m);
+            }
             m.is_paused = true;
             m.paused = elapsed(m);
             m.start = None;
@@ -996,6 +1012,52 @@ mod tests {
         })
         .unwrap()
     }
+    #[test]
+    fn autoshow_reveals_prepared_video_but_respects_disabled_and_live_hidden_windows() {
+        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+        for enabled in [true, false] {
+            reset();
+            let mut cpu = StubCpu::new();
+            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            cpu.write_mem(0x1008, &1u32.to_le_bytes()).unwrap();
+            let mut kernel = crate::gx::tests::fresh_kernel();
+            kernel.framebuffer.resize(2, 2);
+            kernel.framebuffer.pixels.fill(0x55);
+            let mut movie = Movie::new();
+            movie.info.width = 2;
+            movie.info.height = 2;
+            movie.window_properties[13] = if enabled { u32::MAX } else { 0 };
+            let (_sender, receiver) = mpsc::sync_channel(1);
+            movie.receiver = Some(receiver);
+            movie.pending = Some(vec![0xff; 8]);
+            MOVIES.lock().unwrap().insert(1, movie);
+            call(&mut cpu, &mut kernel, "ds_window_19", [0x1000, 0, 0]);
+            assert!(!MOVIES.lock().unwrap()[&1].visible);
+            call(&mut cpu, &mut kernel, "ds_control_7", [0x1000, 0, 0]);
+            assert_eq!(MOVIES.lock().unwrap()[&1].visible, enabled);
+            let t = thunk("Sleep");
+            service(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            })
+            .unwrap();
+            assert_eq!(
+                kernel.framebuffer.pixels,
+                vec![if enabled { 0xff } else { 0x55 }; 8]
+            );
+            // Repeating Run is not a state transition and must not undo an
+            // explicit hide made while playback is already running.
+            call(&mut cpu, &mut kernel, "ds_window_19", [0x1000, 0, 0]);
+            call(&mut cpu, &mut kernel, "ds_control_7", [0x1000, 0, 0]);
+            assert!(!MOVIES.lock().unwrap()[&1].visible);
+            call(&mut cpu, &mut kernel, "ds_control_8", [0x1000, 0, 0]);
+            assert_eq!(MOVIES.lock().unwrap()[&1].visible, enabled);
+        }
+        reset();
+    }
+
     #[test]
     fn directshow_graph_identity_interfaces_and_reference_lifetime() {
         let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());

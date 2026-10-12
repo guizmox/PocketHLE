@@ -2775,3 +2775,9 @@ a test-only suite mutex. They have real wall-clock guest wait deadlines and
 launch their own concurrent emulators, so simultaneous whole suites overload
 small CI runners. Intra-suite process/thread concurrency and guest deadlines
 are unchanged. Child process reports are printed before the parent assertion.
+
+DirectShow Run/Pause state transitions honor IVideoWindow AutoShow (slot 13,
+default true). Colors calls put_Visible(false) while preparing its intro and
+expects Run to reveal it. Idempotent Run/Pause must not re-show a window hidden
+during playback. AutoShow false is honored. Official contract:
+https://learn.microsoft.com/en-us/previous-versions/ms786976(v=vs.85)

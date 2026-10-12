@@ -37,6 +37,7 @@ mod tests {
         assert_eq!(lookup("GZGA800056"), Some("Agaju (oct 2005)"));
         assert_eq!(lookup("GZGA200098"), Some("Alien Hominid"));
         assert_eq!(lookup("GZGA900016"), Some("Chicane (licensed cars)"));
+        assert_eq!(lookup("GZGA800016"), Some("Chicane (E3 demo)"));
         assert_eq!(lookup("GZGA900015"), Some("Colors (early demo)"));
         assert_eq!(lookup("GZGA200030"), Some("Motocross 2005"));
         assert_eq!(lookup("GZGA200041"), Some("Furious Phil"));

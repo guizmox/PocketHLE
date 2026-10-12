@@ -569,3 +569,8 @@ a degenerate range, matching software. No game-name branch, renderer switch,
 texture edit or context-reset workaround is involved. A native regression checks
 Carmageddon's range, descending positive ranges, ordinary ascending ranges and
 equal endpoints against the software rasterizer on desktop GL and GLES2.
+
+DirectShow presentation honors AutoShow on genuine Run/Pause graph state
+changes (default enabled). Colors hides its intro window while preparing the
+graph and relies on Run to reveal it. Live explicit hiding and AutoShow false
+remain valid. No GPU shader, readback or video codec change is involved.

@@ -2,8 +2,11 @@ crates/pocket-core/tests/ram_guest.rs
 crates/pocket-gles/src/gpu/mod.rs
 crates/pocket-kernel/src/vfs.rs
 crates/pocket-library/Cargo.toml
+crates/pocket-library/data/gizmondo-titles.json
 crates/pocket-library/src/analysis.rs
+crates/pocket-library/src/gizmondo_titles.rs
 crates/pocket-library/src/lib.rs
+crates/pocket-winceapi/src/directshow.rs
 docs/AGENTS.md
 docs/GIZMONDO.md
 docs/GPU.md

@@ -177,3 +177,12 @@ exact card serial, distinguishing ALT versions even with identical artwork.
 
 Android lower-band titles use horizontal marquee for overflowing names,
 including ALT suffixes. Short names remain stationary.
+
+Colors hides its DirectShow video window during intro preparation, then calls
+Run with AutoShow enabled. The graph must show that window on an actual Run
+or Pause transition. Repeated Run while already playing must not undo a live
+explicit hide, and AutoShow disabled must preserve hidden playback. This
+fixes audio-only intros without changing decoding or adding a Colors exception.
+
+GZGA800016 is catalogued as Chicane (E3 demo), independently of the licensed
+cars version and the retail title.
