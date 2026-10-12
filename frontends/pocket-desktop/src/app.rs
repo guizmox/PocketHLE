@@ -1979,13 +1979,14 @@ impl PocketLauncher {
                 let Some(frame) = self.last_frame_snapshot.as_ref() else {
                     return;
                 };
-                crate::pocketpc_layout::PocketPcLayout::new(
-                    [frame.width, frame.height],
-                    self.game_rotation,
-                    scale / ui.ctx().pixels_per_point(),
-                    Pos2::ZERO,
-                )
-                .size()
+                let screen = if self.game_rotation.is_quarter_turn() {
+                    Vec2::new(frame.height as f32, frame.width as f32)
+                } else {
+                    Vec2::new(frame.width as f32, frame.height as f32)
+                };
+                let screen = screen * scale / ui.ctx().pixels_per_point();
+                // Original side pad is 164 points wide; captions need extra height.
+                Vec2::new(screen.x + 176.0, screen.y.max(262.0) + 70.0)
             };
             // Keep only the measured top/status bars around the console.
             // Measuring avoids fixed guesses about title bars or display DPI.
@@ -2133,66 +2134,113 @@ impl PocketLauncher {
         ScrollArea::both().show(ui, |ui| self.ui_pocketpc(ui));
     }
 
+    /// Original PocketPC presentation: framebuffer beside the virtual controls.
+    /// Rendering and input still use the shared current emulator paths.
     fn ui_pocketpc(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Run output");
+        if let Some(name) = self.running_game.as_ref() {
+            ui.label(format!("Running {name}…"));
+        }
+        ui.add_space(6.0);
+        ui.horizontal_top(|ui| {
+            self.ui_pocketpc_screen(ui);
+            ui.add_space(12.0);
+            self.ui_virtual_pad(ui);
+        });
+        if let Some(status) = self.last_frame_status.as_ref() {
+            ui.add_space(8.0);
+            ui.label(RichText::new(status).small().color(Color32::from_gray(170)));
+        }
+    }
+
+    fn ui_pocketpc_screen(&mut self, ui: &mut egui::Ui) {
         let Some(frame) = self.last_frame_snapshot.as_ref() else {
             ui.label("Starting PocketPC…");
             return;
         };
-        let native = [frame.width, frame.height];
         let guest_size = Vec2::new(frame.width as f32, frame.height as f32);
+        let display_size = if self.game_rotation.is_quarter_turn() {
+            Vec2::new(guest_size.y, guest_size.x)
+        } else {
+            guest_size
+        };
         let scale = if self.upscale_x2 { 2.0 } else { 1.0 } / ui.ctx().pixels_per_point();
-        let mut layout = crate::pocketpc_layout::PocketPcLayout::new(
-            native,
-            self.game_rotation,
-            scale,
-            Pos2::ZERO,
-        );
-        // Center the housing in extra window space without fractional LCD scaling.
-        let space = ((ui.available_width() - layout.size().x) * 0.5).max(0.0);
-        let (canvas, _) = ui.allocate_exact_size(
-            Vec2::new(layout.size().x + space * 2.0, layout.size().y),
-            Sense::hover(),
-        );
-        let dpi = ui.ctx().pixels_per_point();
-        let origin = canvas.min + Vec2::new(space, 0.0);
-        layout.origin = Pos2::new(
-            (origin.x * dpi).round() / dpi,
-            (origin.y * dpi).round() / dpi,
-        );
-        layout.draw_shell(ui.painter());
-        let lcd = layout.screen();
-        self.paint_guest_frame(ui, lcd);
-        self.handle_pointer(ui.ctx(), &lcd, guest_size);
-        for (rect, label, button) in layout.controls() {
-            let display_button = rotate_direction_button(button, layout.turns);
-            let vk = rotate_direction_vk(
-                display_button.vk(),
-                (4 - rotation_turns(self.game_rotation)) % 4,
-            );
-            let now = pointer_held_in(ui.ctx(), &rect.intersect(ui.clip_rect()));
-            let was = self.held.is_held_by(InputSource::Pointer, vk);
-            if now && !was && self.held.press(InputSource::Pointer, vk) {
-                self.send_input(InputEvent::KeyDown { vk });
-            } else if was && !now && self.held.release(InputSource::Pointer, vk) {
-                self.send_input(InputEvent::KeyUp { vk });
-            }
-            layout.draw_button(ui.painter(), rect, label, self.held.is_held(vk));
-            let keys = self
-                .library
-                .config()
-                .keybindings
-                .keys_for(display_button)
-                .join(", ");
-            ui.interact(
-                rect,
-                ui.make_persistent_id(("ppc_button", vk)),
-                Sense::click_and_drag(),
-            )
-            .on_hover_text(format!(
-                "{} — keyboard: {}",
-                display_button.label(),
-                if keys.is_empty() { "unbound" } else { &keys }
-            ));
+        let (rect, _) = ui.allocate_exact_size(display_size * scale, Sense::click_and_drag());
+        self.paint_guest_frame(ui, rect);
+        self.handle_pointer(ui.ctx(), &rect, guest_size);
+    }
+
+    fn ui_virtual_pad(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.label(RichText::new("Controls").strong());
+            ui.add_space(4.0);
+            // ----- D-pad: 3x3 grid with cardinal arrows -----
+            egui::Grid::new("vpad_dpad")
+                .spacing(Vec2::new(2.0, 2.0))
+                .show(ui, |ui| {
+                    ui.label("");
+                    self.vbutton(ui, "▲", GuestButton::DpadUp, 44.0);
+                    ui.label("");
+                    ui.end_row();
+                    self.vbutton(ui, "◀", GuestButton::DpadLeft, 44.0);
+                    ui.label("");
+                    self.vbutton(ui, "▶", GuestButton::DpadRight, 44.0);
+                    ui.end_row();
+                    ui.label("");
+                    self.vbutton(ui, "▼", GuestButton::DpadDown, 44.0);
+                    ui.label("");
+                    ui.end_row();
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                self.vbutton(ui, "Action", GuestButton::Action, 52.0);
+                self.vbutton(ui, "A", GuestButton::ButtonA, 52.0);
+                self.vbutton(ui, "B", GuestButton::ButtonB, 52.0);
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                self.vbutton(ui, "C", GuestButton::ButtonC, 52.0);
+                self.vbutton(ui, "1", GuestButton::Soft1, 52.0);
+                self.vbutton(ui, "2", GuestButton::Soft2, 52.0);
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                self.vbutton(ui, "Turbo", GuestButton::Turbo, 60.0);
+            });
+        });
+    }
+
+    /// Render one virtual button. Pressed-while-pointer-is-down
+    /// generates `WM_KEYDOWN` once; releasing fires `WM_KEYUP`.
+    ///
+    /// The held state comes from [`pointer_held_in`] rather than from
+    /// the `Response`, because egui stops calling a still-held press a
+    /// click after 0.8 s — see that function.
+    fn vbutton(&mut self, ui: &mut egui::Ui, label: &str, guest: GuestButton, size: f32) {
+        let vk = rotate_direction_vk(guest.vk(), (4 - rotation_turns(self.game_rotation)) % 4);
+        let was_pressed = self.held.is_held_by(InputSource::Pointer, vk);
+        let mut button = egui::Button::new(RichText::new(label).size(16.0).strong())
+            .min_size(Vec2::new(size, size));
+        if self.held.is_held(vk) {
+            button = button.fill(Color32::from_rgb(80, 130, 255));
+        }
+        let keys = self.library.config().keybindings.keys_for(guest).join(", ");
+        let response = ui.add_sized(Vec2::new(size, size), button);
+        // Naming the keyboard shortcut on the button is how a user
+        // discovers what their own bindings ended up as.
+        let response = if keys.is_empty() {
+            response.on_hover_text(format!("{} (no key bound)", guest.label()))
+        } else {
+            response.on_hover_text(format!("{} — {keys}", guest.label()))
+        };
+        let now_pressed = pointer_held_in(ui.ctx(), &response.rect.intersect(ui.clip_rect()));
+        // Only the edges matter, and `HeldButtons` has the last word on
+        // whether the guest hears about them: the keyboard may be
+        // holding this same button.
+        if now_pressed && !was_pressed && self.held.press(InputSource::Pointer, vk) {
+            self.send_input(InputEvent::KeyDown { vk });
+        } else if was_pressed && !now_pressed && self.held.release(InputSource::Pointer, vk) {
+            self.send_input(InputEvent::KeyUp { vk });
         }
     }
 
@@ -2962,59 +3010,26 @@ mod tests {
         );
     }
     #[test]
-    fn ppc_directions_follow_display_rotation_and_rotated_shell() {
+    fn ppc_side_pad_maps_display_directions_back_to_guest() {
         let up = GuestButton::DpadUp.vk();
-        assert_eq!(rotate_direction_vk(up, 3), GuestButton::DpadLeft.vk());
-        assert_eq!(rotate_direction_vk(up, 1), GuestButton::DpadRight.vk());
-        assert_eq!(rotate_direction_vk(up, 2), GuestButton::DpadDown.vk());
-        for native in [[240, 320], [320, 240]] {
-            for rotation in RotationPref::ALL {
-                let layout =
-                    crate::pocketpc_layout::PocketPcLayout::new(native, rotation, 1.0, Pos2::ZERO);
-                let controls = layout.controls();
-                let center = controls
-                    .iter()
-                    .find(|(_, _, b)| *b == GuestButton::Action)
-                    .unwrap()
-                    .0
-                    .center();
-                for (rect, _, button) in controls {
-                    if !matches!(
-                        button,
-                        GuestButton::DpadUp
-                            | GuestButton::DpadDown
-                            | GuestButton::DpadLeft
-                            | GuestButton::DpadRight
-                    ) {
-                        continue;
-                    }
-                    let delta = rect.center() - center;
-                    let visible = if delta.x.abs() > delta.y.abs() {
-                        if delta.x > 0.0 {
-                            GuestButton::DpadRight
-                        } else {
-                            GuestButton::DpadLeft
-                        }
-                    } else if delta.y > 0.0 {
-                        GuestButton::DpadDown
-                    } else {
-                        GuestButton::DpadUp
-                    };
-                    assert_eq!(rotate_direction_button(button, layout.turns), visible);
-                    let pointer_vk =
-                        rotate_direction_vk(visible.vk(), (4 - rotation_turns(rotation)) % 4);
-                    let keyboard_vk =
-                        rotate_direction_vk(visible.vk(), (4 - rotation_turns(rotation)) % 4);
-                    assert_eq!(pointer_vk, keyboard_vk);
-                    assert_eq!(
-                        pointer_vk,
-                        rotate_direction_button(button, u8::from(native[0] > native[1])).vk()
-                    );
-                }
-                assert_eq!(
-                    rotate_direction_vk(GuestButton::ButtonA.vk(), layout.turns),
-                    GuestButton::ButtonA.vk()
-                );
+        for (rotation, expected) in [
+            (RotationPref::None, GuestButton::DpadUp),
+            (RotationPref::Cw90, GuestButton::DpadLeft),
+            (RotationPref::Half, GuestButton::DpadDown),
+            (RotationPref::Ccw90, GuestButton::DpadRight),
+        ] {
+            let inverse = (4 - rotation_turns(rotation)) % 4;
+            assert_eq!(rotate_direction_vk(up, inverse), expected.vk());
+            for button in [
+                GuestButton::Action,
+                GuestButton::ButtonA,
+                GuestButton::ButtonB,
+                GuestButton::ButtonC,
+                GuestButton::Soft1,
+                GuestButton::Soft2,
+                GuestButton::Turbo,
+            ] {
+                assert_eq!(rotate_direction_vk(button.vk(), inverse), button.vk());
             }
         }
     }

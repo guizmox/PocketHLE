@@ -1591,10 +1591,9 @@ the imported game's platform. No game files move when switching tabs.
 
 For PPC keyboard arrows apply the inverse user presentation rotation to the
 guest VK. A natively landscape framebuffer already has landscape coordinates,
-so its orientation must not be applied again to keyboard input. Pointer pad
-buttons instead rotate with the entire shell (natural orientation plus user
-rotation), then follow that same inverse presentation mapping. Their visible
-arrow and the matching host arrow key must agree. Action buttons retain their
+so its orientation must not be applied again to keyboard input. PocketPC pointer-pad arrows remain upright in the original side panel and
+use the same inverse user presentation rotation as keyboard arrows. Their
+visible arrow and the matching host arrow key must agree. Action buttons retain their
 bindings; Gizmondo keys retain their existing behavior. Release held input on
 rotation or PPC framebuffer geometry changes. Preserve geometry-based checks
 for all four rotations with portrait and landscape native framebuffers.
@@ -3113,3 +3112,21 @@ About/credits expose https://github.com/guizmox/PocketHLE on Windows/Linux and A
 Selected demo-card title IDs prefer the executable's GZxxNNNNNN ancestor directory. Shared launcher markers cannot supply a split game's ID. Desktop cartridge labels, bottom captions and shared game information use the same helper. Existing imports need no migration or reimport.
 
 Static game names come from the maintainer's Liste_Jeux.xlsx IDs/titles, with the explicit 200030 Motocross / 200041 Furious Phil correction. Known static titles precede BMP-derived names at import; BMP artwork is retained. Existing ID-shaped names migrate on library load, preserving custom names, IDs, settings and save paths. No release/build version is inferred from a shared title ID. Unknown codes use the previous fallback. The unclear GZGA22222 source row is retained literally, not expanded speculatively.
+
+## Desktop PocketPC presentation restoration (2026-10-12)
+
+PocketPC uses the original upstream side-panel presentation (eea7ac6): an
+unframed framebuffer beside a 3x3 cardinal D-pad, Action/A/B, C/1/2 and Turbo.
+Gizmondo remains on its existing photographed skin. The current shared menu
+provides rotation/fullscreen/game options, with filters, screenshot capture,
+controller bindings and integer screen scaling retained. Stylus coordinates
+continue through the current inverse-rotation mapping. Pointer-held keys stay
+separate from keyboard/controller sources, and clipping excludes hidden buttons.
+Window fitting accounts for the side panel rather than PocketPC housing.
+This desktop path is shared by Windows/Linux; Android is unchanged.
+Validation: restored UI methods typechecked against actual egui and pocket-library
+with warnings denied; original pad layout/button inventory compared to upstream;
+Gizmondo view verified byte-identical to lot08 R3. Complete Windows compilation
+and interactive UI validation still require the target environment.
+
+The obsolete desktop pocketpc_layout module/source is removed. Side-pad rotation tests replace shell geometry checks.

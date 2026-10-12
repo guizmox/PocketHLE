@@ -13,7 +13,6 @@
 mod app;
 mod fullscreen_layout;
 mod gamepad;
-mod pocketpc_layout;
 mod reconstruction;
 mod rumble;
 mod runner;
