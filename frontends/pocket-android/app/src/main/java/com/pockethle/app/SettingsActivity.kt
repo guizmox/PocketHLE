@@ -60,6 +60,14 @@ class SettingsActivity : AppCompatActivity() {
             }
             toggle("gprs_enabled", "GPRS/data", current.gprsEnabled) { current = current.copy(gprsEnabled = it) }
             toggle("gps_fixed_enabled", "Fixed GPS position", current.gpsFixedEnabled) { current = current.copy(gpsFixedEnabled = it) }
+            giz.addPreference(ListPreference(requireContext()).apply {
+                key = "gps_fixed_mode"; title = "Simulated GPS position"; isPersistent = false
+                entries = arrayOf("Near Eiffel Tower (within 1 km)", "Manual coordinates")
+                entryValues = arrayOf("random", "manual")
+                value = if (current.gpsFixedRandom) "random" else "manual"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, v -> current = current.copy(gpsFixedRandom = v == "random"); writeConfig(); true }
+            })
             fun coordinate(keyName: String, label: String, latitude: Boolean) {
                 giz.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                     key = keyName; title = label; isPersistent = false

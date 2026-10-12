@@ -226,14 +226,10 @@ impl Runner {
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
             process.state.vfs.camera_service().set_allowed(hardware.1);
             process.state.vfs.gps_service().set_allowed(hardware.2);
-            #[cfg(windows)]
             if is_gizmondo && launcher_config.gps_fixed_enabled {
                 let gps = process.state.vfs.gps_service();
                 if gps
-                    .set_fixed_position(Some((
-                        launcher_config.gps_fixed_latitude,
-                        launcher_config.gps_fixed_longitude,
-                    )))
+                    .set_fixed_position(launcher_config.simulated_gps_position())
                     .is_err()
                 {
                     if let Some(startup) = startup.as_mut() {

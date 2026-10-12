@@ -455,10 +455,7 @@ fn run_process(
         process.state.vfs.gps_service().set_allowed(hardware.2);
         if is_gizmondo && launcher_config.gps_fixed_enabled {
             let gps = process.state.vfs.gps_service();
-            if let Err(e) = gps.set_fixed_position(Some((
-                launcher_config.gps_fixed_latitude,
-                launcher_config.gps_fixed_longitude,
-            ))) {
+            if let Err(e) = gps.set_fixed_position(launcher_config.simulated_gps_position()) {
                 return (format!("Invalid fixed GPS coordinates: {e}"), 0xc000000d);
             }
             gps.set_allowed(true);

@@ -555,6 +555,9 @@ pub struct LauncherConfig {
     /// Explicit simulated GPS on Windows and Android, independent of host permission.
     #[serde(default)]
     pub gps_fixed_enabled: bool,
+    /// Pick one simulated fix within 1 km of the Eiffel Tower per launch.
+    #[serde(default)]
+    pub gps_fixed_random: bool,
     #[serde(default)]
     pub gps_fixed_latitude: f64,
     #[serde(default)]
@@ -679,6 +682,7 @@ impl Default for LauncherConfig {
             camera_enabled: false,
             gps_enabled: false,
             gps_fixed_enabled: false,
+            gps_fixed_random: false,
             gps_fixed_latitude: 0.,
             gps_fixed_longitude: 0.,
             gprs_enabled: default_gprs_enabled(),
@@ -3212,5 +3216,66 @@ mod tests {
             serde_json::from_str::<ScreenPref>(&json).unwrap(),
             ScreenPref::Hpc
         );
+    }
+}
+
+impl LauncherConfig {
+    /// One fix per game launch, never a changing random walk while playing.
+    pub fn simulated_gps_position(&self) -> Option<(f64, f64)> {
+        if !self.gps_fixed_enabled {
+            return None;
+        }
+        if !self.gps_fixed_random {
+            return Some((self.gps_fixed_latitude, self.gps_fixed_longitude));
+        }
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        Some(eiffel_position(seed))
+    }
+}
+
+fn eiffel_position(mut seed: u64) -> (f64, f64) {
+    fn unit(seed: &mut u64) -> f64 {
+        *seed = seed.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = *seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        ((z ^ (z >> 31)) >> 11) as f64 / ((1u64 << 53) as f64)
+    }
+    let radius = 1000.0 * unit(&mut seed).sqrt();
+    let bearing = std::f64::consts::TAU * unit(&mut seed);
+    let angular = radius / 6_371_000.0;
+    let lat = 48.8584_f64.to_radians();
+    let lon = 2.2945_f64.to_radians();
+    let target_lat = (lat.sin() * angular.cos() + lat.cos() * angular.sin() * bearing.cos()).asin();
+    let target_lon = lon
+        + (bearing.sin() * angular.sin() * lat.cos())
+            .atan2(angular.cos() - lat.sin() * target_lat.sin());
+    (target_lat.to_degrees(), target_lon.to_degrees())
+}
+
+#[cfg(test)]
+mod simulated_gps_tests {
+    use super::*;
+    #[test]
+    fn eiffel_fixes_stay_inside_one_kilometre_and_manual_values_survive() {
+        for seed in 0..1000 {
+            let (lat, lon) = eiffel_position(seed);
+            let dlat = (lat - 48.8584).to_radians();
+            let dlon = (lon - 2.2945).to_radians();
+            let a = (dlat / 2.).sin().powi(2)
+                + lat.to_radians().cos()
+                    * 48.8584_f64.to_radians().cos()
+                    * (dlon / 2.).sin().powi(2);
+            assert!(2. * 6_371_000. * a.sqrt().asin() <= 1000.0001);
+        }
+        let mut c = LauncherConfig::default();
+        assert!(c.simulated_gps_position().is_none());
+        c.gps_fixed_enabled = true;
+        c.gps_fixed_latitude = 12.;
+        c.gps_fixed_longitude = 34.;
+        assert_eq!(c.simulated_gps_position(), Some((12., 34.)));
     }
 }

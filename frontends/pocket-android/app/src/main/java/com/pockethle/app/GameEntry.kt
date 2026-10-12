@@ -119,6 +119,7 @@ data class LauncherConfig(
     val cameraEnabled: Boolean = false,
     val gpsEnabled: Boolean = false,
     val gpsFixedEnabled: Boolean = false,
+    val gpsFixedRandom: Boolean = false,
     val gpsFixedLatitude: Double = 0.0,
     val gpsFixedLongitude: Double = 0.0,
     val upscaleFilter: String = "reconstruction",
@@ -159,6 +160,7 @@ data class LauncherConfig(
         put("camera_enabled", cameraEnabled)
         put("gps_enabled", gpsEnabled)
         put("gps_fixed_enabled", gpsFixedEnabled)
+        put("gps_fixed_random", gpsFixedRandom)
         put("gps_fixed_latitude", gpsFixedLatitude)
         put("gps_fixed_longitude", gpsFixedLongitude)
         put("upscale_filter", upscaleFilter)
@@ -204,6 +206,7 @@ data class LauncherConfig(
             cameraEnabled = obj.optBoolean("camera_enabled", false),
             gpsEnabled = obj.optBoolean("gps_enabled", false),
             gpsFixedEnabled = obj.optBoolean("gps_fixed_enabled", false),
+            gpsFixedRandom = obj.optBoolean("gps_fixed_random", false),
             gpsFixedLatitude = obj.optDouble("gps_fixed_latitude", 0.0),
             gpsFixedLongitude = obj.optDouble("gps_fixed_longitude", 0.0),
             upscaleFilter = obj.optString("upscale_filter", "reconstruction"),

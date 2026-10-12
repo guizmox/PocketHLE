@@ -1330,11 +1330,18 @@ impl PocketLauncher {
         ui.heading(if gizmondo { "Gizmondo options" } else { "Emulator Settings" });
         if gizmondo {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
-            .on_hover_text("Allow games to read the Windows location service; availability and accuracy depend on the PC.");
-        #[cfg(windows)] {
+            .on_hover_text("Allow games to read the host location service where available.");
+        {
             ui.checkbox(&mut draft.gps_fixed_enabled, "Fixed GPS position (simulated, next launch)")
                 .on_hover_text("Use this position instead of Windows location, even when location permission is unavailable.");
             ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
+                egui::ComboBox::from_id_source("simulated_gps_mode")
+                    .selected_text(if draft.gps_fixed_random { "Near Eiffel Tower (within 1 km)" } else { "Manual coordinates" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.gps_fixed_random, true, "Near Eiffel Tower (within 1 km)");
+                        ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
+                    });
+                ui.label("A simulated fix is chosen once per launch. Manual coordinates remain saved.");
                 ui.horizontal(|ui| {
                     ui.label("Latitude");
                     ui.add(egui::DragValue::new(&mut draft.gps_fixed_latitude).speed(0.0001).clamp_range(-90.0..=90.0).max_decimals(7));

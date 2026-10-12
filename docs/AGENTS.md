@@ -3091,3 +3091,7 @@ kernel after releasing the gate, before frontend polling. Keep idle cadence,
 Sleep durations, suspension counts and control application unchanged. No timeout
 increase or skipped test. Native ARM runner reproduction requires Unicorn and
 libclang; local build lacks libclang, so full diagnostic confirmation is pending.
+
+## Frontend feature updates (2026-10-12)
+
+Simulated GPS offers manual coordinates and one random uniform-area spherical fix within 1 km of the Eiffel Tower per launch. gps_fixed_random persists across Windows/Android settings. The same shared provider setup works on Linux. Manual coordinates remain stored and native permission bypass/lifecycle are unchanged.
