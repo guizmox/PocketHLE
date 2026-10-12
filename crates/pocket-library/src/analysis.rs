@@ -175,7 +175,29 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
     let path = game.executable_path(root);
     let bytes = std::fs::read(&path).unwrap_or_default();
     let strings = binary_strings(&bytes);
-    let text = strings.join(" ").to_ascii_lowercase();
+    let mut text = strings.join(" ").to_ascii_lowercase();
+    // Resolve the shared CE4.2 ordinal map for Gizmondo; Pocket PC versions
+    // can use different tables, so do not infer their features from these ordinals.
+    if giz {
+        if let Ok(img) = pocket_pe::load_file(&path) {
+            let table: serde_json::Value = serde_json::from_str(include_str!(
+                "../../pocket-winceapi/data/coredll-ordinals.json"
+            ))
+            .unwrap_or_default();
+            for import in &img.imports {
+                if import.dll.eq_ignore_ascii_case("coredll.dll") {
+                    if let pocket_pe::ImportBinding::Ordinal(ordinal) = import.binding {
+                        if let Some(name) = table["ordinals"][ordinal.to_string()].as_str() {
+                            text.push(' ');
+                            text.push_str(&name.to_ascii_lowercase());
+                            a.evidence
+                                .push(format!("Import: COREDLL #{ordinal} = {name} (CE4.2 map)"));
+                        }
+                    }
+                }
+            }
+        }
+    }
     a.title_id = detect_gizmondo_title_id(&game.extracted_dir(root))
         .or_else(|| find_title_id_in_strings(&strings));
 
@@ -262,7 +284,74 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             }
         }
     }
-    if text.contains("vib1:") || text.contains("vibrator") {
+    // Device names and transport APIs are evidence; scene-camera names are not.
+    // Imports referenced by ordinal have no readable name, so absence is not proof.
+    for (label, needles) in [
+        (
+            "Bluetooth",
+            &[
+                "bth1:",
+                "bth.dll",
+                "bthutil.dll",
+                "bluetoothapis.dll",
+                "bthgetsdp",
+                "bthenum",
+                "rfcomm",
+            ][..],
+        ),
+        (
+            "Data / Internet",
+            &[
+                "wininet.dll",
+                "ws2.dll",
+                "ws2_32.dll",
+                "internetconnect",
+                "httpsendrequest",
+            ][..],
+        ),
+        ("GPS", &["gps1:", "gpsopen", "gpsgetposition"][..]),
+        (
+            "Camera",
+            &["cam1:", "cameracapture.dll", "cameracapturestart"][..],
+        ),
+        (
+            "Power management",
+            &[
+                "getsystempowerstatus",
+                "requestpowernotifications",
+                "setpowersupply",
+                "powermanager/",
+            ][..],
+        ),
+        (
+            "SIM / cellular",
+            &[
+                "siminitialize",
+                "simgetdevcaps",
+                "simgetrecord",
+                "sim.dll",
+                "ril.dll",
+                "sim1:",
+            ][..],
+        ),
+    ] {
+        let evidence: Vec<_> = needles
+            .iter()
+            .filter(|needle| text.contains(**needle))
+            .collect();
+        a.hardware.push((
+            label.into(),
+            if evidence.is_empty() {
+                "No static evidence (dynamic or ordinal calls may be present)".into()
+            } else {
+                "✓ Detected".into()
+            },
+        ));
+        for needle in evidence {
+            a.evidence.push(format!("{label}: {needle}"));
+        }
+    }
+    if text.contains("vib1:") || text.contains("vibrator") || text.contains("nledsetdevice") {
         a.hardware.push(("Vibration".into(), "✓ Detected".into()));
         a.evidence.push(if text.contains("vib1:") {
             "Hardware string: VIB1:".into()
@@ -277,11 +366,21 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
     if text.contains("lowbatery_msg")
         || text.contains("criticalbatery_msg")
         || text.contains("lowbattery")
+        || text.contains("getsystempowerstatus")
+        || text.contains("requestpowernotifications")
     {
         a.hardware
             .push(("Battery events".into(), "✓ Detected".into()));
         a.evidence
             .push("Battery notification strings detected".into());
+    }
+    for label in ["Vibration", "Backlight", "Battery events"] {
+        if !a.hardware.iter().any(|(name, _)| name == label) {
+            a.hardware.push((
+                label.into(),
+                "No static evidence (dynamic or ordinal calls may be present)".into(),
+            ));
+        }
     }
     if giz {
         a.hardware
@@ -396,5 +495,40 @@ mod tests {
         bytes[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(pe_timestamp(&bytes), None);
         assert_eq!(pe_timestamp(b"MZ"), None);
+    }
+}
+
+#[cfg(test)]
+mod hardware_detection_tests {
+    #[test]
+    fn device_strings_detect_features_without_confusing_scene_cameras() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let game: GameEntry = serde_json::from_value(serde_json::json!({
+            "id":"fixture", "display_name":"Fixture", "source_cab":"fixture.zip",
+            "executable":"extracted/Autorun.exe", "imported_at":0,
+        }))
+        .unwrap();
+        let path = game.executable_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            b"GPS1:\0CAM1:\0nBTH1:\0WININET.dll\0VIB1:\0PowerManager/ActivityTimer\0",
+        )
+        .unwrap();
+        let a = analyze_game(&game, root.path());
+        for label in [
+            "GPS",
+            "Camera",
+            "Bluetooth",
+            "Data / Internet",
+            "Vibration",
+            "Power management",
+        ] {
+            assert!(a.hardware.contains(&(label.into(), "✓ Detected".into())));
+        }
+        std::fs::write(&path, b"FREECAMERA\0CHASECAMERA\0").unwrap();
+        let a = analyze_game(&game, root.path());
+        assert!(!a.hardware.contains(&("Camera".into(), "✓ Detected".into())));
     }
 }

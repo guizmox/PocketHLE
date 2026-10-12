@@ -1,4 +1,5 @@
 README-Feature-Delivery.txt
+crates/pocket-library/src/analysis.rs
 crates/pocket-library/src/lib.rs
 docs/AGENTS.md
 frontends/pocket-android-jni/src/runner.rs
