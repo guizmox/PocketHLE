@@ -1,4 +1,2 @@
-tools/camtest/src/camtest.c
-tools/camtest/build.py
-tools/camtest/README.md
-tools/camtest/dist/PocketHLE-CAMTEST.zip
+crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/camera.rs

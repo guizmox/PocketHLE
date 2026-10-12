@@ -313,6 +313,66 @@ mod tests {
         }
     }
     #[test]
+    fn closed_camera_handles_set_last_error_after_each_reopen() {
+        let mut r = Rig::new();
+        for cycle in 0..8 {
+            r.start();
+            r.info(320, 240, 1000);
+            assert_eq!(
+                r.ctl(2105, 0x1100, 16, 0x10000, 153600),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(r.ctl(2107, 0, 0, 0, 0), DispatchOutcome::ReturnedR0(0));
+            assert_eq!(r.error(), 50);
+            assert_eq!(r.ctl(2104, 0, 0, 0, 0), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(
+                call(
+                    &mut r.cpu,
+                    &mut r.k,
+                    &mut r.d,
+                    "coredll.dll",
+                    "CloseHandle",
+                    &[r.h]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(r.drops.load(Ordering::SeqCst), cycle + 1);
+            assert!(!r.k.vfs.is_handle(r.h));
+            assert_eq!(
+                call(
+                    &mut r.cpu,
+                    &mut r.k,
+                    &mut r.d,
+                    "coredll.dll",
+                    "SetLastError",
+                    &[50]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                r.ctl(2102, 0, 0, 0x1400, 16),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(r.error(), 6);
+            assert!(r.k.vfs.camera_deadlines.is_empty());
+            if cycle != 7 {
+                r.h = match call(
+                    &mut r.cpu,
+                    &mut r.k,
+                    &mut r.d,
+                    "coredll.dll",
+                    "CreateFileW",
+                    &[0x1000, 0xc0000000, 0, 0, 3, 0, 0],
+                ) {
+                    DispatchOutcome::ReturnedR0(h) => h,
+                    _ => panic!(),
+                };
+                assert_ne!(r.h, u32::MAX);
+            }
+        }
+    }
+
+    #[test]
     fn sdk_stop_set_start_preview_capture_sequence() {
         let mut r = Rig::new();
         assert_eq!(r.ctl(2104, 0, 0, 0, 0), DispatchOutcome::ReturnedR0(1));

@@ -1,0 +1,28 @@
+PocketHLE Camera Handle Error Fix R2 — full-file overlay
+
+Base: guizmox/PocketHLE 4123cff2c98c10592bc44a3ac4d55fcbc7e924a5.
+Equivalent production fix and regression tests to Handle Error Fix R1.
+Extract into the PocketHLE checkout, replacing the two listed Rust files.
+No Python merger or git apply is needed. No source file is deleted.
+Other diagnostic tools and documentation are not replaced by this overlay.
+
+DeviceIoControl rejects invalid/closed VFS handles with LastError 6 before
+reading other arguments. Live camera unsupported IOCTLs still return 50.
+Camera acquisition, orientation, pacing and memory allocation are unchanged.
+The dispatcher is shared by Windows and Android; rebuild the target to apply.
+
+Windows CMD:
+
+powershell -NoProfile -Command "Get-Content 'removed-files.txt' | ForEach-Object { if (Test-Path -LiteralPath $_) { Remove-Item -LiteralPath $_ -Force } }"
+powershell -NoProfile -Command "Get-Content 'patch-files.txt' | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTime = Get-Date }"
+cargo build --release -p pocket-desktop
+target\release\pockethle-gui.exe
+
+Rerun your existing CAMTEST v3 and send CAMTEST.TXT. Expect aggregate PASS and
+LastError 6 on all invalid/closed-handle probes. Successful calls can preserve
+an earlier LastError; do not interpret a PASS line's old error as a failure.
+
+Validation: original dispatcher reproduced 50 instead of 6; after correction,
+289 WinCE API tests PASS, 3 native-GPU tests ignored. Includes eight controlled
+camera capture/stop/close/reopen cycles with exact capture drop counts. Rustfmt
+and whitespace checks PASS. Physical Windows follow-up remains to be run.
