@@ -2769,3 +2769,9 @@ For SD Card / Storage Card serial aliases, an existing physical GZGA directory
 wins over the flattened extraction root, case-insensitively. This preserves
 Supernaturals nested serial marker while direct-file Toy Golf imports retain
 root aliases. Do not blindly remount serial prefixes at extracted.
+
+The five native ARM integration suites in pocket-core/tests/ram_guest.rs share
+a test-only suite mutex. They have real wall-clock guest wait deadlines and
+launch their own concurrent emulators, so simultaneous whole suites overload
+small CI runners. Intra-suite process/thread concurrency and guest deadlines
+are unchanged. Child process reports are printed before the parent assertion.

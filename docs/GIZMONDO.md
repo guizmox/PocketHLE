@@ -174,3 +174,6 @@ volume checks require those card-relative paths to remain valid.
 Android library cards always display their catalogue/custom title below the
 card, including artwork-backed tiles. The desktop-style lower band shows the title, platform/resolution and
 exact card serial, distinguishing ALT versions even with identical artwork.
+
+Android lower-band titles use horizontal marquee for overflowing names,
+including ALT suffixes. Short names remain stationary.

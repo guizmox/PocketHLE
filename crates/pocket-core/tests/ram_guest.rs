@@ -9,6 +9,18 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
+// These diagnostics contain real-time 5s/15s guest waits and each launches
+// concurrent emulators. Running five whole suites at once on small CI runners
+// can time out PROCTEST although it finishes successfully immediately after.
+// Serialize suites, retaining all concurrency *within* each guest diagnostic.
+static DIAGNOSTIC_SUITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn diagnostic_suite() -> std::sync::MutexGuard<'static, ()> {
+    DIAGNOSTIC_SUITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct GuestFiles(PathBuf);
 impl Drop for GuestFiles {
     fn drop(&mut self) {
@@ -37,6 +49,7 @@ fn main_exitthread_then_last_worker_exit_keeps_callback_stacks_alive() {
     );
 }
 fn run_guest(executable: &[u8], expected_code: u32) {
+    let _suite = diagnostic_suite();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -169,6 +182,19 @@ fn run_guest(executable: &[u8], expected_code: u32) {
         });
     let report = fs::read_to_string(report_path).unwrap();
     println!("{report}");
+    // Print child reports before asserting so CI distinguishes a parent wait
+    // timeout from a failed process-contract check in the child itself.
+    for entry in &entries {
+        if entry
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("PROCTEST.TXT"))
+        {
+            println!(
+                "Child process report:\n{}",
+                fs::read_to_string(entry).unwrap()
+            );
+        }
+    }
     assert!(
         report.contains("RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000"),
         "{report}"
@@ -343,6 +369,7 @@ fn launch_pending(
 
 #[test]
 fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
+    let _suite = diagnostic_suite();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -452,6 +479,7 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
 
 #[test]
 fn native_arm_timing_waits_callbacks_and_egl_release_resources() {
+    let _suite = diagnostic_suite();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

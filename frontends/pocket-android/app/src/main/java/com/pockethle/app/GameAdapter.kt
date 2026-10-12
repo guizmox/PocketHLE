@@ -54,6 +54,7 @@ class GameAdapter(
         fun bind(entry: GameEntry) {
             title.text = entry.displayName
             caption.text = entry.displayName
+            caption.isSelected = true
             val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
             val label = itemView.findViewById<View>(R.id.game_label)
             val bitmap = if (entry.icon == "cartridge.png") BitmapFactory.decodeFile(File(libraryRoot,"games/${entry.id}/cartridge.png").absolutePath) else null

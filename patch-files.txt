@@ -1,3 +1,4 @@
+crates/pocket-core/tests/ram_guest.rs
 crates/pocket-gles/src/gpu/mod.rs
 crates/pocket-kernel/src/vfs.rs
 crates/pocket-library/Cargo.toml
