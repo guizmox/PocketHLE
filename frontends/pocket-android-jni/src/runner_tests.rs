@@ -91,7 +91,7 @@ fn android_runner_ramtest_processes_and_orphan_complete() {
     for (name, result) in [
         (
             "RAMTEST.TXT",
-            "RAMTEST_RESULT PASS checks=0x00000084 failures=0x00000000",
+            "RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000",
         ),
         ("PROCTEST.TXT", "PROCTEST_RESULT PASS"),
         ("ORPHANTEST.TXT", "ORPHANTEST_RESULT PASS"),
@@ -116,20 +116,58 @@ fn android_runner_vfstest_sharing_rename_quota_and_repeat_cleanup() {
         .unwrap()
         .id
         .clone();
-    for _ in 0..2 {
+    for run in 1u32..=2 {
         run_diagnostic(&files.0, &id);
         let text = report(&files.0, "VFSTEST.TXT");
         println!("{text}");
         assert!(
-            text.contains("VFSTEST_RESULT PASS checks=0x00000067 failures=0x00000000"),
+            text.contains("VFSTEST_RESULT PASS checks=0x0000006c failures=0x00000000"),
             "{text}"
         );
         assert!(!text.lines().any(|l| l.starts_with("FAIL ")), "{text}");
+        let mut names: Vec<_> = fs::read_dir(files.0.join("flash"))
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+            })
+            .collect();
+        names.sort();
         assert_eq!(
-            fs::read_dir(files.0.join("flash")).unwrap().count(),
-            1,
-            "probe files, directories and quota allocations must be removed"
+            names,
+            ["pockethle-vfstest-persist-v3.bin", "vfstest.txt"],
+            "only the report and persistence marker may remain after cleanup"
         );
+        let marker_path = fs::read_dir(files.0.join("flash"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("PocketHLE-VFSTEST-PERSIST-v3.bin")
+            })
+            .unwrap();
+        let marker = fs::read(marker_path).unwrap();
+        let mut expected = Vec::new();
+        for value in [0x56544633u32, 1, run] {
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(
+            marker, expected,
+            "successful run must advance the versioned marker"
+        );
+        if run == 1 {
+            assert!(text.contains("INFO persistence.first_run"), "{text}");
+        } else {
+            assert!(
+                text.contains("INFO persistence.prior_successful_runs=0x00000001"),
+                "{text}"
+            );
+        }
     }
 }
 
@@ -170,7 +208,7 @@ fn disabled_process_launch_reproduces_android_vfs_report() {
     let text = report(&files.0, "VFSTEST.TXT");
     println!("{text}");
     assert!(
-        text.contains("VFSTEST_RESULT FAIL checks=0x00000067 failures=0x00000018"),
+        text.contains("VFSTEST_RESULT FAIL checks=0x0000006b failures=0x00000018"),
         "{text}"
     );
 }
