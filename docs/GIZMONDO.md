@@ -161,3 +161,8 @@ New installations enable Camera, GPS and Bluetooth in Gizmondo options by
 default. Existing serialized preferences, including disabled values, are
 preserved. Host services are still acquired only when requested by the guest;
 platform permission handling is unchanged. Simulated GPS remains opt-in.
+
+Serial mount aliases use a matching physical GZGA directory when present.
+Only flattened layouts map the alias to the extraction root. This prevents
+Supernaturals marker reads from resolving to a directory rather than its
+four-byte marker file, while preserving flattened Toy Golf card paths.

@@ -6,4 +6,6 @@ crates/pocket-library/src/lib.rs
 docs/AGENTS.md
 docs/GIZMONDO.md
 docs/GPU.md
+frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
+frontends/pocket-desktop/src/runner.rs

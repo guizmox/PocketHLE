@@ -2763,3 +2763,9 @@ external files/directories. Shared resources apply only to demo-card splits.
 Flattening must preserve the SD volume identity: OpenVolume::declared_serial
 decodes a four-byte direct GZGA marker as well as GZGA/GZGA markers. Toy Golf
 terminates before rendering when the reported volume serial does not match.
+
+Desktop and JNI mount each install_dirs prefix through GameEntry::install_mount_dir.
+For SD Card / Storage Card serial aliases, an existing physical GZGA directory
+wins over the flattened extraction root, case-insensitively. This preserves
+Supernaturals nested serial marker while direct-file Toy Golf imports retain
+root aliases. Do not blindly remount serial prefixes at extracted.

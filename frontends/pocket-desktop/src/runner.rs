@@ -385,7 +385,7 @@ impl Runner {
         // archive never opens and the game calls through a pointer it
         // never stored, which surfaces as READ_UNMAPPED at 0x2.
         for prefix in &game.install_dirs {
-            emu.mount_read_only_dir(prefix, &extracted);
+            emu.mount_read_only_dir(prefix, game.install_mount_dir(&library_root, prefix));
         }
         if let Some(prefix) = game.guest_install_prefix() {
             emu.mount_read_only_dir(&prefix, &extracted);

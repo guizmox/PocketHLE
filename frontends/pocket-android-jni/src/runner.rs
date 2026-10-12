@@ -539,7 +539,7 @@ fn run_process(
         }
     }
     for prefix in &entry.install_dirs {
-        emu.mount_read_only_dir(prefix, &extracted);
+        emu.mount_read_only_dir(prefix, entry.install_mount_dir(library_root, prefix));
     }
     if let Some(prefix) = entry.guest_install_prefix() {
         emu.mount_read_only_dir(&prefix, &extracted);

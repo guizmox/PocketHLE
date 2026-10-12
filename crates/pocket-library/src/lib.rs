@@ -224,6 +224,34 @@ impl GameEntry {
         library_root.join(self.relative_dir()).join("extracted")
     }
 
+    /// Serial aliases serve flattened games, but must not hide a real card
+    /// directory (Supernaturals keeps its marker in GZGA200099/GZGA200099).
+    pub fn install_mount_dir(&self, library_root: &Path, prefix: &str) -> PathBuf {
+        let extracted = self.extracted_dir(library_root);
+        let parts: Vec<_> = prefix
+            .split(['\\', '/'])
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() == 2
+            && (parts[0].eq_ignore_ascii_case("SD Card")
+                || parts[0].eq_ignore_ascii_case("Storage Card"))
+            && is_gizmondo_title_id(parts[1])
+        {
+            if let Ok(entries) = fs::read_dir(&extracted) {
+                if let Some(directory) = entries.flatten().find(|entry| {
+                    entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && entry
+                            .file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(parts[1])
+                }) {
+                    return directory.path();
+                }
+            }
+        }
+        extracted
+    }
+
     /// A wrapped MultiBoot ZIP keeps its launcher and GZGA directories inside
     /// one wrapper. Mount that directory as the card, not the extraction root:
     /// rooted multiboot.hog reads must not rely on cross-directory fallback.
@@ -3604,6 +3632,34 @@ mod tests {
             assert_eq!(lib.games().len(), 2);
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn serial_mount_alias_preserves_real_directories_and_flattened_files() {
+        let root = tmpdir("serial_mount");
+        let mut game = entry_with_install_dir(None);
+        game.id = "GZGA200099".into();
+        let extracted = game.extracted_dir(&root);
+        fs::create_dir_all(extracted.join("gzga200099")).unwrap();
+        fs::write(extracted.join("gzga200099/GZGA200099"), [1, 2, 3, 4]).unwrap();
+        for prefix in ["\\SD Card\\GZGA200099\\", "\\Storage Card\\gzga200099\\"] {
+            assert_eq!(
+                game.install_mount_dir(&root, prefix),
+                extracted.join("gzga200099")
+            );
+        }
+        // A marker file itself must not become a directory mount (Toy Golf).
+        fs::remove_dir_all(extracted.join("gzga200099")).unwrap();
+        fs::write(extracted.join("GZGA200099"), [1, 2, 3, 4]).unwrap();
+        assert_eq!(
+            game.install_mount_dir(&root, "\\SD Card\\GZGA200099\\"),
+            extracted
+        );
+        assert_eq!(
+            game.install_mount_dir(&root, "\\Program Files\\GZGA200099\\"),
+            extracted
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
