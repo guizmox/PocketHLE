@@ -9,8 +9,9 @@ platform-specific. See [DESKTOP-PARITY.md](DESKTOP-PARITY.md).
 
 Demo cards prompt **Keep launcher** or **Separate games**. Separate entries own
 directories, settings and saves, while retaining shared resources and card paths.
-Known GZGA catalogue names take priority over BMP filenames. A valid BMP beside
-the executable supplies cartridge artwork. Import names remain editable; renaming
+Known GZGA catalogue names supply game titles, identified from card directories
+and markers. Executable contents and BMP filenames never supply titles;
+a valid BMP beside the executable supplies cartridge artwork only. Import names remain editable; renaming
 does not change game IDs or save paths. Static API detection reports evidence for
 Bluetooth, data, GPS, camera, vibration, power and SIM; lack of static evidence
 is not proof that a game cannot use a dynamically loaded API.

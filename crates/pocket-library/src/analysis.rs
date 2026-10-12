@@ -168,21 +168,6 @@ fn version_value(strings: &[String], key: &str) -> Option<String> {
     None
 }
 
-fn find_title_id_in_strings(strings: &[String]) -> Option<String> {
-    for s in strings {
-        let b = s.as_bytes();
-        for w in b.windows(10) {
-            if w[..2].eq_ignore_ascii_case(b"GZ")
-                && w[2..4].iter().all(|c| c.is_ascii_alphabetic())
-                && w[4..].iter().all(|c| c.is_ascii_digit())
-            {
-                return Some(String::from_utf8_lossy(w).to_ascii_uppercase());
-            }
-        }
-    }
-    None
-}
-
 fn first_matching_string(strings: &[String], pred: impl Fn(&str) -> bool) -> Option<String> {
     strings
         .iter()
@@ -224,7 +209,7 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             }
         }
     }
-    a.title_id = game_gizmondo_title_id(game, root).or_else(|| find_title_id_in_strings(&strings));
+    a.title_id = game_gizmondo_title_id(game, root);
 
     // PE VERSIONINFO. Keep file/product versions separate and avoid using
     // FileDescription/InternalName as the library title: prototype builds often
@@ -586,7 +571,8 @@ mod selected_card_id_tests {
         game.executable = "extracted/Wrapper/Agaju/AUTORUN.EXE".into();
         let own = game.executable_path(root.path());
         std::fs::create_dir_all(own.parent().unwrap()).unwrap();
-        std::fs::write(own, []).unwrap();
+        std::fs::write(own, b"Misleading catalogue reference: GZGA200015").unwrap();
         assert!(game_gizmondo_title_id(&game, root.path()).is_none());
+        assert!(analyze_game(&game, root.path()).title_id.is_none());
     }
 }

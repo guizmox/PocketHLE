@@ -1,5 +1,6 @@
 crates/pocket-kernel/src/vfs.rs
 crates/pocket-library/data/gizmondo-titles.json
+crates/pocket-library/src/analysis.rs
 crates/pocket-library/src/gizmondo_titles.rs
 crates/pocket-library/src/lib.rs
 docs/AGENTS.md

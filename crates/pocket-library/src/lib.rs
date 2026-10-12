@@ -1407,15 +1407,7 @@ impl Library {
         let display_name = if is_demo_card {
             "Demo Card".to_string()
         } else {
-            written
-                .iter()
-                .find_map(|path| {
-                    path.file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .filter(|stem| !stem.eq_ignore_ascii_case("autorun"))
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| pretty_id(&id))
+            pretty_id(&id)
         };
         let entry = GameEntry {
             id: id.clone(),
@@ -1690,10 +1682,7 @@ impl Library {
             entry.settings.rotation = RotationPref::Cw90;
         }
         if is_gizmondo_game(&entry, &self.root) && !self.is_demo_card_entry(&entry) {
-            if let Some((name, icon)) =
-                cartridge_artwork(&game_dir, &entry.executable_path(&self.root))
-            {
-                entry.display_name = name;
+            if let Some(icon) = cartridge_artwork(&game_dir, &entry.executable_path(&self.root)) {
                 entry.icon = Some(icon);
             }
         }
@@ -3098,17 +3087,51 @@ mod tests {
     }
 
     #[test]
-    fn real_cartridge_bmp_supplies_name_and_png_and_invalid_bmp_falls_back() {
+    fn real_cartridge_bmp_supplies_artwork_without_changing_name() {
         let root = tmpdir("cartridge_bmp");
-        let card = root.join("GZGA200001");
+        let card = root.join("games/test/extracted/GZGA200001");
         fs::create_dir_all(&card).unwrap();
+        fs::write(card.join("GZGA200001"), b"marker").unwrap();
         let exe = card.join("autorun.exe");
         write_pe_importing(&exe, &[]);
         image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30]))
             .save_with_format(card.join("My Game.bmp"), image::ImageFormat::Bmp)
             .unwrap();
-        assert_eq!(cartridge_artwork(&root, &exe).unwrap().0, "My Game");
+        assert_eq!(
+            cartridge_artwork(&root, &exe),
+            Some(PathBuf::from("cartridge.png"))
+        );
         assert!(root.join("cartridge.png").is_file());
+        let mut library = Library::open(&root).unwrap();
+        let game: GameEntry = serde_json::from_value(serde_json::json!({
+            "id": "test", "display_name": "Import fallback", "source_cab": "game.zip",
+            "executable": "extracted/GZGA200001/autorun.exe", "imported_at": 0
+        }))
+        .unwrap();
+        let entry = library.commit_entry("test", game).unwrap();
+        assert_eq!(entry.display_name, "Import fallback");
+        assert_eq!(entry.icon, Some(PathBuf::from("cartridge.png")));
+        // ZIP fallback must not borrow a title from any resource filename either.
+        use std::io::Write;
+        let archive_path = root.join("Archive_Name.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+        for (name, data) in [
+            ("GZGA200001/autorun.exe", fs::read(&exe).unwrap()),
+            (
+                "GZGA200001/My Game.bmp",
+                fs::read(card.join("My Game.bmp")).unwrap(),
+            ),
+            ("GZGA200001/GZGA200001", b"marker".to_vec()),
+        ] {
+            archive
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(&data).unwrap();
+        }
+        archive.finish().unwrap();
+        let entry = library.import_zip(&archive_path).unwrap();
+        assert_eq!(entry.display_name, "Archive Name");
+        assert_eq!(entry.icon, Some(PathBuf::from("cartridge.png")));
         fs::write(card.join("My Game.bmp"), b"bad bitmap").unwrap();
         assert!(cartridge_artwork(&root, &exe).is_none());
         let _ = fs::remove_dir_all(root);
@@ -3590,7 +3613,7 @@ mod simulated_gps_tests {
 }
 
 /// Use a real label BMP beside the game binary. Reject oversized inputs before decoding.
-fn cartridge_artwork(game_dir: &Path, exe: &Path) -> Option<(String, PathBuf)> {
+fn cartridge_artwork(game_dir: &Path, exe: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<_> = fs::read_dir(exe.parent()?)
         .ok()?
         .flatten()
@@ -3626,10 +3649,7 @@ fn cartridge_artwork(game_dir: &Path, exe: &Path) -> Option<(String, PathBuf)> {
         {
             continue;
         }
-        let name = path.file_stem()?.to_string_lossy().trim().to_owned();
-        if !name.is_empty() {
-            return Some((name, PathBuf::from("cartridge.png")));
-        }
+        return Some(PathBuf::from("cartridge.png"));
     }
     None
 }

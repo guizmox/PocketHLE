@@ -2585,7 +2585,7 @@ Simulated GPS offers manual coordinates and one random uniform-area spherical fi
 
 Game hardware information detects Bluetooth, Internet, GPS, camera, vibration, power, SIM, battery and backlight using device strings, named imports and the existing CE4.2 coredll ordinal map for Gizmondo. No static evidence is not proof of absence. Scene camera symbols are not camera-device evidence.
 
-Valid BMP labels beside a Gizmondo executable are preferred for the imported title and converted to cartridge.png for desktop/Android cartridge artwork. Input size and dimensions are bounded; invalid BMPs retain the existing fallback. Demo launchers remain Demo Card. No bitmap or copyrighted game payload is bundled.
+Valid BMP labels beside a Gizmondo executable are converted to cartridge.png for desktop/Android cartridge artwork only; their filenames never supply game titles. Input size and dimensions are bounded; invalid BMPs retain the existing fallback. Demo launchers remain Demo Card. No bitmap or copyrighted game payload is bundled.
 
 Demo import prompts Keep launcher / Separate games. Each separated entry owns a game directory, settings and save namespace, retains original card-relative paths and shared resources, and excludes other games directory trees. Native splits run off the Android/desktop UI thread. Source launcher removal follows successful title creation. Split entries retain Gizmondo platform identity even without a GZGA marker.
 
@@ -2599,7 +2599,7 @@ About/credits expose https://github.com/guizmox/PocketHLE on Windows/Linux and A
 
 Selected demo-card title IDs prefer the executable's GZxxNNNNNN ancestor directory. Shared launcher markers cannot supply a split game's ID. Desktop cartridge labels, bottom captions and shared game information use the same helper. Existing imports need no migration or reimport.
 
-Static game names come from the maintainer's Liste_Jeux.xlsx IDs/titles, with the explicit 200030 Motocross / 200041 Furious Phil correction. Known static titles precede BMP-derived names at import; BMP artwork is retained. Existing ID-shaped names migrate on library load, preserving custom names, IDs, settings and save paths. No release/build version is inferred from a shared title ID. Unknown codes use the previous fallback. The initially unclear GZGA22222 source row was later corrected by the maintainer to GZGA200069 (Catapult).
+Static game names come from the maintainer's Liste_Jeux.xlsx IDs/titles, with the explicit 200030 Motocross / 200041 Furious Phil correction. Known static titles supply names at import; unknown codes retain the regular import fallback, independently of BMP filenames. BMP artwork is retained. Existing ID-shaped names migrate on library load, preserving custom names, IDs, settings and save paths. No release/build version is inferred from a shared title ID. Unknown codes use the previous fallback. The initially unclear GZGA22222 source row was later corrected by the maintainer to GZGA200069 (Catapult).
 
 ## Desktop PocketPC presentation restoration (2026-10-12)
 
@@ -2702,3 +2702,9 @@ launcher labels, not inferred official title IDs or patches to game binaries.
 
 The maintainer confirms GZGA200069 as Catapult. That exact ID is registered;
 the ambiguous GZGA22222 entry is removed rather than guessed or retained as an alias.
+
+Game identity no longer falls back to GZGA-looking strings inside executables.
+Analysis uses the selected executable/card directory marker via the shared title
+ID helper. Binary metadata/hardware inspection remains available, but neither
+binary content nor BMP filenames supply a game title. Existing user-edited
+display names are retained; unknown IDs keep the ordinary import fallback.
