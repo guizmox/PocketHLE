@@ -1,8 +1,4 @@
-crates/pocket-cpu/src/lib.rs
-crates/pocket-cpu/src/unicorn.rs
-crates/pocket-cpu/src/slice_timer.rs
 crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/audio.rs
-crates/pocket-winceapi/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-core/tests/audio_guest.rs
+crates/pocket-kernel/src/vfs.rs
+crates/pocket-kernel/src/vfs_fallback_index.rs
+docs/AGENTS.md

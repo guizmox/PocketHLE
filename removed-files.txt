@@ -1,1 +1,1 @@
-crates/pocket-winceapi/src/audio_diagnostics.rs
+crates/pocket-kernel/src/run_diagnostics.rs

@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex};
 
 #[path = "vfs_contract.rs"]
 mod contracts;
+#[path = "vfs_fallback_index.rs"]
+mod fallback_index;
 pub use contracts::{OpenResult, VfsShared};
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
@@ -229,8 +231,10 @@ struct Mount {
     host_dir: PathBuf,
     read_only: bool,
     /// Read-only mounts are a session snapshot for recursive fallback.
+    /// Group by basename so Trailblazer's repeated loose-asset probes do not
+    /// rank the entire demo card while its render/audio threads wait.
     /// Exact lookups remain live; writable mounts never use this index.
-    fallback_files: RefCell<Option<Vec<PathBuf>>>,
+    fallback_files: RefCell<Option<fallback_index::FallbackIndex>>,
 }
 
 /// The Gizmondo registration service device exposed as `REG1:`.
@@ -730,47 +734,16 @@ impl Vfs {
         files
     }
 
-    fn rank_fallback_files(
-        root: &Path,
-        wanted: &[&str],
-        files: &[PathBuf],
-    ) -> (usize, Vec<PathBuf>) {
-        let mut best = 0;
-        let mut found = Vec::new();
-        for path in files {
-            let Ok(relative) = path.strip_prefix(root) else {
-                continue;
-            };
-            let score = relative
-                .components()
-                .rev()
-                .zip(wanted.iter().rev())
-                .take_while(|(component, expected)| {
-                    component
-                        .as_os_str()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case(expected)
-                })
-                .count();
-            if score > best {
-                best = score;
-                found.clear();
-            }
-            if score != 0 && score == best && found.len() < 2 {
-                found.push(path.clone());
-            }
-        }
-        (best, found)
-    }
-
     fn find_path_recursive(mount: &Mount, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
         if mount.read_only {
             let mut files = mount.fallback_files.borrow_mut();
-            let files = files.get_or_insert_with(|| Self::collect_fallback_files(&mount.host_dir));
-            Self::rank_fallback_files(&mount.host_dir, wanted, files)
+            let index = files.get_or_insert_with(|| {
+                fallback_index::FallbackIndex::new(Self::collect_fallback_files(&mount.host_dir))
+            });
+            fallback_index::rank(&mount.host_dir, wanted, index.candidates(wanted))
         } else {
             let files = Self::collect_fallback_files(&mount.host_dir);
-            Self::rank_fallback_files(&mount.host_dir, wanted, &files)
+            fallback_index::rank(&mount.host_dir, wanted, &files)
         }
     }
 
