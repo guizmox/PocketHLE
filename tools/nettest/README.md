@@ -18,3 +18,7 @@ checks the guest ABI only, not native TLS. That variant is not distributed.
 
 Rebuild without any proprietary SDK using Python, Clang and LLD:
 `python tools/nettest/build.py --clang clang --lld ld.lld`
+
+Version 2 adds 40 nested session/connection/request create/cascading-close cycles.
+These cycles do not send additional requests to example.com. Pending native
+request cancellation and physical network operation remain separate checks.

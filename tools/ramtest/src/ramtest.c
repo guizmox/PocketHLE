@@ -324,6 +324,47 @@ static U32 last_lifecycle_worker(void *arg) {
     return 33;
 }
 #endif
+/* Mix resource types: isolated tests do not catch interactions between owners. */
+static void test_mixed_lifetimes(void) {
+    MemStatus before=status("mixed.before"),after;U32 i,good=1;
+    for(i=0;i<64;i++) {
+        U32 event=0,alias=0,mutex=0,thread=0,module=0,id=0,code=0;
+        void *block=LocalAlloc(0x40,8192),*pages=VirtualAlloc(0,16384,0x3000,4);
+        event=CreateEventW(0,0,0,0);mutex=CreateMutexW(0,1,0);
+        module=LoadLibraryW(L"ramprobe.dll");thread=CreateThread(0,0x40000,worker,(void*)i,4,&id);
+        if(!block||!pages||!event||!mutex||!module||!thread)good=0;
+        if(event) {
+            if(!DuplicateHandle(GetCurrentProcess(),event,GetCurrentProcess(),&alias,0,0,2))good=0;
+            if(!CloseHandle(event))good=0;
+            SetLastError(123);if(SetEvent(event)||GetLastError()!=6)good=0;
+            if(alias&&(!SetEvent(alias)||WaitForSingleObject(alias,0)!=0||!CloseHandle(alias)))good=0;
+        }
+        if(mutex&&(!ReleaseMutex(mutex)||!CloseHandle(mutex)))good=0;
+        if(thread){if(ResumeThread(thread)!=1||WaitForSingleObject(thread,5000)!=0||!GetExitCodeThread(thread,&code)||code!=77)good=0;if(!CloseHandle(thread))good=0;}
+        if(module&&!FreeLibrary(module))good=0;
+        if(block&&LocalFree(block)!=0)good=0;
+        if(pages&&!VirtualFree(pages,0,0x8000))good=0;
+        after.length=sizeof(after);GlobalMemoryStatus(&after);
+        if(after.avail!=before.avail||after.virtual_avail!=before.virtual_avail)good=0;
+        if(!good)break;
+    }
+    check("mixed.64_cycles_alloc_event_mutex_thread_dll",good&&i==64);
+    after=status("mixed.after");check("mixed.exact_ram_and_address_space_refund",after.avail==before.avail&&after.virtual_avail==before.virtual_avail);
+}
+static void test_process_repetition(void) {
+    MemStatus before=status("process_cycles.before"),after;U32 i,good=1,j;
+    for(i=0;i<8;i++) {
+        U32 info[4]={0},code=0;
+        if(!CreateProcessW(L"\\SD Card\\GZRT999999\\procworker.exe",L"c",0,0,0,0,0,0,0,info)) {good=0;break;}
+        if(WaitForSingleObject(info[0],5000)!=0||!GetExitCodeProcess(info[0],&code)||code!=77)good=0;
+        if(!CloseHandle(info[1])||!CloseHandle(info[0]))good=0;
+        for(j=0;j<200;j++){after.length=sizeof(after);GlobalMemoryStatus(&after);if(after.avail==before.avail)break;Sleep(10);}
+        if(after.avail!=before.avail)good=0;
+        if(!good)break;
+    }
+    check("process_cycles.8_launch_exit_close_reclaim",good&&i==8);
+    after=status("process_cycles.after");check("process_cycles.exact_ram_refund",after.avail==before.avail);
+}
 static void test_division(U32 store,U32 ram,U32 page) {
     MemStatus before=status("division.before"),after;U32 s=0,r=0,p=0,result;
     result=SetSystemMemoryDivision(store+16);check("division.shift_free_pages",result==0);
@@ -348,16 +389,16 @@ __attribute__((section(".text.entry"))) U32 entry(void) {
 
     {const W16 *name=L"\\Flash Disk\\RAMTEST.TXT";while(name[n]&&n<259){report_path[n]=name[n];n++;}report_path[n]=0;}
     report=CreateFileW(report_path,0x40000000,0,0,2,0x80,0);
-    if(report==0xFFFFFFFF){MessageBoxW(0,L"Impossible d'ecrire RAMTEST.TXT.",L"PocketHLE RAM test",0);return 2;}
-    note("PocketHLE native ARM RAM + image paging + TLS + processes test v7");
+    if(report==0xFFFFFFFF){MessageBoxW(0,L"Cannot write RAMTEST.TXT.",L"PocketHLE RAM test",0);return 2;}
+    note("PocketHLE native ARM RAM + image paging + TLS + processes test v8");
     if(!GetSystemMemoryDivision(&store,&ram,&page)){check("gizmondo.profile_present",0);note("STOP: import this ZIP as a Gizmondo title; no RAM profile configured.");}
     else {
         check("gizmondo.profile_present",1);s=status("baseline");check("status.structure_and_page_size",s.length==32&&page==4096);check("status.total_matches_division",s.total==ram*page);check("status.no_swap",s.page_total==0&&s.page_avail==0);check("status.private_slot",s.virtual_total==0x2000000);
-        test_virtual();test_local();test_heap_errors();test_tls();test_wait_errors();test_threads();test_processes();test_dlls();test_division(store,ram,page);test_native_dependencies();test_image_paging();test_lifecycle();
+        test_virtual();test_local();test_heap_errors();test_tls();test_wait_errors();test_threads();test_processes();test_dlls();test_mixed_lifetimes();test_process_repetition();test_division(store,ram,page);test_native_dependencies();test_image_paging();test_lifecycle();
     }
     {U32 n=0;n+=text(line_buffer+n,(failures||io_failed)?"RAMTEST_RESULT FAIL checks=0x":"RAMTEST_RESULT PASS checks=0x");n+=hex(line_buffer+n,checks);n+=text(line_buffer+n," failures=0x");n+=hex(line_buffer+n,failures);line_buffer[n++]='\r';line_buffer[n++]='\n';emit(line_buffer,n);}
     CloseHandle(report);
-    MessageBoxW(0,(failures||io_failed)?L"ECHEC : transmettre RAMTEST.TXT.":L"SUCCES : RAM et threads valides. Fermer puis verifier DLLTEST.TXT.",L"PocketHLE RAM test",0);
+    MessageBoxW(0,(failures||io_failed)?L"FAIL: see RAMTEST.TXT.":L"PASS: RAM and lifecycle checks. Close, then check DLLTEST.TXT.",L"PocketHLE RAM test",0);
 #ifdef TEST_EXIT_PROCESS
     ExitProcess(77);
 #elif defined(TEST_LAST_WORKER_EXIT)

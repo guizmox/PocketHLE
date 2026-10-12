@@ -367,6 +367,27 @@ mod tests {
         }
     }
     #[test]
+    fn repeated_capture_restart_and_last_owner_drop_release_native_objects() {
+        let (service, drops) = fixture();
+        service.set_allowed(true);
+        for cycle in 0..100 {
+            let first = service.open().unwrap();
+            let second = service.open().unwrap();
+            assert!(Arc::ptr_eq(&first, &second));
+            let weak = Arc::downgrade(&first);
+            first.lock().unwrap().start().unwrap();
+            drop(first);
+            assert_eq!(drops.load(Ordering::SeqCst), cycle * 2);
+            second.lock().unwrap().stop();
+            assert_eq!(drops.load(Ordering::SeqCst), cycle * 2 + 1);
+            second.lock().unwrap().start().unwrap();
+            drop(second);
+            assert!(weak.upgrade().is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), cycle * 2 + 2);
+        }
+    }
+
+    #[test]
     fn shared_device_stops_on_disable_or_last_close_without_cycles() {
         let (s, drops) = fixture();
         s.set_allowed(true);

@@ -885,10 +885,16 @@ pub(crate) fn resume(mut saved: SuspendedMovies) {
 pub(crate) fn reset() {
     MOVIES.lock().unwrap().clear();
 }
+// DirectShow's graph registry is process-global. Tests using independent fake
+// CPUs must not reset one another's graph collection while asserting lifetimes.
+#[cfg(test)]
+static TEST_GRAPH_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn launcher_preview_survives_swaps_between_video_frames() {
+        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();
@@ -936,6 +942,7 @@ mod tests {
     }
     #[test]
     fn directshow_suspension_restores_graph_and_freezes_movie_clock() {
+        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let mut movie = Movie::new();
         movie.playing = true;
@@ -991,6 +998,7 @@ mod tests {
     }
     #[test]
     fn directshow_graph_identity_interfaces_and_reference_lifetime() {
+        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
         let mut cpu = StubCpu::new();
         let mut kernel = crate::gx::tests::fresh_kernel();
         cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
@@ -1250,6 +1258,7 @@ mod decoder_tests {
     use super::*;
     #[test]
     fn native_seek_bounds_audio_and_video_and_can_restart_repeatedly() {
+        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seeking.wmv");
         for _ in 0..5 {
@@ -1290,6 +1299,7 @@ mod lifetime_tests {
     }
     #[test]
     fn all_sdk_interfaces_share_identity_and_release_across_100_graphs() {
+        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let (mut cpu, mut k, mut d) = crate::bluetooth::tests::setup();
         cpu.map_region(0x50000000, 65536, Prot::READ | Prot::WRITE)

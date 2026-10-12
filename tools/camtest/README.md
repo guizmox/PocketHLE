@@ -39,3 +39,7 @@ Original diagnostic validation: real ARM execution with Unicorn and a synthetic
 camera, 15 successful checks, BMP dimensions and colors verified. This does not
 establish Windows/Android hardware compatibility. Current Android APK build and
 hardware test status are recorded in [the build guide](../../docs/ANDROID-BUILD.md).
+
+Version 2 adds eight complete start/preview/stop/close/reopen cycles and rejects
+IOCTLs on the closed handle. Test both Android landscape orientations and
+pause/resume separately; these require the physical camera.

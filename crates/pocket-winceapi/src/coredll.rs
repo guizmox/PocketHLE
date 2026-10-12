@@ -3639,6 +3639,13 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     /// `CTL_CODE(FILE_DEVICE_DISK, 0x709, METHOD_BUFFERED, FILE_READ_ACCESS)`
     const IOCTL_DISK_GET_STORAGEID: u32 = 0x0007_1c24;
     let handle = ctx.arg_u32(0)?;
+    // Closed/unknown device handles must not fall through to an unsupported
+    // IOCTL and leave a previous LastError behind. The VFS owns these handles.
+    if ctx.kernel.object_handles.is_closed(handle) || !ctx.kernel.vfs.is_handle(handle) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+
     let code = ctx.arg_u32(1)?;
     let in_len = ctx.arg_u32(3)?;
     let out_buf = ctx.arg_u32(4)?;
@@ -27583,6 +27590,23 @@ mod tests {
         assert_eq!(c.kernel.key_repeat_cursor, 0);
         assert!(c.kernel.key_repeat_next_ms.unwrap() >= monotonic_ms());
     }
+    #[test]
+    fn device_ioctl_invalid_handle_sets_error_before_reading_unused_buffers() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        for handle in [0, u32::MAX, 0xdead_aaaa] {
+            kernel.thread_last_errors.insert(0, 50);
+            assert_eq!(
+                tls_test_call(&mut cpu, &mut kernel, device_io_control, &[handle]),
+                0
+            );
+            assert_eq!(
+                kernel.thread_last_errors.get(&0),
+                Some(&ERROR_INVALID_HANDLE)
+            );
+        }
+    }
+
     fn tls_test_call(
         cpu: &mut StubCpu,
         kernel: &mut KernelState,

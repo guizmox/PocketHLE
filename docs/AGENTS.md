@@ -2638,3 +2638,38 @@ Non-Gizmondo sessions retain raw camera orientation. No Activity is stored in
 CameraHost, no new listener/thread/timer or camera reopen is needed for a turn.
 
 Orientation reference: https://developer.android.com/media/camera/camera2/camera-preview
+
+## Diagnostic lifecycle and timing coverage (2026-10-12)
+
+RAMTEST v8 retains all previous suites, adds 64 mixed resource cycles and eight
+process launch/exit/reclaim cycles (136 checks). VFSTEST v3 adds 64 mixed file
+cycles and exact refunds plus a versioned 12-byte run marker (108 checks).
+The marker is retained outside its temporary probe directory; a malformed marker
+fails without replacement. A restart between runs verifies persistence.
+TIMETEST v1 measures Sleep/waits/timer callbacks/audio callbacks with nested Sleep,
+40 waveOut lifetimes and EGL identical-frame/late-resume pacing (44 checks).
+Guest clock quantization has explicit lower tolerances; host slowness is measured
+and warned, not treated as proof of a timing-contract violation.
+
+CAM/GPS/NET/VIB/BT diagnostics add repeated lifetimes while retaining original
+checks. BTTEST sources/build are recovered from its original shipped diagnostic,
+retaining bounded Unicode/MAC inquiry output. Kernel-only camera/network tests
+count native-provider destruction/cancellation over 100 repeated mock cycles.
+The new ARM camera cycle caught DeviceIoControl retaining an old LastError
+after a handle was closed. It now rejects unknown/closed VFS device handles
+with ERROR_INVALID_HANDLE before reading unused buffers. A focused unit and
+actual ARM cycle cover this correction. No game tracing or resource monitor is
+introduced. These checks do not prove no physical driver/JIT/OS allocation leak.
+
+CI regenerates TIMETEST beside RAM/VFS fixtures before integration tests. The
+contract runner is documented in tools/gizmondo-diagnostics/README.md; default
+ignored native GPU tests remain explicitly unexecuted unless requested.
+
+The hardware guest integration suite executes CAM/GPS/NET/VIB/BT ARM binaries
+with controlled providers. Camera/location/motor/session/transfer live counters
+must return to zero; Bluetooth exercises startup and inquiry cancellation. This
+checks guest ABI and ownership, not physical sensors, radio exchange or TLS.
+Guest suites run sequentially to avoid competing emulation deadlines. DirectShow
+unit fixtures share a test-only gate around their process-global graph registry
+so parallel tests cannot reset one another's graphs. Production graph behavior
+is unchanged by this test gate.

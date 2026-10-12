@@ -170,7 +170,7 @@ fn run_guest(executable: &[u8], expected_code: u32) {
     let report = fs::read_to_string(report_path).unwrap();
     println!("{report}");
     assert!(
-        report.contains("RAMTEST_RESULT PASS checks=0x00000084 failures=0x00000000"),
+        report.contains("RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000"),
         "{report}"
     );
     assert!(
@@ -375,7 +375,7 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
         assert!(init.set_memory_division(Some(ram.clone())));
     }
     let baseline = ram.snapshot();
-    for _ in 0..2 {
+    for iteration in 0..2 {
         let mut emu = Emulator::with_unicorn_cpu().unwrap();
         emu.max_slices = 3_000_000;
         emu.set_halt_on_unimplemented(true);
@@ -417,6 +417,26 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
         let report = fs::read_to_string(path).unwrap();
         println!("{report}");
         assert!(report.contains("VFSTEST_RESULT PASS"), "{report}");
+        assert!(
+            report.contains("PASS cycles.64_duplicate_flush_close_delete"),
+            "{report}"
+        );
+        let marker_path = fs::read_dir(&flash)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("PocketHLE-VFSTEST-PERSIST-v3.bin")
+            })
+            .unwrap();
+        let marker = fs::read(marker_path).unwrap();
+        assert_eq!(&marker[..8], &[0x33, 0x46, 0x54, 0x56, 1, 0, 0, 0]);
+        assert_eq!(
+            u32::from_le_bytes(marker[8..12].try_into().unwrap()),
+            iteration + 1
+        );
         assert!(!report.lines().any(|l| l.starts_with("FAIL ")), "{report}");
         assert_eq!(emu.process().unwrap().state.process_exit_code, Some(0));
         drop(emu);
@@ -424,8 +444,77 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
         assert_eq!(ram.snapshot().store_used, baseline.store_used);
         assert_eq!(
             fs::read_dir(&flash).unwrap().count(),
-            1,
-            "all fixture data must be removed"
+            2,
+            "only report and the diagnostic persistence marker remain"
         );
     }
+}
+
+#[test]
+fn native_arm_timing_waits_callbacks_and_egl_release_resources() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let files = GuestFiles(std::env::temp_dir().join(format!("pockethle-timing-{nonce}")));
+    fs::create_dir_all(&files.0).unwrap();
+    let flash = files.0.join("flash");
+    fs::create_dir_all(&flash).unwrap();
+    fs::write(
+        files.0.join("AUTORUN.EXE"),
+        include_bytes!("../../../tools/timetest/dist/GZTT999995/AUTORUN.EXE"),
+    )
+    .unwrap();
+    let mut emu = Emulator::with_unicorn_cpu().unwrap();
+    emu.max_slices = 3_000_000;
+    emu.set_halt_on_unimplemented(true);
+    emu.load_pe(files.0.join("AUTORUN.EXE")).unwrap();
+    emu.set_gpu_renderer(false);
+    assert!(emu.set_memory_division(Some(MemoryDivision::gizmondo_sdk_default())));
+    emu.set_screen_size(320, 240);
+    {
+        let state = &mut emu.process_mut().unwrap().state;
+        state
+            .vfs
+            .mount_read_only("\\SD Card\\GZTT999995\\", &files.0);
+        state.vfs.mount_save_dir("\\Flash Disk\\", &flash);
+        state.module_path = "\\SD Card\\GZTT999995\\AUTORUN.EXE".into();
+        state.synthetic_message_budget = 0;
+    }
+    let mut hook = |state: &mut KernelState| {
+        if state.modal.is_some() {
+            state
+                .pending_input
+                .push_back(InputEvent::KeyDown { vk: 0x0d });
+        }
+        FrameAction::Continue
+    };
+    emu.run_with_hook(&mut hook).unwrap();
+    let report_path = fs::read_dir(&flash)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("TIMETEST.TXT")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Missing TIMETEST report; guest exit={:?}",
+                emu.process().unwrap().state.process_exit_code
+            )
+        });
+    let report = fs::read_to_string(report_path).unwrap();
+    println!("{report}");
+    assert!(report.contains("TIMETEST_RESULT PASS"), "{report}");
+    assert!(
+        !report.lines().any(|line| line.starts_with("FAIL ")),
+        "{report}"
+    );
+    let state = &emu.process().unwrap().state;
+    assert_eq!(state.process_exit_code, Some(0));
+    assert!(state.timers.is_empty());
+    assert!(state.wave_out.devices.is_empty());
+    assert!(state.vfs.open_handles().is_empty());
 }

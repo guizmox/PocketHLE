@@ -7,7 +7,7 @@ static void hex(U32 n){U32 i;line("0x");for(i=0;i<8;i++)report[used++]="01234567
 static void check(const char*s,U32 ok){line(ok?"PASS ":"FAIL ");line(s);if(!ok){failed++;line(" error=");hex(GetLastError());}line("\r\n");}
 __attribute__((section(".text.entry"))) U32 entry(void){
  U32 h,n,count=0,i,settings[7]={0,1,0,0,0,0,0},query[7]={0};
- line("PocketHLE ARM VIBTEST v1\r\n");
+ line("PocketHLE ARM VIBTEST v2\r\n");
  h=CreateFileW(L"VIB1:",0xc0000000,0,0,3,0,0);check("device.open",h!=0xffffffff);if(h==0xffffffff)goto finish;
  check("device.count",DeviceIoControl(h,0,0,0,&count,4,&n,0)&&count==1&&n==4);
  check("device.continuous",DeviceIoControl(h,2,settings,28,0,0,0,0));
@@ -20,8 +20,8 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  check("nled.meta_double_pulse",NLedSetDevice(2,settings));Sleep(2000);settings[1]=0;check("nled.stop_meta",NLedSetDevice(2,settings));
  settings[0]=1;check("nled.reject_invalid_motor",!NLedSetDevice(2,settings)&&GetLastError()==87);settings[0]=0;
  check("nled.reject_null",!NLedGetDeviceInfo(0,0)&&GetLastError()==87);
- for(i=0;i<20;i++){settings[1]=1;if(!NLedSetDevice(2,settings))break;settings[1]=0;if(!NLedSetDevice(2,settings))break;}
- check("motor.release_reopen_20",i==20);
+ for(i=0;i<64;i++){settings[1]=1;if(!NLedSetDevice(2,settings))break;settings[1]=0;if(!NLedSetDevice(2,settings))break;}
+ check("motor.release_reopen_64",i==64);
 finish:
  settings[0]=0;settings[1]=0;NLedSetDevice(2,settings);if(h!=0xffffffff)CloseHandle(h);
  line(failed?"VIBTEST_RESULT FAIL\r\n":"VIBTEST_RESULT PASS\r\n");

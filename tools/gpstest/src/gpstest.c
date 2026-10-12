@@ -9,7 +9,7 @@ static U32 word(const unsigned char*p,U32 o){return p[o]|p[o+1]<<8|p[o+2]<<16|p[
 static U32 save(const W16*path,const void*p,U32 size){U32 n=0,h=CreateFileW(path,0x40000000,0,0,2,0,0),ok;if(h==0xffffffff)return 0;ok=WriteFile(h,p,size,&n,0)&&n==size;CloseHandle(h);return ok;}
 __attribute__((section(".text.entry"))) U32 entry(void){
  unsigned char p[180]={0};U32 h,other,n,t,i,fix=0;
- line("PocketHLE ARM GPS1 test v1\r\n");
+ line("PocketHLE ARM GPS1 test v2\r\n");
  h=CreateFileW(L"GPS1:",0x80000000,0,0,3,0,0);check("gps.open",h!=0xffffffff);if(h==0xffffffff)goto finish;
  other=CreateFileW(L"GPS1:",0x80000000,0,0,3,0,0);check("gps.exclusive_share",other==0xffffffff&&GetLastError()==32);if(other!=0xffffffff)CloseHandle(other);
  check("gps.read_packed_180",ReadFile(h,p,180,&n,0)&&n==180);
@@ -23,8 +23,8 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  line(fix&&word(p,37)<10000?"COLORS_POSITION_ELIGIBLE YES\r\n":"COLORS_POSITION_ELIGIBLE NO\r\n");
  check("gps.save_snapshot",save(L"\\Flash Disk\\GPSTEST.BIN",p,180));
  check("gps.close",CloseHandle(h));h=0xffffffff;
- for(i=0;i<20;i++){h=CreateFileW(L"GPS1:",0x80000000,0,0,3,0,0);if(h==0xffffffff||!CloseHandle(h)){check("gps.reopen_close_20",0);break;}h=0xffffffff;}
- if(i==20)check("gps.reopen_close_20",1);
+ for(i=0;i<32;i++){h=CreateFileW(L"GPS1:",0x80000000,0,0,3,0,0);if(h==0xffffffff||!ReadFile(h,p,180,&n,0)||n!=180||!CloseHandle(h)){check("gps.read_reopen_close_32",0);break;}h=0xffffffff;}
+ if(i==32)check("gps.read_reopen_close_32",1);
 finish:
  if(h!=0xffffffff)CloseHandle(h);
  line(failed?"GPSTEST_RESULT FAIL\r\n":"GPSTEST_RESULT PASS\r\n");save(L"\\Flash Disk\\GPSTEST.TXT",report,used);

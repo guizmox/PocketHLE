@@ -38,12 +38,48 @@ static void check(const char*s,U32 good){checks++;if(!good)failures++;line(good?
 static void hex(U32 n){char b[11];U32 i;b[0]='0';b[1]='x';for(i=0;i<8;i++)b[2+i]="0123456789abcdef"[(n>>(28-4*i))&15];b[10]=0;line(b);}
 static U32 launch(Info*i,const W16*mode,U32 flags){return CreateProcessW(L"\\SD Card\\GZVT999998\\vfsworker.exe",mode,0,0,0,flags,0,0,0,i);}
 static U32 done(Info*i,U32 expected){U32 code=0,ok=WaitForSingleObject(i->process,5000)==0&&GetExitCodeProcess(i->process,&code)&&code==expected;CloseHandle(i->thread);CloseHandle(i->process);return ok;}
+
+#define PERSIST L"\\Flash Disk\\PocketHLE-VFSTEST-PERSIST-v3.bin"
+static U32 persistence_run=0;
+static U32 persistence_read(void) {
+    U32 h,n=0,data[3]={0};
+    h=open_file(PERSIST,R,3,3);
+    if(h==BAD){if(GetLastError()==2){line("INFO persistence.first_run\r\n");return 1;}return 0;}
+    if(!ReadFile(h,data,12,&n,0)||n!=12||GetFileSize(h,0)!=12||data[0]!=0x56544633||data[1]!=1||data[2]==0||data[2]==0xffffffff){CloseHandle(h);return 0;}
+    CloseHandle(h);persistence_run=data[2];line("INFO persistence.prior_successful_runs=");hex(persistence_run);line("\r\n");return 1;
+}
+static void persistence_write(void) {
+    U32 data[3]={0x56544633,1,persistence_run+1},h=open_file(PERSIST,W,3,persistence_run?3:1);
+    U32 ok=h!=BAD&&io_write(h,data,12)&&FlushFileBuffers(h);
+    if(h!=BAD&&!CloseHandle(h))ok=0;
+    check("persistence.commit_next_run",ok);
+}
+static void repeated_files(void) {
+    Mem before,after;U32 i,good=1,h,j,n,alias,free_before[2],free_after[2],total[2],dummy[2];char b[8];
+    before.length=sizeof(before);GlobalMemoryStatus(&before);
+    GetDiskFreeSpaceExW(L"\\Flash Disk\\",free_before,total,dummy);
+    for(i=0;i<64;i++) {
+        alias=0;h=open_file(FILE,R|W,0,1);
+        if(h==BAD){good=0;break;}
+        if(!io_write(h,"CYCLE",5)||!FlushFileBuffers(h)||!DuplicateHandle(GetCurrentProcess(),h,GetCurrentProcess(),&alias,0,0,2))good=0;
+        if(!CloseHandle(h))good=0;
+        SetLastError(123);if(ReadFile(h,b,1,&n,0)||GetLastError()!=6)good=0;
+        SetLastError(123);j=open_file(FILE,R,3,3);if(j!=BAD||GetLastError()!=32)good=0;if(j!=BAD)CloseHandle(j);
+        if(alias){if(SetFilePointer(alias,0,0,0)!=0||!ReadFile(alias,b,5,&n,0)||n!=5||!eq(b,"CYCLE",5))good=0;if(!CloseHandle(alias))good=0;}
+        if(!DeleteFileW(FILE))good=0;
+        if(!good)break;
+    }
+    check("cycles.64_duplicate_flush_close_delete",good&&i==64);
+    after.length=sizeof(after);GlobalMemoryStatus(&after);check("cycles.exact_ram_refund",before.avail==after.avail);
+    GetDiskFreeSpaceExW(L"\\Flash Disk\\",free_after,total,dummy);check("cycles.exact_flash_space_refund",free_before[0]==free_after[0]&&free_before[1]==free_after[1]);
+}
 __attribute__((section(".text.entry"))) U32 entry(void){
  U32 h,j,n=0,alias=0,ready,release,f,free0[2],free1[2],total[2],dummy[2],found[150],count=0;char b[16];Info info;Mem before,after;void *protected_out;
  {extern char __image_start[],__image_end[];const volatile unsigned char*p=(const volatile unsigned char*)__image_start;volatile unsigned char sink=0;while(p<(const volatile unsigned char*)__image_end){sink^=*p;p+=4096;}(void)sink;}
- line("PocketHLE native ARM VFS test v2\r\n");
+ line("PocketHLE native ARM VFS test v3\r\n");
  DeleteFileW(L"\\Flash Disk\\VFSTEST.TXT");
  if(GetFileAttributesW(ROOT)!=BAD){line("FAIL fixture.directory_already_exists; no existing files touched\r\n");failures++;goto finish;}
+ check("persistence.read_previous_run",persistence_read());if(failures)goto finish;
  check("directories.create",CreateDirectoryW(ROOT,0));SetLastError(123);check("directories.existing_error",!CreateDirectoryW(ROOT,0)&&GetLastError()==183);
  SetLastError(123);check("directories.missing_parent",!CreateDirectoryW(ROOT L"\\absent\\child",0)&&GetLastError()==3);
  SetLastError(123);check("create.missing_existing",open_file(FILE,R,3,3)==BAD&&GetLastError()==2);
@@ -127,10 +163,11 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  SetLastError(123);check("quota.write_refused_no_growth",!WriteFile(h,"X",1,&n,0)&&GetLastError()==112&&GetFileSize(h,0)==free0[0]);
  after.length=sizeof(after);GlobalMemoryStatus(&after);line("INFO quota.ram_before=");hex(before.avail);line(" ram_after=");hex(after.avail);line(" total_before=");hex(before.total);line(" total_after=");hex(after.total);line("\r\n");check("quota.nand_not_ram",before.avail==after.avail);
  SetFilePointer(h,0,0,0);check("quota.truncate_refunds",SetEndOfFile(h)&&GetDiskFreeSpaceExW(L"\\Flash Disk\\",free1,total,dummy)&&free1[0]==free0[0]);CloseHandle(h);
- check("cleanup.file",DeleteFileW(FILE));check("cleanup.directory",RemoveDirectoryW(ROOT));
+ check("cleanup.file",DeleteFileW(FILE));repeated_files();check("cleanup.directory",RemoveDirectoryW(ROOT));
+ if(!failures)persistence_write();
 finish:
  line(failures?"VFSTEST_RESULT FAIL checks=":"VFSTEST_RESULT PASS checks=");hex(checks);line(" failures=");hex(failures);line("\r\n");
  h=open_file(L"\\Flash Disk\\VFSTEST.TXT",W,3,2);if(h!=BAD){io_write(h,report,used);CloseHandle(h);}
- MessageBoxW(0,failures?L"ECHEC : voir VFSTEST.TXT":L"SUCCES : VFSTEST.TXT",L"PocketHLE VFS test",0);return failures?1:0;
+ MessageBoxW(0,failures?L"FAIL: see VFSTEST.TXT":L"PASS: see VFSTEST.TXT",L"PocketHLE VFS test",0);return failures?1:0;
 }
 #endif

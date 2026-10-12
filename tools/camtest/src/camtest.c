@@ -23,8 +23,8 @@ static U32 bitmap(const void*p){
 }
 __attribute__((section(".text.entry"))) U32 entry(void){
  U32 h=BAD,bytes=0,format[4]={640,480,320,240},get[4]={0},bad[4]={640,480,321,240};
- U32 info[4]={320,240,0,10000},old_count,t;void *pixels=0;
- line("PocketHLE ARM CAM1 test v1\r\n");
+ U32 info[4]={320,240,0,10000},old_count,t,i,good;void *pixels=0;
+ line("PocketHLE ARM CAM1 test v2\r\n");
  h=CreateFileW(L"CAM1:",R|W,0,0,3,0,0);check("camera.open",h!=BAD);if(h==BAD)goto finish;
  check("camera.stop_initial",control(h,2104,0,0,0,0,&bytes));
  check("camera.reject_non_multiple_of_8",!control(h,2101,bad,16,0,0,&bytes)&&GetLastError()==87);
@@ -43,6 +43,17 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  }else check("camera.capture_i420",0);
  check("camera.unsupported_ioctl",!control(h,2107,0,0,0,0,&bytes)&&GetLastError()==50);
  check("camera.stop_final",control(h,2104,0,0,0,0,&bytes));
+ check("camera.close_first_session",CloseHandle(h));h=BAD;good=1;
+ info[0]=320;info[1]=240;info[3]=10000;
+ for(i=0;i<8;i++) {
+  h=CreateFileW(L"CAM1:",R|W,0,0,3,0,0);if(h==BAD){good=0;break;}
+  if(!control(h,2101,format,16,0,0,&bytes)||!control(h,2103,0,0,0,0,&bytes)||!control(h,2105,info,16,pixels,153600,&bytes)||bytes!=153600)good=0;
+  if(!control(h,2104,0,0,0,0,&bytes))good=0;
+  if(!CloseHandle(h))good=0;
+  if(control(h,2102,0,0,get,16,&bytes)||GetLastError()!=6)good=0;
+  h=BAD;if(!good)break;
+ }
+ check("camera.8_start_preview_stop_close_reopen",good&&i==8);
 finish:
  if(h!=BAD){control(h,2104,0,0,0,0,&bytes);CloseHandle(h);}if(pixels)VirtualFree(pixels,0,0x8000);
  line(failures?"CAMTEST_RESULT FAIL\r\n":"CAMTEST_RESULT PASS\r\n");

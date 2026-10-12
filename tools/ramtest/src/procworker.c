@@ -8,6 +8,7 @@ __attribute__((section(".text.entry"))) U32 entry(U32 instance,U32 previous,cons
     U32 data[6],h,alias=0,code=0,n=0,id=0,good=1;const W16 *full=GetCommandLineW();
     (void)instance;(void)previous;(void)show;
     if(!command||!full||full[0]!=command[0])return 1;
+    if(command[0]=='c')return 77;
     ready=CreateEventW(0,1,0,L"PocketHLE.PROC.READY");tick=CreateEventW(0,0,0,L"PocketHLE.PROC.TICK");
     if(!ready||!tick)return 2;
     switch(command[0]) {

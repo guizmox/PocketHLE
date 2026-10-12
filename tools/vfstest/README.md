@@ -1,27 +1,27 @@
-# VFSTEST v2 — ARM virtual filesystem diagnostic
+# VFSTEST v3 — ARM virtual filesystem diagnostic
 
-Import `PocketHLE-VFSTEST-v2.zip` into PocketHLE and run it twice. Each time, wait
-for **SUCCES** (the existing guest diagnostic message), then press Enter to close
+Import `PocketHLE-VFSTEST.zip` into PocketHLE and run it twice. Each time, wait
+for **PASS** , then press Enter to close
 the dialog. The same program tests files, volumes and interprocess operations.
 
 The report is `\Flash Disk\VFSTEST.TXT`, normally
 `C:\Users\gtristant\Documents\PocketHLE\flash\VFSTEST.TXT`:
 
 ```text
-VFSTEST_RESULT PASS checks=0x00000067 failures=0x00000000
+VFSTEST_RESULT PASS checks=0x0000006c failures=0x00000000
 ```
 
-The 103 checks cover CreateFileW dispositions, CRT r+/w+/a/a+ modes, local/remote
+The original 103 checks cover CreateFileW dispositions, CRT r+/w+/a/a+ modes, local/remote
 sharing and duplication, errors and invalid/protected output pointers, searches
 and attributes, actual directory deletion, moves without overwriting and negative
 file-position changes. They also check shared RAM files, volume accounting, the
 32 MiB Flash quota, refusal to write when full, and space reclaimed by truncation
 or deletion without charging NAND storage against RAM.
 
-The diagnostic uses only its `\Flash Disk\PocketHLE-VFS-PROBE` directory and report.
+The diagnostic uses only its `\Flash Disk\PocketHLE-VFS-PROBE` directory and report, plus `PocketHLE-VFSTEST-PERSIST-v3.bin`.
 If the directory already exists, it refuses to start to avoid deleting unknown
-files. On success, it removes its temporary files/directories and keeps only the
-report. An existing report is replaced. The card's `asset.bin` checks read-only
+files. On success, it removes its temporary files/directories and keeps the
+report and its dedicated 12-byte persistence marker. An existing report is replaced. The card's `asset.bin` checks read-only
 mount behavior. Game saves are not used.
 
 The 64 MiB NAND model reserves 32 MiB for the OS and provides 32 MiB for Flash Disk.
@@ -56,3 +56,16 @@ It initializes both GlobalMemoryStatus buffers before measuring and adds
 INFO quota.ram_before / ram_after / total_before / total_after to the report.
 This distinguishes RAM page changes from NAND charges; no tolerance turns a
 failed assertion into a pass.
+
+## Version 3 lifecycle and persistence checks
+
+Adds 64 create/write/flush/duplicate/close/read/delete cycles, closed-handle
+errors, share leases surviving the original handle, and exact RAM/Flash refunds.
+A dedicated persistence marker records successful runs. On the second run,
+`INFO persistence.prior_successful_runs=0x00000001` confirms the first marker
+survived; after an emulator restart it tests restart persistence too.
+Malformed or foreign marker data makes the test fail without overwriting it.
+Only a fully successful run advances the marker. To reset the diagnostic,
+remove only its marker after inspecting the report; no game save is used.
+The updated complete run has 108 checks (0x6c). A first successful run alone
+does not establish restart persistence.

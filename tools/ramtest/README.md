@@ -6,12 +6,12 @@ requiring a proprietary SDK or commercial assets.
 
 1. Apply the source patch and rebuild the GUI.
 2. Import `PocketHLE-RAMTEST.zip` as a Gizmondo ZIP game.
-3. Launch it. The final dialog must display **SUCCES** (the existing guest message).
+3. Launch it. The final dialog must display **PASS** .
    Press Enter to close it.
 4. Read `RAMTEST.TXT`. Its final line must be
-   `RAMTEST_RESULT PASS checks=0x00000084 failures=0x00000000` (132 checks).
+   `RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000` (136 checks).
 5. After closing the dialog, check `flash/DLLTEST.TXT` for a final
-   `DLLTEST_RESULT PASS`. Process exit callbacks write it after acknowledgment.
+   `DLLTEST_RESULT PASS`. Process exit callbacks write it after acknowledgment. The guest dialog is in English.
 6. Check `flash/DEPTEST.TXT` for `DEPTEST_RESULT PASS` (dependency order and rollback).
 7. Check `flash/PROCTEST.TXT` and `flash/ORPHANTEST.TXT` for
    `PROCTEST_RESULT PASS` and `ORPHANTEST_RESULT PASS`.
@@ -24,6 +24,11 @@ remains read-only. To find the report from Windows CMD:
 ```bat
 powershell -NoProfile -Command "Get-ChildItem 'C:\Users\gtristant\Documents\PocketHLE' -Recurse -Filter RAMTEST.TXT | Select-Object -ExpandProperty FullName"
 ```
+
+Version 8 retains the full v7 suite and adds 64 mixed allocation/event/mutex/
+thread/DLL cycles with exact RAM/address-space refunds, plus eight consecutive
+process launch/exit/handle-close cycles with RAM reclamation after each child.
+This measures guest-accounted resources, not native GPU/driver allocations.
 
 Version 7 adds a multiprocess suite: normal/suspended process creation, command
 lines and identifiers, explicit duplication, private TLS, remote thread control,

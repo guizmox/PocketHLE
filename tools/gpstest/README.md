@@ -28,3 +28,6 @@ Build without proprietary SDK code:
 ```text
 python tools/gpstest/build.py --clang clang --lld ld.lld
 ```
+
+Version 2 reads the packed snapshot on each of 32 open/read/close cycles.
+This verifies API lifetimes; no-fix snapshots remain valid API results.

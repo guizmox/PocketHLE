@@ -58,6 +58,12 @@ jobs:
         run: |
           python3 tools/ramtest/build.py
           python3 tools/vfstest/build.py
+          python3 tools/timetest/build.py
+          python3 tools/camtest/build.py
+          python3 tools/gpstest/build.py
+          python3 tools/nettest/build.py
+          python3 tools/vibtest/build.py
+          python3 tools/bttest/build.py
       - name: advisory clippy analysis
         env:
           # This job already uses continue-on-error; retain diagnostics as warnings.
@@ -90,6 +96,12 @@ jobs:
         run: |
           python3 tools/ramtest/build.py
           python3 tools/vfstest/build.py
+          python3 tools/timetest/build.py
+          python3 tools/camtest/build.py
+          python3 tools/gpstest/build.py
+          python3 tools/nettest/build.py
+          python3 tools/vibtest/build.py
+          python3 tools/bttest/build.py
       - name: run workspace tests sequentially
         # ARM process diagnostics use short guest wait deadlines. Avoid competing
         # emulator/process trees on the runner's limited vCPUs; keep every test.

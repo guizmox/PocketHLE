@@ -12,3 +12,5 @@
 
 Diagnostic instructions stay alongside each tool under `tools/`. Recorded run
 evidence and captures stay under `proof/`; they are not all-platform certification.
+
+- [Gizmondo diagnostic coverage and contract runner](../tools/gizmondo-diagnostics/README.md)

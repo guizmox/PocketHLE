@@ -33,10 +33,22 @@ static void run(U32 secure,U32 post){
 cleanup:
  if(s){check("session.close_children",InternetCloseHandle(s));if(r)check("request.invalid_after_parent_close",!InternetCloseHandle(r)&&GetLastError()==6);}
 }
-__attribute__((section(".text.entry"))) U32 entry(void){U32 dll,h,n;
- line("PocketHLE ARM NETTEST v1\r\n");dll=LoadLibraryW(L"wininet.dll");check("wininet.load",dll!=0);if(!dll)goto finish;
+__attribute__((section(".text.entry"))) U32 entry(void){U32 dll,h,n,i,session,connection,request,good=1;
+ line("PocketHLE ARM NETTEST v2\r\n");dll=LoadLibraryW(L"wininet.dll");check("wininet.load",dll!=0);if(!dll)goto finish;
  BIND(InternetOpenW);BIND(InternetConnectW);BIND(HttpOpenRequestW);BIND(HttpAddRequestHeadersW);BIND(HttpSendRequestW);BIND(HttpQueryInfoW);BIND(InternetQueryDataAvailable);BIND(InternetReadFile);BIND(InternetCloseHandle);
  run(0,0);run(1,0);
+ /* Pure handle churn: do not send forty extra requests to a public server. */
+ for(i=0;i<40;i++) {
+  session=InternetOpenW(L"PocketHLE lifecycle",0,0,0,0);if(!session){good=0;break;}
+  connection=InternetConnectW(session,L"example.com",443,0,0,3,0,0);
+  request=connection?HttpOpenRequestW(connection,L"GET",L"/",L"HTTP/1.1",0,0,0x00800000,0):0;
+  if(!connection||!request)good=0;
+  if(!InternetCloseHandle(session))good=0;
+  if(request&&(InternetCloseHandle(request)||GetLastError()!=6))good=0;
+  if(connection&&(InternetCloseHandle(connection)||GetLastError()!=6))good=0;
+  if(!good)break;
+ }
+ check("handles.40_cascading_close_reopen",good&&i==40);
 #ifdef LOCAL_VALIDATION
  run(0,1);
 #endif

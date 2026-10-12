@@ -513,6 +513,25 @@ mod tests {
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     #[test]
+    fn repeated_transfer_drop_releases_buffer_and_cancels_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        for cycle in 0..100 {
+            let channel = Channel::default();
+            let count = Arc::clone(&cancellations);
+            let transfer = channel.transfer(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+            channel.push(&vec![7; BUFFER_LIMIT]).unwrap();
+            drop(transfer);
+            assert!(channel.cancelled());
+            assert!(channel.0 .0.lock().unwrap().bytes.is_empty());
+            assert_eq!(channel.push(b"late"), Err(12017));
+            assert_eq!(cancellations.load(Ordering::SeqCst), cycle + 1);
+        }
+    }
+
+    #[test]
     fn completed_stream_and_empty_read() {
         let c = Channel::default();
         let mut t = c.transfer(|| {});

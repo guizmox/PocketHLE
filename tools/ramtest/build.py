@@ -9,6 +9,8 @@ U16=lambda x:struct.pack('<H',x)
 U32=lambda x:struct.pack('<I',x)
 def align(n,a):return (n+a-1)&~(a-1)
 SIGNATURES={
+ 'CreateMutexW':('unsigned int','void*,unsigned int,const unsigned short*'),
+ 'ReleaseMutex':('unsigned int','unsigned int'),
  'CreateProcessW':('unsigned int','const unsigned short*,const unsigned short*,void*,void*,unsigned int,unsigned int,void*,void*,void*,void*'),
  'SuspendThread':('unsigned int','unsigned int'), 'TerminateProcess':('unsigned int','unsigned int,unsigned int'),
  'GetExitCodeProcess':('unsigned int','unsigned int,unsigned int*'),
