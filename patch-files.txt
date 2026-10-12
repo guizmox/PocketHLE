@@ -1,4 +1,5 @@
 Cargo.lock
+List of Gizmondo work games.md
 README-Feature-Delivery.txt
 SOURCE-SHA256.txt
 crates/pocket-library/Cargo.toml
@@ -21,4 +22,5 @@ frontends/pocket-android/app/src/main/res/layout/item_game_grid.xml
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs
 patch-files.txt
+proof/List of Gizmondo working games.md
 removed-files.txt

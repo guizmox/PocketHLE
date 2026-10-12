@@ -3106,6 +3106,8 @@ Android Pocket PC sessions restore the upstream eea7ac6 activity layout/control 
 
 Linux and Windows share the desktop frontend, settings, layouts, filters, controller handling and imports. Simulated GPS is available on Linux. Native camera/Bluetooth/location/Internet implementations are platform-specific; matching UI does not imply Linux hardware bridge parity. See DESKTOP-PARITY.md.
 
+Compatibility tables reflect the maintainer-reported OK status for the maintained collection and retail catalogue names. They are not new independent gameplay runs or proof of all modes. Original proof directories remain intact.
+
 Selected demo-card title IDs prefer the executable's GZxxNNNNNN ancestor directory. Shared launcher markers cannot supply a split game's ID. Desktop cartridge labels, bottom captions and shared game information use the same helper. Existing imports need no migration or reimport.
 
 Static game names come from the maintainer's Liste_Jeux.xlsx IDs/titles, with the explicit 200030 Motocross / 200041 Furious Phil correction. Known static titles precede BMP-derived names at import; BMP artwork is retained. Existing ID-shaped names migrate on library load, preserving custom names, IDs, settings and save paths. No release/build version is inferred from a shared title ID. Unknown codes use the previous fallback. The unclear GZGA22222 source row is retained literally, not expanded speculatively.
