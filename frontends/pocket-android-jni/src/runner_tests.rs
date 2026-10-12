@@ -207,8 +207,15 @@ fn disabled_process_launch_reproduces_android_vfs_report() {
     .unwrap();
     let text = report(&files.0, "VFSTEST.TXT");
     println!("{text}");
+    // VFSTEST v3 adds a failing lifecycle-cycle check to this deliberately
+    // broken no-process-launch path: 25 failures, not the previous 24.
     assert!(
-        text.contains("VFSTEST_RESULT FAIL checks=0x0000006b failures=0x00000018"),
+        text.lines()
+            .any(|line| line == "FAIL cycles.64_duplicate_flush_close_delete"),
+        "{text}"
+    );
+    assert!(
+        text.contains("VFSTEST_RESULT FAIL checks=0x0000006b failures=0x00000019"),
         "{text}"
     );
 }
