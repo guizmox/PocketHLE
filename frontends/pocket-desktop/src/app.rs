@@ -1291,9 +1291,7 @@ impl PocketLauncher {
         if keep {
             self.demo_import = None;
             self.rename_draft = Some((id, name, true));
-            return;
-        }
-        if split {
+        } else if split {
             self.demo_import = None;
             self.status = "Separating demo card games…".into();
             let root = self.library.root().to_path_buf();

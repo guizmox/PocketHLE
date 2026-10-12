@@ -1664,6 +1664,16 @@ impl Library {
     /// existing game with the same id.
     fn commit_entry(&mut self, id: &str, mut entry: GameEntry) -> Result<&GameEntry, LibraryError> {
         let game_dir = self.root.join("games").join(id);
+        if !is_gizmondo_game(&entry, &self.root)
+            && entry.executable.file_stem().is_some_and(|name| {
+                name.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("cod2")
+            })
+            && entry.settings.rotation == RotationPref::None
+        {
+            entry.settings.rotation = RotationPref::Cw90;
+        }
         if is_gizmondo_game(&entry, &self.root) && !self.is_demo_card_entry(&entry) {
             if let Some((name, icon)) =
                 cartridge_artwork(&game_dir, &entry.executable_path(&self.root))

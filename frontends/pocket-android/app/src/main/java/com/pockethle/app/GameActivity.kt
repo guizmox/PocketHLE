@@ -88,6 +88,12 @@ class GameActivity : AppCompatActivity() {
      * launcher's "Rotate display" combo already does.
      */
     private var rotationDegrees: Int = 0
+    private var gizmondoGame = true
+    private var gameId = ""
+    private var gameRoot = ""
+    private var presentationOrientation = -1
+    private var pocketPcFullscreen = false
+    private var pocketPcFullscreenMode = "with_controls"
     private var dpadDeadzone = ControlDeadzone.LARGE
 
     /** Android keycode -> guest virtual key currently held. */
@@ -134,12 +140,29 @@ class GameActivity : AppCompatActivity() {
         showFps = config.showFps
         displayScale = config.displayScale
         controlsOpacity = config.controlsOpacity
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        setContentView(R.layout.activity_game)
+        gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
+        gameRoot = LibraryPaths.root(this)
+        gizmondoGame = gameId.isNotEmpty() && NativeBridge.isGizmondoGame(gameRoot,gameId)
+        requestedOrientation = if (gizmondoGame) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        setContentView(if (gizmondoGame) R.layout.activity_game else R.layout.activity_game_pocketpc)
         gameControls = findViewById(R.id.game_controls)
         gameControls.alpha = controlsOpacity
-        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
-        hideSystemBars()
+        if (gizmondoGame) {
+            androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)
+            hideSystemBars()
+        } else {
+            pocketPcFullscreen=config.fullscreen
+            pocketPcFullscreenMode=config.fullscreenMode
+            val toolbar=findViewById<androidx.appcompat.widget.Toolbar>(R.id.toolbar)
+            setSupportActionBar(toolbar)
+            findViewById<View>(R.id.btn_fullscreen).setOnClickListener {
+                releaseHeldInput()
+                pocketPcFullscreen=!pocketPcFullscreen
+                updatePocketPcLayout()
+            }
+            gameControls.addOnLayoutChangeListener { _,_,_,_,_,_,_,_,_ -> updatePocketPcControlsPadding() }
+            updatePocketPcLayout()
+        }
 
         val name = intent.getStringExtra(EXTRA_GAME_NAME) ?: "PocketHLE"
         title = name
@@ -189,6 +212,17 @@ class GameActivity : AppCompatActivity() {
         val fixedGps = config.gpsFixedEnabled && isGizmondo
         rotationDegrees = if (isGizmondo) 0 else readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
+        if (!gizmondoGame) {
+            findViewById<View>(R.id.btn_rotate_game).setOnClickListener {
+                releaseHeldInput()
+                rotationDegrees=(rotationDegrees+90)%360
+                glRenderer.setRotationDegrees(rotationDegrees)
+                val json=JSONObject(NativeBridge.readGameSettings(gameRoot,gameId))
+                json.put("rotation",when(rotationDegrees) {90->"cw90";180->"half";270->"ccw90";else->"none"})
+                NativeBridge.writeGameSettings(gameRoot,gameId,json.toString())
+                lastFrame?.let { frame -> updatePocketPcOrientation(frame);glRenderer.submit(frame);surface.requestRender() }
+            }
+        }
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
         GpsHost.initialize(this)
@@ -235,7 +269,7 @@ class GameActivity : AppCompatActivity() {
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        hideSystemBars()
+        if (gizmondoGame) hideSystemBars() else updatePocketPcLayout()
         // Re-submit the last frame so the picture is re-letterboxed for
         // the new window shape even if the guest is between frames. This
         // deliberately does not go through `paintFrame`, which would
@@ -272,7 +306,7 @@ class GameActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (hasFocus && (gizmondoGame || pocketPcFullscreen)) hideSystemBars()
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -283,6 +317,12 @@ class GameActivity : AppCompatActivity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (joiningSession) return
+        if (!gizmondoGame && pocketPcFullscreen) {
+            releaseHeldInput()
+            pocketPcFullscreen=false
+            updatePocketPcLayout()
+            return
+        }
 
         // Ask the emulator to wind down gracefully; the polling
         // tick will notice the worker exited and call finishSession.
@@ -493,7 +533,48 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
+    /** Original upstream policy: portrait reserves the measured strip height;
+     * landscape overlays translucent controls, retaining the full game area. */
+    private fun updatePocketPcControlsPadding() {
+        if (gizmondoGame) return
+        val area=findViewById<View>(R.id.game_area)
+        val landscape=resources.configuration.orientation==Configuration.ORIENTATION_LANDSCAPE
+        val bottom=if (gameControls.visibility==View.VISIBLE && !landscape) gameControls.height else 0
+        if (area.paddingBottom!=bottom) area.setPadding(0,0,0,bottom)
+    }
+
+    private fun updatePocketPcLayout() {
+        if (gizmondoGame) return
+        findViewById<View>(R.id.toolbar).visibility=if (pocketPcFullscreen) View.GONE else View.VISIBLE
+        gameControls.visibility=if (pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") View.GONE else View.VISIBLE
+        findViewById<android.widget.ImageButton>(R.id.btn_fullscreen)
+            .setImageResource(if (pocketPcFullscreen) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,!pocketPcFullscreen)
+        if (pocketPcFullscreen) hideSystemBars() else {
+            androidx.core.view.WindowInsetsControllerCompat(window,window.decorView)
+                .show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        }
+        updatePocketPcControlsPadding()
+    }
+
+    private fun updatePocketPcOrientation(frame: FrameSnapshot) {
+        if (gizmondoGame) return
+        val quarter = rotationDegrees == 90 || rotationDegrees == 270
+        val width = if (quarter) frame.height else frame.width
+        val height = if (quarter) frame.width else frame.height
+        val orientation = if (width > height) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        if (presentationOrientation != orientation) { presentationOrientation=orientation;requestedOrientation=orientation }
+    }
+
+    private fun rotatedDirection(vk:Int):Int {
+        if (gizmondoGame) return vk
+        val directions=listOf(VK_UP,VK_RIGHT,VK_DOWN,VK_LEFT)
+        val index=directions.indexOf(vk)
+        return if(index<0) vk else directions[(index-rotationDegrees/90+4)%4]
+    }
+
     private fun paintFrame(frame: FrameSnapshot) {
+        updatePocketPcOrientation(frame)
         progress.visibility = View.GONE
         glRenderer.submit(frame)
         surface.requestRender()
@@ -635,7 +716,8 @@ class GameActivity : AppCompatActivity() {
         return true
     }
 
-    private fun acquireGuestKey(handle: Long, vk: Int) {
+    private fun acquireGuestKey(handle: Long, requestedVk: Int) {
+        val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: 0
         heldGuestKeys[vk] = count + 1
         if (count == 0) {
@@ -643,7 +725,8 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
-    private fun releaseGuestKey(handle: Long, vk: Int) {
+    private fun releaseGuestKey(handle: Long, requestedVk: Int) {
+        val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: return
         if (count <= 1) {
             heldGuestKeys.remove(vk)
@@ -667,6 +750,12 @@ class GameActivity : AppCompatActivity() {
         heldPhysicalKeys.clear()
         heldGuestKeys.clear()
         (gameControls as? GizmondoControls)?.clearPressedControls()
+        if (!gizmondoGame) {
+            for (id in intArrayOf(R.id.btn_up,R.id.btn_down,R.id.btn_left,R.id.btn_right,
+                R.id.btn_action,R.id.btn_turbo,R.id.btn_a,R.id.btn_b,R.id.btn_c,R.id.btn_soft1,R.id.btn_soft2)) {
+                findViewById<View?>(id)?.isPressed=false
+            }
+        }
         heldVirtualKeys.clear()
         heldAxisKeys.clear()
         surfacePointerDown = false
@@ -722,7 +811,8 @@ class GameActivity : AppCompatActivity() {
      * counts as hardware input; a diagonal uses two existing directional keys.
      */
     private fun wireVirtualGamepad() {
-        (gameControls as? GizmondoControls)?.dpad?.onDirectionsChanged = { view, mask ->
+        val dpad=(gameControls as? GizmondoControls)?.dpad
+        dpad?.onDirectionsChanged = { view, mask ->
             val handle = session
             if (handle != 0L) {
                 var newlyPressed = false
@@ -741,6 +831,13 @@ class GameActivity : AppCompatActivity() {
                 }
                 if (newlyPressed) controlHaptic(view)
             }
+        }
+        if (!gizmondoGame) {
+            bindVk(R.id.btn_up,VK_UP)
+            bindVk(R.id.btn_down,VK_DOWN)
+            bindVk(R.id.btn_left,VK_LEFT)
+            bindVk(R.id.btn_right,VK_RIGHT)
+            bindVk(R.id.btn_turbo,VK_F3)
         }
         bindVk(R.id.btn_action, VK_RETURN)
         bindVk(R.id.btn_piano1, 0x70)

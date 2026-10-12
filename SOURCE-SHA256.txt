@@ -1,0 +1,16 @@
+ffc405af0356154a62f78d9d236e966841845bae4a162bc0b7caeabbe2f26b87  crates/pocket-library/data/gizmondo-titles.json
+808e323990aa0d38772c2a18bbe0b727a8ed1df1236645121c6d88ce44c3289a  crates/pocket-library/src/analysis.rs
+cc4c58c554132a4bc19c6370ec92fb066b22ffb4875ef95d2148efced0053c3f  crates/pocket-library/src/gizmondo_titles.rs
+1fb3323e529136c24ca2d8ec9697ee9fcedec9d86135cf8ffbd472e0fff4b465  crates/pocket-library/src/lib.rs
+685c560da4e3c3c572dfa339e15d5b409493af885569989f2f15d18e55c7a2ee  frontends/pocket-android-jni/src/lib.rs
+1bbaa07ba6950e1a2b1f2352ff9a2695da77496ed61086d425e0655e75dbac02  frontends/pocket-android-jni/src/runner.rs
+45837ad650878e4ae49c9705a924d5d60826665b37e667c8bc060227c954ea51  frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+36d2275c6fdd5e726e41e9d531ba9fa7aaa6a635d387fcfc04e26882fef03f52  frontends/pocket-android/app/src/main/java/com/pockethle/app/GameAdapter.kt
+c7342cef322c5ee37541973192e3034e47b414664c484d03f58538fc01480a35  frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
+7e69a310b5528e8792112c683b0f4be3e9bdd40802c2f1c3e2746386880efee9  frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
+40c7344800a402f9417dc8509a0ed0d7d45f3eed7301f273fc9539b1d485543e  frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
+6a22cc3c174af837653122a4aa4fd5b53bd0a5ef19b7f5fe984ae41dc27cbb9d  frontends/pocket-android/app/src/main/java/com/pockethle/app/SettingsActivity.kt
+8be6c869ef0b5fe568ee1bc827489ef0bae27598cbd80988bc741e4725706120  frontends/pocket-android/app/src/main/res/layout/activity_game_pocketpc.xml
+85f8f293f9e925f68379ff818b3287d3b4c70d7fccc0781f9592f750d0dab266  frontends/pocket-android/app/src/main/res/layout/item_game_grid.xml
+97bee13ce6969d77b538abe2417be415755e98f615ae61d61974a431d4fbd5ef  frontends/pocket-desktop/src/app.rs
+4b876198a88d52286552a0988594b6efaaa31ef352a960a787a1ed699e04896f  frontends/pocket-desktop/src/runner.rs
