@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('pe_builder', ROOT.parent/'ramtest/build.py')
 b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
-NAMES = ['CreateFileW','WriteFile','CloseHandle','GetLastError','VirtualAlloc','VirtualFree','MessageBoxW','GetTickCount','DeviceIoControl']
+NAMES = ['CreateFileW','WriteFile','CloseHandle','GetLastError','VirtualAlloc','VirtualFree','MessageBoxW','GetTickCount','DeviceIoControl','SetLastError']
 SIG = {**b.SIGNATURES, 'GetTickCount':('unsigned int','void'),
        'DeviceIoControl':('unsigned int','unsigned int,unsigned int,void*,unsigned int,void*,unsigned int,unsigned int*,void*')}
 def main():
