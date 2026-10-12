@@ -1658,7 +1658,10 @@ impl Library {
         let shared: Vec<_> = files
             .iter()
             .filter(|file| {
-                gzga_game_directory(file, extracted).is_none()
+                // A collection is a set of independent card directories, not
+                // a shared installation. Only demo-card splits copy shared files.
+                remove_card.is_some()
+                    && gzga_game_directory(file, extracted).is_none()
                     && !is_guest_exe(file)
                     && !games.keys().any(|directory| file.starts_with(directory))
             })
@@ -3519,6 +3522,8 @@ mod tests {
             let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
             for (name, data) in [
                 ("common/data.bin", b"shared".as_slice()),
+                ("Movies/trailer.wmv", b"external movie".as_slice()),
+                ("GZGA900013/Movies/own.wmv", b"game movie".as_slice()),
                 ("GZGA900013/autorun.exe", pe.as_slice()),
                 ("GZGA900013/helper.cab", b"not an installer".as_slice()),
                 ("GZGA900013/multiboot.hog", b"WART3.00".as_slice()),
@@ -3547,10 +3552,14 @@ mod tests {
                 assert!(!lib.is_demo_card(&entry.id));
                 assert!(entry.executable_path(lib.root()).is_file());
                 let extracted = entry.extracted_dir(lib.root());
-                assert_eq!(
-                    fs::read(extracted.join("common/data.bin")).unwrap(),
-                    b"shared"
-                );
+                assert!(!extracted.join("common").exists());
+                assert!(!extracted.join("Movies/trailer.wmv").exists());
+                if entry.id == "GZGA900013" {
+                    assert_eq!(
+                        fs::read(extracted.join("Movies/own.wmv")).unwrap(),
+                        b"game movie"
+                    );
+                }
                 let own = game_gizmondo_title_id(entry, lib.root()).unwrap();
                 let other = if own == "GZGA900013" {
                     "gzga900049"

@@ -124,7 +124,9 @@ ZIP classification follows this priority:
    pair inside a GZGA belongs to that game and does not classify the entire ZIP.
 3. Other layouts use the ordinary single-game import.
 
-Each GZGA entry gets its own game files and copies of shared resources. Known
+Each GZGA entry gets only the contents of its own directory. Files and folders
+outside runnable GZGA directories are ignored, including Movies and common
+resources; this collection import is distinct from demo-card splitting. Known
 IDs use the static catalogue, including ALT labels. Data-only GZGA directories
 without an executable are resources rather than launchable games.
 
@@ -149,3 +151,8 @@ serials are not silently equated with another release of the same game.
 An exact serial filename alongside the executable also identifies Gizmondo,
 with or without a directory or nested marker file. Serial matching ignores case;
 extensions such as GZGA800069.txt are not serial markers.
+
+Flattened serial marker files also supply the emulated SD-card volume serial.
+The SDK encoding is numeric title ID minus volume serial minus one, modulo
+2^32. Reading only nested markers regressed Toy Golf startup after flattening;
+the storage driver now decodes either direct files or original nested markers.

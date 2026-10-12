@@ -1,4 +1,5 @@
 crates/pocket-gles/src/gpu/mod.rs
+crates/pocket-kernel/src/vfs.rs
 crates/pocket-library/Cargo.toml
 crates/pocket-library/src/analysis.rs
 crates/pocket-library/src/lib.rs

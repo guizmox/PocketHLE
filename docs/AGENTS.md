@@ -2757,3 +2757,9 @@ The desktop VFSTEST runner cleanup assertion now permits exactly VFSTEST.TXT
 and PocketHLE-VFSTEST-PERSIST-v3.bin, verifies the 108-check PASS summary and
 validates the marker's 12 bytes (magic 0x56544633, version 1, first-run count 1).
 The marker is intentional persistent state, not a leaked temporary probe file.
+
+GZGA collection imports copy only each runnable GZGA directory, ignoring all
+external files/directories. Shared resources apply only to demo-card splits.
+Flattening must preserve the SD volume identity: OpenVolume::declared_serial
+decodes a four-byte direct GZGA marker as well as GZGA/GZGA markers. Toy Golf
+terminates before rendering when the reported volume serial does not match.

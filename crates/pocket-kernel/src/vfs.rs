@@ -165,7 +165,8 @@ impl OpenVolume {
     /// for one to boot at all.
     ///
     /// Gizmondo's card marker is not a raw serial: the same-named file in
-    /// a GZGA directory stores `numeric_id - serial - 1`, modulo 2^32.
+    /// a GZGA directory (or directly in a flattened game root) stores
+    /// `numeric_id - serial - 1`, modulo 2^32.
     /// Decode it so all titles from one card report the same volume identity.
     /// Other volumes keep a stable serial derived from their host path.
     pub fn serial(&self) -> u32 {
@@ -186,7 +187,10 @@ impl OpenVolume {
     fn declared_serial(&self) -> Option<u32> {
         let entries = std::fs::read_dir(&self.host_dir).ok()?;
         for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() && !kind.is_file() {
                 continue;
             }
             let name = entry.file_name();
@@ -200,7 +204,14 @@ impl OpenVolume {
             let Ok(numeric_id) = digits.parse::<u32>() else {
                 continue;
             };
-            let marker = entry.path().join(&name);
+            // Independent imports flatten the card directory. The same serial
+            // marker then sits directly beside autorun.exe (Toy Golf and other
+            // SDK titles still validate it against the reported volume serial).
+            let marker = if kind.is_dir() {
+                entry.path().join(&name)
+            } else {
+                entry.path()
+            };
             let Ok(bytes) = std::fs::read(&marker) else {
                 continue;
             };
@@ -2355,6 +2366,21 @@ mod tests {
         assert!(v.open("\\sd card\\vol:", Access::Read, false).is_some());
         assert!(v.close(h));
         assert!(v.volume(h).is_none());
+    }
+
+    #[test]
+    fn flattened_toy_golf_marker_reports_the_original_card_serial() {
+        let dir = tempfile::tempdir().unwrap();
+        // Real Toy Golf marker supplied with the flattened installed game.
+        std::fs::write(dir.path().join("GZGA200046"), [0x17, 0x0d, 0x8b, 0x6a]).unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\SD Card\\", dir.path());
+        v.mount_read_only("\\SD Card\\GZGA200046\\", dir.path());
+        let h = v.open("\\SD Card\\Vol:", Access::Read, false).unwrap();
+        let expected = 200046u32.wrapping_sub(0x6a8b0d17).wrapping_sub(1);
+        assert_eq!(v.volume(h).unwrap().serial(), expected);
+        let marker = v.resolve("\\SD Card\\GZGA200046\\GZGA200046").unwrap();
+        assert_eq!(std::fs::read(marker).unwrap(), [0x17, 0x0d, 0x8b, 0x6a]);
     }
 
     #[test]
