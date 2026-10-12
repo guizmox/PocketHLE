@@ -1420,7 +1420,7 @@ impl Library {
             }
             let child = children[0].path();
             let name = children[0].file_name().to_string_lossy().to_string();
-            if name.to_ascii_uppercase().starts_with("GZGA") && is_gizmondo_title_id(&name) {
+            if is_gizmondo_title_id(&name) {
                 break;
             }
             content_root = child;
@@ -3632,6 +3632,40 @@ mod tests {
             assert_eq!(lib.games().len(), 2);
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn single_directory_unwrapping_preserves_sdk_card_boundaries() {
+        use std::io::Write;
+        let root = tmpdir("sdk_boundary");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.exe");
+        write_pe_importing(&fixture, &[]);
+        let pe = fs::read(fixture).unwrap();
+        let path = root.join("diagnostic.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        for (name, bytes) in [
+            ("Wrapper/GZVT999998/AUTORUN.EXE", pe.as_slice()),
+            ("Wrapper/GZVT999998/GZVT999998", b"mark".as_slice()),
+        ] {
+            archive
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let entry = lib.import_zip(&path).unwrap().clone();
+        assert_eq!(
+            entry.executable,
+            PathBuf::from("extracted/GZVT999998/AUTORUN.EXE")
+        );
+        assert!(entry
+            .extracted_dir(lib.root())
+            .join("GZVT999998/GZVT999998")
+            .is_file());
+        assert!(!entry.extracted_dir(lib.root()).join("Wrapper").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

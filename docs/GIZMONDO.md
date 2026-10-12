@@ -166,3 +166,7 @@ Serial mount aliases use a matching physical GZGA directory when present.
 Only flattened layouts map the alias to the extraction root. This prevents
 Supernaturals marker reads from resolving to a directory rather than its
 four-byte marker file, while preserving flattened Toy Golf card paths.
+
+Sole-directory unwrapping stops at every exact GZxx###### SDK card boundary,
+including GZVT diagnostic cards, not just commercial GZGA directories. SDK
+volume checks require those card-relative paths to remain valid.
