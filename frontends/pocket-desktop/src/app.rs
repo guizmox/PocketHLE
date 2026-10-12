@@ -1,6 +1,6 @@
 //! egui application: library screen, settings, per-game sheet.
 
-use pocket_library::{analyze_game, detect_gizmondo_title_id, GameAnalysis};
+use pocket_library::{analyze_game, game_gizmondo_title_id, GameAnalysis};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -126,6 +126,7 @@ pub struct PocketLauncher {
     selected_game: Option<String>,
     library_gizmondo: bool,
     rename_draft: Option<(String, String, bool)>,
+    demo_import: Option<(String, String)>,
     pending_run: Option<GameEntry>,
     screen: Screen,
     runner: Runner,
@@ -496,6 +497,7 @@ impl HeldButtons {
 #[derive(Debug)]
 pub enum UiEvent {
     ImportFinished(Result<(String, String), String>),
+    DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
     RunFinished(RunOutcome),
 }
 
@@ -600,6 +602,7 @@ impl PocketLauncher {
             screenshot: Default::default(),
             selected_game: None,
             rename_draft: None,
+            demo_import: None,
             pending_run: None,
             screen: Screen::Library,
             runner,
@@ -640,11 +643,31 @@ impl PocketLauncher {
                     if let Some(game) = self.library.games().iter().find(|g| g.id == id) {
                         self.library_gizmondo = is_gizmondo_game(game, self.library.root());
                         self.selected_game = Some(game.id.clone());
-                        self.rename_draft = Some((id, name, true));
+                        if self.library.is_demo_card(&id) {
+                            self.demo_import = Some((id, name));
+                        } else {
+                            self.rename_draft = Some((id, name, true));
+                        }
                     }
                 }
                 UiEvent::ImportFinished(Err(e)) => {
                     self.status = format!("Import failed: {e}");
+                }
+                UiEvent::DemoSplitFinished(id, result) => {
+                    self.reload_library();
+                    self.icon_cache.clear();
+                    match result {
+                        Ok(entries) => {
+                            self.status = format!("Imported {} separate games.", entries.len());
+                            self.selected_game = entries.first().map(|e| e.id.clone());
+                        }
+                        Err(e) => {
+                            self.status = format!("Could not split card: {e}");
+                            if let Some(entry) = self.library.get(&id) {
+                                self.rename_draft = Some((id, entry.display_name.clone(), true));
+                            }
+                        }
+                    }
                 }
                 UiEvent::RunFinished(outcome) => {
                     self.last_frame_status = Some(outcome.summary.clone());
@@ -1116,7 +1139,7 @@ impl PocketLauncher {
         );
         let giz = is_gizmondo_game(game, self.library.root());
         if giz {
-            let title_id = detect_gizmondo_title_id(&game.extracted_dir(self.library.root()));
+            let title_id = game_gizmondo_title_id(game, self.library.root());
             let artwork = if game.icon.as_deref() == Some(std::path::Path::new("cartridge.png")) {
                 if let Some(path) = game.icon_path(self.library.root()) {
                     if let Ok(bytes) = std::fs::read(path) {
@@ -1236,7 +1259,7 @@ impl PocketLauncher {
             .size(12.0)
             .color(Color32::from_gray(185)),
         );
-        if let Some(id) = detect_gizmondo_title_id(&game.extracted_dir(self.library.root())) {
+        if let Some(id) = game_gizmondo_title_id(game, self.library.root()) {
             text_ui.label(
                 RichText::new(id)
                     .monospace()
@@ -1250,6 +1273,37 @@ impl PocketLauncher {
         }
         if card_response.double_clicked() {
             self.spawn_run(game);
+        }
+    }
+
+    fn ui_demo_import(&mut self, ctx: &egui::Context) {
+        let Some((id, name)) = self.demo_import.clone() else {
+            return;
+        };
+        let mut split = false;
+        let mut keep = false;
+        egui::Window::new("Import demo card").collapsible(false).resizable(false).show(ctx,|ui| {
+            ui.label("Keep the original launcher or create a separate library entry for each game?");
+            ui.label("Separate games each have their own directory. Shared card resources are copied.");
+            keep=ui.button("Keep launcher").clicked();
+            split=ui.button("Separate games").clicked();
+        });
+        if keep {
+            self.demo_import = None;
+            self.rename_draft = Some((id, name, true));
+            return;
+        }
+        if split {
+            self.demo_import = None;
+            self.status = "Separating demo card games…".into();
+            let root = self.library.root().to_path_buf();
+            let tx = self.events_tx.clone();
+            std::thread::spawn(move || {
+                let result = Library::open(root)
+                    .and_then(|mut library| library.split_demo_card(&id))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(UiEvent::DemoSplitFinished(id, result));
+            });
         }
     }
 
@@ -2871,6 +2925,7 @@ impl eframe::App for PocketLauncher {
             }
         });
         if !console_only {
+            self.ui_demo_import(ctx);
             self.ui_rename_game(ctx);
         }
         // While a game is running we want to drain the live frame

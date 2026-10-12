@@ -45,6 +45,32 @@ pub fn detect_gizmondo_title_id(root: &std::path::Path) -> Option<String> {
     scan(root, 0)
 }
 
+/// Prefer the selected executable's card directory over shared demo-card assets.
+/// This is cheap enough for library tiles: never rescan a whole binary per frame.
+pub fn game_gizmondo_title_id(game: &GameEntry, root: &std::path::Path) -> Option<String> {
+    let extracted = game.extracted_dir(root);
+    let executable = game.executable_path(root);
+    let mut directory = executable.parent()?;
+    while directory.starts_with(&extracted) {
+        if let Some(name) = directory.file_name().and_then(|n| n.to_str()) {
+            if crate::is_gizmondo_title_id(name) {
+                return Some(name.to_ascii_uppercase());
+            }
+        }
+        if directory == extracted {
+            break;
+        }
+        directory = directory.parent()?;
+    }
+    // A split title without its own serial must not inherit the launcher's
+    // serial (or another shared card's marker). A local marker is still valid.
+    if game.source_cab.starts_with("demo-card:") {
+        detect_gizmondo_title_id(executable.parent()?)
+    } else {
+        detect_gizmondo_title_id(&extracted)
+    }
+}
+
 fn pe_timestamp(bytes: &[u8]) -> Option<u32> {
     if bytes.len() < 0x40 || &bytes[..2] != b"MZ" {
         return None;
@@ -198,8 +224,7 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             }
         }
     }
-    a.title_id = detect_gizmondo_title_id(&game.extracted_dir(root))
-        .or_else(|| find_title_id_in_strings(&strings));
+    a.title_id = game_gizmondo_title_id(game, root).or_else(|| find_title_id_in_strings(&strings));
 
     // PE VERSIONINFO. Keep file/product versions separate and avoid using
     // FileDescription/InternalName as the library title: prototype builds often
@@ -530,5 +555,38 @@ mod hardware_detection_tests {
         std::fs::write(&path, b"FREECAMERA\0CHASECAMERA\0").unwrap();
         let a = analyze_game(&game, root.path());
         assert!(!a.hardware.contains(&("Camera".into(), "✓ Detected".into())));
+    }
+}
+
+#[cfg(test)]
+mod selected_card_id_tests {
+    #[test]
+    fn executable_card_wins_over_shared_demo_marker_and_unknown_ids_stay_unknown() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
+            "id":"split", "display_name":"Game", "source_cab":"demo-card:Demo.zip",
+            "executable":"extracted/Wrapper/GZGA200016/AUTORUN.EXE", "imported_at":0,
+        }))
+        .unwrap();
+        let shared = game.extracted_dir(root.path()).join("Wrapper/GZGA200007");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("GZGA200007"), []).unwrap();
+        let own = game.executable_path(root.path());
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(&own, []).unwrap();
+        assert_eq!(
+            game_gizmondo_title_id(&game, root.path()).as_deref(),
+            Some("GZGA200016")
+        );
+        assert_eq!(
+            analyze_game(&game, root.path()).title_id.as_deref(),
+            Some("GZGA200016")
+        );
+        game.executable = "extracted/Wrapper/Agaju/AUTORUN.EXE".into();
+        let own = game.executable_path(root.path());
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(own, []).unwrap();
+        assert!(game_gizmondo_title_id(&game, root.path()).is_none());
     }
 }

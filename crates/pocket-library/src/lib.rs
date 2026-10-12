@@ -33,8 +33,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod analysis;
-pub use analysis::{analyze_game, detect_gizmondo_title_id, GameAnalysis};
+pub use analysis::{analyze_game, detect_gizmondo_title_id, game_gizmondo_title_id, GameAnalysis};
 
+pub mod gizmondo_titles;
 pub mod keybindings;
 pub mod save_data;
 
@@ -140,7 +141,8 @@ pub struct GameEntry {
 /// serial. The legacy Alien Hominid repack is retained as a narrow fallback.
 pub fn is_gizmondo_game(entry: &GameEntry, library_root: &Path) -> bool {
     let extracted = entry.extracted_dir(library_root);
-    has_gizmondo_marker(&extracted)
+    entry.source_cab.starts_with("demo-card:")
+        || has_gizmondo_marker(&extracted)
         || (entry
             .source_cab
             .to_ascii_lowercase()
@@ -790,6 +792,15 @@ impl Library {
         let mut library_changed = false;
         for game in self.library.games.iter_mut() {
             let mut migrated = false;
+            // Upgrade only ID-shaped placeholders. Preserve user-edited names.
+            if let Some(id) = game_gizmondo_title_id(game, &self.root) {
+                if game.display_name.eq_ignore_ascii_case(&id) {
+                    if let Some(title) = gizmondo_titles::lookup(&id) {
+                        game.display_name = title.to_owned();
+                        migrated = true;
+                    }
+                }
+            }
             if game.settings.cpu_backend == CpuBackendPref::Stub {
                 game.settings.cpu_backend = CpuBackendPref::Unicorn;
                 migrated = true;
@@ -831,6 +842,9 @@ impl Library {
             config_changed = true;
         }
         if library_changed {
+            self.library
+                .games
+                .sort_by(|a, b| a.display_name.cmp(&b.display_name));
             if let Err(e) = write_json(&self.root.join("library.json"), &self.library) {
                 log::warn!("could not save migrated library.json: {e}");
             }
@@ -1516,6 +1530,123 @@ impl Library {
         }
     }
 
+    /// Identify an already imported card before asking how it should appear.
+    pub fn is_demo_card(&self, id: &str) -> bool {
+        self.get(id)
+            .is_some_and(|entry| self.is_demo_card_entry(entry))
+    }
+
+    /// Separate titles into independent directories. Keep shared root resources
+    /// and original SD-card paths, but exclude the other games' directory trees.
+    pub fn split_demo_card(&mut self, id: &str) -> Result<Vec<GameEntry>, LibraryError> {
+        let source = self
+            .get(id)
+            .cloned()
+            .ok_or_else(|| LibraryError::NotFound(id.into()))?;
+        if !self.is_demo_card_entry(&source) {
+            return Err(LibraryError::NoExecutable);
+        }
+        let extracted = source.extracted_dir(&self.root);
+        let launcher = source.executable_path(&self.root);
+        let card_root = launcher.parent().ok_or(LibraryError::NoExecutable)?;
+        let files = import_tree_files(&extracted)?;
+        let mut by_directory = std::collections::BTreeMap::new();
+        for path in files
+            .iter()
+            .filter(|p| is_guest_exe(p) && **p != launcher && p.parent() != launcher.parent())
+        {
+            let Some(relative) = path.strip_prefix(card_root).ok() else {
+                continue;
+            };
+            let Some(first) = relative.components().next() else {
+                continue;
+            };
+            let parent = card_root.join(first.as_os_str());
+            let preferred = path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("autorun.exe"));
+            if preferred || !by_directory.contains_key(&parent) {
+                by_directory.insert(parent, path.clone());
+            }
+        }
+        if by_directory.is_empty() {
+            return Err(LibraryError::NoExecutable);
+        }
+        let directories: Vec<_> = by_directory.keys().cloned().collect();
+        let mut prepared = Vec::new();
+        let result = (|| -> Result<(), LibraryError> {
+            for (directory, exe) in &by_directory {
+                let stem = sanitize_id(
+                    directory
+                        .file_name()
+                        .map(|s| s.to_string_lossy())
+                        .as_deref(),
+                );
+                let base = format!("{id}_{stem}");
+                let mut new_id = base.clone();
+                let mut suffix = 2;
+                while self.root.join("games").join(&new_id).exists() {
+                    new_id = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
+                let destination = self.root.join("games").join(&new_id);
+                fs::create_dir_all(destination.join("extracted"))?;
+                let mut entry = source.clone();
+                entry.id = new_id.clone();
+                entry.source_cab = format!("demo-card:{}", source.source_cab);
+                entry.display_name = pretty_id(&stem);
+                entry.executable = PathBuf::from("extracted").join(
+                    exe.strip_prefix(&extracted)
+                        .map_err(|_| LibraryError::NoExecutable)?,
+                );
+                entry.icon = None;
+                entry.companions.clear();
+                prepared.push(entry);
+                for file in &files {
+                    if file == &launcher
+                        || file.parent() == Some(card_root)
+                            && file.file_name().is_some_and(|n| {
+                                n.to_string_lossy().eq_ignore_ascii_case("multiboot.hog")
+                            })
+                    {
+                        continue;
+                    }
+                    if directories
+                        .iter()
+                        .any(|other| other != directory && file.starts_with(other))
+                    {
+                        continue;
+                    }
+                    let relative = file
+                        .strip_prefix(&extracted)
+                        .map_err(|_| LibraryError::NoExecutable)?;
+                    let dest = destination.join("extracted").join(relative);
+                    fs::create_dir_all(dest.parent().unwrap())?;
+                    fs::copy(file, dest)?;
+                }
+                let entry = prepared.last_mut().unwrap();
+                entry.icon = extract_icon_png(&destination, &entry.executable_path(&self.root));
+                entry.companions =
+                    record_extracted_libraries(&destination.join("extracted"), &destination);
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            for entry in &prepared {
+                let _ = fs::remove_dir_all(self.root.join("games").join(&entry.id));
+            }
+            return Err(e);
+        }
+        let mut entries = Vec::new();
+        for entry in prepared {
+            let new_id = entry.id.clone();
+            entries.push(self.commit_entry(&new_id, entry)?.clone());
+        }
+        // Delete only the newly imported launcher after all titles are persisted.
+        self.remove(id)?;
+        Ok(entries)
+    }
+
     fn is_demo_card_entry(&self, entry: &GameEntry) -> bool {
         let exe = entry.executable_path(&self.root);
         exe.parent()
@@ -1539,6 +1670,14 @@ impl Library {
             {
                 entry.display_name = name;
                 entry.icon = Some(icon);
+            }
+        }
+        // A known static title is the suggestion; BMP artwork remains intact.
+        if is_gizmondo_game(&entry, &self.root) && !self.is_demo_card_entry(&entry) {
+            if let Some(title) = game_gizmondo_title_id(&entry, &self.root)
+                .and_then(|id| gizmondo_titles::lookup(&id))
+            {
+                entry.display_name = title.to_owned();
             }
         }
         // Persist a per-game manifest so the game directory is
@@ -2932,6 +3071,94 @@ mod tests {
     }
 
     #[test]
+    fn demo_split_creates_independent_game_trees_and_preserves_shared_resources() {
+        use std::io::Write;
+        let root = tmpdir("demo_split");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.exe");
+        write_pe_importing(&fixture, &[]);
+        let pe = fs::read(fixture).unwrap();
+        let archive_path = root.join("Demo.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+        for (name, data) in [
+            ("Wrapper/autorun.exe", pe.as_slice()),
+            ("Wrapper/multiboot.hog", b"WART3.00".as_slice()),
+            ("Wrapper/common/data.bin", b"shared".as_slice()),
+            ("Wrapper/GZGA200001/autorun.exe", pe.as_slice()),
+            ("Wrapper/GZGA200001/GZGA200001", b"marker".as_slice()),
+            ("Wrapper/Agaju/autorun.exe", pe.as_slice()),
+            ("Wrapper/Agaju/data.bin", b"game2".as_slice()),
+        ] {
+            archive
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(data).unwrap();
+        }
+        archive.finish().unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let id = lib.import_zip(&archive_path).unwrap().id.clone();
+        assert!(lib.is_demo_card(&id));
+        let entries = lib.split_demo_card(&id).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(lib.get(&id).is_none());
+        for e in &entries {
+            assert!(e.executable_path(lib.root()).is_file());
+            assert!(e
+                .extracted_dir(lib.root())
+                .join("Wrapper/common/data.bin")
+                .is_file());
+            assert!(!e
+                .extracted_dir(lib.root())
+                .join("Wrapper/autorun.exe")
+                .exists());
+            let own = e.executable.parent().unwrap().file_name().unwrap();
+            let other = if own == "Agaju" {
+                "GZGA200001"
+            } else {
+                "Agaju"
+            };
+            assert!(!e
+                .extracted_dir(lib.root())
+                .join("Wrapper")
+                .join(other)
+                .exists());
+        }
+        assert_ne!(entries[0].id, entries[1].id);
+        lib.remove(&entries[0].id).unwrap();
+        assert!(entries[1].executable_path(lib.root()).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalogue_upgrades_id_placeholders_but_preserves_custom_names_and_save_paths() {
+        let root = tmpdir("title_catalogue_migration");
+        let mut lib = Library::open(&root).unwrap();
+        let mut game = entry_with_install_dir(None);
+        game.id = "demo_chicane".into();
+        game.source_cab = "demo-card:Demo.zip".into();
+        game.executable = "extracted/GZGA200016/Autorun.exe".into();
+        game.display_name = "Gzga200016".into();
+        let exe = game.executable_path(&root);
+        write_pe_importing(&exe, &[]);
+        lib.library.games.push(game.clone());
+        lib.save().unwrap();
+        let mut loaded = Library::open(&root).unwrap();
+        let e = loaded.get("demo_chicane").unwrap();
+        assert_eq!(e.display_name, "Chicane");
+        assert_eq!(e.executable, game.executable);
+        assert_eq!(e.save_prefix, game.save_prefix);
+        loaded
+            .rename_game("demo_chicane", "My custom Chicane")
+            .unwrap();
+        let reloaded = Library::open(&root).unwrap();
+        assert_eq!(
+            reloaded.get("demo_chicane").unwrap().display_name,
+            "My custom Chicane"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn demo_card_detection_requires_supported_sibling_pair() {
         let root = tmpdir("demo_card_pair");
         let launcher = root.join("autorun.exe");
@@ -3361,4 +3588,26 @@ fn cartridge_artwork(game_dir: &Path, exe: &Path) -> Option<(String, PathBuf)> {
         }
     }
     None
+}
+
+fn import_tree_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    fn visit(root: &Path, depth: usize, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if depth > 32 {
+            return Ok(());
+        }
+        for item in fs::read_dir(root)? {
+            let item = item?;
+            let kind = item.file_type()?;
+            if kind.is_dir() {
+                visit(&item.path(), depth + 1, files)?;
+            } else if kind.is_file() {
+                files.push(item.path());
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    visit(root, 0, &mut files)?;
+    files.sort();
+    Ok(files)
 }

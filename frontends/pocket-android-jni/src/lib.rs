@@ -939,3 +939,39 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_analyzeGame<'local>(
         Err(error) => new_jstring(&env, error_json(&format!("analyzeGame: {error:#}"))),
     }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_isDemoCard<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root: JString<'local>,
+    id: JString<'local>,
+) -> jni::sys::jboolean {
+    let Some(root) = jstring_to_path(&mut env, root) else {
+        return 0;
+    };
+    let Some(id) = jstring_to_string(&mut env, id) else {
+        return 0;
+    };
+    u8::from(Library::open(root).is_ok_and(|lib| lib.is_demo_card(&id)))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_splitDemoCard<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root: JString<'local>,
+    id: JString<'local>,
+) -> jstring {
+    let Some(root) = jstring_to_path(&mut env, root) else {
+        return new_jstring(&env, error_json("missing library root"));
+    };
+    let Some(id) = jstring_to_string(&mut env, id) else {
+        return new_jstring(&env, error_json("missing game ID"));
+    };
+    let result = (|| -> anyhow::Result<String> {
+        let entries = Library::open(root)?.split_demo_card(&id)?;
+        Ok(serde_json::to_string(&entries)?)
+    })();
+    new_jstring(&env, result.unwrap_or_else(|e| error_json(&e.to_string())))
+}

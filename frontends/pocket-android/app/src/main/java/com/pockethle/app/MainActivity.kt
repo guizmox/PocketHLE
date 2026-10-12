@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
     private fun editGameName(id: String, detectedName: String, title: String) {
         val input = android.widget.EditText(this).apply { setText(detectedName); selectAll(); isSingleLine = true }
         val dialog = AlertDialog.Builder(this).setTitle(title).setView(input)
-            .setNegativeButton(android.R.string.cancel,null).setPositiveButton("Enregistrer",null).create()
+            .setNegativeButton(android.R.string.cancel,null).setPositiveButton("Save",null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val name=input.text.toString().trim()
@@ -264,7 +264,21 @@ class MainActivity : AppCompatActivity() {
             }
             val name = obj.optString("display_name", obj.optString("id", "?"))
             val id = obj.getString("id")
-            editGameName(id, name, "Confirm game name")
+            if (NativeBridge.isDemoCard(rootDir,id)) {
+                AlertDialog.Builder(this).setTitle("Import demo card")
+                    .setMessage("Keep the original launcher or create a separate directory and library entry for each game?")
+                    .setCancelable(false)
+                    .setNegativeButton("Keep launcher") { _,_ -> editGameName(id,name,"Confirm game name") }
+                    .setPositiveButton("Separate games") { _,_ ->
+                        lifecycleScope.launch {
+                            val split=withContext(Dispatchers.IO) { runCatching { GameEntry.listFromJson(NativeBridge.splitDemoCard(rootDir,id)) } }
+                            split.fold(onSuccess={ entries ->
+                                refreshLibrary()
+                                Snackbar.make(recycler,"Imported ${entries.size} separate games. Names can be edited from each game menu.",Snackbar.LENGTH_LONG).show()
+                            },onFailure={ e -> Snackbar.make(recycler,"Could not split card: ${e.message}",Snackbar.LENGTH_LONG).show() })
+                        }
+                    }.show()
+            } else editGameName(id, name, "Confirm game name")
             Snackbar.make(
                 recycler,
                 getString(R.string.import_success, name),
