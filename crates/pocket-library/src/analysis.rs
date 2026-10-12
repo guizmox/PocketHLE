@@ -22,7 +22,8 @@ pub fn detect_gizmondo_title_id(root: &std::path::Path) -> Option<String> {
         }
         for e in std::fs::read_dir(dir).ok()?.flatten() {
             let p = e.path();
-            if !p.is_dir() {
+            let kind = e.file_type().ok()?;
+            if !kind.is_dir() && !kind.is_file() {
                 continue;
             }
             if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
@@ -31,13 +32,14 @@ pub fn detect_gizmondo_title_id(root: &std::path::Path) -> Option<String> {
                     && b[..2].eq_ignore_ascii_case(b"GZ")
                     && b[2..4].iter().all(|c| c.is_ascii_alphabetic())
                     && b[4..].iter().all(|c| c.is_ascii_digit())
-                    && p.join(n).is_file()
                 {
                     return Some(n.to_ascii_uppercase());
                 }
             }
-            if let Some(v) = scan(&p, depth + 1) {
-                return Some(v);
+            if kind.is_dir() {
+                if let Some(v) = scan(&p, depth + 1) {
+                    return Some(v);
+                }
             }
         }
         None
@@ -61,6 +63,10 @@ pub fn game_gizmondo_title_id(game: &GameEntry, root: &std::path::Path) -> Optio
             break;
         }
         directory = directory.parent()?;
+    }
+    // Flattened imports store their exact serial as the stable library ID.
+    if crate::is_gizmondo_title_id(&game.id) {
+        return Some(game.id.to_ascii_uppercase());
     }
     // A split title without its own serial must not inherit the launcher's
     // serial (or another shared card's marker). A local marker is still valid.

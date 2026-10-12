@@ -131,3 +131,21 @@ without an executable are resources rather than launchable games.
 Desktop and Android block library interaction while importing or splitting a
 card, then restore it on completion or error. The desktop also blocks the
 underlying interface while the demo-card choice is pending.
+
+ZIP imports recursively discard a sole enclosing directory before classification.
+A GZGA boundary is retained for identification. Independent games are installed
+as `games/GZGAxxxxxx/extracted/<payload>`, without the archive name or a second
+GZGA directory. Unidentified ordinary games use `games/<archive-id>/extracted/`.
+Demo cards kept as launchers retain their internal shared card layout; split
+cards use the same independent game layout. Reimporting a legacy collection
+migrates matching entries while retaining their settings, custom names and saves.
+
+Platform identification accepts an exact GZxx plus six-digit directory name even
+when the directory is empty: CatData.zip has root Autorun.exe and GZGA800069/,
+without a serial marker file. This is Gizmondo, not PocketPC. The directory serial
+identifies the platform independently of catalogue title availability; unknown
+serials are not silently equated with another release of the same game.
+
+An exact serial filename alongside the executable also identifies Gizmondo,
+with or without a directory or nested marker file. Serial matching ignores case;
+extensions such as GZGA800069.txt are not serial markers.

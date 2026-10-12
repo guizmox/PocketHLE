@@ -137,12 +137,13 @@ pub struct GameEntry {
 /// Whether this entry is a Gizmondo card image.
 ///
 /// ZIP repacks do not have a CAB install manifest, so the launcher detects
-/// the card by the `GZxx######` marker file that titles read for the card
-/// serial. The legacy Alien Hominid repack is retained as a narrow fallback.
+/// the card by an exact `GZxx######` directory, including empty serial
+/// directories in repacks. The legacy Alien Hominid repack is retained as a narrow fallback.
 pub fn is_gizmondo_game(entry: &GameEntry, library_root: &Path) -> bool {
     let extracted = entry.extracted_dir(library_root);
     entry.source_cab.starts_with("demo-card:")
         || entry.source_cab.starts_with("gzga-collection:")
+        || is_gizmondo_title_id(&entry.id)
         || has_gizmondo_marker(&extracted)
         || (entry
             .source_cab
@@ -174,7 +175,7 @@ fn has_gizmondo_marker(root: &Path) -> bool {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if !file_type.is_dir() {
+            if !file_type.is_dir() && !file_type.is_file() {
                 continue;
             }
 
@@ -182,11 +183,11 @@ fn has_gizmondo_marker(root: &Path) -> bool {
                 continue;
             };
 
-            if is_gizmondo_title_id(name) && path.join(name).is_file() {
+            if is_gizmondo_title_id(name) {
                 return true;
             }
 
-            if scan(&path, depth + 1) {
+            if file_type.is_dir() && scan(&path, depth + 1) {
                 return true;
             }
         }
@@ -1328,22 +1329,13 @@ impl Library {
         &mut self,
         zip_path: impl AsRef<Path>,
     ) -> Result<Vec<GameEntry>, LibraryError> {
-        let entry = self.import_zip_single(zip_path)?.clone();
-        if self.is_demo_card_entry(&entry) {
-            return Ok(vec![entry]);
-        }
-        let extracted = entry.extracted_dir(&self.root);
-        let files = import_tree_files(&extracted)?;
-        match gzga_collection_root(&files, &extracted) {
-            Some(card_root) => self.split_game_collection(&entry.id, &card_root, None),
-            None => Ok(vec![entry]),
-        }
+        self.import_zip_single(zip_path)
     }
 
     fn import_zip_single(
         &mut self,
         zip_path: impl AsRef<Path>,
-    ) -> Result<&GameEntry, LibraryError> {
+    ) -> Result<Vec<GameEntry>, LibraryError> {
         let zip_path = zip_path.as_ref();
         let source_name = zip_path
             .file_name()
@@ -1354,10 +1346,12 @@ impl Library {
             return Err(LibraryError::InvalidId(source_name));
         }
 
-        let game_dir = self.root.join("games").join(&id);
-        if game_dir.exists() {
-            fs::remove_dir_all(&game_dir)?;
-        }
+        // Classify before publishing any library entry. Own game trees move
+        // into their final extracted directory; no archive-named placeholder.
+        let staging = tempfile::Builder::new()
+            .prefix(".gzga-import-")
+            .tempdir_in(self.root.join("games"))?;
+        let game_dir = staging.path().join("single");
         let extracted_dir = game_dir.join("extracted");
         fs::create_dir_all(&extracted_dir)?;
 
@@ -1387,6 +1381,31 @@ impl Library {
         }
         if written.is_empty() {
             return Err(LibraryError::NoExecutable);
+        }
+        // Strip only sole enclosing folders; retain a GZGA boundary so its
+        // identity and the demo-card/GZGA priority are not lost.
+        let mut content_root = extracted_dir.clone();
+        loop {
+            let children: Vec<_> = fs::read_dir(&content_root)?.collect::<Result<_, _>>()?;
+            if children.len() != 1 || !children[0].file_type()?.is_dir() {
+                break;
+            }
+            let child = children[0].path();
+            let name = children[0].file_name().to_string_lossy().to_string();
+            if name.to_ascii_uppercase().starts_with("GZGA") && is_gizmondo_title_id(&name) {
+                break;
+            }
+            content_root = child;
+        }
+        if content_root != extracted_dir {
+            let unwrapped = staging.path().join("unwrapped");
+            fs::rename(&content_root, &unwrapped)?;
+            fs::remove_dir_all(&extracted_dir)?;
+            fs::rename(unwrapped, &extracted_dir)?;
+            written = written
+                .into_iter()
+                .map(|path| extracted_dir.join(path.strip_prefix(&content_root).unwrap()))
+                .collect();
         }
 
         let demo_launcher = demo_card_launcher(&written, &extracted_dir);
@@ -1432,8 +1451,9 @@ impl Library {
                 let name = cab.file_name().ok_or(LibraryError::NoExecutable)?;
                 fs::copy(cab, nested_dir.join(name))?;
             }
-            fs::remove_dir_all(&game_dir)?;
-            let result = self.import_cab(&staged_main);
+            let result = self
+                .import_cab(&staged_main)
+                .map(|entry| vec![entry.clone()]);
             let _ = fs::remove_dir_all(&nested_dir);
             return result;
         }
@@ -1479,7 +1499,7 @@ impl Library {
             display_name,
             provider: None,
             executable,
-            source_cab: source_name,
+            source_cab: source_name.clone(),
             install_dir: None,
             install_dirs: Vec::new(),
             save_prefix: None,
@@ -1493,7 +1513,300 @@ impl Library {
             companions: record_extracted_libraries(&extracted_dir, &game_dir),
         };
 
-        self.commit_entry(&id, entry)
+        if !is_demo_card && gzga_collection_root(&written, &extracted_dir).is_some() {
+            return self.import_game_trees(staging, entry, &extracted_dir, &written, None);
+        }
+        let mut entry = entry;
+        if !is_demo_card {
+            if let Some(code) = detect_gizmondo_title_id(&extracted_dir) {
+                entry.id = code;
+                entry.display_name = gizmondo_titles::lookup(&entry.id)
+                    .unwrap_or(&entry.id)
+                    .to_owned();
+            }
+        }
+        let previous = self.previous_import(&entry.id, &source_name)?;
+        self.preserve_import_preferences(&mut entry, previous.as_ref(), &game_dir)?;
+        write_json(&game_dir.join("game.json"), &entry)?;
+        self.publish_staged_imports(staging, vec![(entry, game_dir, previous)], None)
+    }
+
+    fn previous_import(
+        &self,
+        id: &str,
+        source_name: &str,
+    ) -> Result<Option<GameEntry>, LibraryError> {
+        let matches: Vec<_> = self
+            .library
+            .games
+            .iter()
+            .filter(|game| {
+                game.id.eq_ignore_ascii_case(id)
+                    || game
+                        .source_cab
+                        .strip_prefix("gzga-collection:")
+                        .is_some_and(|source| source.eq_ignore_ascii_case(source_name))
+                        && game_gizmondo_title_id(game, &self.root)
+                            .is_some_and(|code| code.eq_ignore_ascii_case(id))
+                    || game.source_cab.eq_ignore_ascii_case(source_name)
+                        && !self.is_demo_card_entry(game)
+                        && game_gizmondo_title_id(game, &self.root)
+                            .is_some_and(|code| code.eq_ignore_ascii_case(id))
+                        && !game
+                            .executable_path(&self.root)
+                            .parent()
+                            .is_some_and(|parent| {
+                                fs::read_dir(parent).is_ok_and(|files| {
+                                    files.flatten().any(|file| {
+                                        file.file_name()
+                                            .to_string_lossy()
+                                            .eq_ignore_ascii_case("multiboot.hog")
+                                    })
+                                })
+                            })
+            })
+            .cloned()
+            .collect();
+        if matches.len() > 1 {
+            return Err(LibraryError::InvalidId(format!(
+                "multiple existing imports for {id}"
+            )));
+        }
+        Ok(matches.into_iter().next())
+    }
+
+    fn preserve_import_preferences(
+        &self,
+        entry: &mut GameEntry,
+        previous: Option<&GameEntry>,
+        staged: &Path,
+    ) -> Result<(), LibraryError> {
+        if let Some(previous) = previous {
+            entry.settings = previous.settings.clone();
+            entry.display_name = previous.display_name.clone();
+            let saves = previous.save_dir(&self.root);
+            if saves.is_dir() {
+                for file in import_tree_files(&saves)? {
+                    let dest = staged
+                        .join(save_data::SAVE_DIR_NAME)
+                        .join(file.strip_prefix(&saves).unwrap());
+                    fs::create_dir_all(dest.parent().unwrap())?;
+                    fs::copy(file, dest)?;
+                }
+            }
+        }
+        let gizmondo = entry.source_cab.starts_with("gzga-collection:")
+            || is_gizmondo_title_id(&entry.id)
+            || has_gizmondo_marker(&staged.join("extracted"));
+        if gizmondo {
+            if let Some(icon) = cartridge_artwork(staged, &staged.join(&entry.executable)) {
+                entry.icon = Some(icon);
+            }
+        } else if previous.is_none()
+            && entry.settings.rotation == RotationPref::None
+            && entry.executable.file_stem().is_some_and(|name| {
+                name.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("cod2")
+            })
+        {
+            entry.settings.rotation = RotationPref::Cw90;
+        }
+        Ok(())
+    }
+
+    /// Move each GZGA's contents into its ordinary extracted directory. The
+    /// ZIP's outer folders never become part of the installed game's path.
+    fn import_game_trees(
+        &mut self,
+        staging: tempfile::TempDir,
+        source: GameEntry,
+        extracted: &Path,
+        files: &[PathBuf],
+        remove_card: Option<GameEntry>,
+    ) -> Result<Vec<GameEntry>, LibraryError> {
+        let mut games = std::collections::BTreeMap::new();
+        for exe in files.iter().filter(|p| is_guest_exe(p)) {
+            let directory = if remove_card.is_some() {
+                if exe.parent() == Some(extracted) {
+                    continue;
+                }
+                let Some(first) = exe
+                    .strip_prefix(extracted)
+                    .ok()
+                    .and_then(|relative| relative.components().next())
+                else {
+                    continue;
+                };
+                extracted.join(first.as_os_str())
+            } else {
+                let Some(directory) = gzga_game_directory(exe, extracted) else {
+                    continue;
+                };
+                directory
+            };
+            let preferred = exe
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("autorun.exe"));
+            if preferred || !games.contains_key(&directory) {
+                games.insert(directory, exe.clone());
+            }
+        }
+        if games.is_empty() {
+            return Err(LibraryError::NoExecutable);
+        }
+        let shared: Vec<_> = files
+            .iter()
+            .filter(|file| {
+                gzga_game_directory(file, extracted).is_none()
+                    && !is_guest_exe(file)
+                    && !games.keys().any(|directory| file.starts_with(directory))
+            })
+            .filter(|file| {
+                !file
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("multiboot.hog"))
+            })
+            .cloned()
+            .collect();
+        let mut ids = std::collections::BTreeSet::new();
+        for directory in games.keys() {
+            let folder = directory.file_name().unwrap().to_string_lossy();
+            let id = if is_gizmondo_title_id(&folder) {
+                folder.to_ascii_uppercase()
+            } else {
+                sanitize_id(Some(&folder))
+            };
+            if !ids.insert(id.clone()) {
+                return Err(LibraryError::InvalidId(format!(
+                    "duplicate GZGA directory {id}"
+                )));
+            }
+        }
+        let mut prepared = Vec::new();
+        for (directory, exe) in games {
+            let folder = directory.file_name().unwrap().to_string_lossy();
+            let id = if is_gizmondo_title_id(&folder) {
+                folder.to_ascii_uppercase()
+            } else {
+                sanitize_id(Some(&folder))
+            };
+            let previous = self.previous_import(&id, &source.source_cab)?;
+            let destination = staging.path().join("entries").join(&id);
+            fs::create_dir_all(&destination)?;
+            let relative_exe = exe.strip_prefix(&directory).unwrap().to_path_buf();
+            fs::rename(&directory, destination.join("extracted"))?;
+            for file in &shared {
+                let Ok(relative) = file.strip_prefix(directory.parent().unwrap()) else {
+                    continue;
+                };
+                let dest = destination.join("extracted").join(relative);
+                if !dest.exists() {
+                    fs::create_dir_all(dest.parent().unwrap())?;
+                    fs::copy(file, dest)?;
+                }
+            }
+            let mut entry = source.clone();
+            entry.id = id.clone();
+            entry.display_name = gizmondo_titles::lookup(&id).unwrap_or(&id).to_owned();
+            entry.source_cab = format!(
+                "{}:{}",
+                if is_gizmondo_title_id(&id) {
+                    "gzga-collection"
+                } else {
+                    "demo-card"
+                },
+                source.source_cab
+            );
+            entry.executable = PathBuf::from("extracted").join(relative_exe);
+            // Keep SDK absolute serial paths working after removing the host
+            // GZGA wrapper. These are existing frontend mount aliases.
+            entry.install_dirs = vec![
+                format!("\\SD Card\\{folder}\\"),
+                format!("\\Storage Card\\{folder}\\"),
+            ];
+            entry.icon = extract_icon_png(&destination, &destination.join(&entry.executable));
+            entry.companions =
+                record_extracted_libraries(&destination.join("extracted"), &destination);
+            self.preserve_import_preferences(&mut entry, previous.as_ref(), &destination)?;
+            write_json(&destination.join("game.json"), &entry)?;
+            prepared.push((entry, destination, previous));
+        }
+        self.publish_staged_imports(staging, prepared, remove_card)
+    }
+
+    /// Publish one catalog update only after all game files are ready. Existing
+    /// installations stay recoverable until that update succeeds.
+    fn publish_staged_imports(
+        &mut self,
+        staging: tempfile::TempDir,
+        prepared: Vec<(GameEntry, PathBuf, Option<GameEntry>)>,
+        remove_card: Option<GameEntry>,
+    ) -> Result<Vec<GameEntry>, LibraryError> {
+        for (entry, _, previous) in &prepared {
+            let destination = self.root.join(entry.relative_dir());
+            if destination.exists()
+                && !previous
+                    .as_ref()
+                    .is_some_and(|old| old.id.eq_ignore_ascii_case(&entry.id))
+            {
+                return Err(LibraryError::InvalidId(format!(
+                    "destination already exists: {}",
+                    destination.display()
+                )));
+            }
+        }
+        let mut next = self.library.clone();
+        let mut backups = Vec::new();
+        let mut installed = Vec::new();
+        let result = (|| -> Result<(), LibraryError> {
+            for (index, (entry, directory, previous)) in prepared.iter().enumerate() {
+                if let Some(previous) = previous {
+                    let original = self.root.join(previous.relative_dir());
+                    if original.exists() {
+                        let backup = staging.path().join(format!("backup-{index}"));
+                        fs::rename(&original, &backup)?;
+                        backups.push((original, backup));
+                    }
+                    next.games.retain(|game| game.id != previous.id);
+                }
+                let destination = self.root.join(entry.relative_dir());
+                fs::rename(directory, &destination)?;
+                installed.push(destination);
+                next.games.retain(|game| game.id != entry.id);
+                next.games.push(entry.clone());
+            }
+            if let Some(card) = &remove_card {
+                let original = self.root.join(card.relative_dir());
+                let backup = staging.path().join("backup-card");
+                fs::rename(&original, &backup)?;
+                backups.push((original, backup));
+                next.games.retain(|game| game.id != card.id);
+            }
+            next.games
+                .sort_by(|a, b| a.display_name.cmp(&b.display_name));
+            write_json(&self.root.join("library.json"), &next)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let mut restored = true;
+            for directory in installed.iter().rev() {
+                restored &= fs::remove_dir_all(directory).is_ok();
+            }
+            for (original, backup) in backups.iter().rev() {
+                restored &= fs::rename(backup, original).is_ok();
+            }
+            if !restored {
+                let recovery = staging.keep();
+                log::error!(
+                    "import rollback incomplete; retained recovery files at {}",
+                    recovery.display()
+                );
+            }
+            return Err(error);
+        }
+        self.library = next;
+        Ok(prepared.into_iter().map(|(entry, _, _)| entry).collect())
     }
 
     /// Import a RAR archive containing a Pocket PC game.
@@ -1618,138 +1931,28 @@ impl Library {
         if !self.is_demo_card_entry(&source) {
             return Err(LibraryError::NoExecutable);
         }
-        let launcher = source.executable_path(&self.root);
-        let card_root = launcher.parent().ok_or(LibraryError::NoExecutable)?;
-        self.split_game_collection(id, card_root, Some(&launcher))
-    }
-
-    fn split_game_collection(
-        &mut self,
-        id: &str,
-        card_root: &Path,
-        launcher: Option<&Path>,
-    ) -> Result<Vec<GameEntry>, LibraryError> {
-        let source = self
-            .get(id)
-            .cloned()
-            .ok_or_else(|| LibraryError::NotFound(id.into()))?;
-        let extracted = source.extracted_dir(&self.root);
-        let files = import_tree_files(&extracted)?;
-        let mut by_directory = std::collections::BTreeMap::new();
-        for path in files.iter().filter(|p| {
-            is_guest_exe(p) && Some(p.as_path()) != launcher && p.parent() != Some(card_root)
-        }) {
-            let parent = if launcher.is_none() {
-                let Some(directory) = gzga_game_directory(path, &extracted) else {
-                    continue;
-                };
-                directory
-            } else {
-                let Some(relative) = path.strip_prefix(card_root).ok() else {
-                    continue;
-                };
-                let Some(first) = relative.components().next() else {
-                    continue;
-                };
-                card_root.join(first.as_os_str())
-            };
-            let preferred = path
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("autorun.exe"));
-            if preferred || !by_directory.contains_key(&parent) {
-                by_directory.insert(parent, path.clone());
-            }
+        let staging = tempfile::Builder::new()
+            .prefix(".gzga-import-")
+            .tempdir_in(self.root.join("games"))?;
+        let extracted = staging.path().join("card");
+        fs::create_dir_all(&extracted)?;
+        let card_root = source.extracted_dir(&self.root);
+        let mut files = Vec::new();
+        for file in import_tree_files(&card_root)? {
+            let dest = extracted.join(file.strip_prefix(&card_root).unwrap());
+            fs::create_dir_all(dest.parent().unwrap())?;
+            fs::copy(file, &dest)?;
+            files.push(dest);
         }
-        if by_directory.is_empty() {
-            return Err(LibraryError::NoExecutable);
-        }
-        let directories: Vec<_> = by_directory.keys().cloned().collect();
-        let mut prepared = Vec::new();
-        let result = (|| -> Result<(), LibraryError> {
-            for (directory, exe) in &by_directory {
-                let stem = sanitize_id(
-                    directory
-                        .file_name()
-                        .map(|s| s.to_string_lossy())
-                        .as_deref(),
-                );
-                let base = format!("{id}_{stem}");
-                let mut new_id = base.clone();
-                let mut suffix = 2;
-                while self.root.join("games").join(&new_id).exists() {
-                    new_id = format!("{base}_{suffix}");
-                    suffix += 1;
-                }
-                let destination = self.root.join("games").join(&new_id);
-                fs::create_dir_all(destination.join("extracted"))?;
-                let mut entry = source.clone();
-                entry.id = new_id.clone();
-                entry.source_cab = format!(
-                    "{}:{}",
-                    if launcher.is_some() {
-                        "demo-card"
-                    } else {
-                        "gzga-collection"
-                    },
-                    source.source_cab
-                );
-                entry.display_name = pretty_id(&stem);
-                entry.executable = PathBuf::from("extracted").join(
-                    exe.strip_prefix(&extracted)
-                        .map_err(|_| LibraryError::NoExecutable)?,
-                );
-                entry.icon = None;
-                entry.companions.clear();
-                prepared.push(entry);
-                for file in &files {
-                    if launcher.is_none() && is_guest_exe(file) && !file.starts_with(directory) {
-                        continue;
-                    }
-                    if Some(file.as_path()) == launcher
-                        || file.parent() == Some(card_root)
-                            && file.file_name().is_some_and(|n| {
-                                n.to_string_lossy().eq_ignore_ascii_case("multiboot.hog")
-                            })
-                    {
-                        continue;
-                    }
-                    if directories
-                        .iter()
-                        .any(|other| other != directory && file.starts_with(other))
-                    {
-                        continue;
-                    }
-                    let relative = file
-                        .strip_prefix(&extracted)
-                        .map_err(|_| LibraryError::NoExecutable)?;
-                    let dest = destination.join("extracted").join(relative);
-                    fs::create_dir_all(dest.parent().unwrap())?;
-                    fs::copy(file, dest)?;
-                }
-                let entry = prepared.last_mut().unwrap();
-                entry.icon = extract_icon_png(&destination, &entry.executable_path(&self.root));
-                entry.companions =
-                    record_extracted_libraries(&destination.join("extracted"), &destination);
-            }
-            Ok(())
-        })();
-        if let Err(e) = result {
-            for entry in &prepared {
-                let _ = fs::remove_dir_all(self.root.join("games").join(&entry.id));
-            }
-            return Err(e);
-        }
-        let mut entries = Vec::new();
-        for entry in prepared {
-            let new_id = entry.id.clone();
-            entries.push(self.commit_entry(&new_id, entry)?.clone());
-        }
-        // Delete the temporary card/collection entry only after all titles are persisted.
-        self.remove(id)?;
-        Ok(entries)
+        self.import_game_trees(staging, source.clone(), &extracted, &files, Some(source))
     }
 
     fn is_demo_card_entry(&self, entry: &GameEntry) -> bool {
+        if entry.source_cab.starts_with("gzga-collection:")
+            || entry.source_cab.starts_with("demo-card:")
+        {
+            return false;
+        }
         let exe = entry.executable_path(&self.root);
         if !exe
             .file_name()
@@ -3296,7 +3499,7 @@ mod tests {
         }
         archive.finish().unwrap();
         let entry = library.import_zip(&archive_path).unwrap();
-        assert_eq!(entry.display_name, "Gzga200001");
+        assert_eq!(entry.display_name, "GZGA200001");
         assert_eq!(entry.icon, Some(PathBuf::from("cartridge.png")));
         fs::write(card.join("My Game.bmp"), b"bad bitmap").unwrap();
         assert!(cartridge_artwork(&root, &exe).is_none());
@@ -3345,7 +3548,7 @@ mod tests {
                 assert!(entry.executable_path(lib.root()).is_file());
                 let extracted = entry.extracted_dir(lib.root());
                 assert_eq!(
-                    fs::read(extracted.join(format!("{wrapper}common/data.bin"))).unwrap(),
+                    fs::read(extracted.join("common/data.bin")).unwrap(),
                     b"shared"
                 );
                 let own = game_gizmondo_title_id(entry, lib.root()).unwrap();
@@ -3354,7 +3557,14 @@ mod tests {
                 } else {
                     "GZGA900013"
                 };
-                assert!(!extracted.join(format!("{wrapper}{other}")).exists());
+                assert!(!extracted.join(other).exists());
+                assert!(!extracted.join("Wrapper").exists());
+                assert!(!extracted.join(&own).exists());
+                assert_eq!(entry.id, own);
+                assert_eq!(
+                    extracted,
+                    lib.root().join("games").join(&own).join("extracted")
+                );
             }
             lib.remove(&entries[0].id).unwrap();
             assert!(entries[1].executable_path(lib.root()).is_file());
@@ -3385,6 +3595,71 @@ mod tests {
             assert_eq!(lib.games().len(), 2);
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn serial_file_next_to_executable_identifies_gizmondo() {
+        let root = tmpdir("serial_file");
+        let mut game = entry_with_install_dir(None);
+        game.id = "unknown".into();
+        game.source_cab = "unknown.zip".into();
+        game.executable = "extracted/Autorun.exe".into();
+        let exe = game.executable_path(&root);
+        write_pe_importing(&exe, &[]);
+        fs::write(exe.parent().unwrap().join("gzga800069"), b"serial").unwrap();
+        assert!(is_gizmondo_game(&game, &root));
+        assert_eq!(
+            game_gizmondo_title_id(&game, &root).as_deref(),
+            Some("GZGA800069")
+        );
+        fs::remove_file(exe.parent().unwrap().join("gzga800069")).unwrap();
+        fs::write(exe.parent().unwrap().join("GZGA800069.txt"), b"text").unwrap();
+        assert!(!is_gizmondo_game(&game, &root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_serial_directory_identifies_root_game_and_wrappers_are_removed() {
+        use std::io::Write;
+        let root = tmpdir("empty_serial");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.exe");
+        write_pe_importing(&fixture, &[]);
+        let pe = fs::read(fixture).unwrap();
+        for serial in [Some("GZGA800069"), None] {
+            let archive_path = root.join("mon_jeu.zip");
+            let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+            archive
+                .start_file(
+                    "Wrapper/Nested/Autorun.exe",
+                    zip::write::FileOptions::default(),
+                )
+                .unwrap();
+            archive.write_all(&pe).unwrap();
+            if let Some(serial) = serial {
+                archive
+                    .add_directory(
+                        format!("Wrapper/Nested/{serial}/"),
+                        zip::write::FileOptions::default(),
+                    )
+                    .unwrap();
+            }
+            archive.finish().unwrap();
+            let mut lib =
+                Library::open(root.join(if serial.is_some() { "giz" } else { "normal" })).unwrap();
+            let entry = lib.import_zip(&archive_path).unwrap().clone();
+            assert_eq!(entry.id, serial.unwrap_or("mon_jeu"));
+            assert_eq!(entry.executable, PathBuf::from("extracted/Autorun.exe"));
+            assert_eq!(is_gizmondo_game(&entry, lib.root()), serial.is_some());
+            assert!(!entry.extracted_dir(lib.root()).join("Wrapper").exists());
+            if serial.is_some() {
+                assert_eq!(
+                    game_gizmondo_title_id(&entry, lib.root()).as_deref(),
+                    serial
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3424,9 +3699,8 @@ mod tests {
                 .extracted_dir(lib.root())
                 .join("common/data.bin")
                 .is_file());
-            assert!(!e.extracted_dir(lib.root()).join("autorun.exe").exists());
-            let own = e.executable.parent().unwrap().file_name().unwrap();
-            let other = if own == "Agaju" {
+            assert_eq!(e.executable, PathBuf::from("extracted/autorun.exe"));
+            let other = if e.id == "agaju" {
                 "GZGA200001"
             } else {
                 "Agaju"
