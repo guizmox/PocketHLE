@@ -538,8 +538,8 @@ fn run_process(
             summary_lines.push(format!("Module path: {guest_exe}"));
         }
     }
-    for prefix in &entry.install_dirs {
-        emu.mount_read_only_dir(prefix, entry.install_mount_dir(library_root, prefix));
+    for (prefix, directory) in entry.install_mounts(library_root) {
+        emu.mount_read_only_dir(&prefix, directory);
     }
     if let Some(prefix) = entry.guest_install_prefix() {
         emu.mount_read_only_dir(&prefix, &extracted);

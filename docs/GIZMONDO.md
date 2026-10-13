@@ -241,3 +241,50 @@ is not implied. PocketHLE's clipping implementation is unchanged.
 
 Usage: `python3 tools/patch-supernaturals-skybox.py Supernaturals.exe fixed.exe`.
 The output must not already exist. Unknown builds are rejected before writing.
+
+### Original SDK paths in alternative versions
+
+`GameEntry::install_mounts` keeps declared installation aliases and adds SD Card
+and Storage Card aliases for exact GZGA files/directories alongside the executable
+or at the extraction root. A marker file maps to its containing game directory;
+a physical GZGA directory maps to itself. This is startup-only discovery and does
+not rename entries, move files, change saves or guess aliases from game titles.
+All variants retaining their original SDK markers use this common path.
+
+Colors (E3 demo), catalogued as GZGA800015, still opens GZGA200015 paths. Its
+provided files include that original marker. Without the alias, startup loads an
+incomplete registry then dereferences a missing Camera node at 0x000ACBD4.
+Mounting the original card path resolves the asset loading and reaches the E3
+main menu. Desktop and Android both use the same alias list, including already
+installed games; no reimport or binary patch is required.
+
+### Unfinished Business: zlib
+
+The provided zlib.dll exports confirm ordinal 22 = inflateInit_, 19 = inflate,
+20 = inflateEnd and 2 = compress. Their named/ordinal handlers now implement the
+56-byte WinCE z_stream ABI using owned per-process flate2 streams. Input/output
+pointers, remaining counts, totals, Adler checksum and zlib status values are
+updated across calls. Streams are released by inflateEnd or process teardown.
+Version/size checks and bounded buffers reject invalid requests. Compression is
+also implemented for the game's save path. Other zlib functions remain outside
+this initial subset. No dependency was added and the supplied game DLL is intact.
+The supplied demo reaches its rendered first-person scene.
+
+### Initial SDL 1.2 guest support
+
+Named SDL.dll imports now cover video/timer initialization, software 16/24/32-bit
+surfaces, RGB(A) mapping, clipping/fills, blits with color key/alpha, lock/unlock,
+presentation, keyboard/pointer events, key-state queries, delay/ticks and error/
+version queries. Surfaces use the 32-bit SDL 1.2 ABI in guest-owned heap memory;
+presentation converts to PocketHLE's RGB565 framebuffer. Delay uses the existing
+guest scheduler. Offscreen surfaces and static query pointers survive SDL_Quit
+until the caller frees them or the process ends. State is process-owned.
+
+This is a partial SDL 1.2 implementation, separate from the desktop launcher's
+host SDL2. SDL2 guest ABI, SDL audio, joystick/CD-ROM subsystems, paletted video,
+SDL OpenGL, RWops, SDL_image/SDL_mixer and ordinal-only SDL DLL imports are not
+implemented. Unsupported subsystems/video modes report failure; they do not
+claim success. Neither supplied demo imports SDL, so validation uses ABI unit
+tests and a native ARM diagnostic (Init/SetVideoMode/FillRect/Flip/ExitProcess),
+not a claim of complete SDL-game compatibility. Additional DLL/game samples
+are needed to establish ordinal mappings and extend coverage.

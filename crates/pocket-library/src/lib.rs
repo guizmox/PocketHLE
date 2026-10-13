@@ -252,6 +252,59 @@ impl GameEntry {
         extracted
     }
 
+    /// Include the original SDK card paths as well as catalogue variant IDs.
+    /// Colors E3 is filed under GZGA800015 but still opens GZGA200015 paths.
+    pub fn install_mounts(&self, library_root: &Path) -> Vec<(String, PathBuf)> {
+        let mut mounts: Vec<_> = self
+            .install_dirs
+            .iter()
+            .map(|prefix| (prefix.clone(), self.install_mount_dir(library_root, prefix)))
+            .collect();
+        let extracted = self.extracted_dir(library_root);
+        let executable = self.executable_path(library_root);
+        let mut roots = vec![extracted.clone()];
+        if let Some(parent) = executable.parent().filter(|parent| *parent != extracted) {
+            roots.push(parent.to_path_buf());
+        }
+        for root in roots {
+            if let Ok(entries) = fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_ascii_uppercase();
+                    if !is_gizmondo_title_id(&name) {
+                        continue;
+                    }
+                    let Ok(kind) = entry.file_type() else {
+                        continue;
+                    };
+                    if !kind.is_file() && !kind.is_dir() {
+                        continue;
+                    }
+                    let target = if kind.is_dir() {
+                        entry.path()
+                    } else {
+                        root.clone()
+                    };
+                    for card in ["SD Card", "Storage Card"] {
+                        let prefix = format!("\\{card}\\{name}\\");
+                        if let Some((_, directory)) = mounts
+                            .iter_mut()
+                            .find(|(existing, _)| existing.eq_ignore_ascii_case(&prefix))
+                        {
+                            // A declared flattened-root fallback must not hide
+                            // an actual marker beside a nested executable.
+                            if *directory == extracted && target != extracted {
+                                *directory = target.clone();
+                            }
+                        } else {
+                            mounts.push((prefix, target.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        mounts
+    }
+
     /// A wrapped MultiBoot ZIP keeps its launcher and GZGA directories inside
     /// one wrapper. Mount that directory as the card, not the extraction root:
     /// rooted multiboot.hog reads must not rely on cross-directory fallback.
@@ -4152,6 +4205,44 @@ mod tests {
                 .display_name,
             "My Agaju demo"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn original_sdk_marker_aliases_preserve_alternative_identity_and_real_directories() {
+        let root = tmpdir("alt_original_marker_alias");
+        let mut game = entry_with_install_dir(None);
+        game.id = "GZGA800015".into();
+        game.executable = "extracted/Autorun.exe".into();
+        game.install_dirs = vec!["\\SD Card\\GZGA800015\\".into()];
+        let extracted = game.extracted_dir(&root);
+        fs::create_dir_all(&extracted).unwrap();
+        fs::write(extracted.join("GZGA200015"), [1, 2, 3, 4]).unwrap();
+        fs::create_dir_all(extracted.join("GZGA200099")).unwrap();
+        fs::write(extracted.join("GZGA200099/GZGA200099"), [1, 2, 3, 4]).unwrap();
+        fs::write(extracted.join("GZGA900015.txt"), b"not a marker").unwrap();
+        let mounts = game.install_mounts(&root);
+        assert!(mounts.contains(&("\\SD Card\\GZGA800015\\".into(), extracted.clone())));
+        for card in ["SD Card", "Storage Card"] {
+            assert!(mounts.contains(&(format!("\\{card}\\GZGA200015\\"), extracted.clone())));
+            assert!(mounts.contains(&(
+                format!("\\{card}\\GZGA200099\\"),
+                extracted.join("GZGA200099")
+            )));
+        }
+        assert_eq!(mounts.len(), 5);
+        assert_eq!(game.id, "GZGA800015");
+        game.executable = "extracted/bin/Autorun.exe".into();
+        game.install_dirs.push("\\SD Card\\GZGA200015\\".into());
+        fs::create_dir_all(extracted.join("bin")).unwrap();
+        fs::write(extracted.join("bin/GZGA200015"), [1, 2, 3, 4]).unwrap();
+        let nested = game.install_mounts(&root);
+        assert!(nested.contains(&("\\SD Card\\GZGA200015\\".into(), extracted.join("bin"))));
+        assert!(nested.contains(&("\\Storage Card\\GZGA200015\\".into(), extracted.join("bin"))));
+        assert!(nested.contains(&(
+            "\\SD Card\\GZGA200099\\".into(),
+            extracted.join("GZGA200099")
+        )));
         fs::remove_dir_all(root).unwrap();
     }
 

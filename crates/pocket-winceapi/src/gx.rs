@@ -441,6 +441,8 @@ pub(crate) mod tests {
             wave_out: Default::default(),
             hss: Default::default(),
             gz_files: Default::default(),
+            zlib_streams: Default::default(),
+            sdl: Default::default(),
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,

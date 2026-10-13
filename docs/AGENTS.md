@@ -2808,3 +2808,32 @@ VA 0x23920/file 0x12D20 to far=16, for one SHA256-identified executable. The cam
 is used by Journal and may be shared with gameplay. No rendering exception is
 introduced: proper six-plane clipping from 64276c2f remains intact. See
 docs/GIZMONDO.md for reproduction scope and the patch's exact binary identity.
+
+SDK alternative-title path aliases (2026-10-13): both frontends mount
+GameEntry::install_mounts, retaining declared aliases and adding exact original
+GZGA marker filenames/directories found at extraction root or beside the EXE.
+Physical card directories map to themselves. Marker files map to their parent.
+Do not infer these paths from display names or remap all serials at extracted:
+Colors E3 needs its original GZGA200015 alias alongside catalogue GZGA800015,
+while Supernaturals needs its actual nested directory. This is launch-time only
+and works for previously imported variants without changing game IDs or saves.
+
+zlib.dll HLE uses process-owned kernel::zlib streams and the explicit WinCE
+56-byte z_stream ABI; Unfinished Business's attached DLL confirms ordinals
+2/19/20/22 (compress/inflate/inflateEnd/inflateInit_). Counts/pointers/totals
+must reflect partial progress, including buffer/error results; state cleanup is
+inflateEnd/process teardown. This subset does not emulate every zlib export.
+
+SDL.dll named-import HLE is an initial SDL 1.2 video/timer/input subset.
+Its guest structures and heap surfaces are process-owned kernel::sdl state;
+32-bit SDL_Surface is 60 bytes and SDL_PixelFormat 40 bytes. Real guest ARM
+Init/SetVideoMode/FillRect/Flip was checked against the exact framebuffer image.
+Unsupported audio/GL/joystick/palette/RWops and SDL2/ordinal-only imports are not
+silently advertised as supported. See docs/GIZMONDO.md for limits. This module
+is unrelated to bundled host SDL2 controller support. Timer-test rearm intervals
+are long to avoid wall-clock failures under CI descheduling; due/coalescing is
+set explicitly by the test and production timer behavior is unchanged.
+
+Corrective source ZIPs include patch-files.txt (one modified/added relative path
+per line) and patch-remove-files.txt when needed. Preserve the maintainer's
+PowerShell timestamp command; do not substitute a different delivery workflow.

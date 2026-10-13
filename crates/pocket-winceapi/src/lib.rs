@@ -41,11 +41,13 @@ pub mod hss;
 mod media_static;
 pub mod ole32;
 pub mod ordinals;
+mod sdl;
 mod shell;
 mod vibration;
 mod wavein;
 mod wininet;
 mod ws2;
+mod zlib;
 
 use std::collections::HashMap;
 use std::io::Write;

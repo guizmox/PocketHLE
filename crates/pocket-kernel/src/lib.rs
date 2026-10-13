@@ -55,11 +55,13 @@ pub mod native_thunks;
 pub mod power;
 mod process_control;
 pub mod registry;
+pub mod sdl;
 pub mod shared_objects;
 mod tls;
 pub mod tracker;
 pub mod vfs;
 pub mod vibration;
+pub mod zlib;
 
 pub use audio::{AudioEngine, AudioTap, GuestFormat, VoiceParams};
 pub use framebuffer::{Framebuffer, FB_BYTES, FB_HEIGHT, FB_WIDTH};
@@ -1299,6 +1301,8 @@ pub struct KernelState {
     /// (`gzopen` / `gzread` / `gzseek` / `gzclose`). Rayman Ultimate
     /// loads every map asset through these imports.
     pub gz_files: crate::gz::GzFiles,
+    pub zlib_streams: crate::zlib::ZlibStreams,
+    pub sdl: crate::sdl::SdlState,
     /// Messages posted with `PostMessageW` (and the `MM_WOM_DONE`
     /// notifications we synthesise for `waveOut`), waiting to be
     /// handed to the guest by `GetMessageW` / `PeekMessageW`.
@@ -3164,6 +3168,8 @@ impl Process {
                 wave_out: Default::default(),
                 hss: Default::default(),
                 gz_files: Default::default(),
+                zlib_streams: Default::default(),
+                sdl: Default::default(),
                 posted_messages: Default::default(),
                 msg_queues: HashMap::new(),
                 next_msg_queue_handle: 0xDEAD_E500,

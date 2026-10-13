@@ -1849,7 +1849,7 @@ fn ver_query_value_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 
 // ---------- process / time ----------
 
-fn get_tick_count(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn get_tick_count(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static START: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now()
@@ -2584,7 +2584,7 @@ fn leave_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 /// too. `WaitFor*Object*` deliberately does not do this: those handlers
 /// re-run their call on re-entry, and stacking the callback detour on
 /// top of that has no game asking for it.
-fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // Must come first: when `waveOutProc` returns, the thunk re-fires
     // this handler with R0..R3 holding the callback's result rather than
     // the sleep duration, and `wave_out_enter_callback` is what puts the
@@ -21660,6 +21660,8 @@ mod tests {
             wave_out: Default::default(),
             hss: Default::default(),
             gz_files: Default::default(),
+            zlib_streams: Default::default(),
+            sdl: Default::default(),
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
@@ -27929,14 +27931,16 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
+        // Exercise due/coalescing explicitly below. A long rearm interval avoids
+        // wall-clock flakiness when parallel tests or CI deschedule this thread.
         for (hwnd, id) in [(FAKE_HWND, 12), (0, 12), (FAKE_HWND, 13)] {
             assert_eq!(
-                tls_test_call(&mut cpu, &mut kernel, set_timer, &[hwnd, id, 100, 0]),
+                tls_test_call(&mut cpu, &mut kernel, set_timer, &[hwnd, id, 60_000, 0]),
                 id
             );
         }
         kernel.current_thread = 1;
-        tls_test_call(&mut cpu, &mut kernel, set_timer, &[0, 12, 100, 0]);
+        tls_test_call(&mut cpu, &mut kernel, set_timer, &[0, 12, 60_000, 0]);
         assert_eq!(kernel.timers.len(), 4);
         kernel.current_thread = 0;
         assert_eq!(
