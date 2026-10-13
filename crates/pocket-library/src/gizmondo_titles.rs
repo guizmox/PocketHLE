@@ -1,7 +1,7 @@
 //! Static title suggestions from the maintainer's Liste_Jeux.xlsx (Builds/Temp),
 //! supplemented with exact GZGA200 identifiers from the supplied MultiBoot launcher.
-//! Local 800/900 IDs carry user-requested alternative-version labels.
-//! Official IDs identify titles; local 800/900 IDs distinguish supplied variants.
+//! Local 700/800/900 IDs carry user-requested alternative-version labels.
+//! Official IDs identify titles; local 700/800/900 IDs distinguish supplied variants.
 //! No runtime network lookup.
 use std::{collections::BTreeMap, sync::OnceLock};
 static TITLES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
@@ -33,8 +33,8 @@ mod tests {
         assert_eq!(lookup("GZGA280045"), Some("Ball Busters"));
         assert_eq!(lookup("GZGA200069"), Some("Catapult"));
         assert_eq!(lookup("GZGA900056"), Some("Agaju (E3 demo)"));
-        assert_eq!(lookup("GZGA900069"), Some("Catapult (may 2005)"));
-        assert_eq!(lookup("GZGA800056"), Some("Agaju (oct 2005)"));
+        assert_eq!(lookup("GZGA900069"), Some("Catapult (august 2005)"));
+        assert_eq!(lookup("GZGA800056"), Some("Agaju (august 2005)"));
         assert_eq!(lookup("GZGA200098"), Some("Alien Hominid"));
         assert_eq!(lookup("GZGA900016"), Some("Chicane (licensed cars)"));
         assert_eq!(lookup("GZGA800016"), Some("Chicane (E3 demo)"));

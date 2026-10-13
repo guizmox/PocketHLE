@@ -61,6 +61,10 @@ object NativeBridge {
     @JvmStatic external fun hasColors(libraryRoot: String): Boolean
 
     /** Returns the freshly imported game as a JSON [GameEntry]. */
+    @JvmStatic external fun prepareImport(libraryRoot: String, source: String): String
+    @JvmStatic external fun commitPreparedImport(libraryRoot: String, token: Long, allowUpdates: Boolean): String
+    @JvmStatic external fun cancelPreparedImport(libraryRoot: String, token: Long)
+
     @JvmStatic external fun importCab(libraryRoot: String, cabPath: String): String
     @JvmStatic external fun isDemoCard(libraryRoot: String, id: String): Boolean
     @JvmStatic external fun splitDemoCard(libraryRoot: String, id: String): String

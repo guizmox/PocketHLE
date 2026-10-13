@@ -10,7 +10,7 @@ use egui_extras::image::load_image_bytes;
 use pocket_core::kernel::InputEvent;
 use pocket_library::{
     is_gizmondo_game, CpuBackendPref, DpadDeadzone, GameEntry, GameSettings, GuestButton,
-    LauncherConfig, Library, RotationPref, ScreenPref,
+    LauncherConfig, Library, PreparedImport, RotationPref, ScreenPref,
 };
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
@@ -127,6 +127,8 @@ pub struct PocketLauncher {
     library_gizmondo: bool,
     rename_draft: Option<(String, String, bool)>,
     demo_import: Option<(String, String)>,
+    pending_import: Option<PreparedImport>,
+    updating_import: bool,
     library_busy: bool,
     pending_run: Option<GameEntry>,
     screen: Screen,
@@ -502,6 +504,7 @@ impl HeldButtons {
 #[derive(Debug)]
 pub enum UiEvent {
     ImportFinished(Result<Vec<GameEntry>, String>),
+    ImportPrepared(PreparedImport),
     DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
     RunFinished(RunOutcome),
 }
@@ -608,6 +611,8 @@ impl PocketLauncher {
             selected_game: None,
             rename_draft: None,
             demo_import: None,
+            pending_import: None,
+            updating_import: false,
             library_busy: false,
             pending_run: None,
             screen: Screen::Library,
@@ -643,18 +648,33 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                UiEvent::ImportPrepared(pending) => {
+                    self.pending_import = Some(pending);
+                    self.status = "Waiting for update confirmation...".into();
+                }
                 UiEvent::ImportFinished(Ok(entries)) => {
                     self.library_busy = false;
-                    self.status = format!("Imported {} game(s).", entries.len());
+                    let updated = self.updating_import;
+                    self.updating_import = false;
+                    self.status = format!(
+                        "{} {} game(s).",
+                        if updated {
+                            "Imported or updated"
+                        } else {
+                            "Imported"
+                        },
+                        entries.len()
+                    );
                     self.reload_library();
                     self.icon_cache.clear();
                     if let Some(game) = entries.first() {
                         let (id, name) = (game.id.clone(), game.display_name.clone());
                         self.library_gizmondo = is_gizmondo_game(game, self.library.root());
                         self.selected_game = Some(id.clone());
-                        if self.library.is_demo_card(&id) {
+                        if !updated && self.library.is_demo_card(&id) {
                             self.demo_import = Some((id, name));
-                        } else if entries.len() == 1
+                        } else if !updated
+                            && entries.len() == 1
                             && !game.source_cab.starts_with("gzga-collection:")
                         {
                             self.rename_draft = Some((id, name, true));
@@ -662,6 +682,7 @@ impl PocketLauncher {
                     }
                 }
                 UiEvent::ImportFinished(Err(e)) => {
+                    self.updating_import = false;
                     self.library_busy = false;
                     self.status = format!("Import failed: {e}");
                     self.reload_library();
@@ -1293,6 +1314,59 @@ impl PocketLauncher {
         }
         if card_response.double_clicked() {
             self.spawn_run(game);
+        }
+    }
+
+    fn ui_import_update(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_import.as_ref() else {
+            return;
+        };
+        let names: Vec<_> = pending
+            .updates()
+            .iter()
+            .map(|game| game.display_name.clone())
+            .collect();
+        let count = pending.entries().len();
+        let mut update = false;
+        let mut cancel = false;
+        egui::Window::new("Update existing games?")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("These games are already installed:");
+                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for name in &names {
+                        ui.label(name);
+                    }
+                });
+                ui.label("Replace their game files and keep saves, names and settings?");
+                if count > names.len() {
+                    ui.label(format!(
+                        "{} new game(s) will also be imported.",
+                        count - names.len()
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    cancel = ui.button("Cancel import").clicked();
+                    update = ui.button("Update games").clicked();
+                });
+            });
+        if cancel {
+            self.pending_import = None;
+            self.library_busy = false;
+            self.status = "Import cancelled.".into();
+        } else if update {
+            let pending = self.pending_import.take().unwrap();
+            let root = self.library.root().to_path_buf();
+            let tx = self.events_tx.clone();
+            self.updating_import = true;
+            self.status = "Updating game files...".into();
+            std::thread::spawn(move || {
+                let result = Library::open(root)
+                    .and_then(|mut lib| lib.apply_prepared_import(pending, true))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(UiEvent::ImportFinished(result));
+            });
         }
     }
 
@@ -2766,27 +2840,18 @@ impl PocketLauncher {
                     .unwrap_or(library_root.clone());
                 lib.config_mut().last_import_dir = Some(parent);
                 lib.save().map_err(|e| e.to_string())?;
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_ascii_lowercase);
-                if ext.as_deref() == Some("zip") {
-                    return lib.import_zip_entries(&path).map_err(|e| e.to_string());
+                let pending = lib.prepare_import(&path).map_err(|e| e.to_string())?;
+                if !pending.updates().is_empty() {
+                    tx.send(UiEvent::ImportPrepared(pending))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(Vec::new());
                 }
-                let entry = match ext.as_deref() {
-                    Some("rar") => lib.import_rar(&path),
-                    Some("cab") => lib.import_cab(&path),
-                    Some("zip") => lib.import_zip(&path),
-                    // Treat anything else (`.exe`, no extension, …)
-                    // as a raw ARM PE32. `import_exe` rejects it
-                    // with a clear error if the machine type is
-                    // wrong.
-                    _ => lib.import_exe(&path),
-                }
-                .map_err(|e| e.to_string())?;
-                Ok(vec![entry.clone()])
+                lib.apply_prepared_import(pending, false)
+                    .map_err(|e| e.to_string())
             })();
-            let _ = tx.send(UiEvent::ImportFinished(result));
+            if !matches!(&result, Ok(entries) if entries.is_empty()) {
+                let _ = tx.send(UiEvent::ImportFinished(result));
+            }
         });
         self.status = "Importing...".to_string();
     }
@@ -2913,6 +2978,7 @@ impl eframe::App for PocketLauncher {
                     }
                 });
             });
+            self.ui_import_update(ctx);
             if !self.library_busy {
                 self.ui_demo_import(ctx);
             }

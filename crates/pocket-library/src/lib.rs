@@ -793,6 +793,26 @@ pub struct Library {
     config: LauncherConfig,
 }
 
+/// An import extracted off the UI thread, without changing installed games.
+/// Dropping it cancels the operation and deletes its private staging directory.
+#[derive(Debug)]
+pub struct PreparedImport {
+    staging: tempfile::TempDir,
+    target_root: PathBuf,
+    entries: Vec<GameEntry>,
+    updates: Vec<GameEntry>,
+}
+
+impl PreparedImport {
+    pub fn entries(&self) -> &[GameEntry] {
+        &self.entries
+    }
+
+    pub fn updates(&self) -> &[GameEntry] {
+        &self.updates
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LibraryFile {
     #[serde(default = "default_schema_version")]
@@ -827,6 +847,98 @@ pub fn default_library_root() -> PathBuf {
 }
 
 impl Library {
+    /// Prepare any supported source once. The ordinary importers run in an
+    /// isolated library, so their ZIP classification and executable selection
+    /// are exactly the same as a normal import, including collections.
+    pub fn prepare_import(&self, path: impl AsRef<Path>) -> Result<PreparedImport, LibraryError> {
+        use std::io::Read;
+        let path = path.as_ref();
+        let staging = tempfile::Builder::new()
+            .prefix(".pending-import-")
+            .tempdir_in(self.root.join("games"))?;
+        let mut provisional = Library::open(staging.path())?;
+        provisional.config = self.config.clone();
+        let mut signature = [0; 4];
+        let count = fs::File::open(path)?.read(&mut signature)?;
+        let ext = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let _imported = if count == 4 && signature[..2] == *b"PK" || ext == "zip" {
+            provisional.import_zip_entries(path)?
+        } else {
+            let entry = if signature == *b"MSCF" || ext == "cab" {
+                provisional.import_cab(path)?
+            } else if signature == *b"Rar!" || ext == "rar" {
+                provisional.import_rar(path)?
+            } else {
+                provisional.import_exe(path)?
+            };
+            vec![entry.clone()]
+        };
+        // Nested installers/RAR wrappers may import more than the first entry
+        // returned by their compatibility API. Publish every prepared game.
+        let entries = provisional.games().to_vec();
+        let mut updates = Vec::new();
+        for entry in &entries {
+            let source = entry
+                .source_cab
+                .strip_prefix("gzga-collection:")
+                .unwrap_or(&entry.source_cab);
+            if let Some(previous) = self.previous_import(&entry.id, source)? {
+                updates.push(previous);
+            }
+        }
+        Ok(PreparedImport {
+            staging,
+            target_root: self.root.clone(),
+            entries,
+            updates,
+        })
+    }
+
+    /// Publish only after the frontend's update confirmation. Re-read current
+    /// preferences and saves; do not overwrite changes made during the dialog.
+    pub fn apply_prepared_import(
+        &mut self,
+        pending: PreparedImport,
+        allow_updates: bool,
+    ) -> Result<Vec<GameEntry>, LibraryError> {
+        if pending.target_root != self.root {
+            return Err(LibraryError::InvalidId(
+                "import belongs to another library".into(),
+            ));
+        }
+        let mut prepared = Vec::new();
+        for mut entry in pending.entries {
+            let source = entry
+                .source_cab
+                .strip_prefix("gzga-collection:")
+                .unwrap_or(&entry.source_cab);
+            let previous = self.previous_import(&entry.id, source)?;
+            if let Some(previous) = &previous {
+                if !allow_updates || !pending.updates.iter().any(|game| game.id == previous.id) {
+                    return Err(LibraryError::InvalidId(format!(
+                        "update confirmation required for {}",
+                        previous.display_name
+                    )));
+                }
+            }
+            let directory = pending.staging.path().join("games").join(&entry.id);
+            if previous.is_some() {
+                let incoming_saves = directory.join(save_data::SAVE_DIR_NAME);
+                if incoming_saves.exists() {
+                    fs::remove_dir_all(incoming_saves)?;
+                }
+            }
+            self.preserve_import_preferences(&mut entry, previous.as_ref(), &directory)?;
+            write_json(&directory.join("game.json"), &entry)?;
+            prepared.push((entry, directory, previous));
+        }
+        self.publish_staged_imports(pending.staging, prepared, None)
+    }
+
     /// Open the library rooted at `root`, creating the directory and
     /// default `library.json` / `config.json` if they don't exist.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, LibraryError> {
@@ -869,9 +981,19 @@ impl Library {
         let mut library_changed = false;
         for game in self.library.games.iter_mut() {
             let mut migrated = false;
-            // Upgrade only ID-shaped placeholders. Preserve user-edited names.
+            // Upgrade ID placeholders and the two corrected catalogue dates.
+            // Other user-edited names are preserved.
             if let Some(id) = game_gizmondo_title_id(game, &self.root) {
-                if game.display_name.eq_ignore_ascii_case(&id) {
+                let corrected_date = match id.as_str() {
+                    "GZGA900069" => game
+                        .display_name
+                        .eq_ignore_ascii_case("Catapult (may 2005)"),
+                    "GZGA800056" => ["Agaju (oct 2005)", "Agaju (october 2005)"]
+                        .iter()
+                        .any(|old| game.display_name.eq_ignore_ascii_case(old)),
+                    _ => false,
+                };
+                if game.display_name.eq_ignore_ascii_case(&id) || corrected_date {
                     if let Some(title) = gizmondo_titles::lookup(&id) {
                         game.display_name = title.to_owned();
                         migrated = true;
@@ -3634,6 +3756,161 @@ mod tests {
         }
     }
 
+    fn update_fixture(root: &Path, payload: &[u8]) -> PathBuf {
+        use std::io::Write;
+        let exe = root.join("fixture.exe");
+        write_pe_importing(&exe, &[]);
+        let pe = fs::read(exe).unwrap();
+        let zip = root.join("update.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+        for (name, bytes) in [
+            ("GZGA200016/autorun.exe", pe.as_slice()),
+            ("GZGA200016/data.bin", payload),
+        ] {
+            archive
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        zip
+    }
+
+    #[test]
+    fn prepared_update_requires_confirmation_and_preserves_latest_names_settings_and_saves() {
+        let root = tmpdir("prepared_update");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let old = update_fixture(&root, b"old");
+        let game = lib.import_zip(&old).unwrap().clone();
+        let save = game.save_dir(lib.root()).join("nested/progress.dat");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, b"progress").unwrap();
+        let flash = lib.root().join("flash/other-game.sav");
+        fs::create_dir_all(flash.parent().unwrap()).unwrap();
+        fs::write(&flash, b"other save").unwrap();
+        let new = update_fixture(&root, b"new");
+        let pending = lib.prepare_import(&new).unwrap();
+        assert_eq!(pending.updates().len(), 1);
+        assert_eq!(
+            fs::read(game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"old"
+        );
+        drop(pending);
+        assert_eq!(fs::read(&save).unwrap(), b"progress");
+        let pending = lib.prepare_import(&new).unwrap();
+        assert!(lib.apply_prepared_import(pending, false).is_err());
+        assert_eq!(
+            fs::read(game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"old"
+        );
+        let pending = lib.prepare_import(&new).unwrap();
+        lib.rename_game(&game.id, "My Chicane").unwrap();
+        lib.get_mut(&game.id).unwrap().settings.rotation = RotationPref::Cw90;
+        lib.save().unwrap();
+        let updated = lib.apply_prepared_import(pending, true).unwrap();
+        assert_eq!(updated[0].display_name, "My Chicane");
+        assert_eq!(updated[0].settings.rotation, RotationPref::Cw90);
+        assert_eq!(
+            fs::read(game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"new"
+        );
+        assert_eq!(fs::read(save).unwrap(), b"progress");
+        assert_eq!(fs::read(flash).unwrap(), b"other save");
+        assert_eq!(lib.games().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_new_import_refuses_an_unconfirmed_intervening_install() {
+        let root = tmpdir("prepared_race");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let archive = update_fixture(&root, b"data");
+        let pending = lib.prepare_import(&archive).unwrap();
+        assert!(pending.updates().is_empty());
+        let game = lib.import_zip(&archive).unwrap().clone();
+        fs::write(
+            game.extracted_dir(lib.root()).join("data.bin"),
+            b"changed by another import",
+        )
+        .unwrap();
+        assert!(lib.apply_prepared_import(pending, true).is_err());
+        assert_eq!(
+            fs::read(game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"changed by another import"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_collection_updates_only_existing_game_and_imports_new_game() {
+        use std::io::Write;
+        let root = tmpdir("prepared_collection");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let old = update_fixture(&root, b"old");
+        let old_game = lib.import_zip(&old).unwrap().clone();
+        let save = old_game.save_dir(lib.root()).join("save.dat");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, b"saved progress").unwrap();
+        let pe = fs::read(root.join("fixture.exe")).unwrap();
+        let archive_path = root.join("collection.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&archive_path).unwrap());
+        for (name, bytes) in [
+            ("GZGA200016/autorun.exe", pe.as_slice()),
+            ("GZGA200016/data.bin", b"new".as_slice()),
+            ("GZGA200015/autorun.exe", pe.as_slice()),
+            ("GZGA200015/data.bin", b"colors".as_slice()),
+            ("Movies/trailer.wmv", b"external".as_slice()),
+        ] {
+            archive
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        let pending = lib.prepare_import(&archive_path).unwrap();
+        assert_eq!(pending.entries().len(), 2);
+        assert_eq!(pending.updates().len(), 1);
+        assert_eq!(pending.updates()[0].id, old_game.id);
+        lib.apply_prepared_import(pending, true).unwrap();
+        assert_eq!(lib.games().len(), 2);
+        assert_eq!(fs::read(&save).unwrap(), b"saved progress");
+        assert_eq!(
+            fs::read(old_game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"new"
+        );
+        for game in lib.games() {
+            assert!(!game.extracted_dir(lib.root()).join("Movies").exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_update_rolls_back_when_catalog_publish_fails() {
+        let root = tmpdir("prepared_update_rollback");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let old = update_fixture(&root, b"old");
+        let game = lib.import_zip(&old).unwrap().clone();
+        let save = game.save_dir(lib.root()).join("progress.dat");
+        fs::create_dir_all(save.parent().unwrap()).unwrap();
+        fs::write(&save, b"progress").unwrap();
+        let new = update_fixture(&root, b"new");
+        let pending = lib.prepare_import(&new).unwrap();
+        fs::remove_file(lib.root().join("library.json")).unwrap();
+        fs::create_dir(lib.root().join("library.json")).unwrap();
+        assert!(lib.apply_prepared_import(pending, true).is_err());
+        assert_eq!(
+            fs::read(game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"old"
+        );
+        assert_eq!(fs::read(save).unwrap(), b"progress");
+        assert_eq!(lib.games().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn single_directory_unwrapping_preserves_sdk_card_boundaries() {
         use std::io::Write;
@@ -3839,6 +4116,43 @@ mod tests {
             "My custom Chicane"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalogue_corrects_old_variant_dates_without_renaming_custom_titles() {
+        let root = tmpdir("variant_date_migration");
+        let mut lib = Library::open(&root).unwrap();
+        for (id, old_name) in [
+            ("GZGA900069", "Catapult (may 2005)"),
+            ("GZGA800056", "Agaju (october 2005)"),
+        ] {
+            let mut entry = entry_with_install_dir(None);
+            entry.id = id.into();
+            entry.display_name = old_name.into();
+            entry.executable = "extracted/autorun.exe".into();
+            write_pe_importing(&entry.executable_path(&root), &[]);
+            lib.library.games.push(entry);
+        }
+        lib.save().unwrap();
+        let mut loaded = Library::open(&root).unwrap();
+        assert_eq!(
+            loaded.get("GZGA900069").unwrap().display_name,
+            "Catapult (august 2005)"
+        );
+        assert_eq!(
+            loaded.get("GZGA800056").unwrap().display_name,
+            "Agaju (august 2005)"
+        );
+        loaded.rename_game("GZGA800056", "My Agaju demo").unwrap();
+        assert_eq!(
+            Library::open(&root)
+                .unwrap()
+                .get("GZGA800056")
+                .unwrap()
+                .display_name,
+            "My Agaju demo"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

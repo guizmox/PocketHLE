@@ -186,3 +186,58 @@ fixes audio-only intros without changing decoding or adding a Colors exception.
 
 GZGA800016 is catalogued as Chicane (E3 demo), independently of the licensed
 cars version and the retail title.
+
+Additional alternative-version catalogue entries:
+
+| Card ID | Title |
+| --- | --- |
+| GZGA800015 | Colors (E3 demo) |
+| GZGA700016 | Chicane (early demo) |
+| GZGA900032 | Conflict Vietnam (Interim Demo) |
+| GZGA200097 | Unfinished Business (Gametrac Demo) |
+
+These codes were unused in the shared catalogue when added. The 700/800/900
+codes are local variant labels; they are not inferred official cartridge IDs.
+Existing Colors and Chicane variants retain their codes and names. Desktop and
+Android both read this shared table. Game folders must use the assigned code.
+
+### Updating an installed game
+
+Desktop and Android prepare imports in an isolated temporary library before
+publishing files. Existing IDs trigger an English update confirmation listing
+the affected games. A mixed GZGA collection lists updates and the count of new
+games; cancelling discards the entire prepared import. Normal ZIP classification
+and directory unwrapping are unchanged.
+
+Confirmation replaces the imported game contents and refreshes imported metadata
+and artwork. Per-game saves, shared Flash Disk data, custom titles and game
+settings are retained. Current preferences and saves are read at publication,
+not at preparation. Publication uses the existing backup/rollback transaction;
+an installation appearing during the dialog requires a new confirmation. The
+library UI stays unavailable during preparation, confirmation and publication.
+Updating a demo-card launcher does not automatically split it again.
+
+The catalogue names for GZGA900069 and GZGA800056 are respectively
+`Catapult (august 2005)` and `Agaju (august 2005)`. Opening an older library
+corrects the former automatic May/October names, leaving custom titles intact.
+
+### Supernaturals demo skybox
+
+The supplied GZGA200099 executable sets a camera's far plane to 4.5, while its
+sky cube has coordinates +/-4 and some transformed corners lie beyond that
+plane. Correct far-plane clipping cuts triangular gaps out of the sky in both
+GPU and software rendering. The old software path masked the problem by not
+clipping the far plane; commit 64276c2f7920a34e88c4ce859ab4b9257c750824 added
+six-plane clipping. The six sky textures are present and decode correctly.
+
+`tools/patch-supernaturals-skybox.py` recognises the exact supplied executable
+by SHA256 and changes the camera far plane from 4.5 to 16. The single changed
+byte is at file offset 0x12D20 (ARM instruction at guest VA 0x23920); all assets
+and other executable bytes are unchanged. This camera is used by Journal and
+may also be used by gameplay, so this is a game-executable correction, not a
+Journal-only renderer exception. The separate camera instruction at 0x25340
+is unchanged. Journal was checked in both rendering modes; full-game coverage
+is not implied. PocketHLE's clipping implementation is unchanged.
+
+Usage: `python3 tools/patch-supernaturals-skybox.py Supernaturals.exe fixed.exe`.
+The output must not already exist. Unknown builds are rejected before writing.

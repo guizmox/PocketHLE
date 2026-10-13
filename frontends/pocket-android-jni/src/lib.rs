@@ -123,6 +123,82 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_listGames<'local>(
     }
 }
 
+// Prepared imports own their temporary trees until the Activity confirms or
+// cancels. Tokens are opaque IDs, never guest pointers or arbitrary host paths.
+static PREPARED_IMPORTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u64, (PathBuf, pocket_library::PreparedImport)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static NEXT_IMPORT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn take_prepared_import(root: &Path, token: u64) -> anyhow::Result<pocket_library::PreparedImport> {
+    let mut imports = PREPARED_IMPORTS.lock().unwrap_or_else(|e| e.into_inner());
+    anyhow::ensure!(
+        imports.get(&token).is_some_and(|(owner, _)| owner == root),
+        "unknown import token or wrong library"
+    );
+    Ok(imports.remove(&token).unwrap().1)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_prepareImport<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    source: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        let path = jstring_to_path(&mut env, source).context("missing import source")?;
+        let pending = Library::open(&root)?.prepare_import(path)?;
+        let token = NEXT_IMPORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let json = serde_json::json!({"ok": true, "token": token.to_string(), "count": pending.entries().len(), "updates": pending.updates()});
+        let mut imports = PREPARED_IMPORTS.lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(imports.len() < 16, "too many pending imports");
+        imports.insert(token, (root, pending));
+        Ok(json.to_string())
+    })();
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("prepareImport: {e:#}"))),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+    allow_updates: jni::sys::jboolean,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        let pending = take_prepared_import(&root, token as u64)?;
+        let entries = Library::open(&root)?.apply_prepared_import(pending, allow_updates != 0)?;
+        if entries.len() == 1 && !entries[0].source_cab.starts_with("gzga-collection:") {
+            Ok(serde_json::to_string(&entries[0])?)
+        } else {
+            Ok(serde_json::to_string(&entries)?)
+        }
+    })();
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("commitPreparedImport: {e:#}"))),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_cancelPreparedImport<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+) {
+    if let Some(root) = jstring_to_path(&mut env, library_root) {
+        let _ = take_prepared_import(&root, token as u64);
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_importCab<'local>(
     mut env: JNIEnv<'local>,

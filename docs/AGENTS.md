@@ -2697,7 +2697,7 @@ unchanged, including exact GZGA270 and GZGA280 entries; no prefix substitution
 is inferred. Both known Colors IDs enable the global text-language preference.
 
 User-requested local alternative-version catalogue IDs are GZGA900056 for
-Agaju (E3 demo) and GZGA900069 for Catapult (may 2005). These are custom
+Agaju (E3 demo) and GZGA900069 for Catapult (august 2005). These are custom
 launcher labels, not inferred official title IDs or patches to game binaries.
 
 The maintainer confirms GZGA200069 as Catapult. That exact ID is registered;
@@ -2722,7 +2722,7 @@ localisation/english.loc NULL-file crash at 0x21db8 (LR 0x175c4) with the suppli
 launcher in a "14 - Complete Set of Games" wrapper, without relaxing VFS path
 isolation or adding a guest NULL-handle workaround.
 
-Catalogue additions: local GZGA800056 = Agaju (oct 2005), GZGA900016 = Chicane
+Catalogue additions: local GZGA800056 = Agaju (august 2005), GZGA900016 = Chicane
 (alternative), GZGA900015 = Colors (early demo); maintainer GZGA200098 = Alien Hominid.
 
 Local GZGA900013 labels the user-supplied Richard Burns Rally (april 2005) variant.
@@ -2781,3 +2781,30 @@ default true). Colors calls put_Visible(false) while preparing its intro and
 expects Run to reveal it. Idempotent Run/Pause must not re-show a window hidden
 during playback. AutoShow false is honored. Official contract:
 https://learn.microsoft.com/en-us/previous-versions/ms786976(v=vs.85)
+
+Catalogue additions (2026-10-13): local GZGA800015 = Colors (E3 demo),
+GZGA700016 = Chicane (early demo), GZGA900032 = Conflict Vietnam (Interim Demo).
+The maintainer requests GZGA200097 = Unfinished Business (Gametrac Demo);
+that exact identifier was unallocated in the table. All previous mappings are
+preserved. These are title catalogue entries, not executable/card-serial patches.
+
+GUI imports use Library::prepare_import followed by apply_prepared_import.
+Preparation runs the existing importers once in an isolated temporary library,
+including nested-container imports; Installed IDs must be confirmed before
+publication. PreparedImport owns the temporary tree and drops it on cancellation.
+Both desktop and Android keep library interaction disabled through confirmation.
+The JNI bridge stores owned preparations behind opaque, library-bound tokens,
+which the Activity cancels on destruction. Updates retain current per-game saves,
+shared Flash Disk contents, custom titles and settings using the existing atomic
+publication/rollback mechanism. Never bypass the newly-installed-ID confirmation
+check when applying a prepared import. Demo-card updates do not trigger split.
+
+Catalogue date corrections migrate only the exact former automatic labels:
+GZGA900069 Catapult (august 2005), GZGA800056 Agaju (august 2005).
+
+The provided Supernaturals demo's camera far plane (4.5) clips its +/-4 sky cube.
+The guarded tools/patch-supernaturals-skybox.py changes only the instruction at
+VA 0x23920/file 0x12D20 to far=16, for one SHA256-identified executable. The camera
+is used by Journal and may be shared with gameplay. No rendering exception is
+introduced: proper six-plane clipping from 64276c2f remains intact. See
+docs/GIZMONDO.md for reproduction scope and the patch's exact binary identity.

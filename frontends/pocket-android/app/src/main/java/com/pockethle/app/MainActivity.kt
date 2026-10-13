@@ -204,8 +204,12 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         busyDialog?.dismiss()
         busyDialog = null
+        pendingImportToken?.let { NativeBridge.cancelPreparedImport(rootDir, it) }
+        pendingImportToken = null
         super.onDestroy()
     }
+
+    @Volatile private var pendingImportToken: Long? = null
 
     private fun handleImport(uri: Uri) {
         if (libraryBusy) return
@@ -218,7 +222,17 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.IO) {
                     runCatching {
                         val cabFile = LibraryPaths.copyUriToCache(this@MainActivity, uri, name)
-                        importArchiveOrExe(cabFile)
+                        val raw = NativeBridge.prepareImport(rootDir, cabFile.absolutePath)
+                        val obj = JSONObject(raw)
+                        if (!obj.optBoolean("ok", false)) error(obj.optString("error"))
+                        val token = obj.getString("token").toLong()
+                        pendingImportToken = token
+                        if (isDestroyed || isFinishing) {
+                            NativeBridge.cancelPreparedImport(rootDir, token)
+                            pendingImportToken = null
+                            error("Import cancelled")
+                        }
+                        raw
                     }
                 }
             } finally {
@@ -228,8 +242,7 @@ class MainActivity : AppCompatActivity() {
 
             result.fold(
                 onSuccess = { raw ->
-                    handleImportResult(raw)
-                    refreshLibrary()
+                    showPreparedImport(raw)
                 },
                 onFailure = { err ->
                     Snackbar.make(
@@ -242,48 +255,61 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun importArchiveOrExe(file: java.io.File): String {
-        val signature = file.inputStream().use { input ->
-            ByteArray(4).also { buffer ->
-                var offset = 0
-                while (offset < buffer.size) {
-                    val count = input.read(buffer, offset, buffer.size - offset)
-                    if (count < 0) break
-                    offset += count
-                }
-            }
+    private fun showPreparedImport(raw: String) {
+        val obj = JSONObject(raw)
+        val token = obj.getString("token").toLong()
+        val updates = obj.getJSONArray("updates")
+        if (updates.length() == 0) {
+            commitPreparedImport(token, false)
+            return
         }
-        val isZip = signature[0] == 'P'.code.toByte() &&
-            signature[1] == 'K'.code.toByte() &&
-            (signature[2] == 3.toByte() || signature[2] == 5.toByte() || signature[2] == 7.toByte())
-        val isCab = signature.contentEquals(byteArrayOf(
-            'M'.code.toByte(),
-            'S'.code.toByte(),
-            'C'.code.toByte(),
-            'F'.code.toByte(),
-        ))
-        val isExe = signature[0] == 'M'.code.toByte() && signature[1] == 'Z'.code.toByte()
+        val names = (0 until updates.length()).map { updates.getJSONObject(it).getString("display_name") }
+        val newCount = obj.getInt("count") - updates.length()
+        setLibraryBusy("Waiting for update confirmation…")
+        busyDialog?.dismiss()
+        busyDialog = null
+        val message = "Already installed:\n" + names.joinToString("\n") +
+            "\n\nReplace their game files and keep saves, names and settings?" +
+            if (newCount > 0) "\n$newCount new game(s) will also be imported." else ""
+        AlertDialog.Builder(this).setTitle("Update existing games?")
+            .setMessage(message).setCancelable(false)
+            .setNegativeButton("Cancel import") { _, _ ->
+                NativeBridge.cancelPreparedImport(rootDir, token)
+                pendingImportToken = null
+                setLibraryBusy(null)
+            }
+            .setPositiveButton("Update games") { _, _ -> commitPreparedImport(token, true) }
+            .show()
+    }
 
-        return when {
-            isZip -> NativeBridge.importZip(rootDir, file.absolutePath)
-            isCab -> NativeBridge.importCab(rootDir, file.absolutePath)
-            isExe -> NativeBridge.importExe(rootDir, file.absolutePath)
-            file.extension.equals("rar", ignoreCase = true) ->
-                NativeBridge.importRar(rootDir, file.absolutePath)
-            file.extension.equals("zip", ignoreCase = true) -> NativeBridge.importZip(rootDir, file.absolutePath)
-            file.extension.equals("cab", ignoreCase = true) -> NativeBridge.importCab(rootDir, file.absolutePath)
-            file.extension.equals("exe", ignoreCase = true) -> NativeBridge.importExe(rootDir, file.absolutePath)
-            else -> error("Unsupported file: choose a RAR, ZIP, CAB, or ARM EXE, or a Windows installer")
+    private fun commitPreparedImport(token: Long, allowUpdates: Boolean) {
+        setLibraryBusy(if (allowUpdates) "Updating game files…" else "Importing games…")
+        lifecycleScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    runCatching { NativeBridge.commitPreparedImport(rootDir, token, allowUpdates) }
+                }
+            } finally {
+                NativeBridge.cancelPreparedImport(rootDir, token)
+                pendingImportToken = null
+                setLibraryBusy(null)
+            }
+            result.fold(onSuccess = { raw ->
+                handleImportResult(raw, !allowUpdates)
+                refreshLibrary()
+            }, onFailure = { err ->
+                Snackbar.make(recycler, getString(R.string.import_failed, err.message ?: "unknown"), Snackbar.LENGTH_LONG).show()
+            })
         }
     }
 
-    private fun handleImportResult(raw: String) {
+    private fun handleImportResult(raw: String, confirmName: Boolean = true) {
         try {
             if (raw.trimStart().startsWith("[")) {
                 val entries = GameEntry.listFromJson(raw)
                 gizmondoTab = true
                 findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs).getTabAt(0)?.select()
-                Snackbar.make(recycler, "Imported ${entries.size} separate games.", Snackbar.LENGTH_LONG).show()
+                Snackbar.make(recycler, if (confirmName) "Imported ${entries.size} separate games." else "Imported or updated ${entries.size} games. Saves and settings kept.", Snackbar.LENGTH_LONG).show()
                 return
             }
             val obj = JSONObject(raw)
@@ -297,7 +323,7 @@ class MainActivity : AppCompatActivity() {
             }
             val name = obj.optString("display_name", obj.optString("id", "?"))
             val id = obj.getString("id")
-            if (NativeBridge.isDemoCard(rootDir,id)) {
+            if (confirmName && NativeBridge.isDemoCard(rootDir,id)) {
                 AlertDialog.Builder(this).setTitle("Import demo card")
                     .setMessage("Keep the original launcher or create a separate directory and library entry for each game?")
                     .setCancelable(false)
@@ -318,10 +344,10 @@ class MainActivity : AppCompatActivity() {
                             },onFailure={ e -> Snackbar.make(recycler,"Could not split card: ${e.message}",Snackbar.LENGTH_LONG).show() })
                         }
                     }.show()
-            } else editGameName(id, name, "Confirm game name")
+            } else if (confirmName) editGameName(id, name, "Confirm game name")
             Snackbar.make(
                 recycler,
-                getString(R.string.import_success, name),
+                if (confirmName) getString(R.string.import_success, name) else "Updated $name; saves and settings kept.",
                 Snackbar.LENGTH_SHORT,
             ).show()
         } catch (e: Exception) {
