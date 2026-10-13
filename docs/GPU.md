@@ -131,7 +131,12 @@ Windows device performance still require user builds/tests.
 
 Brightness slider positions remain registry 1/11/21/31. Neutral/default is 11,
 unchanged pixels. Minimum 1 now blends 20% toward black (128 becomes 103), between
-the earlier 50% and 1/12 settings. Upper steps and ceiling remain unchanged.
+the earlier 50% and 1/12 settings. The upper range now uses a reduced ceiling:
+level 4 (registry 31) matches the previous level 3, blending 1/12 toward white;
+level 3 (registry 21) blends 1/24 toward white, halfway from neutral to that ceiling.
+For channel 128 the four displayed levels are 103/128/133/138. Guest pixels and
+registry values are unchanged; the common presentation path applies this to both
+GPU and software.
 
 
 ### Point and line rasterization (software and native GPU)

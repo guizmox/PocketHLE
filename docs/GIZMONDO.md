@@ -72,7 +72,9 @@ The Gizmondo Brightness button opens the game's menu through its guest key.
 Backlight registry/events control bounded image adjustment; this is not host
 screen brightness. The four Colors positions are 1/11/21/31; 11 is neutral and
 matches the original image. Missing/invalid values use 11. The minimum darkens
-by about 20%, and the maximum blends one sixth toward white; neither blacks out
+by about 20%, and the maximum blends one twelfth toward white. Level 4 uses the
+previous level 3; the new level 3 blends one twenty-fourth toward white, halfway
+between neutral level 2 and the new maximum. Neither blacks out
 nor whites out the screen. Screenshots follow the existing displayed-image path.
 
 ## Battery, shell status and video

@@ -1,14 +1,4 @@
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/sdl.rs
-crates/pocket-kernel/src/zlib.rs
-crates/pocket-library/src/lib.rs
-crates/pocket-winceapi/src/lib.rs
-crates/pocket-winceapi/src/game_dlls.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/gx.rs
-crates/pocket-winceapi/src/sdl.rs
-crates/pocket-winceapi/src/zlib.rs
-frontends/pocket-desktop/src/runner.rs
-frontends/pocket-android-jni/src/runner.rs
-docs/AGENTS.md
+crates/pocket-kernel/src/framebuffer.rs
+docs/GPU.md
 docs/GIZMONDO.md
+docs/AGENTS.md

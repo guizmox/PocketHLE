@@ -128,8 +128,9 @@ impl Framebuffer {
             (c - c * (11 - self.backlight_level) / 50) as u8
         } else {
             // Colors' four positions are 1/11/21/31: the second is neutral.
-            // The third is halfway to the reduced maximum (one sixth white).
-            (c + (255 - c) * (self.backlight_level - 11) / 120) as u8
+            // Level 4 now uses the previous level 3 (one twelfth white).
+            // Level 3 is halfway from neutral to that ceiling (one twenty-fourth).
+            (c + (255 - c) * (self.backlight_level - 11) / 240) as u8
         }
     }
 
@@ -451,15 +452,15 @@ mod tests {
         fb.set_backlight_level(1);
         assert_eq!(fb.backlight_channel(128), 103);
         fb.set_backlight_level(31);
-        assert_eq!(fb.backlight_channel(128), 149);
+        assert_eq!(fb.backlight_channel(128), 138);
         let maximum = fb.snapshot_rgba8888();
         fb.set_backlight_level(21);
         assert_ne!(fb.snapshot_rgba8888(), maximum);
-        assert_eq!(fb.backlight_channel(128), 138);
+        assert_eq!(fb.backlight_channel(128), 133);
         let middle = fb.backlight_channel(128);
         fb.set_backlight_level(11);
         assert!(fb.backlight_channel(128) < middle);
-        assert!(middle < 149);
+        assert!(middle < 138);
         fb.set_backlight_level(11);
         for channel in 0..=255u8 {
             assert_eq!(fb.backlight_channel(channel), channel);

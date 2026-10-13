@@ -2442,9 +2442,11 @@ game owns its menu. Registry defaults are Level/OnLevel 11, DimLevel 0 (the SDK
 hardware default was 24). Runners
 synchronise OnLevel during existing frontend polling. Presentation maps RGB
 channels with level 11 reproducing the unmodified image and level 1 blending
-one fifth toward black (20% dimming). The visual ceiling is the former penultimate Colors setting,
-21 (one sixth white blend), reached at slider 31. Levels above neutral 11
-are scaled across the entire upper range: slider 21 is halfway to slider 31. This avoids the washed-out former maximum and preserves distinct steps.
+one fifth toward black (20% dimming). The visual ceiling at slider 31 now uses
+the previous slider-21 appearance (one twelfth white blend). The new slider 21
+blends one twenty-fourth toward white, halfway from neutral to slider 31.
+The four positions display channel 128 as 103/128/133/138, with levels 1 and 2
+unchanged. Levels above neutral 11 are scaled across the entire upper range.
 Missing/wrong-type values, 0 and out-of-range DWORDs fall back to 11 on every
 frontend sync, including after a previous dim setting. Device snapshot loading
 also repairs missing/invalid Level and OnLevel and missing DimLevel before
