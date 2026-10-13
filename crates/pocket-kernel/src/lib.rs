@@ -3451,6 +3451,31 @@ pub fn run_main_loop_with_hook(
                         mem = dump_mem_around(cpu, pc_now, 16),
                         stack = dump_stack_code_addrs(cpu, sp_now, 64, image_base, image_end),
                     );
+                // Report ownership at the fault, without reading the pointed-to
+                // bytes or changing permissions. Colors E3's Android strcmp
+                // fault needs reserve/commit metadata to distinguish a stale
+                // arena pointer from a CPU protection-tracking error.
+                for (label, reg) in [("R0", ArmReg::R0), ("R1", ArmReg::R1)] {
+                    let address = cpu.read_reg(reg).unwrap_or(0);
+                    if let Some((base, size, committed)) = process.state.heap.virtual_block(address)
+                    {
+                        log::error!(
+                            "{label} memory: addr=0x{address:08x}, virtual reservation=0x{base:08x}+0x{size:x}, page_committed={}, committed_pages={}",
+                            committed.contains(&(address / 4096)), committed.len()
+                        );
+                    } else if let Some((&base, &size)) =
+                        process.state.heap.live.iter().find(|&(base, size)| {
+                            address >= *base
+                                && address
+                                    .checked_sub(*base)
+                                    .is_some_and(|offset| offset < *size)
+                        })
+                    {
+                        log::error!("{label} memory: addr=0x{address:08x}, live heap allocation=0x{base:08x}+0x{size:x}");
+                    } else {
+                        log::error!("{label} memory: addr=0x{address:08x}, no matching tracked heap allocation or virtual reservation");
+                    }
+                }
                 return Err(e.into());
             }
         };

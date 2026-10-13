@@ -6,6 +6,14 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 static TITLES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
+/// Local catalogue IDs distinguish alternative builds from the original card.
+pub fn is_alternative(id: &str) -> bool {
+    let id = id.to_ascii_uppercase();
+    id.starts_with("GZGA")
+        && matches!(id.as_bytes().get(4), Some(b'7' | b'8' | b'9'))
+        && lookup(&id).is_some()
+}
+
 pub fn lookup(id: &str) -> Option<&'static str> {
     TITLES
         .get_or_init(|| {

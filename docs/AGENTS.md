@@ -2839,3 +2839,24 @@ set explicitly by the test and production timer behavior is unchanged.
 Corrective source ZIPs include patch-files.txt (one modified/added relative path
 per line) and patch-remove-files.txt when needed. Preserve the maintainer's
 PowerShell timestamp command; do not substitute a different delivery workflow.
+
+Android Colors E3 protected-read diagnostic: the supplied log faults in the
+native strcmp thunk at 0x70000300, caller 0x9509c, with R0=0x37316b and protected
+page 0x373000. Local runs with native Unicorn 2.1.4/2.1.5 reach the E3 menu;
+the user reproduced the conflict on Windows and confirmed that another Colors
+version had written the shared Flash Disk config. The SDK parser's signed key
+hash becomes a negative bucket index while loading that config before the menu.
+Known local alternative catalogue IDs (700/800/900) now mount Flash Disk from
+GameEntry::gizmondo_flash_dir: games/<entry.id>/saves/flash, in both GUI runners.
+Standard titles retain library/flash. Identify variants by catalogue ID or
+declared SD/Storage Card install alias, never by mutable display names or the
+original SDK marker. Do not copy incompatible shared data into a new ALT area.
+Old shared files remain intact; normal prepared reimports preserve the ALT
+Flash Disk recursively with the rest of saves. Child processes use the same
+entry identity. No game, division helper or memory-protection patch is needed.
+CPU faults also report R0/R1 heap or
+virtual-reservation ownership and committed-page status without reading those
+buffers. VirtualAlloc/VirtualFree emit debug-level allocation/range records.
+Android Settings / Log verbosity=3 enables API trace; the default info level
+cannot show these records. This diagnostic does not change memory protections,
+allocation behavior, renderer selection or any game executable.

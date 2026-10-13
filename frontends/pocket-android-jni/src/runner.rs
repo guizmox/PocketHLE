@@ -522,7 +522,12 @@ fn run_process(
     emu.mount_read_only_dir("\\Program Files\\", &extracted);
     emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
     if is_gizmondo {
-        emu.mount_save_dir("\\Flash Disk\\", library_root.join("flash"));
+        let flash_disk = entry.gizmondo_flash_dir(library_root);
+        emu.mount_save_dir("\\Flash Disk\\", &flash_disk);
+        summary_lines.push(format!(
+            "Mounted Gizmondo Flash Disk at {}",
+            flash_disk.display()
+        ));
         emu.mount_read_only_dir("\\SD Card\\", card_root);
         emu.mount_read_only_dir("\\Storage Card\\", card_root);
         emu.mount_read_only_dir("\\SD Card\\Game\\", &extracted);

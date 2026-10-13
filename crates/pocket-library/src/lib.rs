@@ -341,6 +341,28 @@ impl GameEntry {
         save_data::save_dir_for(library_root, &self.id)
     }
 
+    /// Alternative builds retain the original SDK's Flash Disk paths, but
+    /// must not load another version's config/save format (Colors E3 crashes
+    /// parsing the standard build's config.cfg before its main menu).
+    pub fn gizmondo_flash_dir(&self, library_root: &Path) -> PathBuf {
+        let alternative = gizmondo_titles::is_alternative(&self.id)
+            || self.install_dirs.iter().any(|prefix| {
+                let parts: Vec<_> = prefix
+                    .split(['\\', '/'])
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                parts.len() == 2
+                    && (parts[0].eq_ignore_ascii_case("SD Card")
+                        || parts[0].eq_ignore_ascii_case("Storage Card"))
+                    && gizmondo_titles::is_alternative(parts[1])
+            });
+        if alternative {
+            self.save_dir(library_root).join("flash")
+        } else {
+            library_root.join("flash")
+        }
+    }
+
     /// Absolute path to the main executable.
     pub fn executable_path(&self, library_root: &Path) -> PathBuf {
         library_root
@@ -3810,6 +3832,10 @@ mod tests {
     }
 
     fn update_fixture(root: &Path, payload: &[u8]) -> PathBuf {
+        update_fixture_with_id(root, payload, "GZGA200016")
+    }
+
+    fn update_fixture_with_id(root: &Path, payload: &[u8], id: &str) -> PathBuf {
         use std::io::Write;
         let exe = root.join("fixture.exe");
         write_pe_importing(&exe, &[]);
@@ -3817,8 +3843,8 @@ mod tests {
         let zip = root.join("update.zip");
         let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
         for (name, bytes) in [
-            ("GZGA200016/autorun.exe", pe.as_slice()),
-            ("GZGA200016/data.bin", payload),
+            (format!("{id}/autorun.exe"), pe.as_slice()),
+            (format!("{id}/data.bin"), payload),
         ] {
             archive
                 .start_file(name, zip::write::FileOptions::default())
@@ -3827,6 +3853,33 @@ mod tests {
         }
         archive.finish().unwrap();
         zip
+    }
+
+    #[test]
+    fn alternative_flash_survives_confirmed_reimport() {
+        let root = tmpdir("alternative_flash_update");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let archive = update_fixture_with_id(&root, b"old", "GZGA800015");
+        let game = lib.import_zip(&archive).unwrap().clone();
+        let config = game
+            .gizmondo_flash_dir(lib.root())
+            .join("mygames/gzga200015 colors/config.cfg");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, b"compatible E3 config").unwrap();
+        let archive = update_fixture_with_id(&root, b"new", "GZGA800015");
+        let pending = lib.prepare_import(&archive).unwrap();
+        let updated = lib.apply_prepared_import(pending, true).unwrap();
+        assert_eq!(
+            updated[0].gizmondo_flash_dir(lib.root()),
+            game.gizmondo_flash_dir(lib.root())
+        );
+        assert_eq!(fs::read(config).unwrap(), b"compatible E3 config");
+        assert_eq!(
+            fs::read(game.extracted_dir(lib.root()).join("data.bin")).unwrap(),
+            b"new"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4204,6 +4257,47 @@ mod tests {
                 .unwrap()
                 .display_name,
             "My Agaju demo"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn alternative_flash_disks_do_not_share_standard_configs_or_each_other() {
+        let root = tmpdir("alternative_flash_disks");
+        let mut game = entry_with_install_dir(None);
+        game.id = "GZGA200015".into();
+        let standard = game.gizmondo_flash_dir(&root);
+        assert_eq!(standard, root.join("flash"));
+        let config = Path::new("mygames/gzga200015 colors/config.cfg");
+        fs::create_dir_all(standard.join(config).parent().unwrap()).unwrap();
+        fs::write(standard.join(config), b"standard configuration").unwrap();
+        for id in ["GZGA800015", "GZGA900015", "GZGA800016", "GZGA900056"] {
+            game.id = id.into();
+            let isolated = game.gizmondo_flash_dir(&root);
+            assert_eq!(isolated, game.save_dir(&root).join("flash"));
+            assert!(!isolated.join(config).exists());
+            fs::create_dir_all(isolated.join(config).parent().unwrap()).unwrap();
+            fs::write(isolated.join(config), id.as_bytes()).unwrap();
+        }
+        game.id = "GZGA800015".into();
+        game.display_name = "My renamed demo".into();
+        assert_eq!(
+            fs::read(game.gizmondo_flash_dir(&root).join(config)).unwrap(),
+            b"GZGA800015"
+        );
+        game.id = "old_archive_id".into();
+        game.install_dirs = vec!["\\SD Card\\gzga800015\\".into()];
+        assert_eq!(
+            game.gizmondo_flash_dir(&root),
+            game.save_dir(&root).join("flash")
+        );
+        game.install_dirs = vec!["\\SD Card\\GZGA200015\\".into()];
+        assert_eq!(game.gizmondo_flash_dir(&root), standard);
+        game.id = "GZGA999999".into();
+        assert_eq!(game.gizmondo_flash_dir(&root), standard);
+        assert_eq!(
+            fs::read(standard.join(config)).unwrap(),
+            b"standard configuration"
         );
         fs::remove_dir_all(root).unwrap();
     }

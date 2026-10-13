@@ -351,10 +351,11 @@ impl Runner {
         if is_gizmondo {
             // A real Gizmondo has two distinct storage areas: the game lives on
             // the removable SD card while persistent save data lives on the
-            // internal `\Flash Disk`.  Keep the latter writable and shared by
-            // Gizmondo titles so WinCE paths such as
+            // internal `\Flash Disk`. Alternative builds need an isolated
+            // backing directory because they reuse the standard card's paths.
+            // Preserve guest WinCE paths such as
             // `\Flash Disk\MyGames\Midway\Midway96.sav` work unchanged.
-            let flash_disk = library_root.join("flash");
+            let flash_disk = game.gizmondo_flash_dir(&library_root);
             emu.mount_save_dir("\\Flash Disk\\", &flash_disk);
             summary_lines.push(format!(
                 "Mounted Gizmondo Flash Disk at {}",

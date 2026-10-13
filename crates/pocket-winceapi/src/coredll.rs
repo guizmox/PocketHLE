@@ -9210,6 +9210,10 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             set_thread_error(ctx, ERROR_NOT_SUPPORTED);
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
+        log::debug!(
+            "VirtualAlloc addr=0x{addr:08x} size=0x{size:x} type=0x{kind:x} protect=0x{protect:x} -> 0x{base:08x}, reservation=0x{block_base:08x}+0x{block_size:x}, committed_pages={}",
+            committed.len()
+        );
         return Ok(DispatchOutcome::ReturnedR0(base));
     }
 
@@ -9260,6 +9264,9 @@ fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
+    log::debug!(
+        "VirtualFree addr=0x{address:08x} size=0x{size:x} type=0x{kind:x} -> success, affected=0x{start:08x}+0x{bytes:x}"
+    );
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 

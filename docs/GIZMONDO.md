@@ -260,6 +260,16 @@ Mounting the original card path resolves the asset loading and reaches the E3
 main menu. Desktop and Android both use the same alias list, including already
 installed games; no reimport or binary patch is required.
 
+Known alternative catalogue builds (local GZGA700/800/900 IDs) use their own
+`games/<game-id>/saves/flash/` as the guest `\Flash Disk\`, on Windows and Android.
+Their SDK save paths stay unchanged, but configurations from another build are
+not shared: Colors E3 can crash before its menu when loading the standard build's
+`MyGames/GZGA200015 Colors/config.cfg`. Standard titles continue using the existing
+shared `flash/`. Existing shared saves are retained; alternatives start with an
+empty isolated Flash Disk rather than copying potentially incompatible files.
+Reimport updates preserve these isolated saves. Recognition uses catalogue IDs
+and declared card aliases, so renaming a title does not change this behavior.
+
 ### Unfinished Business: zlib
 
 The provided zlib.dll exports confirm ordinal 22 = inflateInit_, 19 = inflate,
