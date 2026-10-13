@@ -2696,7 +2696,12 @@ and longitude. Remember coordinates/mode, but require an explicit enable for
 each launch. Simulation belongs to Colors only; other games retain host GPS
 when enabled. Desktop host-access preparation and Android permission requests
 must honor this same Colors identity guard, so simulation bypasses device GPS.
-The multiplayer server also moved into this menu; its previous value is saved.
+Android startup includes Fill GPS using DevicePositionRequest: copy the newest
+valid cached device fix first, otherwise request a fix with the existing 20s
+timeout. Permission denial/unavailability leave coordinates unchanged; filling
+never enables Fake GPS or persists the draft. Close/Start/onStop cancel capture;
+a pending permission callback cannot update a dismissed menu. The multiplayer
+server has a separate spaced section heading; its previous value is saved.
 Gizmondo options retain hardware activations. The Colors player-ID editor is
 hidden; persisted installation identity generation remains unchanged.
 

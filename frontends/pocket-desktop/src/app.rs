@@ -2759,14 +2759,7 @@ impl PocketLauncher {
     }
 
     fn spawn_import_dialog(&mut self) {
-        if self.colors_startup_prompt.is_some() {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.label(&self.status);
-            });
-            self.ui_colors_startup(ctx);
-            return;
-        }
-        if self.library_busy || self.demo_import.is_some() {
+        if self.library_busy || self.demo_import.is_some() || self.colors_startup_prompt.is_some() {
             return;
         }
         self.library_busy = true;
@@ -3044,6 +3037,13 @@ impl eframe::App for PocketLauncher {
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        if self.colors_startup_prompt.is_some() {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(&self.status);
+            });
+            self.ui_colors_startup(ctx);
+            return;
+        }
         if self.library_busy || self.demo_import.is_some() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.vertical_centered(|ui| {

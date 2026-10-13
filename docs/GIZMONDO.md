@@ -115,6 +115,10 @@ or **Manual coordinates** (latitude −90..90, longitude −180..180). Coordinat
 and mode are remembered. Simulated GPS works even when hardware GPS is disabled,
 and skips real location access/permission requests. Other games keep real GPS.
 
+On Android, **Fill GPS** copies the latest known device position, or requests a
+new fix if none is cached. It fills the draft coordinates without enabling Fake
+GPS or saving them until Start. Closing the menu cancels the position request.
+
 The same menu holds **Colors multiplayer server**, retaining the previous value;
 blank restores the public server. **Start** saves these choices and launches;
 **Cancel** discards draft changes. Language, simulated GPS and server editors

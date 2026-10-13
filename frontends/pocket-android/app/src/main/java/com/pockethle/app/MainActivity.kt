@@ -38,6 +38,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
     private lateinit var rootDir: String
+    private var colorsGpsRequest: DevicePositionRequest? = null
+    private var cancelColorsGpsFill: (() -> Unit)? = null
+    private var pendingGpsFill: (() -> Unit)? = null
+    private val gpsFillPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val fill = pendingGpsFill
+        pendingGpsFill = null
+        if (grants.values.any { it }) fill?.invoke()
+        else if (fill != null) android.widget.Toast.makeText(this, "Location permission denied", android.widget.Toast.LENGTH_LONG).show()
+    }
+
+    override fun onStop() {
+        cancelColorsGpsFill?.invoke()
+        super.onStop()
+    }
 
     private val importGame = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -409,18 +425,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showColorsStartup(entry: GameEntry, languages: JSONArray, config: JSONObject) {
+        lateinit var dialog: AlertDialog
         val content = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             val padding = (20 * resources.displayMetrics.density).toInt()
             setPadding(padding, padding, padding, padding)
         }
-        fun label(text: String) { content.addView(TextView(this).apply { this.text = text }) }
+        fun label(text: String): TextView = TextView(this).apply { this.text = text }.also { content.addView(it) }
         fun spinner(labels: List<String>) = android.widget.Spinner(this).also {
             it.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
             content.addView(it)
         }
-        fun field(title: String, value: String, coordinates: Boolean = false): android.widget.EditText {
-            label(title)
+        fun field(title: String, value: String, coordinates: Boolean = false, sectionTitle: Boolean = false): android.widget.EditText {
+            val heading = label(title)
+            if (sectionTitle) {
+                heading.setTypeface(heading.typeface, android.graphics.Typeface.BOLD)
+                heading.textSize = 18f
+                heading.setPadding(0, 0, 0, (8 * resources.displayMetrics.density).toInt())
+            }
             return android.widget.EditText(this).also {
                 it.setText(value)
                 it.setSingleLine(true)
@@ -452,6 +474,50 @@ class MainActivity : AppCompatActivity() {
         val longitude = field("Longitude", config.optDouble("gps_fixed_longitude", 0.0).toString(), true)
         label("Decimal coordinates: north/east positive, south/west negative.")
         label("Fake GPS replaces device location for this launch.")
+        val fillStatus = TextView(this)
+        val fillGps = android.widget.Button(this).apply { text = "Fill GPS" }
+        content.addView(fillGps)
+        content.addView(fillStatus)
+        fillStatus.text = "Copy the latest known position, or request a new fix."
+        fun fillDevicePosition() {
+            if (!dialog.isShowing || colorsGpsRequest != null) return
+            val permissions = GpsHost.permissions()
+            val granted = permissions.any {
+                androidx.core.content.ContextCompat.checkSelfPermission(this, it) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+            if (!granted) {
+                pendingGpsFill = { fillDevicePosition() }
+                gpsFillPermissions.launch(permissions)
+                return
+            }
+            fillGps.isEnabled = false
+            fillStatus.text = "Waiting for device position…"
+            colorsGpsRequest = DevicePositionRequest(this) { location, message ->
+                colorsGpsRequest = null
+                if (dialog.isShowing) {
+                    fillGps.isEnabled = true
+                    if (location != null) {
+                        latitude.setText(location.latitude.toString())
+                        longitude.setText(location.longitude.toString())
+                        val timestamp = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(location.time))
+                        fillStatus.text = "Coordinates copied (position: $timestamp)"
+                        // Filling coordinates never enables Fake GPS or saves the draft.
+                    } else {
+                        fillStatus.text = message ?: "No position available"
+                    }
+                }
+            }
+            colorsGpsRequest?.start()
+        }
+        cancelColorsGpsFill = {
+            if (colorsGpsRequest != null) {
+                colorsGpsRequest?.close()
+                colorsGpsRequest = null
+                fillGps.isEnabled = true
+                fillStatus.text = "Position request canceled. Tap Fill GPS to try again."
+            }
+        }
+        fillGps.setOnClickListener { fillDevicePosition() }
         fun updateGpsControls() {
             mode.isEnabled = fakeGps.isChecked
             latitude.isEnabled = fakeGps.isChecked && mode.selectedItemPosition == 1
@@ -463,17 +529,31 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
         updateGpsControls()
-        val server = field("Colors multiplayer server", config.optString("colors_server_url"))
+        content.addView(View(this).apply { setBackgroundColor(android.graphics.Color.GRAY) }, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            (1 * resources.displayMetrics.density).toInt().coerceAtLeast(1),
+        ).apply {
+            topMargin = (20 * resources.displayMetrics.density).toInt()
+            bottomMargin = (16 * resources.displayMetrics.density).toInt()
+        })
+        val server = field("Colors multiplayer server", config.optString("colors_server_url"), sectionTitle = true)
         label("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.")
-        val dialog = AlertDialog.Builder(this)
+        dialog = AlertDialog.Builder(this)
             .setTitle("Colors startup")
             .setView(android.widget.ScrollView(this).apply { addView(content) })
             .setPositiveButton("Start", null)
             .setNegativeButton(android.R.string.cancel, null)
             .create()
-        dialog.setOnDismissListener { launchPending = false }
+        dialog.setOnDismissListener {
+            cancelColorsGpsFill?.invoke()
+            cancelColorsGpsFill = null
+            pendingGpsFill = null
+            launchPending = false
+        }
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                pendingGpsFill = null
+                cancelColorsGpsFill?.invoke()
                 val lat = latitude.text.toString().trim().replace(',', '.').toDoubleOrNull()
                 val lon = longitude.text.toString().trim().replace(',', '.').toDoubleOrNull()
                 if (fakeGps.isChecked && mode.selectedItemPosition == 1 &&
