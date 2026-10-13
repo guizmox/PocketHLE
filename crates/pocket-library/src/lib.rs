@@ -780,6 +780,9 @@ pub struct LauncherConfig {
     /// Physical controller inputs, independent of keyboard bindings.
     #[serde(default = "keybindings::default_gamepad_bindings")]
     pub gamepad_bindings: std::collections::BTreeMap<String, GuestButton>,
+    /// Desktop host action, independent of guest Piano 5 / VK_F11.
+    #[serde(default = "keybindings::default_gamepad_fullscreen")]
+    pub gamepad_fullscreen: Option<String>,
     /// Show the `Backend: … / Running…` status line under the game.
     ///
     /// It is a debug read-out, and on a phone in landscape it eats a
@@ -931,6 +934,14 @@ fn default_fullscreen_mode() -> String {
     "with_controls".to_string()
 }
 
+impl LauncherConfig {
+    pub fn gamepad_toggles_fullscreen(&self, control: &str) -> bool {
+        // Preserve an existing custom guest binding when upgrading old configs.
+        self.gamepad_fullscreen.as_deref() == Some(control)
+            && !self.gamepad_bindings.contains_key(control)
+    }
+}
+
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
@@ -960,6 +971,7 @@ impl Default for LauncherConfig {
             orientation: default_orientation(),
             keybindings: KeyBindings::default(),
             gamepad_bindings: keybindings::default_gamepad_bindings(),
+            gamepad_fullscreen: keybindings::default_gamepad_fullscreen(),
             show_backend_log: default_show_backend_log(),
             controls_opacity: default_controls_opacity(),
         }
@@ -1004,6 +1016,13 @@ struct LibraryFile {
     #[serde(default)]
     games: Vec<GameEntry>,
 }
+
+/// Deck settings are isolated while the imported catalogue remains shared.
+pub const CONFIG_FILE_NAME: &str = if cfg!(feature = "steam-deck") {
+    "config-steamdeck.json"
+} else {
+    "config.json"
+};
 
 /// Resolve the default library root, in the order the desktop
 /// launcher has always used:
@@ -1131,7 +1150,7 @@ impl Library {
         fs::create_dir_all(root.join("games"))?;
 
         let library = read_or_default::<LibraryFile>(&root.join("library.json"))?;
-        let config = read_or_default::<LauncherConfig>(&root.join("config.json"))?;
+        let config = read_or_default::<LauncherConfig>(&root.join(CONFIG_FILE_NAME))?;
         let mut this = Self {
             root,
             library,
@@ -1236,7 +1255,7 @@ impl Library {
             }
         }
         if config_changed {
-            if let Err(e) = write_json(&self.root.join("config.json"), &self.config) {
+            if let Err(e) = write_json(&self.root.join(CONFIG_FILE_NAME), &self.config) {
                 log::warn!("could not save migrated config.json: {e}");
             }
         }
@@ -1265,7 +1284,7 @@ impl Library {
     /// Persist the current `library.json` and `config.json` to disk.
     pub fn save(&self) -> Result<(), LibraryError> {
         write_json(&self.root.join("library.json"), &self.library)?;
-        write_json(&self.root.join("config.json"), &self.config)?;
+        write_json(&self.root.join(CONFIG_FILE_NAME), &self.config)?;
         Ok(())
     }
 
@@ -3264,6 +3283,24 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn edition_settings_save_without_replacing_the_other_edition() {
+        let root = tempfile::tempdir().unwrap();
+        let other = if cfg!(feature = "steam-deck") {
+            "config.json"
+        } else {
+            "config-steamdeck.json"
+        };
+        let original = br#"{"schema_version":1,"colors_language":"fr","fullscreen":true}"#;
+        fs::write(root.path().join(other), original).unwrap();
+        let mut library = Library::open(root.path()).unwrap();
+        library.config_mut().fullscreen = false;
+        library.save().unwrap();
+        assert_eq!(fs::read(root.path().join(other)).unwrap(), original);
+        assert!(root.path().join(CONFIG_FILE_NAME).is_file());
+        assert!(!Library::open(root.path()).unwrap().config().fullscreen);
+    }
+
+    #[test]
     fn colors_language_eligibility_uses_title_id_not_display_name() {
         let root = tempfile::tempdir().unwrap();
         let mut game: GameEntry = serde_json::from_value(serde_json::json!({
@@ -3550,7 +3587,7 @@ mod tests {
         let root = tmpdir("missing_api_log");
         let mut lib = Library::open(&root).unwrap();
         assert!(lib.config().log_unimplemented_apis);
-        fs::write(root.join("config.json"), br#"{"schema_version":1}"#).unwrap();
+        fs::write(root.join(CONFIG_FILE_NAME), br#"{"schema_version":1}"#).unwrap();
         lib = Library::open(&root).unwrap();
         assert!(lib.config().log_unimplemented_apis);
         assert_eq!(lib.config().upscale_filter, "reconstruction");
@@ -3583,7 +3620,7 @@ mod tests {
             "last_import_dir": null,
         });
         fs::write(
-            root2.join("config.json"),
+            root2.join(CONFIG_FILE_NAME),
             serde_json::to_vec_pretty(&legacy_config).unwrap(),
         )
         .unwrap();
@@ -3714,7 +3751,7 @@ mod tests {
             "last_import_dir": null,
         });
         fs::write(
-            root.join("config.json"),
+            root.join(CONFIG_FILE_NAME),
             serde_json::to_vec_pretty(&legacy_config).unwrap(),
         )
         .unwrap();

@@ -7,6 +7,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Game library / configuration management for PocketHLE GUI frontends."
 
+[features]
+steam-deck = []
+
 [dependencies]
 anyhow.workspace = true
 log.workspace = true

@@ -164,6 +164,50 @@ impl Transitions {
             .collect()
     }
 }
+// Poll the same normalized controls used by SDL events. Dolphin likewise
+// refreshes gamepad state explicitly; keep events as well for short presses.
+const POLLED_BUTTONS: [Button; 21] = [
+    Button::A,
+    Button::B,
+    Button::X,
+    Button::Y,
+    Button::Back,
+    Button::Guide,
+    Button::Start,
+    Button::LeftStick,
+    Button::RightStick,
+    Button::LeftShoulder,
+    Button::RightShoulder,
+    Button::DPadUp,
+    Button::DPadDown,
+    Button::DPadLeft,
+    Button::DPadRight,
+    Button::Misc1,
+    Button::Paddle1,
+    Button::Paddle2,
+    Button::Paddle3,
+    Button::Paddle4,
+    Button::Touchpad,
+];
+const POLLED_AXES: [Axis; 6] = [
+    Axis::LeftX,
+    Axis::LeftY,
+    Axis::RightX,
+    Axis::RightY,
+    Axis::TriggerLeft,
+    Axis::TriggerRight,
+];
+fn poll_controller(controller: &GameController, state: &mut Transitions) -> Vec<Event> {
+    let id = controller.instance_id() as usize;
+    let mut changes = Vec::new();
+    for button in POLLED_BUTTONS {
+        changes.extend(state.change(id, button_name(button), controller.button(button)));
+    }
+    for axis in POLLED_AXES {
+        changes.extend(state.controller_axis(id, axis, controller.axis(axis)));
+    }
+    changes
+}
 enum Device {
     Controller(GameController),
     Raw(Joystick),
@@ -253,6 +297,14 @@ fn worker(
     sdl2::hint::set("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI", "1");
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
+    if cfg!(feature = "steam-deck") && crate::gamepad_host::is_wine() {
+        // Apply after normal defaults and before opening any SDL device.
+        // Explicit environment overrides remain available for advanced setups.
+        for (name, value) in crate::gamepad_host::PROTON_HINTS {
+            sdl2::hint::set(name, value);
+        }
+        log::info!("Controller profile: Wine/Proton XInput");
+    }
     let sdl = sdl2::init()?;
     let controllers = sdl.game_controller()?;
     let joysticks = sdl.joystick()?;
@@ -361,6 +413,7 @@ fn worker(
             rumble_on = on;
             last_rumble = Instant::now();
         }
+        joysticks.update();
         for event in events.poll_iter() {
             let mut changes = Vec::new();
             match event {
@@ -420,6 +473,50 @@ fn worker(
                 }
                 _ => {}
             }
+            for change in changes {
+                publish(tx, ctx, change)?;
+            }
+        }
+        // Explicit refresh also works when SDL's automatic event update is
+        // disabled. Drain queued transitions first so a short down/up pair is
+        // never replaced by its final snapshot. Transitions deduplicates both
+        // paths, including releases, and egui still owns the focus policy.
+        for device in devices.values() {
+            if !device.attached() {
+                continue;
+            }
+            let changes = match device {
+                Device::Controller(controller) => poll_controller(controller, &mut state),
+                Device::Raw(joystick) => {
+                    let id = joystick.instance_id() as usize;
+                    let mut changes = Vec::new();
+                    for button in 0..joystick.num_buttons().min(256) {
+                        if let Ok(down) = joystick.button(button) {
+                            changes.extend(state.change(
+                                id,
+                                format!("SdlRawButton:{button}"),
+                                down,
+                            ));
+                        }
+                    }
+                    for axis in 0..joystick.num_axes().min(256) {
+                        if let Ok(value) = joystick.axis(axis) {
+                            changes.extend(state.axis(
+                                id,
+                                &format!("SdlRawAxis:{axis}-"),
+                                &format!("SdlRawAxis:{axis}+"),
+                                value as f32 / 32767.0,
+                            ));
+                        }
+                    }
+                    for hat in 0..joystick.num_hats().min(256) {
+                        if let Ok(value) = joystick.hat(hat) {
+                            changes.extend(state.hat(id, hat as u8, value));
+                        }
+                    }
+                    changes
+                }
+            };
             for change in changes {
                 publish(tx, ctx, change)?;
             }
@@ -638,6 +735,32 @@ mod tests {
             queued,
             vec![("South".into(), true), ("South".into(), false)]
         );
+        // Direct-state fallback: capture still works if no queued
+        // button event reaches the consumer, without duplicating a later event.
+        let mut state = Transitions::default();
+        assert_eq!(
+            unsafe { sdl2::sys::SDL_JoystickSetVirtualButton(pointer, 0, 1) },
+            0
+        );
+        joysticks.update();
+        events.poll_iter().for_each(drop);
+        let down = poll_controller(&controller, &mut state);
+        assert!(
+            matches!(&down[..], [Event::Input { control, down: true, .. }] if control == "South")
+        );
+        assert!(poll_controller(&controller, &mut state).is_empty());
+        assert!(state.change(id as usize, "South".into(), true).is_none());
+        assert_eq!(
+            unsafe { sdl2::sys::SDL_JoystickSetVirtualButton(pointer, 0, 0) },
+            0
+        );
+        joysticks.update();
+        events.poll_iter().for_each(drop);
+        let up = poll_controller(&controller, &mut state);
+        assert!(
+            matches!(&up[..], [Event::Input { control, down: false, .. }] if control == "South")
+        );
+        assert!(poll_controller(&controller, &mut state).is_empty());
         drop(controller);
         drop(joystick);
         assert_eq!(unsafe { sdl2::sys::SDL_JoystickDetachVirtual(index) }, 0);

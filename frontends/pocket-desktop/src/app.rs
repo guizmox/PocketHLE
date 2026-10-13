@@ -124,6 +124,10 @@ pub struct PocketLauncher {
     screenshot: crate::screenshot::SharedScreenshot,
     library: Library,
     selected_game: Option<String>,
+    deck_library_actions: Vec<String>,
+    deck_scroll_selection: bool,
+    library_columns: usize,
+    deck_nav_repeat: Option<(String, Instant)>,
     library_gizmondo: bool,
     rename_draft: Option<(String, String, bool)>,
     demo_import: Option<(String, String)>,
@@ -155,7 +159,7 @@ pub struct PocketLauncher {
     gamepad_selected: Option<usize>,
     gamepad_error: Option<String>,
     gamepad_held: std::collections::HashMap<(usize, String), u16>,
-    gamepad_capture: Option<GuestButton>,
+    gamepad_capture: Option<ControllerCapture>,
     gamepad_last_input: Option<String>,
     /// `Some` while a stylus drag is in progress — carries the last
     /// reported game-space coordinates so we don't spam the guest
@@ -427,6 +431,12 @@ enum Screen {
 ///
 /// The on-screen pad and the physical keyboard can hold the same VK at
 /// the same time, so [`HeldButtons`] keeps one set per source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControllerCapture {
+    Guest(GuestButton),
+    Fullscreen,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputSource {
     Keyboard,
@@ -614,6 +624,10 @@ impl PocketLauncher {
             }),
             screenshot: Default::default(),
             selected_game: None,
+            deck_library_actions: Vec::new(),
+            deck_scroll_selection: false,
+            library_columns: 1,
+            deck_nav_repeat: None,
             rename_draft: None,
             demo_import: None,
             pending_import: None,
@@ -1060,7 +1074,13 @@ impl PocketLauncher {
         } else {
             pocketpc
         };
+        if cfg!(feature = "steam-deck") {
+            ui.label(
+                "D-pad / stick: select • A: play • X: platform • Y: game options • Start: settings",
+            );
+        }
         if games.is_empty() {
+            self.deck_library_actions.clear();
             self.selected_game = None;
             ui.add_space(80.0);
             ui.vertical_centered(|ui| {
@@ -1086,6 +1106,37 @@ impl PocketLauncher {
         {
             self.selected_game = games.first().map(|g| g.id.clone());
         }
+        if cfg!(feature = "steam-deck") {
+            for control in std::mem::take(&mut self.deck_library_actions) {
+                let index = self
+                    .selected_game
+                    .as_ref()
+                    .and_then(|id| games.iter().position(|g| &g.id == id))
+                    .unwrap_or(0);
+                if control == "South" {
+                    let game = games[index].clone();
+                    self.deck_nav_repeat = None;
+                    self.spawn_run(&game);
+                    return;
+                }
+                if control == "North" {
+                    let game = &games[index];
+                    self.game_settings_draft = Some((game.id.clone(), game.settings.clone()));
+                    self.screen = Screen::GameSettings;
+                    self.deck_nav_repeat = None;
+                    return;
+                }
+                if let Some(next) = crate::deck_navigation::next_index(
+                    index,
+                    games.len(),
+                    self.library_columns,
+                    &control,
+                ) {
+                    self.selected_game = Some(games[next].id.clone());
+                    self.deck_scroll_selection |= next != index;
+                }
+            }
+        }
         let selected = self.selected_game.clone();
 
         ui.horizontal_top(|ui| {
@@ -1103,6 +1154,7 @@ impl PocketLauncher {
                         let columns = ((ui.available_width() + gap) / (card_size.x + gap))
                             .floor()
                             .max(1.0) as usize;
+                        self.library_columns = columns;
                         egui::Grid::new("library_grid")
                             .num_columns(columns)
                             .min_col_width(card_size.x)
@@ -1146,6 +1198,10 @@ impl PocketLauncher {
 
     fn ui_game_card(&mut self, ui: &mut egui::Ui, game: &GameEntry, size: Vec2, selected: bool) {
         let (card_rect, card_response) = ui.allocate_exact_size(size, Sense::click());
+        if selected && self.deck_scroll_selection {
+            ui.scroll_to_rect(card_rect, Some(egui::Align::Center));
+            self.deck_scroll_selection = false;
+        }
         let stroke = if selected {
             egui::Stroke::new(2.0_f32, Color32::from_rgb(95, 170, 225))
         } else {
@@ -1688,6 +1744,7 @@ impl PocketLauncher {
                     }
                 });
             if old != self.gamepad_selected {
+                self.deck_nav_repeat = None;
                 let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
                 for key in keys {
                     self.release_gamepad_control(&key);
@@ -1700,6 +1757,13 @@ impl PocketLauncher {
                 .as_deref()
                 .unwrap_or("waiting for a button / stick…")
         ));
+
+        if !ui.ctx().input(|i| i.viewport().focused.unwrap_or(true)) {
+            ui.colored_label(
+                Color32::YELLOW,
+                "Window inactive: controller assignment is paused.",
+            );
+        }
 
         // Copied out so the closures below can mutate the capture state
         // without holding a second borrow of `self`.
@@ -1825,13 +1889,13 @@ impl PocketLauncher {
                                     }
                                 });
                             });
-                        if self.gamepad_capture == Some(button) {
+                        if self.gamepad_capture == Some(ControllerCapture::Guest(button)) {
                             ui.add(egui::Label::new("Press a controller input…").wrap(false));
                             if ui.small_button("Cancel controller").clicked() {
                                 self.gamepad_capture = None;
                             }
                         } else if ui.button("Add controller input").clicked() {
-                            self.gamepad_capture = Some(button);
+                            self.gamepad_capture = Some(ControllerCapture::Guest(button));
                             capture = None;
                         }
                     });
@@ -1840,7 +1904,39 @@ impl PocketLauncher {
             });
 
         ui.add_space(6.0);
-        if ui.button("Reset controller to defaults").clicked() {
+        if cfg!(feature = "steam-deck") {
+            ui.horizontal(|ui| {
+                ui.label("Controller fullscreen:");
+                ui.label(
+                    draft
+                        .gamepad_fullscreen
+                        .as_deref()
+                        .map(crate::gamepad::label)
+                        .unwrap_or_else(|| "disabled".into()),
+                );
+                if self.gamepad_capture == Some(ControllerCapture::Fullscreen) {
+                    ui.label("Press a controller input…");
+                    if ui.button("Cancel fullscreen assignment").clicked() {
+                        self.gamepad_capture = None;
+                    }
+                } else if ui.button("Assign fullscreen").clicked() {
+                    self.gamepad_capture = Some(ControllerCapture::Fullscreen);
+                    capture = None;
+                }
+                if ui.button("Disable fullscreen button").clicked() {
+                    draft.gamepad_fullscreen = None;
+                    if self.gamepad_capture == Some(ControllerCapture::Fullscreen) {
+                        self.gamepad_capture = None;
+                    }
+                }
+            });
+            if ui.button("Apply Steam Deck preset").clicked() {
+                draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
+                draft.gamepad_fullscreen =
+                    pocket_library::keybindings::default_gamepad_fullscreen();
+                self.gamepad_capture = None;
+            }
+        } else if ui.button("Reset controller to defaults").clicked() {
             draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
             self.gamepad_capture = None;
         }
@@ -2611,11 +2707,25 @@ impl PocketLauncher {
         }
     }
 
+    fn update_gamepad_input(&mut self, ctx: &egui::Context) {
+        if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            self.release_all_keys();
+        }
+        self.gamepad_rx.set_output(
+            self.gamepad_selected,
+            self.screen == Screen::Run
+                && self.running_game.is_some()
+                && ctx.input(|i| i.viewport().focused.unwrap_or(true)),
+        );
+        self.handle_gamepads(ctx);
+    }
+
     fn handle_gamepads(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.gamepad_rx.rx.try_recv() {
             match event {
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
                 crate::gamepad::Event::Devices(devices) => {
+                    self.deck_nav_repeat = None;
                     self.gamepad_devices = devices;
                     if !self
                         .gamepad_devices
@@ -2646,21 +2756,123 @@ impl PocketLauncher {
                 } => {
                     let key = (device, control.clone());
                     if !down {
+                        if Some(device) == self.gamepad_selected
+                            && self
+                                .deck_nav_repeat
+                                .as_ref()
+                                .is_some_and(|(held, _)| held == &control)
+                        {
+                            self.deck_nav_repeat = None;
+                        }
                         self.release_gamepad_control(&key);
                         continue;
                     }
-                    if Some(device) != self.gamepad_selected
-                        || !ctx.input(|i| i.viewport().focused.unwrap_or(true))
-                    {
+                    // Show reception before filtering: on Steam Deck/Proton,
+                    // detection alone cannot distinguish missing SDL reports
+                    // from a different device or an inactive egui window.
+                    let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+                    let selected = Some(device) == self.gamepad_selected;
+                    let reason = if !selected {
+                        " (ignored: another controller is selected)"
+                    } else if !focused {
+                        " (ignored: window inactive)"
+                    } else {
+                        ""
+                    };
+                    self.gamepad_last_input = Some(format!(
+                        "{} [device {}]{}",
+                        crate::gamepad::label(&control),
+                        device,
+                        reason
+                    ));
+                    if !selected || !focused {
                         continue;
                     }
-                    self.gamepad_last_input = Some(crate::gamepad::label(&control));
                     if self.screen == Screen::Settings {
                         if let (Some(button), Some(draft)) =
                             (self.gamepad_capture, self.config_draft.as_mut())
                         {
-                            draft.gamepad_bindings.insert(control.clone(), button);
+                            match button {
+                                ControllerCapture::Guest(button) => {
+                                    if draft.gamepad_fullscreen.as_deref() == Some(control.as_str())
+                                    {
+                                        draft.gamepad_fullscreen = None;
+                                    }
+                                    draft.gamepad_bindings.insert(control.clone(), button);
+                                }
+                                ControllerCapture::Fullscreen => {
+                                    draft.gamepad_bindings.remove(&control);
+                                    draft.gamepad_fullscreen = Some(control.clone());
+                                }
+                            }
                             self.gamepad_capture = None;
+                            continue;
+                        }
+                    }
+                    if self.library.config().gamepad_toggles_fullscreen(&control) {
+                        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                        self.set_fullscreen(ctx, !fullscreen);
+                        continue;
+                    }
+                    if cfg!(feature = "steam-deck") {
+                        if self.colors_startup_prompt.is_some() {
+                            self.deck_library_actions.push(control);
+                            continue;
+                        }
+                        if self.screen == Screen::Run
+                            && control == "Select"
+                            && !self
+                                .library
+                                .config()
+                                .gamepad_bindings
+                                .contains_key("Select")
+                        {
+                            self.return_to_library(ctx);
+                            continue;
+                        }
+                        if self.screen != Screen::Run && control == "East" {
+                            self.config_draft = None;
+                            self.game_settings_draft = None;
+                            self.gamepad_capture = None;
+                            self.binding_capture = None;
+                            self.screen = if self.running_game.is_some() {
+                                Screen::Run
+                            } else {
+                                Screen::Library
+                            };
+                            self.deck_library_actions.clear();
+                            self.deck_nav_repeat = None;
+                            continue;
+                        }
+                        if self.screen == Screen::Library
+                            && !self.library_busy
+                            && self.rename_draft.is_none()
+                            && self.pending_import.is_none()
+                            && self.demo_import.is_none()
+                        {
+                            match control.as_str() {
+                                "West" => {
+                                    self.library_gizmondo = !self.library_gizmondo;
+                                    self.selected_game = None;
+                                    self.deck_scroll_selection = true;
+                                }
+                                "Start" => {
+                                    self.config_draft = Some(self.library.config().clone());
+                                    self.screen = Screen::Settings;
+                                }
+                                "South" | "North" => {
+                                    self.deck_library_actions.push(control.clone())
+                                }
+                                direction if crate::deck_navigation::is_direction(direction) => {
+                                    self.deck_library_actions.push(control.clone());
+                                    self.deck_nav_repeat = Some((
+                                        control.clone(),
+                                        Instant::now() + Duration::from_millis(350),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                            continue;
                         }
                     }
                     if self.screen != Screen::Run {
@@ -2843,12 +3055,44 @@ impl PocketLauncher {
         let mut draft = previous.clone();
         let mut selected = None;
         let mut cancelled = false;
+        if cfg!(feature = "steam-deck") {
+            for control in std::mem::take(&mut self.deck_library_actions) {
+                match control.as_str() {
+                    "South" => {
+                        selected = Some(draft.clone());
+                        break;
+                    }
+                    "East" => {
+                        cancelled = true;
+                        break;
+                    }
+                    direction
+                        if crate::deck_navigation::is_direction(direction)
+                            && languages.len() > 1 =>
+                    {
+                        let index = languages
+                            .iter()
+                            .position(|language| language.id == draft.colors_language)
+                            .unwrap_or(0);
+                        if let Some(next) =
+                            crate::deck_navigation::next_index(index, languages.len(), 1, direction)
+                        {
+                            draft.colors_language = languages[next].id.to_owned();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         egui::Window::new("Colors startup")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.label("Choose options for this launch.");
+                if cfg!(feature = "steam-deck") {
+                    ui.label("A: Start • B: Back • D-pad / stick: language");
+                }
                 if languages.len() > 1 {
                 ui.label("Language");
                 for language in &languages {
@@ -3037,6 +3281,25 @@ impl eframe::App for PocketLauncher {
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        if cfg!(feature = "steam-deck") {
+            self.update_gamepad_input(ctx);
+        }
+        if self.screen != Screen::Library
+            || !ctx.input(|i| i.viewport().focused.unwrap_or(true))
+            || self.colors_startup_prompt.is_some()
+            || self.library_busy
+            || self.rename_draft.is_some()
+            || self.demo_import.is_some()
+            || self.pending_import.is_some()
+        {
+            self.deck_nav_repeat = None;
+        } else if let Some((control, next)) = self.deck_nav_repeat.as_mut() {
+            if Instant::now() >= *next {
+                self.deck_library_actions.push(control.clone());
+                *next = Instant::now() + Duration::from_millis(120);
+            }
+            ctx.request_repaint_after(Duration::from_millis(30));
+        }
         if self.colors_startup_prompt.is_some() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.label(&self.status);
@@ -3061,16 +3324,9 @@ impl eframe::App for PocketLauncher {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
-        if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
-            self.release_all_keys();
+        if !cfg!(feature = "steam-deck") {
+            self.update_gamepad_input(ctx);
         }
-        self.gamepad_rx.set_output(
-            self.gamepad_selected,
-            self.screen == Screen::Run
-                && self.running_game.is_some()
-                && ctx.input(|i| i.viewport().focused.unwrap_or(true)),
-        );
-        self.handle_gamepads(ctx);
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);
         if let Some(result) = self

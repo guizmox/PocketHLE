@@ -1,1 +1,11 @@
-crates/pocket-library/data/gizmondo-titles.json
+crates/pocket-library/Cargo.toml
+crates/pocket-library/src/keybindings.rs
+crates/pocket-library/src/lib.rs
+frontends/pocket-desktop/Cargo.toml
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/deck_navigation.rs
+frontends/pocket-desktop/src/desktop_main.rs
+frontends/pocket-desktop/src/gamepad.rs
+frontends/pocket-desktop/src/gamepad_host.rs
+frontends/pocket-desktop/src/main.rs
+frontends/pocket-desktop/src/steamdeck_main.rs

@@ -395,7 +395,7 @@ mod tests {
 
 /// Position-based names remain stable across controller brands. Nintendo's
 /// South button is B, East is A, North is X and West is Y.
-pub fn default_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
+fn xbox_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
     use GuestButton::*;
     [
         ("DPadUp", DpadUp),
@@ -420,9 +420,108 @@ pub fn default_gamepad_bindings() -> std::collections::BTreeMap<String, GuestBut
     .collect()
 }
 
+pub fn default_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
+    if cfg!(feature = "steam-deck") {
+        steam_deck_gamepad_bindings()
+    } else {
+        xbox_gamepad_bindings()
+    }
+}
+
+pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
+    let mut bindings = xbox_gamepad_bindings();
+    bindings.remove("LeftTrigger"); // L1 is a host action, never a guest key.
+    bindings.insert("RightTrigger".into(), GuestButton::GizPiano1);
+    bindings.insert("LeftTrigger2".into(), GuestButton::Soft1);
+    bindings.insert("RightTrigger2".into(), GuestButton::Soft2);
+    bindings
+}
+
+/// Xbox LB / Steam Deck L1 toggles host fullscreen.
+pub fn default_gamepad_fullscreen() -> Option<String> {
+    cfg!(feature = "steam-deck").then(|| "LeftTrigger".to_owned())
+}
+
 #[cfg(test)]
 mod controller_tests {
     use super::*;
+    #[test]
+    fn build_defaults_are_scoped_to_the_deck_edition() {
+        let config: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
+        if cfg!(feature = "steam-deck") {
+            assert!(config.gamepad_toggles_fullscreen("LeftTrigger"));
+            assert_eq!(config.gamepad_bindings, steam_deck_gamepad_bindings());
+        } else {
+            assert_eq!(config.gamepad_fullscreen, None);
+            assert_eq!(config.gamepad_bindings, xbox_gamepad_bindings());
+        }
+    }
+    #[test]
+    fn xbox_deck_preset_separates_host_fullscreen_from_gizmondo_keys() {
+        let mut config = crate::LauncherConfig::default();
+        config.gamepad_bindings = steam_deck_gamepad_bindings();
+        config.gamepad_fullscreen = Some("LeftTrigger".into());
+        assert!(config.gamepad_toggles_fullscreen("LeftTrigger"));
+        assert!(!config.gamepad_bindings.contains_key("LeftTrigger"));
+        assert_eq!(
+            config.gamepad_bindings.get("RightTrigger"),
+            Some(&GuestButton::GizPiano1)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("LeftTrigger2"),
+            Some(&GuestButton::Soft1)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("RightTrigger2"),
+            Some(&GuestButton::Soft2)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("South"),
+            Some(&GuestButton::Action)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("North"),
+            Some(&GuestButton::ButtonA)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("East"),
+            Some(&GuestButton::ButtonB)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("West"),
+            Some(&GuestButton::ButtonC)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("DPadUp"),
+            Some(&GuestButton::DpadUp)
+        );
+        assert_eq!(
+            config.gamepad_bindings.get("LeftStickUp"),
+            Some(&GuestButton::DpadUp)
+        );
+    }
+    #[test]
+    fn fullscreen_defaults_preserve_custom_guest_bindings_and_disabled_setting() {
+        let mut config: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
+        config.gamepad_bindings = steam_deck_gamepad_bindings();
+        config.gamepad_fullscreen = Some("LeftTrigger".into());
+        assert!(config.gamepad_toggles_fullscreen("LeftTrigger"));
+        assert!(!config.gamepad_toggles_fullscreen("Start"));
+        config
+            .gamepad_bindings
+            .insert("LeftTrigger".into(), GuestButton::GizPiano5);
+        assert!(!config.gamepad_toggles_fullscreen("LeftTrigger"));
+        config.gamepad_bindings.remove("LeftTrigger");
+        config.gamepad_fullscreen = None;
+        let saved = serde_json::to_string(&config).unwrap();
+        let loaded: crate::LauncherConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.gamepad_fullscreen, None);
+        assert!(!loaded.gamepad_toggles_fullscreen("LeftTrigger"));
+        config.gamepad_fullscreen = Some("RightThumb".into());
+        let saved = serde_json::to_string(&config).unwrap();
+        let loaded: crate::LauncherConfig = serde_json::from_str(&saved).unwrap();
+        assert!(loaded.gamepad_toggles_fullscreen("RightThumb"));
+    }
     #[test]
     fn old_config_gets_controller_defaults_and_custom_bindings_survive() {
         let old: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
