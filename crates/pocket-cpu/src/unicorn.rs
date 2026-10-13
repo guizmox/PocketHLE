@@ -757,6 +757,9 @@ impl Cpu for UnicornCpu {
     }
 
     fn set_slice_timeout_us(&mut self, timeout_us: u64) -> Result<(), CpuError> {
+        if timeout_us == self.scheduler_timeout_us {
+            return Ok(());
+        }
         if timeout_us != 0 && self.scheduler_timer.is_none() {
             self.scheduler_timer = Some(
                 slice_timer::SliceTimer::new(self.uc.get_handle() as usize)
@@ -782,8 +785,8 @@ impl Cpu for UnicornCpu {
         // non-zero `count` would silently install a per-instruction
         // counting hook and tank throughput ~5-10x. Slices are instead
         // ended by the IAT-thunk code hooks (which call `emu_stop` on
-        // every emulated API call) and, optionally, by a wall-clock
-        // watchdog for pathological API-free loops.
+        // every emulated API call) and the reusable scheduler timer for
+        // API-free loops. A separate diagnostic watchdog remains opt-in.
         if self.scheduler_timeout_us != 0 {
             if let Some(timer) = &self.scheduler_timer {
                 timer.arm(self.scheduler_timeout_us);
@@ -842,6 +845,42 @@ impl Cpu for UnicornCpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wall_clock_preemption_resumes_an_api_free_poll_without_changing_guest_state() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.map_region(0x2000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        // Poll a host-refreshed cell, like native GetTickCount. No API or
+        // instruction hook occurs inside the loop; only completion is hooked.
+        let words = [
+            0xe59f1014u32, // ldr r1,[pc,#20] -> literal 0x2000
+            0xe5910000,    // ldr r0,[r1]
+            0xe3500000,    // cmp r0,#0
+            0x0afffffc,    // beq 0x1004
+            0xe3a0702a,    // mov r7,#42
+            0xea000039,    // b 0x1100
+            0xe12fff1e,
+            0x2000,
+        ];
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        cpu.write_mem(0x1000, &bytes).unwrap();
+        cpu.write_mem(0x2000, &0u32.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R7, 17).unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        cpu.set_slice_timeout_us(20_000).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 0).unwrap(),
+            StopReason::InstructionLimit
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R7).unwrap(), 17);
+        let pc = cpu.read_reg(ArmReg::Pc).unwrap();
+        cpu.write_mem(0x2000, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(cpu.run_until_hook(pc, 0).unwrap(), StopReason::Hook(0x1100));
+        assert_eq!(cpu.read_reg(ArmReg::R7).unwrap(), 42);
+        cpu.set_slice_timeout_us(0).unwrap();
+    }
 
     #[test]
     fn register_trace_observes_without_stopping_or_changing_arm_execution() {

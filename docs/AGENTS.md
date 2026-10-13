@@ -2872,3 +2872,18 @@ ALT entry.id for games/<id>/saves/flash. Hit & Myth's provided repack nested
 GZGA200049 marker inside a renamed GZGA900049 directory, so original root marker
 scanning alone had missed the alias. Local native software/GPU both reach its
 language screen after a lengthy boot; no frozen guest or binary repair shown.
+
+
+Hit & Myth Texas splash freeze: prior local tests set the explicit diagnostic
+POCKETHLE_SLICE_TIMEOUT_MS=20, masking an API-free native-clock polling loop.
+Without it the guest froze before starting audio and stopped servicing the host.
+Normal kernel slices now use the existing reusable wall-clock SliceTimer with
+20ms quantum (5ms while live audio workers need it). No per-instruction counter,
+new thread per emu_start, game patch or native-clock ABI change is introduced.
+Unchanged timeout settings return immediately to avoid redundant timer-state
+locking on each API dispatch. API-free loops can refresh the host-managed tick
+page and service input/Exit; preserve registers/PC when resuming a timed-out slice.
+Validation must run WITHOUT POCKETHLE_SLICE_TIMEOUT_MS; otherwise it cannot
+prove this repair. A real ARM poll test checks preemption/resume and unchanged
+registers before the host updates its cell; the kernel host-hook test also checks
+preemption is enabled with no audio. Recheck native splash/menu and Exit behavior.

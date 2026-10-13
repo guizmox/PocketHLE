@@ -310,3 +310,14 @@ claim success. Neither supplied demo imports SDL, so validation uses ABI unit
 tests and a native ARM diagnostic (Init/SetVideoMode/FillRect/Flip/ExitProcess),
 not a claim of complete SDL-game compatibility. Additional DLL/game samples
 are needed to establish ordinal mappings and extend coverage.
+
+
+### Hit & Myth (May 2005): Texas splash clock polling
+
+This build can spin before audio startup on native GetTickCount, which reads a
+host-managed page without entering the HLE dispatcher. Previously an API-free
+slice could run indefinitely, so neither time nor launcher input advanced.
+The kernel now bounds all CPU slices with its existing reusable host-time timer:
+20ms normally, retaining the 5ms live-audio quantum. Native clock thunks and game
+files remain unchanged. Validation must omit POCKETHLE_SLICE_TIMEOUT_MS: setting
+that diagnostic watchdog masked the original freeze in earlier local tests.

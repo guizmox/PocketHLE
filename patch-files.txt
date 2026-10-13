@@ -1,4 +1,4 @@
-crates/pocket-library/src/gizmondo_titles.rs
-crates/pocket-library/src/lib.rs
+crates/pocket-cpu/src/unicorn.rs
+crates/pocket-kernel/src/lib.rs
 docs/AGENTS.md
 docs/GIZMONDO.md

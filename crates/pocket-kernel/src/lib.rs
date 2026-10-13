@@ -3418,21 +3418,24 @@ pub fn run_main_loop_with_hook(
         cpu.write_reg(ArmReg::Pc, pc)?;
         // Refresh the host-managed tick page so the native
         // `GetTickCount` thunk's plain `LDR` returns a fresh
-        // millisecond count for any guest call inside this slice.
+        // millisecond count for any guest call inside this slice. Timed-out
+        // API-free slices reach this refresh as well.
         // `tick_written` lets it skip the guest write when the
         // millisecond has not turned over yet, which is the common
         // case at ~280 slices per millisecond.
         native_thunks::refresh_tick_page(cpu, &mut tick_written);
-        // Live guest mixer rings must not depend on the main thread entering
-        // another API. Bound audio-active slices by elapsed host time;
-        // Unicorn retains translation-block chaining (no instruction counter).
+        // Native GetTickCount reads the tick page without trapping. Hit & Myth
+        // (May 2005) spins on it at the Texas splash before audio starts: without
+        // preemption this loop can neither refresh time nor service Exit/input.
+        // Bound every slice by host time, retaining the shorter audio quantum
+        // and Unicorn's translation-block chaining (no instruction counter).
         let audio_worker_pending = !process.state.wave_out.live_loops.is_empty()
             && process
                 .state
                 .threads
                 .iter()
                 .any(|thread| thread.started && !thread.finished && thread.suspend_count == 0);
-        cpu.set_slice_timeout_us(if audio_worker_pending { 5_000 } else { 0 })?;
+        cpu.set_slice_timeout_us(if audio_worker_pending { 5_000 } else { 20_000 })?;
         let stop = if pc == THREAD_SCHEDULER_IDLE_VA {
             Ok(StopReason::Hook(pc))
         } else {
@@ -4160,6 +4163,7 @@ mod tests {
     struct StrictMapCpu {
         inner: StubCpu,
         mapped: Vec<(u32, u32)>,
+        last_slice_timeout: Option<u64>,
     }
 
     impl StrictMapCpu {
@@ -4167,6 +4171,7 @@ mod tests {
             Self {
                 inner: StubCpu::new(),
                 mapped: Vec::new(),
+                last_slice_timeout: None,
             }
         }
     }
@@ -4227,6 +4232,11 @@ mod tests {
 
         fn request_stop(&mut self) {
             self.inner.request_stop()
+        }
+
+        fn set_slice_timeout_us(&mut self, timeout_us: u64) -> Result<(), CpuError> {
+            self.last_slice_timeout = Some(timeout_us);
+            Ok(())
         }
     }
 
@@ -4351,7 +4361,7 @@ mod tests {
         .unwrap();
         // A hook-free stub exhausts its budget on every slice. The loader's
         // stub has exit hooks, so use a fresh CPU for this specific path.
-        let mut cpu = StubCpu::new();
+        let mut cpu = StrictMapCpu::new();
         cpu.map_region(0x11000, 0x1000, Prot::READ | Prot::WRITE | Prot::EXEC)
             .unwrap();
         cpu.write_mem(0x11000, &0xeafffffeu32.to_le_bytes())
@@ -4377,6 +4387,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hook.0, 1);
+        // No audio or API hooks are needed for the host to regain control.
+        assert_eq!(cpu.last_slice_timeout, Some(20_000));
         assert_eq!(
             process.state.pending_input.front(),
             Some(&InputEvent::KeyDown { vk: 0x28 })
