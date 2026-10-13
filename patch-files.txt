@@ -1,11 +1,6 @@
-crates/pocket-library/Cargo.toml
+.github/workflows/ci.yml
 crates/pocket-library/src/keybindings.rs
 crates/pocket-library/src/lib.rs
-frontends/pocket-desktop/Cargo.toml
+docs/STEAMDECK.md
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/deck_navigation.rs
-frontends/pocket-desktop/src/desktop_main.rs
-frontends/pocket-desktop/src/gamepad.rs
-frontends/pocket-desktop/src/gamepad_host.rs
-frontends/pocket-desktop/src/main.rs
-frontends/pocket-desktop/src/steamdeck_main.rs

@@ -67,6 +67,19 @@ impl UpscaleFilter {
             Self::Nearest => "Nearest (crisp pixels; fastest)",
         }
     }
+    fn stepped(self, forward: bool) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|filter| *filter == self)
+            .unwrap_or(0);
+        let next = if forward {
+            (index + 1) % Self::ALL.len()
+        } else {
+            (index + Self::ALL.len() - 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
+    }
+
     fn gpu_filter(self) -> i32 {
         match self {
             Self::Nearest => 0,
@@ -115,6 +128,10 @@ pub struct PocketLauncher {
     gizmondo_skin: Option<egui::TextureHandle>,
     upscale_x2: bool,
     upscale_filter: UpscaleFilter,
+    deck_filter_notice: Option<(String, Instant)>,
+    deck_filter_press: Option<(usize, Instant)>,
+    deck_start_press: Option<(usize, Instant)>,
+    deck_piano_release: Option<(usize, Instant)>,
     upscale_window_size: Option<Vec2>,
     console_fit_pending: bool,
     library_window_size: Option<Vec2>,
@@ -608,6 +625,10 @@ impl PocketLauncher {
             gizmondo_skin: None,
             upscale_x2: false,
             upscale_filter,
+            deck_filter_notice: None,
+            deck_filter_press: None,
+            deck_start_press: None,
+            deck_piano_release: None,
             upscale_window_size: None,
             console_fit_pending: false,
             library_window_size: None,
@@ -1745,6 +1766,8 @@ impl PocketLauncher {
                 });
             if old != self.gamepad_selected {
                 self.deck_nav_repeat = None;
+                self.deck_filter_press = None;
+                self.deck_start_press = None;
                 let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
                 for key in keys {
                     self.release_gamepad_control(&key);
@@ -2701,6 +2724,9 @@ impl PocketLauncher {
     }
 
     fn release_all_keys(&mut self) {
+        self.deck_start_press = None;
+        self.deck_piano_release = None;
+        self.deck_filter_press = None;
         self.gamepad_held.clear();
         for vk in self.held.drain_all() {
             self.send_input(InputEvent::KeyUp { vk });
@@ -2726,6 +2752,8 @@ impl PocketLauncher {
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
                 crate::gamepad::Event::Devices(devices) => {
                     self.deck_nav_repeat = None;
+                    self.deck_filter_press = None;
+                    self.deck_start_press = None;
                     self.gamepad_devices = devices;
                     if !self
                         .gamepad_devices
@@ -2756,6 +2784,60 @@ impl PocketLauncher {
                 } => {
                     let key = (device, control.clone());
                     if !down {
+                        if cfg!(feature = "steam-deck")
+                            && control == "Start"
+                            && self
+                                .deck_start_press
+                                .as_ref()
+                                .is_some_and(|(id, _)| *id == device)
+                        {
+                            if let Some((_, pressed_at)) = self.deck_start_press.take() {
+                                if self.screen == Screen::Run
+                                    && self.running_is_gizmondo
+                                    && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                                {
+                                    let button = match crate::deck_navigation::start_action(
+                                        pressed_at.elapsed(),
+                                        true,
+                                    ) {
+                                        Some(crate::deck_navigation::StartAction::Volume) => {
+                                            GuestButton::GizPiano2
+                                        }
+                                        Some(crate::deck_navigation::StartAction::Brightness) => {
+                                            GuestButton::GizPiano3
+                                        }
+                                        None => unreachable!("released Start always has an action"),
+                                    };
+                                    self.pulse_deck_piano(device, button);
+                                }
+                            }
+                        }
+                        if cfg!(feature = "steam-deck")
+                            && control == "Select"
+                            && self
+                                .deck_filter_press
+                                .as_ref()
+                                .is_some_and(|(id, _)| *id == device)
+                        {
+                            if let Some((_, pressed_at)) = self.deck_filter_press.take() {
+                                if self.screen == Screen::Run
+                                    && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                                {
+                                    match crate::deck_navigation::select_action(
+                                        pressed_at.elapsed(),
+                                        true,
+                                    ) {
+                                        Some(crate::deck_navigation::SelectAction::NextFilter) => {
+                                            self.cycle_deck_upscale_filter(ctx, true)
+                                        }
+                                        Some(
+                                            crate::deck_navigation::SelectAction::ReturnToLibrary,
+                                        ) => self.return_to_library(ctx),
+                                        None => {}
+                                    }
+                                }
+                            }
+                        }
                         if Some(device) == self.gamepad_selected
                             && self
                                 .deck_nav_repeat
@@ -2827,7 +2909,16 @@ impl PocketLauncher {
                                 .gamepad_bindings
                                 .contains_key("Select")
                         {
-                            self.return_to_library(ctx);
+                            self.deck_filter_press = Some((device, Instant::now()));
+                            continue;
+                        }
+                        if self.screen == Screen::Run
+                            && self.running_is_gizmondo
+                            && control == "Start"
+                            && self.library.config().gamepad_bindings.get("Start")
+                                == Some(&GuestButton::GizPiano2)
+                        {
+                            self.deck_start_press = Some((device, Instant::now()));
                             continue;
                         }
                         if self.screen != Screen::Run && control == "East" {
@@ -2903,6 +2994,37 @@ impl PocketLauncher {
             {
                 self.send_input(InputEvent::KeyUp { vk });
             }
+        }
+    }
+
+    fn pulse_deck_piano(&mut self, device: usize, button: GuestButton) {
+        // Keep the press visible across frontend/guest polling slices. An
+        // immediate down/up pair can otherwise disappear before the game polls.
+        if let Some((previous_device, _)) = self.deck_piano_release.take() {
+            self.release_gamepad_control(&(previous_device, "DeckStartPulse".into()));
+        }
+        let vk = button.vk();
+        self.gamepad_held
+            .insert((device, "DeckStartPulse".into()), vk);
+        if self.held.press(InputSource::Gamepad, vk) {
+            self.send_input(InputEvent::KeyDown { vk });
+        }
+        self.deck_piano_release = Some((device, Instant::now() + Duration::from_millis(80)));
+    }
+
+    fn cycle_deck_upscale_filter(&mut self, ctx: &egui::Context, forward: bool) {
+        self.upscale_filter = self.upscale_filter.stepped(forward);
+        self.library.config_mut().upscale_filter = self.upscale_filter.id().into();
+        self.status = match self.library.save() {
+            Ok(()) => format!("Upscaling filter: {}", self.upscale_filter.label()),
+            Err(error) => format!("Could not save filter: {error}"),
+        };
+        self.deck_filter_notice = Some((
+            self.upscale_filter.label().to_owned(),
+            Instant::now() + Duration::from_secs(3),
+        ));
+        if let Some(frame) = self.last_frame_snapshot.clone() {
+            self.refresh_frame_texture(ctx, &frame);
         }
     }
 
@@ -3284,6 +3406,32 @@ impl eframe::App for PocketLauncher {
         if cfg!(feature = "steam-deck") {
             self.update_gamepad_input(ctx);
         }
+        if let Some((device, release_at)) = self.deck_piano_release {
+            if Instant::now() >= release_at {
+                self.deck_piano_release = None;
+                self.release_gamepad_control(&(device, "DeckStartPulse".into()));
+            }
+        }
+        if cfg!(feature = "steam-deck") && self.screen == Screen::Run && self.running_is_gizmondo {
+            if let Some((device, pressed_at)) = self.deck_start_press {
+                if crate::deck_navigation::start_action(pressed_at.elapsed(), false)
+                    == Some(crate::deck_navigation::StartAction::Brightness)
+                {
+                    self.deck_start_press = None;
+                    self.pulse_deck_piano(device, GuestButton::GizPiano3);
+                }
+            }
+        }
+        if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
+            if let Some((_, pressed_at)) = self.deck_filter_press {
+                if crate::deck_navigation::select_action(pressed_at.elapsed(), false)
+                    == Some(crate::deck_navigation::SelectAction::ReturnToLibrary)
+                {
+                    self.deck_filter_press = None;
+                    self.return_to_library(ctx);
+                }
+            }
+        }
         if self.screen != Screen::Library
             || !ctx.input(|i| i.viewport().focused.unwrap_or(true))
             || self.colors_startup_prompt.is_some()
@@ -3427,6 +3575,22 @@ impl eframe::App for PocketLauncher {
                 Screen::Run => self.ui_run(ui),
             }
         });
+        if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
+            if let Some((label, expires)) = self.deck_filter_notice.clone() {
+                if Instant::now() < expires {
+                    egui::Area::new(egui::Id::new("deck_filter_notice"))
+                        .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 12.0))
+                        .interactable(false)
+                        .show(ctx, |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.label(format!("Filter: {label}"));
+                            });
+                        });
+                } else {
+                    self.deck_filter_notice = None;
+                }
+            }
+        }
         if !console_only && !self.library_busy {
             self.ui_demo_import(ctx);
             self.ui_rename_game(ctx);
@@ -3450,6 +3614,27 @@ impl eframe::App for PocketLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deck_filter_steps_wrap_and_reverse_without_skipping_a_filter() {
+        for filter in UpscaleFilter::ALL {
+            assert_eq!(filter.stepped(true).stepped(false), filter);
+            let mut current = filter;
+            for _ in 0..UpscaleFilter::ALL.len() {
+                current = current.stepped(true);
+            }
+            assert_eq!(current, filter);
+        }
+        assert_eq!(
+            UpscaleFilter::Nearest.stepped(true),
+            UpscaleFilter::Reconstruction
+        );
+        assert_eq!(
+            UpscaleFilter::Reconstruction.stepped(false),
+            UpscaleFilter::Nearest
+        );
+    }
+
     #[test]
     fn saved_filter_ids_restore_every_mode_and_unknown_ids_fall_back() {
         for filter in UpscaleFilter::ALL {

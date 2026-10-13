@@ -34,9 +34,82 @@ pub fn next_index(index: usize, count: usize, columns: usize, control: &str) -> 
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectAction {
+    NextFilter,
+    ReturnToLibrary,
+}
+
+pub fn select_action(elapsed: std::time::Duration, released: bool) -> Option<SelectAction> {
+    if elapsed >= std::time::Duration::from_millis(650) {
+        Some(SelectAction::ReturnToLibrary)
+    } else if released {
+        Some(SelectAction::NextFilter)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartAction {
+    Volume,
+    Brightness,
+}
+
+pub fn start_action(elapsed: std::time::Duration, released: bool) -> Option<StartAction> {
+    if elapsed >= std::time::Duration::from_millis(650) {
+        Some(StartAction::Brightness)
+    } else if released {
+        Some(StartAction::Volume)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn start_hold_does_not_trigger_volume_before_brightness() {
+        use std::time::Duration;
+        assert_eq!(start_action(Duration::from_millis(0), false), None);
+        assert_eq!(start_action(Duration::from_millis(649), false), None);
+        assert_eq!(
+            start_action(Duration::from_millis(100), true),
+            Some(StartAction::Volume)
+        );
+        assert_eq!(
+            start_action(Duration::from_millis(650), false),
+            Some(StartAction::Brightness)
+        );
+        assert_eq!(
+            start_action(Duration::from_millis(650), true),
+            Some(StartAction::Brightness)
+        );
+    }
+
+    #[test]
+    fn select_tap_and_hold_are_distinct_at_the_deadline() {
+        use std::time::Duration;
+        assert_eq!(select_action(Duration::from_millis(100), false), None);
+        assert_eq!(
+            select_action(Duration::from_millis(100), true),
+            Some(SelectAction::NextFilter)
+        );
+        assert_eq!(
+            select_action(Duration::from_millis(649), true),
+            Some(SelectAction::NextFilter)
+        );
+        assert_eq!(
+            select_action(Duration::from_millis(650), false),
+            Some(SelectAction::ReturnToLibrary)
+        );
+        assert_eq!(
+            select_action(Duration::from_millis(650), true),
+            Some(SelectAction::ReturnToLibrary)
+        );
+    }
+
     #[test]
     fn vertical_navigation_matches_the_grid_and_partial_last_row() {
         assert_eq!(next_index(1, 8, 3, "DPadDown"), Some(4));

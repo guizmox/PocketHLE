@@ -434,7 +434,22 @@ pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, Guest
     bindings.insert("RightTrigger".into(), GuestButton::GizPiano1);
     bindings.insert("LeftTrigger2".into(), GuestButton::Soft1);
     bindings.insert("RightTrigger2".into(), GuestButton::Soft2);
+    bindings.insert("Start".into(), GuestButton::GizPiano2);
     bindings
+}
+
+/// Upgrade only the exact first factory Deck preset, preserving user mappings.
+pub fn migrate_steam_deck_gamepad_bindings(
+    bindings: &mut std::collections::BTreeMap<String, GuestButton>,
+) {
+    if !cfg!(feature = "steam-deck") {
+        return;
+    }
+    let mut previous = steam_deck_gamepad_bindings();
+    previous.insert("Start".into(), GuestButton::GizPiano1);
+    if *bindings == previous {
+        *bindings = steam_deck_gamepad_bindings();
+    }
 }
 
 /// Xbox LB / Steam Deck L1 toggles host fullscreen.
@@ -445,6 +460,24 @@ pub fn default_gamepad_fullscreen() -> Option<String> {
 #[cfg(test)]
 mod controller_tests {
     use super::*;
+    #[test]
+    fn legacy_deck_factory_preset_migrates_without_overwriting_custom_controls() {
+        let current = steam_deck_gamepad_bindings();
+        let mut previous = current.clone();
+        previous.insert("Start".into(), GuestButton::GizPiano1);
+        migrate_steam_deck_gamepad_bindings(&mut previous);
+        if cfg!(feature = "steam-deck") {
+            assert_eq!(previous, current);
+        } else {
+            assert_eq!(previous.get("Start"), Some(&GuestButton::GizPiano1));
+        }
+        let mut custom = current.clone();
+        custom.insert("Start".into(), GuestButton::ButtonA);
+        let saved = custom.clone();
+        migrate_steam_deck_gamepad_bindings(&mut custom);
+        assert_eq!(custom, saved);
+    }
+
     #[test]
     fn build_defaults_are_scoped_to_the_deck_edition() {
         let config: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
@@ -463,6 +496,10 @@ mod controller_tests {
         config.gamepad_fullscreen = Some("LeftTrigger".into());
         assert!(config.gamepad_toggles_fullscreen("LeftTrigger"));
         assert!(!config.gamepad_bindings.contains_key("LeftTrigger"));
+        assert_eq!(
+            config.gamepad_bindings.get("Start"),
+            Some(&GuestButton::GizPiano2)
+        );
         assert_eq!(
             config.gamepad_bindings.get("RightTrigger"),
             Some(&GuestButton::GizPiano1)

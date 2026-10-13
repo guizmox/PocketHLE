@@ -1150,7 +1150,8 @@ impl Library {
         fs::create_dir_all(root.join("games"))?;
 
         let library = read_or_default::<LibraryFile>(&root.join("library.json"))?;
-        let config = read_or_default::<LauncherConfig>(&root.join(CONFIG_FILE_NAME))?;
+        let mut config = read_or_default::<LauncherConfig>(&root.join(CONFIG_FILE_NAME))?;
+        keybindings::migrate_steam_deck_gamepad_bindings(&mut config.gamepad_bindings);
         let mut this = Self {
             root,
             library,
