@@ -302,6 +302,38 @@ impl GameEntry {
                 }
             }
         }
+        // A repack can rename the marker directory to the ALT ID while its
+        // executable still hardcodes the original card path. Hit & Myth's
+        // GZGA900049/GZGA200049 marker is one such layout: marker discovery at
+        // the extraction root alone cannot supply GZGA200049/data.
+        let mut ids = vec![self.id.as_str()];
+        for prefix in &self.install_dirs {
+            let parts: Vec<_> = prefix
+                .split(['\\', '/'])
+                .filter(|part| !part.is_empty())
+                .collect();
+            if parts.len() == 2
+                && (parts[0].eq_ignore_ascii_case("SD Card")
+                    || parts[0].eq_ignore_ascii_case("Storage Card"))
+            {
+                ids.push(parts[1]);
+            }
+        }
+        for id in ids {
+            let Some(original) = gizmondo_titles::original_card_id(id) else {
+                continue;
+            };
+            for card in ["SD Card", "Storage Card"] {
+                let prefix = format!("\\{card}\\{original}\\");
+                if !mounts
+                    .iter()
+                    .any(|(existing, _)| existing.eq_ignore_ascii_case(&prefix))
+                {
+                    let target = self.install_mount_dir(library_root, &prefix);
+                    mounts.push((prefix, target));
+                }
+            }
+        }
         mounts
     }
 
@@ -4257,6 +4289,71 @@ mod tests {
                 .unwrap()
                 .display_name,
             "My Agaju demo"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generic_alt_suffix_mounts_assets_and_isolates_flash_without_a_catalogue_entry() {
+        let root = tmpdir("generic_alt_suffix");
+        let table: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../data/gizmondo-titles.json")).unwrap();
+        let mut ids: Vec<&str> = table
+            .keys()
+            .filter(|id| {
+                id.starts_with("GZGA7") || id.starts_with("GZGA8") || id.starts_with("GZGA9")
+            })
+            .map(String::as_str)
+            .collect();
+        assert_eq!(ids.len(), 11);
+        ids.extend(["GZGA900123", "GZGA600123"]);
+        for id in ids {
+            let original = format!("GZGA2{}", &id[5..]);
+            let mut game = entry_with_install_dir(None);
+            game.id = id.into();
+            game.display_name = "Custom title".into();
+            game.executable = "extracted/autorun.exe".into();
+            game.install_dirs = vec![format!("\\SD Card\\{id}\\")];
+            let extracted = game.extracted_dir(&root);
+            fs::create_dir_all(extracted.join(id)).unwrap();
+            fs::create_dir_all(extracted.join("data")).unwrap();
+            fs::write(extracted.join(id).join(&original), [1, 2, 3, 4]).unwrap();
+            fs::write(extracted.join("data/asset.bin"), b"assets").unwrap();
+            let mounts = game.install_mounts(&root);
+            for card in ["SD Card", "Storage Card"] {
+                let prefix = format!("\\{card}\\{original}\\");
+                let (_, target) = mounts.iter().find(|(p, _)| p == &prefix).unwrap();
+                assert_eq!(fs::read(target.join("data/asset.bin")).unwrap(), b"assets");
+                assert_eq!(mounts.iter().filter(|(p, _)| p == &prefix).count(), 1);
+            }
+            assert_eq!(
+                game.gizmondo_flash_dir(&root),
+                game.save_dir(&root).join("flash")
+            );
+            game.id = format!("legacy_{id}");
+            assert!(game
+                .install_mounts(&root)
+                .iter()
+                .any(|(p, _)| p == &format!("\\SD Card\\{original}\\")));
+            assert_eq!(
+                game.gizmondo_flash_dir(&root),
+                game.save_dir(&root).join("flash")
+            );
+        }
+        for id in [
+            "GZGA200049",
+            "GZGA270049",
+            "GZGA280045",
+            "GZGA90012",
+            "GZGA90012x",
+            "GZAP900049",
+            "GZGA999999",
+        ] {
+            assert_eq!(gizmondo_titles::original_card_id(id), None);
+        }
+        assert_eq!(
+            gizmondo_titles::original_card_id("gzga900049").as_deref(),
+            Some("GZGA200049")
         );
         fs::remove_dir_all(root).unwrap();
     }

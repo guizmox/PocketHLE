@@ -253,6 +253,16 @@ a physical GZGA directory maps to itself. This is startup-only discovery and doe
 not rename entries, move files, change saves or guess aliases from game titles.
 All variants retaining their original SDK markers use this common path.
 
+Local ALT IDs also receive their original SDK path generically: exact numeric
+`GZGAx00xxx` IDs, with x different from 2, map to `GZGA200xxx`. Keep the suffix
+and change only the variant digit; no catalogue entry or display name is needed.
+Both SD Card and Storage Card receive the alias. Existing original marker aliases
+and physical game directories retain priority. Official 270/280 card IDs use a
+separate numbering scheme and are not rewritten by this local ALT rule.
+The supplied Hit & Myth repack has GZGA900049/GZGA200049, while its executable
+opens GZGA200049/data; root-only marker discovery could not provide that alias.
+
+
 Colors (E3 demo), catalogued as GZGA800015, still opens GZGA200015 paths. Its
 provided files include that original marker. Without the alias, startup loads an
 incomplete registry then dereferences a missing Camera node at 0x000ACBD4.
@@ -260,14 +270,14 @@ Mounting the original card path resolves the asset loading and reaches the E3
 main menu. Desktop and Android both use the same alias list, including already
 installed games; no reimport or binary patch is required.
 
-Known alternative catalogue builds (local GZGA700/800/900 IDs) use their own
+Local alternative builds (numeric GZGAx00xxx IDs with x different from 2) use their own
 `games/<game-id>/saves/flash/` as the guest `\Flash Disk\`, on Windows and Android.
 Their SDK save paths stay unchanged, but configurations from another build are
 not shared: Colors E3 can crash before its menu when loading the standard build's
 `MyGames/GZGA200015 Colors/config.cfg`. Standard titles continue using the existing
 shared `flash/`. Existing shared saves are retained; alternatives start with an
 empty isolated Flash Disk rather than copying potentially incompatible files.
-Reimport updates preserve these isolated saves. Recognition uses catalogue IDs
+Reimport updates preserve these isolated saves. Recognition uses the numeric ID pattern
 and declared card aliases, so renaming a title does not change this behavior.
 
 ### Unfinished Business: zlib

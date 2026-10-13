@@ -6,12 +6,28 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 static TITLES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
-/// Local catalogue IDs distinguish alternative builds from the original card.
+/// Local variant IDs use GZGAx00xxx; normal game IDs use GZGA200xxx.
 pub fn is_alternative(id: &str) -> bool {
+    original_card_id(id).is_some()
+}
+
+/// The executable keeps its SDK card ID when the catalogue assigns an ALT ID.
+/// Keep the numeric suffix, replacing only the local variant digit with 2.
+/// No catalogue entry or mutable display name is required. Official 270/280
+/// card IDs use a different scheme and must not be conflated with local ALTs.
+pub fn original_card_id(id: &str) -> Option<String> {
     let id = id.to_ascii_uppercase();
-    id.starts_with("GZGA")
-        && matches!(id.as_bytes().get(4), Some(b'7' | b'8' | b'9'))
-        && lookup(&id).is_some()
+    let bytes = id.as_bytes();
+    if bytes.len() == 10
+        && id.starts_with("GZGA")
+        && bytes[4..].iter().all(u8::is_ascii_digit)
+        && bytes[4] != b'2'
+        && bytes[5..7] == *b"00"
+    {
+        Some(format!("GZGA2{}", &id[5..]))
+    } else {
+        None
+    }
 }
 
 pub fn lookup(id: &str) -> Option<&'static str> {

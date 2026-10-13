@@ -2846,9 +2846,9 @@ page 0x373000. Local runs with native Unicorn 2.1.4/2.1.5 reach the E3 menu;
 the user reproduced the conflict on Windows and confirmed that another Colors
 version had written the shared Flash Disk config. The SDK parser's signed key
 hash becomes a negative bucket index while loading that config before the menu.
-Known local alternative catalogue IDs (700/800/900) now mount Flash Disk from
+Local alternative numeric IDs GZGAx00xxx (x != 2) mount Flash Disk from
 GameEntry::gizmondo_flash_dir: games/<entry.id>/saves/flash, in both GUI runners.
-Standard titles retain library/flash. Identify variants by catalogue ID or
+Standard titles retain library/flash. Identify variants by numeric ID or
 declared SD/Storage Card install alias, never by mutable display names or the
 original SDK marker. Do not copy incompatible shared data into a new ALT area.
 Old shared files remain intact; normal prepared reimports preserve the ALT
@@ -2860,3 +2860,15 @@ buffers. VirtualAlloc/VirtualFree emit debug-level allocation/range records.
 Android Settings / Log verbosity=3 enables API trace; the default info level
 cannot show these records. This diagnostic does not change memory protections,
 allocation behavior, renderer selection or any game executable.
+
+
+Local ALT card aliases and Flash isolation share original_card_id's generic
+numeric rule: exact GZGAx00xxx -> GZGA200xxx for x != 2. Unknown catalogue titles
+still work; malformed/non-numeric IDs and official 270/280 numbers do not match.
+GameEntry::install_mounts adds the original SD/Storage Card prefixes from entry
+ID and declared exact card aliases after real marker discovery, never replacing
+an existing original mount. Canonical assets do not mean shared saves: retain
+ALT entry.id for games/<id>/saves/flash. Hit & Myth's provided repack nested
+GZGA200049 marker inside a renamed GZGA900049 directory, so original root marker
+scanning alone had missed the alias. Local native software/GPU both reach its
+language screen after a lengthy boot; no frozen guest or binary repair shown.
