@@ -72,24 +72,32 @@ pub extern "system" fn Java_com_pockethle_app_MainActivity_banner<'local>(
     )
 }
 
-/// Settings eligibility uses the same title-ID helper as desktop and launch.
+/// Available languages for the selected Colors installation, not another variant.
 #[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_hasColors<'local>(
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_colorsLanguages<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     library_root: JString<'local>,
-) -> jni::sys::jboolean {
-    let Some(root) = jstring_to_path(&mut env, library_root) else {
-        return 0;
-    };
-    let Ok(lib) = Library::open(&root) else {
-        return 0;
-    };
-    u8::from(
-        lib.games()
+    id: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root)
+            .ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        let id = jstring_to_string(&mut env, id).ok_or_else(|| anyhow::anyhow!("missing ID"))?;
+        let lib = Library::open(&root)?;
+        let game = lib
+            .games()
             .iter()
-            .any(|game| pocket_library::is_colors_game(game, &root)),
-    )
+            .find(|game| game.id == id)
+            .ok_or_else(|| anyhow::anyhow!("unknown game"))?;
+        Ok(serde_json::to_string(&pocket_library::colors_languages(
+            game, &root,
+        ))?)
+    })();
+    match result {
+        Ok(body) => new_jstring(&env, body),
+        Err(error) => new_jstring(&env, error_json(&format!("colorsLanguages: {error:#}"))),
+    }
 }
 
 #[no_mangle]
@@ -987,6 +995,28 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_isGizmondoGame<'local
             .iter()
             .find(|e| e.id == id)
             .map(|e| pocket_library::is_gizmondo_game(e, &root))
+            .unwrap_or(false))
+    })();
+    u8::from(result.unwrap_or(false))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_isColorsGame<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root: JString<'local>,
+    id: JString<'local>,
+) -> jni::sys::jboolean {
+    let result = (|| -> anyhow::Result<bool> {
+        let root =
+            jstring_to_path(&mut env, root).ok_or_else(|| anyhow::anyhow!("missing root"))?;
+        let id: String = env.get_string(&id)?.into();
+        let lib = Library::open(&root)?;
+        Ok(lib
+            .games()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| pocket_library::is_colors_game(e, &root))
             .unwrap_or(false))
     })();
     u8::from(result.unwrap_or(false))

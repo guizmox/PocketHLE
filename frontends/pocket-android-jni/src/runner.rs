@@ -454,12 +454,17 @@ fn run_process(
             process
                 .state
                 .vfs
-                .set_colors_language(&launcher_config.colors_language);
+                .set_colors_language(pocket_library::colors_launch_language(
+                    entry,
+                    library_root,
+                    &launcher_config.colors_language,
+                ));
         }
         process.state.vfs.bluetooth.service.set_allowed(hardware.0);
         process.state.vfs.camera_service().set_allowed(hardware.1);
         process.state.vfs.gps_service().set_allowed(hardware.2);
-        if is_gizmondo && launcher_config.gps_fixed_enabled {
+        if pocket_library::is_colors_game(entry, library_root) && launcher_config.gps_fixed_enabled
+        {
             let gps = process.state.vfs.gps_service();
             if let Err(e) = gps.set_fixed_position(launcher_config.simulated_gps_position()) {
                 return (format!("Invalid fixed GPS coordinates: {e}"), 0xc000000d);
@@ -478,7 +483,11 @@ fn run_process(
                 .set_gprs_enabled(launcher_config.gprs_enabled);
             if let Err(e) = pocket_core::kernel::colors::configure(
                 &mut process.state,
-                &launcher_config.colors_server_url,
+                if pocket_library::is_colors_game(entry, library_root) {
+                    &launcher_config.colors_server_url
+                } else {
+                    ""
+                },
                 &launcher_config.colors_terminal_id,
             ) {
                 summary_lines.push(e);

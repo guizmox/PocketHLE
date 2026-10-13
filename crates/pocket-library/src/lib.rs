@@ -811,6 +811,83 @@ pub fn is_colors_game(game: &GameEntry, root: &Path) -> bool {
     })
 }
 
+/// Languages physically available beside this Colors installation's strings.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ColorsLanguage {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+pub fn colors_languages(game: &GameEntry, root: &Path) -> Vec<ColorsLanguage> {
+    if !is_colors_game(game, root) {
+        return Vec::new();
+    }
+    let exe = game.executable_path(root);
+    let Some(directory) = exe.parent() else {
+        return Vec::new();
+    };
+    let card_root = game.gizmondo_card_root(root);
+    let mut directories = vec![directory.to_path_buf()];
+    // Walk up only inside this card, never into another installed variant.
+    {
+        let card = card_root;
+        let mut parent = directory;
+        while parent != card && parent.starts_with(&card) {
+            let Some(next) = parent.parent() else {
+                break;
+            };
+            directories.push(next.to_path_buf());
+            parent = next;
+        }
+    }
+    for directory in directories {
+        let names: Vec<_> = fs::read_dir(directory)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase())
+            .collect();
+        let mut languages = Vec::new();
+        for (id, label, extensions) in [
+            ("english", "English", &["eng"][..]),
+            ("french", "French", &["fre", "fra"][..]),
+            ("german", "German", &["ger", "deu"][..]),
+            ("italian", "Italian", &["ita"][..]),
+            ("spanish", "Spanish", &["spa", "esp"][..]),
+        ] {
+            if extensions.iter().any(|extension| {
+                names
+                    .iter()
+                    .filter(|name| **name == format!("bstrings.{extension}"))
+                    .count()
+                    == 1
+            }) {
+                languages.push(ColorsLanguage { id, label });
+            }
+        }
+        if !languages.is_empty() {
+            return languages;
+        }
+    }
+    Vec::new()
+}
+
+/// One-language cards start directly; unavailable preferences fall back to English.
+pub fn colors_launch_language(game: &GameEntry, root: &Path, preferred: &str) -> &'static str {
+    let languages = colors_languages(game, root);
+    if languages.len() == 1 {
+        return languages[0].id;
+    }
+    languages
+        .iter()
+        .find(|language| language.id == preferred)
+        .or_else(|| languages.iter().find(|language| language.id == "english"))
+        .or_else(|| languages.first())
+        .map_or("english", |language| language.id)
+}
+
 fn default_colors_server_url() -> String {
     "https://vps-50cdd0fc.vps.ovh.ca".to_owned()
 }
@@ -1088,10 +1165,13 @@ impl Library {
         let mut library_changed = false;
         for game in self.library.games.iter_mut() {
             let mut migrated = false;
-            // Upgrade ID placeholders and the two corrected catalogue dates.
+            // Upgrade ID placeholders and corrected catalogue names.
             // Other user-edited names are preserved.
             if let Some(id) = game_gizmondo_title_id(game, &self.root) {
                 let corrected_date = match id.as_str() {
+                    "GZAP200001" => game
+                        .display_name
+                        .eq_ignore_ascii_case("Copilot Navigation 2005"),
                     "GZGA900069" => game
                         .display_name
                         .eq_ignore_ascii_case("Catapult (may 2005)"),
@@ -3200,6 +3280,63 @@ mod tests {
     }
 
     #[test]
+    fn colors_launch_choices_use_local_files_and_remember_only_available_languages() {
+        let root = tempfile::tempdir().unwrap();
+        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
+            "id": "GZGA200015", "display_name": "Custom name", "source_cab": "game.zip",
+            "executable": "extracted/Colors.exe", "imported_at": 0
+        }))
+        .unwrap();
+        let card = game.extracted_dir(root.path());
+        fs::create_dir_all(&card).unwrap();
+        assert!(is_colors_game(&game, root.path()));
+        assert!(colors_languages(&game, root.path()).is_empty());
+        fs::write(card.join("bstrings.ENG"), b"english").unwrap();
+        assert_eq!(colors_languages(&game, root.path()).len(), 1);
+        assert_eq!(
+            colors_launch_language(&game, root.path(), "french"),
+            "english"
+        );
+        fs::write(card.join("BSTRINGS.FRA"), b"french").unwrap();
+        fs::write(card.join("bstrings.fre"), b"same language alias").unwrap();
+        fs::write(card.join("bstrings.xyz"), b"unknown").unwrap();
+        assert_eq!(
+            colors_languages(&game, root.path())
+                .iter()
+                .map(|l| l.id)
+                .collect::<Vec<_>>(),
+            vec!["english", "french"]
+        );
+        assert_eq!(
+            colors_launch_language(&game, root.path(), "french"),
+            "french"
+        );
+        assert_eq!(
+            colors_launch_language(&game, root.path(), "german"),
+            "english"
+        );
+        game.id = "GZGA270015".into();
+        let other = game.extracted_dir(root.path());
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("bstrings.ita"), b"italian").unwrap();
+        assert_eq!(
+            colors_launch_language(&game, root.path(), "french"),
+            "italian"
+        );
+        assert_eq!(colors_languages(&game, root.path()).len(), 1);
+        fs::write(other.join("bstrings.spa"), b"spanish").unwrap();
+        assert_eq!(
+            colors_launch_language(&game, root.path(), "french"),
+            "italian"
+        );
+        for id in ["GZGA800015", "GZGA900015", "GZGA200016"] {
+            game.id = id.into();
+            assert!(!is_colors_game(&game, root.path()));
+            assert!(colors_languages(&game, root.path()).is_empty());
+        }
+    }
+
+    #[test]
     fn colors_configuration_migrates_defaults_and_roundtrips_player_settings() {
         let old: LauncherConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(old.colors_server_url, default_colors_server_url());
@@ -3713,6 +3850,39 @@ mod tests {
                 .is_file());
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn gzap_artwork_handles_bootstrap_and_nested_executable_without_borrowing() {
+        let root = tmpdir("gzap_artwork");
+        let extracted = root.join("extracted");
+        let card = extracted.join("GZAP200001");
+        fs::create_dir_all(card.join("bin")).unwrap();
+        let bitmap = card.join("CoPilot.bmp");
+        image::RgbImage::from_pixel(4, 2, image::Rgb([10, 20, 30]))
+            .save_with_format(&bitmap, image::ImageFormat::Bmp)
+            .unwrap();
+        for exe in [extracted.join("CoPilot.exe"), card.join("bin/CoPilot.exe")] {
+            assert_eq!(
+                cartridge_artwork(&root, &exe),
+                Some(PathBuf::from("cartridge.png"))
+            );
+            let image = image::open(root.join("cartridge.png")).unwrap();
+            assert_eq!((image.width(), image.height()), (4, 2));
+        }
+        // Multiple application cards are ambiguous for a root bootstrap.
+        fs::create_dir_all(extracted.join("GZAP200006")).unwrap();
+        assert_eq!(
+            cartridge_artwork(&root, &extracted.join("CoPilot.exe")),
+            None
+        );
+        assert_eq!(gizmondo_titles::lookup("GZAP200001"), Some("Copilot UK"));
+        assert_eq!(
+            gizmondo_titles::lookup("GZAP200006"),
+            Some("Gizmondo Navigator USA West")
+        );
+        assert!(is_gizmondo_title_id("GZAP200001"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4826,17 +4996,60 @@ mod simulated_gps_tests {
 
 /// Use a real label BMP beside the game binary. Reject oversized inputs before decoding.
 fn cartridge_artwork(game_dir: &Path, exe: &Path) -> Option<PathBuf> {
-    let mut candidates: Vec<_> = fs::read_dir(exe.parent()?)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension()
+    // CoPilot can select a bootstrap EXE above its GZAP application folder,
+    // or an EXE below the card BMP. Search only that install's ancestors and
+    // a unique immediate GZAP folder; never borrow art from another app card.
+    let extracted = game_dir.join("extracted");
+    let mut directories = vec![exe.parent()?.to_path_buf()];
+    if exe.starts_with(&extracted) {
+        let mut parent = exe.parent()?;
+        while parent != extracted {
+            parent = parent.parent()?;
+            directories.push(parent.to_path_buf());
+        }
+    }
+    let mut candidates = Vec::new();
+    for directory in directories {
+        let mut card_dirs = Vec::new();
+        let mut bitmaps = Vec::new();
+        for entry in fs::read_dir(&directory)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_ascii_uppercase();
+            if path.is_dir() && name.starts_with("GZAP") && is_gizmondo_title_id(&name) {
+                card_dirs.push(path);
+            } else if path.is_file()
+                && path
+                    .extension()
                     .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("bmp"))
-        })
-        .collect();
-    candidates.sort();
+            {
+                bitmaps.push(path);
+            }
+        }
+        bitmaps.sort();
+        candidates.extend(bitmaps);
+        if card_dirs.len() == 1 {
+            let mut card_bitmaps: Vec<_> = fs::read_dir(&card_dirs[0])
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("bmp"))
+                })
+                .collect();
+            card_bitmaps.sort();
+            candidates.extend(card_bitmaps);
+        }
+    }
     for path in candidates {
         if fs::metadata(&path).ok()?.len() > 16 * 1024 * 1024 {
             continue;

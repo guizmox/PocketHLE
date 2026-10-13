@@ -2677,26 +2677,39 @@ so parallel tests cannot reset one another's graphs. Production graph behavior
 is unchanged by this test gate.
 
 
-## Global Colors language preference
+## Colors startup options
 
-Desktop and Android Gizmondo options expose English UI for colors_language
-(english/french/german/italian/spanish), default English for existing configs.
-Colors preferences are grouped at the bottom of Gizmondo options.
-Eligibility and launch activation use game_gizmondo_title_id == GZGA200015 or GZGA270015,
-never a display-name match. At the next launch, Colors alone redirects read-side
-bstrings.eng resolution to a case-insensitive sibling bstrings.fre/ger/ita/spa
-(fra/deu/esp aliases accepted). Missing or ambiguous translations retain English.
-No executable or installed resource is rewritten. Write/create destinations stay
-on the original exact path. The alias is process-local, not part of VfsShared,
-so another game sharing device services does not inherit it. Translation files
-must already exist beside bstrings.eng; this does not supply translations or
-rewrite entries inside data.zcd. Original game archives are required for in-game
-validation and any version-specific missing string keys.
+Desktop and Android show an English-language Colors startup menu on every Run
+request, before entering emulation. The language list comes from this card's
+physical bstrings siblings (eng/fre/fra/ger/deu/ita/spa/esp), deduplicated by
+language, never from another installed variant or an editable display name.
+Only normal Colors cards GZGA200015 and GZGA270015 are eligible; demo/ALT
+cards launch directly and do not inherit these language/GPS/server overrides. The remembered colors_language is preselected if available;
+otherwise English. One-language cards show their language without a selector.
+Start persists only these launch preferences before running; Cancel does not
+persist draft edits or start emulation. Already confirmed pending runs do not
+reopen the menu after stopping another game.
+
+Fake GPS starts disabled in each new menu. Enabling it reuses the existing
+once-per-launch fix near Eiffel Tower (within 1 km), or validated manual latitude
+and longitude. Remember coordinates/mode, but require an explicit enable for
+each launch. Simulation belongs to Colors only; other games retain host GPS
+when enabled. Desktop host-access preparation and Android permission requests
+must honor this same Colors identity guard, so simulation bypasses device GPS.
+The multiplayer server also moved into this menu; its previous value is saved.
+Gizmondo options retain hardware activations. The Colors player-ID editor is
+hidden; persisted installation identity generation remains unchanged.
+
+VFS read-side bstrings.eng aliases remain process-local, use only case-insensitive
+siblings beside the resolved resource, and preserve English on missing or
+ambiguous translation. No EXE/resource or write destination changes. No supplied
+translations or rewriting inside data.zcd. Device validation still requires
+original assets and version-specific string keys.
 
 The static title table includes the 26 previously missing GZGA200 IDs extracted
 from the supplied MultiBoot launcher. Existing maintainer titles and IDs stay
 unchanged, including exact GZGA270 and GZGA280 entries; no prefix substitution
-is inferred. Both known Colors IDs enable the global text-language preference.
+is inferred. Only normal GZGA2… Colors IDs enable the startup menu.
 
 User-requested local alternative-version catalogue IDs are GZGA900056 for
 Agaju (E3 demo) and GZGA900069 for Catapult (august 2005). These are custom

@@ -32,17 +32,6 @@ class SettingsActivity : AppCompatActivity() {
     class GlobalPreferencesFragment : PreferenceFragmentCompat() {
         private lateinit var rootDir: String
         private var current: LauncherConfig = LauncherConfig.default()
-        private var positionRequest: DevicePositionRequest? = null
-        private var positionPreference: Preference? = null
-        private val locationPermissionRequest = registerForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
-        ) { grants ->
-            if (isAdded && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
-                if (grants.values.any { it }) fillDevicePosition()
-                else android.widget.Toast.makeText(context, "Location permission denied", android.widget.Toast.LENGTH_LONG).show()
-            }
-        }
-
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             rootDir = LibraryPaths.root(requireContext())
             current = readConfig() ?: LauncherConfig.default()
@@ -59,49 +48,6 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             toggle("gprs_enabled", "GPRS/data", current.gprsEnabled) { current = current.copy(gprsEnabled = it) }
-            toggle("gps_fixed_enabled", "Fixed GPS position", current.gpsFixedEnabled) { current = current.copy(gpsFixedEnabled = it) }
-            giz.addPreference(ListPreference(requireContext()).apply {
-                key = "gps_fixed_mode"; title = "Simulated GPS position"; isPersistent = false
-                entries = arrayOf("Near Eiffel Tower (within 1 km)", "Manual coordinates")
-                entryValues = arrayOf("random", "manual")
-                value = if (current.gpsFixedRandom) "random" else "manual"
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, v -> current = current.copy(gpsFixedRandom = v == "random"); writeConfig(); true }
-            })
-            fun coordinate(keyName: String, label: String, latitude: Boolean) {
-                giz.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
-                    key = keyName; title = label; isPersistent = false
-                    text = (if (latitude) current.gpsFixedLatitude else current.gpsFixedLongitude).toString()
-                    summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
-                    setOnBindEditTextListener { it.inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED }
-                    setOnPreferenceChangeListener { _, value ->
-                        val number = value.toString().trim().replace(',', '.').toDoubleOrNull()
-                        val limit = if (latitude) 90.0 else 180.0
-                        if (number == null || !number.isFinite() || number !in -limit..limit) {
-                            android.widget.Toast.makeText(context, "Invalid coordinate (−$limit to $limit)", android.widget.Toast.LENGTH_LONG).show(); false
-                        } else {
-                            current = if (latitude) current.copy(gpsFixedLatitude = number) else current.copy(gpsFixedLongitude = number)
-                            writeConfig(); true
-                        }
-                    }
-                })
-            }
-            coordinate("gps_fixed_latitude", "Latitude", true)
-            coordinate("gps_fixed_longitude", "Longitude", false)
-            positionPreference = object : Preference(requireContext()) {
-                override fun onBindViewHolder(holder: androidx.preference.PreferenceViewHolder) {
-                    super.onBindViewHolder(holder)
-                    val button = holder.findViewById(android.R.id.button1) as android.widget.Button
-                    button.isEnabled = isEnabled
-                    button.setOnClickListener { fillDevicePosition() }
-                }
-            }.apply {
-                key = "gps_fill_position"; title = "Device position"; isPersistent = false
-                summary = "Copy the latest known position, or request a new fix."
-                widgetLayoutResource = R.layout.preference_fill_position
-                setOnPreferenceClickListener { fillDevicePosition(); true }
-            }
-            giz.addPreference(positionPreference!!)
             val display = findPreference<androidx.preference.PreferenceScreen>("display_options")!!
             display.addPreference(ListPreference(requireContext()).apply {
                 key = "upscale_filter"; title = "Filter"; isPersistent = false
@@ -144,50 +90,12 @@ class SettingsActivity : AppCompatActivity() {
             giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "gps_enabled"
                 title = "GPS / device location (GPS1)"
-                summary = "Real device location; fixed position works independently of this option."
+                summary = "Allow games to read real device location. Colors Fake GPS is selected at launch."
                 isPersistent = false
                 isChecked = current.gpsEnabled
                 setOnPreferenceChangeListener { _, value ->
                     current = current.copy(gpsEnabled = value as Boolean)
                     writeConfig(); true
-                }
-            })
-            giz.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
-                key = "colors_server_url"
-                title = "Colors multiplayer server"
-                summary = "Host, IP or URL, for example nas.local:8080. Applied on the next launch."
-                isPersistent = false
-                text = current.colorsServerUrl
-                setOnPreferenceChangeListener { _, value ->
-                    val input = value.toString().trim()
-                    val origin = if (input.isEmpty() || input.contains("://")) input else "http://$input"
-                    val uri = android.net.Uri.parse(origin)
-                    if (origin.isNotEmpty() && (uri.scheme !in listOf("http", "https") || uri.host.isNullOrBlank() || !uri.userInfo.isNullOrBlank() || !uri.query.isNullOrBlank() || !uri.fragment.isNullOrBlank() || (uri.path ?: "") !in listOf("", "/"))) {
-                        android.widget.Toast.makeText(context, "Enter a host or HTTP(S) origin without a path", android.widget.Toast.LENGTH_LONG).show(); false
-                    } else { current = current.copy(colorsServerUrl = origin.trimEnd('/')); writeConfig(); true }
-                }
-            })
-            giz.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
-                key = "colors_terminal_id"
-                title = "Colors player ID (optional)"
-                summary = "Leave empty to keep this installation's identity"
-                isPersistent = false
-                text = current.colorsTerminalId
-                setOnPreferenceChangeListener { _, value ->
-                    val identity=value.toString().trim()
-                    if(identity.length>128 || !identity.matches(Regex("[A-Za-z0-9_.-]*"))) { android.widget.Toast.makeText(context,"ID: ASCII letters, digits, hyphen, dot or underscore (maximum 128 characters)",android.widget.Toast.LENGTH_LONG).show();false }
-                    else { current=current.copy(colorsTerminalId=identity);writeConfig();true }
-                }
-            })
-            giz.addPreference(ListPreference(requireContext()).apply {
-                key = "colors_language"; title = "Colors language"; isPersistent = false
-                entries = arrayOf("English", "French", "German", "Italian", "Spanish")
-                entryValues = arrayOf("english", "french", "german", "italian", "spanish")
-                value = current.colorsLanguage
-                isEnabled = NativeBridge.hasColors(rootDir)
-                summary = if (isEnabled) "Applied on the next launch. Missing translations use English." else "Install Colors to choose its language."
-                setOnPreferenceChangeListener { _, value ->
-                    current = current.copy(colorsLanguage = value.toString()); writeConfig(); true
                 }
             })
             val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Keyboard and controllers" }
@@ -291,44 +199,6 @@ class SettingsActivity : AppCompatActivity() {
                 return true
             }
             return super.onPreferenceTreeClick(preference)
-        }
-
-        private fun fillDevicePosition() {
-            if (positionRequest != null || !isAdded) return
-            val permissions = GpsHost.permissions()
-            val granted = permissions.any {
-                androidx.core.content.ContextCompat.checkSelfPermission(requireContext(), it) == android.content.pm.PackageManager.PERMISSION_GRANTED
-            }
-            if (!granted) { locationPermissionRequest.launch(permissions); return }
-            positionPreference?.isEnabled = false
-            positionPreference?.summary = "Waiting for device position…"
-            positionRequest = DevicePositionRequest(requireContext()) { location, message ->
-                positionRequest = null
-                positionPreference?.isEnabled = true
-                if (location != null) {
-                    // Filling coordinates does not silently enable fixed GPS mode.
-                    current = readConfig() ?: current
-                    current = current.copy(gpsFixedLatitude = location.latitude, gpsFixedLongitude = location.longitude)
-                    findPreference<androidx.preference.EditTextPreference>("gps_fixed_latitude")?.text = location.latitude.toString()
-                    findPreference<androidx.preference.EditTextPreference>("gps_fixed_longitude")?.text = location.longitude.toString()
-                    writeConfig()
-                    val timestamp = java.text.DateFormat.getDateTimeInstance().format(java.util.Date(location.time))
-                    positionPreference?.summary = "Coordinates copied (position: $timestamp)"
-                } else {
-                    positionPreference?.summary = message
-                    android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show()
-                }
-            }
-            positionRequest?.start()
-        }
-
-        override fun onStop() {
-            if (positionRequest != null) {
-                positionRequest?.close(); positionRequest = null
-                positionPreference?.isEnabled = true
-                positionPreference?.summary = "Position request canceled. Tap Fill to try again."
-            }
-            super.onStop()
         }
 
         private fun saveKeyboardBinding(button: String, name: String?) {

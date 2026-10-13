@@ -33,7 +33,7 @@ Desktop also provides `pockethle-bt-test server`, `scan` and `client ADDRESS`.
 ## GPS
 
 Host GPS is opt-in and uses real location when available and permitted.
-Simulated GPS offers manual coordinates or a point within 1 km of the Eiffel
+The normal Colors startup menu offers manual coordinates or a point within 1 km of the Eiffel
 Tower, selected once per launch. Simulation takes priority if enabled; disable
 it and enable host GPS to use the real provider. Manual coordinates are retained.
 Fake fixes do not require host-location permission; Bluetooth may independently
@@ -102,17 +102,33 @@ regression checks are documented in [GPU.md](GPU.md).
 
 ## Colors language
 
-At the bottom of Gizmondo options, **Colors language** selects English, French, German,
-Italian or Spanish for the next launch. The preference is global and becomes
-available when Colors (GZGA200015 or GZGA270015) is installed. If the chosen translation is
-missing, Colors uses English. The installation must contain the translation
-beside `bstrings.eng`; no translation files are bundled and the game executable
-and original resources remain unchanged. Other titles keep their own language.
+Normal Colors cards GZGA200015 and GZGA270015 show a **Colors startup** menu
+on every launch on Windows and Android. Demo/ALT cards launch directly and do
+not inherit these language, Fake GPS or server overrides.
+When its card contains several supported `bstrings` languages, the list shows
+only those installed and preselects the previous choice. A missing preference
+falls back to English; a one-language card shows its available language.
+
+**Fake GPS** is disabled initially at each launch. Enable it to replace real
+GPS with either **Near Eiffel Tower (within 1 km)** (one simulated fix per launch)
+or **Manual coordinates** (latitude −90..90, longitude −180..180). Coordinates
+and mode are remembered. Simulated GPS works even when hardware GPS is disabled,
+and skips real location access/permission requests. Other games keep real GPS.
+
+The same menu holds **Colors multiplayer server**, retaining the previous value;
+blank restores the public server. **Start** saves these choices and launches;
+**Cancel** discards draft changes. Language, simulated GPS and server editors
+have moved out of Gizmondo options, which retain hardware activations. The
+player-ID editor is hidden; the installation's generated identity is retained.
+
+Supported resources are `bstrings.eng`, `.fre`/`.fra`, `.ger`/`.deu`, `.ita`,
+and `.spa`/`.esp`, case-insensitive, deduplicated by language. Resource redirection
+stays beside the resolved English file, preserves English fallback, and does not
+modify the EXE or original resources. No translations are bundled.
 
 Desktop cartridge BMP artwork preserves its aspect ratio, centred within the
 white SD-card label. Wide images fit its full width; tall images also respect
 the label height. Artwork never stretches into the Gizmondo band.
-
 
 ## GZGA collection ZIP imports
 

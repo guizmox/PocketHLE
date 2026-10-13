@@ -210,7 +210,7 @@ class GameActivity : AppCompatActivity() {
         val gameSettings = runCatching { GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(rootDir, id))) }.getOrDefault(GameSettings.default())
         dpadDeadzone = ControlDeadzone.from(gameSettings.dpadDeadzone)
         (gameControls as? GizmondoControls)?.dpad?.deadZoneRadius = dpadDeadzone.radius
-        val fixedGps = config.gpsFixedEnabled && isGizmondo
+        val fixedGps = config.gpsFixedEnabled && NativeBridge.isColorsGame(rootDir, id)
         rotationDegrees = if (isGizmondo) 0 else readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
         if (!gizmondoGame) {

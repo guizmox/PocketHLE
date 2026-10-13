@@ -383,7 +383,149 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private var launchPending = false
+
     private fun launchGame(entry: GameEntry) {
+        if (libraryBusy || launchPending) return
+        launchPending = true
+        lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    Triple(NativeBridge.isColorsGame(rootDir, entry.id),
+                        JSONArray(NativeBridge.colorsLanguages(rootDir, entry.id)),
+                        JSONObject(NativeBridge.readConfig(rootDir)))
+                }
+                if (!result.first) {
+                    launchPending = false
+                    startGame(entry)
+                    return@launch
+                }
+                showColorsStartup(entry, result.second, result.third)
+            } catch (error: Exception) {
+                launchPending = false
+                Snackbar.make(recycler, error.message ?: "Could not read launch options", Snackbar.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun showColorsStartup(entry: GameEntry, languages: JSONArray, config: JSONObject) {
+        val content = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val padding = (20 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding, padding, padding)
+        }
+        fun label(text: String) { content.addView(TextView(this).apply { this.text = text }) }
+        fun spinner(labels: List<String>) = android.widget.Spinner(this).also {
+            it.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+            content.addView(it)
+        }
+        fun field(title: String, value: String, coordinates: Boolean = false): android.widget.EditText {
+            label(title)
+            return android.widget.EditText(this).also {
+                it.setText(value)
+                it.setSingleLine(true)
+                if (coordinates) it.inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+                content.addView(it)
+            }
+        }
+        val ids = (0 until languages.length()).map { languages.getJSONObject(it).getString("id") }
+        val labels = (0 until languages.length()).map { languages.getJSONObject(it).getString("label") }
+        val language = if (ids.size > 1) {
+            label("Language")
+            spinner(labels).apply {
+                val previous = ids.indexOf(config.optString("colors_language", "english"))
+                setSelection(if (previous >= 0) previous else ids.indexOf("english").coerceAtLeast(0))
+            }
+        } else {
+            label("Language: ${labels.firstOrNull() ?: "English"}")
+            null
+        }
+        val fakeGps = androidx.appcompat.widget.SwitchCompat(this).apply {
+            text = "Fake GPS"
+            isChecked = false
+        }
+        content.addView(fakeGps)
+        val mode = spinner(listOf("Near Eiffel Tower (within 1 km)", "Manual coordinates"))
+        mode.setSelection(if (config.optBoolean("gps_fixed_random")) 0 else 1)
+        label("A simulated fix is chosen once per launch. Manual coordinates remain saved.")
+        val latitude = field("Latitude", config.optDouble("gps_fixed_latitude", 0.0).toString(), true)
+        val longitude = field("Longitude", config.optDouble("gps_fixed_longitude", 0.0).toString(), true)
+        label("Decimal coordinates: north/east positive, south/west negative.")
+        label("Fake GPS replaces device location for this launch.")
+        fun updateGpsControls() {
+            mode.isEnabled = fakeGps.isChecked
+            latitude.isEnabled = fakeGps.isChecked && mode.selectedItemPosition == 1
+            longitude.isEnabled = latitude.isEnabled
+        }
+        fakeGps.setOnCheckedChangeListener { _, _ -> updateGpsControls() }
+        mode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) { updateGpsControls() }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+        updateGpsControls()
+        val server = field("Colors multiplayer server", config.optString("colors_server_url"))
+        label("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Colors startup")
+            .setView(android.widget.ScrollView(this).apply { addView(content) })
+            .setPositiveButton("Start", null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        dialog.setOnDismissListener { launchPending = false }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val lat = latitude.text.toString().trim().replace(',', '.').toDoubleOrNull()
+                val lon = longitude.text.toString().trim().replace(',', '.').toDoubleOrNull()
+                if (fakeGps.isChecked && mode.selectedItemPosition == 1 &&
+                    (lat == null || lon == null || !lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0)) {
+                    android.widget.Toast.makeText(this, "Invalid coordinates: latitude −90..90, longitude −180..180", android.widget.Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                val input = server.text.toString().trim()
+                val origin = if (input.isEmpty() || input.contains("://")) input else "http://$input"
+                val uri = android.net.Uri.parse(origin)
+                if (origin.isNotEmpty() && (uri.scheme !in listOf("http", "https") || uri.host.isNullOrBlank() || !uri.userInfo.isNullOrBlank() || !uri.query.isNullOrBlank() || !uri.fragment.isNullOrBlank() || (uri.path ?: "") !in listOf("", "/"))) {
+                    server.error = "Enter a host or HTTP(S) origin without a path"
+                    return@setOnClickListener
+                }
+                val selected = language?.let { ids[it.selectedItemPosition] } ?: ids.firstOrNull() ?: "english"
+                val fixedEnabled = fakeGps.isChecked
+                val fixedRandom = mode.selectedItemPosition == 0
+                dialog.setCancelable(false)
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
+                lifecycleScope.launch {
+                    try {
+                        val saved = withContext(Dispatchers.IO) {
+                            val latest = JSONObject(NativeBridge.readConfig(rootDir))
+                            latest.put("colors_language", selected)
+                            latest.put("gps_fixed_enabled", fixedEnabled)
+                            latest.put("gps_fixed_random", fixedRandom)
+                            if (lat != null && lat.isFinite() && lat in -90.0..90.0) latest.put("gps_fixed_latitude", lat)
+                            if (lon != null && lon.isFinite() && lon in -180.0..180.0) latest.put("gps_fixed_longitude", lon)
+                            latest.put("colors_server_url", origin.trimEnd('/'))
+                            JSONObject(NativeBridge.writeConfig(rootDir, latest.toString()))
+                        }
+                        if (saved.optBoolean("ok")) { dialog.dismiss(); startGame(entry) }
+                        else {
+                            dialog.setCancelable(true)
+                            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
+                            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                            Snackbar.make(recycler, saved.optString("error", "Could not save options"), Snackbar.LENGTH_LONG).show()
+                        }
+                    } catch (error: Exception) {
+                        dialog.setCancelable(true)
+                        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
+                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                        Snackbar.make(recycler, error.message ?: "Could not save options", Snackbar.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun startGame(entry: GameEntry) {
         startActivity(
             Intent(this, GameActivity::class.java)
                 .putExtra(GameActivity.EXTRA_GAME_ID, entry.id)

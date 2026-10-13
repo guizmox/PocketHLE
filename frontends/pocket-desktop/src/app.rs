@@ -131,6 +131,11 @@ pub struct PocketLauncher {
     updating_import: bool,
     library_busy: bool,
     pending_run: Option<GameEntry>,
+    colors_startup_prompt: Option<(
+        GameEntry,
+        Vec<pocket_library::ColorsLanguage>,
+        LauncherConfig,
+    )>,
     screen: Screen,
     runner: Runner,
     events_rx: Receiver<UiEvent>,
@@ -615,6 +620,7 @@ impl PocketLauncher {
             updating_import: false,
             library_busy: false,
             pending_run: None,
+            colors_startup_prompt: None,
             screen: Screen::Library,
             runner,
             events_rx: rx,
@@ -723,7 +729,7 @@ impl PocketLauncher {
         // or accepting a final snapshot under the new game's identity.
         if self.running_game.is_none() {
             if let Some(game) = self.pending_run.take() {
-                self.spawn_run(&game);
+                self.spawn_run_selected(&game);
             }
         }
         // Drain any live preview frames the background runner may
@@ -1524,56 +1530,11 @@ impl PocketLauncher {
         if gizmondo {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the host location service where available.");
-        {
-            ui.checkbox(&mut draft.gps_fixed_enabled, "Simulated GPS position (next launch)")
-                .on_hover_text("Use a simulated position instead of host location.");
-            ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
-                egui::ComboBox::from_id_source("simulated_gps_mode")
-                    .selected_text(if draft.gps_fixed_random { "Near Eiffel Tower (within 1 km)" } else { "Manual coordinates" })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.gps_fixed_random, true, "Near Eiffel Tower (within 1 km)");
-                        ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
-                    });
-                ui.label("A simulated fix is chosen once per launch. Manual coordinates remain saved.");
-                ui.horizontal(|ui| {
-                    ui.label("Latitude");
-                    ui.add(egui::DragValue::new(&mut draft.gps_fixed_latitude).speed(0.0001).clamp_range(-90.0..=90.0).max_decimals(7));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Longitude");
-                    ui.add(egui::DragValue::new(&mut draft.gps_fixed_longitude).speed(0.0001).clamp_range(-180.0..=180.0).max_decimals(7));
-                });
-                ui.label("Decimal coordinates: north/east positive, south/west negative.");
-                ui.label("The game will use this simulated position instead of host location.");
-            });
-        }
         ui.checkbox(&mut draft.gprs_enabled, "GPRS/data")
             .on_hover_text("Use the PC Internet connection for the Gizmondo data connection. Takes effect on the next launch.");
         ui.checkbox(&mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
         ui.checkbox(&mut draft.camera_enabled, "Camera hardware (CAM1)")
             .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
-        ui.separator();
-        ui.label("Colors multiplayer server (next launch)");
-        ui.text_edit_singleline(&mut draft.colors_server_url)
-            .on_hover_text("Example: http://192.168.1.10:8080. Leave empty to restore the public Colors server on the next load.");
-        ui.label("Colors player ID (optional)");
-        ui.text_edit_singleline(&mut draft.colors_terminal_id)
-            .on_hover_text("Leave empty to keep this installation's persistent device identity.");
-        let colors_installed = self.library.games().iter().any(|game| pocket_library::is_colors_game(game, self.library.root()));
-        ui.add_enabled_ui(colors_installed, |ui| {
-            ui.label("Colors language");
-            egui::ComboBox::from_id_source("colors_language")
-                .selected_text(match draft.colors_language.as_str() {
-                    "french" => "French", "german" => "German", "italian" => "Italian", "spanish" => "Spanish", _ => "English",
-                })
-                .show_ui(ui, |ui| {
-                    for (value, label) in [("english", "English"), ("french", "French"), ("german", "German"), ("italian", "Italian"), ("spanish", "Spanish")] {
-                        ui.selectable_value(&mut draft.colors_language, value.to_owned(), label);
-                    }
-                });
-            ui.label("Applied on the next launch. Missing translations use English.");
-        });
-        if !colors_installed { ui.label("Install Colors to choose its language."); }
         } else {
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")
@@ -2798,6 +2759,13 @@ impl PocketLauncher {
     }
 
     fn spawn_import_dialog(&mut self) {
+        if self.colors_startup_prompt.is_some() {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(&self.status);
+            });
+            self.ui_colors_startup(ctx);
+            return;
+        }
         if self.library_busy || self.demo_import.is_some() {
             return;
         }
@@ -2857,10 +2825,118 @@ impl PocketLauncher {
     }
 
     fn spawn_run(&mut self, game: &GameEntry) {
+        let languages = pocket_library::colors_languages(game, self.library.root());
+        if pocket_library::is_colors_game(game, self.library.root()) {
+            let mut draft = self.library.config().clone();
+            draft.gps_fixed_enabled = false;
+            draft.colors_language = pocket_library::colors_launch_language(
+                game,
+                self.library.root(),
+                &draft.colors_language,
+            )
+            .to_owned();
+            self.colors_startup_prompt = Some((game.clone(), languages, draft));
+        } else {
+            self.spawn_run_selected(game);
+        }
+    }
+
+    fn ui_colors_startup(&mut self, ctx: &egui::Context) {
+        let Some((game, languages, previous)) = self.colors_startup_prompt.as_ref() else {
+            return;
+        };
+        let game = game.clone();
+        let languages = languages.clone();
+        let mut draft = previous.clone();
+        let mut selected = None;
+        let mut cancelled = false;
+        egui::Window::new("Colors startup")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Choose options for this launch.");
+                if languages.len() > 1 {
+                ui.label("Language");
+                for language in &languages {
+                    ui.radio_value(&mut draft.colors_language, language.id.to_owned(), language.label);
+                }
+                } else if let Some(language) = languages.first() { ui.label(format!("Language: {}", language.label)); }
+        {
+            ui.checkbox(&mut draft.gps_fixed_enabled, "Fake GPS")
+                .on_hover_text("Use a simulated position instead of host location.");
+            ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
+                egui::ComboBox::from_id_source("simulated_gps_mode")
+                    .selected_text(if draft.gps_fixed_random { "Near Eiffel Tower (within 1 km)" } else { "Manual coordinates" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.gps_fixed_random, true, "Near Eiffel Tower (within 1 km)");
+                        ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
+                    });
+                ui.label("A simulated fix is chosen once per launch. Manual coordinates remain saved.");
+                ui.horizontal(|ui| {
+                    ui.label("Latitude");
+                    ui.add(egui::DragValue::new(&mut draft.gps_fixed_latitude).speed(0.0001).clamp_range(-90.0..=90.0).max_decimals(7));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Longitude");
+                    ui.add(egui::DragValue::new(&mut draft.gps_fixed_longitude).speed(0.0001).clamp_range(-180.0..=180.0).max_decimals(7));
+                });
+                ui.label("Decimal coordinates: north/east positive, south/west negative.");
+                ui.label("The game will use this simulated position instead of host location.");
+            });
+        }
+                ui.separator();
+                ui.label("Colors multiplayer server");
+                ui.text_edit_singleline(&mut draft.colors_server_url)
+                    .on_hover_text("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.");
+                if ui.button("Start").clicked() {
+                    selected = Some(draft.clone());
+                }
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+            });
+        if let Some((_, _, value)) = self.colors_startup_prompt.as_mut() {
+            *value = draft;
+        }
+        if let Some(draft) = selected {
+            let input = draft.colors_server_url.trim().trim_end_matches('/');
+            let server = if input.is_empty() || input.contains("://") {
+                input.to_owned()
+            } else {
+                format!("http://{input}")
+            };
+            if pocket_core::kernel::internet::State::default()
+                .set_colors_endpoint(&server)
+                .is_err()
+            {
+                self.status = "Enter a host or HTTP(S) origin without a path.".into();
+                return;
+            }
+            let config = self.library.config_mut();
+            config.colors_language = draft.colors_language;
+            config.gps_fixed_enabled = draft.gps_fixed_enabled;
+            config.gps_fixed_random = draft.gps_fixed_random;
+            config.gps_fixed_latitude = draft.gps_fixed_latitude;
+            config.gps_fixed_longitude = draft.gps_fixed_longitude;
+            config.colors_server_url = server;
+            match self.library.save() {
+                Ok(()) => {
+                    self.colors_startup_prompt = None;
+                    self.spawn_run_selected(&game);
+                }
+                Err(error) => self.status = format!("Could not save startup options: {error}"),
+            }
+        } else if cancelled {
+            self.colors_startup_prompt = None;
+        }
+    }
+
+    fn spawn_run_selected(&mut self, game: &GameEntry) {
         #[cfg(windows)]
         if self.library.config().gps_enabled
             && !(self.library.config().gps_fixed_enabled
-                && is_gizmondo_game(game, self.library.root()))
+                && pocket_library::is_colors_game(game, self.library.root()))
         {
             pocket_core::kernel::gps::prepare_host_access();
         }
@@ -2984,13 +3060,6 @@ impl eframe::App for PocketLauncher {
             }
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
-        }
-        #[cfg(windows)]
-        if self.library.config().gps_enabled
-            && (!self.library.config().gps_fixed_enabled
-                || (self.screen == Screen::Run && !self.running_is_gizmondo))
-        {
-            pocket_core::kernel::gps::prepare_host_access();
         }
         if self.screen != Screen::Run || !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             self.release_all_keys();
