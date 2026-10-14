@@ -106,6 +106,10 @@ jobs:
         # ARM process diagnostics use short guest wait deadlines. Avoid competing
         # emulator/process trees on the runner's limited vCPUs; keep every test.
         run: cargo test --workspace --release --locked -- --test-threads=1
+      - name: test Steam Deck configuration and defaults
+        run: cargo test --release --locked -p pocket-library --features steam-deck --lib -- --test-threads=1
+      - name: test Steam Deck frontend navigation and filter controls
+        run: cargo test --release --locked -p pocket-desktop --features steam-deck --bin pockethle-steamdeck deck_ -- --test-threads=1
 
   build-unicorn:
     name: build with unicorn-engine
@@ -216,6 +220,26 @@ jobs:
         with:
           name: PocketHLE-windows-x86_64
           path: PocketHLE-windows-x86_64.zip
+      - name: build Steam Deck edition for Proton
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p pocket-desktop --features steam-deck --bin pockethle-steamdeck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: stage Steam Deck artifacts
+        shell: bash
+        run: |
+          mkdir -p dist/PocketHLE-steamdeck
+          cp target/cargo/release/pockethle-steamdeck.exe dist/PocketHLE-steamdeck/
+          cp docs/STEAMDECK.md dist/PocketHLE-steamdeck/README-SteamDeck.md
+      - name: zip Steam Deck artifacts
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/PocketHLE-steamdeck/* -DestinationPath PocketHLE-steamdeck-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketHLE-steamdeck-x86_64
+          path: PocketHLE-steamdeck-x86_64.zip
+          if-no-files-found: error
 
   build-android:
     name: build android APK
