@@ -361,11 +361,12 @@ The strategies, in the order they are tried:
 | --- | --- | --- | --- |
 | 1 | **Native ARM/VFP code** written into the thunk slot | `native_thunks::native_thunk_for` returns code. Gated on `dll.eq_ignore_ascii_case("coredll.dll")` (`native_thunks.rs:225`) and **never** used for MIPS. | Zero host round-trips. `memcpy`, `strlen`, float helpers. |
 | 2 | **Constant return**: `mov r0, #imm; bx lr` | Native declined *and* `cpu.arch() == Arm` *and* `Dispatcher::constant_for` answers. | Zero host round-trips. Derby's imports hit this ~33% of the time. |
-| 3 | **`bx lr` + code hook** → Rust `Handler` | Everything else. `ARM_BX_LR` = `[0x1e, 0xff, 0x2f, 0xe1]`; MIPS gets `MIPS_JR_RA`. | One host call per guest call. |
+| 3 | **CPU-local exact 64-bit arithmetic** | ARM COREDLL `__rt_{s,u}{div,rem}64by64` on supported backends; static, ordinal and dynamic imports share installation. | Unicorn stops internally, calculates while stopped, resumes through padded `bx lr`, skipping kernel dispatch. Preserve the original slice deadline and clear hooks on unmap. |
+| 4 | **`bx lr` + code hook** → Rust `Handler` | Everything else. `ARM_BX_LR` = `[0x1e, 0xff, 0x2f, 0xe1]`; MIPS gets `MIPS_JR_RA`. | One host call per guest call. |
 
 Strategy 2 is why invariant 2 exists: `constant_for` is consulted once,
 at load time, and its answer is frozen into guest memory. A handler whose
-return value depends on mutable state must be strategy 3.
+return value depends on mutable state must be strategy 4.
 
 The dynamic-export DLL list in step 6 is hard-coded at
 `crates/pocket-kernel/src/lib.rs:1620`: `coredll.dll`, `commctrl.dll`,

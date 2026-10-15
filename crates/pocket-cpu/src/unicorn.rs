@@ -123,6 +123,7 @@ pub struct UnicornCpu {
     arch: Arch,
     mips_status: u32,
     code_hooks: Vec<(u32, u32, UcHookId)>,
+    inline_arithmetic: std::collections::HashMap<u32, crate::arithmetic64::Arithmetic64>,
     images: Rc<RefCell<crate::image_pages::ImagePages>>,
     scheduler_timeout_us: u64,
 }
@@ -184,6 +185,7 @@ impl UnicornCpu {
             stop_requested: Rc::new(RefCell::new(false)),
             mips_status: 0,
             code_hooks: Vec::new(),
+            inline_arithmetic: std::collections::HashMap::new(),
             images,
             scheduler_timeout_us: 0,
             scheduler_timer: None,
@@ -439,9 +441,88 @@ fn slice_watchdog_us() -> u64 {
     })
 }
 
+impl UnicornCpu {
+    fn run_once(
+        &mut self,
+        start_va: u32,
+        scheduler_us: u64,
+        watchdog_us: u64,
+    ) -> Result<StopReason, CpuError> {
+        *self.last_hook.borrow_mut() = None;
+        *self.stop_requested.borrow_mut() = false;
+        // IMPORTANT: run with `count = 0` (no instruction limit) so the
+        // QEMU TCG keeps chaining translation blocks at full speed. A
+        // non-zero `count` would silently install a per-instruction
+        // counting hook and tank throughput ~5-10x. Slices are instead
+        // ended by the IAT-thunk code hooks (which call `emu_stop` on
+        // every emulated API call) and the reusable scheduler timer for
+        // API-free loops. A separate diagnostic watchdog remains opt-in.
+        if scheduler_us != 0 {
+            if let Some(timer) = &self.scheduler_timer {
+                timer.arm(scheduler_us);
+            }
+        }
+        let r = self.uc.emu_start(
+            start_va as u64,
+            0,           // until = 0 → run until stopped
+            watchdog_us, // remaining explicit diagnostic watchdog
+            0,           // count = 0 → keep TB chaining (do NOT pass a limit)
+        );
+        if let Some(timer) = &self.scheduler_timer {
+            timer.disarm();
+        }
+        if let Some(addr) = *self.last_hook.borrow() {
+            return Ok(StopReason::Hook(addr));
+        }
+        match r {
+            // No hook fired: either an explicit stop was requested from
+            // another thread/hook, or the watchdog timeout elapsed.
+            // Both are benign slice boundaries — the caller refreshes
+            // state and resumes from the current PC.
+            Ok(()) => {
+                if *self.stop_requested.borrow() {
+                    Ok(StopReason::Requested)
+                } else {
+                    Ok(StopReason::InstructionLimit)
+                }
+            }
+            Err(e) => {
+                let fault = self.last_fault.borrow().clone();
+                if let Some((kind, addr)) = fault {
+                    Err(CpuError::Backend(format!(
+                        "emu_start: {e:?} ({kind}) at guest address 0x{addr:08x}; pc=0x{:08x} lr=0x{:08x} sp=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x}",
+                        self.read_reg(ArmReg::Pc).unwrap_or(0),
+                        self.read_reg(ArmReg::Lr).unwrap_or(0),
+                        self.read_reg(ArmReg::Sp).unwrap_or(0),
+                        self.read_reg(ArmReg::R0).unwrap_or(0),
+                        self.read_reg(ArmReg::R1).unwrap_or(0),
+                        self.read_reg(ArmReg::R2).unwrap_or(0),
+                        self.read_reg(ArmReg::R3).unwrap_or(0),
+                    )))
+                } else {
+                    Err(CpuError::Backend(format!("emu_start: {e:?}")))
+                }
+            }
+        }
+    }
+}
+
 impl Cpu for UnicornCpu {
     fn arch(&self) -> Arch {
         self.arch
+    }
+
+    fn install_inline_arithmetic64(
+        &mut self,
+        va: u32,
+        operation: crate::arithmetic64::Arithmetic64,
+    ) -> Result<bool, CpuError> {
+        if self.arch != Arch::Arm {
+            return Ok(false);
+        }
+        self.add_code_hook(va)?;
+        self.inline_arithmetic.insert(va, operation);
+        Ok(true)
     }
 
     fn supports_image_paging(&self) -> bool {
@@ -462,6 +543,8 @@ impl Cpu for UnicornCpu {
             return Ok(false);
         }
         let end = u64::from(va) + u64::from(size);
+        self.inline_arithmetic
+            .retain(|address, _| *address < va || u64::from(*address) >= end);
         let regions = self
             .uc
             .mem_regions()
@@ -778,61 +861,49 @@ impl Cpu for UnicornCpu {
         start_va: u32,
         _max_instructions: u64,
     ) -> Result<StopReason, CpuError> {
-        *self.last_hook.borrow_mut() = None;
-        *self.stop_requested.borrow_mut() = false;
-        // IMPORTANT: run with `count = 0` (no instruction limit) so the
-        // QEMU TCG keeps chaining translation blocks at full speed. A
-        // non-zero `count` would silently install a per-instruction
-        // counting hook and tank throughput ~5-10x. Slices are instead
-        // ended by the IAT-thunk code hooks (which call `emu_stop` on
-        // every emulated API call) and the reusable scheduler timer for
-        // API-free loops. A separate diagnostic watchdog remains opt-in.
-        if self.scheduler_timeout_us != 0 {
-            if let Some(timer) = &self.scheduler_timer {
-                timer.arm(self.scheduler_timeout_us);
+        if self.inline_arithmetic.is_empty() {
+            return self.run_once(start_va, self.scheduler_timeout_us, slice_watchdog_us());
+        }
+        let started = std::time::Instant::now();
+        let scheduler = self.scheduler_timeout_us;
+        let watchdog = slice_watchdog_us();
+        let mut current = start_va;
+        let mut consumed = false;
+        loop {
+            let elapsed = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            if consumed
+                && ((scheduler != 0 && elapsed >= scheduler)
+                    || (watchdog != 0 && elapsed >= watchdog))
+            {
+                return Ok(StopReason::InstructionLimit);
             }
-        }
-        let r = self.uc.emu_start(
-            start_va as u64,
-            0,                   // until = 0 → run until stopped
-            slice_watchdog_us(), // retain the explicit diagnostic watchdog
-            0,                   // count = 0 → keep TB chaining (do NOT pass a limit)
-        );
-        if let Some(timer) = &self.scheduler_timer {
-            timer.disarm();
-        }
-        if let Some(addr) = *self.last_hook.borrow() {
-            return Ok(StopReason::Hook(addr));
-        }
-        match r {
-            // No hook fired: either an explicit stop was requested from
-            // another thread/hook, or the watchdog timeout elapsed.
-            // Both are benign slice boundaries — the caller refreshes
-            // state and resumes from the current PC.
-            Ok(()) => {
-                if *self.stop_requested.borrow() {
-                    Ok(StopReason::Requested)
+            let remaining = |limit: u64| {
+                if limit == 0 {
+                    0
                 } else {
-                    Ok(StopReason::InstructionLimit)
+                    limit.saturating_sub(elapsed).max(1)
                 }
-            }
-            Err(e) => {
-                let fault = self.last_fault.borrow().clone();
-                if let Some((kind, addr)) = fault {
-                    Err(CpuError::Backend(format!(
-                        "emu_start: {e:?} ({kind}) at guest address 0x{addr:08x}; pc=0x{:08x} lr=0x{:08x} sp=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x}",
-                        self.read_reg(ArmReg::Pc).unwrap_or(0),
-                        self.read_reg(ArmReg::Lr).unwrap_or(0),
-                        self.read_reg(ArmReg::Sp).unwrap_or(0),
-                        self.read_reg(ArmReg::R0).unwrap_or(0),
-                        self.read_reg(ArmReg::R1).unwrap_or(0),
-                        self.read_reg(ArmReg::R2).unwrap_or(0),
-                        self.read_reg(ArmReg::R3).unwrap_or(0),
-                    )))
-                } else {
-                    Err(CpuError::Backend(format!("emu_start: {e:?}")))
-                }
-            }
+            };
+            let stop = self.run_once(current, remaining(scheduler), remaining(watchdog))?;
+            let StopReason::Hook(address) = stop else {
+                return Ok(stop);
+            };
+            let Some(operation) = self.inline_arithmetic.get(&address).copied() else {
+                return Ok(stop);
+            };
+            // Read/write registers only while emulation is stopped. Pure helpers
+            // stay inside this CPU slice, retaining one fixed wall-clock deadline.
+            let n = u64::from(self.read_reg(ArmReg::R0)?)
+                | (u64::from(self.read_reg(ArmReg::R1)?) << 32);
+            let d = u64::from(self.read_reg(ArmReg::R2)?)
+                | (u64::from(self.read_reg(ArmReg::R3)?) << 32);
+            let value = operation.evaluate(n, d);
+            self.write_return_pair(value as u32, (value >> 32) as u32)?;
+            // The padded next word is bx lr. Execute it natively so Thumb returns
+            // and an interrupt between result publication and return stay exact.
+            current = address + 4;
+            self.write_reg(ArmReg::Pc, current)?;
+            consumed = true;
         }
     }
 
@@ -845,6 +916,151 @@ impl Cpu for UnicornCpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_arithmetic64_matches_wide_integer_oracle_without_kernel_dispatch_or_clobbering() {
+        use crate::arithmetic64::Arithmetic64;
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.write_mem(0x1000, &0xe12fff1eu32.to_le_bytes()).unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        let operations = [
+            Arithmetic64::SignedDivide,
+            Arithmetic64::UnsignedDivide,
+            Arithmetic64::SignedRemainder,
+            Arithmetic64::UnsignedRemainder,
+        ];
+        let edges = [
+            0,
+            1,
+            2,
+            u32::MAX as u64,
+            1u64 << 32,
+            i64::MAX as u64,
+            i64::MIN as u64,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let mut cases: Vec<_> = edges
+            .iter()
+            .flat_map(|&a| edges.iter().map(move |&b| (a, b)))
+            .collect();
+        let mut seed = 0xa3d7b9c1e2f40567u64;
+        for _ in 0..2000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let a = seed;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            cases.push((a, seed));
+        }
+        for (index, operation) in operations.into_iter().enumerate() {
+            let thunk = 0x1200 + index as u32 * 32;
+            cpu.write_mem(thunk, &[0x1e, 0xff, 0x2f, 0xe1, 0x1e, 0xff, 0x2f, 0xe1])
+                .unwrap();
+            assert!(cpu.install_inline_arithmetic64(thunk, operation).unwrap());
+            for &(n, d) in &cases {
+                cpu.write_reg(ArmReg::R0, n as u32).unwrap();
+                cpu.write_reg(ArmReg::R1, (n >> 32) as u32).unwrap();
+                cpu.write_reg(ArmReg::R2, d as u32).unwrap();
+                cpu.write_reg(ArmReg::R3, (d >> 32) as u32).unwrap();
+                cpu.write_reg(ArmReg::R4, 0xdeadbeef).unwrap();
+                cpu.write_reg(ArmReg::R12, 0xcafebabe).unwrap();
+                cpu.write_reg(ArmReg::Sp, 0x1f00).unwrap();
+                cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+                let flags = (cpu.read_reg(ArmReg::Cpsr).unwrap() & 0x0fffffff) | 0xa0000000;
+                cpu.write_reg(ArmReg::Cpsr, flags).unwrap();
+                cpu.write_fpscr(0x02000000).unwrap();
+                assert_eq!(
+                    cpu.run_until_hook(thunk, 100).unwrap(),
+                    StopReason::Hook(0x1100)
+                );
+                let actual = u64::from(cpu.read_reg(ArmReg::R0).unwrap())
+                    | (u64::from(cpu.read_reg(ArmReg::R1).unwrap()) << 32);
+                let expected = if d == 0 {
+                    0
+                } else {
+                    match operation {
+                        Arithmetic64::SignedDivide => {
+                            ((n as i64 as i128) / (d as i64 as i128)) as u64
+                        }
+                        Arithmetic64::SignedRemainder => {
+                            ((n as i64 as i128) % (d as i64 as i128)) as u64
+                        }
+                        Arithmetic64::UnsignedDivide => (u128::from(n) / u128::from(d)) as u64,
+                        Arithmetic64::UnsignedRemainder => (u128::from(n) % u128::from(d)) as u64,
+                    }
+                };
+                assert_eq!(actual, expected, "{operation:?} {n:#x} {d:#x}");
+                assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(), d as u32);
+                assert_eq!(cpu.read_reg(ArmReg::R3).unwrap(), (d >> 32) as u32);
+                assert_eq!(cpu.read_reg(ArmReg::R4).unwrap(), 0xdeadbeef);
+                assert_eq!(cpu.read_reg(ArmReg::R12).unwrap(), 0xcafebabe);
+                assert_eq!(cpu.read_reg(ArmReg::Sp).unwrap(), 0x1f00);
+                assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x1100);
+                assert_eq!(cpu.read_reg(ArmReg::Cpsr).unwrap(), flags);
+                assert_eq!(cpu.read_fpscr().unwrap(), 0x02000000);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_arithmetic_hooks_are_removed_with_their_mapping() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.install_inline_arithmetic64(0x1000, crate::arithmetic64::Arithmetic64::SignedDivide)
+            .unwrap();
+        cpu.unmap_region(0x1000, 0x1000).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.write_mem(0x1000, &0xe12fff1eu32.to_le_bytes()).unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        cpu.write_reg(ArmReg::R0, 17).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 3).unwrap();
+        cpu.write_reg(ArmReg::R3, 0).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 100).unwrap(),
+            StopReason::Hook(0x1100)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 17);
+    }
+
+    #[test]
+    fn inline_arithmetic_returns_to_thumb_and_remains_preemptible() {
+        use crate::arithmetic64::Arithmetic64;
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.write_mem(0x1000, &0x47a0u16.to_le_bytes()).unwrap(); // Thumb blx r4
+        cpu.write_mem(0x1200, &[0x1e, 0xff, 0x2f, 0xe1, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        cpu.install_inline_arithmetic64(0x1200, Arithmetic64::SignedDivide)
+            .unwrap();
+        cpu.add_code_hook(0x1002).unwrap();
+        cpu.write_reg(ArmReg::R0, (-123i64) as u32).unwrap();
+        cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+        cpu.write_reg(ArmReg::R2, 5).unwrap();
+        cpu.write_reg(ArmReg::R3, 0).unwrap();
+        cpu.write_reg(ArmReg::R4, 0x1200).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1001, 100).unwrap(),
+            StopReason::Hook(0x1002)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), (-24i32) as u32);
+        assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), u32::MAX);
+        assert_ne!(cpu.read_reg(ArmReg::Cpsr).unwrap() & 0x20, 0);
+        // No stopping API hook inside this ARM loop; the scheduler still gets control.
+        for (offset, word) in [0xe1a0e00fu32, 0xe12fff14, 0xeafffffc]
+            .into_iter()
+            .enumerate()
+        {
+            cpu.write_mem(0x1400 + offset as u32 * 4, &word.to_le_bytes())
+                .unwrap();
+        }
+        cpu.set_slice_timeout_us(1000).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1400, 0).unwrap(),
+            StopReason::InstructionLimit
+        );
+    }
 
     #[test]
     fn wall_clock_preemption_resumes_an_api_free_poll_without_changing_guest_state() {

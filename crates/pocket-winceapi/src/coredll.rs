@@ -4827,7 +4827,20 @@ fn map_resource_module_inner(
                 let native = thunk.friendly_name.as_deref().and_then(|name| {
                     pocket_kernel::native_thunks::native_thunk_for(&import.dll, name)
                 });
-                if let Some(words) = native {
+                let inline_arithmetic = match thunk.friendly_name.as_deref() {
+                    Some(name) if native.is_none() => {
+                        pocket_kernel::native_thunks::install_inline_arithmetic64(
+                            ctx.cpu,
+                            address,
+                            &import.dll,
+                            name,
+                        )?
+                    }
+                    _ => false,
+                };
+                if inline_arithmetic {
+                    // Owned by the CPU mapping, removed with the DLL thunk range.
+                } else if let Some(words) = native {
                     ctx.cpu
                         .write_mem(address, &pocket_kernel::native_thunks::thunk_bytes(&words))?;
                     if let Some(offset) = thunk.friendly_name.as_deref().and_then(|name| {

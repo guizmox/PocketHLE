@@ -16,6 +16,7 @@
 
 use thiserror::Error;
 
+pub mod arithmetic64;
 pub mod image_pages;
 pub mod stub;
 #[cfg(feature = "unicorn")]
@@ -138,6 +139,19 @@ pub enum StopReason {
 /// Common interface to a CPU emulation backend.
 pub trait Cpu {
     fn arch(&self) -> Arch;
+
+    /// Optional ARM register-only helper, handled inside the CPU run loop.
+    /// The caller supplies two consecutive ARM `bx lr` words at va. Successful
+    /// calls update r0:r1 and return through the second word; other state is
+    /// preserved. Internal backend stops need not reach the kernel dispatcher.
+    /// Backends without this capability keep ordinary dispatcher semantics.
+    fn install_inline_arithmetic64(
+        &mut self,
+        _va: u32,
+        _operation: arithmetic64::Arithmetic64,
+    ) -> Result<bool, CpuError> {
+        Ok(false)
+    }
 
     /// ARM floating-point control/status register (independent of GPRs).
     fn read_fpscr(&mut self) -> Result<u32, CpuError> {

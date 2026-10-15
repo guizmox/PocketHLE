@@ -52,6 +52,31 @@
 /// otherwise-unused tail of each 32-byte slot.
 const BX_LR: u32 = 0xE12F_FF1E;
 
+/// Pure 64-bit helpers cannot fit a general integer divide in a 32-byte ARM
+/// thunk. Colors' pose interpolation calls these repeatedly per model. A CPU
+/// backend may serve their exact register arithmetic without leaving its run
+/// loop; unsupported backends retain the regular handler.
+pub fn install_inline_arithmetic64(
+    cpu: &mut dyn pocket_cpu::Cpu,
+    va: u32,
+    dll: &str,
+    name: &str,
+) -> Result<bool, pocket_cpu::CpuError> {
+    use pocket_cpu::arithmetic64::Arithmetic64;
+    if cpu.arch() != pocket_cpu::Arch::Arm || !dll.eq_ignore_ascii_case("coredll.dll") {
+        return Ok(false);
+    }
+    let operation = match name {
+        "__rt_sdiv64by64" => Arithmetic64::SignedDivide,
+        "__rt_udiv64by64" => Arithmetic64::UnsignedDivide,
+        "__rt_srem64by64" => Arithmetic64::SignedRemainder,
+        "__rt_urem64by64" => Arithmetic64::UnsignedRemainder,
+        _ => return Ok(false),
+    };
+    cpu.write_mem(va, &thunk_bytes(&pad(&[BX_LR])))?;
+    cpu.install_inline_arithmetic64(va, operation)
+}
+
 /// Build an 8-word thunk image, padding with `bx lr` after the
 /// supplied instructions.
 const fn pad(words: &[u32]) -> [u32; 8] {

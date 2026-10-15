@@ -53,7 +53,9 @@ validation. CI should rebuild both native libraries and the APK together.
 The complete supplied archive uses the same executable as the standalone upload.
 The measured scene is the tutorial dialogue with The Bum, after loading central.
 Runs use the real ARM CPU, native offscreen GLES on headless Linux/Mesa, silent
-host audio, native game resolution and sparse framebuffer captures. These are
+host audio, a 240x320 CLI framebuffer and sparse captures. The graphical
+launcher normally configures this Gizmondo title at 320x240; these timings
+are therefore comparisons of the same diagnostic setup, not final device FPS. These are
 not physical Windows, Deck or Android performance measurements.
 
 API timings and guest execution intervals were first collected separately,
@@ -85,6 +87,40 @@ crowded city scenes may differ; no whole-game speedup is claimed.
 
 All instrumentation, alternate entry points and extra mounts were local probes.
 No profiler, permanent game hooks, changed game resource or frame-rate override
-is included in production. This delivery implements the requested startup action
-and documents the identified performance target; it does not claim a performance
-fix.
+is included in production. The generic optimization also handles four pure COREDLL helpers inside the CPU
+run loop: `__rt_sdiv64by64`, `__rt_udiv64by64`, `__rt_srem64by64` and
+`__rt_urem64by64`. It removes the kernel/dispatcher round-trip, not the guest
+animation calculation. Unicorn stops before reading/writing registers and resumes
+through the thunk's padded ARM `bx lr`; signed/unsigned results, zero divisors and
+signed overflow match the existing handlers exactly. Other backends retain the
+normal dispatcher. Older divisor-first helper variants are unchanged.
+
+The original CPU slice deadline remains fixed across all helper calls, including
+an API-free arithmetic loop. Static named/ordinal imports, dynamic exports and
+native DLL imports use the same installer; unmapping removes the helper hook.
+Tests compare 8,324 inputs with independent wide-integer arithmetic, preserve
+registers/flags/FPSCR, return to Thumb, and verify scheduler preemption, remapping,
+LastError and neighbouring API dispatch. This is shared emulator code for PC,
+Deck and Android; no Colors address or executable fingerprint is used.
+
+An experimental callback implementation was discarded after a loading crash in
+one repeat. The delivered implementation only changes registers while Unicorn is
+stopped. Repeat-run results and limits are included with the patch. No full-game,
+physical-device or universal FPS improvement is asserted.
+
+## Optimization measurements
+
+Alternating old-dispatcher / CPU-local runs of the same diagnostic binary use
+minimal identical entry/return probes, the same inputs, and no concurrent build
+in measured runs. Between presentation counters 175 and 275, each run executes
+exactly 900 calls of 0x912b8. Old path: 1980.196 and 2039.207 ms; CPU-local path:
+1884.634 and 2005.930 ms. Mean elapsed time drops about 3.2%, but run-to-run
+variation overlaps: this is a modest local result, not a robust whole-game FPS
+claim. Both optimized repeats finish the loading/tutorial sequence without a
+crash. A separate 320x240 run is a stability check only, not an A/B benchmark.
+
+An isolated diagnostic ARM loop performs 100,000 signed 64-bit divisions through
+the original Colors IAT ordinal 2000. Alternating process wall times including
+startup: old path 213.6/224.5 ms, CPU-local 118.7/124.3 ms (about 44.5% less).
+This isolates call overhead; it is not representative of game-wide performance.
+No diagnostic executable or copyrighted game data is distributed in the patch.

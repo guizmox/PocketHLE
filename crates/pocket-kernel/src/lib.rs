@@ -2799,7 +2799,15 @@ impl Process {
             } else {
                 None
             };
-            if let Some(words) = native.or(constant) {
+            let inline_arithmetic = match thunk.friendly_name.as_deref() {
+                Some(name) if native.is_none() && constant.is_none() => {
+                    native_thunks::install_inline_arithmetic64(cpu, thunk_va, &imp.dll, name)?
+                }
+                _ => false,
+            };
+            if inline_arithmetic {
+                // Register-only helper handled inside the CPU run loop.
+            } else if let Some(words) = native.or(constant) {
                 let bytes = native_thunks::thunk_bytes(&words);
                 cpu.write_mem(thunk_va, &bytes)?;
                 if let Some(offset) = fallback_offset {
@@ -2869,7 +2877,9 @@ impl Process {
                 } else {
                     None
                 };
-                if let Some((offset, words)) = hybrid {
+                if native_thunks::install_inline_arithmetic64(cpu, thunk_va, &dll, &name)? {
+                    // Match static imports without a kernel-dispatch hook.
+                } else if let Some((offset, words)) = hybrid {
                     cpu.write_mem(thunk_va, &native_thunks::thunk_bytes(&words))?;
                     let fallback = thunk_va + offset;
                     cpu.add_code_hook(fallback)?;
