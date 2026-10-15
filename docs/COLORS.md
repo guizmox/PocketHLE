@@ -10,10 +10,10 @@ are disabled until it finishes. It never runs automatically on later launches.
 - Decrypt and validate `config.cfg` and an existing `Save/SaveFile.isv` before
   changing either file.
 - Set `TurfWarUnlocked=1`, preserving the other config settings.
-- If `Save/Character/Money < 20000`, set Money to exactly 20000 and ServerMoney
-  to at least 20000, preserving a higher ServerMoney. This keeps the game's two
+- If `Save/Character/Money < 75000`, set Money to exactly 75000 and ServerMoney
+  to at least 75000, preserving a higher ServerMoney. This keeps the game's two
   balance fields coherent without reducing either balance.
-- If Money is already 20000 or higher, leave the entire ISV byte-identical.
+- If Money is already 75000 or higher, leave the entire ISV byte-identical.
 - If no save exists, unlock the option without inventing a campaign save.
 - Preserve missions, inventory, character statistics, tags and position. This
   is the local menu unlock; it does not fake multiplayer registration.
@@ -150,3 +150,10 @@ The Linux diagnostic uses a temporary loopback HTTP backend and deterministic
 real raster tile bytes; Windows WinHTTP, Android HttpURLConnection and the live
 public deployment are not exercised by this run. Restart/redeploy the server
 with its patch; updating PocketHLE alone does not repair the server response.
+
+The funding floor is now 75,000 dollars, increased from the original 20,000
+policy at the maintainer's request. The ARM round-trip results above refer to the
+previous floor; the codec is unchanged. Repeating Unlock also upgrades an
+existing 20,000 save to 75,000. Tests cover 74,999/75,000/75,001, higher server
+balances and idempotency. This is a minimum balance, not an additive grant; no
+automatic launch-time credit, server starting-money or turf-price change.

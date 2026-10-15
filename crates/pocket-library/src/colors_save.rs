@@ -145,12 +145,12 @@ fn fund_save(input: &[u8]) -> Result<(Vec<u8>, bool)> {
     }
     let money = money.context("Colors player balance not found")?;
     let server = server.context("Colors server balance not found")?;
-    if money.2 >= 20_000 {
+    if money.2 >= 75_000 {
         return Ok((input.to_vec(), false));
     }
     let mut replacements = vec![
-        (money.0, money.1, 20_000),
-        (server.0, server.1, server.2.max(20_000)),
+        (money.0, money.1, 75_000),
+        (server.0, server.1, server.2.max(75_000)),
     ];
     replacements.sort_by_key(|field| std::cmp::Reverse(field.0));
     let mut output = text;
@@ -270,9 +270,9 @@ fn unlock_in_flash(flash: &Path) -> Result<String> {
         }
     }
     Ok(if funded {
-        "Turf Wars unlocked; existing balance set to 20,000."
+        "Turf Wars unlocked; existing balance set to $75,000."
     } else if old_save.is_some() {
-        "Turf Wars unlocked; balance already at least 20,000, save unchanged."
+        "Turf Wars unlocked; balance already at least $75,000, save unchanged."
     } else {
         "Turf Wars unlocked; no existing save to fund."
     }
@@ -303,15 +303,15 @@ mod tests {
     }
     #[test]
     fn balances_never_decrease_and_other_progress_is_byte_preserved() {
-        for money in [0, 525, 19_999, 20_000, 20_001, 100_000] {
+        for money in [0, 525, 20_000, 74_999, 75_000, 75_001, 100_000] {
             for server in [525, 80_000] {
                 let original = save(money, server);
                 let (changed, funded) = fund_save(&original).unwrap();
-                assert_eq!(funded, money < 20_000);
-                if money >= 20_000 {
+                assert_eq!(funded, money < 75_000);
+                if money >= 75_000 {
                     assert_eq!(changed, original);
                 } else {
-                    assert_eq!(changed, save(20_000, server.max(20_000)));
+                    assert_eq!(changed, save(75_000, server.max(75_000)));
                 }
                 assert_eq!(fund_save(&changed).unwrap(), (changed, false));
             }
@@ -349,7 +349,7 @@ mod tests {
         assert!(backups.contains(&old_save));
         assert_eq!(
             fs::read(directory.join("save/savefile.isv")).unwrap(),
-            save(20_000, 20_000)
+            save(75_000, 75_000)
         );
         unlock_in_flash(temp.path()).unwrap();
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 4);

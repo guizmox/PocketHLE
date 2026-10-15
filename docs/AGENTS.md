@@ -4,9 +4,9 @@ Colors startup's explicit "Unlock Turf Wars (skip solo missions)" action is shar
 through pocket-library::colors_save, called off the UI thread on desktop/Deck
 (X in the startup dialog) and Android JNI. Never apply it automatically at launch
 or while a game is running. It changes encrypted config.cfg TurfWarUnlocked to 1
-and, only if an existing Save/SaveFile.isv Character/Money is below 20000, sets
-Money to 20000 and ServerMoney to at least 20000 without reducing a higher value.
-At Money >= 20000 the entire ISV remains byte-identical. No save is invented when
+and, only if an existing Save/SaveFile.isv Character/Money is below 75000, sets
+Money to 75000 and ServerMoney to at least 75000 without reducing a higher value.
+At Money >= 75000 the entire ISV remains byte-identical. No save is invented when
 absent. Config defaults remain the game's responsibility; only the unlock flag
 is created if config is absent. No TWPlayerValid/network-registration flag,
 mission state, inventory, tags, position or other options are changed.
@@ -18,7 +18,8 @@ config fails. Case-insensitive path lookup rejects ambiguous names and symlinks;
 use GameEntry::gizmondo_flash_dir so alternative namespaces stay isolated.
 Local validation invoked original ARM config read/write and ISV parser/serializer
 on copies of the supplied config/save. Original and modified ISV round-trip exact
-plaintext, with only Money/ServerMoney changing from 525 to 20000 and the config
+plaintext, with only Money/ServerMoney changing from 525 to 20000 (the previous
+funding floor; current policy is 75000) and the config
 unlock flag from 0 to 1. This verifies the Flash/CRT fix on Colors' save pipeline,
 not full gameplay or a device UI. The subsequently supplied complete Colors archive reaches the 3D tutorial. Direct
 entry/return timing identifies 0x912b8 as a substantial recurring guest cost,
