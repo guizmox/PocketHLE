@@ -4,6 +4,7 @@ crates/pocket-library/Cargo.toml
 crates/pocket-library/src/lib.rs
 crates/pocket-library/src/updates.rs
 crates/pocket-library/tests/data/releases.json
+crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/gles.rs
 docs/AGENTS.md
 docs/GPU.md

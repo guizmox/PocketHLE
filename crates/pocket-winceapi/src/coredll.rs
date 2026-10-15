@@ -8375,10 +8375,13 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
         Access::Write => 2,
         Access::ReadWrite => 3,
     };
-    // Rooted reads must stay rooted. Stripping the leading separator makes
-    // the VFS prepend the module directory a second time and repeatedly scan
-    // the whole card. The VFS itself handles wrapped-install suffix lookup.
-    if !create && (path.starts_with('\\') || path.starts_with('/')) {
+    // Absolute paths must stay rooted, including writes. Battlestations first
+    // tries MyGames/Midway/Midway96.sav, then creates its directories on failure.
+    // A basename fallback can falsely succeed at the Flash Disk root, skipping
+    // that recovery and leaving a save its rooted reads cannot find. It can
+    // also truncate an unrelated save or bypass a read-only card mount.
+    // The VFS itself handles wrapped-install suffix lookup for reads only.
+    if path.starts_with('\\') || path.starts_with('/') {
         if let Some(handle) = ctx
             .kernel
             .vfs
@@ -21248,6 +21251,85 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(cpu.read_u32_le(0x2008).unwrap(), 7);
+    }
+
+    #[test]
+    fn crt_absolute_save_failure_allows_battlestations_to_create_its_directories() {
+        for parent_exists in [false, true] {
+            let flash = tempfile::tempdir().unwrap();
+            let card = tempfile::tempdir().unwrap();
+            if parent_exists {
+                std::fs::create_dir(flash.path().join("MyGames")).unwrap();
+            }
+            let mut kernel = fresh_kernel();
+            kernel.vfs.mount_read_only("\\SD Card\\", card.path());
+            kernel.vfs.mount_save_dir("\\Flash Disk\\", flash.path());
+            kernel.vfs.set_default_dir("\\SD Card\\GZGA200038\\");
+            let mut cpu = StubCpu::new();
+            let thunk = dummy_thunk();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let path = "\\Flash Disk\\MyGames\\Midway\\Midway96.sav";
+            // Battlestations creates the directories only after fopen fails.
+            assert_eq!(open_cstr_path(&mut ctx, path, "wb"), 0);
+            assert!(!flash.path().join("midway96.sav").exists());
+            if !parent_exists {
+                ctx.kernel
+                    .vfs
+                    .create_directory("\\Flash Disk\\MyGames")
+                    .unwrap();
+            }
+            ctx.kernel
+                .vfs
+                .create_directory("\\Flash Disk\\MyGames\\Midway")
+                .unwrap();
+            let handle = open_cstr_path(&mut ctx, path, "wb");
+            assert_ne!(handle, 0);
+            let payload = vec![0x5a; 0x660];
+            assert_eq!(ctx.kernel.vfs.write(handle, &payload), Some(payload.len()));
+            assert!(ctx.kernel.vfs.close(handle));
+            let handle = open_cstr_path(&mut ctx, path, "rb");
+            assert_ne!(handle, 0);
+            let mut bytes = vec![0; payload.len()];
+            assert_eq!(ctx.kernel.vfs.read(handle, &mut bytes), Some(payload.len()));
+            assert_eq!(bytes, payload);
+            assert!(ctx.kernel.vfs.close(handle));
+            assert!(!flash.path().join("midway96.sav").exists());
+        }
+    }
+
+    #[test]
+    fn crt_absolute_writes_never_redirect_or_truncate_another_mount() {
+        let flash = tempfile::tempdir().unwrap();
+        let card = tempfile::tempdir().unwrap();
+        std::fs::write(flash.path().join("midway96.sav"), b"existing save").unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount_read_only("\\SD Card\\", card.path());
+        kernel.vfs.mount_save_dir("\\Flash Disk\\", flash.path());
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for path in [
+            "\\SD Card\\Midway96.sav",
+            "/SD Card/Midway96.sav",
+            "\\Flash Disk\\missing\\Midway96.sav",
+            "/Flash Disk/missing/Midway96.sav",
+        ] {
+            for mode in ["wb", "ab", "r+b"] {
+                assert_eq!(open_cstr_path(&mut ctx, path, mode), 0, "{path} {mode}");
+                assert_eq!(
+                    std::fs::read(flash.path().join("midway96.sav")).unwrap(),
+                    b"existing save"
+                );
+            }
+        }
     }
 
     #[test]

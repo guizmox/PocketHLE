@@ -1,5 +1,22 @@
 # PocketHLE — architecture reference for coding agents
 
+Absolute CRT file paths must stay rooted for writes as well as reads.
+Battlestations' supplied autorun.exe save routine at 0x2bb14 first opens
+`\\Flash Disk\\MyGames\\Midway\\Midway96.sav` in wb mode; on failure it
+creates MyGames and Midway, retries, and writes 0x660 bytes. The CRT basename
+fallback previously created Flash Disk/Midway96.sav instead, falsely succeeding
+and skipping those directory calls. Rooted reads may subsequently reject that
+misplaced file when MyGames already exists. Keep the initial NULL result for
+missing parents and let the guest create its directories; never redirect an
+absolute write into another mount or truncate an unrelated basename match.
+Both fopen and _wfopen share this path, on desktop/Deck and Android. Relative
+path compatibility lookup and the VFS read-side resource fallback are unchanged.
+Regression tests cover empty/existing MyGames, save round-trip, slash spellings,
+wb/ab/r+b failures, read-only cards and preservation of existing root saves.
+The supplied ARM save routine was invoked locally in isolation with a diagnostic
+entry point, not through full gameplay (only the EXE was supplied). Existing
+misplaced saves are not automatically moved or overwritten.
+
 Startup update checks query guizmox/PocketHLE published stable Releases only,
 off the UI thread, never Actions artifacts. Desktop uses pocket-library::updates
 with the optional release-updates HTTPS feature; Android uses ReleaseUpdates
