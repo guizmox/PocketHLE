@@ -124,3 +124,29 @@ the original Colors IAT ordinal 2000. Alternating process wall times including
 startup: old path 213.6/224.5 ms, CPU-local 118.7/124.3 ms (about 44.5% less).
 This isolates call overhead; it is not representative of game-wide performance.
 No diagnostic executable or copyrighted game data is distributed in the patch.
+
+## Startup presentation and Turf Wars transfer error
+
+The startup form shows only the unlock button. Its result and balance policy
+appear in an acknowledged popup after the action, with no backup notice or
+launcher welcome/status text in the form. Backups continue internally. Deck A/B
+dismiss the popup without starting a game on the same input.
+
+With the supplied complete game, Fake GPS Paris (48.8584, 2.2945), a local server
+at GizmondoColorsTurfWarsServer 0d3765a, actual ARM and GPU rendering, the map GIF
+arrives in HTTP 200 but the game displays `Erreur de transfert. Réessayer.`
+The original coordinate parser at 0xf2704 returns false if either turf coordinate
+is <= 0 (0xf279c..0xf27b0). The signed server grid around Eiffel Tower includes
+negative X and zero Y, so the metadata callback rejects it after image decoding.
+This is a server protocol mismatch; the hardening commit did not introduce the
+signed coordinate scheme. No emulator bypass or game patch is appropriate.
+
+The separate server patch uses a fixed +1,000,000 bias for both client turf IDs,
+with inverse conversion on incoming turf commands. GPS degrees, signed SQLite
+keys, map projection, ownership and grid origin stay unchanged. Map tile rendering
+also converts the wire IDs back to signed storage coordinates before fetching.
+The same game now displays the interactive Paris map without the transfer error.
+The Linux diagnostic uses a temporary loopback HTTP backend and deterministic
+real raster tile bytes; Windows WinHTTP, Android HttpURLConnection and the live
+public deployment are not exercised by this run. Restart/redeploy the server
+with its patch; updating PocketHLE alone does not repair the server response.

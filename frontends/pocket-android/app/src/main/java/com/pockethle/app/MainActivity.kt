@@ -564,24 +564,31 @@ class MainActivity : AppCompatActivity() {
             text = "Unlock Turf Wars (skip solo missions)"
         }
         content.addView(unlockTurf)
-        label("Sets an existing balance below 20,000 to 20,000. A higher balance is preserved. Original files are backed up.")
-        val unlockStatus = label("")
         unlockTurf.setOnClickListener {
             unlockTurf.isEnabled = false
             dialog.setCancelable(false)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
-            unlockStatus.text = "Unlocking Turf Wars…"
+            unlockTurf.text = "Unlocking Turf Wars…"
             lifecycleScope.launch {
                 try {
                     val result = withContext(Dispatchers.IO) {
                         JSONObject(NativeBridge.unlockColorsTurfWars(rootDir, entry.id))
                     }
-                    if (dialog.isShowing) unlockStatus.text = if (result.optBoolean("ok")) result.optString("message") else result.optString("error", "Could not unlock Turf Wars")
+                    if (dialog.isShowing) {
+                        val message = if (result.optBoolean("ok")) {
+                            result.optString("message") + "\n\nAn existing balance below 20,000 is set to 20,000. A higher balance is preserved."
+                        } else result.optString("error", "Could not unlock Turf Wars")
+                        AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars")
+                            .setMessage(message).setPositiveButton(android.R.string.ok, null).show()
+                    }
                 } catch (error: Exception) {
-                    if (dialog.isShowing) unlockStatus.text = error.message ?: "Could not unlock Turf Wars"
+                    if (dialog.isShowing) AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars")
+                        .setMessage(error.message ?: "Could not unlock Turf Wars")
+                        .setPositiveButton(android.R.string.ok, null).show()
                 } finally {
                     if (dialog.isShowing) {
+                        unlockTurf.text = "Unlock Turf Wars (skip solo missions)"
                         unlockTurf.isEnabled = true
                         dialog.setCancelable(true)
                         dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true

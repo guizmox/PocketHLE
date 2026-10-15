@@ -10619,6 +10619,36 @@ fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
     if vk >= 256 {
         return 0;
     }
+    // Sonic/SEGA polls VK_LSHIFT/VK_LCONTROL, while Gizmondo buttons and
+    // host bindings send generic SHIFT/CONTROL. Win32 generic modifier queries
+    // also cover both sides; a specific right key must not press the left key.
+    let modifiers: &[usize] = match vk {
+        0x10 => &[0x10, 0xA0, 0xA1],
+        0x11 => &[0x11, 0xA2, 0xA3],
+        0x12 => &[0x12, 0xA4, 0xA5],
+        0xA0 => &[0xA0, 0x10],
+        0xA1 => &[0xA1, 0x10],
+        0xA2 => &[0xA2, 0x11],
+        0xA3 => &[0xA3, 0x11],
+        0xA4 => &[0xA4, 0x12],
+        0xA5 => &[0xA5, 0x12],
+        _ => &[],
+    };
+    if !modifiers.is_empty() {
+        let down = modifiers.iter().any(|&code| {
+            ctx.kernel
+                .pending_input
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    InputEvent::KeyDown { vk } if usize::from(*vk) == code => Some(true),
+                    InputEvent::KeyUp { vk } if usize::from(*vk) == code => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(ctx.kernel.pressed_keys[code])
+        });
+        return if down { 0x8000 } else { 0 };
+    }
     let aliases = |code: usize| -> [usize; 2] {
         match code {
             0xC1..=0xC4 => [code, code + 0x10],
@@ -27911,6 +27941,47 @@ mod tests {
             .push_back(InputEvent::KeyUp { vk: 0xd1 });
         assert_eq!(key_state_value(&mut c, 0xc1), 0);
         assert_eq!(key_state_value(&mut c, u32::MAX), 0);
+    }
+
+    #[test]
+    fn modifier_polling_accepts_generic_buttons_and_preserves_side_releases() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        for (generic, left, right) in [(0x10, 0xa0, 0xa1), (0x11, 0xa2, 0xa3), (0x12, 0xa4, 0xa5)] {
+            c.kernel.pending_input.clear();
+            c.kernel
+                .pending_input
+                .push_back(InputEvent::KeyDown { vk: generic });
+            assert_eq!(key_state_value(&mut c, left), 0x8000);
+            assert_eq!(key_state_value(&mut c, right), 0x8000);
+            c.kernel
+                .pending_input
+                .push_back(InputEvent::KeyUp { vk: generic });
+            assert_eq!(key_state_value(&mut c, left), 0);
+            c.kernel.pending_input.clear();
+            c.kernel.pressed_keys[left as usize] = true;
+            assert_eq!(key_state_value(&mut c, generic.into()), 0x8000);
+            assert_eq!(key_state_value(&mut c, right), 0);
+            c.kernel
+                .pending_input
+                .push_back(InputEvent::KeyDown { vk: right as u16 });
+            c.kernel
+                .pending_input
+                .push_back(InputEvent::KeyUp { vk: left as u16 });
+            assert_eq!(key_state_value(&mut c, left), 0);
+            assert_eq!(key_state_value(&mut c, generic.into()), 0x8000);
+            c.kernel
+                .pending_input
+                .push_back(InputEvent::KeyUp { vk: right as u16 });
+            assert_eq!(key_state_value(&mut c, generic.into()), 0);
+            c.kernel.pressed_keys[left as usize] = false;
+        }
     }
 
     #[test]

@@ -157,6 +157,7 @@ pub struct PocketLauncher {
         Vec<pocket_library::ColorsLanguage>,
         LauncherConfig,
     )>,
+    colors_startup_notice: Option<(String, String)>,
     screen: Screen,
     runner: Runner,
     events_rx: Receiver<UiEvent>,
@@ -680,6 +681,7 @@ impl PocketLauncher {
             events_rx: rx,
             events_tx: tx,
             release_update: None,
+            colors_startup_notice: None,
             frame_rx: None,
             input_tx: None,
             held: HeldButtons::default(),
@@ -692,7 +694,7 @@ impl PocketLauncher {
             gamepad_last_input: None,
             pointer_down_at: None,
             running_game: None,
-            status: "Welcome to PocketHLE.".to_string(),
+            status: String::new(),
             config_draft: None,
             game_settings_draft: None,
             last_frame_texture: None,
@@ -755,7 +757,9 @@ impl PocketLauncher {
             match ev {
                 UiEvent::ColorsUnlocked(result) => {
                     self.library_busy = false;
-                    self.status = result.unwrap_or_else(|error| format!("Could not unlock Turf Wars: {error}"));
+                    self.colors_startup_notice = Some(("Unlock Turf Wars".into(),
+                        result.map(|message| format!("{message}\n\nAn existing balance below 20,000 is set to 20,000. A higher balance is preserved."))
+                            .unwrap_or_else(|error| format!("Could not unlock Turf Wars: {error}"))));
                 }
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
@@ -825,6 +829,9 @@ impl PocketLauncher {
                     self.release_all_keys();
                     self.pointer_down_at = None;
                     self.running_game = None;
+                    if self.screen == Screen::Run && self.pending_run.is_none() {
+                        self.return_to_library(ctx);
+                    }
                 }
             }
         }
@@ -3250,6 +3257,28 @@ impl PocketLauncher {
     }
 
     fn ui_colors_startup(&mut self, ctx: &egui::Context) {
+        if let Some((title, message)) = self.colors_startup_notice.clone() {
+            let mut close = ctx.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Escape)
+            });
+            close |= self
+                .deck_library_actions
+                .iter()
+                .any(|control| matches!(control.as_str(), "South" | "East"));
+            self.deck_library_actions.clear();
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(message);
+                    close |= ui.button("OK").clicked();
+                });
+            if close {
+                self.colors_startup_notice = None;
+            }
+            return;
+        }
         let Some((game, languages, previous)) = self.colors_startup_prompt.as_ref() else {
             return;
         };
@@ -3341,8 +3370,7 @@ impl PocketLauncher {
                 if ui.add_enabled(!self.library_busy && self.running_game.is_none(), egui::Button::new("Unlock Turf Wars (skip solo missions)")).clicked() {
                     unlock_requested = true;
                 }
-                ui.label("Unlocks Turf Wars and sets an existing balance below 20,000 to 20,000. A higher balance is preserved. Original files are backed up.");
-                ui.label(&self.status);
+                if self.library_busy { ui.horizontal(|ui| { ui.spinner(); ui.label("Unlocking Turf Wars…"); }); }
                 if ui.add_enabled(!self.library_busy, egui::Button::new("Start")).clicked() {
                     selected = Some(draft.clone());
                 }
@@ -3359,7 +3387,8 @@ impl PocketLauncher {
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
             std::thread::spawn(move || {
-                let result = pocket_library::colors_save::unlock_turf_wars(&game, &root).map_err(|error| error.to_string());
+                let result = pocket_library::colors_save::unlock_turf_wars(&game, &root)
+                    .map_err(|error| error.to_string());
                 let _ = tx.send(UiEvent::ColorsUnlocked(result));
             });
             return;
@@ -3375,7 +3404,10 @@ impl PocketLauncher {
                 .set_colors_endpoint(&server)
                 .is_err()
             {
-                self.status = "Enter a host or HTTP(S) origin without a path.".into();
+                self.colors_startup_notice = Some((
+                    "Colors startup".into(),
+                    "Enter a host or HTTP(S) origin without a path.".into(),
+                ));
                 return;
             }
             let config = self.library.config_mut();
@@ -3555,9 +3587,7 @@ impl eframe::App for PocketLauncher {
             ctx.request_repaint_after(Duration::from_millis(30));
         }
         if self.colors_startup_prompt.is_some() {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.label(&self.status);
-            });
+            egui::CentralPanel::default().show(ctx, |_| {});
             self.ui_colors_startup(ctx);
             return;
         }

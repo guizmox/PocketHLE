@@ -2970,3 +2970,25 @@ Validation must run WITHOUT POCKETHLE_SLICE_TIMEOUT_MS; otherwise it cannot
 prove this repair. A real ARM poll test checks preemption/resume and unchanged
 registers before the host updates its cell; the kernel host-hook test also checks
 preemption is enabled with no audio. Recheck native splash/menu and Exit behavior.
+
+
+## Colors startup notices, game completion and Sonic modifier polling
+
+Colors startup retains only its unlock button; completion/errors appear in an
+acknowledged popup on desktop/Deck and Android. Do not add balance descriptions,
+launcher status/welcome text or backup notices to the startup form. File backups
+remain mandatory internally. Deck A/B dismiss the notice without also launching
+the game; queued navigation is cleared while the notice is open.
+
+A desktop/Deck RunFinished event returns the active Run screen to the catalogue
+and restores its saved window sizing. Preserve a pending replacement launch and
+avoid redirecting users who have already navigated into settings/library.
+
+The supplied Sonic/SEGA ARM input routine at 0x882d0 polls VK_LSHIFT (0xA0) and
+VK_LCONTROL (0xA2), while Gizmondo buttons emit generic SHIFT/CONTROL. Key-state
+queries accept generic modifier state for either side; generic queries combine
+left/right states, and a specific opposite-side key alone does not count. Pending
+releases apply separately to each source key so releasing one side does not
+release a held opposite side. Existing C1/D1 aliases and ordinary key ordering
+remain unchanged. Apply to shared GetKeyState/GetAsyncKeyState, with no title
+fingerprint, game patch or changed global button bindings.
