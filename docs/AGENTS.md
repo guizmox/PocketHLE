@@ -1,5 +1,30 @@
 # PocketHLE — architecture reference for coding agents
 
+Colors startup's explicit "Unlock Turf Wars (skip solo missions)" action is shared
+through pocket-library::colors_save, called off the UI thread on desktop/Deck
+(X in the startup dialog) and Android JNI. Never apply it automatically at launch
+or while a game is running. It changes encrypted config.cfg TurfWarUnlocked to 1
+and, only if an existing Save/SaveFile.isv Character/Money is below 20000, sets
+Money to 20000 and ServerMoney to at least 20000 without reducing a higher value.
+At Money >= 20000 the entire ISV remains byte-identical. No save is invented when
+absent. Config defaults remain the game's responsibility; only the unlock flag
+is created if config is absent. No TWPlayerValid/network-registration flag,
+mission state, inventory, tags, position or other options are changed.
+The byte codec was reconstructed from the supplied Colors ARM transform at
+0xe9600/0xe96dc; both files must decode/validate before writes. Unknown or ambiguous
+formats fail without touching either original. Keep unique named backups of each
+changed original, stage atomic replacements and roll back the save if publishing
+config fails. Case-insensitive path lookup rejects ambiguous names and symlinks;
+use GameEntry::gizmondo_flash_dir so alternative namespaces stay isolated.
+Local validation invoked original ARM config read/write and ISV parser/serializer
+on copies of the supplied config/save. Original and modified ISV round-trip exact
+plaintext, with only Money/ServerMoney changing from 525 to 20000 and the config
+unlock flag from 0 to 1. This verifies the Flash/CRT fix on Colors' save pipeline,
+not full gameplay or a device UI. The subsequently supplied complete Colors archive reaches the 3D tutorial. Direct
+entry/return timing identifies 0x912b8 as a substantial recurring guest cost,
+consistent with model-pose interpolation (inference from disassembly). See COLORS.md
+for measurements and limits. All temporary profiling hooks are removed from production.
+
 Absolute CRT file paths must stay rooted for writes as well as reads.
 Battlestations' supplied autorun.exe save routine at 0x2bb14 first opens
 `\\Flash Disk\\MyGames\\Midway\\Midway96.sav` in wb mode; on failure it

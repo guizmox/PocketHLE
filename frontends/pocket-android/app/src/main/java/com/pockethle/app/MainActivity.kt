@@ -560,6 +560,36 @@ class MainActivity : AppCompatActivity() {
         })
         val server = field("Colors multiplayer server", config.optString("colors_server_url"), sectionTitle = true)
         label("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.")
+        val unlockTurf = android.widget.Button(this).apply {
+            text = "Unlock Turf Wars (skip solo missions)"
+        }
+        content.addView(unlockTurf)
+        label("Sets an existing balance below 20,000 to 20,000. A higher balance is preserved. Original files are backed up.")
+        val unlockStatus = label("")
+        unlockTurf.setOnClickListener {
+            unlockTurf.isEnabled = false
+            dialog.setCancelable(false)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+            unlockStatus.text = "Unlocking Turf Wars…"
+            lifecycleScope.launch {
+                try {
+                    val result = withContext(Dispatchers.IO) {
+                        JSONObject(NativeBridge.unlockColorsTurfWars(rootDir, entry.id))
+                    }
+                    if (dialog.isShowing) unlockStatus.text = if (result.optBoolean("ok")) result.optString("message") else result.optString("error", "Could not unlock Turf Wars")
+                } catch (error: Exception) {
+                    if (dialog.isShowing) unlockStatus.text = error.message ?: "Could not unlock Turf Wars"
+                } finally {
+                    if (dialog.isShowing) {
+                        unlockTurf.isEnabled = true
+                        dialog.setCancelable(true)
+                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
+                        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
+                    }
+                }
+            }
+        }
         dialog = AlertDialog.Builder(this)
             .setTitle("Colors startup")
             .setView(android.widget.ScrollView(this).apply { addView(content) })
@@ -593,6 +623,7 @@ class MainActivity : AppCompatActivity() {
                 val selected = language?.let { ids[it.selectedItemPosition] } ?: ids.firstOrNull() ?: "english"
                 val fixedEnabled = fakeGps.isChecked
                 val fixedRandom = mode.selectedItemPosition == 0
+                unlockTurf.isEnabled = false
                 dialog.setCancelable(false)
                 dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
@@ -610,12 +641,14 @@ class MainActivity : AppCompatActivity() {
                         }
                         if (saved.optBoolean("ok")) { dialog.dismiss(); startGame(entry) }
                         else {
+                            unlockTurf.isEnabled = true
                             dialog.setCancelable(true)
                             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
                             dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
                             Snackbar.make(recycler, saved.optString("error", "Could not save options"), Snackbar.LENGTH_LONG).show()
                         }
                     } catch (error: Exception) {
+                        unlockTurf.isEnabled = true
                         dialog.setCancelable(true)
                         dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
                         dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true

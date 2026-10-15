@@ -72,6 +72,34 @@ pub extern "system" fn Java_com_pockethle_app_MainActivity_banner<'local>(
     )
 }
 
+/// Explicit offline save action from Colors' startup dialog, before game launch.
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_unlockColorsTurfWars<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    id: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing root")?;
+        let id = jstring_to_string(&mut env, id).context("missing ID")?;
+        let library = Library::open(&root)?;
+        let game = library
+            .games()
+            .iter()
+            .find(|game| game.id == id)
+            .context("unknown game")?;
+        pocket_library::colors_save::unlock_turf_wars(game, &root)
+    })();
+    new_jstring(
+        &env,
+        match result {
+            Ok(message) => serde_json::json!({"ok": true, "message": message}).to_string(),
+            Err(error) => error_json(&format!("Could not unlock Turf Wars: {error:#}")),
+        },
+    )
+}
+
 /// Available languages for the selected Colors installation, not another variant.
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_colorsLanguages<'local>(

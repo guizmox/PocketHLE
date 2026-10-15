@@ -27,6 +27,8 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+pub mod colors_save;
+
 use rars::ArchiveReader;
 
 use serde::{Deserialize, Serialize};

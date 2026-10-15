@@ -536,6 +536,7 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
+    ColorsUnlocked(Result<String, String>),
     ReleaseAvailable(pocket_library::updates::Update),
     ImportFinished(Result<Vec<GameEntry>, String>),
     ImportPrepared(PreparedImport),
@@ -752,6 +753,10 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                UiEvent::ColorsUnlocked(result) => {
+                    self.library_busy = false;
+                    self.status = result.unwrap_or_else(|error| format!("Could not unlock Turf Wars: {error}"));
+                }
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
                     self.pending_import = Some(pending);
@@ -3253,7 +3258,11 @@ impl PocketLauncher {
         let mut draft = previous.clone();
         let mut selected = None;
         let mut cancelled = false;
-        if cfg!(feature = "steam-deck") {
+        let mut unlock_requested = false;
+        if self.library_busy {
+            self.deck_library_actions.clear();
+        }
+        if cfg!(feature = "steam-deck") && !self.library_busy {
             for control in std::mem::take(&mut self.deck_library_actions) {
                 match control.as_str() {
                     "South" => {
@@ -3262,6 +3271,10 @@ impl PocketLauncher {
                     }
                     "East" => {
                         cancelled = true;
+                        break;
+                    }
+                    "West" if self.running_game.is_none() => {
+                        unlock_requested = true;
                         break;
                     }
                     direction
@@ -3289,7 +3302,7 @@ impl PocketLauncher {
             .show(ctx, |ui| {
                 ui.label("Choose options for this launch.");
                 if cfg!(feature = "steam-deck") {
-                    ui.label("A: Start • B: Back • D-pad / stick: language");
+                    ui.label("A: Start • B: Back • X: Unlock Turf Wars • D-pad / stick: language");
                 }
                 if languages.len() > 1 {
                 ui.label("Language");
@@ -3324,15 +3337,32 @@ impl PocketLauncher {
                 ui.label("Colors multiplayer server");
                 ui.text_edit_singleline(&mut draft.colors_server_url)
                     .on_hover_text("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.");
-                if ui.button("Start").clicked() {
+                ui.separator();
+                if ui.add_enabled(!self.library_busy && self.running_game.is_none(), egui::Button::new("Unlock Turf Wars (skip solo missions)")).clicked() {
+                    unlock_requested = true;
+                }
+                ui.label("Unlocks Turf Wars and sets an existing balance below 20,000 to 20,000. A higher balance is preserved. Original files are backed up.");
+                ui.label(&self.status);
+                if ui.add_enabled(!self.library_busy, egui::Button::new("Start")).clicked() {
                     selected = Some(draft.clone());
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.add_enabled(!self.library_busy, egui::Button::new("Cancel")).clicked() {
                     cancelled = true;
                 }
             });
         if let Some((_, _, value)) = self.colors_startup_prompt.as_mut() {
             *value = draft;
+        }
+        if unlock_requested && !self.library_busy && self.running_game.is_none() {
+            self.library_busy = true;
+            self.status = "Unlocking Turf Wars…".into();
+            let root = self.library.root().to_path_buf();
+            let tx = self.events_tx.clone();
+            std::thread::spawn(move || {
+                let result = pocket_library::colors_save::unlock_turf_wars(&game, &root).map_err(|error| error.to_string());
+                let _ = tx.send(UiEvent::ColorsUnlocked(result));
+            });
+            return;
         }
         if let Some(draft) = selected {
             let input = draft.colors_server_url.trim().trim_end_matches('/');
