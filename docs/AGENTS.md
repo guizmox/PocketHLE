@@ -1,5 +1,14 @@
 # PocketHLE — architecture reference for coding agents
 
+Startup update checks query guizmox/PocketHLE published stable Releases only,
+off the UI thread, never Actions artifacts. Desktop uses pocket-library::updates
+with the optional release-updates HTTPS feature; Android uses ReleaseUpdates
+and the workspace Cargo version generated into BuildConfig.UPDATE_VERSION.
+Keep shared version/asset fixtures aligned and do not compare Android's legacy
+test-build label against stable tags. UI notices wait for catalogue availability;
+Deck A/B must not launch a game behind the update prompt. No package installer,
+library mutation or permissive TLS verifier belongs in this path. See UPDATES.md.
+
 RGBA readback of the exposed RGB565/alpha-less EGL surfaces returns alpha 255
 for in-bounds pixels. Internal RGBA alpha remains available to the renderer;
 never overwrite it or texture alpha to implement this conversion. Stuntcar
@@ -1609,7 +1618,13 @@ Ex2 writes 56 bytes including ABI padding, returning 56; buffers larger than
 and read-only outputs with zero and thread GetLastError=87 before writing.
 Status projects the host battery through kernel::power. Windows calls
 GetSystemPowerStatus; Android reads the sticky ACTION_BATTERY_CHANGED Intent
-without registering a receiver or requiring permission. A shared one-second
+without registering a receiver or requiring permission. The shared host
+projection normalizes known percentages to guest flags: critical 0..5%,
+low 6..20%, normal 21..66%, high 67..100%. Android uses the same thresholds.
+Charging and absent-battery flags remain honored. Alerts use known percentages
+before host LOW/CRITICAL bits, so Windows cannot raise low above 20%; when the
+percentage is unknown, known host severity flags remain the fallback. The
+percentage itself is unchanged. A shared one-second
 cache is used unless fUpdate requests a refresh. Failed reads report unknown,
 never an invented critical battery. No-battery hosts report flag 128/percent 255.
 Backup battery is absent, optional telemetry is unknown. Successful calls

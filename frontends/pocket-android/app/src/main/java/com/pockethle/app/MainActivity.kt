@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: GameAdapter
     private var gizmondoTab = true
     private var libraryBusy = false
+    private var pendingReleaseUpdate: ReleaseUpdates.Update? = null
     private var busyDialog: AlertDialog? = null
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
@@ -98,11 +99,31 @@ class MainActivity : AppCompatActivity() {
         findViewById<FloatingActionButton>(R.id.fab_import).setOnClickListener {
             if (!libraryBusy) importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
         }
+        lifecycleScope.launch {
+            pendingReleaseUpdate = withContext(Dispatchers.IO) {
+                ReleaseUpdates.check(BuildConfig.UPDATE_VERSION)
+            }
+            showReleaseUpdate()
+        }
     }
 
     override fun onResume() {
         super.onResume()
         if (!libraryBusy) refreshLibrary()
+        showReleaseUpdate()
+    }
+
+    private fun showReleaseUpdate() {
+        val update = pendingReleaseUpdate ?: return
+        if (ReleaseUpdates.announced || libraryBusy || isFinishing || isDestroyed ||
+            !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+        ReleaseUpdates.announced = true
+        pendingReleaseUpdate = null
+        Snackbar.make(recycler, "PocketHLE ${update.version} is available", Snackbar.LENGTH_INDEFINITE)
+            .setAction("Download") {
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url))) }
+                    .onFailure { android.widget.Toast.makeText(this, "No browser available", android.widget.Toast.LENGTH_LONG).show() }
+            }.show()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -215,6 +236,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage(message)
             .setCancelable(false)
             .create().also { it.setCanceledOnTouchOutside(false); it.show() }
+        if (!libraryBusy) showReleaseUpdate()
     }
 
     override fun onDestroy() {

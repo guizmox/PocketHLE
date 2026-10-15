@@ -11,6 +11,25 @@ pub struct Status {
     pub full: u32,
 }
 impl Status {
+    fn with_guest_thresholds(mut self) -> Self {
+        if self.percent <= 100 && (self.flags == 255 || self.flags & 128 == 0) {
+            // Host LOW/CRITICAL thresholds differ. Use the same guest levels
+            // on Windows and Android, preserving charging and other known bits.
+            let other = if self.flags == 255 {
+                0
+            } else {
+                self.flags & !7
+            };
+            self.flags = other
+                | match self.percent {
+                    0..=5 => 4,
+                    6..=20 => 2,
+                    67..=100 => 1,
+                    _ => 0,
+                };
+        }
+        self
+    }
     pub const UNKNOWN: Self = Self {
         ac: 255,
         flags: 255,
@@ -63,6 +82,7 @@ pub fn status(refresh: bool) -> Status {
             .backend
             .as_ref()
             .map_or_else(native, |b| b.read())
+            .map(Status::with_guest_thresholds)
             .unwrap_or(Status::UNKNOWN);
         c.at = Some(Instant::now());
     }
@@ -119,6 +139,40 @@ mod tests {
             0
         );
         assert_eq!(Status::UNKNOWN.ce_bytes()[2], 255);
+    }
+    #[test]
+    fn host_levels_are_normalized_at_guest_boundaries() {
+        for (percent, level) in [
+            (0, 4),
+            (5, 4),
+            (6, 2),
+            (20, 2),
+            (21, 0),
+            (33, 0),
+            (66, 0),
+            (67, 1),
+            (100, 1),
+        ] {
+            for host_flags in [0, 1, 2, 4, 8, 10, 12, 255] {
+                let input = Status {
+                    percent,
+                    flags: host_flags,
+                    ..Status::UNKNOWN
+                };
+                let result = input.with_guest_thresholds();
+                let charging = if host_flags == 255 { 0 } else { host_flags & 8 };
+                assert_eq!(result.flags, level | charging);
+                assert_eq!(result.percent, percent);
+                assert_eq!(result.ce_bytes()[1], level | charging);
+            }
+        }
+        assert_eq!(Status::UNKNOWN.with_guest_thresholds(), Status::UNKNOWN);
+        let absent = Status {
+            flags: 128,
+            percent: 0,
+            ..Status::UNKNOWN
+        };
+        assert_eq!(absent.with_guest_thresholds(), absent);
     }
     #[test]
     fn cache_and_forced_refresh() {
@@ -386,10 +440,18 @@ fn severity(s: Status) -> Option<u8> {
     if s.ac == 1 || (s.flags != 255 && s.flags & 128 != 0) {
         return Some(0);
     }
+    if s.flags != 255 && s.flags & 8 != 0 {
+        return Some(0);
+    }
+    // A known percentage takes precedence over the host's own alert thresholds.
+    if s.percent <= 100 {
+        return Some(match s.percent {
+            0..=5 => 2,
+            6..=20 => 1,
+            _ => 0,
+        });
+    }
     if s.flags != 255 {
-        if s.flags & 8 != 0 {
-            return Some(0);
-        }
         if s.flags & 4 != 0 {
             return Some(2);
         }
@@ -397,15 +459,7 @@ fn severity(s: Status) -> Option<u8> {
             return Some(1);
         }
     }
-    if s.percent <= 5 {
-        Some(2)
-    } else if s.percent <= 33 {
-        Some(1)
-    } else if s.percent <= 100 {
-        Some(0)
-    } else {
-        None
-    }
+    None
 }
 #[cfg(test)]
 mod gizmondo_alert_tests {
@@ -420,15 +474,52 @@ mod gizmondo_alert_tests {
         }
     }
     #[test]
+    fn known_percent_overrides_host_low_and_critical_flags() {
+        for flags in [0, 2, 4] {
+            for (percent, expected) in [(0, 2), (5, 2), (6, 1), (20, 1), (21, 0), (33, 0), (100, 0)]
+            {
+                assert_eq!(
+                    severity(Status {
+                        flags,
+                        ..s(percent, 0)
+                    }),
+                    Some(expected)
+                );
+            }
+        }
+        assert_eq!(
+            severity(Status {
+                flags: 2,
+                ..s(255, 0)
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            severity(Status {
+                flags: 4,
+                ..s(255, 0)
+            }),
+            Some(2)
+        );
+        assert_eq!(
+            severity(Status {
+                flags: 8,
+                ..s(4, 0)
+            }),
+            Some(0)
+        );
+        assert_eq!(severity(s(4, 1)), Some(0));
+    }
+    #[test]
     fn sdk_names_thresholds_rearm_and_no_spam() {
         let mut a = GizmondoAlerts::default();
         let mut q = VecDeque::new();
         a.register("LOWBATERY_MSG", 0xc111);
         a.register("CRITICALBATERY_MSG", 0xc222);
         a.deliver(&mut q, s(80, 0));
-        a.deliver(&mut q, s(30, 0));
+        a.deliver(&mut q, s(20, 0));
         assert_eq!(q.pop_front(), Some((0xffff, 0xc111, 0, 0)));
-        a.deliver(&mut q, s(29, 0));
+        a.deliver(&mut q, s(19, 0));
         assert!(q.is_empty());
         a.deliver(&mut q, s(3, 0));
         assert_eq!(q.pop_front(), Some((0xffff, 0xc222, 0, 0)));

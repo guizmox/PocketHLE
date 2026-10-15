@@ -161,6 +161,7 @@ pub struct PocketLauncher {
     runner: Runner,
     events_rx: Receiver<UiEvent>,
     events_tx: Sender<UiEvent>,
+    release_update: Option<pocket_library::updates::Update>,
     /// Live framebuffer updates streamed by [`Runner`] while a game
     /// is running. `Some` between [`Self::spawn_run`] and
     /// `UiEvent::RunFinished`; `None` otherwise.
@@ -535,6 +536,7 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
+    ReleaseAvailable(pocket_library::updates::Update),
     ImportFinished(Result<Vec<GameEntry>, String>),
     ImportPrepared(PreparedImport),
     DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
@@ -610,6 +612,22 @@ impl PocketLauncher {
         visuals.override_text_color = Some(Color32::from_rgb(230, 232, 237));
         cc.egui_ctx.set_visuals(visuals);
         let (tx, rx) = mpsc::channel();
+        let updates_tx = tx.clone();
+        let updates_ctx = cc.egui_ctx.clone();
+        std::thread::spawn(move || {
+            use pocket_library::updates::{self, Platform};
+            let platform = if cfg!(feature = "steam-deck") {
+                Platform::SteamDeck
+            } else if cfg!(windows) {
+                Platform::Windows
+            } else {
+                Platform::Linux
+            };
+            if let Some(update) = updates::check(env!("CARGO_PKG_VERSION"), platform) {
+                let _ = updates_tx.send(UiEvent::ReleaseAvailable(update));
+                updates_ctx.request_repaint();
+            }
+        });
         let runner = Runner::new();
         runner.set_missing_api_logging(library.config().log_unimplemented_apis);
         let upscale_filter = UpscaleFilter::from_id(&library.config().upscale_filter);
@@ -660,6 +678,7 @@ impl PocketLauncher {
             runner,
             events_rx: rx,
             events_tx: tx,
+            release_update: None,
             frame_rx: None,
             input_tx: None,
             held: HeldButtons::default(),
@@ -686,9 +705,54 @@ impl PocketLauncher {
         }
     }
 
+    fn release_prompt_ready(&self) -> bool {
+        self.release_update.is_some()
+            && self.screen == Screen::Library
+            && !self.library_busy
+            && self.colors_startup_prompt.is_none()
+            && self.demo_import.is_none()
+            && self.pending_import.is_none()
+            && self.rename_draft.is_none()
+            && self.pending_run.is_none()
+    }
+
+    fn ui_release_update(&mut self, ctx: &egui::Context) -> bool {
+        if !self.release_prompt_ready() {
+            return false;
+        }
+        self.deck_nav_repeat = None;
+        self.deck_library_actions.clear();
+        let update = self.release_update.as_ref().unwrap();
+        let mut download = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        let mut dismiss = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(50.0);
+                ui.heading("PocketHLE update available");
+                ui.label(format!(
+                    "Installed: {}   Available: {}",
+                    env!("CARGO_PKG_VERSION"),
+                    update.version
+                ));
+                ui.add_space(12.0);
+                download |= ui.button("Download (Enter / A)").clicked();
+                dismiss |= ui.button("Later (Escape / B)").clicked();
+            });
+        });
+        if download {
+            ctx.open_url(egui::OpenUrl::new_tab(&update.url));
+        }
+        if download || dismiss {
+            self.release_update = None;
+            self.deck_library_actions.clear();
+        }
+        true
+    }
+
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
                     self.pending_import = Some(pending);
                     self.status = "Waiting for update confirmation...".into();
@@ -2870,6 +2934,18 @@ impl PocketLauncher {
                     if !selected || !focused {
                         continue;
                     }
+                    if self.release_prompt_ready() {
+                        if control == "South" {
+                            if let Some(update) = self.release_update.take() {
+                                ctx.open_url(egui::OpenUrl::new_tab(&update.url));
+                            }
+                        } else if control == "East" {
+                            self.release_update = None;
+                        }
+                        self.deck_library_actions.clear();
+                        self.deck_nav_repeat = None;
+                        continue;
+                    }
                     if self.screen == Screen::Settings {
                         if let (Some(button), Some(draft)) =
                             (self.gamepad_capture, self.config_draft.as_mut())
@@ -3474,6 +3550,9 @@ impl eframe::App for PocketLauncher {
         }
         if !cfg!(feature = "steam-deck") {
             self.update_gamepad_input(ctx);
+        }
+        if self.ui_release_update(ctx) {
+            return;
         }
         self.handle_physical_keyboard(ctx);
         self.drain_events(ctx);

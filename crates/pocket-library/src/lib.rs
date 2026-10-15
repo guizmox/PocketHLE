@@ -38,6 +38,7 @@ pub use analysis::{analyze_game, detect_gizmondo_title_id, game_gizmondo_title_i
 pub mod gizmondo_titles;
 pub mod keybindings;
 pub mod save_data;
+pub mod updates;
 
 pub use keybindings::{GuestButton, KeyBinding, KeyBindings};
 

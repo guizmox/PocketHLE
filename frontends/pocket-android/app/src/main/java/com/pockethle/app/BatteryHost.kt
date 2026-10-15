@@ -25,7 +25,7 @@ object BatteryHost {
                 ((level.toLong() * 100 / scale).coerceIn(0, 100)).toInt() else 255
             val charging = battery.getIntExtra(BatteryManager.EXTRA_STATUS, -1) == BatteryManager.BATTERY_STATUS_CHARGING
             val flags = if (percent == 255) 255 else
-                (if (percent <= 5) 4 else if (percent <= 33) 2 else if (percent > 66) 1 else 0) or
+                (if (percent <= 5) 4 else if (percent <= 20) 2 else if (percent > 66) 1 else 0) or
                     (if (charging) 8 else 0)
             pack(ac, flags, percent)
         } catch (_: RuntimeException) { unknown }

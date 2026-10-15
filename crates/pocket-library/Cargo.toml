@@ -9,12 +9,18 @@ description = "Game library / configuration management for PocketHLE GUI fronten
 
 [features]
 steam-deck = []
+release-updates = ["dep:ureq", "dep:rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
 
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver = "1"
+ureq = { version = "2.12", optional = true, default-features = false, features = ["tls"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = { version = "0.7", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 thiserror.workspace = true
 directories = "5"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }

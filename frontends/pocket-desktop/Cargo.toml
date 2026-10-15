@@ -49,7 +49,7 @@ directories = "5"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 pocket-core = { path = "../../crates/pocket-core" }
-pocket-library = { path = "../../crates/pocket-library" }
+pocket-library = { path = "../../crates/pocket-library", features = ["release-updates"] }
 pocket-pe = { path = "../../crates/pocket-pe" }
 
 xbrz-rs = "=0.1.0"

@@ -3,6 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Compare the same release number as desktop; Android's test-build suffix is
+// a packaging label and must not advertise an older stable APK as an update.
+val pocketReleaseVersion = Regex("""(?m)^version\s*=\s*"([^"]+)"""")
+    .find(rootProject.file("../../Cargo.toml").readText())!!.groupValues[1]
+
 android {
     namespace = "com.pockethle.app"
     compileSdk = 35
@@ -15,6 +20,7 @@ android {
         targetSdk = 34
         versionCode = 5
         versionName = "0.3.1-android-test3"
+        buildConfigField("String", "UPDATE_VERSION", "\"$pocketReleaseVersion\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -34,9 +40,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    buildFeatures { buildConfig = true }
+    sourceSets.getByName("test").resources.srcDir(rootProject.file("../../crates/pocket-library/tests/data"))
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.0")
