@@ -1506,6 +1506,13 @@ fn gl_read_pixels(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
                     (pocket_gles::GL_RGBA, GL_UNSIGNED_BYTE) => {
                         let d = row as usize * stride + col as usize * 4;
                         buf[d..d + 4].copy_from_slice(&c.target.color[s..s + 4]);
+                        // EGL advertises RGB565 with no alpha channel. The
+                        // internal RGBA target retains alpha for rendering,
+                        // but reading a missing surface component returns 1.
+                        // Stuntcar Extreme captures its HUD labels this way:
+                        // leaking clear-alpha zero makes its image conversion
+                        // blend the blue colour key to opaque black.
+                        buf[d + 3] = 255;
                     }
                     (pocket_gles::GL_RGB, GL_UNSIGNED_BYTE) => {
                         let d = row as usize * stride + col as usize * 3;
@@ -2919,6 +2926,55 @@ mod tests {
         drop(saved);
         assert_eq!(with_ctx(|c| c.lighting.lights[0].diffuse), values);
         assert!(with_ctx(|c| c.lighting.two_sided));
+    }
+
+    fn assert_rgb_surface_rgba_readback(gpu: bool) {
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        reset_for_test(1, 1);
+        if gpu {
+            set_gpu_renderer(true);
+            assert!(with_ctx(|c| c.gpu_active()));
+        }
+        for alpha in [0, 32768, 65536] {
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_clear_colorx,
+                &[0, 0, 65280, alpha],
+            );
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_clear,
+                &[pocket_gles::GL_COLOR_BUFFER_BIT],
+            );
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_read_pixels,
+                &[0, 0, 1, 1, pocket_gles::GL_RGBA, GL_UNSIGNED_BYTE, SCRATCH],
+            );
+            assert_eq!(cpu.read_mem(SCRATCH, 4).unwrap(), [0, 0, 254, 255]);
+            // Readback must not rewrite the renderer's alpha or RGB precision.
+            assert_eq!(
+                with_ctx(|c| c.target.color[3]),
+                ((alpha * 255 + 32768) / 65536) as u8
+            );
+        }
+    }
+
+    #[test]
+    fn rgba_readback_of_rgb_surface_does_not_leak_internal_alpha() {
+        let _g = guard();
+        assert_rgb_surface_rgba_readback(false);
+    }
+
+    #[test]
+    #[ignore = "requires native GL/GLES2"]
+    fn native_rgba_readback_of_rgb_surface_does_not_leak_internal_alpha() {
+        let _g = guard();
+        assert_rgb_surface_rgba_readback(true);
     }
 
     #[test]

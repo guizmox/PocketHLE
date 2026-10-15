@@ -1,6 +1,3 @@
-.github/workflows/ci.yml
-crates/pocket-library/src/keybindings.rs
-crates/pocket-library/src/lib.rs
-docs/STEAMDECK.md
-frontends/pocket-desktop/src/app.rs
-frontends/pocket-desktop/src/deck_navigation.rs
+crates/pocket-winceapi/src/gles.rs
+docs/AGENTS.md
+docs/GPU.md

@@ -1,5 +1,27 @@
 # GPU rendering
 
+## RGB surface RGBA readback (Stuntcar Extreme)
+
+The single exposed EGL configuration advertises RGB565 and zero alpha bits.
+`glReadPixels(GL_RGBA, GL_UNSIGNED_BYTE)` must therefore return alpha 255 for
+in-bounds pixels, even though the internal software/native targets retain RGBA
+for rendering. Keep their stored alpha and existing RGB precision unchanged;
+this is an API readback conversion, not a texture or shader alteration.
+
+Stuntcar Extreme captures its HUD labels against a blue clear colour with
+alpha zero. Returning that internal zero caused the game's CPU image conversion
+to blend the blue colour key to black before building the cached label textures.
+Returning the missing surface alpha as one preserves the key and lets the game
+generate transparent backgrounds. Do not replace black texels globally or add a
+game-name branch. The original executable and resources remain unchanged.
+
+Local native ARM execution with the supplied game reproduces the black labels
+before the fix and transparent labels after it on software and Mesa GPU paths.
+Physical Android/Windows confirmation and complete APK/EXE packaging remain
+separate checks. API regressions exercise transparent/partial/opaque internal
+clear alpha, opaque readback, unchanged RGB and retained internal alpha on both
+software and the native renderer.
+
 ## Configuration
 
 **GPU rendering (experimental)** is enabled by default when the global setting is

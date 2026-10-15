@@ -1,5 +1,12 @@
 # PocketHLE — architecture reference for coding agents
 
+RGBA readback of the exposed RGB565/alpha-less EGL surfaces returns alpha 255
+for in-bounds pixels. Internal RGBA alpha remains available to the renderer;
+never overwrite it or texture alpha to implement this conversion. Stuntcar
+Extreme's cached HUD labels rely on opaque surface readback to preserve their
+blue colour key through CPU image conversion. See docs/GPU.md for reproduction
+and scope; no executable/resource patch or title-specific branch is needed.
+
 ## Gizmondo VIB1 / NLED vibration bridge
 
 The SDK Vibrator and RingToneControl examples use VIB1: and NLED count (0),
