@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-android-jni"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-cab"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "cab",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "log",
@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-cpu"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "bitflags 2.11.1",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-desktop"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "directories",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-gles"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "log",
  "once_cell",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-kernel"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2972,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-library"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "directories",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-pe"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "pocket-winceapi"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "cc",
