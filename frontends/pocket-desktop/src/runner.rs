@@ -615,6 +615,7 @@ struct ChildJob {
 struct RunHook {
     colors_random_gps: Option<pocket_library::LauncherConfig>,
     refresh_colors_gps: bool,
+    geofence_down: bool,
     frame_tx: Option<Sender<FrameSnapshot>>,
     input_rx: Option<Arc<Mutex<Receiver<InputCommand>>>>,
     stop_all: Arc<AtomicBool>,
@@ -818,7 +819,21 @@ impl RunHook {
                 let rx = rx.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
                     match rx.try_recv() {
-                        Ok(InputCommand::Input(ev)) => pending.push_back(ev),
+                        Ok(InputCommand::Input(ev)) => {
+                            match ev {
+                                InputEvent::KeyDown { vk: 0x73 } => {
+                                    if !self.geofence_down && self.colors_random_gps.is_some() {
+                                        self.refresh_colors_gps = true;
+                                    }
+                                    self.geofence_down = true;
+                                }
+                                InputEvent::KeyUp { vk: 0x73 } => self.geofence_down = false,
+                                _ => {}
+                            }
+                            // Keep Geofence's normal guest behavior for all input sources.
+                            pending.push_back(ev);
+                        }
+
                         Ok(InputCommand::RefreshColorsGps) => self.refresh_colors_gps = true,
                         Ok(InputCommand::Stop) => stop_requested = true,
                         Err(TryRecvError::Empty) => break,
@@ -885,6 +900,7 @@ impl RunHook {
         Self {
             colors_random_gps: None,
             refresh_colors_gps: false,
+            geofence_down: false,
             frame_tx,
             input_rx: input_rx.map(|rx| Arc::new(Mutex::new(rx))),
             stop_all: Arc::new(AtomicBool::new(false)),
@@ -1219,5 +1235,38 @@ mod presentation_clock_tests {
         phase = presentation_phase(phase, after_pause);
         assert!(phase.is_some());
         assert!(presentation_phase(phase, after_pause).is_none());
+    }
+}
+
+#[cfg(test)]
+mod geofence_refresh_tests {
+    use super::*;
+    #[test]
+    fn geofence_preserves_guest_events_and_refreshes_only_on_press_in_eiffel_mode() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut hook = RunHook::new(None, Some(rx));
+        let mut pending = std::collections::VecDeque::new();
+        let down = InputEvent::KeyDown { vk: 0x73 };
+        let up = InputEvent::KeyUp { vk: 0x73 };
+        tx.send(InputCommand::Input(down)).unwrap();
+        tx.send(InputCommand::Input(up)).unwrap();
+        assert!(!hook.drain_input(&mut pending));
+        assert!(!hook.refresh_colors_gps);
+        let mut config = pocket_library::LauncherConfig::default();
+        config.gps_fixed_enabled = true;
+        config.gps_fixed_random = true;
+        hook.colors_random_gps = Some(config);
+        tx.send(InputCommand::Input(down)).unwrap();
+        assert!(!hook.drain_input(&mut pending));
+        assert!(std::mem::take(&mut hook.refresh_colors_gps));
+        tx.send(InputCommand::Input(down)).unwrap();
+        assert!(!hook.drain_input(&mut pending));
+        assert!(!hook.refresh_colors_gps);
+        tx.send(InputCommand::Input(up)).unwrap();
+        assert!(!hook.drain_input(&mut pending));
+        assert_eq!(pending.iter().copied().collect::<Vec<_>>(), vec![down, up, down, down, up]);
+        tx.send(InputCommand::RefreshColorsGps).unwrap();
+        assert!(!hook.drain_input(&mut pending));
+        assert!(hook.refresh_colors_gps);
     }
 }

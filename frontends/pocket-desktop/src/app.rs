@@ -3362,9 +3362,9 @@ impl PocketLauncher {
                         ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
                     });
                 if draft.gps_fixed_enabled && draft.gps_fixed_random {
-                    ui.label("F12: choose a new random position while playing.");
+                    ui.label("F12 / Geofence: choose a new random position while playing.");
                 }
-                ui.label("A simulated fix is chosen at launch. Manual coordinates remain saved.");
+                if !draft.gps_fixed_random {
                 ui.horizontal(|ui| {
                     ui.label("Latitude");
                     ui.add(egui::DragValue::new(&mut draft.gps_fixed_latitude).speed(0.0001).clamp_range(-90.0..=90.0).max_decimals(7));
@@ -3374,6 +3374,7 @@ impl PocketLauncher {
                     ui.add(egui::DragValue::new(&mut draft.gps_fixed_longitude).speed(0.0001).clamp_range(-180.0..=180.0).max_decimals(7));
                 });
                 ui.label("Decimal coordinates: north/east positive, south/west negative.");
+                }
                 ui.label("The game will use this simulated position instead of host location.");
             });
         }

@@ -491,7 +491,7 @@ class MainActivity : AppCompatActivity() {
         content.addView(fakeGps)
         val mode = spinner(listOf("Near Eiffel Tower (within 1 km)", "Manual coordinates"))
         mode.setSelection(if (config.optBoolean("gps_fixed_random")) 0 else 1)
-        label("A simulated fix is chosen once per launch. Manual coordinates remain saved.")
+        val manualGpsStart = content.childCount
         val latitude = field("Latitude", config.optDouble("gps_fixed_latitude", 0.0).toString(), true)
         val longitude = field("Longitude", config.optDouble("gps_fixed_longitude", 0.0).toString(), true)
         label("Decimal coordinates: north/east positive, south/west negative.")
@@ -500,6 +500,7 @@ class MainActivity : AppCompatActivity() {
         val fillGps = android.widget.Button(this).apply { text = "Fill GPS" }
         content.addView(fillGps)
         content.addView(fillStatus)
+        val manualGpsViews = (manualGpsStart until content.childCount).map { content.getChildAt(it) }
         fillStatus.text = "Copy the latest known position, or request a new fix."
         fun fillDevicePosition() {
             if (!dialog.isShowing || colorsGpsRequest != null) return
@@ -542,8 +543,11 @@ class MainActivity : AppCompatActivity() {
         fillGps.setOnClickListener { fillDevicePosition() }
         fun updateGpsControls() {
             mode.isEnabled = fakeGps.isChecked
-            latitude.isEnabled = fakeGps.isChecked && mode.selectedItemPosition == 1
-            longitude.isEnabled = latitude.isEnabled
+            val manual = fakeGps.isChecked && mode.selectedItemPosition == 1
+            manualGpsViews.forEach { it.visibility = if (manual) View.VISIBLE else View.GONE }
+            latitude.isEnabled = manual
+            longitude.isEnabled = manual
+            if (!manual) cancelColorsGpsFill?.invoke()
         }
         fakeGps.setOnCheckedChangeListener { _, _ -> updateGpsControls() }
         mode.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {

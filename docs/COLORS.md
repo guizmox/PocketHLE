@@ -188,3 +188,9 @@ both original guest key-down and key-up events. Other games and manual/host
 GPS modes retain their original input behavior. Manual coordinates are not
 changed or saved. No server request is added: the game receives the new fix
 on its next GPS read and performs its usual map refresh.
+
+Desktop/Deck Geofence also supplements normal guest input with the Eiffel refresh,
+for keyboard, controller and onscreen keys routed as VK 0x73. F12 remains available.
+Latitude/longitude and coordinate guidance appear only in manual mode; Android
+also hides Fill GPS controls outside enabled manual mode and cancels pending fills.
+Stored manual values survive mode switching.
