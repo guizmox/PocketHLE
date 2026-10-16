@@ -177,3 +177,14 @@ adds nothing. Solo spending, forced refresh, saturation, existing accounts,
 and the supplied save are also covered. This is an isolated native protocol
 fixture, not a full gameplay or physical-device test. Both app and server updates
 are required. Starting funds must be changed in deployed custom rules too.
+
+## Explicit Eiffel Tower GPS refresh
+
+In Colors only, with Fake GPS and Near Eiffel Tower selected, desktop/Deck F12
+chooses a new simulated position within 1 km of the tower. The hint appears
+only under that selected startup option. Holding F12 does not repeat.
+Android Geofence (VK 0x73) adds the same action on the press edge, retaining
+both original guest key-down and key-up events. Other games and manual/host
+GPS modes retain their original input behavior. Manual coordinates are not
+changed or saved. No server request is added: the game receives the new fix
+on its next GPS read and performs its usual map refresh.

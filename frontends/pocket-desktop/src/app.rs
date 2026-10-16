@@ -3136,6 +3136,20 @@ impl PocketLauncher {
                 }
                 continue;
             }
+            if key == egui::Key::F12
+                && self.screen == Screen::Run
+                && self.library.config().gps_fixed_enabled
+                && self.library.config().gps_fixed_random
+                && self.running_game_id.as_deref().and_then(|id| self.library.get(id))
+                    .is_some_and(|game| pocket_library::is_colors_game(game, self.library.root()))
+            {
+                if pressed && !repeat {
+                    if let Some(tx) = self.input_tx.as_ref() {
+                        let _ = tx.send(InputCommand::RefreshColorsGps);
+                    }
+                }
+                continue;
+            }
             if key == egui::Key::F11 {
                 if pressed && !repeat {
                     let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -3328,7 +3342,6 @@ impl PocketLauncher {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.label("Choose options for this launch.");
                 if cfg!(feature = "steam-deck") {
                     ui.label("A: Start • B: Back • X: Unlock Turf Wars • D-pad / stick: language");
                 }
@@ -3348,7 +3361,10 @@ impl PocketLauncher {
                         ui.selectable_value(&mut draft.gps_fixed_random, true, "Near Eiffel Tower (within 1 km)");
                         ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
                     });
-                ui.label("A simulated fix is chosen once per launch. Manual coordinates remain saved.");
+                if draft.gps_fixed_enabled && draft.gps_fixed_random {
+                    ui.label("F12: choose a new random position while playing.");
+                }
+                ui.label("A simulated fix is chosen at launch. Manual coordinates remain saved.");
                 ui.horizontal(|ui| {
                     ui.label("Latitude");
                     ui.add(egui::DragValue::new(&mut draft.gps_fixed_latitude).speed(0.0001).clamp_range(-90.0..=90.0).max_decimals(7));

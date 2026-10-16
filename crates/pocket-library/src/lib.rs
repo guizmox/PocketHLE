@@ -729,7 +729,7 @@ pub struct LauncherConfig {
     /// Explicit simulated GPS on Windows and Android, independent of host permission.
     #[serde(default)]
     pub gps_fixed_enabled: bool,
-    /// Pick one simulated fix within 1 km of the Eiffel Tower per launch.
+    /// Pick a simulated fix within 1 km of the Eiffel Tower at launch or explicit refresh.
     #[serde(default)]
     pub gps_fixed_random: bool,
     #[serde(default)]
@@ -4975,7 +4975,7 @@ mod tests {
 }
 
 impl LauncherConfig {
-    /// One fix per game launch, never a changing random walk while playing.
+    /// One fix per call: used at launch and for explicit Eiffel-mode refresh only.
     pub fn simulated_gps_position(&self) -> Option<(f64, f64)> {
         if !self.gps_fixed_enabled {
             return None;

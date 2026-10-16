@@ -73,7 +73,7 @@ impl Service {
             }
         }
     }
-    /// Explicit simulator setting, configured before the guest opens GPS1.
+    /// Explicit simulator setting; an open GPS1 stream uses updates on its next read.
     /// This does not enable device access by itself.
     pub fn set_fixed_position(&self, position: Option<(f64, f64)>) -> Result<()> {
         if let Some((lat, lon)) = position {
@@ -405,6 +405,11 @@ mod tests {
         assert_eq!(word(&b, 25) as i32, 1517654321);
         assert_eq!(word(&b, 37), 500);
         assert!(b[45..].iter().all(|v| *v == 0));
+        // Reposition a simulator without closing the guest's existing GPS1 handle.
+        s.set_fixed_position(Some((48.8584, 2.2945))).unwrap();
+        let updated = d.lock().unwrap().packet().unwrap();
+        assert_eq!(word(&updated, 21) as i32, 488584000);
+        assert_eq!(word(&updated, 25) as i32, 22945000);
         let mut capture = FixedCapture {
             latitude: 0.,
             longitude: 0.,

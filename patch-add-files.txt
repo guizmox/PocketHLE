@@ -1,3 +1,6 @@
-Cargo.toml
-Cargo.lock
-frontends/pocket-android/app/build.gradle.kts
+crates/pocket-kernel/src/gps.rs
+crates/pocket-library/src/lib.rs
+docs/COLORS.md
+frontends/pocket-android-jni/src/runner.rs
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/runner.rs

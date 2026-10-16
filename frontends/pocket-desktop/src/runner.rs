@@ -233,6 +233,14 @@ impl Runner {
                         &launcher_config.colors_language,
                     ));
             }
+            hook.colors_random_gps = if pocket_library::is_colors_game(game, library_root)
+                && launcher_config.gps_fixed_enabled
+                && launcher_config.gps_fixed_random
+            {
+                Some(launcher_config.clone())
+            } else {
+                None
+            };
             process.state.vfs.bluetooth.service.set_allowed(hardware.0);
             process.state.vfs.camera_service().set_allowed(hardware.1);
             process.state.vfs.gps_service().set_allowed(hardware.2);
@@ -567,6 +575,8 @@ impl FrameSnapshot {
 pub enum InputCommand {
     /// User input (tap / D-pad / key) to forward to the guest.
     Input(InputEvent),
+    /// Explicitly choose another Colors Eiffel Tower simulated fix.
+    RefreshColorsGps,
     /// "Back to library" button — ask the run loop to stop cleanly.
     Stop,
 }
@@ -603,6 +613,8 @@ struct ChildJob {
 }
 
 struct RunHook {
+    colors_random_gps: Option<pocket_library::LauncherConfig>,
+    refresh_colors_gps: bool,
     frame_tx: Option<Sender<FrameSnapshot>>,
     input_rx: Option<Arc<Mutex<Receiver<InputCommand>>>>,
     stop_all: Arc<AtomicBool>,
@@ -807,6 +819,7 @@ impl RunHook {
                 loop {
                     match rx.try_recv() {
                         Ok(InputCommand::Input(ev)) => pending.push_back(ev),
+                        Ok(InputCommand::RefreshColorsGps) => self.refresh_colors_gps = true,
                         Ok(InputCommand::Stop) => stop_requested = true,
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
@@ -870,6 +883,8 @@ impl RunHook {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
+            colors_random_gps: None,
+            refresh_colors_gps: false,
             frame_tx,
             input_rx: input_rx.map(|rx| Arc::new(Mutex::new(rx))),
             stop_all: Arc::new(AtomicBool::new(false)),
@@ -897,6 +912,12 @@ impl FrameHook for RunHook {
         } else {
             self.stop_all.load(Ordering::Acquire)
         };
+        if std::mem::take(&mut self.refresh_colors_gps) && !stop_requested {
+            if let Some(config) = self.colors_random_gps.as_ref() {
+                let _ = state.vfs.gps_service()
+                    .set_fixed_position(config.simulated_gps_position());
+            }
+        }
         if !stop_requested {
             self.run_pending_child(state);
         }

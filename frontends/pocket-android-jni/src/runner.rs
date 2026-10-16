@@ -460,6 +460,14 @@ fn run_process(
                     &launcher_config.colors_language,
                 ));
         }
+        hook.colors_random_gps = if pocket_library::is_colors_game(entry, library_root)
+            && launcher_config.gps_fixed_enabled
+            && launcher_config.gps_fixed_random
+        {
+            Some(launcher_config.clone())
+        } else {
+            None
+        };
         process.state.vfs.bluetooth.service.set_allowed(hardware.0);
         process.state.vfs.camera_service().set_allowed(hardware.1);
         process.state.vfs.gps_service().set_allowed(hardware.2);
@@ -681,6 +689,8 @@ pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
 /// Bridges the UI thread (Kotlin) and the running emulator on the
 /// worker thread.
 struct SessionHook {
+    colors_random_gps: Option<pocket_library::LauncherConfig>,
+    geofence_down: bool,
     state: Arc<SessionState>,
     input_rx: Arc<Mutex<Receiver<InputCommand>>>,
     stop_all: Arc<AtomicBool>,
@@ -696,6 +706,28 @@ struct SessionHook {
 }
 
 impl SessionHook {
+    fn queue_input(
+        &mut self,
+        ev: InputEvent,
+        gps: &pocket_core::kernel::gps::Service,
+        pending: &mut std::collections::VecDeque<InputEvent>,
+    ) {
+        match ev {
+            InputEvent::KeyDown { vk: 0x73 } => {
+                if !self.geofence_down {
+                    if let Some(config) = self.colors_random_gps.as_ref() {
+                        let _ = gps.set_fixed_position(config.simulated_gps_position());
+                    }
+                }
+                self.geofence_down = true;
+            }
+            InputEvent::KeyUp { vk: 0x73 } => self.geofence_down = false,
+            _ => {}
+        }
+        // The simulator action supplements, rather than consumes, the hardware key.
+        pending.push_back(ev);
+    }
+
     fn run_pending_child(&mut self, state: &mut KernelState) {
         let Some(request) = state.pending_process_launch.take() else {
             return;
@@ -917,6 +949,8 @@ impl SessionHook {
 
     fn new(state: Arc<SessionState>, input_rx: Receiver<InputCommand>) -> Self {
         Self {
+            colors_random_gps: None,
+            geofence_down: false,
             stop_all: Arc::clone(&state.stop_all),
             state,
             input_rx: Arc::new(Mutex::new(input_rx)),
@@ -939,10 +973,13 @@ impl FrameHook for SessionHook {
         self.reap_children();
         let mut stop_requested = self.stop_all.load(Ordering::Acquire);
         if !self.input_disconnected && self.foreground.load(Ordering::Acquire) == self.pid {
-            let input = self.input_rx.lock().unwrap_or_else(|e| e.into_inner());
+            let input_rx = Arc::clone(&self.input_rx);
+            let input = input_rx.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 match input.try_recv() {
-                    Ok(InputCommand::Input(ev)) => kernel.pending_input.push_back(ev),
+                    Ok(InputCommand::Input(ev)) => {
+                        self.queue_input(ev, &kernel.vfs.gps_service(), &mut kernel.pending_input);
+                    },
                     Ok(InputCommand::Stop) => stop_requested = true,
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -1019,5 +1056,41 @@ mod presentation_clock_tests {
         phase = presentation_phase(phase, after_pause);
         assert!(phase.is_some());
         assert!(presentation_phase(phase, after_pause).is_none());
+    }
+}
+
+#[cfg(test)]
+mod geofence_refresh_tests {
+    use super::*;
+    use pocket_core::kernel::gps::Service;
+    fn coordinates(gps: &Service) -> [u8; 8] {
+        gps.open().unwrap().lock().unwrap().packet().unwrap()[21..29].try_into().unwrap()
+    }
+    #[test]
+    fn geofence_adds_one_refresh_per_press_and_preserves_guest_events() {
+        let (_, rx) = channel();
+        let mut hook = SessionHook::new(Arc::new(SessionState::new()), rx);
+        let gps = Service::default();
+        gps.set_allowed(true);
+        gps.set_fixed_position(Some((12., 34.))).unwrap();
+        let original = coordinates(&gps);
+        let down = InputEvent::KeyDown { vk: 0x73 };
+        let up = InputEvent::KeyUp { vk: 0x73 };
+        let mut pending = std::collections::VecDeque::new();
+        // Other games and host/manual modes have no random Colors config.
+        hook.queue_input(down, &gps, &mut pending);
+        hook.queue_input(up, &gps, &mut pending);
+        assert_eq!(coordinates(&gps), original);
+        let mut config = pocket_library::LauncherConfig::default();
+        config.gps_fixed_enabled = true;
+        config.gps_fixed_random = true;
+        hook.colors_random_gps = Some(config);
+        hook.queue_input(down, &gps, &mut pending);
+        let refreshed = coordinates(&gps);
+        assert_ne!(refreshed, original);
+        hook.queue_input(down, &gps, &mut pending);
+        assert_eq!(coordinates(&gps), refreshed);
+        hook.queue_input(up, &gps, &mut pending);
+        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![down, up, down, down, up]);
     }
 }
