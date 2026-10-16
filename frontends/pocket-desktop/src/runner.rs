@@ -65,9 +65,11 @@ impl Runner {
         game: GameEntry,
         live_tx: Option<Sender<FrameSnapshot>>,
         input_rx: Option<Receiver<InputCommand>>,
+        gps_notice_tx: Option<Sender<(f64, f64)>>,
     ) -> RunOutcome {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
+        hook.gps_notice_tx = gps_notice_tx;
         let card_root = game.gizmondo_card_root(&library_root);
         self.run_process(
             &library_root,
@@ -615,6 +617,7 @@ struct ChildJob {
 struct RunHook {
     colors_random_gps: Option<pocket_library::LauncherConfig>,
     refresh_colors_gps: bool,
+    gps_notice_tx: Option<Sender<(f64, f64)>>,
     geofence_down: bool,
     frame_tx: Option<Sender<FrameSnapshot>>,
     input_rx: Option<Arc<Mutex<Receiver<InputCommand>>>>,
@@ -900,6 +903,7 @@ impl RunHook {
         Self {
             colors_random_gps: None,
             refresh_colors_gps: false,
+            gps_notice_tx: None,
             geofence_down: false,
             frame_tx,
             input_rx: input_rx.map(|rx| Arc::new(Mutex::new(rx))),
@@ -930,8 +934,11 @@ impl FrameHook for RunHook {
         };
         if std::mem::take(&mut self.refresh_colors_gps) && !stop_requested {
             if let Some(config) = self.colors_random_gps.as_ref() {
-                let _ = state.vfs.gps_service()
-                    .set_fixed_position(config.simulated_gps_position());
+                if let Some(position) = config.simulated_gps_position() {
+                    if state.vfs.gps_service().set_fixed_position(Some(position)).is_ok() {
+                        if let Some(tx) = &self.gps_notice_tx { let _ = tx.send(position); }
+                    }
+                }
             }
         }
         if !stop_requested {

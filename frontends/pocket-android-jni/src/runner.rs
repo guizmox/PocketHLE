@@ -118,6 +118,7 @@ pub(crate) struct SessionState {
     /// overwrites whatever was there because the UI only ever
     /// cares about the newest frame.
     latest_frame: Mutex<Option<FrameSnapshot>>,
+    gps_notice: Mutex<Option<(f64, f64)>>,
     /// `true` while the worker thread is still running. Flipped to
     /// `false` exactly once, just before the worker returns.
     running: Mutex<bool>,
@@ -136,6 +137,7 @@ impl SessionState {
         Self {
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
+            gps_notice: Mutex::new(None),
             running: Mutex::new(true),
             summary: Mutex::new(None),
             audio: Mutex::new(None),
@@ -151,6 +153,9 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn poll_gps_notice(&self) -> Option<(f64, f64)> {
+        self.state.gps_notice.lock().ok()?.take()
+    }
     /// Move the latest framebuffer out of the shared slot.
     pub fn poll_frame(&self) -> Option<FrameSnapshot> {
         self.state
@@ -716,7 +721,11 @@ impl SessionHook {
             InputEvent::KeyDown { vk: 0x73 } => {
                 if !self.geofence_down {
                     if let Some(config) = self.colors_random_gps.as_ref() {
-                        let _ = gps.set_fixed_position(config.simulated_gps_position());
+                        if let Some(position) = config.simulated_gps_position() {
+                            if gps.set_fixed_position(Some(position)).is_ok() {
+                                if let Ok(mut slot) = self.state.gps_notice.lock() { *slot = Some(position); }
+                            }
+                        }
                     }
                 }
                 self.geofence_down = true;

@@ -135,6 +135,7 @@ object NativeBridge {
     @JvmStatic external fun nativePollAudio(handle: Long, maxSamples: Int): ShortArray?
 
     /** `1` while the worker is still running, `0` once it has exited. */
+    @JvmStatic external fun nativePollGpsNotice(handle: Long): String?
     @JvmStatic external fun nativeIsRunning(handle: Long): Int
 
     /**

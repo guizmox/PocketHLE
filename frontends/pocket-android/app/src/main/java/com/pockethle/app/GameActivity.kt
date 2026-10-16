@@ -122,6 +122,9 @@ class GameActivity : AppCompatActivity() {
                     paintFrame(frame)
                 }
             }
+            NativeBridge.nativePollGpsNotice(session)?.let { message ->
+                android.widget.Toast.makeText(this@GameActivity, message, android.widget.Toast.LENGTH_LONG).show()
+            }
             updateFpsOverlay()
             if (NativeBridge.nativeIsRunning(session) == 0) {
                 // Worker exited on its own (game called ExitProcess

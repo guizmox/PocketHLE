@@ -167,6 +167,8 @@ pub struct PocketLauncher {
     /// is running. `Some` between [`Self::spawn_run`] and
     /// `UiEvent::RunFinished`; `None` otherwise.
     frame_rx: Option<Receiver<FrameSnapshot>>,
+    gps_notice_rx: Option<Receiver<(f64, f64)>>,
+    gps_notice: Option<(String, Instant)>,
     /// Channel for sending [`InputCommand`]s (taps / D-pad / stop)
     /// to the running emulator. Mirrors `frame_rx`.
     input_tx: Option<Sender<InputCommand>>,
@@ -683,6 +685,8 @@ impl PocketLauncher {
             release_update: None,
             colors_startup_notice: None,
             frame_rx: None,
+            gps_notice_rx: None,
+            gps_notice: None,
             input_tx: None,
             held: HeldButtons::default(),
             gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone()),
@@ -848,6 +852,11 @@ impl PocketLauncher {
         if let Some(rx) = self.frame_rx.as_ref() {
             while let Ok(frame) = rx.try_recv() {
                 latest = Some(frame);
+            }
+        }
+        if let Some(rx) = &self.gps_notice_rx {
+            while let Ok((lat, lon)) = rx.try_recv() {
+                self.gps_notice = Some((format!("Fake GPS position refreshed!\nLatitude: {lat:.6}\nLongitude: {lon:.6}"), Instant::now() + Duration::from_secs(3)));
             }
         }
         if let Some(frame) = latest {
@@ -3481,6 +3490,9 @@ impl PocketLauncher {
         self.console_fit_pending = true;
         let (frame_tx, frame_rx) = mpsc::channel();
         let (input_tx, input_rx) = mpsc::channel();
+        let (gps_notice_tx, gps_notice_rx) = mpsc::channel();
+        self.gps_notice_rx = Some(gps_notice_rx);
+        self.gps_notice = None;
         self.frame_rx = Some(frame_rx);
         self.input_tx = Some(input_tx);
         self.held = HeldButtons::default();
@@ -3490,7 +3502,7 @@ impl PocketLauncher {
         let tx = self.events_tx.clone();
         let runner = self.runner.clone();
         std::thread::spawn(move || {
-            let outcome = runner.run_game(library_root, game, Some(frame_tx), Some(input_rx));
+            let outcome = runner.run_game(library_root, game, Some(frame_tx), Some(input_rx), Some(gps_notice_tx));
             let _ = tx.send(UiEvent::RunFinished(outcome));
         });
         self.status = "Starting emulator...".to_string();
@@ -3745,6 +3757,16 @@ impl eframe::App for PocketLauncher {
                     self.deck_filter_notice = None;
                 }
             }
+        }
+        if let Some((message, expires)) = self.gps_notice.clone() {
+            if Instant::now() < expires && self.screen == Screen::Run {
+                egui::Area::new(egui::Id::new("gps_refresh_notice"))
+                    .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 16.0))
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| { ui.label(message); });
+                    });
+            } else { self.gps_notice = None; }
         }
         if !console_only && !self.library_busy {
             self.ui_demo_import(ctx);

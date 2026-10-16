@@ -1,7 +1,6 @@
-crates/pocket-library/src/lib.rs
-docs/AGENTS.md
-docs/COLORS.md
-docs/GIZMONDO.md
 frontends/pocket-android-jni/src/runner.rs
-frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
+frontends/pocket-android-jni/src/lib.rs
+frontends/pocket-desktop/src/runner.rs
 frontends/pocket-desktop/src/app.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
