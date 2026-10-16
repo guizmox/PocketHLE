@@ -1,9 +1,1 @@
-Cargo.lock
-crates/pocket-core/Cargo.toml
-crates/pocket-core/src/colors_wallet.rs
-crates/pocket-core/src/lib.rs
 crates/pocket-library/src/colors_save.rs
-docs/AGENTS.md
-docs/COLORS.md
-frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
-frontends/pocket-desktop/src/app.rs

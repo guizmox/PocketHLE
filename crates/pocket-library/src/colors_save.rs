@@ -297,7 +297,14 @@ mod tests {
         );
         unlock_in_flash(temp.path()).unwrap();
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 3);
-        assert!(!directory.join("config.cfg").exists());
+        // Inspect directory entries: on Windows, exists("config.cfg") also
+        // resolves the existing "Config.CFG" and cannot detect a duplicate.
+        let config_names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().eq_ignore_ascii_case("config.cfg"))
+            .collect();
+        assert_eq!(config_names, vec![std::ffi::OsString::from("Config.CFG")]);
     }
     #[test]
     fn repeated_unlock_never_changes_campaign_gains_or_sync_checkpoint() {
