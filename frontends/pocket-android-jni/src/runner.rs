@@ -723,7 +723,9 @@ impl SessionHook {
                     if let Some(config) = self.colors_random_gps.as_ref() {
                         if let Some(position) = config.simulated_gps_position() {
                             if gps.set_fixed_position(Some(position)).is_ok() {
-                                if let Ok(mut slot) = self.state.gps_notice.lock() { *slot = Some(position); }
+                                if let Ok(mut slot) = self.state.gps_notice.lock() {
+                                    *slot = Some(position);
+                                }
                             }
                         }
                     }

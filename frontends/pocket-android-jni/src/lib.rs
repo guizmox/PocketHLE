@@ -888,15 +888,20 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeIsRunning<'loca
 
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollGpsNotice<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
 ) -> jstring {
     let Some(position) = session_from_handle(handle).and_then(|s| s.poll_gps_notice()) else {
         return std::ptr::null_mut();
     };
-    let message = format!("Fake GPS position refreshed!\nLatitude: {:.6}\nLongitude: {:.6}", position.0, position.1);
-    env.new_string(message).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+    let message = format!(
+        "Fake GPS position refreshed!\nLatitude: {:.6}\nLongitude: {:.6}",
+        position.0, position.1
+    );
+    env.new_string(message)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
