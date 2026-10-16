@@ -758,8 +758,7 @@ impl PocketLauncher {
                 UiEvent::ColorsUnlocked(result) => {
                     self.library_busy = false;
                     self.colors_startup_notice = Some(("Unlock Turf Wars".into(),
-                        result.map(|message| format!("{message}\n\nAn existing balance below $75,000 is set to $75,000. A higher balance is preserved."))
-                            .unwrap_or_else(|error| format!("Could not unlock Turf Wars: {error}"))));
+                        result.unwrap_or_else(|error| format!("Could not unlock Turf Wars: {error}"))));
                 }
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {

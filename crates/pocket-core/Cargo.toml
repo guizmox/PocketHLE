@@ -23,6 +23,7 @@ video-static = ["pocket-winceapi/video-static"]
 anyhow.workspace = true
 log.workspace = true
 thiserror.workspace = true
+sha2 = "0.11"
 
 pocket-cab = { path = "../pocket-cab" }
 pocket-pe = { path = "../pocket-pe" }

@@ -1,4 +1,4 @@
-//! Explicit, offline Colors startup action. Never runs automatically at launch.
+//! Explicit Colors menu unlock. Solo/online money is not granted by this action.
 use crate::{is_colors_game, GameEntry};
 use anyhow::{bail, Context, Result};
 use std::{
@@ -95,13 +95,12 @@ fn unlock_config(input: &[u8]) -> Result<Vec<u8>> {
     Ok(transform(output.as_bytes(), false))
 }
 
-fn fund_save(input: &[u8]) -> Result<(Vec<u8>, bool)> {
+fn validate_save(input: &[u8]) -> Result<(u32, u32)> {
     let text = String::from_utf8(transform(input, true)).context("Unknown Colors save format")?;
     let mut stack: Vec<&str> = Vec::new();
     let mut pending = None;
     let mut money = None;
     let mut server = None;
-    let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let clean = line.trim();
         if clean == "{" {
@@ -122,15 +121,12 @@ fn fund_save(input: &[u8]) -> Result<(Vec<u8>, bool)> {
                     if number > i32::MAX as u32 {
                         bail!("Invalid Colors balance");
                     }
-                    let start = offset + line.find(clean).unwrap() + index + clean[index..].len()
-                        - clean[index..].trim_start().len();
-                    let field = (start, start + value.len(), number);
                     let slot = if name == "Money" {
                         &mut money
                     } else {
                         &mut server
                     };
-                    if slot.replace(field).is_some() {
+                    if slot.replace(number).is_some() {
                         bail!("Duplicate Colors balance");
                     }
                 }
@@ -138,26 +134,14 @@ fn fund_save(input: &[u8]) -> Result<(Vec<u8>, bool)> {
                 pending = Some(clean);
             }
         }
-        offset += line.len();
     }
     if !stack.is_empty() || pending.is_some() {
         bail!("Incomplete Colors save");
     }
-    let money = money.context("Colors player balance not found")?;
-    let server = server.context("Colors server balance not found")?;
-    if money.2 >= 75_000 {
-        return Ok((input.to_vec(), false));
-    }
-    let mut replacements = vec![
-        (money.0, money.1, 75_000),
-        (server.0, server.1, server.2.max(75_000)),
-    ];
-    replacements.sort_by_key(|field| std::cmp::Reverse(field.0));
-    let mut output = text;
-    for (start, end, value) in replacements {
-        output.replace_range(start..end, &value.to_string());
-    }
-    Ok((transform(output.as_bytes(), false), true))
+    Ok((
+        money.context("Colors player balance not found")?,
+        server.context("Colors server balance not found")?,
+    ))
 }
 
 fn child(parent: &Path, name: &str) -> Result<PathBuf> {
@@ -223,60 +207,27 @@ fn unlock_in_flash(flash: &Path) -> Result<String> {
     let old_config = read_optional(&config)?;
     let old_save = read_optional(&save)?;
     let new_config = unlock_config(old_config.as_deref().unwrap_or_default())?;
-    let (new_save, funded) = old_save
-        .as_ref()
-        .map(|bytes| fund_save(bytes))
-        .transpose()?
-        .unwrap_or_default();
+    if let Some(bytes) = old_save.as_ref() {
+        validate_save(bytes)?;
+    }
     let config_changed = old_config.as_deref() != Some(new_config.as_slice());
-    if !config_changed && !funded {
-        return Ok("Turf Wars already unlocked; balance unchanged.".into());
+    if !config_changed {
+        return Ok("Turf Wars already unlocked. Solo balance unchanged; online funds are managed by the server.".into());
     }
     // Validate both files before touching either. Keep unique original copies.
     fs::create_dir_all(&directory)?;
-    for (path, original, changed) in [
-        (&config, old_config.as_ref(), config_changed),
-        (&save, old_save.as_ref(), funded),
-    ] {
-        if changed {
-            if let Some(bytes) = original {
-                let mut backup = tempfile::Builder::new()
-                    .prefix(&format!(
-                        "{}-before-turf-",
-                        path.file_name().unwrap().to_string_lossy()
-                    ))
-                    .suffix(".bak")
-                    .tempfile_in(&directory)?;
-                backup.write_all(bytes)?;
-                backup.as_file().sync_all()?;
-                backup.keep().map_err(|error| error.error)?;
-                log::info!(
-                    "Colors original {} backed up before Turf Wars unlock",
-                    path.display()
-                );
-            }
-        }
+    if let Some(bytes) = old_config.as_ref() {
+        let mut backup = tempfile::Builder::new()
+            .prefix("config.cfg-before-turf-")
+            .suffix(".bak")
+            .tempfile_in(&directory)?;
+        backup.write_all(bytes)?;
+        backup.as_file().sync_all()?;
+        backup.keep().map_err(|error| error.error)?;
+        log::info!("Colors original config backed up before Turf Wars unlock");
     }
-    if funded {
-        replace(&save, &new_save)?;
-    }
-    if config_changed {
-        if let Err(error) = replace(&config, &new_config) {
-            if funded {
-                replace(&save, old_save.as_ref().unwrap())
-                    .context("Unlock failed; restore the retained Colors save backup")?;
-            }
-            return Err(error);
-        }
-    }
-    Ok(if funded {
-        "Turf Wars unlocked; existing balance set to $75,000."
-    } else if old_save.is_some() {
-        "Turf Wars unlocked; balance already at least $75,000, save unchanged."
-    } else {
-        "Turf Wars unlocked; no existing save to fund."
-    }
-    .into())
+    replace(&config, &new_config)?;
+    Ok("Turf Wars unlocked. Solo balance unchanged; starting online funds are provided by the server on first registration.".into())
 }
 
 #[cfg(test)]
@@ -302,18 +253,11 @@ mod tests {
         );
     }
     #[test]
-    fn balances_never_decrease_and_other_progress_is_byte_preserved() {
+    fn balances_are_validated_without_granting_or_changing_them() {
         for money in [0, 525, 20_000, 74_999, 75_000, 75_001, 100_000] {
             for server in [525, 80_000] {
                 let original = save(money, server);
-                let (changed, funded) = fund_save(&original).unwrap();
-                assert_eq!(funded, money < 75_000);
-                if money >= 75_000 {
-                    assert_eq!(changed, original);
-                } else {
-                    assert_eq!(changed, save(75_000, server.max(75_000)));
-                }
-                assert_eq!(fund_save(&changed).unwrap(), (changed, false));
+                assert_eq!(validate_save(&original).unwrap(), (money, server));
             }
         }
     }
@@ -344,16 +288,39 @@ mod tests {
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "bak"))
             .map(|entry| fs::read(entry.path()).unwrap())
             .collect();
-        assert_eq!(backups.len(), 2);
+        assert_eq!(backups.len(), 1);
         assert!(backups.contains(&old_config));
-        assert!(backups.contains(&old_save));
+        assert!(!backups.contains(&old_save));
         assert_eq!(
             fs::read(directory.join("save/savefile.isv")).unwrap(),
-            save(75_000, 75_000)
+            old_save
         );
         unlock_in_flash(temp.path()).unwrap();
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 4);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 3);
         assert!(!directory.join("config.cfg").exists());
+    }
+    #[test]
+    fn repeated_unlock_never_changes_campaign_gains_or_sync_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("MyGames/GZGA200015 Colors");
+        fs::create_dir_all(directory.join("Save")).unwrap();
+        fs::write(directory.join("config.cfg"), config()).unwrap();
+        let path = directory.join("Save/SaveFile.isv");
+        // Different checkpoints cover pending solo gains and solo spending.
+        for (money, checkpoint) in [(525, 0), (1525, 525), (1000, 1525), (98000, 90000)] {
+            let original = save(money, checkpoint);
+            fs::write(&path, &original).unwrap();
+            for _ in 0..20 {
+                unlock_in_flash(temp.path()).unwrap();
+                assert_eq!(fs::read(&path).unwrap(), original);
+            }
+        }
+        let backups = fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "bak"))
+            .count();
+        assert_eq!(backups, 1);
     }
     #[test]
     fn missing_save_is_not_invented_and_corrupt_save_aborts_config_change() {
@@ -375,7 +342,7 @@ mod tests {
             "Save\n{\nCharacter\n{\nMoney -1\nServerMoney 0\n}\n}\n",
             "Save\n{\nCharacter\n{\nMoney 1\nMoney 2\nServerMoney 0\n}\n}\n",
         ] {
-            assert!(fund_save(&transform(plain.as_bytes(), false)).is_err());
+            assert!(validate_save(&transform(plain.as_bytes(), false)).is_err());
         }
     }
 }

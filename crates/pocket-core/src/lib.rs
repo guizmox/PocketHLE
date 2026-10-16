@@ -12,6 +12,8 @@
 //! When compiled with `--features unicorn`, [`Emulator::with_unicorn_cpu`]
 //! provides a fully working ARM backend.
 
+mod colors_wallet;
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -102,7 +104,11 @@ impl Emulator {
     /// Load and map a PE file into the emulator. Existing process
     /// state is replaced.
     pub fn load_pe(&mut self, path: impl AsRef<Path>) -> Result<&Process> {
-        let image = pe::load_file(path).context("loading PE")?;
+        let path = path.as_ref();
+        let raw = std::fs::read(path).context("reading PE")?;
+        let mut image = pe::load_bytes(&raw).context("loading PE")?;
+        image.source_path = path.display().to_string();
+        colors_wallet::apply(&raw, &mut image).context("Colors wallet compatibility")?;
         pocket_winceapi::reset_media_backends();
         let process = Process::map_into(
             image,

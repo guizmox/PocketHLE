@@ -577,7 +577,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (dialog.isShowing) {
                         val message = if (result.optBoolean("ok")) {
-                            result.optString("message") + "\n\nAn existing balance below $75,000 is set to $75,000. A higher balance is preserved."
+                            result.optString("message")
                         } else result.optString("error", "Could not unlock Turf Wars")
                         AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars")
                             .setMessage(message).setPositiveButton(android.R.string.ok, null).show()

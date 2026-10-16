@@ -1,3 +1,7 @@
+Cargo.lock
+crates/pocket-core/Cargo.toml
+crates/pocket-core/src/colors_wallet.rs
+crates/pocket-core/src/lib.rs
 crates/pocket-library/src/colors_save.rs
 docs/AGENTS.md
 docs/COLORS.md

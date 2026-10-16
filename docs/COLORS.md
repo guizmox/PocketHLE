@@ -10,34 +10,28 @@ are disabled until it finishes. It never runs automatically on later launches.
 - Decrypt and validate `config.cfg` and an existing `Save/SaveFile.isv` before
   changing either file.
 - Set `TurfWarUnlocked=1`, preserving the other config settings.
-- If `Save/Character/Money < 75000`, set Money to exactly 75000 and ServerMoney
-  to at least 75000, preserving a higher ServerMoney. This keeps the game's two
-  balance fields coherent without reducing either balance.
-- If Money is already 75000 or higher, leave the entire ISV byte-identical.
-- If no save exists, unlock the option without inventing a campaign save.
-- Preserve missions, inventory, character statistics, tags and position. This
-  is the local menu unlock; it does not fake multiplayer registration.
+- Leave the entire ISV byte-identical, regardless of Money or ServerMoney.
+- Never contact the server, grant money, or change registration identity.
+- Repeated clicks only keep the unlock flag enabled. They preserve pending solo
+  gains, previous online purchases, and the synchronization checkpoint.
+- If no save exists, do not invent one. Preserve missions and all other settings.
 
-Every changed original gets a unique `config.cfg-before-turf-*.bak` or
-`SaveFile.isv-before-turf-*.bak` copy in the Colors Flash directory. Replacements
-are atomic per file; if config publication fails after the save was changed,
-restore the original save. Unknown/corrupt formats, ambiguous case variants and
-symlinks are rejected. The normal/alternative Flash namespace comes from
-`GameEntry::gizmondo_flash_dir`, not the display name or an SD alias.
+Only a changed original config gets a unique `config.cfg-before-turf-*.bak`.
+Config replacement is atomic. Unknown/corrupt formats, ambiguous case variants
+and symlinks are rejected before writing. Use `GameEntry::gizmondo_flash_dir`.
 
 ## Save validation
 
 The supplied config decodes to `TurfWarUnlocked=0`; the supplied ISV contains
 Money=525 and ServerMoney=525. The codec was reconstructed from the original ARM
 byte transform at 0xe9600/0xe96dc, including feedback and rotating key state.
-No executable patch is required for the production action.
+The startup unlock itself requires no executable patch.
 
 Local diagnostic entry points invoked the supplied executable's original config
 reader/writer and ISV parser/serializer through PocketHLE. With the generic
 absolute-write fix applied, the game opens the original Flash paths for rb/wb.
-The original ISV round-trips to exactly its original plaintext. After the startup
-action, the ARM parser/serializer accepts the modified ISV and round-trips exact
-plaintext with only Money/ServerMoney changed to 20000. Config read/write retains
+The original ISV round-trips to exactly its original plaintext. Earlier funding-policy diagnostics also verified that the ARM parser/serializer
+accepts changed balances. The current startup action leaves the ISV untouched. Config read/write retains
 all settings, and the host unlock changes only TurfWarUnlocked from 0 to 1.
 Original uploaded files remain untouched; all runs use copies.
 
@@ -151,9 +145,35 @@ real raster tile bytes; Windows WinHTTP, Android HttpURLConnection and the live
 public deployment are not exercised by this run. Restart/redeploy the server
 with its patch; updating PocketHLE alone does not repair the server response.
 
-The funding floor is now 75,000 dollars, increased from the original 20,000
-policy at the maintainer's request. The ARM round-trip results above refer to the
-previous floor; the codec is unchanged. Repeating Unlock also upgrades an
-existing 20,000 save to 75,000. Tests cover 74,999/75,000/75,001, higher server
-balances and idempotency. This is a minimum balance, not an additive grant; no
-automatic launch-time credit, server starting-money or turf-price change.
+## Independent solo and online wallets
+
+The previous local funding policy is removed. Unlock never writes Money or
+ServerMoney. Existing saves previously granted 75,000 are preserved, not reset.
+A server starting-money floor of 75,000 (configurable) applies only to new online
+registrations. Existing online accounts are not topped up on reconnect.
+
+`pocket-core::colors_wallet` adapts only the supplied retail executable, SHA-256
+`065c6f62e793210e7889cab087495a42a84c77b7b41899410156017cb43d7a92`.
+Unknown versions remain unchanged. The checked patch changes only the loaded
+image; the EXE on disk is never modified. It uses original encrypted save routines
+to preserve solo Money and checkpoint ServerMoney to solo Money. The online
+amount stays in the online user object. Only positive subsequent solo earnings
+are added to the online amount; solo spending does not debit the online wallet.
+No graphics paths are changed.
+
+Original ARM functions: balance reader 0x17cd8, save writer 0x17ef4,
+response parser 0xf1a9c, registration builder 0xe6880, sync builder 0xe66d4.
+The mode-2 registration/sync ACK also checkpoints the local balance. Ordinary
+refreshes retain the original game's checkpoint timing. This does not add
+transaction IDs or exactly-once recovery after network failures to the legacy
+protocol, nor authenticate offline earnings.
+
+`tools/verify_separate_wallets.py` in the companion server patch executes the
+original ARM request builders, parser, encrypted ISV I/O and balance arithmetic,
+using the exact bytes exported by the Rust compatibility test and a real local
+HTTP/SQLite backend. Verified: solo 525 -> online 75,000; online purchase ->45,000
+while solo stays 525; solo gain +1,000 ->online 46,000 and solo 1,525; reconnect
+adds nothing. Solo spending, forced refresh, saturation, existing accounts,
+and the supplied save are also covered. This is an isolated native protocol
+fixture, not a full gameplay or physical-device test. Both app and server updates
+are required. Starting funds must be changed in deployed custom rules too.
