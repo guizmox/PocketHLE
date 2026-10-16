@@ -2647,7 +2647,7 @@ libclang; local build lacks libclang, so full diagnostic confirmation is pending
 
 ## Frontend feature updates (2026-10-12)
 
-Simulated GPS offers manual coordinates and one random uniform-area spherical fix within 1 km of the Eiffel Tower per launch. gps_fixed_random persists across Windows/Android settings. The same shared provider setup works on Linux. Manual coordinates remain stored and native permission bypass/lifecycle are unchanged.
+Simulated GPS offers manual coordinates and one random uniform-area spherical fix within 800 m of the Eiffel Tower per launch. gps_fixed_random persists across Windows/Android settings. The same shared provider setup works on Linux. Manual coordinates remain stored and native permission bypass/lifecycle are unchanged.
 
 Game hardware information detects Bluetooth, Internet, GPS, camera, vibration, power, SIM, battery and backlight using device strings, named imports and the existing CE4.2 coredll ordinal map for Gizmondo. No static evidence is not proof of absence. Scene camera symbols are not camera-device evidence.
 
@@ -2755,7 +2755,7 @@ persist draft edits or start emulation. Already confirmed pending runs do not
 reopen the menu after stopping another game.
 
 Fake GPS starts disabled in each new menu. Enabling it reuses the existing
-once-per-launch fix near Eiffel Tower (within 1 km), or validated manual latitude
+once-per-launch fix near Eiffel Tower (within 800 m), or validated manual latitude
 and longitude. Remember coordinates/mode, but require an explicit enable for
 each launch. Simulation belongs to Colors only; other games retain host GPS
 when enabled. Desktop host-access preparation and Android permission requests

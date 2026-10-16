@@ -979,7 +979,7 @@ impl FrameHook for SessionHook {
                 match input.try_recv() {
                     Ok(InputCommand::Input(ev)) => {
                         self.queue_input(ev, &kernel.vfs.gps_service(), &mut kernel.pending_input);
-                    },
+                    }
                     Ok(InputCommand::Stop) => stop_requested = true,
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -1064,7 +1064,9 @@ mod geofence_refresh_tests {
     use super::*;
     use pocket_core::kernel::gps::Service;
     fn coordinates(gps: &Service) -> [u8; 8] {
-        gps.open().unwrap().lock().unwrap().packet().unwrap()[21..29].try_into().unwrap()
+        gps.open().unwrap().lock().unwrap().packet().unwrap()[21..29]
+            .try_into()
+            .unwrap()
     }
     #[test]
     fn geofence_adds_one_refresh_per_press_and_preserves_guest_events() {
@@ -1091,6 +1093,9 @@ mod geofence_refresh_tests {
         hook.queue_input(down, &gps, &mut pending);
         assert_eq!(coordinates(&gps), refreshed);
         hook.queue_input(up, &gps, &mut pending);
-        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![down, up, down, down, up]);
+        assert_eq!(
+            pending.into_iter().collect::<Vec<_>>(),
+            vec![down, up, down, down, up]
+        );
     }
 }

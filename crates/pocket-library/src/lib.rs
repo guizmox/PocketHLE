@@ -729,7 +729,7 @@ pub struct LauncherConfig {
     /// Explicit simulated GPS on Windows and Android, independent of host permission.
     #[serde(default)]
     pub gps_fixed_enabled: bool,
-    /// Pick a simulated fix within 1 km of the Eiffel Tower at launch or explicit refresh.
+    /// Pick a simulated fix within 800 m of the Eiffel Tower at launch or explicit refresh.
     #[serde(default)]
     pub gps_fixed_random: bool,
     #[serde(default)]
@@ -4999,7 +4999,7 @@ fn eiffel_position(mut seed: u64) -> (f64, f64) {
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         ((z ^ (z >> 31)) >> 11) as f64 / ((1u64 << 53) as f64)
     }
-    let radius = 1000.0 * unit(&mut seed).sqrt();
+    let radius = 800.0 * unit(&mut seed).sqrt();
     let bearing = std::f64::consts::TAU * unit(&mut seed);
     let angular = radius / 6_371_000.0;
     let lat = 48.8584_f64.to_radians();
@@ -5015,7 +5015,7 @@ fn eiffel_position(mut seed: u64) -> (f64, f64) {
 mod simulated_gps_tests {
     use super::*;
     #[test]
-    fn eiffel_fixes_stay_inside_one_kilometre_and_manual_values_survive() {
+    fn eiffel_fixes_stay_inside_800_metres_and_manual_values_survive() {
         for seed in 0..1000 {
             let (lat, lon) = eiffel_position(seed);
             let dlat = (lat - 48.8584).to_radians();
@@ -5024,7 +5024,7 @@ mod simulated_gps_tests {
                 + lat.to_radians().cos()
                     * 48.8584_f64.to_radians().cos()
                     * (dlon / 2.).sin().powi(2);
-            assert!(2. * 6_371_000. * a.sqrt().asin() <= 1000.0001);
+            assert!(2. * 6_371_000. * a.sqrt().asin() <= 800.0001);
         }
         let mut c = LauncherConfig::default();
         assert!(c.simulated_gps_position().is_none());

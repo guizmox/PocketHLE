@@ -181,7 +181,7 @@ are required. Starting funds must be changed in deployed custom rules too.
 ## Explicit Eiffel Tower GPS refresh
 
 In Colors only, with Fake GPS and Near Eiffel Tower selected, desktop/Deck F12
-chooses a new simulated position within 1 km of the tower. The hint appears
+chooses a new simulated position within 800 m of the tower. The hint appears
 only under that selected startup option. Holding F12 does not repeat.
 Android Geofence (VK 0x73) adds the same action on the press edge, retaining
 both original guest key-down and key-up events. Other games and manual/host

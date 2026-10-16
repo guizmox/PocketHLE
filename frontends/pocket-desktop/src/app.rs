@@ -3356,9 +3356,9 @@ impl PocketLauncher {
                 .on_hover_text("Use a simulated position instead of host location.");
             ui.add_enabled_ui(draft.gps_fixed_enabled, |ui| {
                 egui::ComboBox::from_id_source("simulated_gps_mode")
-                    .selected_text(if draft.gps_fixed_random { "Near Eiffel Tower (within 1 km)" } else { "Manual coordinates" })
+                    .selected_text(if draft.gps_fixed_random { "Near Eiffel Tower (within 800 m)" } else { "Manual coordinates" })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.gps_fixed_random, true, "Near Eiffel Tower (within 1 km)");
+                        ui.selectable_value(&mut draft.gps_fixed_random, true, "Near Eiffel Tower (within 800 m)");
                         ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
                     });
                 if draft.gps_fixed_enabled && draft.gps_fixed_random {

@@ -489,7 +489,7 @@ class MainActivity : AppCompatActivity() {
             isChecked = false
         }
         content.addView(fakeGps)
-        val mode = spinner(listOf("Near Eiffel Tower (within 1 km)", "Manual coordinates"))
+        val mode = spinner(listOf("Near Eiffel Tower (within 800 m)", "Manual coordinates"))
         mode.setSelection(if (config.optBoolean("gps_fixed_random")) 0 else 1)
         val manualGpsStart = content.childCount
         val latitude = field("Latitude", config.optDouble("gps_fixed_latitude", 0.0).toString(), true)

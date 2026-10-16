@@ -33,7 +33,7 @@ Desktop also provides `pockethle-bt-test server`, `scan` and `client ADDRESS`.
 ## GPS
 
 Host GPS is opt-in and uses real location when available and permitted.
-The normal Colors startup menu offers manual coordinates or a point within 1 km of the Eiffel
+The normal Colors startup menu offers manual coordinates or a point within 800 m of the Eiffel
 Tower, selected once per launch. Simulation takes priority if enabled; disable
 it and enable host GPS to use the real provider. Manual coordinates are retained.
 Fake fixes do not require host-location permission; Bluetooth may independently
@@ -110,7 +110,7 @@ only those installed and preselects the previous choice. A missing preference
 falls back to English; a one-language card shows its available language.
 
 **Fake GPS** is disabled initially at each launch. Enable it to replace real
-GPS with either **Near Eiffel Tower (within 1 km)** (one simulated fix per launch)
+GPS with either **Near Eiffel Tower (within 800 m)** (one simulated fix per launch)
 or **Manual coordinates** (latitude −90..90, longitude −180..180). Coordinates
 and mode are remembered. Simulated GPS works even when hardware GPS is disabled,
 and skips real location access/permission requests. Other games keep real GPS.
