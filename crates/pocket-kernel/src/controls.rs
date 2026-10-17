@@ -285,6 +285,7 @@ pub struct ChildWindow {
     pub checked: bool,
     pub list_items: Vec<(String, u32)>,
     pub list_selected: Option<usize>,
+    pub list_column_count: u32,
     pub font: u32,
 }
 
@@ -635,6 +636,13 @@ pub enum ControlAction {
     /// box latched: the parent must receive
     /// `WM_COMMAND(MAKEWPARAM(id, BN_CLICKED), hwndChild)`.
     Clicked { parent: u32, id: u32, hwnd: u32 },
+    Notify {
+        parent: u32,
+        id: u32,
+        hwnd: u32,
+        code: u32,
+        index: i32,
+    },
     /// The event was consumed by a control (focus change, a character
     /// typed into an edit) but produces no notification.
     Consumed,
@@ -720,6 +728,7 @@ impl Controls {
             checked: false,
             list_items: Vec::new(),
             list_selected: None,
+            list_column_count: 0,
             font: crate::gdi::STOCK_SYSTEM_FONT,
         });
         hwnd
@@ -875,7 +884,17 @@ impl Controls {
     /// Stylus down. Takes the focus, and arms a push button.
     pub fn pointer_down(&mut self, x: i32, y: i32) -> Option<ControlAction> {
         let hwnd = self.hit_test(x, y)?;
+        let origin = self
+            .get(hwnd)
+            .map(|c| self.parent_origin(c.parent))
+            .unwrap_or((0, 0));
         let child = self.get_mut(hwnd)?;
+        if child.class == ControlClass::ListView && child.enabled {
+            let index = ((y - origin.1 - child.y).max(0) / 24) as usize;
+            if index < child.list_items.len() {
+                child.list_selected = Some(index);
+            }
+        }
         if !child.is_focusable() {
             return Some(ControlAction::Consumed);
         }
@@ -890,6 +909,22 @@ impl Controls {
     /// Stylus up. A button only notifies its parent when the release
     /// lands back inside the rectangle the press started in.
     pub fn pointer_up(&mut self, x: i32, y: i32) -> Option<ControlAction> {
+        if let Some(hwnd) = self.hit_test(x, y) {
+            if let Some(c) = self
+                .get(hwnd)
+                .filter(|c| c.class == ControlClass::ListView && c.enabled)
+            {
+                if let Some(index) = c.list_selected {
+                    return Some(ControlAction::Notify {
+                        parent: c.parent,
+                        id: c.id,
+                        hwnd,
+                        code: (-2i32) as u32,
+                        index: index as i32,
+                    });
+                }
+            }
+        }
         let captured = self.capture;
         if captured == 0 {
             // Not our press — but still swallow a release over a
@@ -1022,6 +1057,24 @@ impl Controls {
             return Some(ControlAction::Consumed);
         }
         match child.class {
+            ControlClass::ListView if vk == 0x26 || vk == 0x28 => {
+                if child.list_items.is_empty() {
+                    return Some(ControlAction::Consumed);
+                }
+                let next = match child.list_selected {
+                    Some(i) if vk == 0x26 => i.saturating_sub(1),
+                    Some(i) => (i + 1).min(child.list_items.len() - 1),
+                    None => 0,
+                };
+                child.list_selected = Some(next);
+                Some(ControlAction::Notify {
+                    parent: child.parent,
+                    id: child.id,
+                    hwnd: child.hwnd,
+                    code: (-101i32) as u32,
+                    index: next as i32,
+                })
+            }
             ControlClass::Edit => {
                 if vk == VK_BACK {
                     child.text.pop();
@@ -1069,11 +1122,21 @@ impl Controls {
     /// them — the separate pass makes the "frames are backdrop" rule
     /// explicit rather than incidental.
     pub fn render(&self, surf: &mut Surface<'_>) {
-        // Children of a frame window, which no panel owns.
+        self.render_composited(surf, |_, _| {});
+    }
+    pub fn render_composited(
+        &self,
+        surf: &mut Surface<'_>,
+        mut layer: impl FnMut(u32, &mut Surface<'_>),
+    ) {
         self.render_children_of(surf, |parent| self.panel(parent).is_none());
+        layer(0, surf);
         for panel in &self.panels {
             panel.render(surf);
             self.render_children_of(surf, |parent| parent == panel.hwnd);
+            if panel.visible {
+                layer(panel.hwnd, surf);
+            }
         }
     }
 

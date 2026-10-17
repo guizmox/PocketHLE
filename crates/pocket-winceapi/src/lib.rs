@@ -31,6 +31,7 @@ mod copilot;
 pub mod coredll;
 mod datetime;
 pub mod ddraw;
+mod dialog_keys;
 mod directshow;
 pub mod dlgtemplate;
 pub mod game_dlls;
@@ -40,10 +41,12 @@ pub mod gx;
 pub mod hss;
 #[cfg(feature = "video-static")]
 mod media_static;
+mod number_format;
 pub mod ole32;
 pub mod ordinals;
 mod scroll;
 mod sdl;
+mod serial;
 mod shell;
 mod vibration;
 mod wavein;
@@ -451,7 +454,10 @@ impl Dispatcher for WinCeDispatcher {
         if let Some(outcome) = coredll::wake_due_worker(&mut CallCtx { cpu, thunk, kernel })? {
             return Ok(outcome);
         }
-        let handler_opt = self.resolve_handler(thunk);
+        let handler_opt = self.resolve_handler(thunk).or_else(|| {
+            coredll::native_import_available(kernel, thunk)
+                .then_some(coredll::native_import as Handler)
+        });
         let report_missing = handler_opt.is_none()
             && self
                 .unimplemented_sink

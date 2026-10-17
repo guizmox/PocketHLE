@@ -2602,6 +2602,9 @@ mod tests {
             context.set_error(pocket_gles::GL_INVALID_ENUM);
         });
         set_egl_error(EGL_BAD_DISPLAY);
+        let _graph_gate = crate::directshow::TEST_GRAPH_GATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved = crate::suspend_session();
         reset_for_session();
         with_ctx(|context| {
@@ -2919,6 +2922,9 @@ mod tests {
             &[MODEL_TWO_SIDE, 65536],
         );
         assert!(with_ctx(|c| c.lighting.two_sided));
+        let _graph_gate = crate::directshow::TEST_GRAPH_GATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved = crate::suspend_session();
         reset_for_session();
         assert_eq!(with_ctx(|c| c.lighting.lights[0].diffuse), [1.; 4]);

@@ -814,6 +814,21 @@ fn cmd_run(
         }
     }
     scheduled.sort_by_key(|(f, _)| *f);
+    if let Ok(position) = std::env::var("POCKETHLE_GPS_POSITION") {
+        let (lat, lon) = position
+            .split_once(',')
+            .context("POCKETHLE_GPS_POSITION expects latitude,longitude")?;
+        let service = emu
+            .process()
+            .context("loaded process")?
+            .state
+            .vfs
+            .gps_service();
+        service
+            .set_fixed_position(Some((lat.parse()?, lon.parse()?)))
+            .map_err(|e| anyhow::anyhow!("GPS position error {e}"))?;
+        service.set_allowed(true);
+    }
     for spec in patches {
         let (addr_str, hex_str) = spec
             .split_once('=')
@@ -837,6 +852,14 @@ fn cmd_run(
             .with_context(|| format!("applying --patch {spec:?}"))?;
         println!("Patched {} bytes at guest VA 0x{:08x}", bytes.len(), addr);
     }
+    // Opt-in observation only: leave the guest instructions and state intact.
+    if let Ok(addresses) = std::env::var("POCKETHLE_TRACE_VAS") {
+        for address in addresses.split(',').filter(|s| !s.trim().is_empty()) {
+            let va = u32::from_str_radix(address.trim().trim_start_matches("0x"), 16)
+                .with_context(|| format!("invalid POCKETHLE_TRACE_VAS address {address:?}"))?;
+            emu.add_register_trace(va, "cli")?;
+        }
+    }
     for spec in watches {
         let s = spec.trim_start_matches("0x");
         let va = u32::from_str_radix(s, 16)
@@ -851,6 +874,14 @@ fn cmd_run(
     );
 
     let mut hooks: Vec<Box<dyn pocket_core::kernel::FrameHook>> = Vec::new();
+    if let Some(path) = std::env::var_os("POCKETHLE_INPUT_FILE") {
+        hooks.push(Box::new(LiveInputHook {
+            path: PathBuf::from(path),
+            offset: 0,
+            last_poll: std::time::Instant::now(),
+            scheduled: ScheduledInputHook::new(Vec::new()),
+        }));
+    }
     if !scheduled.is_empty() {
         // Ahead of the frame dumper so an input scheduled for frame N
         // is queued before the guest renders past it.
@@ -900,9 +931,34 @@ fn cmd_run(
     };
     emu.stop_audio();
 
+    if let Ok(spec) = std::env::var("POCKETHLE_DUMP_MEMORY") {
+        let mut parts = spec.splitn(3, ':');
+        let address = parts.next().unwrap_or("").trim_start_matches("0x");
+        let size = parts.next().unwrap_or("").trim_start_matches("0x");
+        let path = parts.next().unwrap_or("");
+        match (
+            u32::from_str_radix(address, 16),
+            u32::from_str_radix(size, 16),
+        ) {
+            (Ok(address), Ok(size)) if !path.is_empty() && size <= 16 * 1024 * 1024 => {
+                match emu.read_guest_memory(address, size) {
+                    Ok(bytes) => {
+                        std::fs::write(path, bytes).with_context(|| {
+                            format!("writing diagnostic memory snapshot {path:?}")
+                        })?;
+                    }
+                    Err(e) => eprintln!("warn: diagnostic memory snapshot failed: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "warn: POCKETHLE_DUMP_MEMORY expects HEX_VA:HEX_SIZE:PATH (at most 16 MiB)"
+            ),
+        }
+    }
+
     if let Some(p) = emu.process() {
         let ppm = p.state.framebuffer.snapshot_ppm();
-        let final_path = std::path::PathBuf::from("/tmp/pockethle-final.ppm");
+        let final_path = std::env::temp_dir().join("pockethle-final.ppm");
         if let Err(e) = std::fs::write(&final_path, &ppm) {
             eprintln!("warn: could not write {} ({e})", final_path.display());
         } else {
@@ -1191,6 +1247,89 @@ fn scheduled_input_due(
         );
     at_frame <= frames_seen
         || (stalled && (held_release || at_frame == frames_seen.saturating_add(1)))
+}
+
+/// Optional, append-only host command file for interactive headless debugging.
+/// Commands are `key TOKEN`, `tap X,Y`, or `quit`, terminated by a newline.
+struct LiveInputHook {
+    path: PathBuf,
+    offset: usize,
+    last_poll: std::time::Instant,
+    scheduled: ScheduledInputHook,
+}
+impl pocket_core::kernel::FrameHook for LiveInputHook {
+    fn on_frame(
+        &mut self,
+        state: &mut pocket_core::kernel::KernelState,
+    ) -> pocket_core::kernel::FrameAction {
+        use pocket_core::kernel::{FrameAction, InputEvent};
+        if self.last_poll.elapsed() >= std::time::Duration::from_millis(50) {
+            self.last_poll = std::time::Instant::now();
+            // Keep diagnostics bounded and ignore incomplete appended lines.
+            if std::fs::metadata(&self.path).is_ok_and(|m| m.len() <= 65536) {
+                if let Ok(text) = std::fs::read_to_string(&self.path) {
+                    if text.len() < self.offset {
+                        self.offset = 0;
+                    }
+                    if let Some(tail) = text.get(self.offset..) {
+                        for line in tail.split_inclusive('\n') {
+                            if !line.ends_with('\n') {
+                                break;
+                            }
+                            self.offset += line.len();
+                            let line = line.trim();
+                            if line.is_empty() || line.starts_with('#') {
+                                continue;
+                            }
+                            if line == "quit" {
+                                return FrameAction::Stop;
+                            }
+                            let at = self
+                                .scheduled
+                                .pending
+                                .back()
+                                .map_or(self.scheduled.frames_seen + 1, |(at, _)| at + 20);
+                            let events = if let Some(key) = line.strip_prefix("key ") {
+                                parse_virtual_key(key.trim()).ok().map(|vk| {
+                                    vec![
+                                        (at, InputEvent::KeyDown { vk }),
+                                        (at + INPUT_HOLD_FRAMES, InputEvent::KeyUp { vk }),
+                                    ]
+                                })
+                            } else if let Some(tap) = line.strip_prefix("tap ") {
+                                tap.split_once(',')
+                                    .and_then(|(x, y)| {
+                                        Some((
+                                            x.trim().parse::<u16>().ok()?,
+                                            y.trim().parse::<u16>().ok()?,
+                                        ))
+                                    })
+                                    .map(|(x, y)| {
+                                        vec![
+                                            (at, InputEvent::PointerDown { x, y }),
+                                            (at + 1, InputEvent::PointerMove { x, y }),
+                                            (
+                                                at + INPUT_HOLD_FRAMES,
+                                                InputEvent::PointerUp { x, y },
+                                            ),
+                                        ]
+                                    })
+                            } else {
+                                None
+                            };
+                            if let Some(events) = events {
+                                log::info!("live input: {line}");
+                                self.scheduled.pending.extend(events);
+                            } else {
+                                log::warn!("invalid live input command: {line:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.scheduled.on_frame(state)
+    }
 }
 
 struct ScheduledInputHook {

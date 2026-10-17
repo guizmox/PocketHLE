@@ -157,6 +157,9 @@ pub struct Device {
     last_diagnostic: Option<(u32, u32, u32)>,
 }
 impl Device {
+    pub fn access_allowed(&self) -> bool {
+        self.gate.allowed.load(Ordering::Acquire)
+    }
     fn diagnostic(
         &mut self,
         error: u32,

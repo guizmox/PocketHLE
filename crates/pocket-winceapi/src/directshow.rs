@@ -904,7 +904,7 @@ pub(crate) fn reset() {
 // DirectShow's graph registry is process-global. Tests using independent fake
 // CPUs must not reset one another's graph collection while asserting lifetimes.
 #[cfg(test)]
-static TEST_GRAPH_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_GRAPH_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {

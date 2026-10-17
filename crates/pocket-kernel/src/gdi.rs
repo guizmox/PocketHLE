@@ -205,6 +205,7 @@ pub struct Dc {
     pub text_align: u32,
     pub bk_color: u32,
     pub bk_transparent: bool,
+    pub current_position: (i32, i32),
 }
 
 impl Default for Dc {
@@ -221,6 +222,7 @@ impl Default for Dc {
             text_align: 0,
             bk_color: 0x00ff_ffff,
             bk_transparent: false,
+            current_position: (0, 0),
         }
     }
 }
@@ -537,6 +539,101 @@ impl<'a> Surface<'a> {
         let pix = self.pixels_mut();
         pix[off] = bytes[0];
         pix[off + 1] = bytes[1];
+    }
+
+    /// Clip before rasterization: native map coordinates can be far outside
+    /// the viewport. LineTo excludes its terminal point, as Windows GDI does.
+    pub fn line(&mut self, from: (i32, i32), to: (i32, i32), color: u16, width: u32) {
+        let (w, h) = self.dimensions();
+        if w == 0 || h == 0 {
+            return;
+        }
+        let width = width.clamp(1, 2048) as i32;
+        let (x, y) = (from.0 as f64, from.1 as f64);
+        let (dx, dy) = (to.0 as f64 - x, to.1 as f64 - y);
+        let mut a = 0.0f64;
+        let mut b = 1.0f64;
+        for (p, q) in [
+            (-dx, x + width as f64),
+            (dx, w as f64 + width as f64 - x),
+            (-dy, y + width as f64),
+            (dy, h as f64 + width as f64 - y),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return;
+                }
+            } else {
+                let t = q / p;
+                if p < 0.0 {
+                    a = a.max(t);
+                } else {
+                    b = b.min(t);
+                }
+                if a > b {
+                    return;
+                }
+            }
+        }
+        let (mut x0, mut y0) = ((x + a * dx).round() as i32, (y + a * dy).round() as i32);
+        let (x1, y1) = ((x + b * dx).round() as i32, (y + b * dy).round() as i32);
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let mut error = dx + dy;
+        loop {
+            if (x0, y0) == to {
+                break;
+            }
+            self.fill_rect(x0 - width / 2, y0 - width / 2, width, width, color);
+            if (x0, y0) == (x1, y1) {
+                break;
+            }
+            let twice = 2 * error;
+            if twice >= dy {
+                error += dy;
+                x0 += sx;
+            }
+            if twice <= dx {
+                error += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    /// Alternate-fill polygon, with scanlines clipped to the target bitmap.
+    pub fn polygon(&mut self, points: &[(i32, i32)], color: u16) {
+        if points.len() < 3 {
+            return;
+        }
+        let (width, height) = self.dimensions();
+        let top = points.iter().map(|p| p.1).min().unwrap().max(0);
+        let bottom = points.iter().map(|p| p.1).max().unwrap().min(height as i32);
+        let mut intersections = Vec::new();
+        for y in top..bottom {
+            intersections.clear();
+            let scan = y as f64 + 0.5;
+            for i in 0..points.len() {
+                let a = points[i];
+                let b = points[(i + 1) % points.len()];
+                if (a.1 as f64 <= scan && b.1 as f64 > scan)
+                    || (b.1 as f64 <= scan && a.1 as f64 > scan)
+                {
+                    intersections.push(
+                        a.0 as f64
+                            + (scan - a.1 as f64) * (b.0 as f64 - a.0 as f64)
+                                / (b.1 as f64 - a.1 as f64),
+                    );
+                }
+            }
+            intersections.sort_by(f64::total_cmp);
+            for pair in intersections.chunks_exact(2) {
+                let l = (pair[0] - 0.5).ceil().clamp(0.0, width as f64) as i32;
+                let r = (pair[1] - 0.5).ceil().clamp(0.0, width as f64) as i32;
+                self.fill_rect(l, y, r - l, 1, color);
+            }
+        }
     }
 
     pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u16) {
@@ -1050,5 +1147,30 @@ mod tests {
         let bm = g.bitmap(bm_h).unwrap();
         assert_eq!(bm.pixels[0], 0x00);
         assert_eq!(bm.pixels[1], 0xf8);
+    }
+    #[test]
+    fn native_map_lines_clip_extreme_coordinates_and_exclude_last_pixel() {
+        let mut bitmap = Bitmap::new(16, 16);
+        let mut surface = Surface::Bitmap(&mut bitmap);
+        surface.line((i32::MIN, 8), (i32::MAX, 8), 0xffff, 1);
+        assert_eq!(
+            surface
+                .pixels()
+                .chunks_exact(2)
+                .filter(|b| *b == [255, 255])
+                .count(),
+            16
+        );
+        surface.line((2, 2), (5, 2), 0x1234, 1);
+        assert_eq!(
+            &surface.pixels()[(2 * 16 + 4) * 2..(2 * 16 + 4) * 2 + 2],
+            &0x1234u16.to_le_bytes()
+        );
+        assert_eq!(
+            &surface.pixels()[(2 * 16 + 5) * 2..(2 * 16 + 5) * 2 + 2],
+            &[0, 0]
+        );
+        surface.polygon(&[(0, 0), (4, 0), (4, 4), (0, 4)], 0xabcd);
+        assert_eq!(&surface.pixels()[0..2], &0xabcdu16.to_le_bytes());
     }
 }

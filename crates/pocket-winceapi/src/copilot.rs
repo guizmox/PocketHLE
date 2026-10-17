@@ -284,14 +284,23 @@ struct DataCheck {
     version: Option<String>,
 }
 
+#[cfg(test)]
 fn find_data(vfs: &Vfs) -> DataCheck {
+    find_data_from_config(vfs, None)
+}
+
+fn find_data_from_config(vfs: &Vfs, selected_config: Option<&str>) -> DataCheck {
     let mut dirs = Vec::<String>::new();
     let mut expected_version = None::<String>;
 
-    for guest_cfg in CONFIG_FILES {
-        let Some(cfg) = read_guest_file(vfs, guest_cfg) else {
-            continue;
-        };
+    // Navigator USA West uses GZAP250006 rather than the UK directory.
+    // Read the selected executable's own config before compatibility aliases.
+    let configs = selected_config.map(str::to_owned).into_iter().chain(
+        CONFIG_FILES
+            .iter()
+            .filter_map(|path| read_guest_file(vfs, path)),
+    );
+    for cfg in configs {
         if let Some(version) = cfg_value(&cfg, "Version", "Major") {
             expected_version = Some(version.to_string());
         }
@@ -358,7 +367,11 @@ fn get_data_cd_exist_code(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     let version_out = ctx.arg_u32(2)?;
     let path_out = ctx.arg_u32(3)?;
 
-    let check = find_data(&ctx.kernel.vfs);
+    let config = ctx
+        .kernel
+        .find_module_file("data.cfg")
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    let check = find_data_from_config(&ctx.kernel.vfs, config.as_deref());
     if status_out != 0 {
         ctx.cpu.write_mem(status_out, &check.status.to_le_bytes())?;
     }

@@ -118,6 +118,10 @@ fn deregister_device(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     }
 }
 fn set_mask(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let serial_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.serial_ports.contains_key(&serial_handle) {
+        return crate::serial::control(ctx);
+    }
     let h = ctx.arg_u32(0)?;
     let mask = ctx.arg_u32(1)?;
     let Some(open) = ctx.kernel.vfs.bluetooth_open(h) else {
@@ -132,6 +136,10 @@ fn set_mask(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 fn get_mask(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let serial_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.serial_ports.contains_key(&serial_handle) {
+        return crate::serial::control(ctx);
+    }
     let h = ctx.arg_u32(0)?;
     let ptr = ctx.arg_u32(1)?;
     let Some(open) = ctx.kernel.vfs.bluetooth_open(h) else {
@@ -151,6 +159,10 @@ fn get_mask(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 fn wait_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let serial_handle = ctx.arg_u32(0)?;
+    if ctx.kernel.serial_ports.contains_key(&serial_handle) {
+        return crate::serial::control(ctx);
+    }
     finish_wait(ctx)?;
     let h = ctx.arg_u32(0)?;
     let ptr = ctx.arg_u32(1)?;

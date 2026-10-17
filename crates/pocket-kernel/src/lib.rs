@@ -56,6 +56,7 @@ pub mod power;
 mod process_control;
 pub mod registry;
 pub mod sdl;
+pub mod serial;
 pub mod shared_objects;
 mod tls;
 pub mod tracker;
@@ -203,7 +204,7 @@ pub const MODULE_REGION_BASE: u32 = 0x3000_0000;
 pub const MODULE_REGION_STRIDE: u32 = 0x0100_0000;
 /// One past the last address [`MODULE_REGION_BASE`] may grow into, so
 /// the 16th `LoadLibraryW` fails instead of colliding with the heap.
-pub const MODULE_REGION_END: u32 = 0x4000_0000;
+pub const MODULE_REGION_END: u32 = 0x5000_0000;
 
 /// "bx lr" in ARM mode (little endian).
 pub const ARM_BX_LR: [u8; 4] = [0x1e, 0xff, 0x2f, 0xe1];
@@ -704,6 +705,41 @@ pub struct GuestCallFrame {
     pub sp: u32,
 }
 
+/// Per-thread continuation for IsDialogMessage's synchronous guest callbacks.
+#[derive(Debug, Clone, Copy)]
+pub struct DialogKeyFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: GuestCallFrame,
+    pub dialog: u32,
+    pub target: u32,
+    pub key: u32,
+    pub stage: u8,
+}
+
+/// DestroyWindow holds HWND/procedure metadata until native MFC teardown returns.
+#[derive(Debug)]
+pub struct WindowDestroyFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: GuestCallFrame,
+    pub notifications: std::collections::VecDeque<(u32, u32)>,
+    pub windows: Vec<u32>,
+}
+
+/// Single-line EDIT notifications run synchronously while caller guards are set.
+#[derive(Debug, Clone, Copy)]
+pub struct ControlNotifyFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: GuestCallFrame,
+    pub parent: u32,
+    pub hwnd: u32,
+    pub id: u32,
+    pub result: u32,
+    pub stage: u8,
+}
+
 /// Which leg of the synchronous `CreateWindowExW` message sequence is
 /// currently running inside the guest `WndProc`.
 ///
@@ -1082,9 +1118,13 @@ pub struct KernelState {
     pub window_userdata: HashMap<u32, u32>,
     /// Window handles and their class names.
     pub window_classes: HashMap<u32, String>,
+    pub window_class_controls: HashMap<String, controls::ControlClass>,
+    pub control_class_prototypes: HashMap<(usize, u32), controls::ControlClass>,
     /// Styles, extended styles and parent handles for each top-level HWND.
     pub window_styles: HashMap<u32, (u32, u32)>,
     pub window_parents: HashMap<u32, u32>,
+    pub window_rects: HashMap<u32, (i32, i32, i32, i32)>,
+    pub window_dcs: HashMap<u32, u32>,
     /// Visibility of real top-level window instances.
     pub window_visibility: HashMap<u32, bool>,
     /// Per-window user data used by WndProc implementations (GWL_USERDATA).
@@ -1126,16 +1166,20 @@ pub struct KernelState {
     pub dialog_frame_hwnd: u32,
     pub active_window: u32,
     pub window_ids: HashMap<u32, u32>,
+    pub serial_ports: HashMap<u32, serial::Port>,
     pub scroll_info: HashMap<(u32, u32), [i32; 5]>,
     pub window_extra: HashMap<(u32, i32), u32>,
     pub dialog_default_frames: Vec<(usize, u32, GuestCallFrame)>,
     pub dialog_frame_stack: Vec<(GuestCallFrame, u32)>,
+    pub window_destroy_frames: Vec<WindowDestroyFrame>,
+    pub control_notify_frames: Vec<ControlNotifyFrame>,
+    pub dialog_key_frames: Vec<DialogKeyFrame>,
     pub accelerator_frames: Vec<(usize, u32, GuestCallFrame)>,
     pub shell_status: Option<u32>,
     /// Per-thread DispatchMessageW continuations. A worker may run while
     /// another thread is inside WndProc; its callback return must restore
     /// only its own arguments/stack, never another thread's continuation.
-    pub message_frames: HashMap<usize, GuestCallFrame>,
+    pub message_frames: HashMap<usize, Vec<GuestCallFrame>>,
     /// Bottom status bar created via commctrl's `CreateStatusWindowW`.
     ///
     /// Pocket PC apps get a real shell-drawn bar here; PocketHLE has no
@@ -1360,6 +1404,20 @@ pub struct MainThreadState {
 }
 
 impl KernelState {
+    /// A modal loop may dispatch again inside its caller's WndProc. Only
+    /// the matching stack level is a return; a deeper call is a new frame.
+    pub fn take_message_return(&mut self, owner: usize, sp: u32) -> Option<GuestCallFrame> {
+        let frames = self.message_frames.get_mut(&owner)?;
+        if frames.last()?.sp != sp {
+            return None;
+        }
+        let frame = frames.pop();
+        if frames.is_empty() {
+            self.message_frames.remove(&owner);
+        }
+        frame
+    }
+
     /// Colors writes the shared device registry from its own brightness slider.
     pub fn sync_power_notifications(&mut self) {
         if !self.power_notifications.is_empty() || !self.battery_alerts.is_empty() {
@@ -1638,7 +1696,67 @@ impl KernelState {
         let controls = self.controls.clone();
         let modal = self.modal.clone();
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
-        controls.render(&mut surf);
+        let mut layers = Vec::new();
+        for (&hwnd, &dc) in &self.window_dcs {
+            let Some(meta) = self.gdi.dc(dc) else {
+                continue;
+            };
+            let Some(bitmap) = meta.selected_bitmap.and_then(|h| self.gdi.bitmap(h)) else {
+                continue;
+            };
+            let (mut current, mut x, mut y, mut owner, mut visible) =
+                (hwnd, 0i32, 0i32, 0u32, true);
+            for _ in 0..64 {
+                if current == 0 || current == 0xdead0001 || current == 0xdead0000 {
+                    break;
+                }
+                if self.window_visibility.get(&current) == Some(&false) {
+                    visible = false;
+                    break;
+                }
+                if let Some(panel) = controls.panel(current) {
+                    visible &= panel.visible;
+                    let (ox, oy) = panel.client_origin();
+                    x = x.saturating_add(ox);
+                    y = y.saturating_add(oy);
+                    owner = current;
+                    break;
+                }
+                if let Some(rect) = self.window_rects.get(&current) {
+                    x = x.saturating_add(rect.0);
+                    y = y.saturating_add(rect.1);
+                }
+                let Some(parent) = self.window_parents.get(&current).copied() else {
+                    break;
+                };
+                if parent == current {
+                    visible = false;
+                    break;
+                }
+                current = parent;
+            }
+            if visible {
+                layers.push((hwnd, owner, x, y, bitmap.clone()));
+            }
+        }
+        layers.sort_by_key(|layer| layer.0);
+        controls.render_composited(&mut surf, |owner, surface| {
+            for (_, parent, x, y, bm) in &layers {
+                if *parent == owner {
+                    surface.blit_from_bytes(
+                        *x,
+                        *y,
+                        0,
+                        0,
+                        bm.width as i32,
+                        bm.height as i32,
+                        &bm.pixels,
+                        bm.width,
+                        bm.height,
+                    );
+                }
+            }
+        });
         // The modal goes last: it is a separate top-level window and
         // has to cover whatever the application and its children drew.
         if let Some(modal) = modal {
@@ -3144,8 +3262,12 @@ impl Process {
                 window_procs: HashMap::new(),
                 window_userdata: HashMap::new(),
                 window_classes: HashMap::new(),
+                window_class_controls: HashMap::new(),
+                control_class_prototypes: HashMap::new(),
                 window_styles: HashMap::new(),
                 window_parents: HashMap::new(),
+                window_rects: HashMap::new(),
+                window_dcs: HashMap::new(),
                 window_visibility: HashMap::new(),
                 window_user_data: 0,
                 timers: HashMap::new(),
@@ -3160,10 +3282,14 @@ impl Process {
                 dialog_frame_hwnd: 0,
                 active_window: 0,
                 window_ids: HashMap::new(),
+                serial_ports: HashMap::new(),
                 scroll_info: HashMap::new(),
                 window_extra: HashMap::new(),
                 dialog_default_frames: Vec::new(),
                 dialog_frame_stack: Vec::new(),
+                window_destroy_frames: Vec::new(),
+                control_notify_frames: Vec::new(),
+                dialog_key_frames: Vec::new(),
                 accelerator_frames: Vec::new(),
                 shell_status: None,
                 message_frames: Default::default(),
@@ -3345,7 +3471,7 @@ pub fn run_main_loop(
 
 /// Same as [`run_main_loop`], but also calls `frame_hook` between
 /// each slice so the host-side window can repaint and pump events.
-fn image_uses_thumb_entry(cpu: &mut dyn Cpu, image: &LoadedImage) -> Result<bool, KernelError> {
+pub fn image_uses_thumb_entry(cpu: &mut dyn Cpu, image: &LoadedImage) -> Result<bool, KernelError> {
     if image.machine == machine::MIPS_R3000 || image.machine == machine::MIPS_R4000 {
         return Ok(false);
     }
@@ -3619,7 +3745,10 @@ pub fn run_main_loop_with_hook(
                     }
                     if addr == KERNEL_TRAP_BASE {
                         let owner = process.state.current_thread;
-                        if let Some(frame) = process.state.message_frames.remove(&owner) {
+                        if let Some(frame) = process
+                            .state
+                            .take_message_return(owner, cpu.read_reg(ArmReg::Sp)?)
+                        {
                             for (index, value) in frame.args.iter().enumerate() {
                                 cpu.write_reg(
                                     match index {
@@ -3855,7 +3984,9 @@ pub fn run_main_loop_with_hook(
                                     .contains(&addr)
                                 {
                                     let owner = process.state.current_thread;
-                                    if let Some(frame) = process.state.message_frames.remove(&owner)
+                                    if let Some(frame) = process
+                                        .state
+                                        .take_message_return(owner, cpu.read_reg(ArmReg::Sp)?)
                                     {
                                         for (index, value) in frame.args.iter().enumerate() {
                                             cpu.write_reg(
@@ -4361,11 +4492,11 @@ mod tests {
         .unwrap();
         process.state.message_frames.insert(
             0,
-            GuestCallFrame {
+            vec![GuestCallFrame {
                 args: [0x1234, 2, 0, 0],
                 sp: 0x2222,
                 lr: 0x3333,
-            },
+            }],
         );
         let worker = GuestThread::new(
             0x11000, 0, 0x50000, 0x1000, 0xf000fe00, 0x11000, 0xdead7c00, [0; 17],
@@ -4397,18 +4528,21 @@ mod tests {
         .unwrap();
         process.state.message_frames.insert(
             0,
-            GuestCallFrame {
+            vec![GuestCallFrame {
                 args: [0x1234, 2, 0, 0],
                 sp: 0x2222,
                 lr: 0x3333,
-            },
+            }],
         );
         cpu.write_reg(ArmReg::R0, 0xdeadbeef).unwrap();
         cpu.write_reg(ArmReg::R1, 17).unwrap();
         cpu.write_reg(ArmReg::Lr, 0x11000).unwrap();
         run_main_loop(&mut cpu, &mut process, &mut NullDispatcher, 100, 1).unwrap();
         assert_eq!(process.state.process_exit_code, None);
-        assert_eq!(process.state.message_frames[&0].args[0], 0x1234);
+        assert_eq!(
+            process.state.message_frames[&0].last().unwrap().args[0],
+            0x1234
+        );
         assert_eq!(process.state.thread_last_errors[&0], 6);
         assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 0);
     }

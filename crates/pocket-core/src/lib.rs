@@ -223,6 +223,13 @@ impl Emulator {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// Read guest memory for an explicitly requested diagnostic snapshot.
+    pub fn read_guest_memory(&mut self, addr: u32, size: u32) -> Result<Vec<u8>> {
+        self.cpu
+            .read_mem(addr, size)
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
     /// Install an instruction-level code hook at the given guest VA.
     /// Used by `--watch` for diagnostic breakpoints. When the CPU
     /// reaches the address, the kernel run loop will dump registers
