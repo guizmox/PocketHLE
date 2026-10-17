@@ -315,14 +315,18 @@ mod tests {
         fs::write(
             &config_path,
             transform(b"TurfWarUnlocked=1\nTagEditorUnlocked=0\n", false),
-        ).unwrap();
+        )
+        .unwrap();
         let save_path = directory.join("Save/SaveFile.isv");
         for (money, server_money) in [(525, 525), (1500, 525), (98000, 90000)] {
             let original = save(money, server_money);
             fs::write(&save_path, &original).unwrap();
             unlock_in_flash(temp.path()).unwrap();
             assert_eq!(fs::read(&save_path).unwrap(), original);
-            assert_eq!(validate_save(&fs::read(&save_path).unwrap()).unwrap(), (money, server_money));
+            assert_eq!(
+                validate_save(&fs::read(&save_path).unwrap()).unwrap(),
+                (money, server_money)
+            );
         }
         assert_eq!(
             transform(&fs::read(&config_path).unwrap(), true),
@@ -337,7 +341,10 @@ mod tests {
     }
     #[test]
     fn invalid_or_duplicate_tag_flags_are_rejected_without_modification() {
-        for setting in ["TagEditorUnlocked=2\n", "TagEditorUnlocked=0\nTagEditorUnlocked=1\n"] {
+        for setting in [
+            "TagEditorUnlocked=2\n",
+            "TagEditorUnlocked=0\nTagEditorUnlocked=1\n",
+        ] {
             let cfg = transform(format!("TurfWarUnlocked=1\n{setting}").as_bytes(), false);
             assert!(unlock_config(&cfg).is_err());
         }
