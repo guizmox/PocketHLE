@@ -82,6 +82,7 @@ fn is_live_hwnd(hwnd: u32) -> bool {
         || hwnd == FAKE_MODAL_HWND
         || hwnd == FAKE_DESKTOP_HWND
         || hwnd == FAKE_STATUSBAR_HWND
+        || (0xDEAD_1000..0xDEAD_2000).contains(&hwnd)
         || Controls::is_child_hwnd(hwnd)
 }
 const PAINTSTRUCT_BYTES: u32 = 32;
@@ -460,12 +461,12 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ShowWindow", show_window);
     d.register_handler(dll, "UpdateWindow", update_window);
     d.register_handler(dll, "MoveWindow", move_window);
-    d.register_constant(dll, "SetForegroundWindow", 1, one_returning);
+    d.register_handler(dll, "SetForegroundWindow", set_foreground_window);
     // PPC2002 apps disable the IME on the very first line of WinMain.
     // There is no IME here, so "already disabled" is the honest answer.
     d.register_constant(dll, "ImmDisableIME", 1, one_returning);
-    d.register_constant(dll, "BringWindowToTop", 1, one_returning);
-    d.register_constant(dll, "SetActiveWindow", FAKE_HWND, one_returning);
+    d.register_handler(dll, "BringWindowToTop", set_foreground_window);
+    d.register_handler(dll, "SetActiveWindow", set_active_window);
     d.register_handler(dll, "GetKeyState", get_key_state);
     d.register_handler(dll, "GetAsyncKeyState", get_async_key_state);
     d.register_handler(dll, "keybd_event", keybd_event);
@@ -490,6 +491,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "GetWindowTextLengthA", 0, zero_returning);
     d.register_handler(dll, "DefWindowProcW", def_window_proc_w);
     d.register_handler(dll, "DefWindowProcA", def_window_proc_w);
+    d.register_handler(dll, "DefDlgProcW", def_dlg_proc_w);
+    d.register_handler(dll, "DefDlgProcA", def_dlg_proc_w);
     d.register_handler(dll, "DispatchMessageW", dispatch_message_w);
     d.register_handler(dll, "CallWindowProcW", call_window_proc_w);
     d.register_handler(dll, "GetMessageW", get_message_w);
@@ -693,6 +696,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetActiveWindow", get_active_window);
     d.register_handler(dll, "GetParent", get_parent);
     d.register_handler(dll, "GetWindow", get_window);
+    d.register_handler(dll, "GetDlgCtrlID", get_dlg_ctrl_id);
 
     // ---- Menu APIs (Pocket PC games rarely show a menu but check
     // / update menu state on most game-state transitions). All
@@ -2413,6 +2417,7 @@ pub(crate) fn wake_due_worker(
     if ctx.kernel.wave_out.function_frame.is_some()
         || ctx.kernel.create_frame.is_some()
         || ctx.kernel.dialog_frame.is_some()
+        || !ctx.kernel.dialog_default_frames.is_empty()
         || !ctx.kernel.vector_iter_stack.is_empty()
         || !ctx.kernel.qsort_frames.is_empty()
         || !ctx.kernel.module_attach_frames.is_empty()
@@ -8493,6 +8498,11 @@ fn crt_fopen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let name = read_cstr_string(ctx, name_p, 260)?;
     let mode = read_cstr_string(ctx, mode_p, 8)?;
     let h = open_cstr_path(ctx, &name, &mode);
+    // Opt-in CoPilot diagnostic: a failed fopen can cause a silent startup exit.
+    // The standard trace level hides the requested file and mode.
+    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
+        log::info!("CoPilot trace: fopen path={name:?} mode={mode:?} result=0x{h:08x}");
+    }
     // A game that silently gets a NULL `FILE*` usually goes on to spin
     // or bail somewhere far away from here, so say which path missed.
     if h == 0 {
@@ -9453,27 +9463,74 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     Ok(DispatchOutcome::ReturnedR0(0xC001))
 }
 
+/// Keep the historical primary HWND, but give each additional app-defined
+/// window its own identity. CoPilot creates several instances of the same
+/// class; aliasing every instance to FAKE_HWND corrupts its per-window state.
+fn next_top_level_hwnd(existing: &std::collections::HashMap<u32, String>) -> Option<u32> {
+    if !existing.contains_key(&FAKE_HWND) {
+        return Some(FAKE_HWND);
+    }
+    (0xDEAD_1000..0xDEAD_2000).find(|hwnd| !existing.contains_key(hwnd))
+}
+
+/// Enter a synchronous window procedure callback, suspending any WM_CREATE
+/// already active on the guest stack. Windows CE calls the nested WndProc
+/// synchronously too: skipping it leaves child window objects uninitialized.
+fn begin_window_callback(
+    kernel: &mut KernelState,
+    frame: GuestCallFrame,
+    stage: CreateStage,
+    hwnd: u32,
+) {
+    if let Some(parent) = kernel.create_frame.take() {
+        kernel
+            .create_frame_stack
+            .push((parent, kernel.create_stage, kernel.create_frame_hwnd));
+    }
+    kernel.create_frame = Some(frame);
+    kernel.create_stage = stage;
+    kernel.create_frame_hwnd = hwnd;
+}
+
+/// Restore the suspended parent callback (if any) after the nested callback
+/// has returned; do not lose its saved registers or the HWND it must return.
+fn finish_window_callback(kernel: &mut KernelState) {
+    if let Some((parent, stage, hwnd)) = kernel.create_frame_stack.pop() {
+        kernel.create_frame = Some(parent);
+        kernel.create_stage = stage;
+        kernel.create_frame_hwnd = hwnd;
+    } else {
+        kernel.create_frame = None;
+        kernel.create_stage = CreateStage::Idle;
+        kernel.create_frame_hwnd = 0;
+    }
+}
+
 fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // Must be the first thing we do: the thunk re-fires this whole handler
     // when the hijacked `WndProc` returns, and by then R0..R3 hold the
     // callback's result rather than the original arguments.
-    if let Some(frame) = ctx.kernel.create_frame {
-        // A `CreateWindowExW` issued from *inside* the WM_CREATE handler runs
-        // on a deeper stack; only SP back at its saved value means the
-        // `WndProc` we hijacked has actually returned.
-        if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
-            ctx.kernel.create_frame = None;
-            ctx.kernel.create_stage = CreateStage::Idle;
-            let result = ctx.cpu.read_reg(ArmReg::R0)?;
-            if result as i32 == -1 {
-                log::warn!("WndProc returned -1 from WM_CREATE; the guest wanted creation to fail");
+    if ctx.kernel.create_stage == CreateStage::Create {
+        if let Some(frame) = ctx.kernel.create_frame {
+            // A nested CreateWindowExW runs with a *lower* guest SP.
+            // Only an SP back at the current frame's saved value means
+            // its own WndProc has returned.
+            if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
+                let result = ctx.cpu.read_reg(ArmReg::R0)?;
+                if result as i32 == -1 {
+                    log::warn!(
+                        "WndProc returned -1 from WM_CREATE; the guest wanted creation to fail"
+                    );
+                }
+                ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
+                ctx.cpu.write_reg(ArmReg::R2, frame.args[2])?;
+                ctx.cpu.write_reg(ArmReg::R3, frame.args[3])?;
+                ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
+                let hwnd = ctx.kernel.create_frame_hwnd;
+                finish_window_callback(ctx.kernel);
+                return Ok(DispatchOutcome::ReturnedR0(hwnd));
             }
-            ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
-            ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
-            ctx.cpu.write_reg(ArmReg::R2, frame.args[2])?;
-            ctx.cpu.write_reg(ArmReg::R3, frame.args[3])?;
-            ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
-            return Ok(DispatchOutcome::ReturnedR0(FAKE_HWND));
         }
     }
     let class_arg = ctx.arg_u32(1)?;
@@ -9520,25 +9577,54 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         );
         return Ok(DispatchOutcome::ReturnedR0(hwnd));
     }
+    let Some(hwnd) = next_top_level_hwnd(&ctx.kernel.window_classes) else {
+        log::warn!("CreateWindowExW: exhausted synthetic HWND space");
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let ex_style = ctx.arg_u32(0)?;
+    let style = ctx.arg_u32(3)?;
+    let parent = ctx.arg_u32(8)?;
+    if style & 0x4000_0000 != 0 {
+        let id = ctx.arg_u32(9)?;
+        ctx.kernel.window_ids.insert(hwnd, id);
+    }
+    ctx.kernel.window_styles.insert(hwnd, (style, ex_style));
+    ctx.kernel.window_parents.insert(
+        hwnd,
+        if parent == 0 {
+            FAKE_DESKTOP_HWND
+        } else {
+            parent
+        },
+    );
+    ctx.kernel
+        .window_visibility
+        .insert(hwnd, style & 0x1000_0000 != 0);
+    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
+        log::info!(
+            "CoPilot trace: CreateWindowExW class={class_name:?} hwnd=0x{hwnd:08x} parent=0x{parent:08x} style=0x{style:08x} nested_depth={}",
+            ctx.kernel.create_frame_stack.len() + usize::from(ctx.kernel.create_frame.is_some())
+        );
+    }
     let wnd_proc = ctx
         .kernel
         .window_class_procs
         .get(&class_name)
         .copied()
         .unwrap_or(ctx.kernel.wnd_proc);
-    if wnd_proc != 0 {
+    if wnd_proc != 0 && hwnd == FAKE_HWND {
         ctx.kernel.wnd_proc = wnd_proc;
     }
     // GWL_USERDATA belongs to the application. Windows initializes it to
     // zero; allocating a non-zero synthetic value here makes games that
     // install their object during WM_CREATE treat a zeroed buffer as an
     // already-live vtable and dereference address 0x00000004.
-    ctx.kernel.window_user_data = 0;
-    ctx.kernel.window_userdata.remove(&FAKE_HWND);
-    ctx.kernel.window_procs.insert(FAKE_HWND, wnd_proc);
-    ctx.kernel
-        .window_classes
-        .insert(FAKE_HWND, class_name.clone());
+    if hwnd == FAKE_HWND {
+        ctx.kernel.window_user_data = 0;
+    }
+    ctx.kernel.window_userdata.remove(&hwnd);
+    ctx.kernel.window_procs.insert(hwnd, wnd_proc);
+    ctx.kernel.window_classes.insert(hwnd, class_name.clone());
     let create_struct = ctx.kernel.heap.alloc(0x40).unwrap_or(0);
     if create_struct != 0 {
         // CREATESTRUCTW: lpCreateParams, hInstance, hMenu, hwndParent, cy,
@@ -9565,7 +9651,7 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             create_params,
             h_instance,
             h_menu,
-            FAKE_HWND,
+            parent,
             cy,
             cx,
             y,
@@ -9582,18 +9668,20 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         ctx.cpu.write_mem(create_struct, &buf)?;
         let (screen_w, screen_h) = screen_dims(ctx);
         let size_lparam = (screen_w & 0xFFFF) | ((screen_h & 0xFFFF) << 16);
-        ctx.kernel.pending_startup.clear();
-        ctx.kernel
-            .pending_startup
-            .push_back((WM_SIZE, 0, size_lparam));
-        ctx.kernel.pending_startup.push_back((WM_SHOWWINDOW, 1, 0));
-        ctx.kernel.pending_startup.push_back((WM_ACTIVATE, 1, 0));
-        ctx.kernel.pending_startup.push_back((WM_SETFOCUS, 0, 0));
+        if hwnd == FAKE_HWND {
+            ctx.kernel.pending_startup.clear();
+            ctx.kernel
+                .pending_startup
+                .push_back((WM_SIZE, 0, size_lparam));
+            ctx.kernel.pending_startup.push_back((WM_SHOWWINDOW, 1, 0));
+            ctx.kernel.pending_startup.push_back((WM_ACTIVATE, 1, 0));
+            ctx.kernel.pending_startup.push_back((WM_SETFOCUS, 0, 0));
+        }
     }
     log::debug!(
-        "CreateWindowExW(class={class_name:?}) -> hwnd=0x{FAKE_HWND:08x}, wndproc=0x{wnd_proc:08x}"
+        "CreateWindowExW(class={class_name:?}) -> hwnd=0x{hwnd:08x}, wndproc=0x{wnd_proc:08x}"
     );
-    if wnd_proc != 0 && create_struct != 0 && !ctx.kernel.synthetic_create_sent {
+    if wnd_proc != 0 && create_struct != 0 {
         // Real Windows dispatches WM_CREATE from inside CreateWindowExW, and
         // titles that run window-init code straight afterwards depend on it:
         // Solitaire caches its window context in a global on WM_CREATE and
@@ -9613,21 +9701,32 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         };
         // WndProc's four arguments all travel in registers, so the guest
         // stack needs no adjustment here.
-        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND)?;
+        ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
         ctx.cpu.write_reg(ArmReg::R1, WM_CREATE)?;
         ctx.cpu.write_reg(ArmReg::R2, 0)?;
         ctx.cpu.write_reg(ArmReg::R3, create_struct)?;
         ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
-        ctx.kernel.create_frame = Some(frame);
-        ctx.kernel.create_stage = CreateStage::Create;
-        ctx.kernel.synthetic_create_sent = true;
+        let nested_depth =
+            ctx.kernel.create_frame_stack.len() + usize::from(ctx.kernel.create_frame.is_some());
+        begin_window_callback(ctx.kernel, frame, CreateStage::Create, hwnd);
+        if nested_depth != 0 && std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
+            log::info!(
+                "CoPilot trace: nested WM_CREATE depth={} hwnd=0x{hwnd:08x} wndproc=0x{wnd_proc:08x}",
+                nested_depth + 1
+            );
+        }
+        if hwnd == FAKE_HWND {
+            ctx.kernel.synthetic_create_sent = true;
+        }
         log::debug!("WM_CREATE -> WndProc(0x{wnd_proc:08x}) from CreateWindowExW");
         return Ok(DispatchOutcome::JumpTo(wnd_proc));
     }
     if create_struct != 0 {
-        ctx.kernel.pending_create = Some((FAKE_HWND, create_struct));
+        if hwnd == FAKE_HWND {
+            ctx.kernel.pending_create = Some((hwnd, create_struct));
+        }
     }
-    Ok(DispatchOutcome::ReturnedR0(FAKE_HWND))
+    Ok(DispatchOutcome::ReturnedR0(hwnd))
 }
 
 /// `BOOL ShowWindow(HWND hWnd, int nCmdShow)`.
@@ -9650,8 +9749,7 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             // A nested `ShowWindow` from inside the WM_SIZE handler runs on a
             // deeper stack; only SP back at its saved value is a real return.
             if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
-                ctx.kernel.create_frame = None;
-                ctx.kernel.create_stage = CreateStage::Idle;
+                finish_window_callback(ctx.kernel);
                 ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
                 ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
                 ctx.cpu.write_reg(ArmReg::R2, frame.args[2])?;
@@ -9667,6 +9765,28 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // Time and Score readouts this way.
     let cmd_show = ctx.arg_u32(1).unwrap_or(1);
     let show = cmd_show != SW_HIDE;
+    if let Some((style, _)) = ctx.kernel.window_styles.get_mut(&hwnd) {
+        if show {
+            *style |= 0x1000_0000;
+        } else {
+            *style &= !0x1000_0000;
+        }
+    }
+    if show
+        && ctx
+            .kernel
+            .window_styles
+            .get(&hwnd)
+            .is_some_and(|s| s.0 & 0x4000_0000 == 0)
+    {
+        ctx.kernel.active_window = hwnd;
+    }
+    if show {
+        queue_window_paint(ctx.kernel, hwnd);
+    }
+    if let Some(visible) = ctx.kernel.window_visibility.get_mut(&hwnd) {
+        *visible = show;
+    }
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         let id = child.id;
         child.visible = show;
@@ -9712,8 +9832,7 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.cpu.write_reg(ArmReg::R2, 0)?;
         ctx.cpu.write_reg(ArmReg::R3, size_lparam)?;
         ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
-        ctx.kernel.create_frame = Some(frame);
-        ctx.kernel.create_stage = CreateStage::Size;
+        begin_window_callback(ctx.kernel, frame, CreateStage::Size, hwnd);
         ctx.kernel.synthetic_size_sent = true;
         log::debug!("WM_SIZE({screen_w}x{screen_h}) -> WndProc(0x{wnd_proc:08x}) from ShowWindow");
         return Ok(DispatchOutcome::JumpTo(wnd_proc));
@@ -9722,9 +9841,8 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn update_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.kernel.wnd_proc != 0 {
-        ctx.kernel.pending_message = Some((FAKE_HWND, WM_PAINT, 0, 0));
-    }
+    let hwnd = ctx.arg_u32(0)?;
+    queue_window_paint(ctx.kernel, hwnd);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -10200,13 +10318,113 @@ fn repaint_controls(ctx: &mut CallCtx<'_>) {
     ctx.kernel.framebuffer.mark_dirty();
 }
 
-/// The window messages a built-in control answers itself.
-///
-/// Only the handful real Pocket PC code sends: the text pair an app uses
-/// to read an `EDIT` back or relabel a `STATIC`, the check-state pair,
-/// and `WM_SETFONT`, which we accept and ignore because our renderer has
-/// exactly one font. Anything else returns `0`, the same as a control
-/// that does not handle a message.
+/// Initial list-view data surface used by CoPilot's startup menu. Keep
+/// guest row data and indices; never manufacture menu labels or actions.
+fn list_view_message(
+    ctx: &mut CallCtx<'_>,
+    hwnd: u32,
+    message: u32,
+    wp: u32,
+    lp: u32,
+) -> Result<u32, KernelError> {
+    let result = match message {
+        0x1004 => ctx.kernel.controls.get(hwnd).unwrap().list_items.len() as u32,
+        0x1007 | 0x104d | 0x1006 | 0x104c => {
+            // insert/set LVITEMA/W
+            let data = ctx.cpu.read_mem(lp, 36)?;
+            let field = |offset| u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            let mask = field(0);
+            let index = field(4) as usize;
+            let text = if mask & 1 != 0 && field(20) != 0 {
+                if message == 0x104d || message == 0x104c {
+                    String::from_utf16_lossy(&read_wstr(ctx, field(20), 1024)?)
+                } else {
+                    read_cstr_string(ctx, field(20), 1024)?
+                }
+            } else {
+                String::new()
+            };
+            let control = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            if message == 0x1007 || message == 0x104d {
+                let index = index.min(control.list_items.len());
+                control.list_items.insert(index, (text, field(32)));
+                index as u32
+            } else if let Some(item) = control.list_items.get_mut(index) {
+                if mask & 1 != 0 {
+                    item.0 = text;
+                }
+                if mask & 4 != 0 {
+                    item.1 = field(32);
+                }
+                1
+            } else {
+                0
+            }
+        }
+        0x1008 => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            if (wp as usize) < c.list_items.len() {
+                c.list_items.remove(wp as usize);
+                c.list_selected = None;
+                1
+            } else {
+                0
+            }
+        }
+        0x1009 => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            c.list_items.clear();
+            c.list_selected = None;
+            1
+        }
+        0x100c | 0x1042 => ctx
+            .kernel
+            .controls
+            .get(hwnd)
+            .unwrap()
+            .list_selected
+            .map(|i| i as u32)
+            .unwrap_or(u32::MAX),
+        0x102b => {
+            let state = ctx.cpu.read_u32_le(lp + 12)?;
+            let mask = ctx.cpu.read_u32_le(lp + 16)?;
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            if mask & 2 != 0 {
+                c.list_selected = if state & 2 != 0 && (wp as usize) < c.list_items.len() {
+                    Some(wp as usize)
+                } else {
+                    None
+                };
+            }
+            1
+        }
+        0x102c => {
+            if ctx.kernel.controls.get(hwnd).unwrap().list_selected == Some(wp as usize) {
+                2
+            } else {
+                0
+            }
+        }
+        0x1032 => u32::from(
+            ctx.kernel
+                .controls
+                .get(hwnd)
+                .unwrap()
+                .list_selected
+                .is_some(),
+        ),
+        0x101b | 0x1061 => wp, // insert column, single display column
+        _ => 0,
+    };
+    if matches!(
+        message,
+        0x1007 | 0x104d | 0x1006 | 0x104c | 0x1008 | 0x1009 | 0x102b
+    ) {
+        repaint_controls(ctx);
+    }
+    Ok(result)
+}
+
 fn control_message(
     ctx: &mut CallCtx<'_>,
     hwnd: u32,
@@ -10214,6 +10432,15 @@ fn control_message(
     wparam: u32,
     lparam: u32,
 ) -> Result<u32, KernelError> {
+    if ctx
+        .kernel
+        .controls
+        .get(hwnd)
+        .is_some_and(|c| c.class == ControlClass::ListView)
+        && message >= 0x1000
+    {
+        return list_view_message(ctx, hwnd, message, wparam, lparam);
+    }
     const WM_SETTEXT: u32 = 0x000C;
     const WM_GETTEXT: u32 = 0x000D;
     const WM_GETTEXTLENGTH: u32 = 0x000E;
@@ -10273,8 +10500,16 @@ fn control_message(
             }
             Ok(0)
         }
-        // Accepted and ignored: one font, and no selection model.
-        WM_SETFONT | EM_SETSEL => Ok(1),
+        // MFC wraps WM_GETFONT in a CFont before reading LOGFONT. A NULL
+        // result on CoPilot's list causes a fault at 0x4d7b4.
+        WM_SETFONT => {
+            if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
+                child.font = wparam;
+            }
+            Ok(0)
+        }
+        0x0031 => Ok(ctx.kernel.controls.get(hwnd).map(|c| c.font).unwrap_or(0)),
+        EM_SETSEL => Ok(1),
         _ => {
             log::debug!("control 0x{hwnd:08x} ignoring message 0x{message:04x}");
             Ok(0)
@@ -10287,10 +10522,26 @@ fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let message = ctx.arg_u32(1)?;
     let wparam = ctx.arg_u32(2)?;
     let lparam = ctx.arg_u32(3)?;
+    if hwnd == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     // Service Gizmondo shell requests before routing to guest windows.
     if crate::shell::message(ctx, hwnd, message, wparam)
         || crate::bluetooth::shell_message(ctx, hwnd, message, wparam)
     {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    // The synthetic desktop is owned by WinCE, not by the application.
+    // CoPilot sends WM_USER+0x268 to GetParent(hwnd), which currently yields
+    // FAKE_DESKTOP_HWND. Falling back to the latest application WndProc for
+    // that handle invokes CoPilot's CWnd dispatcher with no attached object
+    // and dereferences a null pointer at 0x0007c744.
+    if hwnd == FAKE_DESKTOP_HWND {
+        if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
+            log::info!(
+                "CoPilot trace: SendMessageW desktop hwnd=0x{hwnd:08x} msg=0x{message:04x} wp=0x{wparam:08x} lp=0x{lparam:08x} -> default 0"
+            );
+        }
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     // The emulated status bar must never trampoline into the application's WndProc.
@@ -10430,6 +10681,13 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let wparam = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
     let lparam = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
     let timer_callback = message == WM_TIMER && lparam != 0;
+    // Thread messages (hwnd == NULL) have no window procedure. CoPilot
+    // reaches these after its startup dialogs; using the latest WndProc
+    // here passes NULL into MFC's CWnd dispatcher and faults at 0x7c744.
+    // Thread timers with a TIMERPROC are the documented exception.
+    if hwnd == 0 && !timer_callback {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let wnd_proc = if timer_callback {
         lparam & !1
     } else {
@@ -11095,7 +11353,7 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
             }
         }
         if let Some((msg, wp, lp)) = input_to_message(ev) {
-            return (FAKE_HWND, msg, wp, lp);
+            return (input_window(ctx.kernel), msg, wp, lp);
         }
     }
     // Same ordering as `next_message_if_due`: posted driver / guest
@@ -11106,7 +11364,7 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     // A held key repeats ahead of the synthetic paint/timer pump, but
     // behind real input and driver notifications.
     if let Some((msg, wp, lp)) = key_repeat_if_due(ctx) {
-        return (FAKE_HWND, msg, wp, lp);
+        return (input_window(ctx.kernel), msg, wp, lp);
     }
     synthetic_message_for(ctx)
 }
@@ -11177,7 +11435,7 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
             }
         }
         if let Some((msg, wp, lp)) = input_to_message(ev) {
-            return Some((FAKE_HWND, msg, wp, lp));
+            return Some((input_window(ctx.kernel), msg, wp, lp));
         }
     }
     // Driver notifications (`MM_WOM_DONE`) outrank the synthetic
@@ -11187,7 +11445,7 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
         return Some(posted);
     }
     if let Some((msg, wp, lp)) = key_repeat_if_due(ctx) {
-        return Some((FAKE_HWND, msg, wp, lp));
+        return Some((input_window(ctx.kernel), msg, wp, lp));
     }
     synthetic_message_if_due(ctx)
 }
@@ -11683,6 +11941,13 @@ fn create_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// while presenting its own frames; erasing on every synthetic paint made
 /// the screen flash white between its blits.
 fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    if ctx.kernel.controls.get(hwnd).is_some() {
+        let message = ctx.arg_u32(1)?;
+        let wp = ctx.arg_u32(2)?;
+        let lp = ctx.arg_u32(3)?;
+        return control_message(ctx, hwnd, message, wp, lp).map(DispatchOutcome::ReturnedR0);
+    }
     let _hwnd = ctx.arg_u32(0)?;
     let message = ctx.arg_u32(1)?;
     match message {
@@ -11698,6 +11963,82 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         }
         _ => Ok(DispatchOutcome::ReturnedR0(0)),
     }
+}
+
+/// `DefDlgProcW(hwnd, msg, wParam, lParam)` default processing.
+///
+/// CoPilot UK calls this from its dialog window procedure on WM_INITDIALOG.
+/// That message's *default* window-procedure result is zero (it is the
+/// application's DialogProc, not DefDlgProc, that returns TRUE/FALSE for
+/// initial focus). The guest dialog procedure is delivered separately by
+/// CreateDialogIndirectParamW / DialogBoxIndirectParamW in this HLE.
+/// A dialog has a separate DWL_DLGPROC callback. MFC replaces it while
+/// subclassing the default dialog window; preserve that distinction and
+/// return through a saved frame before applying default processing.
+fn def_dlg_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    if ctx
+        .kernel
+        .dialog_default_frames
+        .last()
+        .is_some_and(|(thread, thunk, frame)| {
+            *thread == ctx.kernel.current_thread && *thunk == ctx.thunk.thunk_va && frame.sp == sp
+        })
+    {
+        let result = ctx.cpu.read_reg(ArmReg::R0)?;
+        let (_, _, frame) = ctx.kernel.dialog_default_frames.pop().unwrap();
+        for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+            .into_iter()
+            .zip(frame.args)
+        {
+            ctx.cpu.write_reg(reg, value)?;
+        }
+        ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
+        if result != 0 {
+            // These dialog messages return the callback result directly;
+            // ordinary handled messages use DWL_MSGRESULT instead.
+            let direct = matches!(
+                frame.args[1],
+                WM_INITDIALOG | 0x002e | 0x002f | 0x0037 | 0x0039 | 0x0132..=0x0138
+            );
+            return Ok(DispatchOutcome::ReturnedR0(if direct {
+                result
+            } else {
+                ctx.kernel
+                    .window_extra
+                    .get(&(frame.args[0], 0))
+                    .copied()
+                    .unwrap_or(0)
+            }));
+        }
+        return def_window_proc_w(ctx);
+    }
+    let hwnd = ctx.arg_u32(0)?;
+    let proc = ctx
+        .kernel
+        .window_extra
+        .get(&(hwnd, 4))
+        .copied()
+        .unwrap_or(0);
+    if proc == 0 {
+        return def_window_proc_w(ctx);
+    }
+    let frame = GuestCallFrame {
+        args: [
+            ctx.arg_u32(0)?,
+            ctx.arg_u32(1)?,
+            ctx.arg_u32(2)?,
+            ctx.arg_u32(3)?,
+        ],
+        lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+        sp,
+    };
+    ctx.kernel.window_extra.insert((hwnd, 0), 0);
+    ctx.kernel
+        .dialog_default_frames
+        .push((ctx.kernel.current_thread, ctx.thunk.thunk_va, frame));
+    ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+    Ok(DispatchOutcome::JumpTo(proc))
 }
 
 /// Fill the client area with the registered class background brush and
@@ -13341,12 +13682,18 @@ fn get_dlg_item(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         log::trace!("GetDlgItem(0x{hwnd:08x}, {id}) -> 0x{found:08x}");
         return Ok(DispatchOutcome::ReturnedR0(found));
     }
-    log::trace!("GetDlgItem(0x{hwnd:08x}, {id}) -> no such control");
-    Ok(DispatchOutcome::ReturnedR0(if is_live_hwnd(hwnd) {
-        hwnd
-    } else {
-        0
-    }))
+    let found = ctx
+        .kernel
+        .window_ids
+        .iter()
+        .find_map(|(child, child_id)| {
+            (*child_id == id && ctx.kernel.window_parents.get(child) == Some(&hwnd))
+                .then_some(*child)
+        })
+        .unwrap_or(0);
+    // Returning the parent for a missing id makes MFC's pane search recurse
+    // into itself (CoPilot GetDlgItem(AFX_IDW_PANE_FIRST) at 0x7e95c).
+    Ok(DispatchOutcome::ReturnedR0(found))
 }
 
 /// `CheckRadioButton(hDlg, nIDFirst, nIDLast, nIDCheckButton)`
@@ -13384,24 +13731,63 @@ fn enum_windows(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-/// `IsWindowVisible(hwnd)`
-///
-/// For a control or a dialog panel this is the real answer, tracked by
-/// `ShowWindow`. For a top-level window it stays "yes if it exists",
-/// since we never hide the game's own window.
-///
-/// Solitaire depends on the distinction. It creates the Time and Score
-/// statics hidden, and its status-line updater shows them only after
-/// checking `IsWindowVisible` first — so a handle that always claimed to
-/// be visible made the app skip its own `ShowWindow(SW_SHOW)` and left
-/// both readouts permanently blank.
+/// Check the window and its child-parent chain, not its owner chain.
+/// CoPilot creates WS_VISIBLE children inside a still-hidden dialog, then
+/// probes one at 0x50fe4 during its constructor (caller 0x4d2c0). Reporting
+/// only the child's style enters 0x529a0 before object+0x1b4 is initialized.
+fn window_is_visible(kernel: &KernelState, hwnd: u32) -> bool {
+    let mut current = hwnd;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            // Malformed parent graphs must not hang an API call.
+            return false;
+        }
+        let own_visible = kernel
+            .controls
+            .is_visible(current)
+            .or_else(|| kernel.window_visibility.get(&current).copied())
+            .or_else(|| {
+                kernel
+                    .window_styles
+                    .get(&current)
+                    .map(|s| s.0 & 0x1000_0000 != 0)
+            })
+            .unwrap_or_else(|| is_live_hwnd(current));
+        if !own_visible {
+            return false;
+        }
+        let parent = if let Some(child) = kernel.controls.get(current) {
+            Some(child.parent)
+        } else if kernel
+            .window_styles
+            .get(&current)
+            .is_some_and(|s| s.0 & 0x4000_0000 != 0)
+        {
+            kernel.window_parents.get(&current).copied()
+        } else {
+            None
+        };
+        match parent {
+            Some(parent) if parent != 0 && parent != FAKE_DESKTOP_HWND => current = parent,
+            _ => return true,
+        }
+    }
+}
+
+/// IsWindowVisible includes hidden ancestors without changing the child's
+/// own WS_VISIBLE bit. An owned top-level popup has no child-parent chain.
 fn is_window_visible(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
-    let visible = ctx
-        .kernel
-        .controls
-        .is_visible(hwnd)
-        .unwrap_or_else(|| is_live_hwnd(hwnd));
+    let visible = window_is_visible(ctx.kernel, hwnd);
+    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
+        log::info!(
+            "CoPilot trace: IsWindowVisible hwnd=0x{hwnd:08x} registered={} style={:?} tracked={:?} result={visible}",
+            ctx.kernel.window_classes.contains_key(&hwnd),
+            ctx.kernel.window_styles.get(&hwnd).copied(),
+            ctx.kernel.window_visibility.get(&hwnd).copied()
+        );
+    }
     Ok(DispatchOutcome::ReturnedR0(u32::from(visible)))
 }
 
@@ -13460,6 +13846,15 @@ fn destroy_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     if is_live_hwnd(hwnd) {
+        ctx.kernel.window_classes.remove(&hwnd);
+        ctx.kernel.window_ids.remove(&hwnd);
+        ctx.kernel.scroll_info.retain(|(h, _), _| *h != hwnd);
+        ctx.kernel.window_extra.retain(|(h, _), _| *h != hwnd);
+        ctx.kernel.window_styles.remove(&hwnd);
+        ctx.kernel.window_parents.remove(&hwnd);
+        ctx.kernel.window_visibility.remove(&hwnd);
+        ctx.kernel.window_procs.remove(&hwnd);
+        ctx.kernel.window_userdata.remove(&hwnd);
         ctx.kernel.controls.destroy_children_of(hwnd);
         if ctx.kernel.posted_messages.len() < 256 {
             ctx.kernel
@@ -13483,11 +13878,35 @@ fn find_window_w(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `nIndex == GWL_WNDPROC` (`-4`), we also re-bind the captured
 /// guest `WndProc` so the synthetic message pump dispatches to the
 /// right entry point if the game subclasses its own window.
+fn builtin_window_proc(kernel: &KernelState, hwnd: u32) -> Option<u32> {
+    kernel.controls.get(hwnd)?;
+    // Use a real mapped HLE entry point: MFC saves this value as its
+    // superclass procedure and later invokes it via CallWindowProcW.
+    Some(
+        kernel
+            .dynamic_exports
+            .values()
+            .find_map(|exports| exports.get("DefWindowProcW").copied())
+            .unwrap_or(0),
+    )
+}
+
 fn set_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let n_index = ctx.arg_u32(1)? as i32;
     let new_long = ctx.arg_u32(2)?;
-    let previous = if n_index == -4 {
+    let previous = if n_index >= 0 {
+        ctx.kernel
+            .window_extra
+            .insert((hwnd, n_index), new_long)
+            .unwrap_or(0)
+    } else if n_index == -12 {
+        if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
+            std::mem::replace(&mut child.id, new_long)
+        } else {
+            ctx.kernel.window_ids.insert(hwnd, new_long).unwrap_or(0)
+        }
+    } else if n_index == -4 {
         let previous = ctx
             .kernel
             .window_procs
@@ -13499,22 +13918,52 @@ fn set_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                     .get(&hwnd)
                     .and_then(|class| ctx.kernel.window_class_procs.get(class).copied())
             })
+            .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
             .unwrap_or(ctx.kernel.wnd_proc);
         log::info!("SetWindowLongW(GWL_WNDPROC) re-binding WndProc=0x{new_long:08x} (previous=0x{previous:08x})");
-        ctx.kernel.wnd_proc = new_long;
+        if hwnd == FAKE_HWND {
+            ctx.kernel.wnd_proc = new_long;
+        }
         ctx.kernel.window_procs.insert(hwnd, new_long);
         previous
     } else if n_index == -21 {
-        let previous = ctx
-            .kernel
-            .window_userdata
-            .get(&hwnd)
-            .copied()
-            .unwrap_or(ctx.kernel.window_user_data);
-        ctx.kernel.window_user_data = new_long;
+        let previous =
+            ctx.kernel
+                .window_userdata
+                .get(&hwnd)
+                .copied()
+                .unwrap_or(if hwnd == FAKE_HWND {
+                    ctx.kernel.window_user_data
+                } else {
+                    0
+                });
+        if hwnd == FAKE_HWND {
+            ctx.kernel.window_user_data = new_long;
+        }
         ctx.kernel.window_userdata.insert(hwnd, new_long);
         log::debug!("SetWindowLongW(GWL_USERDATA)=0x{new_long:08x} (previous=0x{previous:08x})");
         previous
+    } else if n_index == -16 || n_index == -20 {
+        if n_index == -16 {
+            if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
+                return Ok(DispatchOutcome::ReturnedR0(std::mem::replace(
+                    &mut child.style,
+                    new_long,
+                )));
+            }
+        }
+        if n_index == -16 {
+            ctx.kernel
+                .window_visibility
+                .insert(hwnd, new_long & 0x1000_0000 != 0);
+        }
+        let entry = ctx.kernel.window_styles.entry(hwnd).or_insert((0, 0));
+        let slot = if n_index == -16 {
+            &mut entry.0
+        } else {
+            &mut entry.1
+        };
+        std::mem::replace(slot, new_long)
     } else {
         0
     };
@@ -13526,7 +13975,20 @@ fn set_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn get_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let n_index = ctx.arg_u32(1)? as i32;
-    let v = if n_index == -4 {
+    let v = if n_index >= 0 {
+        ctx.kernel
+            .window_extra
+            .get(&(hwnd, n_index))
+            .copied()
+            .unwrap_or(0)
+    } else if n_index == -12 {
+        ctx.kernel
+            .controls
+            .get(hwnd)
+            .map(|c| c.id)
+            .or_else(|| ctx.kernel.window_ids.get(&hwnd).copied())
+            .unwrap_or(0)
+    } else if n_index == -4 {
         ctx.kernel
             .window_procs
             .get(&hwnd)
@@ -13537,13 +13999,32 @@ fn get_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                     .get(&hwnd)
                     .and_then(|class| ctx.kernel.window_class_procs.get(class).copied())
             })
+            .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
             .unwrap_or(ctx.kernel.wnd_proc)
     } else if n_index == -21 {
         ctx.kernel
             .window_userdata
             .get(&hwnd)
             .copied()
-            .unwrap_or(ctx.kernel.window_user_data)
+            .unwrap_or(if hwnd == FAKE_HWND {
+                ctx.kernel.window_user_data
+            } else {
+                0
+            })
+    } else if n_index == -16 || n_index == -20 {
+        if n_index == -16 {
+            ctx.kernel
+                .controls
+                .get(hwnd)
+                .map(|child| child.style)
+                .or_else(|| ctx.kernel.window_styles.get(&hwnd).map(|values| values.0))
+                .unwrap_or(0)
+        } else {
+            ctx.kernel
+                .window_styles
+                .get(&hwnd)
+                .map_or(0, |values| values.1)
+        }
     } else {
         0
     };
@@ -13887,8 +14368,22 @@ fn get_version(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// for guests that write the mapping directly — so nothing needs this
 /// one to notice a repaint. `bErase = TRUE` is remembered for the next
 /// paint; fabricated periodic paints alone do not erase the screen.
+fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
+    if kernel.window_procs.contains_key(&hwnd)
+        && window_is_visible(kernel, hwnd)
+        && kernel.posted_messages.len() < 256
+        && !kernel
+            .posted_messages
+            .iter()
+            .any(|m| m.0 == hwnd && m.1 == WM_PAINT)
+    {
+        kernel.posted_messages.push_back((hwnd, WM_PAINT, 0, 0));
+    }
+}
+
 fn invalidate_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _hwnd = ctx.arg_u32(0)?;
+    let hwnd = ctx.arg_u32(0)?;
+    queue_window_paint(ctx.kernel, hwnd);
     let _rect = ctx.arg_u32(1)?;
     if ctx.arg_u32(2)? != 0 {
         ctx.kernel.window_background_erase_pending = true;
@@ -13934,6 +14429,17 @@ fn get_class_name_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         .window_classes
         .get(&hwnd)
         .cloned()
+        .or_else(|| {
+            ctx.kernel.controls.get(hwnd).map(|c| {
+                match c.class {
+                    ControlClass::Button => "BUTTON",
+                    ControlClass::Edit => "EDIT",
+                    ControlClass::Static => "STATIC",
+                    ControlClass::ListView => "SysListView32",
+                }
+                .to_string()
+            })
+        })
         .unwrap_or_default();
     let utf16: Vec<u16> = name
         .encode_utf16()
@@ -17282,9 +17788,6 @@ fn strip_mnemonics(s: &str) -> String {
 /// `GetDlgItem` ten times and `SetDlgItemTextW` four times for its Time
 /// and Score readouts. Ignoring the template left the dialog an empty
 /// rectangle and those calls addressing nothing.
-fn build_dialog_from_template(ctx: &mut CallCtx<'_>, lp_template: u32) {
-    build_dialog_from_template_for(ctx, lp_template, FAKE_DIALOG_HWND, false)
-}
 
 /// Materialise a `DLGTEMPLATE` as a panel owned by `owner_hwnd`.
 ///
@@ -17330,6 +17833,12 @@ fn build_dialog_from_template_for(
         return;
     };
 
+    ctx.kernel
+        .window_styles
+        .insert(owner_hwnd, (tmpl.style, tmpl.ex_style));
+    ctx.kernel
+        .window_visibility
+        .insert(owner_hwnd, modal || tmpl.style & WS_VISIBLE != 0);
     let dlu = Dlu::default();
     let (px, py, pw, ph) = dlu.to_px(tmpl.x as i32, tmpl.y as i32, tmpl.cx as i32, tmpl.cy as i32);
     // A modal dialog always gets a caption, titled from the template or
@@ -17386,6 +17895,9 @@ fn build_dialog_from_template_for(
             ItemClass::Ordinal(class_ordinal::BUTTON) => ControlClass::Button,
             ItemClass::Ordinal(class_ordinal::EDIT) => ControlClass::Edit,
             ItemClass::Ordinal(class_ordinal::STATIC) => ControlClass::Static,
+            ItemClass::Named(name) if ControlClass::from_class_name(name).is_some() => {
+                ControlClass::from_class_name(name).unwrap()
+            }
             other => {
                 // Listboxes, combos, scrollbars and custom classes are
                 // not modelled; skipping one loses a control but keeps
@@ -17442,28 +17954,68 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
         // `DialogProc` runs on a deeper stack; only SP back at its
         // saved value means our callback has actually returned.
         if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
-            ctx.kernel.dialog_frame = None;
+            let hwnd = ctx.kernel.dialog_frame_hwnd;
+            if window_is_visible(ctx.kernel, hwnd)
+                && ctx
+                    .kernel
+                    .window_styles
+                    .get(&hwnd)
+                    .is_some_and(|s| s.0 & 0x4000_0000 == 0)
+            {
+                ctx.kernel.active_window = hwnd;
+            }
+            queue_window_paint(ctx.kernel, hwnd);
+            if let Some((parent, parent_hwnd)) = ctx.kernel.dialog_frame_stack.pop() {
+                ctx.kernel.dialog_frame = Some(parent);
+                ctx.kernel.dialog_frame_hwnd = parent_hwnd;
+            } else {
+                ctx.kernel.dialog_frame = None;
+                ctx.kernel.dialog_frame_hwnd = 0;
+            }
             ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
             ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
             ctx.cpu.write_reg(ArmReg::R2, frame.args[2])?;
             ctx.cpu.write_reg(ArmReg::R3, frame.args[3])?;
             ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
-            log::debug!("CreateDialogIndirectParamW -> hwnd=0x{FAKE_DIALOG_HWND:08x}");
-            return Ok(DispatchOutcome::ReturnedR0(FAKE_DIALOG_HWND));
+            log::debug!("CreateDialogIndirectParamW -> hwnd=0x{hwnd:08x}");
+            return Ok(DispatchOutcome::ReturnedR0(hwnd));
         }
     }
     let dialog_proc = ctx.arg_u32(3)?;
     let init_param = ctx.arg_u32(4).unwrap_or(0);
     let lp_template = ctx.arg_u32(1)?;
-    build_dialog_from_template(ctx, lp_template);
+    // A shared HWND would replace the parent's panel, procedure and object
+    // while CoPilot creates its nested dialogs during WM_INITDIALOG.
+    let hwnd = if !ctx.kernel.window_classes.contains_key(&FAKE_DIALOG_HWND) {
+        FAKE_DIALOG_HWND
+    } else if let Some(hwnd) = next_top_level_hwnd(&ctx.kernel.window_classes) {
+        hwnd
+    } else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let parent = ctx.arg_u32(2)?;
+    ctx.kernel.window_classes.insert(hwnd, "#32770".to_string());
+    ctx.kernel.window_parents.insert(hwnd, parent);
+    build_dialog_from_template_for(ctx, lp_template, hwnd, false);
+    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
+        log::info!(
+            "CoPilot trace: CreateDialog hwnd=0x{hwnd:08x} parent=0x{parent:08x} style={:?}",
+            ctx.kernel.window_styles.get(&hwnd)
+        );
+    }
     if dialog_proc == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(FAKE_DIALOG_HWND));
+        return Ok(DispatchOutcome::ReturnedR0(hwnd));
     }
     // Route later SendMessageW / DispatchMessageW for this handle to the
     // DialogProc rather than the frame window's WndProc.
-    ctx.kernel
-        .window_procs
-        .insert(FAKE_DIALOG_HWND, dialog_proc);
+    let default_proc = ctx
+        .kernel
+        .dynamic_exports
+        .values()
+        .find_map(|exports| exports.get("DefDlgProcW").copied())
+        .unwrap_or(0);
+    ctx.kernel.window_procs.insert(hwnd, default_proc);
+    ctx.kernel.window_extra.insert((hwnd, 4), dialog_proc);
     let args = [
         ctx.cpu.read_reg(ArmReg::R0)?,
         ctx.cpu.read_reg(ArmReg::R1)?,
@@ -17477,11 +18029,17 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
     };
     // DialogProc's four arguments all travel in registers, so the guest
     // stack needs no adjustment here.
-    ctx.cpu.write_reg(ArmReg::R0, FAKE_DIALOG_HWND)?;
+    ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
     ctx.cpu.write_reg(ArmReg::R1, WM_INITDIALOG)?;
     ctx.cpu.write_reg(ArmReg::R2, 0)?;
     ctx.cpu.write_reg(ArmReg::R3, init_param)?;
     ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+    if let Some(parent) = ctx.kernel.dialog_frame.take() {
+        ctx.kernel
+            .dialog_frame_stack
+            .push((parent, ctx.kernel.dialog_frame_hwnd));
+    }
+    ctx.kernel.dialog_frame_hwnd = hwnd;
     ctx.kernel.dialog_frame = Some(frame);
     log::debug!("CreateDialogIndirectParamW -> WM_INITDIALOG trampoline at 0x{dialog_proc:08x}");
     Ok(DispatchOutcome::JumpTo(dialog_proc))
@@ -18876,22 +19434,118 @@ fn get_desktop_window(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     Ok(DispatchOutcome::ReturnedR0(FAKE_DESKTOP_HWND))
 }
 
-fn get_active_window(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(FAKE_HWND))
+fn get_active_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(input_window(ctx.kernel)))
 }
 
-fn get_foreground_window(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(FAKE_HWND))
+fn get_foreground_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    get_active_window(ctx)
 }
 
-fn get_parent(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(FAKE_DESKTOP_HWND))
+fn input_window(kernel: &KernelState) -> u32 {
+    let focus = kernel.controls.focus;
+    if kernel.window_procs.contains_key(&focus) {
+        focus
+    } else if kernel.active_window != 0 {
+        kernel.active_window
+    } else {
+        FAKE_HWND
+    }
+}
+
+fn set_active_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let previous = input_window(ctx.kernel);
+    if hwnd == 0 || ctx.kernel.window_procs.contains_key(&hwnd) {
+        ctx.kernel.active_window = hwnd;
+    }
+    Ok(DispatchOutcome::ReturnedR0(previous))
+}
+
+fn set_foreground_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    set_active_window(ctx)?;
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn get_parent(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    // The desktop is the end of the parent chain. CoPilot's CWnd root
+    // search otherwise repeats GetParent(desktop) forever after startup.
+    if hwnd == 0 || hwnd == FAKE_DESKTOP_HWND {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let parent = ctx
+        .kernel
+        .controls
+        .get(hwnd)
+        .map(|child| child.parent)
+        .or_else(|| ctx.kernel.window_parents.get(&hwnd).copied())
+        .unwrap_or(FAKE_DESKTOP_HWND);
+    Ok(DispatchOutcome::ReturnedR0(parent))
 }
 
 /// `HWND GetWindow(HWND, UINT)` — for synthetic windows we have no
 /// Z-order, so always say "no neighbour" (`NULL`).
-fn get_window(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(0))
+fn get_dlg_ctrl_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    Ok(DispatchOutcome::ReturnedR0(
+        ctx.kernel.controls.get(hwnd).map(|c| c.id).unwrap_or(0),
+    ))
+}
+
+fn get_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let command = ctx.arg_u32(1)?;
+    let parent = ctx
+        .kernel
+        .controls
+        .get(hwnd)
+        .map(|c| c.parent)
+        .or_else(|| ctx.kernel.window_parents.get(&hwnd).copied());
+    let children = |parent| {
+        let mut result = ctx.kernel.controls.children_of(parent);
+        let mut custom: Vec<_> = ctx
+            .kernel
+            .window_parents
+            .iter()
+            .filter(|(h, p)| {
+                **p == parent
+                    && **h != parent
+                    && ctx
+                        .kernel
+                        .window_styles
+                        .get(h)
+                        .is_some_and(|s| s.0 & 0x4000_0000 != 0)
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        custom.sort_unstable();
+        result.extend(custom);
+        result
+    };
+    let result = match command {
+        5 => children(hwnd).first().copied(), // GW_CHILD
+        4 => parent.filter(|_| {
+            ctx.kernel
+                .window_styles
+                .get(&hwnd)
+                .is_some_and(|s| s.0 & 0x4000_0000 == 0)
+        }), // GW_OWNER
+        0..=3 => parent.and_then(|parent| {
+            let siblings = children(parent);
+            let index = siblings.iter().position(|h| *h == hwnd)?;
+            match command {
+                0 => siblings.first().copied(),
+                1 => siblings.last().copied(),
+                2 => siblings.get(index + 1).copied(),
+                3 => index.checked_sub(1).and_then(|i| siblings.get(i).copied()),
+                _ => None,
+            }
+        }),
+        _ => None,
+    }
+    .unwrap_or(0);
+    Ok(DispatchOutcome::ReturnedR0(result))
 }
 
 // _controlfp uses CRT bit positions, not the ARM FPSCR encoding.
@@ -19557,6 +20211,425 @@ fn find_close_change_notification(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_dialog_proc_delivers_init_once_and_restores_its_caller() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        kernel.window_extra.insert((FAKE_DIALOG_HWND, 4), 0x5000);
+        for (r, v) in [
+            (ArmReg::R0, FAKE_DIALOG_HWND),
+            (ArmReg::R1, WM_INITDIALOG),
+            (ArmReg::R2, 7),
+            (ArmReg::R3, 8),
+            (ArmReg::Sp, 0x9000),
+            (ArmReg::Lr, 0x1234),
+        ] {
+            cpu.write_reg(r, v).unwrap();
+        }
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            def_dlg_proc_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x5000)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        assert_eq!(
+            def_dlg_proc_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x1234);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 7);
+        assert!(ctx.kernel.dialog_default_frames.is_empty());
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 59393).unwrap();
+        assert_eq!(
+            get_dlg_item(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
+    #[test]
+    fn listview_rows_font_and_subclass_keep_system_procedure() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x2000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let hwnd = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::ListView,
+            1558,
+            String::new(),
+            0x5000_0000,
+            0,
+            0,
+            100,
+            100,
+        );
+        kernel.wnd_proc = 0x4100;
+        kernel.dynamic_exports.insert(
+            0x1000_0000,
+            [("DefWindowProcW".to_string(), 0x7000_1000)].into(),
+        );
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            control_message(&mut ctx, hwnd, 0x31, 0, 0).unwrap(),
+            STOCK_SYSTEM_FONT
+        );
+        control_message(&mut ctx, hwnd, 0x30, STOCK_SYSTEM_FONT, 0).unwrap();
+        let mut item = [0u8; 36];
+        item[..4].copy_from_slice(&5u32.to_le_bytes());
+        item[20..24].copy_from_slice(&0x2100u32.to_le_bytes());
+        item[32..36].copy_from_slice(&42u32.to_le_bytes());
+        ctx.cpu.write_mem(0x2000, &item).unwrap();
+        let text: Vec<u8> = "Navigate"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        ctx.cpu.write_mem(0x2100, &text).unwrap();
+        assert_eq!(
+            control_message(&mut ctx, hwnd, 0x104d, 0, 0x2000).unwrap(),
+            0
+        );
+        assert_eq!(control_message(&mut ctx, hwnd, 0x1004, 0, 0).unwrap(), 1);
+        assert_eq!(
+            ctx.kernel.controls.get(hwnd).unwrap().list_items[0],
+            ("Navigate".to_string(), 42)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, (-4i32) as u32).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 0x4200).unwrap();
+        assert_eq!(
+            set_window_long_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x7000_1000)
+        );
+        assert_eq!(
+            get_window_long_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x4200)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 5).unwrap();
+        assert_eq!(
+            get_window(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(hwnd)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 2).unwrap();
+        assert_eq!(
+            get_window(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
+    #[test]
+    fn english_phrase_fallback_writes_text_and_guards_capacity() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x2000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x2000, b"Navigate\0").unwrap();
+        let thunk = Thunk {
+            dll: "language.dll".to_string(),
+            friendly_name: Some("LANG_GetPhrase".to_string()),
+            binding: ImportBinding::Name("LANG_GetPhrase".to_string()),
+            ..dummy_thunk()
+        };
+        let mut dispatcher = WinCeDispatcher::new();
+        for (capacity, expected) in [
+            (4, b"Nav\0".as_slice()),
+            (1, b"\0".as_slice()),
+            (0, b"".as_slice()),
+        ] {
+            cpu.write_mem(0x2100, &[0xaa; 16]).unwrap();
+            for (reg, value) in [
+                (ArmReg::R0, 0x2000),
+                (ArmReg::R1, 0x2100),
+                (ArmReg::R2, capacity),
+                (ArmReg::R3, 0),
+            ] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            assert_eq!(
+                pocket_kernel::Dispatcher::dispatch(&mut dispatcher, &mut cpu, &thunk, &mut kernel)
+                    .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let bytes = cpu.read_mem(0x2100, 16).unwrap();
+            assert_eq!(&bytes[..expected.len()], expected);
+            assert!(bytes[expected.len()..].iter().all(|b| *b == 0xaa));
+        }
+    }
+
+    #[test]
+    fn thread_messages_do_not_call_an_application_window_proc() {
+        let mut kernel = fresh_kernel();
+        kernel.wnd_proc = 0x4000;
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x2000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut message = [0u8; 28];
+        message[4..8].copy_from_slice(&0x400u32.to_le_bytes());
+        cpu.write_mem(0x2000, &message).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(ctx.kernel.message_frames.is_empty());
+    }
+
+    #[test]
+    fn desktop_parent_chain_terminates() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for hwnd in [0, FAKE_DESKTOP_HWND] {
+            cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                get_parent(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+        }
+    }
+
+    #[test]
+    fn nested_modeless_dialogs_keep_parent_panel_and_return_each_hwnd() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x2000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(0x8000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        // Two valid empty DLGTEMPLATEs: a hidden parent and visible child.
+        for (address, style) in [(0x2000, 0u32), (0x2100, 0x5000_0000u32)] {
+            let mut template = [0u8; 64];
+            template[..4].copy_from_slice(&style.to_le_bytes());
+            template[14..16].copy_from_slice(&100i16.to_le_bytes());
+            template[16..18].copy_from_slice(&80i16.to_le_bytes());
+            cpu.write_mem(address, &template).unwrap();
+        }
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (sp, template, parent, callback, lr) in [
+            (0x8800, 0x2000, 0, 0x4000, 0x1234),
+            (0x8700, 0x2100, FAKE_DIALOG_HWND, 0x4100, 0x4568),
+        ] {
+            for (reg, value) in [
+                (ArmReg::Sp, sp),
+                (ArmReg::R0, 0),
+                (ArmReg::R1, template),
+                (ArmReg::R2, parent),
+                (ArmReg::R3, callback),
+                (ArmReg::Lr, lr),
+            ] {
+                ctx.cpu.write_reg(reg, value).unwrap();
+            }
+            ctx.cpu.write_mem(sp, &0u32.to_le_bytes()).unwrap();
+            assert_eq!(
+                create_dialog_indirect_param_w(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(callback)
+            );
+        }
+        let child = ctx.kernel.dialog_frame_hwnd;
+        assert_ne!(child, FAKE_DIALOG_HWND);
+        assert_eq!(ctx.kernel.window_extra[&(FAKE_DIALOG_HWND, 4)], 0x4000);
+        assert_eq!(ctx.kernel.window_extra[&(child, 4)], 0x4100);
+        assert!(!ctx.kernel.controls.panel(FAKE_DIALOG_HWND).unwrap().visible);
+        assert!(ctx.kernel.controls.panel(child).unwrap().visible);
+        assert!(!window_is_visible(ctx.kernel, child));
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        assert_eq!(
+            create_dialog_indirect_param_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(child)
+        );
+        assert_eq!(ctx.kernel.dialog_frame_hwnd, FAKE_DIALOG_HWND);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x4568);
+        ctx.cpu.write_reg(ArmReg::Sp, 0x8800).unwrap();
+        assert_eq!(
+            create_dialog_indirect_param_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(FAKE_DIALOG_HWND)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x1234);
+        assert!(ctx.kernel.dialog_frame.is_none());
+        assert!(ctx.kernel.dialog_frame_stack.is_empty());
+    }
+
+    #[test]
+    fn visible_child_of_hidden_dialog_does_not_enter_copilot_early_init() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        let parent = FAKE_HWND;
+        let child = 0xDEAD_1005;
+        kernel.window_styles.insert(parent, (0, 0));
+        kernel.window_visibility.insert(parent, false);
+        kernel.window_styles.insert(child, (0x5000_0000, 0));
+        kernel.window_visibility.insert(child, true);
+        kernel.window_parents.insert(child, parent);
+        cpu.write_reg(ArmReg::R0, child).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            is_window_visible(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        // Showing the parent reveals the child; hiding it does not clear
+        // the child's own style, so showing it again reveals the child.
+        for (cmd, expected) in [(1, true), (0, false), (1, true)] {
+            ctx.cpu.write_reg(ArmReg::R0, parent).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, cmd).unwrap();
+            show_window(&mut ctx).unwrap();
+            assert_eq!(window_is_visible(ctx.kernel, child), expected);
+            assert_eq!(ctx.kernel.window_styles[&child].0, 0x5000_0000);
+            assert_eq!(
+                ctx.kernel.window_styles[&parent].0 & 0x1000_0000 != 0,
+                expected
+            );
+        }
+        // A guest can also change its own visible style via SetWindowLong.
+        ctx.cpu.write_reg(ArmReg::R0, child).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, (-16i32) as u32).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 0x4000_0000).unwrap();
+        set_window_long_w(&mut ctx).unwrap();
+        assert!(!window_is_visible(ctx.kernel, child));
+    }
+
+    #[test]
+    fn window_visibility_follows_all_ancestors_but_not_popup_owner() {
+        let mut kernel = fresh_kernel();
+        for (hwnd, style, parent) in [
+            (FAKE_HWND, 0, 0),
+            (0xDEAD_1000, 0x5000_0000, FAKE_HWND),
+            (0xDEAD_1001, 0x5000_0000, 0xDEAD_1000),
+            (0xDEAD_1002, 0x9000_0000, FAKE_HWND),
+        ] {
+            kernel.window_styles.insert(hwnd, (style, 0));
+            kernel
+                .window_visibility
+                .insert(hwnd, style & 0x1000_0000 != 0);
+            kernel.window_parents.insert(hwnd, parent);
+        }
+        assert!(!window_is_visible(&kernel, 0xDEAD_1001));
+        assert!(window_is_visible(&kernel, 0xDEAD_1002));
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        assert!(window_is_visible(&kernel, 0xDEAD_1001));
+        kernel.window_parents.insert(0xDEAD_1000, 0xDEAD_1001);
+        assert!(!window_is_visible(&kernel, 0xDEAD_1001));
+    }
+
+    #[test]
+    fn nested_wm_create_callbacks_resume_outer_frame_and_hwnd() {
+        let mut k = fresh_kernel();
+        let outer = GuestCallFrame {
+            args: [11, 12, 13, 14],
+            lr: 0x7000,
+            sp: 0x0012_f000,
+        };
+        let inner = GuestCallFrame {
+            args: [21, 22, 23, 24],
+            lr: 0x7100,
+            sp: 0x0012_e000,
+        };
+        begin_window_callback(&mut k, outer, CreateStage::Create, FAKE_HWND);
+        assert!(k.create_frame_stack.is_empty());
+        begin_window_callback(&mut k, inner, CreateStage::Create, 0xDEAD_1000);
+        assert_eq!(k.create_frame_stack.len(), 1);
+        assert_eq!(k.create_frame.unwrap().lr, inner.lr);
+        assert_eq!(k.create_frame_hwnd, 0xDEAD_1000);
+        finish_window_callback(&mut k);
+        assert_eq!(k.create_frame.unwrap().args, outer.args);
+        assert_eq!(k.create_frame.unwrap().sp, outer.sp);
+        assert_eq!(k.create_frame_hwnd, FAKE_HWND);
+        assert_eq!(k.create_stage, CreateStage::Create);
+        finish_window_callback(&mut k);
+        assert!(k.create_frame.is_none());
+        assert_eq!(k.create_stage, CreateStage::Idle);
+        assert_eq!(k.create_frame_hwnd, 0);
+        assert!(k.create_frame_stack.is_empty());
+    }
+
+    #[test]
+    fn nested_create_restores_outer_size_continuation() {
+        let mut k = fresh_kernel();
+        let frame = GuestCallFrame {
+            args: [1, 2, 3, 4],
+            lr: 0x7200,
+            sp: 0x0012_f000,
+        };
+        begin_window_callback(&mut k, frame, CreateStage::Size, FAKE_HWND);
+        begin_window_callback(&mut k, frame, CreateStage::Create, 0xDEAD_1000);
+        finish_window_callback(&mut k);
+        assert_eq!(k.create_stage, CreateStage::Size);
+        assert_eq!(k.create_frame_hwnd, FAKE_HWND);
+        assert_eq!(k.create_frame.unwrap().lr, frame.lr);
+    }
+
+    #[test]
+    fn multiple_application_windows_have_distinct_handles() {
+        let mut existing = std::collections::HashMap::new();
+        let first = super::next_top_level_hwnd(&existing).unwrap();
+        assert_eq!(first, super::FAKE_HWND);
+        existing.insert(first, "Main".to_string());
+        let second = super::next_top_level_hwnd(&existing).unwrap();
+        assert_eq!(second, 0xDEAD_1000);
+        existing.insert(second, "CoPilotPanel".to_string());
+        let third = super::next_top_level_hwnd(&existing).unwrap();
+        assert_eq!(third, 0xDEAD_1001);
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn copilot_window_long_tracks_style_and_userdata_per_hwnd() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for hwnd in [super::FAKE_HWND, 0xDEAD_1000] {
+            kernel
+                .window_styles
+                .insert(hwnd, (0x1000_0000, 0x0000_0080));
+            kernel.window_userdata.insert(hwnd, hwnd ^ 0x1234);
+            for (index, expected) in [(-16_i32, 0x1000_0000), (-20, 0x80), (-21, hwnd ^ 0x1234)] {
+                cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+                cpu.write_reg(ArmReg::R1, index as u32).unwrap();
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                };
+                assert_eq!(
+                    get_window_long_w(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(expected)
+                );
+            }
+        }
+    }
     #[test]
     fn colors_gprs_shell_status_unblocks_host_transport_and_honors_disconnect() {
         use pocket_kernel::internet;
@@ -21681,6 +22754,27 @@ mod tests {
         assert_eq!(ctx.kernel.wave_out.pending.len(), 1); // other handle unaffected
     }
 
+    #[test]
+    fn send_message_to_desktop_does_not_enter_application_wndproc() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        kernel.wnd_proc = 0x0007_ca14;
+        cpu.write_reg(ArmReg::R0, FAKE_DESKTOP_HWND).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x0368).unwrap();
+        cpu.write_reg(ArmReg::R2, 1).unwrap();
+        cpu.write_reg(ArmReg::R3, 0).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            send_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
     fn fresh_kernel() -> KernelState {
         use pocket_kernel::audio::{AudioEngine, GuestFormat};
         use pocket_kernel::{Framebuffer, GdiState};
@@ -21743,14 +22837,26 @@ mod tests {
             window_procs: std::collections::HashMap::new(),
             window_userdata: std::collections::HashMap::new(),
             window_classes: std::collections::HashMap::new(),
+            window_styles: std::collections::HashMap::new(),
+            window_parents: std::collections::HashMap::new(),
+            window_visibility: std::collections::HashMap::new(),
             window_user_data: 0,
             timers: Default::default(),
             synthetic_paint_next_ms: 0,
             synthetic_create_sent: false,
             synthetic_size_sent: false,
             create_frame: None,
+            create_frame_hwnd: 0,
+            create_frame_stack: Vec::new(),
             create_stage: pocket_kernel::CreateStage::Idle,
             dialog_frame: None,
+            dialog_frame_hwnd: 0,
+            active_window: 0,
+            window_ids: std::collections::HashMap::new(),
+            scroll_info: std::collections::HashMap::new(),
+            window_extra: std::collections::HashMap::new(),
+            dialog_default_frames: Vec::new(),
+            dialog_frame_stack: Vec::new(),
             accelerator_frames: Vec::new(),
             shell_status: None,
             status_bar: None,
@@ -23601,9 +24707,12 @@ mod tests {
             invoke(&mut kernel, 0, 0x2000).unwrap(),
             DispatchOutcome::ReturnedR0(1)
         );
+        // Compare the actual file, not the string representation of its path:
+        // Windows treats Agaju and agaju (and / vs. \) as the same directory.
+        let queued_executable = kernel.pending_process_launch.take().unwrap().executable;
         assert_eq!(
-            kernel.pending_process_launch.take().unwrap().executable,
-            executable.clone()
+            std::fs::canonicalize(&queued_executable).unwrap(),
+            std::fs::canonicalize(&executable).unwrap()
         );
         std::fs::remove_file(executable).unwrap();
         assert_eq!(

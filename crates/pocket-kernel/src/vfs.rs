@@ -165,7 +165,7 @@ impl OpenVolume {
     /// for one to boot at all.
     ///
     /// Gizmondo's card marker is not a raw serial: the same-named file in
-    /// a GZGA directory (or directly in a flattened game root) stores
+    /// a GZGA (game) or GZAP (application) directory, or in a flattened root, stores
     /// `numeric_id - serial - 1`, modulo 2^32.
     /// Decode it so all titles from one card report the same volume identity.
     /// Other volumes keep a stable serial derived from their host path.
@@ -195,7 +195,12 @@ impl OpenVolume {
             }
             let name = entry.file_name();
             let upper = name.to_string_lossy().to_ascii_uppercase();
-            let Some(digits) = upper.strip_prefix("GZGA") else {
+            // Both games (GZGA) and applications (GZAP) use the same
+            // four-byte SD-card marker format. CoPilot UK is GZAP200001.
+            let Some(digits) = upper
+                .strip_prefix("GZGA")
+                .or_else(|| upper.strip_prefix("GZAP"))
+            else {
                 continue;
             };
             if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -2381,6 +2386,28 @@ mod tests {
         assert_eq!(v.volume(h).unwrap().serial(), expected);
         let marker = v.resolve("\\SD Card\\GZGA200046\\GZGA200046").unwrap();
         assert_eq!(std::fs::read(marker).unwrap(), [0x17, 0x0d, 0x8b, 0x6a]);
+    }
+
+    #[test]
+    fn copilot_gzap_marker_reports_original_card_serial() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_name = "GZAP200001";
+        let app = dir.path().join(app_name);
+        std::fs::create_dir(&app).unwrap();
+        // Original CoPilot UK marker, shipped in the game's SD-card image.
+        std::fs::write(app.join(app_name), b"SHiZ").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\SD Card\\", dir.path());
+        let h = v.open("\\SD Card\\Vol:", Access::Read, false).unwrap();
+        assert_eq!(v.volume(h).unwrap().serial(), 0xa599_c4ed);
+
+        // Also support the flattened layout produced by some game imports.
+        let flat = tempfile::tempdir().unwrap();
+        std::fs::write(flat.path().join(app_name), b"SHiZ").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\SD Card\\", flat.path());
+        let h = v.open("\\SD Card\\Vol:", Access::Read, false).unwrap();
+        assert_eq!(v.volume(h).unwrap().serial(), 0xa599_c4ed);
     }
 
     #[test]

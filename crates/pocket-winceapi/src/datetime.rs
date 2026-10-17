@@ -23,6 +23,11 @@ pub(crate) fn now() -> [u16; 8] {
     ]
 }
 pub(crate) fn register(d: &mut WinCeDispatcher) {
+    d.register_handler(
+        "coredll.dll",
+        "GetTimeZoneInformation",
+        time_zone_information,
+    );
     for name in [
         "GetDateFormatW",
         "GetDateFormatA",
@@ -32,6 +37,23 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         d.register_handler("coredll.dll", name, format_api);
     }
 }
+/// The virtual local clock is UTC (same policy as GetLocalTime).
+/// TIME_ZONE_INFORMATION is 172 bytes, with no daylight transitions.
+fn time_zone_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let output = ctx.arg_u32(0)?;
+    let mut bytes = [0u8; 172];
+    for offset in [4, 88] {
+        for (i, ch) in "UTC".encode_utf16().enumerate() {
+            bytes[offset + i * 2..offset + i * 2 + 2].copy_from_slice(&ch.to_le_bytes());
+        }
+    }
+    if output == 0 || ctx.cpu.write_mem(output, &bytes).is_err() {
+        crate::coredll::set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    Ok(DispatchOutcome::ReturnedR0(0)) // TIME_ZONE_ID_UNKNOWN, no DST
+}
+
 fn fail(ctx: &mut CallCtx<'_>, error: u32) -> Result<DispatchOutcome, KernelError> {
     crate::coredll::set_thread_error(ctx, error);
     Ok(DispatchOutcome::ReturnedR0(0))
@@ -351,6 +373,43 @@ fn format_api(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
+    #[test]
+    fn timezone_matches_virtual_utc_clock_and_initializes_the_entire_structure() {
+        let (mut cpu, mut k, mut d) = setup();
+        cpu.write_mem(0x1200, &[0xaa; 176]).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetTimeZoneInformation",
+                &[0x1200]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let bytes = cpu.read_mem(0x1200, 176).unwrap();
+        assert_eq!(&bytes[0..4], &[0; 4]);
+        assert_eq!(&bytes[4..10], b"U\0T\0C\0");
+        assert!(bytes[10..88].iter().all(|b| *b == 0));
+        assert_eq!(&bytes[88..94], b"U\0T\0C\0");
+        assert!(bytes[94..172].iter().all(|b| *b == 0));
+        assert_eq!(&bytes[172..], &[0xaa; 4]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetTimeZoneInformation",
+                &[0]
+            ),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+    }
+
     #[test]
     fn formats_civil_dates_and_literals() {
         let st = [2024, 2, 0, 29, 13, 7, 9, 0];

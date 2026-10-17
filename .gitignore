@@ -46,3 +46,4 @@ __pycache__/
 # Intermediate freestanding diagnostic compiler outputs
 /tools/*/build/
 /tools/*/dist/GZ*/
+target-copilot-check

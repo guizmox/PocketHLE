@@ -198,9 +198,10 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
     if style & 0xFFFF == 0x0001 && style >> 16 == 0xFFFF {
         return None;
     }
-    // A dialog with no controls is not worth materialising, and a
-    // four-digit count means we are not looking at a template.
-    if cdit == 0 || cdit > 255 {
+    // Empty dialogs are valid containers for controls created by the guest
+    // during WM_INITDIALOG. Keep their parent/visibility state too.
+    // A four-digit count means we are not looking at a template.
+    if cdit > 255 {
         return None;
     }
 

@@ -1082,6 +1082,11 @@ pub struct KernelState {
     pub window_userdata: HashMap<u32, u32>,
     /// Window handles and their class names.
     pub window_classes: HashMap<u32, String>,
+    /// Styles, extended styles and parent handles for each top-level HWND.
+    pub window_styles: HashMap<u32, (u32, u32)>,
+    pub window_parents: HashMap<u32, u32>,
+    /// Visibility of real top-level window instances.
+    pub window_visibility: HashMap<u32, bool>,
     /// Per-window user data used by WndProc implementations (GWL_USERDATA).
     pub window_user_data: u32,
     /// Timers keyed by (owning thread, window, ID); values are
@@ -1103,6 +1108,11 @@ pub struct KernelState {
     /// interrupted to run the guest's `WndProc` synchronously. See
     /// [`CreateStage`].
     pub create_frame: Option<GuestCallFrame>,
+    /// HWND being initialized by the current synchronous WM_CREATE callback.
+    pub create_frame_hwnd: u32,
+    /// Suspended outer window callbacks when a WM_CREATE creates another window.
+    /// Each entry preserves the outer API continuation, callback kind and HWND.
+    pub create_frame_stack: Vec<(GuestCallFrame, CreateStage, u32)>,
     /// Which leg of the synchronous window-creation message sequence is
     /// in flight inside the guest `WndProc`.
     pub create_stage: CreateStage,
@@ -1112,6 +1122,14 @@ pub struct KernelState {
     /// dialog HWND is only returned to the caller once the callback
     /// unwinds, otherwise the caller stores the callback's `BOOL`.
     pub dialog_frame: Option<GuestCallFrame>,
+    /// Modeless dialogs can create more dialogs during WM_INITDIALOG.
+    pub dialog_frame_hwnd: u32,
+    pub active_window: u32,
+    pub window_ids: HashMap<u32, u32>,
+    pub scroll_info: HashMap<(u32, u32), [i32; 5]>,
+    pub window_extra: HashMap<(u32, i32), u32>,
+    pub dialog_default_frames: Vec<(usize, u32, GuestCallFrame)>,
+    pub dialog_frame_stack: Vec<(GuestCallFrame, u32)>,
     pub accelerator_frames: Vec<(usize, u32, GuestCallFrame)>,
     pub shell_status: Option<u32>,
     /// Per-thread DispatchMessageW continuations. A worker may run while
@@ -3126,14 +3144,26 @@ impl Process {
                 window_procs: HashMap::new(),
                 window_userdata: HashMap::new(),
                 window_classes: HashMap::new(),
+                window_styles: HashMap::new(),
+                window_parents: HashMap::new(),
+                window_visibility: HashMap::new(),
                 window_user_data: 0,
                 timers: HashMap::new(),
                 synthetic_paint_next_ms: 0,
                 synthetic_create_sent: false,
                 synthetic_size_sent: false,
                 create_frame: None,
+                create_frame_hwnd: 0,
+                create_frame_stack: Vec::new(),
                 create_stage: CreateStage::Idle,
                 dialog_frame: None,
+                dialog_frame_hwnd: 0,
+                active_window: 0,
+                window_ids: HashMap::new(),
+                scroll_info: HashMap::new(),
+                window_extra: HashMap::new(),
+                dialog_default_frames: Vec::new(),
+                dialog_frame_stack: Vec::new(),
                 accelerator_frames: Vec::new(),
                 shell_status: None,
                 message_frames: Default::default(),
@@ -3366,6 +3396,9 @@ pub fn run_main_loop_with_hook(
     let mut last_direct_frames = process.state.direct_fb_frames;
     let mut last_direct_present: Option<Instant> = None;
     let mut last_frontend_poll: Option<Instant> = None;
+    // Opt-in diagnostics for CoPilot's otherwise silent early termination.
+    // Leave ordinary PocketHLE sessions and their logs unchanged.
+    let copilot_api_trace = std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some();
     let process_gate = process.state.object_handles.execution_gate();
     loop {
         if max_slices != 0 && slice >= max_slices {
@@ -3530,6 +3563,26 @@ pub fn run_main_loop_with_hook(
                                 == Some(handles::HandleObject::CurrentProcess)
                         {
                             let code = cpu.read_reg(ArmReg::R1)?;
+                            if copilot_api_trace {
+                                let lr = cpu.read_reg(ArmReg::Lr).unwrap_or(0);
+                                let sp = cpu.read_reg(ArmReg::Sp).unwrap_or(0);
+                                log::info!(
+                                    "CoPilot trace: implicit TerminateProcess trap=0x{addr:08x} caller_lr=0x{lr:08x} sp=0x{sp:08x} handle=0x{handle:08x} code=0x{code:08x}"
+                                );
+                                log::info!(
+                                    "CoPilot trace: guest return-address candidates: {}",
+                                    dump_stack_code_addrs(
+                                        cpu,
+                                        sp,
+                                        64,
+                                        process.image.image_base,
+                                        process
+                                            .image
+                                            .image_base
+                                            .saturating_add(process.image.size_of_image),
+                                    )
+                                );
+                            }
                             process.state.record_process_exit(code);
                             log::info!("WinCE implicit TerminateProcess -> exit code 0x{code:08x}");
                             return Ok(());
@@ -3748,8 +3801,19 @@ pub fn run_main_loop_with_hook(
                                 // and no per-call heap allocation — that
                                 // matters because this branch fires on every
                                 // single emulated WinCE API call.
+                                let guest_caller = if copilot_api_trace {
+                                    cpu.read_reg(ArmReg::Lr).unwrap_or(0) & !1
+                                } else {
+                                    0
+                                };
                                 let dispatched = dispatcher.dispatch(cpu, thunk, state);
                                 let outcome = dispatched?;
+                                if copilot_api_trace {
+                                    log::info!(
+                                        "CoPilot trace: API {} caller=0x{guest_caller:08x} outcome={outcome:?}",
+                                        thunk.label()
+                                    );
+                                }
                                 if matches!(outcome, DispatchOutcome::Halt)
                                     && log::log_enabled!(log::Level::Info)
                                 {
@@ -3757,11 +3821,23 @@ pub fn run_main_loop_with_hook(
                                 }
                                 outcome
                             }
-                            None if runtime_thunk.is_some() => dispatcher.dispatch(
-                                cpu,
-                                runtime_thunk.as_ref().unwrap(),
-                                &mut process.state,
-                            )?,
+                            None if runtime_thunk.is_some() => {
+                                let thunk = runtime_thunk.as_ref().unwrap();
+                                let guest_caller = if copilot_api_trace {
+                                    cpu.read_reg(ArmReg::Lr).unwrap_or(0) & !1
+                                } else {
+                                    0
+                                };
+                                let outcome =
+                                    dispatcher.dispatch(cpu, thunk, &mut process.state)?;
+                                if copilot_api_trace {
+                                    log::info!(
+                                        "CoPilot trace: runtime API {} caller=0x{guest_caller:08x} outcome={outcome:?}",
+                                        thunk.label()
+                                    );
+                                }
+                                outcome
+                            }
                             None => {
                                 // A non-thunk code hook fired. The expected
                                 // case is the WinCE kernel-trap region

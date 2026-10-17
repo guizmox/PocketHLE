@@ -2991,3 +2991,52 @@ releases apply separately to each source key so releasing one side does not
 release a held opposite side. Existing C1/D1 aliases and ordinary key ordering
 remain unchanged. Apply to shared GetKeyState/GetAsyncKeyState, with no title
 fingerprint, game patch or changed global button bindings.
+
+## CoPilot UK startup and modeless MFC dialogs (2026-10-17)
+
+The supplied CoPilot.exe (SHA256 4af57b4ac6c538c5fb06a15097c9f634f0879fea6d33aa18f512ddae93748bed)
+originally faults at 0x529a0: STR r1,[r0,#0x54], after loading a still-NULL
+object+0x1b4. The constructor at 0x4d2c0 calls the visibility-dependent path
+before that member is ready. IsWindowVisible must include child ancestors;
+modeless dialogs need distinct HWNDs, panels, extra bytes and callback frames.
+Sharing DEAD0002 lets a child overwrite the parent's hidden/visible state.
+
+DWL_DLGPROC (4) is separate from GWL_WNDPROC (-4). CreateDialog installs the
+mapped HLE DefDlgProc as its window procedure and stores the supplied callback
+in DWL_DLGPROC. MFC's bootstrap replaces both independently; DefDlgProc must
+call the stored dialog procedure and restore its own frame before returning
+DWL_MSGRESULT or applying default processing. Suppressing this callback skips
+OnInitDialog and leaves the Welcome menu empty. Nested dialog and window
+callbacks keep their individual continuations. Built-in controls expose the
+mapped HLE DefWindowProc as superclass, never the application's own WndProc.
+
+GetParent(desktop) and missing GetDlgItem terminate with NULL. Thread messages
+with hwnd=NULL have no window procedure (TIMERPROC is the exception). MFC
+otherwise recurses into itself or dispatches with a NULL CWnd. Child IDs,
+control enumeration, fonts, active window input routing and addressed paints
+are process-owned. The initial SysListView32 subset retains rows, row LPARAM,
+selection, fonts and basic data queries; it is not complete common-controls
+emulation (icons, multi-column layout, owner-data and full notifications remain).
+List queries must not produce new framebuffer frames.
+
+CoPilot config.dll getters read the actual file.cfg section selected by the
+ANSI "file\\section" argument. Missing keys preserve caller defaults.
+LANG_GetPhrase ordinal 46 implements the original bounded English fallback:
+FALSE can still require writing the source phrase. No other language support
+is implied. CEMgr_CheckWhereIsSpeech ordinal 326 has no parameters: R0 at its
+caller is stale, not an output buffer. Its SD-card subset checks configured
+speech directories. Log_Write is a void text/level API, not printf-varargs.
+The remaining map/grid/guidance/alert/TTS vendor engines are still unsupported;
+reaching the Welcome menu is not proof of navigation or speech playback.
+
+GetTimeZoneInformation reports an initialized 172-byte UTC structure, consistent
+with this emulator's UTC GetLocalTime. Standard window scrollbar APIs share
+per-window/per-axis state, mask-based queries and range/page clamping; absent
+bars fail with ERROR_NO_SCROLLBARS, not false success. SB_CTL is not emulated.
+
+Local validation uses native Linux Unicorn and the supplied full card data,
+not the stub CPU and not a patched guest binary. The startup Welcome menu now
+contains Going To..., Options, Help and Play Demo. Unit tests and the default
+Linux release workspace build run locally. Windows GUI/input/audio/GPS behavior
+and route calculation remain separate checks. Test DLL fixtures are generated
+by tools/ramtest/build.py before the two selected crate test suites are run.

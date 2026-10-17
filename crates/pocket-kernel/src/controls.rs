@@ -27,6 +27,7 @@ pub enum ControlClass {
     Button,
     Edit,
     Static,
+    ListView,
 }
 
 impl ControlClass {
@@ -41,6 +42,8 @@ impl ControlClass {
             Some(Self::Edit)
         } else if name.eq_ignore_ascii_case("STATIC") {
             Some(Self::Static)
+        } else if name.eq_ignore_ascii_case("SysListView32") {
+            Some(Self::ListView)
         } else {
             None
         }
@@ -280,6 +283,9 @@ pub struct ChildWindow {
     pub pressed: bool,
     /// `BM_SETCHECK` state of a check box or radio button.
     pub checked: bool,
+    pub list_items: Vec<(String, u32)>,
+    pub list_selected: Option<usize>,
+    pub font: u32,
 }
 
 impl ChildWindow {
@@ -392,6 +398,27 @@ impl ChildWindow {
             ControlClass::Button => self.render_button(surf, focused),
             ControlClass::Edit => self.render_edit(surf, focused),
             ControlClass::Static => self.render_static(surf),
+            ControlClass::ListView => {
+                surf.fill_rect(self.x, self.y, self.w, self.h, Self::WINDOW);
+                for (index, (text, _)) in self.list_items.iter().enumerate() {
+                    let y = self.y + index as i32 * 14;
+                    if y + 14 > self.y + self.h {
+                        break;
+                    }
+                    let selected = self.list_selected == Some(index);
+                    if selected {
+                        surf.fill_rect(self.x, y, self.w, 14, 0x001f);
+                    }
+                    draw_clipped(
+                        surf,
+                        self.x + 2,
+                        y + 3,
+                        text,
+                        if selected { Self::WINDOW } else { Self::TEXT },
+                        self.x + self.w - 1,
+                    );
+                }
+            }
         }
     }
 
@@ -691,6 +718,9 @@ impl Controls {
             enabled: style & WS_DISABLED == 0,
             pressed: false,
             checked: false,
+            list_items: Vec::new(),
+            list_selected: None,
+            font: crate::gdi::STOCK_SYSTEM_FONT,
         });
         hwnd
     }
@@ -736,6 +766,14 @@ impl Controls {
     }
 
     /// `GetDlgItem`: find a control by its parent and id.
+    pub fn children_of(&self, parent: u32) -> Vec<u32> {
+        self.children
+            .iter()
+            .filter(|c| c.parent == parent)
+            .map(|c| c.hwnd)
+            .collect()
+    }
+
     pub fn by_id(&self, parent: u32, id: u32) -> Option<&ChildWindow> {
         self.children
             .iter()
