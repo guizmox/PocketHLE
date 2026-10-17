@@ -653,6 +653,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "DrawFocusRect", 1, one_returning);
     d.register_handler(dll, "SetBkMode", set_bk_mode);
     d.register_handler(dll, "SetBkColor", set_bk_color);
+    d.register_handler(dll, "GetBkColor", get_bk_color);
     d.register_handler(dll, "SetTextColor", set_text_color);
     d.register_handler(dll, "GetTextColor", get_text_color);
     d.register_handler(dll, "SetTextAlign", set_text_align);
@@ -12991,6 +12992,19 @@ fn set_bk_color(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+/// COLORREF GetBkColor(HDC hdc) — return the background color stored
+/// for this device context. An invalid HDC returns CLR_INVALID.
+fn get_bk_color(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hdc = ctx.arg_u32(0)?;
+    let color = ctx
+        .kernel
+        .gdi
+        .dc(hdc)
+        .map(|dc| dc.bk_color)
+        .unwrap_or(u32::MAX);
+    Ok(DispatchOutcome::ReturnedR0(color))
+}
+
 fn set_text_color(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dc = ctx.arg_u32(0)?;
     let color = ctx.arg_u32(1)?;
@@ -14142,7 +14156,31 @@ fn sh_load_dibitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let path = String::from_utf16_lossy(&read_wstr(ctx, path_ptr, 260)?);
-    let Some(bytes) = read_guest_file(ctx, &path) else {
+    // The CRT fopen() path resolver tries several WinCE installation paths
+    // and, for relative paths, mounted-card basenames. A direct VFS lookup
+    // alone can fail for Skystriker's data\menu.bmp even when fopen can
+    // open the same file. Keep the fast path, then reuse fopen's resolver.
+    let bytes = read_guest_file(ctx, &path).or_else(|| {
+        let handle = open_cstr_path(ctx, &path, "rb");
+        if handle == 0 {
+            return None;
+        }
+        let loaded = (|| {
+            let size = usize::try_from(ctx.kernel.vfs.size(handle)?).ok()?;
+            let mut data = vec![0u8; size];
+            let count = ctx.kernel.vfs.read(handle, &mut data)?;
+            data.truncate(count);
+            Some(data)
+        })();
+        // Closing the temporary CRT-style VFS handle is required even if
+        // size/read failed; a bitmap is not an open FILE* in the guest.
+        let _ = ctx.kernel.vfs.close(handle);
+        if loaded.is_some() {
+            log::debug!("SHLoadDIBitmap({path:?}) -> opened via fopen path fallback");
+        }
+        loaded
+    });
+    let Some(bytes) = bytes else {
         log::debug!("SHLoadDIBitmap({path:?}) -> NULL (file not found)");
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
