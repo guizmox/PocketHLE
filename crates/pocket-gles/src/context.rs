@@ -288,6 +288,10 @@ pub struct Context {
     /// `GL_CULL_FACE` enable, tracked separately from the face mode so
     /// `glCullFace` before `glEnable` is not lost.
     cull_enabled: bool,
+    // The rectangle survives disabling GL_SCISSOR_TEST. PipelineState holds
+    // only the effective clip shared by software and native rendering.
+    scissor_enabled: bool,
+    scissor_box: Option<(i32, i32, i32, i32)>,
     /// The face `glCullFace` selected; GL's initial value is `GL_BACK`.
     cull_mode: CullMode,
 
@@ -347,6 +351,8 @@ impl Context {
             clear_color: [0.0, 0.0, 0.0, 1.0],
             clear_depth: 1.0,
             cull_enabled: false,
+            scissor_enabled: false,
+            scissor_box: None,
             cull_mode: CullMode::Back,
             target: RenderTarget::new(width, height),
             error: GL_NO_ERROR,
@@ -559,11 +565,8 @@ impl Context {
                 self.sync_cull();
             }
             GL_SCISSOR_TEST => {
-                if !on {
-                    self.state.scissor = None;
-                }
-                // Enabling without a box set leaves the full-window
-                // default, which matches GL's initial scissor state.
+                self.scissor_enabled = on;
+                self.state.scissor = if on { self.scissor_box } else { None };
             }
             GL_TEXTURE_2D => {
                 let unit = self.active_texture as usize;
@@ -1422,7 +1425,13 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        self.state.scissor = Some((x, y, w, h));
+        // SkyStriker sets a 138x99 aircraft-preview box, but never enables
+        // GL_SCISSOR_TEST. glScissor changes the box, not its enable state;
+        // clipping immediately confined every later gameplay clear/draw.
+        self.scissor_box = Some((x, y, w, h));
+        if self.scissor_enabled {
+            self.state.scissor = self.scissor_box;
+        }
     }
 
     pub fn set_depth_range(&mut self, near: f32, far: f32) {
@@ -2318,6 +2327,89 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
+    fn scissor_enable_sequence(c: &mut Context) {
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.vertex_array = ArrayPointer {
+            enabled: true,
+            size: 3,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: BASE,
+            buffer: 0,
+        };
+        c.set_capability(GL_SCISSOR_TEST, true);
+        c.clear_color = [1., 0., 0., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 1, 1), [255, 0, 0, 255]);
+        c.set_capability(GL_SCISSOR_TEST, false);
+        c.set_scissor(16, 16, 16, 16);
+        c.clear_color = [0., 0., 0., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.current_color = [0., 1., 0., 1.];
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        // Setting a box while disabled must not clip either clear or draw.
+        assert_eq!(pixel(c, 1, 1), [0, 255, 0, 255]);
+        c.set_capability(GL_SCISSOR_TEST, true);
+        c.clear_color = [1., 0., 0., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 20, 40), [255, 0, 0, 255]);
+        assert_eq!(pixel(c, 1, 1), [0, 255, 0, 255]);
+        c.current_color = [0., 0., 1., 1.];
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 20, 40), [0, 0, 255, 255]);
+        assert_eq!(pixel(c, 1, 1), [0, 255, 0, 255]);
+        c.set_capability(GL_SCISSOR_TEST, false);
+        c.set_scissor(0, 0, 8, 8);
+        c.set_capability(GL_SCISSOR_TEST, true);
+        c.set_scissor(0, 0, -1, 8);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.clear_color = [1., 1., 0., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 2, 60), [255, 255, 0, 255]);
+        assert_eq!(pixel(c, 20, 40), [0, 0, 255, 255]);
+        // Disable/re-enable preserves the most recently specified rectangle.
+        c.set_capability(GL_SCISSOR_TEST, false);
+        c.set_capability(GL_SCISSOR_TEST, true);
+        c.clear_color = [1., 0., 1., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 2, 60), [255, 0, 255, 255]);
+        assert_eq!(pixel(c, 20, 40), [0, 0, 255, 255]);
+        c.set_scissor(0, 0, 0, 0);
+        c.clear_color = [1., 1., 1., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 2, 60), [255, 0, 255, 255]);
+        c.set_capability(GL_SCISSOR_TEST, false);
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(pixel(c, 2, 60), [255, 255, 255, 255]);
+        assert_eq!(pixel(c, 20, 40), [255, 255, 255, 255]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+
+    #[test]
+    fn scissor_box_does_not_enable_clipping_and_survives_disable() {
+        scissor_enable_sequence(&mut ctx());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; scissor enable and rectangle are independent"]
+    fn gpu_scissor_box_does_not_enable_clipping_and_survives_disable() {
+        for es in [false, true] {
+            scissor_enable_sequence(&mut native_ctx(es));
+        }
+    }
+
     #[test]
     fn anisotropy_setting_does_not_enable_software_context_gpu() {
         let mut c = Context::new(4, 4);

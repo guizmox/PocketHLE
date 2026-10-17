@@ -1,11 +1,1 @@
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/vfs.rs
-crates/pocket-kernel/src/controls.rs
-crates/pocket-winceapi/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/copilot.rs
-crates/pocket-winceapi/src/gx.rs
-crates/pocket-winceapi/src/dlgtemplate.rs
-crates/pocket-winceapi/src/datetime.rs
-crates/pocket-winceapi/src/scroll.rs
-docs/AGENTS.md
+crates/pocket-gles/src/context.rs
