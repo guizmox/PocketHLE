@@ -1,4 +1,4 @@
-//! Explicit Colors menu unlock. Solo/online money is not granted by this action.
+//! Explicit Colors menu unlocks. Solo/online money is not granted by this action.
 use crate::{is_colors_game, GameEntry};
 use anyhow::{bail, Context, Result};
 use std::{
@@ -58,7 +58,8 @@ fn transform(input: &[u8], decrypt: bool) -> Vec<u8> {
 
 fn unlock_config(input: &[u8]) -> Result<Vec<u8>> {
     let text = String::from_utf8(transform(input, true)).context("Unknown Colors config format")?;
-    let mut found = false;
+    let mut turf_found = false;
+    let mut tag_found = false;
     let mut output = String::new();
     for line in text.split_inclusive('\n') {
         let clean = line.trim_end_matches(['\r', '\n']);
@@ -75,22 +76,34 @@ fn unlock_config(input: &[u8]) -> Result<Vec<u8>> {
         {
             bail!("Invalid Colors config; no files changed");
         }
-        if key == "TurfWarUnlocked" {
-            if found || !matches!(value, "0" | "1") {
-                bail!("Ambiguous Turf Wars setting");
+        if matches!(key, "TurfWarUnlocked" | "TagEditorUnlocked") {
+            let found = if key == "TurfWarUnlocked" {
+                &mut turf_found
+            } else {
+                &mut tag_found
+            };
+            if *found || !matches!(value, "0" | "1") {
+                bail!("Ambiguous Colors unlock setting: {key}");
             }
-            found = true;
-            output.push_str("TurfWarUnlocked=1");
+            *found = true;
+            output.push_str(key);
+            output.push_str("=1");
             output.push_str(&line[clean.len()..]);
         } else {
             output.push_str(line);
         }
     }
-    if !found {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
+    for (key, found) in [
+        ("TurfWarUnlocked", turf_found),
+        ("TagEditorUnlocked", tag_found),
+    ] {
+        if !found {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(key);
+            output.push_str("=1\n");
         }
-        output.push_str("TurfWarUnlocked=1\n");
     }
     Ok(transform(output.as_bytes(), false))
 }
@@ -212,7 +225,7 @@ fn unlock_in_flash(flash: &Path) -> Result<String> {
     }
     let config_changed = old_config.as_deref() != Some(new_config.as_slice());
     if !config_changed {
-        return Ok("Turf Wars already unlocked. Solo balance unchanged; online funds are managed by the server.".into());
+        return Ok("Turf Wars and Tag Editor already unlocked. Player credits unchanged.".into());
     }
     // Validate both files before touching either. Keep unique original copies.
     fs::create_dir_all(&directory)?;
@@ -227,7 +240,7 @@ fn unlock_in_flash(flash: &Path) -> Result<String> {
         log::info!("Colors original config backed up before Turf Wars unlock");
     }
     replace(&config, &new_config)?;
-    Ok("Turf Wars unlocked. Solo balance unchanged; starting online funds are provided by the server on first registration.".into())
+    Ok("Turf Wars and Tag Editor unlocked. Player credits unchanged; online funds remain server-managed.".into())
 }
 
 #[cfg(test)]
@@ -267,10 +280,67 @@ mod tests {
         let changed = unlock_config(&original).unwrap();
         assert_eq!(
             String::from_utf8(transform(&changed, true)).unwrap(),
-            "MainVolume=128\nLanguage=english\nTurfWarUnlocked=1\n"
+            "MainVolume=128\nLanguage=english\nTurfWarUnlocked=1\nTagEditorUnlocked=1\n"
         );
         assert_eq!(unlock_config(&changed).unwrap(), changed);
         assert!(unlock_config(b"corrupt").is_err());
+    }
+    #[test]
+    fn previously_unlocked_turf_wars_can_still_unlock_tag_editor() {
+        // Simulate a player who clicked the old Turf Wars-only button.
+        let old = transform(
+            b"MainVolume=128\nTurfWarUnlocked=1\nTagEditorUnlocked=0\n",
+            false,
+        );
+        let changed = unlock_config(&old).unwrap();
+        assert_eq!(
+            transform(&changed, true),
+            b"MainVolume=128\nTurfWarUnlocked=1\nTagEditorUnlocked=1\n".to_vec()
+        );
+        assert_eq!(unlock_config(&changed).unwrap(), changed);
+
+        // The old config may not contain the newer Tag Editor key at all.
+        let old_without_tag = transform(b"TurfWarUnlocked=1\n", false);
+        assert_eq!(
+            transform(&unlock_config(&old_without_tag).unwrap(), true),
+            b"TurfWarUnlocked=1\nTagEditorUnlocked=1\n".to_vec()
+        );
+    }
+    #[test]
+    fn tag_unlock_preserves_existing_player_credits_and_never_changes_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("MyGames/GZGA200015 Colors");
+        fs::create_dir_all(directory.join("Save")).unwrap();
+        let config_path = directory.join("config.cfg");
+        fs::write(
+            &config_path,
+            transform(b"TurfWarUnlocked=1\nTagEditorUnlocked=0\n", false),
+        ).unwrap();
+        let save_path = directory.join("Save/SaveFile.isv");
+        for (money, server_money) in [(525, 525), (1500, 525), (98000, 90000)] {
+            let original = save(money, server_money);
+            fs::write(&save_path, &original).unwrap();
+            unlock_in_flash(temp.path()).unwrap();
+            assert_eq!(fs::read(&save_path).unwrap(), original);
+            assert_eq!(validate_save(&fs::read(&save_path).unwrap()).unwrap(), (money, server_money));
+        }
+        assert_eq!(
+            transform(&fs::read(&config_path).unwrap(), true),
+            b"TurfWarUnlocked=1\nTagEditorUnlocked=1\n"
+        );
+        let backups = fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "bak"))
+            .count();
+        assert_eq!(backups, 1);
+    }
+    #[test]
+    fn invalid_or_duplicate_tag_flags_are_rejected_without_modification() {
+        for setting in ["TagEditorUnlocked=2\n", "TagEditorUnlocked=0\nTagEditorUnlocked=1\n"] {
+            let cfg = transform(format!("TurfWarUnlocked=1\n{setting}").as_bytes(), false);
+            assert!(unlock_config(&cfg).is_err());
+        }
     }
     #[test]
     fn files_are_backed_up_once_and_mixed_case_paths_are_reused() {

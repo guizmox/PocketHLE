@@ -11,8 +11,8 @@ HTTPS certificate validation remains enabled. Desktop supports environment
 proxies and system certificate roots, retaining public roots for Proton hosts
 whose Windows store is empty. No game/catalogue data is sent or modified.
 
-Only a strictly newer semantic version is offered. Tags use `v0.3.2` or
-`0.3.2`; drafts, prereleases and non-version tags are ignored. Build metadata
+Only a strictly newer semantic version is offered. Tags use `v0.3.3` or
+`0.3.3`; drafts, prereleases and non-version tags are ignored. Build metadata
 does not change precedence. Desktop compares the workspace Cargo version.
 Android's generated `BuildConfig.UPDATE_VERSION` reads that same version from
 the root Cargo.toml; its existing `versionName` test suffix is not the update
@@ -44,7 +44,7 @@ download, automatic installation, EXE replacement or APK installation request.
    Cargo.lock. For Android distribution also increase `versionCode`; keep its
    displayed `versionName` appropriate for the release.
 2. Build and validate the packages from that commit with CI.
-3. Publish a stable GitHub Release with the matching tag, for example `v0.3.2`.
+3. Publish a stable GitHub Release with the matching tag, for example `v0.3.3`.
    Attach the Windows, Linux and Steam Deck packages and the Android APK as
    release assets. Actions artifacts alone do not trigger a release notification.
 

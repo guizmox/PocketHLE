@@ -1,9 +1,9 @@
 # PocketHLE — architecture reference for coding agents
 
-Colors startup's explicit "Unlock Turf Wars (skip solo missions)" action is shared
+Colors startup's explicit "Unlock Turf Wars + Tag Editor" action is shared
 through pocket-library::colors_save, called off the UI thread on desktop/Deck
 (X in the startup dialog) and Android JNI. Never apply it automatically at launch
-or while a game is running. It changes encrypted config.cfg TurfWarUnlocked to 1
+or while a game is running. It changes encrypted config.cfg TurfWarUnlocked and TagEditorUnlocked to 1
 and never modifies the existing ISV, Money, ServerMoney, or online balance.
 Repeated clicks must preserve solo gains and synchronization checkpoints and
 must never contact the server or grant money. No save is invented if absent.

@@ -761,8 +761,8 @@ impl PocketLauncher {
             match ev {
                 UiEvent::ColorsUnlocked(result) => {
                     self.library_busy = false;
-                    self.colors_startup_notice = Some(("Unlock Turf Wars".into(),
-                        result.unwrap_or_else(|error| format!("Could not unlock Turf Wars: {error}"))));
+                    self.colors_startup_notice = Some(("Unlock Turf Wars + Tag Editor".into(),
+                        result.unwrap_or_else(|error| format!("Could not unlock Colors menus: {error}"))));
                 }
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
@@ -3352,7 +3352,7 @@ impl PocketLauncher {
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 if cfg!(feature = "steam-deck") {
-                    ui.label("A: Start • B: Back • X: Unlock Turf Wars • D-pad / stick: language");
+                    ui.label("A: Start • B: Back • X: Unlock Turf Wars + Tag Editor • D-pad / stick: language");
                 }
                 if languages.len() > 1 {
                 ui.label("Language");
@@ -3392,10 +3392,10 @@ impl PocketLauncher {
                 ui.text_edit_singleline(&mut draft.colors_server_url)
                     .on_hover_text("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.");
                 ui.separator();
-                if ui.add_enabled(!self.library_busy && self.running_game.is_none(), egui::Button::new("Unlock Turf Wars (skip solo missions)")).clicked() {
+                if ui.add_enabled(!self.library_busy && self.running_game.is_none(), egui::Button::new("Unlock Turf Wars + Tag Editor")).clicked() {
                     unlock_requested = true;
                 }
-                if self.library_busy { ui.horizontal(|ui| { ui.spinner(); ui.label("Unlocking Turf Wars…"); }); }
+                if self.library_busy { ui.horizontal(|ui| { ui.spinner(); ui.label("Unlocking Turf Wars + Tag Editor…"); }); }
                 if ui.add_enabled(!self.library_busy, egui::Button::new("Start")).clicked() {
                     selected = Some(draft.clone());
                 }
@@ -3408,7 +3408,7 @@ impl PocketLauncher {
         }
         if unlock_requested && !self.library_busy && self.running_game.is_none() {
             self.library_busy = true;
-            self.status = "Unlocking Turf Wars…".into();
+            self.status = "Unlocking Turf Wars + Tag Editor…".into();
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
             std::thread::spawn(move || {

@@ -565,7 +565,7 @@ class MainActivity : AppCompatActivity() {
         val server = field("Colors multiplayer server", config.optString("colors_server_url"), sectionTitle = true)
         label("Host, IP or HTTP(S) origin. Leave empty to use the public Colors server.")
         val unlockTurf = android.widget.Button(this).apply {
-            text = "Unlock Turf Wars (skip solo missions)"
+            text = "Unlock Turf Wars + Tag Editor"
         }
         content.addView(unlockTurf)
         unlockTurf.setOnClickListener {
@@ -573,7 +573,7 @@ class MainActivity : AppCompatActivity() {
             dialog.setCancelable(false)
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
-            unlockTurf.text = "Unlocking Turf Wars…"
+            unlockTurf.text = "Unlocking Turf Wars + Tag Editor…"
             lifecycleScope.launch {
                 try {
                     val result = withContext(Dispatchers.IO) {
@@ -582,17 +582,17 @@ class MainActivity : AppCompatActivity() {
                     if (dialog.isShowing) {
                         val message = if (result.optBoolean("ok")) {
                             result.optString("message")
-                        } else result.optString("error", "Could not unlock Turf Wars")
-                        AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars")
+                        } else result.optString("error", "Could not unlock Colors menus")
+                        AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars + Tag Editor")
                             .setMessage(message).setPositiveButton(android.R.string.ok, null).show()
                     }
                 } catch (error: Exception) {
-                    if (dialog.isShowing) AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars")
-                        .setMessage(error.message ?: "Could not unlock Turf Wars")
+                    if (dialog.isShowing) AlertDialog.Builder(this@MainActivity).setTitle("Unlock Turf Wars + Tag Editor")
+                        .setMessage(error.message ?: "Could not unlock Colors menus")
                         .setPositiveButton(android.R.string.ok, null).show()
                 } finally {
                     if (dialog.isShowing) {
-                        unlockTurf.text = "Unlock Turf Wars (skip solo missions)"
+                        unlockTurf.text = "Unlock Turf Wars + Tag Editor"
                         unlockTurf.isEnabled = true
                         dialog.setCancelable(true)
                         dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true

@@ -95,7 +95,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_unlockColorsTurfWars<
         &env,
         match result {
             Ok(message) => serde_json::json!({"ok": true, "message": message}).to_string(),
-            Err(error) => error_json(&format!("Could not unlock Turf Wars: {error:#}")),
+            Err(error) => error_json(&format!("Could not unlock Colors menus: {error:#}")),
         },
     )
 }

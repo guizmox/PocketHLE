@@ -2,17 +2,17 @@
 
 ## Startup action
 
-Windows/Linux/Steam Deck and Android show **Unlock Turf Wars (skip solo missions)**
+Windows/Linux/Steam Deck and Android show **Unlock Turf Wars + Tag Editor**
 in the existing Colors startup dialog. On Deck, X invokes the same action.
 It runs before starting the game, off the UI thread; Start and repeated actions
 are disabled until it finishes. It never runs automatically on later launches.
 
 - Decrypt and validate `config.cfg` and an existing `Save/SaveFile.isv` before
   changing either file.
-- Set `TurfWarUnlocked=1`, preserving the other config settings.
+- Set `TurfWarUnlocked=1` and `TagEditorUnlocked=1`, preserving all other config settings.
 - Leave the entire ISV byte-identical, regardless of Money or ServerMoney.
 - Never contact the server, grant money, or change registration identity.
-- Repeated clicks only keep the unlock flag enabled. They preserve pending solo
+- Repeated clicks keep both unlock flags enabled, including when Turf Wars was already unlocked by an earlier version. They preserve pending solo
   gains, previous online purchases, and the synchronization checkpoint.
 - If no save exists, do not invent one. Preserve missions and all other settings.
 
@@ -32,7 +32,7 @@ reader/writer and ISV parser/serializer through PocketHLE. With the generic
 absolute-write fix applied, the game opens the original Flash paths for rb/wb.
 The original ISV round-trips to exactly its original plaintext. Earlier funding-policy diagnostics also verified that the ARM parser/serializer
 accepts changed balances. The current startup action leaves the ISV untouched. Config read/write retains
-all settings, and the host unlock changes only TurfWarUnlocked from 0 to 1.
+all other settings; the host unlock changes only TurfWarUnlocked and TagEditorUnlocked to 1.
 Original uploaded files remain untouched; all runs use copies.
 
 Rust tests cover codec/key rotations, lower/equal/higher balances, a higher server
