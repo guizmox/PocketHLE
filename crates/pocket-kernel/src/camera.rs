@@ -120,8 +120,8 @@ impl Device {
             || format[2] > 640
             || format[3] > 480
             || format[2] % 8 != 0
-            // Colors' Tag Editor requests a 192x148 RGB565 preview.
-            // Height need not be a multiple of 8: preview() handles each row.
+        // Colors' Tag Editor requests a 192x148 RGB565 preview.
+        // Height need not be a multiple of 8: preview() handles each row.
         {
             return Err(87);
         }
