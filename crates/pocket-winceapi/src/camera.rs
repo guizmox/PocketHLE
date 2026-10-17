@@ -428,6 +428,31 @@ mod tests {
         assert_eq!(r.drops.load(Ordering::SeqCst), 1);
     }
     #[test]
+    fn colors_tag_editor_accepts_192x148_preview_and_returns_rgb565() {
+        let mut r = Rig::new();
+        r.cpu
+            .write_mem(
+                0x1200,
+                &[640u32, 480, 192, 148]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(
+            r.ctl(2101, 0x1200, 16, 0, 0),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        r.start();
+        r.info(192, 148, 1000);
+        assert_eq!(
+            r.ctl(2105, 0x1100, 16, 0x10000, 192 * 148 * 2),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(r.cpu.read_u32_le(0x1300).unwrap(), 192 * 148 * 2);
+        assert_eq!(r.cpu.read_u32_le(0x1108).unwrap(), 1);
+    }
+    #[test]
     fn errors_and_invalid_output_do_not_consume_a_frame() {
         let mut r = Rig::new();
         r.info(320, 240, 0);

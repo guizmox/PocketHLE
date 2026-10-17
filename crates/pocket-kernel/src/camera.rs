@@ -120,7 +120,8 @@ impl Device {
             || format[2] > 640
             || format[3] > 480
             || format[2] % 8 != 0
-            || format[3] % 8 != 0
+            // Colors' Tag Editor requests a 192x148 RGB565 preview.
+            // Height need not be a multiple of 8: preview() handles each row.
         {
             return Err(87);
         }
@@ -303,6 +304,9 @@ mod tests {
             assert_eq!(d.set_format(bad), Err(87));
         }
         assert_eq!(d.set_format([640, 480, 8, 8]), Ok(()));
+        // ARM Colors autorun.exe passes 192x148 to CAM1 SET_FORMAT.
+        assert_eq!(d.set_format([640, 480, 192, 148]), Ok(()));
+        assert_eq!(d.format, [640, 480, 192, 148]);
         assert_eq!(d.set_format([640, 480, 640, 480]), Ok(()));
     }
     #[test]
