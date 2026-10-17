@@ -127,6 +127,9 @@ crates/pocket-winceapi/src/zlib.rs
 crates/pocket-winceapi/tests/fixtures/README.md
 crates/pocket-winceapi/tests/fixtures/seeking.wmv
 frontends/pocket-cli/src/main.rs
+frontends/pocket-cli/Cargo.toml
+frontends/pocket-desktop/src/runner.rs
+frontends/pocket-cli/examples/navigator_gui_probe.rs
 Cargo.toml
 Cargo.lock
 docs/AGENTS.md

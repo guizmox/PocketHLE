@@ -15460,6 +15460,8 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             // park forever on a dialog that can never call `EndDialog`.
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
+        let previous_active = ctx.kernel.active_window;
+        let previous_focus = ctx.kernel.controls.focus;
         build_dialog_from_template_for(ctx, lp_template, FAKE_MODAL_HWND, true);
         // A template we could not parse leaves no panel behind; without
         // controls the dialog can never be answered.
@@ -15467,7 +15469,20 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             log::debug!("DialogBoxIndirectParamW: no panel materialised, reporting cancelled");
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
+        let frame = GuestCallFrame {
+            args: [
+                ctx.arg_u32(0)?,
+                ctx.arg_u32(1)?,
+                ctx.arg_u32(2)?,
+                ctx.arg_u32(3)?,
+            ],
+            sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+            lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+        };
         ctx.kernel.modal_dialog = Some(ModalDialog {
+            previous_active,
+            previous_focus,
+            frame,
             hwnd: FAKE_MODAL_HWND,
             proc: dialog_proc,
             result: None,
@@ -15564,8 +15579,7 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     // `EndDialog` was called: tear the dialog down and return its result.
     if let Some(result) = ctx.kernel.modal_dialog.as_ref().and_then(|d| d.result) {
         log::debug!("DialogBoxIndirectParamW answered with {result}");
-        close_modal_dialog(ctx);
-        return Ok(DispatchOutcome::ReturnedR0(result));
+        return finish_modal_dialog(ctx, result);
     }
 
     // `DefDlgProc` behaviour: an `IDOK` / `IDCANCEL` the DialogProc did
@@ -15581,8 +15595,7 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     {
         if id == pocket_kernel::msgbox::id::OK || id == pocket_kernel::msgbox::id::CANCEL {
             log::debug!("DialogBoxIndirectParamW: DefDlgProc ends the dialog with {id}");
-            close_modal_dialog(ctx);
-            return Ok(DispatchOutcome::ReturnedR0(id));
+            return finish_modal_dialog(ctx, id);
         }
     }
 
@@ -15594,22 +15607,42 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     };
     if spins >= MESSAGE_BOX_MAX_SPINS {
         log::debug!("DialogBoxIndirectParamW unanswered after {spins} spins, reporting cancelled");
-        close_modal_dialog(ctx);
         // IDCANCEL, the same answer dismissing the dialog would give.
-        return Ok(DispatchOutcome::ReturnedR0(2));
+        return finish_modal_dialog(ctx, 2);
     }
+    // Wait in host time rather than consuming the headless spin budget in
+    // less than a user's reaction time. The kernel still presents/polls input.
+    std::thread::sleep(std::time::Duration::from_millis(1));
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
+}
+
+fn finish_modal_dialog(ctx: &mut CallCtx<'_>, result: u32) -> Result<DispatchOutcome, KernelError> {
+    let frame = ctx.kernel.modal_dialog.as_ref().map(|d| d.frame);
+    close_modal_dialog(ctx);
+    if let Some(frame) = frame {
+        for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+            .into_iter()
+            .zip(frame.args)
+        {
+            ctx.cpu.write_reg(reg, value)?;
+        }
+        ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
+        ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(result))
 }
 
 /// Drop a finished modal dialog: its controls, its panel, its proc
 /// registration, and the repaint that reveals what it was covering.
 fn close_modal_dialog(ctx: &mut CallCtx<'_>) {
-    let hwnd = match ctx.kernel.modal_dialog.take() {
-        Some(d) => d.hwnd,
+    let dialog = match ctx.kernel.modal_dialog.take() {
+        Some(d) => d,
         None => return,
     };
-    ctx.kernel.controls.destroy_children_of(hwnd);
-    ctx.kernel.window_procs.remove(&hwnd);
+    ctx.kernel.controls.destroy_children_of(dialog.hwnd);
+    ctx.kernel.window_procs.remove(&dialog.hwnd);
+    ctx.kernel.active_window = dialog.previous_active;
+    ctx.kernel.controls.focus = dialog.previous_focus;
     repaint_controls(ctx);
     ctx.kernel.framebuffer.mark_dirty();
 }
@@ -15725,6 +15758,7 @@ fn message_box_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
     // Re-enter our own thunk: the call blocks, exactly as it does on the
     // device, and the run loop gets to present a frame in between.
+    std::thread::sleep(std::time::Duration::from_millis(1));
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
 }
 
@@ -21749,6 +21783,73 @@ mod tests {
     }
 
     #[test]
+    fn modal_dialog_answer_and_timeout_restore_original_call_after_guest_callback() {
+        for answer in [Some(7), None] {
+            let mut cpu = scanf_cpu();
+            let mut kernel = fresh_kernel();
+            kernel.active_window = FAKE_HWND;
+            let owner_edit = kernel.controls.create(
+                FAKE_HWND,
+                ControlClass::Edit,
+                93,
+                String::new(),
+                0x50010000,
+                0,
+                0,
+                40,
+                20,
+            );
+            kernel.controls.focus = owner_edit;
+            let thunk = thunk_at(0x70000100);
+            let mut template = [0u8; 64];
+            template[..4].copy_from_slice(&0x10000000u32.to_le_bytes());
+            template[14..16].copy_from_slice(&100i16.to_le_bytes());
+            template[16..18].copy_from_slice(&80i16.to_le_bytes());
+            cpu.write_mem(0x2000, &template).unwrap();
+            for (reg, value) in [
+                (ArmReg::R0, 0x10000),
+                (ArmReg::R1, 0x2000),
+                (ArmReg::R2, FAKE_HWND),
+                (ArmReg::R3, 0x10200),
+                (ArmReg::Sp, 0x1800),
+                (ArmReg::Lr, 0x10400),
+            ] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            cpu.write_mem(0x1800, &0x55u32.to_le_bytes()).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                dialog_box_indirect_param_w(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(0x10200)
+            );
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_INITDIALOG);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0x55);
+            // POP {PC} returns to the thunk but leaves LR at the last guest helper.
+            ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+            ctx.cpu.write_reg(ArmReg::Lr, 0x566F8).unwrap();
+            ctx.kernel.active_window = FAKE_MODAL_HWND;
+            ctx.kernel.controls.focus = 0;
+            let modal = ctx.kernel.modal_dialog.as_mut().unwrap();
+            modal.result = answer;
+            modal.spins = MESSAGE_BOX_MAX_SPINS - 1;
+            assert_eq!(
+                dialog_box_indirect_param_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(answer.unwrap_or(2))
+            );
+            assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1800);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10400);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0x2000);
+            assert!(ctx.kernel.modal_dialog.is_none());
+            assert_eq!(ctx.kernel.active_window, FAKE_HWND);
+            assert_eq!(ctx.kernel.controls.focus, owner_edit);
+        }
+    }
+
+    #[test]
     fn dispatch_message_nested_modal_loop_preserves_both_guest_stacks() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
@@ -22380,6 +22481,33 @@ mod tests {
         assert_eq!(
             get_focus(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(edit)
+        );
+    }
+
+    #[test]
+    fn find_first_file_accepts_mounted_volume_directory_without_initial_slash() {
+        let card = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(card.path().join("DataCD")).unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount_read_only("/SD Card/", card.path());
+        kernel.vfs.set_default_dir("/SD Card/Navigator/");
+        let path: Vec<u16> = "SD Card/DataCD".encode_utf16().chain(Some(0)).collect();
+        cpu.write_mem(0x2000, &wide_to_bytes(&path)).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x3000).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let result = find_first_file_w(&mut ctx).unwrap();
+        assert_ne!(result, DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap() & 0x10, 0x10);
+        assert_eq!(
+            ctx.cpu.read_mem(0x3000 + FIND_DATA_NAME_OFF, 14).unwrap(),
+            wide_to_bytes(&[68, 97, 116, 97, 67, 68, 0])
         );
     }
 

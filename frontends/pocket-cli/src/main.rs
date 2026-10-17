@@ -1284,6 +1284,36 @@ impl pocket_core::kernel::FrameHook for LiveInputHook {
                             if line == "quit" {
                                 return FrameAction::Stop;
                             }
+                            if line == "windows" {
+                                log::info!("window snapshot: active=0x{:08x} focus=0x{:08x} classes={:?} parents={:?} styles={:?} rects={:?} controls={:#?}",
+                                    state.active_window, state.controls.focus, state.window_classes,
+                                    state.window_parents, state.window_styles, state.window_rects, state.controls);
+                                continue;
+                            }
+                            if let Some(position) = line.strip_prefix("gps ") {
+                                let service = state.vfs.gps_service();
+                                let position = position.split_once(',').and_then(|(lat, lon)| {
+                                    Some((
+                                        lat.trim().parse::<f64>().ok()?,
+                                        lon.trim().parse::<f64>().ok()?,
+                                    ))
+                                });
+                                if let Some(position) = position.filter(|_| service.is_enabled()) {
+                                    match service.set_fixed_position(Some(position)) {
+                                        Ok(()) => log::info!(
+                                            "live GPS simulator position: {},{}",
+                                            position.0,
+                                            position.1
+                                        ),
+                                        Err(e) => {
+                                            log::warn!("invalid live GPS position: error {e}")
+                                        }
+                                    }
+                                } else {
+                                    log::warn!("live gps expects LAT,LON and an explicitly enabled GPS service");
+                                }
+                                continue;
+                            }
                             let at = self
                                 .scheduled
                                 .pending

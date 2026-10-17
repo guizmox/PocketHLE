@@ -372,6 +372,27 @@ impl GameEntry {
         }
     }
 
+    /// Preserve the executable's actual directory on a Gizmondo card.
+    /// A flattened import can still use its declared install alias.
+    pub fn gizmondo_guest_exe_path(&self, library_root: &Path) -> Option<String> {
+        let executable = self.launch_path(library_root);
+        let card = self.gizmondo_card_root(library_root);
+        let relative = executable.strip_prefix(&card).ok()?;
+        let parts: Vec<_> = relative
+            .components()
+            .map(|c| c.as_os_str().to_str())
+            .collect::<Option<_>>()?;
+        if parts.is_empty() || parts.iter().any(|p| *p == "..") {
+            return None;
+        }
+        if parts.len() == 1 {
+            if let Some(path) = self.guest_exe_path() {
+                return Some(path);
+            }
+        }
+        Some(format!("\\SD Card\\{}", parts.join("\\")))
+    }
+
     pub fn save_dir(&self, library_root: &Path) -> PathBuf {
         save_data::save_dir_for(library_root, &self.id)
     }
@@ -3523,6 +3544,43 @@ mod tests {
         assert_eq!(
             setup_install_dir(&files).as_deref(),
             Some("\\Program Files\\Asphalt 2 3D\\")
+        );
+    }
+
+    #[test]
+    fn gizmondo_module_path_keeps_nested_card_directory_and_mount_target() {
+        let root = tmpdir("gizmondo-module-nested");
+        let mut entry = entry_with_install_dir(Some("\\SD Card\\"));
+        entry.id = "GZAP250006".into();
+        entry.executable = "extracted/GZAP250006/CoPilot.exe".into();
+        let data = entry.extracted_dir(&root).join("GZAP250006");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("CoPilot.exe"), b"fixture").unwrap();
+        fs::write(data.join("pid.cfg"), b"pid").unwrap();
+        assert_eq!(
+            entry.gizmondo_guest_exe_path(&root).as_deref(),
+            Some("\\SD Card\\GZAP250006\\CoPilot.exe")
+        );
+        assert_eq!(
+            entry.install_mount_dir(&root, "\\SD Card\\GZAP250006\\"),
+            data
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gizmondo_flattened_module_preserves_declared_install_alias() {
+        let root = tmpdir("gizmondo-module-flat");
+        let mut entry = entry_with_install_dir(Some("\\SD Card\\GZAP250006\\"));
+        entry.executable = "extracted/CoPilot.exe".into();
+        assert_eq!(
+            entry.gizmondo_guest_exe_path(&root).as_deref(),
+            Some("\\SD Card\\GZAP250006\\CoPilot.exe")
+        );
+        entry.install_dir = None;
+        assert_eq!(
+            entry.gizmondo_guest_exe_path(&root).as_deref(),
+            Some("\\SD Card\\CoPilot.exe")
         );
     }
 

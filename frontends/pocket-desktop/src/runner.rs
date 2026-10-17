@@ -390,12 +390,6 @@ impl Runner {
                 "Mounted Gizmondo SD-card layout at {}",
                 extracted.display()
             ));
-            if let Some(name) = game.executable.file_name().and_then(|name| name.to_str()) {
-                let guest_exe = format!("\\SD Card\\{name}");
-                emu.set_module_path(&guest_exe);
-                emu.set_default_dir("\\SD Card\\");
-                summary_lines.push(format!("Module path: {guest_exe}"));
-            }
         }
         // A game that keeps its assets in one archive opens it by
         // absolute path built from its own module path -- Spore Origins
@@ -409,7 +403,10 @@ impl Runner {
             emu.mount_read_only_dir(&prefix, directory);
         }
         if let Some(prefix) = game.guest_install_prefix() {
-            emu.mount_read_only_dir(&prefix, &extracted);
+            emu.mount_read_only_dir(
+                &prefix,
+                game.install_mount_dir(library_root, &prefix),
+            );
             summary_lines.push(format!("Mounted {} at {prefix:?}", extracted.display()));
             if let Some(guest_exe) = game.guest_exe_path() {
                 emu.set_module_path(&guest_exe);
@@ -423,6 +420,19 @@ impl Runner {
                     "Save data: {} -> {save_prefix:?}",
                     save_dir.display()
                 ));
+            }
+        }
+        // Use the real card-relative executable path after installing aliases.
+        // CoPilot derives pid.cfg from GetModuleFileNameW and exits immediately
+        // when a nested application is falsely reported at the card root.
+        if is_gizmondo {
+            if let Some(guest_exe) = game.gizmondo_guest_exe_path(library_root) {
+                emu.set_module_path(&guest_exe);
+                if let Some((directory, _)) = guest_exe.rsplit_once('\\') {
+                    emu.set_default_dir(&format!("{directory}\\"));
+                }
+                log::info!("Gizmondo module path: {guest_exe}");
+                summary_lines.push(format!("Module path: {guest_exe}"));
             }
         }
         // GUI users actually play the game, so don't auto-fire

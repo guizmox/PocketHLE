@@ -539,6 +539,11 @@ pub const HSS_MUSIC_GROUP: u32 = 2;
 /// so this records what the parked call is waiting for.
 #[derive(Debug, Clone)]
 pub struct ModalDialog {
+    /// Input routing to restore when the blocking modal returns.
+    pub previous_active: u32,
+    pub previous_focus: u32,
+    /// The blocking API caller, before WM_INITDIALOG/WM_COMMAND detours.
+    pub frame: GuestCallFrame,
     /// Synthetic `HWND` the dialog's panel and controls are registered
     /// under, so its children are addressed separately from a
     /// `CreateDialog*` panel that may already be on screen.

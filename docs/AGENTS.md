@@ -3008,3 +3008,47 @@ POCKETHLE_INPUT_FILE optionally enables an append-only CLI control file
 (up to 64 KiB, complete lines only): `key TOKEN`, `tap X,Y`, `quit`.
 It uses the existing scheduled InputEvent path and holds/release timings;
 no guest instructions or title-specific button bindings are changed.
+
+Mounted-volume spellings without an initial slash (Navigator) resolve at
+the matching explicit mount prefix, for reads, attributes, directory
+enumeration and writes alike. This fixes FindFirstFileW("SD Card/.../datacd")
+rejecting a directory that CRT fopen's rooted retry could already open.
+An explicit `.\\` prefix stays module-relative, ordinary filenames keep the
+module default directory, and read-only mounts/write containment still apply.
+
+The live CLI control file also accepts `windows` for a guest window/control
+snapshot and `gps LAT,LON` to update the fixed simulator position. The latter
+requires an already enabled GPS service; it does not grant location access.
+
+ListView rendering and pointer hit testing share the same row height.
+Navigator's Start Driving row was drawn at y=181 but taps were divided by
+24 instead of the rendered 14 pixels, selecting Enter Destination instead.
+A regression checks both the chosen item/notification and its painted highlight.
+
+DialogBoxIndirectParamW stores its original arguments, SP and LR before
+calling a guest DialogProc, and restores that continuation on EndDialog,
+default IDOK/IDCANCEL and headless timeout. A callback may return with POP {PC}, leaving LR at its last helper call;
+only the saved blocking caller continuation supplies a valid return address. Idle DialogBox/MessageBox retries
+wait 1 ms so their iteration bound leaves time for host button input.
+
+The host modal pump handles Escape as IDCANCEL even without child focus,
+Tab visits only visible enabled WS_TABSTOP children of that modal, and
+Return activates its focused button or its own default button. Underlying
+window controls never receive those modal commands. This preserves shared
+Gizmondo Soft2/Soft1/Play bindings. The external GMSHELLCLASS on-screen
+keyboard protocol is still missing; host typing is not console-only input.
+
+Closing the parked modal also restores its saved active window and child
+focus. Otherwise GetMessage routes later Gizmondo keys to the dialog's
+already destroyed window, even though the navigation map still repaints.
+The continuation regression covers normal EndDialog and headless timeout,
+including an LR left at the last ARM helper and displaced input ownership.
+
+Desktop Gizmondo launches preserve the actual executable directory relative
+ to the mounted card. Flattened imports retain declared install aliases.
+Reporting a nested CoPilot.exe at \SD Card\CoPilot.exe makes it open
+\SD Card\pid.cfg, fail, and terminate with code zero before native DLLs
+load. The path helper is shared with the headless GUI-mount probe; nested
+install prefixes also use install_mount_dir instead of hiding the real
+application folder with the extraction root. Child process guest paths still
+have final precedence. Runtime Windows remains untested in this environment.

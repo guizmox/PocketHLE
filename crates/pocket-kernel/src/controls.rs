@@ -65,6 +65,8 @@ const BS_AUTORADIOBUTTON: u32 = 0x0009;
 
 /// `IDOK`, reported when the caption bar's OK box is tapped.
 pub const IDOK: u32 = 1;
+/// Standard cancel command understood by the dialog manager.
+pub const IDCANCEL: u32 = 2;
 
 /// `WS_VISIBLE`.
 const WS_VISIBLE: u32 = 0x1000_0000;
@@ -289,6 +291,8 @@ pub struct ChildWindow {
     pub font: u32,
 }
 
+const LIST_VIEW_ROW_HEIGHT: i32 = 14;
+
 impl ChildWindow {
     /// Face colour — `COLOR_BTNFACE`, the same light grey the status
     /// bar uses.
@@ -402,13 +406,13 @@ impl ChildWindow {
             ControlClass::ListView => {
                 surf.fill_rect(self.x, self.y, self.w, self.h, Self::WINDOW);
                 for (index, (text, _)) in self.list_items.iter().enumerate() {
-                    let y = self.y + index as i32 * 14;
-                    if y + 14 > self.y + self.h {
+                    let y = self.y + index as i32 * LIST_VIEW_ROW_HEIGHT;
+                    if y + LIST_VIEW_ROW_HEIGHT > self.y + self.h {
                         break;
                     }
                     let selected = self.list_selected == Some(index);
                     if selected {
-                        surf.fill_rect(self.x, y, self.w, 14, 0x001f);
+                        surf.fill_rect(self.x, y, self.w, LIST_VIEW_ROW_HEIGHT, 0x001f);
                     }
                     draw_clipped(
                         surf,
@@ -890,7 +894,7 @@ impl Controls {
             .unwrap_or((0, 0));
         let child = self.get_mut(hwnd)?;
         if child.class == ControlClass::ListView && child.enabled {
-            let index = ((y - origin.1 - child.y).max(0) / 24) as usize;
+            let index = ((y - origin.1 - child.y).max(0) / LIST_VIEW_ROW_HEIGHT) as usize;
             if index < child.list_items.len() {
                 child.list_selected = Some(index);
             }
@@ -1021,6 +1025,50 @@ impl Controls {
 
     /// [`Self::key_down`] restricted to the children of `parent`.
     pub fn key_down_in(&mut self, parent: u32, vk: u16) -> Option<ControlAction> {
+        // Dialog-manager keys apply even when WM_INITDIALOG left no child
+        // focused. Never borrow a default button from the window underneath.
+        if vk == 0x1B {
+            return Some(ControlAction::Clicked {
+                parent,
+                id: IDCANCEL,
+                hwnd: parent,
+            });
+        }
+        if vk == 0x09 {
+            let candidates: Vec<u32> = self
+                .children
+                .iter()
+                .filter(|c| {
+                    c.parent == parent && c.visible && c.is_focusable() && c.style & 0x00010000 != 0
+                })
+                .map(|c| c.hwnd)
+                .collect();
+            if !candidates.is_empty() {
+                let next = candidates
+                    .iter()
+                    .position(|h| *h == self.focus)
+                    .map(|i| (i + 1) % candidates.len())
+                    .unwrap_or(0);
+                self.focus = candidates[next];
+            }
+            return Some(ControlAction::Consumed);
+        }
+        if vk == 0x0D {
+            let focused = self.get(self.focus).filter(|c| {
+                c.parent == parent && c.visible && c.enabled && c.class == ControlClass::Button
+            });
+            let button = focused.or_else(|| {
+                self.children
+                    .iter()
+                    .find(|c| c.parent == parent && c.visible && c.enabled && c.is_default())
+            });
+            if let Some(button) = button {
+                let hwnd = button.hwnd;
+                // Preserve checkbox/radio activation behaviour in key_down.
+                self.focus = hwnd;
+                return self.key_down(vk);
+            }
+        }
         if self.get(self.focus).map(|c| c.parent) != Some(parent) {
             return Some(ControlAction::Consumed);
         }
@@ -1209,6 +1257,79 @@ mod tests {
     }
 
     #[test]
+    fn modal_keyboard_uses_own_cancel_default_and_tab_stops() {
+        let mut ctrls = Controls::default();
+        let other = button(&mut ctrls, 90, 0, 0);
+        let modal = 0xDEAD0003;
+        let accept = ctrls.create(
+            modal,
+            ControlClass::Button,
+            IDOK,
+            "Accept".into(),
+            WS_VISIBLE | 0x10000 | 1,
+            0,
+            0,
+            70,
+            30,
+        );
+        let cancel = ctrls.create(
+            modal,
+            ControlClass::Button,
+            IDCANCEL,
+            "Cancel".into(),
+            WS_VISIBLE | 0x10000,
+            80,
+            0,
+            70,
+            30,
+        );
+        let hidden = ctrls.create(
+            modal,
+            ControlClass::Button,
+            99,
+            "Hidden".into(),
+            0x10000,
+            0,
+            0,
+            70,
+            30,
+        );
+        ctrls.focus = other;
+        assert_eq!(
+            ctrls.key_down_in(modal, 0x1B),
+            Some(ControlAction::Clicked {
+                parent: modal,
+                id: IDCANCEL,
+                hwnd: modal
+            })
+        );
+        assert_eq!(
+            ctrls.key_down_in(modal, 0x0D),
+            Some(ControlAction::Clicked {
+                parent: modal,
+                id: IDOK,
+                hwnd: accept
+            })
+        );
+        assert_eq!(
+            ctrls.key_down_in(modal, 0x09),
+            Some(ControlAction::Consumed)
+        );
+        assert_eq!(ctrls.focus, cancel);
+        assert_eq!(
+            ctrls.key_down_in(modal, 0x0D),
+            Some(ControlAction::Clicked {
+                parent: modal,
+                id: IDCANCEL,
+                hwnd: cancel
+            })
+        );
+        ctrls.key_down_in(modal, 0x09);
+        assert_eq!(ctrls.focus, accept);
+        assert_ne!(ctrls.focus, hidden);
+    }
+
+    #[test]
     fn controls_get_distinct_handles_from_the_parent() {
         let mut ctrls = Controls::default();
         let a = button(&mut ctrls, 201, 60, 72);
@@ -1363,6 +1484,41 @@ mod tests {
         ctrls.destroy_children_of(PARENT);
         assert!(ctrls.is_empty());
         assert_eq!(ctrls.focus, 0);
+    }
+
+    #[test]
+    fn list_view_tap_selects_the_row_actually_drawn_at_that_position() {
+        let mut controls = Controls::default();
+        let hwnd = controls.create(
+            PARENT,
+            ControlClass::ListView,
+            1536,
+            String::new(),
+            0x10000000,
+            10,
+            10,
+            100,
+            60,
+        );
+        controls.get_mut(hwnd).unwrap().list_items = vec![
+            ("New Trip".into(), 1),
+            ("Enter Destination".into(), 2),
+            ("Start Driving".into(), 3),
+        ];
+        controls.pointer_down(80, 44);
+        assert_eq!(controls.get(hwnd).unwrap().list_selected, Some(2));
+        assert!(matches!(
+            controls.pointer_up(80, 44),
+            Some(ControlAction::Notify { index: 2, .. })
+        ));
+        let mut bitmap = Bitmap::new(120, 80);
+        let mut surface = Surface::Bitmap(&mut bitmap);
+        controls.render(&mut surface);
+        let offset = (44 * 120 + 108) * 2;
+        assert_eq!(
+            u16::from_le_bytes(surface.pixels()[offset..offset + 2].try_into().unwrap()),
+            0x001f
+        );
     }
 
     #[test]

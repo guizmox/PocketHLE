@@ -570,6 +570,7 @@ impl Vfs {
     /// anchor anything that is not already rooted at [`Self::default_dir`].
     fn absolute(&self, guest_path: &str) -> String {
         let mut p = guest_path.replace('/', "\\");
+        let explicitly_relative = p.starts_with(".\\");
         while let Some(rest) = p.strip_prefix(".\\") {
             p = rest.to_string();
         }
@@ -579,7 +580,22 @@ impl Vfs {
         if p.starts_with('\\') {
             p
         } else {
-            format!("{}{p}", self.default_dir)
+            // WinCE software also spells a mounted volume as "SD Card/..."
+            // without the initial slash. Navigator probes this directory
+            // through FindFirstFile before loading its HSH/QD grid indexes.
+            // Keep ordinary and explicitly .-relative paths beside the module;
+            // only an exact mounted prefix can name a root-relative path.
+            let rooted = format!("/{}", p.replace('\\', "/").to_ascii_lowercase());
+            let mounted_root = !explicitly_relative
+                && self.mounts.iter().any(|mount| {
+                    let root = mount.prefix.trim_end_matches('/');
+                    !root.is_empty() && (rooted == root || rooted.starts_with(&mount.prefix))
+                });
+            if mounted_root {
+                format!("\\{p}")
+            } else {
+                format!("{}{p}", self.default_dir)
+            }
         }
     }
 
@@ -2238,6 +2254,46 @@ mod tests {
             std::fs::read(dir.path().join("stream.bin")).unwrap(),
             b"XYcdef"
         );
+    }
+
+    #[test]
+    fn mounted_volume_without_initial_slash_resolves_directories_and_keeps_write_policy() {
+        let card = tempfile::tempdir().unwrap();
+        let app = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(card.path().join("DataCD")).unwrap();
+        std::fs::write(card.path().join("DataCD/map.qd"), b"card").unwrap();
+        std::fs::create_dir_all(app.path().join("SD Card/DataCD")).unwrap();
+        std::fs::write(app.path().join("SD Card/DataCD/map.qd"), b"local").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("/SD Card/", card.path());
+        v.mount("/Application/", app.path());
+        v.set_default_dir("/Application/");
+        assert_eq!(
+            v.resolve("sD cArD/DataCD"),
+            Some(card.path().join("DataCD"))
+        );
+        assert_eq!(v.attributes("SD Card/DataCD").unwrap() & 0x10, 0x10);
+        assert_eq!(v.list_dir("SD Card/DataCD").unwrap()[0].0, "map.qd");
+        assert_eq!(
+            v.resolve(".\\SD Card/DataCD/map.qd"),
+            Some(app.path().join("SD Card/DataCD/map.qd"))
+        );
+        assert!(v
+            .open_file("SD Card/DataCD/map.qd", 2, 3, 2, false, 0)
+            .is_err());
+        assert!(v
+            .open_file("SD Card/../../escape", 2, 3, 2, false, 0)
+            .is_err());
+        assert_eq!(
+            std::fs::read(card.path().join("DataCD/map.qd")).unwrap(),
+            b"card"
+        );
+        let writable = tempfile::tempdir().unwrap();
+        v.mount_save_dir("/SD Card/Save/", writable.path());
+        assert!(v
+            .open_file("SD Card/Save/trip.dat", 2, 3, 2, false, 0)
+            .is_ok());
+        assert!(writable.path().join("trip.dat").is_file());
     }
 
     #[test]
