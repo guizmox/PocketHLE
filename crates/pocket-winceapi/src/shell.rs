@@ -44,6 +44,7 @@ pub(crate) fn message(ctx: &mut CallCtx<'_>, hwnd: u32, message: u32, value: u32
 }
 
 pub(crate) fn service(ctx: &mut CallCtx<'_>) {
+    crate::shell_keyboard::service(ctx);
     let Some(previous) = ctx.kernel.shell_status else {
         return;
     };

@@ -472,6 +472,7 @@ pub(crate) mod tests {
             next_menu_handle: 0xDEAD_2000,
             sub_menus: std::collections::HashMap::new(),
             modal: None,
+            shell_keyboard: pocket_kernel::shell_keyboard::ShellKeyboard::default(),
             message_box_spins: 0,
             modal_dialog: None,
         }

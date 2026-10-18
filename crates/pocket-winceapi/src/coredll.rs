@@ -21,6 +21,11 @@
 //! and they get called many thousands of times before the game ever
 //! reaches `WinMain`.
 
+#[path = "coredll/choice_controls.rs"]
+mod choice_controls;
+#[path = "coredll/coordinates.rs"]
+mod coordinates;
+mod trackbar;
 use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
@@ -90,6 +95,8 @@ const PAINTSTRUCT_BYTES: u32 = 32;
 #[cfg(test)]
 mod graphics_tests;
 pub(crate) mod images;
+mod message_queue;
+mod text_draw;
 mod window_graphics;
 
 pub fn register(d: &mut WinCeDispatcher) {
@@ -485,7 +492,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "SetFocus", set_focus);
     d.register_handler(dll, "SetWindowPos", set_window_pos);
     d.register_constant(dll, "AdjustWindowRectEx", 1, one_returning);
-    d.register_constant(dll, "MapWindowPoints", 1, one_returning);
+    d.register_handler(dll, "MapWindowPoints", coordinates::map_window_points);
     d.register_constant(dll, "ClipCursor", 1, one_returning);
     d.register_constant(dll, "SetCursorPos", 1, one_returning);
     d.register_constant(dll, "GetSystemPaletteEntries", 0, zero_returning);
@@ -597,8 +604,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ReleaseSemaphore", release_semaphore);
     d.register_handler(dll, "TlsCall", tls_call);
     d.register_handler(dll, "CeSetThreadQuantum", ce_set_thread_quantum);
-    d.register_constant(dll, "ClientToScreen", 1, one_returning);
-    d.register_constant(dll, "ScreenToClient", 1, one_returning);
+    d.register_handler(dll, "ClientToScreen", coordinates::client_to_screen);
+    d.register_handler(dll, "ScreenToClient", coordinates::screen_to_client);
     d.register_handler(dll, "LoadIconW", load_icon_w);
     d.register_handler(dll, "LoadCursorW", images::load_cursor);
     crate::accelerators::register(d);
@@ -9763,6 +9770,30 @@ fn finish_window_callback(kernel: &mut KernelState) {
     }
 }
 
+/// Resolve the CW_USEDEFAULT sentinel before geometry reaches CREATESTRUCT,
+/// WM_SIZE, GetWindowRect or a rendering surface. Ordinary coordinates survive.
+fn initial_window_rect(
+    style: u32,
+    mut rect: (i32, i32, i32, i32),
+    screen: (u32, u32),
+) -> (i32, i32, i32, i32) {
+    let overlapped = style & 0xc000_0000 == 0;
+    if rect.0 == i32::MIN {
+        rect.0 = 0;
+        rect.1 = 0;
+    }
+    if rect.2 == i32::MIN {
+        if overlapped {
+            rect.2 = (screen.0 as i32).saturating_sub(rect.0).max(0);
+            rect.3 = (screen.1 as i32).saturating_sub(rect.1).max(0);
+        } else {
+            rect.2 = 0;
+            rect.3 = 0;
+        }
+    }
+    rect
+}
+
 fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // Must be the first thing we do: the thunk re-fires this whole handler
     // when the hijacked `WndProc` returns, and by then R0..R3 hold the
@@ -9789,6 +9820,9 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
                 if let Some(rect) = ctx.kernel.window_rects.get(&hwnd).copied() {
                     queue_window_size(ctx.kernel, hwnd, rect.2, rect.3);
                 }
+                // Visible children need their first paint even when the app
+                // never calls ShowWindow again after WS_VISIBLE creation.
+                queue_window_paint(ctx.kernel, hwnd);
                 return Ok(DispatchOutcome::ReturnedR0(hwnd));
             }
         }
@@ -9801,6 +9835,16 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     } else {
         String::new()
     };
+    let rect = initial_window_rect(
+        ctx.arg_u32(3)?,
+        (
+            ctx.arg_u32(4)? as i32,
+            ctx.arg_u32(5)? as i32,
+            ctx.arg_u32(6)? as i32,
+            ctx.arg_u32(7)? as i32,
+        ),
+        screen_dims(ctx),
+    );
     // A built-in control class: on a device the window procedure lives
     // inside coredll, not in the application. Hand back a handle of its
     // own and let `controls` own the pixels — crucially *without*
@@ -9818,10 +9862,10 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             String::new()
         };
         let style = ctx.arg_u32(3)?;
-        let x = ctx.arg_u32(4)? as i32;
-        let y = ctx.arg_u32(5)? as i32;
-        let cx = ctx.arg_u32(6)? as i32;
-        let cy = ctx.arg_u32(7)? as i32;
+        let x = rect.0;
+        let y = rect.1;
+        let cx = rect.2;
+        let cy = rect.3;
         let parent = ctx.arg_u32(8)?;
         // For a child window `hMenu` is the control id — what
         // `GetDlgItem` looks up and what the parent matches in
@@ -9847,10 +9891,10 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             String::from_utf16_lossy(&read_wstr(ctx, text_ptr, 1024)?)
         };
         let style = ctx.arg_u32(3)?;
-        let x = ctx.arg_u32(4)? as i32;
-        let y = ctx.arg_u32(5)? as i32;
-        let w = ctx.arg_u32(6)? as i32;
-        let h = ctx.arg_u32(7)? as i32;
+        let x = rect.0;
+        let y = rect.1;
+        let w = rect.2;
+        let h = rect.3;
         let parent = ctx.arg_u32(8)?;
         let id = ctx.arg_u32(9)?;
         ctx.kernel
@@ -9870,12 +9914,6 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         let id = ctx.arg_u32(9)?;
         ctx.kernel.window_ids.insert(hwnd, id);
     }
-    let rect = (
-        ctx.arg_u32(4)? as i32,
-        ctx.arg_u32(5)? as i32,
-        ctx.arg_u32(6)? as i32,
-        ctx.arg_u32(7)? as i32,
-    );
     ctx.kernel.window_rects.insert(hwnd, rect);
     log::debug!("window geometry hwnd=0x{hwnd:08x} class={class_name:?} parent=0x{parent:08x} id={} style=0x{style:08x} rect={rect:?}",ctx.arg_u32(9)?);
     ctx.kernel.window_styles.insert(hwnd, (style, ex_style));
@@ -9925,10 +9963,10 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         let ex_style = ctx.arg_u32(0)?;
         let window_name = ctx.arg_u32(2)?;
         let style = ctx.arg_u32(3)?;
-        let x = ctx.arg_u32(4)?;
-        let y = ctx.arg_u32(5)?;
-        let cx = ctx.arg_u32(6)?;
-        let cy = ctx.arg_u32(7)?;
+        let x = rect.0 as u32;
+        let y = rect.1 as u32;
+        let cx = rect.2 as u32;
+        let cy = rect.3 as u32;
         let h_menu = ctx.arg_u32(9)?;
         let h_instance = ctx.arg_u32(10)?;
         let create_params = ctx.arg_u32(11)?;
@@ -10069,10 +10107,10 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             .get(&hwnd)
             .is_some_and(|s| s.0 & 0x4000_0000 == 0)
     {
-        ctx.kernel.active_window = hwnd;
-    }
-    if show {
-        queue_window_paint(ctx.kernel, hwnd);
+        if !matches!(cmd_show, 4 | 8) {
+            ctx.kernel.active_window = hwnd;
+            raise_window_panels(ctx.kernel, hwnd);
+        }
     }
     if let Some(visible) = ctx.kernel.window_visibility.get_mut(&hwnd) {
         *visible = show;
@@ -10080,17 +10118,26 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         let id = child.id;
         child.visible = show;
+        if show {
+            queue_visible_window_paints(ctx.kernel, hwnd);
+        }
         log::debug!("ShowWindow(control id={id}, cmd={cmd_show}) -> visible={show}");
         repaint_controls(ctx);
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
         panel.visible = show;
+        if show {
+            queue_visible_window_paints(ctx.kernel, hwnd);
+        }
         if ctx.kernel.wnd_proc != 0 {
             ctx.kernel.pending_message = Some((FAKE_HWND, WM_PAINT, 0, 0));
         }
         repaint_controls(ctx);
         return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    if show {
+        queue_visible_window_paints(ctx.kernel, hwnd);
     }
     let wnd_proc = ctx.kernel.window_procs.get(&hwnd).copied().unwrap_or(0);
     // Only the first show of the main window needs the sizing pass, and
@@ -10618,7 +10665,102 @@ fn list_view_message(
     lp: u32,
 ) -> Result<u32, KernelError> {
     let result = match message {
-        0x1002 => {
+        0x1000 | 0x1023 => {
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            if message == 0x1000 {
+                c.list_background
+            } else {
+                c.list_text_color
+            }
+        }
+        0x1001 | 0x1024 => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            if message == 0x1001 {
+                c.list_background = lp;
+            } else {
+                c.list_text_color = lp;
+            }
+            repaint_controls(ctx);
+            1
+        }
+        0x1035 => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            let old = c.list_spacing;
+            c.list_spacing = if lp == u32::MAX {
+                (75, 75)
+            } else {
+                ((lp & 0xffff).max(4) as i32, (lp >> 16).max(4) as i32)
+            };
+            repaint_controls(ctx);
+            (old.0 as u32 & 0xffff) | ((old.1 as u32) << 16)
+        }
+        0x100f | 0x1031 => {
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            if wp as usize >= c.list_items.len() || c.style & 3 == 1 || c.style & 3 == 3 {
+                return Ok(0);
+            }
+            let point = if message == 0x100f {
+                (lp as u16 as i16 as i32, (lp >> 16) as u16 as i16 as i32)
+            } else {
+                (
+                    ctx.cpu.read_u32_le(lp)? as i32,
+                    ctx.cpu.read_u32_le(lp + 4)? as i32,
+                )
+            };
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            c.list_positions.resize(c.list_items.len(), None);
+            c.list_positions[wp as usize] = Some(point);
+            repaint_controls(ctx);
+            1
+        }
+        0x1010 => {
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            if wp as usize >= c.list_items.len() {
+                return Ok(0);
+            }
+            let (x, y) = c.list_item_position(wp as usize);
+            ctx.cpu.write_mem(lp, &x.to_le_bytes())?;
+            ctx.cpu.write_mem(lp + 4, &y.to_le_bytes())?;
+            1
+        }
+        0x1040 => {
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            let count = if wp == u32::MAX {
+                c.list_items.len() as u64
+            } else {
+                u64::from(wp)
+            }
+            .min(65535);
+            let width = if lp as u16 == u16::MAX {
+                c.w.max(1)
+            } else {
+                i32::from(lp as u16).max(1)
+            };
+            let (w, h) = if c.list_icon_view() {
+                let columns = (width / c.list_spacing.0).max(1) as u64;
+                (
+                    count.min(columns) * c.list_spacing.0 as u64,
+                    count.div_ceil(columns) * c.list_spacing.1 as u64,
+                )
+            } else {
+                (width as u64, count * c.list_row_height() as u64)
+            };
+            (w.min(65535) as u32) | ((h.min(65535) as u32) << 16)
+        }
+        0x1012 => {
+            let x = ctx.cpu.read_u32_le(lp)? as i32;
+            let y = ctx.cpu.read_u32_le(lp + 4)? as i32;
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            let index = c.list_item_at_point(x, y);
+            ctx.cpu.write_mem(
+                lp + 8,
+                &(if index.is_some() { 0x0eu32 } else { 1 }).to_le_bytes(),
+            )?;
+            ctx.cpu
+                .write_mem(lp + 12, &index.map_or(u32::MAX, |i| i as u32).to_le_bytes())?;
+            index.map_or(u32::MAX, |i| i as u32)
+        }
+        0x1003 => {
             if wp > 2 {
                 return Ok(0);
             }
@@ -10639,7 +10781,7 @@ fn list_view_message(
             repaint_controls(ctx);
             old
         }
-        0x1003 => ctx
+        0x1002 => ctx
             .kernel
             .controls
             .get(hwnd)
@@ -10657,18 +10799,12 @@ fn list_view_message(
             repaint_controls(ctx);
             1
         }
-        0x1012 => {
+        0x1013 => {
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             if wp as usize >= c.list_items.len() {
                 return Ok(0);
             }
-            let row = c.list_row_height();
-            let top = (u64::from(wp) * row as u64).min(i32::MAX as u64) as i32;
-            if top < c.list_scroll_y {
-                c.list_scroll_y = top;
-            } else if top.saturating_add(row) > c.list_scroll_y.saturating_add(c.h) {
-                c.list_scroll_y = top.saturating_add(row).saturating_sub(c.h).max(0);
-            }
+            c.list_ensure_visible(wp as usize);
             repaint_controls(ctx);
             1
         }
@@ -10757,6 +10893,10 @@ fn list_view_message(
             let control = ctx.kernel.controls.get_mut(hwnd).unwrap();
             if message == 0x1007 || message == 0x104d {
                 let index = index.min(control.list_items.len());
+                control
+                    .list_positions
+                    .resize(control.list_items.len(), None);
+                control.list_positions.insert(index, None);
                 control.list_images.resize(control.list_items.len(), -1);
                 control
                     .list_images
@@ -10783,6 +10923,9 @@ fn list_view_message(
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             if (wp as usize) < c.list_items.len() {
                 c.list_items.remove(wp as usize);
+                if (wp as usize) < c.list_positions.len() {
+                    c.list_positions.remove(wp as usize);
+                }
                 if (wp as usize) < c.list_images.len() {
                     c.list_images.remove(wp as usize);
                 }
@@ -10796,6 +10939,7 @@ fn list_view_message(
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             c.list_items.clear();
             c.list_images.clear();
+            c.list_positions.clear();
             c.list_scroll_y = 0;
             c.list_selected = None;
             1
@@ -10869,6 +11013,13 @@ fn control_message(
     wparam: u32,
     lparam: u32,
 ) -> Result<u32, KernelError> {
+    if let Some(result) = trackbar::message(ctx, hwnd, message, wparam, lparam) {
+        return Ok(result);
+    }
+    if let Some(result) = choice_controls::message(ctx, hwnd, message, wparam, lparam)? {
+        return Ok(result);
+    }
+
     if ctx
         .kernel
         .controls
@@ -10886,9 +11037,32 @@ fn control_message(
         {
             return Ok(0);
         }
+        let size = ctx
+            .kernel
+            .gdi
+            .bitmap(handle)
+            .map(|b| (b.width as i32, b.height as i32));
         let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
         let old = c.image;
         c.image = handle;
+        // SS_BITMAP takes the bitmap's size, not the template's DLU size.
+        // In WinCE SS_CENTERIMAGE preserves the control's midpoint while
+        // its bounds change; SS_REALSIZECONTROL instead keeps those bounds.
+        if message == 0x172
+            && wparam == 0
+            && c.class == ControlClass::Static
+            && c.style & 0x1f == 0x0e
+            && c.style & 0x40 == 0
+        {
+            if let Some((width, height)) = size {
+                if c.style & 0x200 != 0 {
+                    c.x += (c.w - width) / 2;
+                    c.y += (c.h - height) / 2;
+                }
+                c.w = width;
+                c.h = height;
+            }
+        }
         repaint_controls(ctx);
         return Ok(old);
     }
@@ -10904,12 +11078,28 @@ fn control_message(
             ControlClass::Edit => 0x81 | if c.style & 0x1004 == 0x1004 { 4 } else { 0 },
             ControlClass::Button => 0x2000 | if c.style & 0xf == 1 { 0x10 } else { 0x20 },
             ControlClass::Static => 0x100,
-            ControlClass::ListView => 0x81,
+            ControlClass::ComboBox => {
+                0x81 | if wparam == 0x0d || (wparam == 0x1b && c.choice_open) {
+                    4
+                } else {
+                    0
+                }
+            }
+            ControlClass::ListView | ControlClass::ListBox | ControlClass::TrackBar => 0x81,
         });
     }
     if message == WM_KEYDOWN {
         let class = ctx.kernel.controls.get(hwnd).map(|c| c.class);
-        if matches!(class, Some(ControlClass::ListView | ControlClass::Button)) {
+        if matches!(
+            class,
+            Some(
+                ControlClass::ListView
+                    | ControlClass::TrackBar
+                    | ControlClass::ListBox
+                    | ControlClass::ComboBox
+                    | ControlClass::Button
+            )
+        ) {
             let previous = ctx.kernel.controls.focus;
             ctx.kernel.controls.focus = hwnd;
             let action = ctx.kernel.controls.key_down(wparam as u16);
@@ -11032,6 +11222,9 @@ fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let lparam = ctx.arg_u32(3)?;
     if hwnd == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if hwnd == pocket_kernel::shell_keyboard::HWND {
+        return crate::shell_keyboard::message(ctx, message, wparam, lparam);
     }
     // Service Gizmondo shell requests before routing to guest windows.
     if crate::shell::message(ctx, hwnd, message, wparam)
@@ -11190,6 +11383,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         .window_procs
         .get(&hwnd)
         .copied()
+        .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
         .unwrap_or(ctx.kernel.wnd_proc))
         & !1;
     if lp_msg == 0 {
@@ -11364,6 +11558,24 @@ fn input_to_message(ev: pocket_kernel::InputEvent) -> Option<(u32, u32, u32)> {
 ///   application unchanged. This is the path every full-screen game
 ///   takes, which is why a title with no controls is unaffected.
 #[allow(clippy::option_option)]
+fn has_native_input_ancestor(kernel: &KernelState, mut hwnd: u32) -> bool {
+    for _ in 0..64 {
+        if kernel.window_procs.get(&hwnd).is_some_and(|p| *p != 0) {
+            return true;
+        }
+        let next = kernel
+            .controls
+            .get(hwnd)
+            .map(|c| c.parent)
+            .or_else(|| kernel.window_parents.get(&hwnd).copied());
+        match next {
+            Some(next) if next != 0 && next != hwnd => hwnd = next,
+            _ => break,
+        }
+    }
+    false
+}
+
 fn controls_take_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
@@ -11372,13 +11584,18 @@ fn controls_take_input(
         return None;
     }
     if matches!(ev, pocket_kernel::InputEvent::KeyDown { .. })
-        && ctx
-            .kernel
-            .window_procs
-            .contains_key(&ctx.kernel.controls.focus)
+        && has_native_input_ancestor(ctx.kernel, ctx.kernel.controls.focus)
+        && focus_belongs_to_active(ctx.kernel, ctx.kernel.controls.focus)
     {
-        // Native PreTranslateMessage gets first refusal. Navigator binds the
-        // Gizmondo B button (VK_SPACE) to Next before EDIT receives WM_CHAR.
+        // The application's parent also gets PreTranslateMessage before an
+        // unsubclassed OS control. Otherwise B/Space becomes a literal space
+        // in Navigator's optional-name EDIT before its parent can handle Next.
+        return None;
+    }
+    if matches!(ev, InputEvent::KeyDown { .. })
+        && ctx.kernel.controls.focus != 0
+        && !focus_belongs_to_active(ctx.kernel, ctx.kernel.controls.focus)
+    {
         return None;
     }
     let action = match ev {
@@ -11422,6 +11639,27 @@ fn control_action_message(
             code,
             index,
         } => {
+            if let Some(c) = ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .filter(|c| c.class == ControlClass::TrackBar)
+            {
+                return Some(Some((
+                    parent,
+                    if c.style & 2 != 0 { 0x115 } else { 0x114 },
+                    code,
+                    hwnd,
+                )));
+            }
+            if ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .is_some_and(|c| matches!(c.class, ControlClass::ListBox | ControlClass::ComboBox))
+            {
+                return Some(Some((parent, WM_COMMAND, (1 << 16) | (id & 0xffff), hwnd)));
+            }
             let key = (hwnd, -1001);
             let ptr = if let Some(ptr) = ctx.kernel.window_extra.get(&key).copied() {
                 ptr
@@ -11592,11 +11830,16 @@ fn set_focus(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         repaint_controls(ctx);
     } else if hwnd == 0 || is_live_hwnd(hwnd) {
         // Focus moved off the controls onto the top-level window.
-        ctx.kernel.controls.focus = 0;
-        if previous != 0 {
+        ctx.kernel.controls.focus = if ctx.kernel.window_procs.contains_key(&hwnd) {
+            hwnd
+        } else {
+            0
+        };
+        if previous != ctx.kernel.controls.focus {
             repaint_controls(ctx);
         }
     }
+    remember_window_focus(ctx.kernel);
     Ok(DispatchOutcome::ReturnedR0(if previous != 0 {
         previous
     } else {
@@ -11638,6 +11881,9 @@ fn move_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         child.h = h;
         log::debug!("MoveWindow(0x{hwnd:08x}) -> ({x},{y},{w},{h})");
         repaint_controls(ctx);
+    }
+    if ctx.arg_u32(5)? != 0 {
+        queue_visible_window_paints(ctx.kernel, hwnd);
     }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -11714,6 +11960,9 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             ctx.kernel.pending_message = Some((FAKE_HWND, WM_PAINT, 0, 0));
         }
         repaint_controls(ctx);
+    }
+    if flags & 0x40 != 0 && flags & 0x8 == 0 {
+        queue_visible_window_paints(ctx.kernel, hwnd);
     }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -12020,7 +12269,89 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
 /// leaves non-GAPI titles that read `VK_RETURN` directly untouched.
 fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
     let ev = ctx.kernel.pending_input.pop_front()?;
-    let queried = ctx.kernel.gapi_keys_queried;
+    if matches!(ev, InputEvent::KeyDown { .. }) {
+        restore_active_dialog_focus(ctx.kernel);
+    }
+    Some(remap_input(ev, ctx.kernel.gapi_keys_queried))
+}
+
+/// A modal return can leave the saved focus in an earlier popup. Do not
+/// deliver the next console key to that popup's control. Prefer the last
+/// explicit child focus, then the first tab stop used by dialog initialization.
+/// Only repair focus outside the active child tree; retain a hidden control
+/// inside the current page so its native parent still handles shortcuts.
+fn restore_active_dialog_focus(kernel: &mut KernelState) {
+    if let Some(target) = active_dialog_focus(kernel) {
+        kernel.controls.focus = target;
+    }
+}
+
+fn active_dialog_focus(kernel: &KernelState) -> Option<u32> {
+    if kernel.active_window == 0 || focus_belongs_to_active(kernel, kernel.controls.focus) {
+        return None;
+    }
+    if let Some(target) = kernel
+        .window_extra
+        .get(&(kernel.active_window, -1201))
+        .copied()
+    {
+        if focus_belongs_to_active(kernel, target)
+            && window_is_visible(kernel, target)
+            && kernel
+                .controls
+                .get(target)
+                .is_some_and(|c| c.enabled && c.is_focusable())
+        {
+            return Some(target);
+        }
+    }
+    kernel
+        .controls
+        .children_of(kernel.active_window)
+        .into_iter()
+        .find(|h| {
+            kernel.controls.get(*h).is_some_and(|c| {
+                c.enabled
+                    && c.style & 0x10000 != 0
+                    && c.is_focusable()
+                    && window_is_visible(kernel, *h)
+            })
+        })
+}
+
+/// Private dialog-manager slot, alongside the stored default button (-1200).
+/// Remember explicit child focus even when the application omits WS_TABSTOP.
+fn remember_window_focus(kernel: &mut KernelState) {
+    let focus = kernel.controls.focus;
+    if !kernel
+        .controls
+        .get(focus)
+        .is_some_and(|c| c.enabled && c.is_focusable())
+    {
+        return;
+    }
+    let mut root = focus;
+    for _ in 0..64 {
+        let parent = if let Some(c) = kernel.controls.get(root) {
+            Some(c.parent)
+        } else if kernel
+            .window_styles
+            .get(&root)
+            .is_some_and(|s| s.0 & 0x40000000 != 0)
+        {
+            kernel.window_parents.get(&root).copied()
+        } else {
+            kernel.window_extra.insert((root, -1201), focus);
+            return;
+        };
+        match parent {
+            Some(parent) if parent != 0 && parent != root => root = parent,
+            _ => return,
+        }
+    }
+}
+
+fn remap_input(ev: InputEvent, queried: bool) -> InputEvent {
     let remapped = match ev {
         InputEvent::KeyDown { vk } => InputEvent::KeyDown {
             vk: pocket_kernel::gapi::remap_host_key(vk, queried),
@@ -12033,7 +12364,7 @@ fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
     if remapped != ev {
         log::debug!("remapped host input {ev:?} to {remapped:?} for GAPI guest");
     }
-    Some(remapped)
+    remapped
 }
 
 /// Non-blocking counterpart of [`next_message`] for `PeekMessageW`:
@@ -12262,6 +12593,12 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if budget > 0 && count >= budget {
         return quit_or_halt(ctx, lp_msg, count, budget, 1);
     }
+    let window = ctx.arg_u32(1)?;
+    let low = ctx.arg_u32(2)?;
+    let high = ctx.arg_u32(3)?;
+    if window != 0 || low != 0 || high != 0 {
+        return message_queue::peek(ctx, lp_msg, window, low, high, remove_mode);
+    }
     // Worker threads see only what was posted to them; an empty queue
     // is a yield back to the main thread, not a window message.
     if let Some(thread_index) = ctx.kernel.current_thread.checked_sub(1) {
@@ -12280,14 +12617,16 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
-        if let Some(outcome) = park_worker(ctx, 0)? {
-            return Ok(outcome);
+        if remove_mode & 2 == 0 {
+            if let Some(outcome) = park_worker(ctx, 0)? {
+                return Ok(outcome);
+            }
         }
     }
     if let Some((hwnd, create_lparam)) = ctx.kernel.pending_create.take() {
         write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, WM_CREATE, 0, create_lparam)?;
         ctx.kernel.synthetic_message_count = count + 1;
-        if remove_mode != 0x0001 {
+        if remove_mode & 1 == 0 {
             ctx.kernel.pending_message = Some((hwnd, WM_CREATE, 0, create_lparam));
         }
         return Ok(DispatchOutcome::ReturnedR0(1));
@@ -12308,6 +12647,9 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         None => match next_message_if_due(ctx) {
             Some(addressed) => addressed,
             None => {
+                if remove_mode & 2 != 0 {
+                    return Ok(DispatchOutcome::ReturnedR0(0));
+                }
                 if let Some(outcome) = park_worker(ctx, 0)? {
                     return Ok(outcome);
                 }
@@ -12326,7 +12668,7 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         addressed.2,
         addressed.3,
     )?;
-    if remove_mode != 0x0001 {
+    if remove_mode & 1 == 0 {
         ctx.kernel.pending_message = Some(addressed);
     } else {
         ctx.kernel.synthetic_message_count += 1;
@@ -12563,6 +12905,7 @@ fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
     let bitmap = ctx.kernel.gdi.create_compatible_bitmap(w, h);
     ctx.kernel.gdi.dc_mut(dc).unwrap().selected_bitmap = Some(bitmap);
     ctx.kernel.window_dcs.insert(hwnd, dc);
+    ctx.kernel.gdi.pending_window_erases.insert(hwnd);
     dc
 }
 fn get_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -12662,7 +13005,94 @@ fn finish_control_notify(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
     Ok(Some(advance_control_notify(ctx, state)?))
 }
 
+fn finish_owner_draw(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    if !ctx.kernel.gdi.owner_draw_frames.last().is_some_and(|f| {
+        f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
+    }) {
+        return Ok(None);
+    }
+    let f = ctx.kernel.gdi.owner_draw_frames.pop().unwrap();
+    do_free(ctx, f.scratch);
+    for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+        .into_iter()
+        .zip(f.frame.args)
+    {
+        ctx.cpu.write_reg(reg, value)?;
+    }
+    ctx.cpu.write_reg(ArmReg::Sp, f.frame.sp)?;
+    ctx.cpu.write_reg(ArmReg::Lr, f.frame.lr)?;
+    ctx.kernel.framebuffer.mark_dirty();
+    Ok(Some(DispatchOutcome::ReturnedR0(0)))
+}
+fn paint_owner_draw(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome, KernelError> {
+    let c = ctx.kernel.controls.get(hwnd).unwrap().clone();
+    let proc = ctx.kernel.window_procs.get(&c.parent).copied().unwrap_or(0);
+    if proc == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let frame = GuestCallFrame {
+        args: [
+            ctx.arg_u32(0)?,
+            ctx.arg_u32(1)?,
+            ctx.arg_u32(2)?,
+            ctx.arg_u32(3)?,
+        ],
+        sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+        lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+    };
+    let DispatchOutcome::ReturnedR0(scratch) = do_alloc(ctx, 48)? else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if scratch == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let dc = window_dc(ctx, hwnd);
+    let state = u32::from(c.pressed)
+        | (u32::from(!c.enabled) << 2)
+        | (u32::from(ctx.kernel.controls.focus == hwnd) << 4);
+    let fields = [
+        4,
+        c.id,
+        0,
+        1,
+        state,
+        hwnd,
+        dc,
+        0,
+        0,
+        c.w.max(0) as u32,
+        c.h.max(0) as u32,
+        0,
+    ];
+    ctx.cpu.write_mem(
+        scratch,
+        &fields
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )?;
+    ctx.kernel
+        .gdi
+        .owner_draw_frames
+        .push(pocket_kernel::gdi::OwnerDrawFrame {
+            thread: ctx.kernel.current_thread,
+            thunk: ctx.thunk.thunk_va,
+            frame,
+            scratch,
+        });
+    ctx.cpu.write_reg(ArmReg::R0, c.parent)?;
+    ctx.cpu.write_reg(ArmReg::R1, 0x2b)?;
+    ctx.cpu.write_reg(ArmReg::R2, c.id)?;
+    ctx.cpu.write_reg(ArmReg::R3, scratch)?;
+    ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+    Ok(DispatchOutcome::JumpTo(proc & !1))
+}
+
 fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = finish_owner_draw(ctx)? {
+        return Ok(outcome);
+    }
     if let Some(outcome) = finish_control_notify(ctx)? {
         return Ok(outcome);
     }
@@ -12694,10 +13124,31 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         }
         _ => {}
     }
+    if ctx.arg_u32(1)? == WM_ERASEBKGND {
+        let dc = window_dc(ctx, hwnd);
+        let erased = if window_graphics::erase_scroll_region(ctx, hwnd, dc)? {
+            true
+        } else if dc == GDI_SCREEN_DC {
+            erase_window_background(ctx);
+            true
+        } else {
+            erase_child_background(ctx, hwnd, dc)?
+        };
+        return Ok(DispatchOutcome::ReturnedR0(u32::from(erased)));
+    }
     if ctx.kernel.controls.get(hwnd).is_some() {
         let message = ctx.arg_u32(1)?;
         let wp = ctx.arg_u32(2)?;
         let lp = ctx.arg_u32(3)?;
+        if message == WM_PAINT
+            && ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .is_some_and(|c| c.class == ControlClass::Button && c.style & 0xf == 0xb)
+        {
+            return paint_owner_draw(ctx, hwnd);
+        }
         let before = ctx.kernel.controls.get(hwnd).unwrap().text.clone();
         let result = control_message(ctx, hwnd, message, wp, lp)?;
         let control = ctx.kernel.controls.get(hwnd).unwrap();
@@ -12726,14 +13177,6 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let _hwnd = ctx.arg_u32(0)?;
     let message = ctx.arg_u32(1)?;
     match message {
-        WM_ERASEBKGND => {
-            let hwnd = ctx.arg_u32(0)?;
-            let dc = window_dc(ctx, hwnd);
-            if !window_graphics::erase_scroll_region(ctx, hwnd, dc)? {
-                erase_window_background(ctx);
-            }
-            Ok(DispatchOutcome::ReturnedR0(1))
-        }
         WM_PAINT => {
             if ctx.kernel.window_background_erase_pending {
                 erase_window_background(ctx);
@@ -12847,12 +13290,85 @@ fn erase_window_background(ctx: &mut CallCtx<'_>) {
     ctx.kernel.framebuffer.mark_dirty();
 }
 
+fn erase_child_background(ctx: &mut CallCtx<'_>, hwnd: u32, dc: u32) -> Result<bool, KernelError> {
+    let brush = ctx
+        .kernel
+        .window_classes
+        .get(&hwnd)
+        .and_then(|name| {
+            ctx.kernel
+                .gdi
+                .class_values
+                .get(&(name.to_ascii_lowercase(), -10))
+        })
+        .copied()
+        .unwrap_or(0);
+    let Some(color) = class_background_color(ctx, brush) else {
+        return Ok(false);
+    };
+    sync_dib_from_guest(ctx, dc)?;
+    if let Some(mut surf) = surface_for_dc(ctx.kernel, dc) {
+        let (w, h) = surf.dimensions();
+        surf.fill_rect(0, 0, w as i32, h as i32, colorref_to_rgb565(color));
+        surf.mark_dirty();
+    }
+    sync_dst_dib_to_guest(ctx, dc)?;
+    Ok(true)
+}
+
 fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    let resumed = ctx.kernel.gdi.paint_erase_frames.last().is_some_and(|f| {
+        f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
+    });
+    let mut erase_unhandled = false;
+    if resumed {
+        erase_unhandled = ctx.cpu.read_reg(ArmReg::R0)? == 0;
+        let f = ctx.kernel.gdi.paint_erase_frames.pop().unwrap().frame;
+        for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+            .into_iter()
+            .zip(f.args)
+        {
+            ctx.cpu.write_reg(reg, value)?;
+        }
+        ctx.cpu.write_reg(ArmReg::Lr, f.lr)?;
+    }
+
     // BeginPaint(hwnd, lpPaint) -> HDC. Apply and report any pending
     // class-brush erase, then fill the PAINTSTRUCT fields games read.
     let hwnd = ctx.arg_u32(0)?;
     let lp_paint = ctx.arg_u32(1)?;
     let dc = window_dc(ctx, hwnd);
+    if !resumed && dc != GDI_SCREEN_DC && ctx.kernel.gdi.pending_window_erases.remove(&hwnd) {
+        if let Some(proc) = ctx
+            .kernel
+            .window_procs
+            .get(&hwnd)
+            .copied()
+            .filter(|p| *p != 0)
+        {
+            let frame = GuestCallFrame {
+                args: [hwnd, lp_paint, ctx.arg_u32(2)?, ctx.arg_u32(3)?],
+                sp,
+                lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+            };
+            ctx.kernel
+                .gdi
+                .paint_erase_frames
+                .push(pocket_kernel::gdi::PaintEraseFrame {
+                    thread: ctx.kernel.current_thread,
+                    thunk: ctx.thunk.thunk_va,
+                    frame,
+                });
+            ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+            ctx.cpu.write_reg(ArmReg::R1, WM_ERASEBKGND)?;
+            ctx.cpu.write_reg(ArmReg::R2, dc)?;
+            ctx.cpu.write_reg(ArmReg::R3, 0)?;
+            ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+            return Ok(DispatchOutcome::JumpTo(proc));
+        }
+        erase_unhandled = !erase_child_background(ctx, hwnd, dc)?;
+    }
     let (screen_w, screen_h) = if dc == GDI_SCREEN_DC {
         screen_dims(ctx)
     } else {
@@ -12868,7 +13384,8 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         let mut buf = [0u8; PAINTSTRUCT_BYTES as usize];
         // hdc
         buf[0..4].copy_from_slice(&dc.to_le_bytes());
-        buf[4..8].copy_from_slice(&u32::from(erase || scroll_erased).to_le_bytes());
+        buf[4..8]
+            .copy_from_slice(&u32::from(erase || scroll_erased || erase_unhandled).to_le_bytes());
         // rcPaint = (0,0, screen width, screen height)
         buf[8..12].copy_from_slice(&0u32.to_le_bytes());
         buf[12..16].copy_from_slice(&0u32.to_le_bytes());
@@ -12911,10 +13428,14 @@ fn create_solid_brush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 }
 
 fn create_pen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _style = ctx.arg_u32(0)?;
+    let style = ctx.arg_u32(0)?;
     let width = ctx.arg_u32(1)?;
     let color = ctx.arg_u32(2)?;
-    let h = ctx.kernel.gdi.create_pen(color, width);
+    let h = if style & 0xf == 5 {
+        STOCK_NULL_PEN
+    } else {
+        ctx.kernel.gdi.create_pen(color, width)
+    };
     Ok(DispatchOutcome::ReturnedR0(h))
 }
 
@@ -12922,6 +13443,14 @@ fn create_pen_indirect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     let ptr = ctx.arg_u32(0)?;
     let bytes = ctx.cpu.read_mem(ptr, 16)?;
     let field = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+    if std::env::var_os("POCKETHLE_GDI_TRACE").is_some() {
+        log::info!(
+            "GDI LOGPEN: style={} width={} color=0x{:06x}",
+            field(0),
+            field(4),
+            field(12)
+        );
+    }
     let handle = if field(0) & 0xf == 5 {
         STOCK_NULL_PEN
     } else {
@@ -13018,6 +13547,10 @@ fn draw_points(ctx: &mut CallCtx<'_>, closed: bool) -> Result<DispatchOutcome, K
         })
         .collect();
     let width = ctx.kernel.gdi.pen(meta.selected_pen).map_or(1, |p| p.width);
+    if std::env::var_os("POCKETHLE_GDI_TRACE").is_some() {
+        log::info!("GDI points: closed={closed} dc=0x{dc:08x} count={count} pen=0x{:08x} color=0x{:06x} width={width} bounds={:?}", meta.selected_pen, meta.pen_color,
+            (points.iter().map(|p|p.0).min(),points.iter().map(|p|p.1).min(),points.iter().map(|p|p.0).max(),points.iter().map(|p|p.1).max()));
+    }
     sync_dib_from_guest(ctx, dc)?;
     if let Some(mut surface) = surface_for_dc(ctx.kernel, dc) {
         if closed && meta.selected_brush != STOCK_NULL_BRUSH {
@@ -13216,24 +13749,61 @@ fn fill_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn rectangle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // Rectangle(hdc, l, t, r, b)
+    draw_closed_shape(ctx, false)
+}
+
+fn draw_closed_shape(ctx: &mut CallCtx<'_>, round: bool) -> Result<DispatchOutcome, KernelError> {
     let hdc = ctx.arg_u32(0)?;
-    let l = ctx.arg_u32(1)? as i32;
-    let t = ctx.arg_u32(2)? as i32;
-    let r = ctx.arg_u32(3)? as i32;
-    let b = ctx.arg_u32(4)? as i32;
-    let dc_meta = ctx
-        .kernel
-        .gdi
-        .dc(hdc)
-        .cloned()
-        .ok_or_else(|| KernelError::Dispatch(format!("Rectangle: bad HDC 0x{hdc:08x}")))?;
-    let fill_rgb = colorref_to_rgb565(dc_meta.brush_color);
-    let stroke_rgb = colorref_to_rgb565(dc_meta.pen_color);
+    let rect = [
+        ctx.arg_u32(1)? as i32,
+        ctx.arg_u32(2)? as i32,
+        ctx.arg_u32(3)? as i32,
+        ctx.arg_u32(4)? as i32,
+    ];
+    let Some(meta) = ctx.kernel.gdi.dc(hdc).cloned() else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let fill =
+        (meta.selected_brush != STOCK_NULL_BRUSH).then(|| colorref_to_rgb565(meta.brush_color));
+    let stroke = (meta.selected_pen != STOCK_NULL_PEN).then(|| {
+        (
+            colorref_to_rgb565(meta.pen_color),
+            ctx.kernel
+                .gdi
+                .pen(meta.selected_pen)
+                .map_or(1, |p| p.width)
+                .clamp(1, 2048),
+        )
+    });
+    sync_dib_from_guest(ctx, hdc)?;
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
-        surf.fill_rect(l, t, r - l, b - t, fill_rgb);
-        surf.stroke_rect(l, t, r - l, b - t, stroke_rgb);
+        if round {
+            surf.ellipse(rect, fill, stroke);
+        } else {
+            let [l, t, r, b] = rect.map(i64::from);
+            if r > l && b > t {
+                let (sw, sh) = surf.dimensions();
+                let mut paint = |left: i64, top: i64, right: i64, bottom: i64, color: u16| {
+                    let (x, y) = (left.max(0).min(sw as i64), top.max(0).min(sh as i64));
+                    let (r, b) = (right.max(0).min(sw as i64), bottom.max(0).min(sh as i64));
+                    if r > x && b > y {
+                        surf.fill_rect(x as i32, y as i32, (r - x) as i32, (b - y) as i32, color);
+                    }
+                };
+                if let Some(color) = fill {
+                    paint(l, t, r, b, color);
+                }
+                if let Some((color, width)) = stroke {
+                    let w = i64::from(width);
+                    paint(l, t, r, (t + w).min(b), color);
+                    paint(l, (b - w).max(t), r, b, color);
+                    paint(l, t, (l + w).min(r), b, color);
+                    paint((r - w).max(l), t, r, b, color);
+                }
+            }
+        }
     }
+    sync_dst_dib_to_guest(ctx, hdc)?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -14686,7 +15256,7 @@ fn enum_windows(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// CoPilot creates WS_VISIBLE children inside a still-hidden dialog, then
 /// probes one at 0x50fe4 during its constructor (caller 0x4d2c0). Reporting
 /// only the child's style enters 0x529a0 before object+0x1b4 is initialized.
-fn window_is_visible(kernel: &KernelState, hwnd: u32) -> bool {
+pub(crate) fn window_is_visible(kernel: &KernelState, hwnd: u32) -> bool {
     let mut current = hwnd;
     let mut visited = std::collections::HashSet::new();
     loop {
@@ -14857,32 +15427,7 @@ fn destroy_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         return Ok(DispatchOutcome::JumpTo(proc));
     }
     for hwnd in &pending.windows {
-        ctx.kernel.controls.destroy(*hwnd);
-        ctx.kernel.controls.destroy_children_of(*hwnd);
-        ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
-        ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
-        ctx.kernel.window_rects.remove(hwnd);
-        if let Some(dc) = ctx.kernel.window_dcs.remove(hwnd) {
-            if let Some(bitmap) = ctx.kernel.gdi.dc(dc).and_then(|d| d.selected_bitmap) {
-                ctx.kernel.gdi.delete(bitmap);
-            }
-            ctx.kernel.gdi.delete(dc);
-        }
-        ctx.kernel.window_classes.remove(hwnd);
-        ctx.kernel.window_ids.remove(hwnd);
-        ctx.kernel.scroll_info.retain(|(h, _), _| h != hwnd);
-        if let Some(ptr) = ctx.kernel.window_extra.get(&(*hwnd, -1001)).copied() {
-            ctx.kernel.heap.free(ptr);
-        }
-        ctx.kernel.window_extra.retain(|(h, _), _| h != hwnd);
-        ctx.kernel.window_styles.remove(hwnd);
-        ctx.kernel.window_parents.remove(hwnd);
-        ctx.kernel.window_visibility.remove(hwnd);
-        ctx.kernel.window_procs.remove(hwnd);
-        ctx.kernel.window_userdata.remove(hwnd);
-        if ctx.kernel.active_window == *hwnd {
-            ctx.kernel.active_window = FAKE_HWND;
-        }
+        discard_window_metadata(ctx, hwnd);
     }
     for (r, v) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
         .into_iter()
@@ -14895,7 +15440,47 @@ fn destroy_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-fn find_window_w(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
+    ctx.kernel.controls.destroy(*hwnd);
+    ctx.kernel.controls.destroy_children_of(*hwnd);
+    ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
+    ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
+    ctx.kernel.window_rects.remove(hwnd);
+    ctx.kernel.gdi.pending_window_erases.remove(hwnd);
+    ctx.kernel.gdi.owner_draw_states.remove(hwnd);
+    if ctx.kernel.pending_message.is_some_and(|m| m.0 == *hwnd) {
+        ctx.kernel.pending_message = None;
+    }
+    if let Some(dc) = ctx.kernel.window_dcs.remove(hwnd) {
+        if let Some(bitmap) = ctx.kernel.gdi.dc(dc).and_then(|d| d.selected_bitmap) {
+            ctx.kernel.gdi.delete(bitmap);
+        }
+        ctx.kernel.gdi.delete(dc);
+    }
+    ctx.kernel.window_classes.remove(hwnd);
+    ctx.kernel.window_ids.remove(hwnd);
+    ctx.kernel.scroll_info.retain(|(h, _), _| h != hwnd);
+    if let Some(ptr) = ctx.kernel.window_extra.get(&(*hwnd, -1001)).copied() {
+        ctx.kernel.heap.free(ptr);
+    }
+    ctx.kernel.window_extra.retain(|(h, _), _| h != hwnd);
+    ctx.kernel.window_styles.remove(hwnd);
+    ctx.kernel.window_parents.remove(hwnd);
+    ctx.kernel.window_visibility.remove(hwnd);
+    ctx.kernel.window_procs.remove(hwnd);
+    ctx.kernel.window_userdata.remove(hwnd);
+    if ctx.kernel.active_window == *hwnd {
+        ctx.kernel.active_window = FAKE_HWND;
+    }
+}
+
+fn find_window_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if crate::shell_keyboard::find(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(
+            pocket_kernel::shell_keyboard::HWND,
+        ));
+    }
+
     // Pocket PC games call FindWindowW on their own class to detect a
     // prior instance of themselves. We always say "no prior instance"
     // so the game proceeds with normal startup.
@@ -15066,6 +15651,9 @@ fn get_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// Solitaire uses it to refresh the score / time labels on its status
 /// dialog. We draw no real controls, so log the text and report success.
 fn set_dlg_item_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = finish_control_notify(ctx)? {
+        return Ok(outcome);
+    }
     let hwnd = ctx.arg_u32(0)?;
     let id = ctx.arg_u32(1)?;
     let p = ctx.arg_u32(2)?;
@@ -15078,12 +15666,11 @@ fn set_dlg_item_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     };
     if let Some(child) = ctx.kernel.controls.by_id(hwnd, id) {
         let child_hwnd = child.hwnd;
-        if let Some(c) = ctx.kernel.controls.get_mut(child_hwnd) {
-            c.text = text.clone();
-            repaint_controls(ctx);
-        }
-        log::debug!("SetDlgItemTextW(id={id}, text={text:?}) -> control updated");
-        return Ok(DispatchOutcome::ReturnedR0(1));
+        ctx.cpu.write_reg(ArmReg::R0, child_hwnd)?;
+        ctx.cpu.write_reg(ArmReg::R1, 0x0c)?;
+        ctx.cpu.write_reg(ArmReg::R2, 0)?;
+        ctx.cpu.write_reg(ArmReg::R3, p)?;
+        return send_message_w(ctx);
     }
     log::debug!("SetDlgItemTextW(id={id}, {text:?})");
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -15139,6 +15726,8 @@ fn set_window_text_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn set_control_text(ctx: &mut CallCtx<'_>, hwnd: u32, text: &str) {
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         child.text = text.to_string();
+        ctx.kernel.gdi.owner_draw_states.remove(&hwnd);
+        ctx.kernel.gdi.pending_window_erases.insert(hwnd);
         repaint_controls(ctx);
     }
 }
@@ -15433,10 +16022,29 @@ fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
     }
 }
 
+fn queue_visible_window_paints(kernel: &mut KernelState, hwnd: u32) {
+    kernel.gdi.pending_window_erases.insert(hwnd);
+    queue_window_paint(kernel, hwnd);
+    let mut children: Vec<_> = kernel
+        .window_procs
+        .keys()
+        .copied()
+        .filter(|child| *child != hwnd && focus_belongs_to_window(kernel, *child, hwnd))
+        .collect();
+    children.sort_unstable();
+    for child in children {
+        kernel.gdi.pending_window_erases.insert(child);
+        queue_window_paint(kernel, child);
+    }
+}
+
 fn invalidate_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     queue_window_paint(ctx.kernel, hwnd);
     let _rect = ctx.arg_u32(1)?;
+    if ctx.arg_u32(2)? != 0 {
+        ctx.kernel.gdi.pending_window_erases.insert(hwnd);
+    }
     if ctx.arg_u32(2)? != 0 && (hwnd == 0 || hwnd == FAKE_HWND) {
         ctx.kernel.window_background_erase_pending = true;
     }
@@ -15488,6 +16096,9 @@ fn get_class_name_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
                     ControlClass::Edit => "EDIT",
                     ControlClass::Static => "STATIC",
                     ControlClass::ListView => "SysListView32",
+                    ControlClass::TrackBar => "msctls_trackbar32",
+                    ControlClass::ListBox => "LISTBOX",
+                    ControlClass::ComboBox => "COMBOBOX",
                 }
                 .to_string()
             })
@@ -15653,6 +16264,13 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             sp: ctx.cpu.read_reg(ArmReg::Sp)?,
             lr: ctx.cpu.read_reg(ArmReg::Lr)?,
         };
+        ctx.kernel
+            .window_parents
+            .insert(FAKE_MODAL_HWND, frame.args[2]);
+        ctx.kernel
+            .window_classes
+            .insert(FAKE_MODAL_HWND, "#32770".into());
+        ctx.kernel.active_window = FAKE_MODAL_HWND;
         ctx.kernel.modal_dialog = Some(ModalDialog {
             previous_active,
             previous_focus,
@@ -15681,6 +16299,11 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             d.initialised = true;
             (d.hwnd, d.proc)
         };
+        // This API owns its modal pump, so it must deliver the initial
+        // paint after initialization rather than waiting for GetMessage.
+        if ctx.kernel.posted_messages.len() < 256 {
+            ctx.kernel.posted_messages.push_back((hwnd, WM_PAINT, 0, 0));
+        }
         let init_param = ctx.arg_u32(4).unwrap_or(0);
         // Re-enter this handler when the DialogProc returns, so the pump
         // below picks up from the next pass.
@@ -15784,6 +16407,33 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         // IDCANCEL, the same answer dismissing the dialog would give.
         return finish_modal_dialog(ctx, 2);
     }
+    // Dispatch only this modal tree's posted traffic. Its native WM_PAINT
+    // draws custom confirmation text, and child procedures draw icon buttons.
+    // Leave the underlying application's queue intact until the modal ends.
+    if let Some(index) = ctx
+        .kernel
+        .posted_messages
+        .iter()
+        .position(|m| focus_belongs_to_window(ctx.kernel, m.0, modal_hwnd))
+    {
+        let (hwnd, message, wp, lp) = ctx.kernel.posted_messages.remove(index).unwrap();
+        let proc = ctx
+            .kernel
+            .window_procs
+            .get(&hwnd)
+            .copied()
+            .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
+            .unwrap_or(0);
+        if proc != 0 {
+            ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+            ctx.cpu.write_reg(ArmReg::R1, message)?;
+            ctx.cpu.write_reg(ArmReg::R2, wp)?;
+            ctx.cpu.write_reg(ArmReg::R3, lp)?;
+            ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+            return Ok(DispatchOutcome::JumpTo(proc));
+        }
+    }
+
     // Wait in host time rather than consuming the headless spin budget in
     // less than a user's reaction time. The kernel still presents/polls input.
     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -15813,8 +16463,12 @@ fn close_modal_dialog(ctx: &mut CallCtx<'_>) {
         Some(d) => d,
         None => return,
     };
-    ctx.kernel.controls.destroy_children_of(dialog.hwnd);
-    ctx.kernel.window_procs.remove(&dialog.hwnd);
+    // No posted paint may outlive its native button's user-data object.
+    let mut windows = ctx.kernel.controls.children_of(dialog.hwnd);
+    windows.push(dialog.hwnd);
+    for hwnd in windows {
+        discard_window_metadata(ctx, &hwnd);
+    }
     ctx.kernel.active_window = dialog.previous_active;
     ctx.kernel.controls.focus = dialog.previous_focus;
     repaint_controls(ctx);
@@ -16703,9 +17357,7 @@ fn set_bitmap_bits(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 fn ellipse(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // Approximate Ellipse with a fill+stroke rect for now — Pocket PC
-    // games use this primarily as a focus indicator.
-    rectangle(ctx)
+    draw_closed_shape(ctx, true)
 }
 
 fn pat_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -16817,73 +17469,7 @@ fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
 /// surface using a built-in 6×8 ASCII font. `n` may be `-1`, in which
 /// case the string is NUL-terminated.
 fn draw_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let hdc = ctx.arg_u32(0)?;
-    let text_p = ctx.arg_u32(1)?;
-    let n = ctx.arg_u32(2)? as i32;
-    let rc_p = ctx.arg_u32(3)?;
-    sync_dib_from_guest(ctx, hdc)?;
-    sync_dib_from_guest(ctx, hdc)?;
-    let dc_meta = match ctx.kernel.gdi.dc(hdc).cloned() {
-        Some(d) => d,
-        None => return Ok(DispatchOutcome::ReturnedR0(0)),
-    };
-    let mut chars = Vec::new();
-    if text_p != 0 {
-        let max = if n < 0 { 1024 } else { (n as u32).min(1024) };
-        let raw = ctx.cpu.read_mem(text_p, max * 2)?;
-        for i in (0..raw.len()).step_by(2) {
-            if i + 1 >= raw.len() {
-                break;
-            }
-            let u = u16::from_le_bytes([raw[i], raw[i + 1]]);
-            if n < 0 && u == 0 {
-                break;
-            }
-            chars.push(u);
-        }
-    }
-    let (rl, rt, rr, rb) = if rc_p != 0 {
-        let r = ctx.cpu.read_mem(rc_p, 16)?;
-        (
-            i32::from_le_bytes([r[0], r[1], r[2], r[3]]),
-            i32::from_le_bytes([r[4], r[5], r[6], r[7]]),
-            i32::from_le_bytes([r[8], r[9], r[10], r[11]]),
-            i32::from_le_bytes([r[12], r[13], r[14], r[15]]),
-        )
-    } else {
-        (
-            0,
-            0,
-            ctx.kernel.framebuffer.width as i32,
-            ctx.kernel.framebuffer.height as i32,
-        )
-    };
-    let color = colorref_to_rgb565(dc_meta.text_color);
-    let bk_color = colorref_to_rgb565(dc_meta.bk_color);
-    let glyph_w = pocket_kernel::font::GLYPH_W;
-    let glyph_h = pocket_kernel::font::GLYPH_H;
-    // DT_CENTER = 1, DT_VCENTER = 4, DT_SINGLELINE = 0x20.
-    let fmt = ctx.arg_u32(4).unwrap_or(0);
-    let pixel_w = chars.len() as i32 * glyph_w;
-    let x = if fmt & 0x1 != 0 {
-        rl + ((rr - rl) - pixel_w).max(0) / 2
-    } else {
-        rl
-    };
-    let y = if fmt & 0x4 != 0 {
-        rt + ((rb - rt) - glyph_h).max(0) / 2
-    } else {
-        rt
-    };
-    if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
-        if !dc_meta.bk_transparent {
-            surf.fill_rect(x, y, pixel_w, glyph_h, bk_color);
-        }
-        pocket_kernel::font::draw_str_u16(&mut surf, x, y, &chars, color);
-        surf.mark_dirty();
-    }
-    sync_dst_dib_to_guest(ctx, hdc)?;
-    Ok(DispatchOutcome::ReturnedR0(glyph_h as u32))
+    text_draw::draw(ctx)
 }
 
 /// `BOOL TextOutW(HDC, int x, int y, LPCWSTR text, int len)` — render a
@@ -18964,15 +19550,11 @@ fn build_dialog_from_template_for(
         .insert(owner_hwnd, modal || tmpl.style & WS_VISIBLE != 0);
     let dlu = Dlu::default();
     let (px, py, pw, ph) = dlu.to_px(tmpl.x as i32, tmpl.y as i32, tmpl.cx as i32, tmpl.cy as i32);
-    // A modal dialog always gets a caption, titled from the template or
-    // left blank — the OK box is what closes it, so a dialog without one
-    // could only ever be dismissed by our own spin limit.
-    let caption = modal.then(|| tmpl.title.clone());
-    let caption_h = i32::from(modal) * DialogPanel::CAPTION_H;
-    // `DialogBox*` draws a frame around its dialog whether or not the
-    // template asks for one; a `WS_CHILD` panel takes the style at its
-    // word.
-    let border = modal || tmpl.style & WS_BORDER != 0;
+    // Custom modal dialogs may deliberately omit the caption and draw
+    // their own buttons. Modal ownership does not add window styles.
+    let caption = (tmpl.style & 0x00c0_0000 == 0x00c0_0000).then(|| tmpl.title.clone());
+    let caption_h = i32::from(caption.is_some()) * DialogPanel::CAPTION_H;
+    let border = tmpl.style & WS_BORDER != 0;
     let frame = 2 * i32::from(border);
     // The template's cx/cy describe the *client* area; the border and
     // caption sit outside it.
@@ -19013,16 +19595,23 @@ fn build_dialog_from_template_for(
         ok_pressed: false,
     });
 
+    if modal {
+        ctx.kernel
+            .window_rects
+            .insert(owner_hwnd, (x, y, win_w, win_h));
+    }
     for item in &tmpl.items {
         let class = match &item.class {
             ItemClass::Ordinal(class_ordinal::BUTTON) => ControlClass::Button,
             ItemClass::Ordinal(class_ordinal::EDIT) => ControlClass::Edit,
             ItemClass::Ordinal(class_ordinal::STATIC) => ControlClass::Static,
+            ItemClass::Ordinal(class_ordinal::LISTBOX) => ControlClass::ListBox,
+            ItemClass::Ordinal(class_ordinal::COMBOBOX) => ControlClass::ComboBox,
             ItemClass::Named(name) if ControlClass::from_class_name(name).is_some() => {
                 ControlClass::from_class_name(name).unwrap()
             }
             other => {
-                // Listboxes, combos, scrollbars and custom classes are
+                // Scrollbars and unknown custom classes are
                 // not modelled; skipping one loses a control but keeps
                 // the rest of the dialog.
                 log::debug!("dialog item id={} class {other:?} not modelled", item.id);
@@ -19042,6 +19631,10 @@ fn build_dialog_from_template_for(
             iw,
             ih,
         );
+        if modal {
+            ctx.kernel.window_rects.insert(hwnd, (ix, iy, iw, ih));
+            ctx.kernel.window_parents.insert(hwnd, owner_hwnd);
+        }
         log::debug!(
             "dialog item id={} {:?} \"{}\" at ({ix},{iy},{iw},{ih}) -> hwnd=0x{hwnd:08x}",
             item.id,
@@ -19079,12 +19672,17 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
         if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
             let hwnd = ctx.kernel.dialog_frame_hwnd;
             if ctx.cpu.read_reg(ArmReg::R0)? != 0 {
-                if let Some(focus) = ctx.kernel.controls.children_of(hwnd).into_iter().find(|h| {
+                let focus = ctx.kernel.controls.children_of(hwnd).into_iter().find(|h| {
                     ctx.kernel.controls.get(*h).is_some_and(|c| {
                         c.visible && c.enabled && c.style & 0x10000 != 0 && c.is_focusable()
                     })
-                }) {
+                });
+                // A new popup with no tab-stop child must not keep the
+                // keyboard focus in its owner's still-existing dialog.
+                if let Some(focus) = focus {
                     ctx.kernel.controls.focus = focus;
+                } else if !focus_belongs_to_window(ctx.kernel, ctx.kernel.controls.focus, hwnd) {
+                    ctx.kernel.controls.focus = hwnd;
                 }
             }
             if window_is_visible(ctx.kernel, hwnd)
@@ -20589,22 +21187,103 @@ fn get_foreground_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     get_active_window(ctx)
 }
 
+fn focus_belongs_to_window(kernel: &KernelState, focus: u32, active: u32) -> bool {
+    if active == 0 {
+        return true;
+    }
+    let mut current = focus;
+    for _ in 0..64 {
+        if current == active {
+            return true;
+        }
+        current = if let Some(child) = kernel.controls.get(current) {
+            child.parent
+        } else if kernel
+            .window_styles
+            .get(&current)
+            .is_some_and(|s| s.0 & 0x4000_0000 != 0)
+        {
+            kernel.window_parents.get(&current).copied().unwrap_or(0)
+        } else {
+            return false;
+        };
+        if current == 0 {
+            return false;
+        }
+    }
+    false
+}
+fn focus_belongs_to_active(kernel: &KernelState, focus: u32) -> bool {
+    focus_belongs_to_window(kernel, focus, kernel.active_window)
+}
 fn input_window(kernel: &KernelState) -> u32 {
-    let focus = kernel.controls.focus;
-    if kernel.window_procs.contains_key(&focus) {
-        focus
-    } else if kernel.active_window != 0 {
+    let focus = active_dialog_focus(kernel).unwrap_or(kernel.controls.focus);
+    // MSG.hwnd names the focused control even when its procedure is
+    // implemented by the host. MFC walks this child-parent chain during
+    // PreTranslateMessage; targeting the top-level window skips the
+    // child dialog's console shortcuts (notably Navigator's Ctrl/Back).
+    if focus_belongs_to_active(kernel, focus) {
+        let mut target = focus;
+        for _ in 0..64 {
+            if (kernel.window_procs.contains_key(&target) || kernel.controls.get(target).is_some())
+                && window_is_visible(kernel, target)
+            {
+                return target;
+            }
+            // A hidden focused control can still belong to the current
+            // dialog (Navigator hides its result list on the name page).
+            // Keep that page in MFC's PreTranslateMessage parent walk.
+            // Jumping straight to the active sheet skips its Next shortcut.
+            let parent = kernel
+                .controls
+                .get(target)
+                .map(|c| c.parent)
+                .or_else(|| kernel.window_parents.get(&target).copied());
+            match parent {
+                Some(parent) if parent != 0 && parent != target => target = parent,
+                _ => break,
+            }
+        }
+    }
+    if kernel.active_window != 0 {
         kernel.active_window
     } else {
         FAKE_HWND
     }
 }
 
+/// Activating a top-level panel must keep its child dialogs above its
+/// background. Ownership of another popup is not a child relationship.
+fn raise_window_panels(kernel: &mut KernelState, hwnd: u32) {
+    let children: Vec<_> = kernel
+        .controls
+        .panel_handles()
+        .filter(|child| *child != hwnd && focus_belongs_to_window(kernel, *child, hwnd))
+        .collect();
+    kernel.controls.raise_panel(hwnd);
+    for child in children {
+        kernel.controls.raise_panel(child);
+    }
+}
+
 fn set_active_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let previous = active_window(ctx.kernel);
+    let style = ctx
+        .kernel
+        .controls
+        .get(hwnd)
+        .map(|c| c.style)
+        .or_else(|| ctx.kernel.window_styles.get(&hwnd).map(|s| s.0));
+    if style.is_some_and(|style| style & 0x4000_0000 != 0) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     if hwnd == 0 || ctx.kernel.window_procs.contains_key(&hwnd) {
         ctx.kernel.active_window = hwnd;
+        if hwnd != 0 {
+            raise_window_panels(ctx.kernel, hwnd);
+            repaint_controls(ctx);
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(previous))
 }
@@ -21068,32 +21747,69 @@ fn modify_menu_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+/// WinCE TransparentImage accepts either a source DC or an unselected bitmap.
+/// Its eleven arguments include a COLORREF key, not an extra flags word.
 fn transparent_image(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
-    let dx = ctx.arg_u32(1)? as i32;
-    let dy = ctx.arg_u32(2)? as i32;
-    let dw = ctx.arg_u32(3)? as i32;
-    let dh = ctx.arg_u32(4)? as i32;
+    let dx = ctx.arg_u32(1)? as i32 as i64;
+    let dy = ctx.arg_u32(2)? as i32 as i64;
+    let dw = (ctx.arg_u32(3)? as i32).unsigned_abs() as i64;
+    let dh = (ctx.arg_u32(4)? as i32).unsigned_abs() as i64;
     let src = ctx.arg_u32(5)?;
-    let sx = ctx.arg_u32(6)? as i32;
-    let sy = ctx.arg_u32(7)? as i32;
-    let sw = ctx.arg_u32(8)? as i32;
-    let sh = ctx.arg_u32(9)? as i32;
-    let _color = ctx.arg_u32(10).unwrap_or(0);
-    let _flags = ctx.arg_u32(11).unwrap_or(0);
-    bit_blt_inner(
-        ctx,
-        dst,
-        dx,
-        dy,
-        dw.min(sw),
-        dh.min(sh),
-        src,
-        sx,
-        sy,
-        pocket_kernel::gdi::rop3::SRCCOPY,
-    )?;
-    Ok(DispatchOutcome::ReturnedR0(1))
+    let sx = ctx.arg_u32(6)? as i32 as i64;
+    let sy = ctx.arg_u32(7)? as i32 as i64;
+    let sw = (ctx.arg_u32(8)? as i32).unsigned_abs() as i64;
+    let sh = (ctx.arg_u32(9)? as i32).unsigned_abs() as i64;
+    let key = colorref_to_rgb565(ctx.arg_u32(10)?);
+    if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let temporary = if ctx.kernel.gdi.bitmap(src).is_some() {
+        let dc = ctx.kernel.gdi.create_memory_dc();
+        ctx.kernel.gdi.select_into(dc, src);
+        Some(dc)
+    } else {
+        None
+    };
+    let mut pixels = std::mem::take(&mut ctx.kernel.bit_blt_src_scratch);
+    let mut decode = std::mem::take(&mut ctx.kernel.dib_decode_scratch);
+    let (width, height, valid) =
+        read_blit_source(ctx, temporary.unwrap_or(src), &mut pixels, &mut decode);
+    if let Some(dc) = temporary {
+        ctx.kernel.gdi.delete(dc);
+    }
+    let mut success = false;
+    if valid {
+        // Transparent pixels must preserve guest writes to a DIB destination.
+        sync_dib_from_guest(ctx, dst)?;
+        if let Some(mut surface) = surface_for_dc(ctx.kernel, dst) {
+            let (w, h) = surface.dimensions();
+            for y in dy.max(0)..(dy + dh).min(h as i64) {
+                let source_y = sy + (y - dy) * sh / dh;
+                if source_y < 0 || source_y >= height as i64 {
+                    continue;
+                }
+                for x in dx.max(0)..(dx + dw).min(w as i64) {
+                    let source_x = sx + (x - dx) * sw / dw;
+                    if source_x < 0 || source_x >= width as i64 {
+                        continue;
+                    }
+                    let offset = (source_y as usize * width as usize + source_x as usize) * 2;
+                    let color = u16::from_le_bytes([pixels[offset], pixels[offset + 1]]);
+                    if color != key {
+                        surface.put_pixel(x as i32, y as i32, color);
+                    }
+                }
+            }
+            surface.mark_dirty();
+            success = true;
+        }
+        sync_dst_dib_to_guest(ctx, dst)?;
+    }
+    ctx.kernel.bit_blt_src_scratch = pixels;
+    ctx.kernel.dib_decode_scratch = decode;
+    Ok(DispatchOutcome::ReturnedR0(u32::from(success)))
 }
 
 // ---------- directory enumeration ----------
@@ -24649,6 +25365,7 @@ mod tests {
             next_menu_handle: 0xDEAD_2000,
             sub_menus: std::collections::HashMap::new(),
             modal: None,
+            shell_keyboard: pocket_kernel::shell_keyboard::ShellKeyboard::default(),
             message_box_spins: 0,
             modal_dialog: None,
         }

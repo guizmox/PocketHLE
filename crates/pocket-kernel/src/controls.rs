@@ -28,6 +28,9 @@ pub enum ControlClass {
     Edit,
     Static,
     ListView,
+    ListBox,
+    ComboBox,
+    TrackBar,
 }
 
 impl ControlClass {
@@ -42,6 +45,12 @@ impl ControlClass {
             Some(Self::Edit)
         } else if name.eq_ignore_ascii_case("STATIC") {
             Some(Self::Static)
+        } else if name.eq_ignore_ascii_case("LISTBOX") {
+            Some(Self::ListBox)
+        } else if name.eq_ignore_ascii_case("COMBOBOX") {
+            Some(Self::ComboBox)
+        } else if name.eq_ignore_ascii_case("msctls_trackbar32") {
+            Some(Self::TrackBar)
         } else if name.eq_ignore_ascii_case("SysListView32") {
             Some(Self::ListView)
         } else {
@@ -290,10 +299,21 @@ pub struct ChildWindow {
     pub list_image_lists: [u32; 3],
     pub list_image_sizes: [(u32, u32); 3],
     pub list_scroll_y: i32,
+    pub list_positions: Vec<Option<(i32, i32)>>,
+    pub list_spacing: (i32, i32),
+    pub list_background: u32,
+    pub list_text_color: u32,
     pub image: u32,
     pub list_selected: Option<usize>,
     pub list_column_count: u32,
     pub font: u32,
+    pub choice_open: bool,
+    pub choice_popup_y: i32,
+    pub choice_popup_h: i32,
+    pub track_range: (i32, i32),
+    pub track_pos: i32,
+    pub track_line: i32,
+    pub track_page: i32,
 }
 
 const LIST_VIEW_ROW_HEIGHT: i32 = 14;
@@ -312,6 +332,148 @@ impl ChildWindow {
     pub fn list_row_height(&self) -> i32 {
         LIST_VIEW_ROW_HEIGHT.max(self.list_image_list().2.min(4096) as i32 + 2)
     }
+    pub fn list_icon_view(&self) -> bool {
+        self.style & 3 == 0 && self.list_image_list().0 != 0
+    }
+    pub fn list_columns(&self) -> usize {
+        (self.w.max(1) / self.list_spacing.0.max(4)).max(1) as usize
+    }
+    pub fn list_item_position(&self, index: usize) -> (i32, i32) {
+        self.list_positions
+            .get(index)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| {
+                if self.list_icon_view() {
+                    let columns = self.list_columns();
+                    (
+                        ((index % columns) as i32).saturating_mul(self.list_spacing.0),
+                        ((index / columns) as i32).saturating_mul(self.list_spacing.1),
+                    )
+                } else {
+                    (
+                        0,
+                        (index as i64 * i64::from(self.list_row_height())).min(i64::from(i32::MAX))
+                            as i32,
+                    )
+                }
+            })
+    }
+    pub fn list_item_at_point(&self, x: i32, y: i32) -> Option<usize> {
+        if x < 0 || x >= self.w || y < 0 || y >= self.h {
+            return None;
+        }
+        if !self.list_icon_view() {
+            return self.list_item_at(y);
+        }
+        let y = y.saturating_add(self.list_scroll_y);
+        (0..self.list_items.len()).find(|i| {
+            let (left, top) = self.list_item_position(*i);
+            x >= left
+                && x < left.saturating_add(self.list_spacing.0)
+                && y >= top
+                && y < top.saturating_add(self.list_spacing.1)
+        })
+    }
+    pub fn list_ensure_visible(&mut self, index: usize) {
+        let top = self.list_item_position(index).1;
+        let height = if self.list_icon_view() {
+            self.list_spacing.1
+        } else {
+            self.list_row_height()
+        };
+        if top < self.list_scroll_y {
+            self.list_scroll_y = top;
+        } else if top.saturating_add(height) > self.list_scroll_y.saturating_add(self.h) {
+            self.list_scroll_y = top.saturating_add(height).saturating_sub(self.h).max(0);
+        }
+    }
+    fn render_icon_list(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
+        let (handle, iw, ih) = self.list_image_list();
+        let clip = [
+            self.x,
+            self.y,
+            self.x.saturating_add(self.w),
+            self.y.saturating_add(self.h),
+        ];
+        for (index, (text, _)) in self.list_items.iter().enumerate() {
+            let (left, top) = self.list_item_position(index);
+            let x = self.x.saturating_add(left);
+            let y = self
+                .y
+                .saturating_add(top)
+                .saturating_sub(self.list_scroll_y);
+            if y < self.y || y.saturating_add(ih as i32 + font::GLYPH_H + 6) > clip[3] {
+                continue;
+            }
+            let cell = self.list_spacing.0;
+            if let Some(image) = gdi.and_then(|g| g.image_lists.get(&handle)).and_then(|l| {
+                self.list_images
+                    .get(index)
+                    .and_then(|i| usize::try_from(*i).ok())
+                    .and_then(|i| l.images.get(i))
+            }) {
+                image.draw(
+                    surf,
+                    x.saturating_add((cell - iw as i32) / 2),
+                    y + 2,
+                    iw,
+                    ih,
+                    clip,
+                );
+            }
+            let limit = ((cell - 4) / font::GLYPH_W).max(1) as usize;
+            let mut lines = vec![String::new()];
+            for word in text.split_whitespace() {
+                let line = lines.last_mut().unwrap();
+                if !line.is_empty()
+                    && line.chars().count() + 1 + word.chars().count() > limit
+                    && self.style & 0x80 == 0
+                    && lines.len() < 2
+                {
+                    lines.push(word.to_string());
+                } else {
+                    let line = lines.last_mut().unwrap();
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    line.push_str(word);
+                }
+            }
+            let selected = self.list_selected == Some(index);
+            for (row, line) in lines.iter().enumerate() {
+                let count = line.chars().count().min(limit) as i32;
+                let tx = x
+                    .saturating_add((cell - count * font::GLYPH_W) / 2)
+                    .max(self.x);
+                let ty = y.saturating_add(ih as i32 + 5 + row as i32 * (font::GLYPH_H + 1));
+                if ty < self.y || ty + font::GLYPH_H > clip[3] {
+                    continue;
+                }
+                if selected {
+                    surf.fill_rect(
+                        tx - 1,
+                        ty - 1,
+                        (count * font::GLYPH_W + 2).min(clip[2] - tx + 1).max(0),
+                        font::GLYPH_H + 2,
+                        0x001f,
+                    );
+                }
+                draw_clipped(
+                    surf,
+                    tx,
+                    ty,
+                    line,
+                    if selected {
+                        Self::WINDOW
+                    } else {
+                        crate::framebuffer::colorref_to_rgb565(self.list_text_color)
+                    },
+                    x.saturating_add(cell - 2).min(clip[2]),
+                );
+            }
+        }
+    }
     pub fn list_item_at(&self, y: i32) -> Option<usize> {
         if y < 0 || y >= self.h {
             return None;
@@ -323,7 +485,17 @@ impl ChildWindow {
             .filter(|i| *i < self.list_items.len())
     }
     fn render_list(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
-        surf.fill_rect(self.x, self.y, self.w, self.h, Self::WINDOW);
+        surf.fill_rect(
+            self.x,
+            self.y,
+            self.w,
+            self.h,
+            crate::framebuffer::colorref_to_rgb565(self.list_background),
+        );
+        if self.list_icon_view() {
+            self.render_icon_list(surf, gdi);
+            return;
+        }
         let row_height = self.list_row_height();
         let (handle, iw, ih) = self.list_image_list();
         let first = (self.list_scroll_y.max(0) / row_height) as usize;
@@ -389,7 +561,16 @@ impl ChildWindow {
 
     /// Is `(px, py)`, in parent-client coordinates, inside this control?
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+        let y = py - self.y;
+        let inside_y = if self.class == ControlClass::ComboBox {
+            (0..self.h.min(20)).contains(&y)
+                || (self.choice_open
+                    && (self.choice_popup_y..self.choice_popup_y + self.choice_popup_h)
+                        .contains(&y))
+        } else {
+            (0..self.h).contains(&y)
+        };
+        px >= self.x && px < self.x + self.w && inside_y
     }
 
     /// `BS_*` type of a button, or `None` for the other classes.
@@ -445,6 +626,139 @@ impl ChildWindow {
         self.button_type() == Some(BS_DEFPUSHBUTTON)
     }
 
+    pub fn choice_height(&self) -> i32 {
+        if self.class == ControlClass::ComboBox {
+            if self.choice_open {
+                20 + self.choice_popup_h
+            } else {
+                self.h.min(20)
+            }
+        } else {
+            self.h
+        }
+    }
+    /// Position a dropdown inside the display without moving its header.
+    pub fn layout_choice_popup(&mut self, screen_y: i32, screen_h: i32) {
+        let wanted = 2 + self.list_items.len().min(6) as i32 * 16;
+        let below = screen_h.saturating_sub(screen_y.saturating_add(20)).max(0);
+        let above = screen_y.max(0);
+        let upwards = below < wanted && above > below;
+        let available = if upwards { above } else { below };
+        let rows = self
+            .list_items
+            .len()
+            .min(6)
+            .min(available.saturating_sub(2) as usize / 16);
+        self.choice_popup_h = (2 + rows as i32 * 16).min(available);
+        self.choice_popup_y = if upwards { -self.choice_popup_h } else { 20 };
+        if let Some(selected) = self.list_selected {
+            let first = self.list_scroll_y.max(0) as usize;
+            if selected < first {
+                self.list_scroll_y = selected as i32;
+            } else if rows > 0 && selected >= first + rows {
+                self.list_scroll_y = (selected + 1 - rows) as i32;
+            }
+        }
+    }
+    fn render_track(&self, surf: &mut Surface<'_>, focused: bool) {
+        let vertical = self.style & 2 != 0;
+        let length = if vertical { self.h } else { self.w };
+        let span = i64::from(self.track_range.1) - i64::from(self.track_range.0);
+        let offset = if span > 0 {
+            ((i64::from(self.track_pos) - i64::from(self.track_range.0))
+                * i64::from((length - 10).max(0))
+                / span) as i32
+        } else {
+            0
+        };
+        let color = if focused { 0x001f } else { 0x7bef };
+        if vertical {
+            surf.fill_rect(
+                self.x + self.w / 2,
+                self.y + 5,
+                2,
+                (self.h - 10).max(0),
+                0x7bef,
+            );
+            surf.fill_rect(self.x + 2, self.y + offset, (self.w - 4).max(0), 10, color);
+        } else {
+            surf.fill_rect(
+                self.x + 5,
+                self.y + self.h / 2,
+                (self.w - 10).max(0),
+                2,
+                0x7bef,
+            );
+            surf.fill_rect(self.x + offset, self.y + 2, 10, (self.h - 4).max(0), color);
+        }
+    }
+
+    fn render_choice(&self, surf: &mut Surface<'_>, focused: bool) {
+        let combo = self.class == ControlClass::ComboBox;
+        let height = if combo { self.h.min(20) } else { self.h };
+        surf.fill_rect(self.x, self.y, self.w, height, Self::WINDOW);
+        stroke(surf, self.x, self.y, self.w, height, Self::SHADOW);
+        if combo {
+            let value = self
+                .list_selected
+                .and_then(|i| self.list_items.get(i))
+                .map(|i| i.0.as_str())
+                .unwrap_or(&self.text);
+            draw_clipped(
+                surf,
+                self.x + 3,
+                self.y + 5,
+                value,
+                Self::TEXT,
+                self.x + self.w - 18,
+            );
+            font::draw_str(surf, self.x + self.w - 12, self.y + 5, "v", Self::TEXT);
+        }
+        if !combo || self.choice_open {
+            let (top, bottom) = if combo {
+                let y = self.y + self.choice_popup_y;
+                surf.fill_rect(self.x, y, self.w, self.choice_popup_h, Self::WINDOW);
+                stroke(surf, self.x, y, self.w, self.choice_popup_h, Self::SHADOW);
+                (y + 1, y + self.choice_popup_h - 1)
+            } else {
+                (self.y + 1, self.y + height - 1)
+            };
+            for (i, (text, _)) in self
+                .list_items
+                .iter()
+                .enumerate()
+                .skip(self.list_scroll_y.max(0) as usize)
+            {
+                let y = top + (i as i32 - self.list_scroll_y.max(0)) * 16;
+                if y + 16 > bottom {
+                    break;
+                }
+                let selected = self.list_selected == Some(i);
+                if selected {
+                    surf.fill_rect(self.x + 1, y, self.w - 2, 16, 0x001f);
+                }
+                draw_clipped(
+                    surf,
+                    self.x + 3,
+                    y + 4,
+                    text,
+                    if selected { Self::WINDOW } else { Self::TEXT },
+                    self.x + self.w - 2,
+                );
+            }
+        }
+        if focused {
+            stroke(
+                surf,
+                self.x + 1,
+                self.y + 1,
+                self.w - 2,
+                if combo { 18 } else { height - 2 },
+                Self::TEXT,
+            );
+        }
+    }
+
     /// Can this control take the input focus? Statics never do, which
     /// is what keeps a tap on a label from stealing the caret from an
     /// edit field, and neither does a disabled control nor a group box.
@@ -483,10 +797,12 @@ impl ChildWindow {
             return;
         }
         match self.class {
+            ControlClass::TrackBar => self.render_track(surf, focused),
             ControlClass::Button => self.render_button(surf, focused),
             ControlClass::Edit => self.render_edit(surf, focused),
             ControlClass::Static => self.render_static(surf),
             ControlClass::ListView => self.render_list(surf, gdi),
+            ControlClass::ListBox | ControlClass::ComboBox => self.render_choice(surf, focused),
         }
         if self.image != 0 {
             if let Some(gdi) = gdi {
@@ -507,12 +823,16 @@ impl ChildWindow {
                         } else {
                             0
                         };
+                    let stretch = self.class == ControlClass::Static
+                        && self.style & 0x1f == 0x0e
+                        && self.style & 0x40 != 0
+                        && !centered;
                     image.draw(
                         surf,
                         x,
                         y,
-                        image.width,
-                        image.height,
+                        if stretch { self.w as u32 } else { image.width },
+                        if stretch { self.h as u32 } else { image.height },
                         [self.x, self.y, self.x + self.w, self.y + self.h],
                     );
                 }
@@ -834,10 +1154,21 @@ impl Controls {
             list_image_lists: [0; 3],
             list_image_sizes: [(0, 0); 3],
             list_scroll_y: 0,
+            list_positions: Vec::new(),
+            list_spacing: (75, 75),
+            list_background: 0x00ffffff,
+            list_text_color: 0,
             image: 0,
             list_selected: None,
             list_column_count: 0,
             font: crate::gdi::STOCK_SYSTEM_FONT,
+            choice_open: false,
+            choice_popup_y: 20,
+            choice_popup_h: 98,
+            track_range: (0, 100),
+            track_pos: 0,
+            track_line: 1,
+            track_page: 20,
         });
         hwnd
     }
@@ -848,6 +1179,34 @@ impl Controls {
     pub fn add_panel(&mut self, panel: DialogPanel) {
         self.panels.retain(|p| p.hwnd != panel.hwnd);
         self.panels.push(panel);
+    }
+
+    /// Panels are composited bottom to top. Activation can bring an older
+    /// modeless dialog above a newer one without destroying either window.
+    pub fn raise_panel(&mut self, hwnd: u32) {
+        if let Some(index) = self.panels.iter().position(|p| p.hwnd == hwnd) {
+            let panel = self.panels.remove(index);
+            self.panels.push(panel);
+        }
+    }
+
+    pub fn layout_choice_popups(&mut self, screen_h: i32) {
+        let positions: Vec<_> = self
+            .children
+            .iter()
+            .filter(|c| c.class == ControlClass::ComboBox && c.choice_open)
+            .filter_map(|c| self.screen_rect(c.hwnd).map(|r| (c.hwnd, r.1)))
+            .collect();
+        for (hwnd, y) in positions {
+            if let Some(c) = self.get_mut(hwnd) {
+                c.layout_choice_popup(y, screen_h);
+            }
+        }
+    }
+
+    /// Panel handles in compositing order, bottom to top.
+    pub fn panel_handles(&self) -> impl Iterator<Item = u32> + '_ {
+        self.panels.iter().map(|panel| panel.hwnd)
     }
 
     pub fn panel(&self, hwnd: u32) -> Option<&DialogPanel> {
@@ -964,6 +1323,15 @@ impl Controls {
     /// visible before showing them; a handle that always claims to be
     /// visible makes the app skip its own `ShowWindow` and the Time and
     /// Score fields never appear.
+    pub fn owner_draw_controls(&self) -> impl Iterator<Item = &ChildWindow> {
+        self.children.iter().filter(|c| {
+            self.is_showing(c)
+                && c.w > 0
+                && c.h > 0
+                && c.class == ControlClass::Button
+                && c.style & 0xf == 0xb
+        })
+    }
     pub fn is_visible(&self, hwnd: u32) -> Option<bool> {
         if let Some(child) = self.get(hwnd) {
             return Some(self.is_showing(child));
@@ -982,6 +1350,13 @@ impl Controls {
         self.children
             .iter()
             .rev()
+            .filter(|c| c.class == ControlClass::ComboBox && c.choice_open)
+            .chain(
+                self.children
+                    .iter()
+                    .rev()
+                    .filter(|c| !(c.class == ControlClass::ComboBox && c.choice_open)),
+            )
             .find(|c| {
                 let (ox, oy) = self.parent_origin(c.parent);
                 !c.is_group_box() && self.is_showing(c) && c.contains(x - ox, y - oy)
@@ -997,8 +1372,34 @@ impl Controls {
             .map(|c| self.parent_origin(c.parent))
             .unwrap_or((0, 0));
         let child = self.get_mut(hwnd)?;
+        if matches!(child.class, ControlClass::ListBox | ControlClass::ComboBox) && child.enabled {
+            self.focus = hwnd;
+            let child = self.get_mut(hwnd).unwrap();
+            let combo = child.class == ControlClass::ComboBox;
+            let local_y = y - origin.1 - child.y;
+            if combo && (0..20).contains(&local_y) {
+                child.choice_open = !child.choice_open;
+                return Some(ControlAction::Consumed);
+            }
+            let index = ((local_y - if combo { child.choice_popup_y + 1 } else { 1 }).max(0) / 16
+                + child.list_scroll_y.max(0)) as usize;
+            if index < child.list_items.len() {
+                child.list_selected = Some(index);
+                child.choice_open = false;
+                return Some(ControlAction::Notify {
+                    parent: child.parent,
+                    id: child.id,
+                    hwnd,
+                    code: 1,
+                    index: index as i32,
+                });
+            }
+            return Some(ControlAction::Consumed);
+        }
         if child.class == ControlClass::ListView && child.enabled {
-            if let Some(index) = child.list_item_at(y - origin.1 - child.y) {
+            if let Some(index) =
+                child.list_item_at_point(x - origin.0 - child.x, y - origin.1 - child.y)
+            {
                 child.list_selected = Some(index);
             }
         }
@@ -1208,7 +1609,31 @@ impl Controls {
             return Some(ControlAction::Consumed);
         }
         match child.class {
-            ControlClass::ListView if vk == 0x26 || vk == 0x28 => {
+            ControlClass::ComboBox
+                if vk == 0x0d || (vk == 0x1b && child.choice_open) || vk == 0x73 =>
+            {
+                child.choice_open = vk != 0x1b && !child.choice_open;
+                Some(ControlAction::Consumed)
+            }
+            ControlClass::TrackBar if matches!(vk, 0x21..=0x28) => {
+                let (value, code) = match vk {
+                    0x24 => (child.track_range.0, 6),
+                    0x23 => (child.track_range.1, 7),
+                    0x21 => (child.track_pos.saturating_sub(child.track_page), 2),
+                    0x22 => (child.track_pos.saturating_add(child.track_page), 3),
+                    0x25 | 0x26 => (child.track_pos.saturating_sub(child.track_line), 0),
+                    _ => (child.track_pos.saturating_add(child.track_line), 1),
+                };
+                child.track_pos = value.clamp(child.track_range.0, child.track_range.1);
+                Some(ControlAction::Notify {
+                    parent: child.parent,
+                    id: child.id,
+                    hwnd: child.hwnd,
+                    code,
+                    index: child.track_pos,
+                })
+            }
+            ControlClass::ListBox | ControlClass::ComboBox if matches!(vk, 0x26 | 0x28) => {
                 if child.list_items.is_empty() {
                     return Some(ControlAction::Consumed);
                 }
@@ -1218,13 +1643,33 @@ impl Controls {
                     None => 0,
                 };
                 child.list_selected = Some(next);
-                let row = child.list_row_height();
-                let top = (next as i64 * i64::from(row)).min(i64::from(i32::MAX)) as i32;
-                if top < child.list_scroll_y {
-                    child.list_scroll_y = top;
-                } else if top.saturating_add(row) > child.list_scroll_y.saturating_add(child.h) {
-                    child.list_scroll_y = top.saturating_add(row).saturating_sub(child.h).max(0);
+                Some(ControlAction::Notify {
+                    parent: child.parent,
+                    id: child.id,
+                    hwnd: child.hwnd,
+                    code: 1,
+                    index: next as i32,
+                })
+            }
+            ControlClass::ListView if matches!(vk, 0x25..=0x28) => {
+                if child.list_items.is_empty() {
+                    return Some(ControlAction::Consumed);
                 }
+                if !child.list_icon_view() && (vk == 0x25 || vk == 0x27) {
+                    return None;
+                }
+                let step = if child.list_icon_view() && (vk == 0x26 || vk == 0x28) {
+                    child.list_columns()
+                } else {
+                    1
+                };
+                let next = match child.list_selected {
+                    Some(i) if vk == 0x25 || vk == 0x26 => i.saturating_sub(step),
+                    Some(i) => i.saturating_add(step).min(child.list_items.len() - 1),
+                    None => 0,
+                };
+                child.list_selected = Some(next);
+                child.list_ensure_visible(next);
                 Some(ControlAction::Notify {
                     parent: child.parent,
                     id: child.id,
@@ -1270,8 +1715,8 @@ impl Controls {
     /// Help strip shows through the Options dialog on top of it.
     ///
     /// Controls parented straight to a frame window go down first, below
-    /// every dialog; panels then follow in creation order, so the most
-    /// recently created dialog — the modal — ends up on top.
+    /// every dialog; panels follow their stacking order, initially creation
+    /// order. Activating an existing dialog brings it to the top.
     ///
     /// Group boxes go down before their siblings. A template lists a
     /// group box *before* the radios it encloses and gives it a
@@ -1306,13 +1751,41 @@ impl Controls {
         gdi: Option<&crate::gdi::GdiState>,
         layer: &mut impl FnMut(u32, &mut Surface<'_>),
     ) {
-        self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi);
         layer(0, surf);
+        self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi);
+        for child in &self.children {
+            if self.panel(child.parent).is_none() && self.is_showing(child) {
+                layer(child.hwnd, surf);
+            }
+        }
+        self.render_open_choices(surf, |parent| self.panel(parent).is_none());
         for panel in &self.panels {
             panel.render(surf);
-            self.render_children_of(surf, |parent| parent == panel.hwnd, gdi);
             if panel.visible {
                 layer(panel.hwnd, surf);
+            }
+            self.render_children_of(surf, |parent| parent == panel.hwnd, gdi);
+            for child in &self.children {
+                if child.parent == panel.hwnd && self.is_showing(child) {
+                    layer(child.hwnd, surf);
+                }
+            }
+            self.render_open_choices(surf, |parent| parent == panel.hwnd);
+        }
+    }
+
+    fn render_open_choices(&self, surf: &mut Surface<'_>, owned: impl Fn(u32) -> bool) {
+        for child in &self.children {
+            if child.class == ControlClass::ComboBox
+                && child.choice_open
+                && owned(child.parent)
+                && self.is_showing(child)
+            {
+                let (ox, oy) = self.parent_origin(child.parent);
+                let mut moved = child.clone();
+                moved.x += ox;
+                moved.y += oy;
+                moved.render_choice(surf, child.hwnd == self.focus);
             }
         }
     }
@@ -1325,12 +1798,16 @@ impl Controls {
         owned: impl Fn(u32) -> bool,
         gdi: Option<&crate::gdi::GdiState>,
     ) {
-        for group_pass in [true, false] {
+        for pass in 0..3 {
             for child in &self.children {
-                if child.is_group_box() != group_pass
-                    || !owned(child.parent)
-                    || !self.is_showing(child)
-                {
+                let child_pass = if child.class == ControlClass::ComboBox && child.choice_open {
+                    2
+                } else if child.is_group_box() {
+                    0
+                } else {
+                    1
+                };
+                if child_pass != pass || !owned(child.parent) || !self.is_showing(child) {
                     continue;
                 }
                 let (ox, oy) = self.parent_origin(child.parent);
@@ -1388,6 +1865,117 @@ mod tests {
             120,
             26,
         )
+    }
+
+    #[test]
+    fn open_dropdown_covers_native_sibling_layers() {
+        let mut controls = Controls::default();
+        let combo = controls.create(
+            PARENT,
+            ControlClass::ComboBox,
+            1,
+            String::new(),
+            WS_VISIBLE,
+            10,
+            70,
+            100,
+            25,
+        );
+        let c = controls.get_mut(combo).unwrap();
+        c.list_items = vec![("First".into(), 0), ("Second".into(), 0)];
+        c.choice_open = true;
+        c.layout_choice_popup(70, 100);
+        let sibling = controls.create(
+            PARENT,
+            ControlClass::Static,
+            2,
+            String::new(),
+            WS_VISIBLE,
+            10,
+            40,
+            100,
+            20,
+        );
+        let mut bm = Bitmap::new(120, 100);
+        controls.render_composited(&mut Surface::Bitmap(&mut bm), |h, surf| {
+            if h == sibling {
+                surf.fill_rect(10, 40, 100, 20, 0xf800);
+            }
+        });
+        let index = (50 * 120 + 100) * 2;
+        assert_eq!(
+            u16::from_le_bytes([bm.pixels[index], bm.pixels[index + 1]]),
+            0xffff
+        );
+    }
+
+    #[test]
+    fn dropdown_at_bottom_opens_above_and_hit_tests_above_siblings() {
+        let mut controls = Controls::default();
+        let combo = controls.create(
+            PARENT,
+            ControlClass::ComboBox,
+            1444,
+            String::new(),
+            WS_VISIBLE,
+            35,
+            145,
+            265,
+            25,
+        );
+        let c = controls.get_mut(combo).unwrap();
+        c.list_items = (0..12).map(|i| (format!("Choice {i}"), i)).collect();
+        c.list_selected = Some(11);
+        c.choice_open = true;
+        c.layout_choice_popup(145, 240);
+        assert!(c.choice_popup_y < 0);
+        assert_eq!(c.list_scroll_y, 6);
+        let y = c.y + c.choice_popup_y + 1 + 5 * 16 + 8;
+        assert!(y >= 0 && y < 240);
+        // A later sibling must not steal the dropdown's click.
+        controls.create(
+            PARENT,
+            ControlClass::Button,
+            10,
+            "Behind".into(),
+            WS_VISIBLE,
+            35,
+            y - 8,
+            265,
+            25,
+        );
+        assert_eq!(controls.hit_test(40, y), Some(combo));
+        assert!(matches!(
+            controls.pointer_down(40, y),
+            Some(ControlAction::Notify { index: 11, .. })
+        ));
+        assert!(!controls.get(combo).unwrap().choice_open);
+    }
+
+    #[test]
+    fn dropdown_rows_fit_small_viewport_and_scroll_to_selection() {
+        let mut controls = Controls::default();
+        let combo = controls.create(
+            PARENT,
+            ControlClass::ComboBox,
+            1,
+            String::new(),
+            WS_VISIBLE,
+            0,
+            10,
+            100,
+            25,
+        );
+        let c = controls.get_mut(combo).unwrap();
+        c.list_items = (0..12).map(|i| (i.to_string(), i)).collect();
+        c.list_selected = Some(10);
+        c.choice_open = true;
+        c.layout_choice_popup(10, 80);
+        assert_eq!(c.choice_popup_y, 20);
+        assert!(10 + c.choice_popup_y + c.choice_popup_h <= 80);
+        assert_eq!(c.list_scroll_y, 8);
+        assert!(c.contains(5, 31));
+        assert!(!c.contains(5, 80));
     }
 
     #[test]

@@ -1284,6 +1284,57 @@ impl pocket_core::kernel::FrameHook for LiveInputHook {
                             if line == "quit" {
                                 return FrameAction::Stop;
                             }
+                            if let Some((down, key)) = line
+                                .strip_prefix("keydown ")
+                                .map(|k| (true, k))
+                                .or_else(|| line.strip_prefix("keyup ").map(|k| (false, k)))
+                            {
+                                if let Ok(vk) = parse_virtual_key(key) {
+                                    if state.pending_input.len() < 256 {
+                                        state.pending_input.push_back(if down {
+                                            InputEvent::KeyDown { vk }
+                                        } else {
+                                            InputEvent::KeyUp { vk }
+                                        });
+                                    }
+                                }
+                                continue;
+                            }
+                            if line == "surfaces" {
+                                for (hwnd, dc) in &state.window_dcs {
+                                    if let Some(bitmap) = state
+                                        .gdi
+                                        .dc(*dc)
+                                        .and_then(|d| d.selected_bitmap)
+                                        .and_then(|b| state.gdi.bitmap(b))
+                                    {
+                                        log::info!("surface: hwnd=0x{hwnd:08x} dc=0x{dc:08x} dims={}x{} nonzero={} visible={:?} class={:?}",bitmap.width,bitmap.height, bitmap.pixels.chunks_exact(2).filter(|p|p[0]!=0 || p[1]!=0).count(),state.window_visibility.get(hwnd),state.window_classes.get(hwnd));
+                                    }
+                                }
+                                continue;
+                            }
+                            if let Some(hwnd) = line.strip_prefix("paint ").and_then(|s| {
+                                u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()
+                            }) {
+                                if state.window_procs.contains_key(&hwnd)
+                                    && state.posted_messages.len() < 256
+                                {
+                                    state.posted_messages.push_back((hwnd, 0xf, 0, 0));
+                                }
+                                continue;
+                            }
+                            if let Some(path) = line.strip_prefix("snapshot ") {
+                                match std::fs::write(path.trim(), state.framebuffer.snapshot_ppm())
+                                {
+                                    Ok(()) => {
+                                        log::info!("live framebuffer snapshot: {}", path.trim())
+                                    }
+                                    Err(error) => {
+                                        log::warn!("live framebuffer snapshot failed: {error}")
+                                    }
+                                }
+                                continue;
+                            }
                             if line == "windows" {
                                 log::info!("window snapshot: active=0x{:08x} focus=0x{:08x} classes={:?} parents={:?} styles={:?} rects={:?} controls={:#?}",
                                     state.active_window, state.controls.focus, state.window_classes,

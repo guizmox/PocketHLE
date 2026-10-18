@@ -264,3 +264,33 @@ pub fn draw_str_u16(surf: &mut Surface<'_>, x: i32, y: i32, s: &[u16], color: u1
     }
     cx - x
 }
+
+/// Draw one bitmap glyph inside a half-open clipping rectangle.
+pub fn draw_char_clipped(
+    surf: &mut Surface<'_>,
+    x: i32,
+    y: i32,
+    ch: char,
+    color: u16,
+    clip: [i32; 4],
+) {
+    let ch = if ch.is_ascii_graphic() || ch == ' ' {
+        ch
+    } else {
+        '?'
+    };
+    let glyph = &GLYPHS[(ch as usize) - 0x20];
+    for (dy, row) in glyph.iter().enumerate() {
+        for dx in 0..5 {
+            let (px, py) = (x.saturating_add(dx), y.saturating_add(dy as i32));
+            if px >= clip[0]
+                && px < clip[2]
+                && py >= clip[1]
+                && py < clip[3]
+                && (row >> (7 - dx)) & 1 != 0
+            {
+                surf.put_pixel(px, py, color);
+            }
+        }
+    }
+}

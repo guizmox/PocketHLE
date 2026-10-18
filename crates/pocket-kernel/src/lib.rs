@@ -59,6 +59,7 @@ pub mod registry;
 pub mod sdl;
 pub mod serial;
 pub mod shared_objects;
+pub mod shell_keyboard;
 mod tls;
 pub mod tracker;
 pub mod vfs;
@@ -1210,6 +1211,7 @@ pub struct KernelState {
     /// than inside them because it is not a child of the guest's window:
     /// it owns its own frame, its own caption bar and the input focus.
     pub modal: Option<msgbox::MessageBox>,
+    pub shell_keyboard: shell_keyboard::ShellKeyboard,
     /// Re-dispatch counter for the parked `MessageBoxW`.
     ///
     /// A modal box on a device waits forever, which is right in front of
@@ -1663,8 +1665,13 @@ impl KernelState {
             }
         }
         self.message_frames.clear();
+        self.gdi.owner_draw_frames.clear();
+        self.gdi.paint_erase_frames.clear();
+        self.gdi.pending_window_erases.clear();
+        self.gdi.owner_draw_states.clear();
         self.accelerator_frames.clear();
         self.shell_status = None;
+        self.shell_keyboard = shell_keyboard::ShellKeyboard::default();
         self.internet.gprs_connected = false;
         self.sync_transferred_handles();
         let pid = self.object_handles.process_id();
@@ -1699,6 +1706,53 @@ impl KernelState {
         if self.controls.is_empty() && self.modal.is_none() {
             return;
         }
+        // Owner-drawn controls belong to the guest. Queue their normal paint
+        // notification; the presentation hook must never call guest code itself.
+        for c in self.controls.owner_draw_controls() {
+            let mut ancestor = c.parent;
+            let mut visible = true;
+            for _ in 0..64 {
+                if ancestor == 0 {
+                    break;
+                }
+                if self.window_visibility.get(&ancestor) == Some(&false)
+                    || self.controls.is_visible(ancestor) == Some(false)
+                {
+                    visible = false;
+                    break;
+                }
+                let parent = self.window_parents.get(&ancestor).copied().unwrap_or(0);
+                if parent == ancestor {
+                    visible = false;
+                    break;
+                }
+                ancestor = parent;
+            }
+            if !visible {
+                continue;
+            }
+            let state = (
+                c.pressed,
+                c.enabled,
+                self.controls.focus == c.hwnd,
+                c.w,
+                c.h,
+            );
+            if self.gdi.owner_draw_states.get(&c.hwnd) != Some(&state)
+                && self.posted_messages.len() < 256
+            {
+                self.gdi.owner_draw_states.insert(c.hwnd, state);
+                if !self
+                    .posted_messages
+                    .iter()
+                    .any(|m| m.0 == c.hwnd && m.1 == 0xf)
+                {
+                    self.posted_messages.push_back((c.hwnd, 0xf, 0, 0));
+                }
+            }
+        }
+        self.controls
+            .layout_choice_popups(self.framebuffer.height as i32);
         let frame_counter = self.framebuffer.frame_counter;
         let controls = self.controls.clone();
         let modal = self.modal.clone();
@@ -1748,8 +1802,12 @@ impl KernelState {
         }
         layers.sort_by_key(|layer| layer.0);
         controls.render_composited_with_images(&mut surf, &self.gdi, |owner, surface| {
-            for (_, parent, x, y, bm) in &layers {
-                if *parent == owner {
+            for (hwnd, parent, x, y, bm) in &layers {
+                if *hwnd == owner
+                    || (*parent == owner
+                        && controls.get(*hwnd).is_none()
+                        && controls.panel(*hwnd).is_none())
+                {
                     surface.blit_from_bytes(
                         *x,
                         *y,
@@ -1764,6 +1822,7 @@ impl KernelState {
                 }
             }
         });
+        self.shell_keyboard.render(&mut surf);
         // The modal goes last: it is a separate top-level window and
         // has to cover whatever the application and its children drew.
         if let Some(modal) = modal {
@@ -3305,6 +3364,7 @@ impl Process {
                 status_bar: None,
                 controls: Default::default(),
                 modal: None,
+                shell_keyboard: shell_keyboard::ShellKeyboard::default(),
                 message_box_spins: 0,
                 modal_dialog: None,
                 pending_input: VecDeque::new(),

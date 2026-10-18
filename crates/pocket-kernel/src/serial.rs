@@ -39,7 +39,7 @@ impl Port {
         }
         if self.queue.is_empty() && Instant::now() >= self.next {
             let packet = self.device.lock().unwrap().packet()?;
-            self.queue.extend(rmc(&packet).bytes());
+            self.queue.extend(fix_sentences(&packet).bytes());
             self.next = Instant::now() + Duration::from_secs(1);
         }
         Ok(())
@@ -81,6 +81,50 @@ fn date(unix: u64) -> (i32, u32, u32) {
     y += i64::from(m <= 2);
     (y as i32, m as u32, d as u32)
 }
+fn sentence(body: &str) -> String {
+    let checksum = body.bytes().fold(0u8, |a, b| a ^ b);
+    format!("${body}*{checksum:02X}\r\n")
+}
+/// Keep the serial compatibility port and GPS1 on the same fix. RMC carries
+/// position/date; GGA and GSA carry the fix quality/mode used by CE receivers.
+/// Unknown satellite identities, counts and DOP are not synthesized.
+fn fix_sentences(p: &[u8; 180]) -> String {
+    let word = |i| u32::from_le_bytes(p[i..i + 4].try_into().unwrap());
+    let valid = word(15) != 0;
+    let (lat, ns) = coord(word(21) as i32 as f64 / 1e7, true);
+    let (lon, ew) = coord(word(25) as i32 as f64 / 1e7, false);
+    let sec = (u64::from(word(11)) + 63072000) % 86400;
+    let mode = u16::from_le_bytes(p[19..21].try_into().unwrap());
+    let altitude = if valid && mode == 6 {
+        format!("{:.2}", word(29) as i32 as f64 / 100.)
+    } else {
+        String::new()
+    };
+    let quality = u8::from(valid);
+    let gga = sentence(&format!(
+        "GPGGA,{:02}{:02}{:02}.00,{lat},{ns},{lon},{ew},{quality},00,,{altitude},M,,M,,",
+        sec / 3600,
+        sec / 60 % 60,
+        sec % 60
+    ));
+    let mut gsa = vec![
+        "GPGSA".to_owned(),
+        "A".to_owned(),
+        (if valid {
+            if mode == 6 {
+                3
+            } else {
+                2
+            }
+        } else {
+            1
+        })
+        .to_string(),
+    ];
+    // Twelve satellite slots, then PDOP/HDOP/VDOP, all unavailable.
+    gsa.extend(std::iter::repeat_n(String::new(), 15));
+    gga + &sentence(&gsa.join(",")) + &rmc(p)
+}
 fn rmc(p: &[u8; 180]) -> String {
     let word = |i| u32::from_le_bytes(p[i..i + 4].try_into().unwrap());
     let lat = word(21) as i32 as f64 / 1e7;
@@ -93,12 +137,41 @@ fn rmc(p: &[u8; 180]) -> String {
     let speed = u16::from_le_bytes(p[33..35].try_into().unwrap()) as f64 / 100. / 0.514444;
     let course = u16::from_le_bytes(p[35..37].try_into().unwrap()) as f64 / 100.;
     let body=format!("GPRMC,{:02}{:02}{:02}.00,{},{lat},{ns},{lon},{ew},{speed:.2},{course:.2},{d:02}{m:02}{:02},,",sec/3600,sec/60%60,sec%60,if word(15)!=0{'A'}else{'V'},y.rem_euclid(100));
-    let sum = body.bytes().fold(0, |a, b| a ^ b);
-    format!("${body}*{sum:02X}\r\n")
+    sentence(&body)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn serial_reports_fix_type_without_inventing_satellites_or_dop() {
+        let mut packet = [0u8; 180];
+        packet[15..19].copy_from_slice(&1u32.to_le_bytes());
+        packet[19..21].copy_from_slice(&5u16.to_le_bytes());
+        let text = fix_sentences(&packet);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for line in &lines {
+            let (body, check) = line[1..].split_once('*').unwrap();
+            assert_eq!(
+                body.bytes().fold(0u8, |a, b| a ^ b),
+                u8::from_str_radix(check, 16).unwrap()
+            );
+        }
+        let gga: Vec<_> = lines[0].split('*').next().unwrap().split(',').collect();
+        assert_eq!(gga[6], "1");
+        assert_eq!(gga[7], "00");
+        assert_eq!(gga[8], "");
+        assert_eq!(gga[9], "");
+        let gsa: Vec<_> = lines[1].split('*').next().unwrap().split(',').collect();
+        assert_eq!(gsa.len(), 18);
+        assert_eq!(gsa[2], "2");
+        assert!(gsa[3..].iter().all(|s| s.is_empty()));
+        packet[15..19].fill(0);
+        let nofix = fix_sentences(&packet);
+        assert!(nofix.lines().next().unwrap().split(',').nth(6) == Some("0"));
+        assert!(nofix.lines().nth(1).unwrap().starts_with("$GPGSA,A,1,"));
+        assert!(nofix.lines().nth(2).unwrap().contains(",V,"));
+    }
     #[test]
     fn serial_fix_uses_existing_permission_and_nmea_checksum() {
         let service = crate::gps::Service::default();
@@ -111,7 +184,11 @@ mod tests {
         port.poll().unwrap();
         let text = String::from_utf8(port.queue.iter().copied().collect()).unwrap();
         assert!(text.contains(",A,4403.129480,N,12305.743500,W,"), "{text}");
-        let (body, sum) = text.trim().trim_start_matches('$').split_once('*').unwrap();
+        let rmc = text
+            .lines()
+            .find(|line| line.starts_with("$GPRMC,"))
+            .unwrap();
+        let (body, sum) = rmc.trim().trim_start_matches('$').split_once('*').unwrap();
         assert_eq!(
             body.bytes().fold(0u8, |a, b| a ^ b),
             u8::from_str_radix(sum, 16).unwrap()

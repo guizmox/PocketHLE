@@ -48,6 +48,7 @@ mod scroll;
 mod sdl;
 mod serial;
 mod shell;
+mod shell_keyboard;
 mod vibration;
 mod wavein;
 mod wininet;

@@ -252,6 +252,21 @@ pub enum GdiObject {
     Font(Font),
 }
 
+#[derive(Debug, Clone)]
+pub struct OwnerDrawFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub scratch: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaintEraseFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+}
+
 #[derive(Debug, Default)]
 pub struct GdiState {
     objects: HashMap<u32, GdiObject>,
@@ -261,6 +276,10 @@ pub struct GdiState {
     pub scroll_erases: HashMap<u32, Vec<[i32; 4]>>,
     pub icons: HashMap<u32, crate::imaging::Image>,
     pub image_lists: HashMap<u32, crate::imaging::ImageList>,
+    pub owner_draw_frames: Vec<OwnerDrawFrame>,
+    pub paint_erase_frames: Vec<PaintEraseFrame>,
+    pub pending_window_erases: std::collections::HashSet<u32>,
+    pub owner_draw_states: HashMap<u32, (bool, bool, bool, i32, i32)>,
 }
 
 impl GdiState {
@@ -273,6 +292,10 @@ impl GdiState {
             scroll_erases: HashMap::new(),
             icons: HashMap::new(),
             image_lists: HashMap::new(),
+            owner_draw_frames: Vec::new(),
+            paint_erase_frames: Vec::new(),
+            pending_window_erases: std::collections::HashSet::new(),
+            owner_draw_states: HashMap::new(),
         };
         // Pre-register stock objects so SelectObject(GetStockObject(...))
         // resolves through the same code path as user-created handles.
@@ -663,6 +686,44 @@ impl<'a> Surface<'a> {
                 let r = (pair[1] - 0.5).ceil().clamp(0.0, width as f64) as i32;
                 self.fill_rect(l, y, r - l, 1, color);
             }
+        }
+    }
+
+    /// Rasterize an ellipse inside an exclusive bounding rectangle. Clip
+    /// before iterating so far-off native map coordinates remain bounded.
+    pub fn ellipse(&mut self, rect: [i32; 4], fill: Option<u16>, stroke: Option<(u16, u32)>) {
+        let [left, top, right, bottom] = rect.map(i64::from);
+        if right <= left || bottom <= top || (fill.is_none() && stroke.is_none()) {
+            return;
+        }
+        let (width, height) = self.dimensions();
+        let (rx, ry) = ((right - left) as f64 / 2.0, (bottom - top) as f64 / 2.0);
+        let (cx, cy) = ((left + right) as f64 / 2.0, (top + bottom) as f64 / 2.0);
+        let pen_width = stroke.map_or(0, |(_, w)| w.clamp(1, 2048)) as f64;
+        let (inner_x, inner_y) = (rx - pen_width, ry - pen_width);
+        let mut changed = false;
+        for y in top.max(0)..bottom.min(height as i64) {
+            for x in left.max(0)..right.min(width as i64) {
+                let (dx, dy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+                if (dx / rx).powi(2) + (dy / ry).powi(2) > 1.0 {
+                    continue;
+                }
+                let inside = inner_x > 0.0
+                    && inner_y > 0.0
+                    && (dx / inner_x).powi(2) + (dy / inner_y).powi(2) < 1.0;
+                let color = if !inside {
+                    stroke.map(|(c, _)| c).or(fill)
+                } else {
+                    fill
+                };
+                if let Some(color) = color {
+                    self.put_pixel(x as i32, y as i32, color);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.mark_dirty();
         }
     }
 

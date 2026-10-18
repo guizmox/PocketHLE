@@ -35,6 +35,17 @@ fn main() -> anyhow::Result<()> {
         pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default(),
     ));
     emu.set_screen_size(320, 240);
+    let extracted = game.extracted_dir(&root);
+    for prefix in [
+        "\\Application\\",
+        "\\Program Files\\",
+        "\\Program Files\\Game\\",
+        "\\expresso\\",
+        "\\SD Card\\Game\\",
+        "\\Storage Card\\Game\\",
+    ] {
+        emu.mount_read_only_dir(prefix, &extracted);
+    }
     emu.mount_read_only_dir("\\SD Card\\", game.gizmondo_card_root(&root));
     emu.mount_read_only_dir("\\Storage Card\\", game.gizmondo_card_root(&root));
     for (prefix, directory) in game.install_mounts(&root) {
@@ -51,22 +62,68 @@ fn main() -> anyhow::Result<()> {
     emu.set_synthetic_message_budget(0);
     emu.max_slices = 0;
     let gps = emu.process().unwrap().state.vfs.gps_service();
-    gps.set_fixed_position(Some((0., 0.))).unwrap();
+    gps.set_fixed_position(Some((47.6062, -122.3321))).unwrap();
     gps.set_allowed(true);
-    println!("legacy={legacy} module={module:?} GPS=0,0 SD=read-only");
+    println!("legacy={legacy} module={module:?} GPS=47.6062,-122.3321 SD=read-only");
     let start = Instant::now();
     let mut stopped = false;
     let mut stage = 0;
+    let input = args.get(4).map(PathBuf::from);
+    let mut consumed = 0;
     emu.run_with_hook(&mut |state: &mut KernelState| {
         let elapsed = start.elapsed();
-        if stage == 0 && elapsed > Duration::from_secs(8) {
+        if let Some(input) = &input {
+            if let Ok(text) = std::fs::read_to_string(input) {
+                let lines: Vec<_> = text.lines().collect();
+                for line in lines.iter().skip(consumed) {
+                    if *line == "quit" {
+                        stopped = true;
+                        return FrameAction::Stop;
+                    }
+                    if let Some(path) = line.strip_prefix("snapshot ") {
+                        let _ = std::fs::write(path, state.framebuffer.snapshot_ppm());
+                    }
+                    if *line == "windows" {
+                        log::info!(
+                            "active={:x} focus={:x} controls={:#?}",
+                            state.active_window,
+                            state.controls.focus,
+                            state.controls
+                        );
+                    }
+                    if let Some((command, value)) = line.split_once(' ') {
+                        let vk = match value {
+                            "enter" => Some(13),
+                            "escape" => Some(27),
+                            "space" => Some(32),
+                            "left" => Some(37),
+                            "up" => Some(38),
+                            "right" => Some(39),
+                            "down" => Some(40),
+                            v => u16::from_str_radix(v.trim_start_matches("0x"), 16).ok(),
+                        };
+                        if let Some(vk) = vk {
+                            match command {
+                                "keydown" => {
+                                    state.pending_input.push_back(InputEvent::KeyDown { vk })
+                                }
+                                "keyup" => state.pending_input.push_back(InputEvent::KeyUp { vk }),
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+                consumed = lines.len();
+            }
+        }
+        if input.is_none() && stage == 0 && elapsed > Duration::from_secs(8) {
             state
                 .pending_input
                 .push_back(InputEvent::KeyDown { vk: 13 });
             state.pending_input.push_back(InputEvent::KeyUp { vk: 13 });
             stage = 1;
         }
-        if elapsed > Duration::from_secs(15) {
+        if elapsed > Duration::from_secs(if input.is_some() { 1800 } else { 15 }) {
             stopped = true;
             FrameAction::Stop
         } else {

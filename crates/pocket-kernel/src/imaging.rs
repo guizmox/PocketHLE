@@ -154,7 +154,7 @@ impl ImageList {
         Some(i)
     }
     pub fn add_strip(&mut self, image: &Image, mask: Option<u16>) -> Option<usize> {
-        if image.height < self.height || image.width % self.width != 0 {
+        if image.height < self.height {
             return None;
         }
         let n = image.width / self.width;
@@ -185,6 +185,15 @@ impl ImageList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn strip_ignores_only_the_incomplete_trailing_cell() {
+        let mut image = Image::new(5, 1).unwrap();
+        image.pixels = vec![1, 2, 3, 4, 5];
+        let mut list = ImageList::new(2, 1).unwrap();
+        assert_eq!(list.add_strip(&image, None), Some(0));
+        assert_eq!(list.images.len(), 2);
+        assert_eq!(list.images[1].pixels, vec![3, 4]);
+    }
     #[test]
     fn masked_strip_and_alpha_draw_preserve_background_and_clip() {
         let mut image = Image::new(4, 1).unwrap();
