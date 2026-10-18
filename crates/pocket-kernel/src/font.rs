@@ -294,3 +294,36 @@ pub fn draw_char_clipped(
         }
     }
 }
+
+/// Rasterize the built-in font at an explicitly selected cell size.
+/// The stock-font path keeps its original 6x8 metrics.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_char_sized_clipped(
+    surf: &mut Surface<'_>,
+    x: i32,
+    y: i32,
+    ch: char,
+    color: u16,
+    width: i32,
+    height: i32,
+    clip: [i32; 4],
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let ch = if ch.is_ascii_graphic() || ch == ' ' {
+        ch
+    } else {
+        '?'
+    };
+    let glyph = &GLYPHS[ch as usize - 0x20];
+    for py in y.max(clip[1])..y.saturating_add(height).min(clip[3]) {
+        let row = glyph[((py - y) as i64 * 8 / i64::from(height)) as usize];
+        for px in x.max(clip[0])..x.saturating_add(width).min(clip[2]) {
+            let column = ((px - x) as i64 * 6 / i64::from(width)) as u32;
+            if column < 5 && (row >> (7 - column)) & 1 != 0 {
+                surf.put_pixel(px, py, color);
+            }
+        }
+    }
+}

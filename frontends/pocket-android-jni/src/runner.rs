@@ -558,18 +558,12 @@ fn run_process(
             "Mounted Gizmondo SD-card layout at {}",
             extracted.display()
         ));
-        if let Some(name) = entry.executable.file_name().and_then(|name| name.to_str()) {
-            let guest_exe = format!("\\SD Card\\{name}");
-            emu.set_module_path(&guest_exe);
-            emu.set_default_dir("\\SD Card\\");
-            summary_lines.push(format!("Module path: {guest_exe}"));
-        }
     }
     for (prefix, directory) in entry.install_mounts(library_root) {
         emu.mount_read_only_dir(&prefix, directory);
     }
     if let Some(prefix) = entry.guest_install_prefix() {
-        emu.mount_read_only_dir(&prefix, &extracted);
+        emu.mount_read_only_dir(&prefix, entry.install_mount_dir(library_root, &prefix));
         // Report the installed path so a game that builds absolute
         // asset paths off its own module name finds its archive.
         if let Some(guest_exe) = entry.guest_exe_path() {
@@ -583,6 +577,18 @@ fn run_process(
                 "Save data: {} -> {save_prefix:?}",
                 save_dir.display()
             ));
+        }
+    }
+    // Keep the executable's directory inside the card, as on desktop. Native
+    // DLLs use GetModuleFileName to locate their configuration and assets.
+    if is_gizmondo {
+        if let Some(guest_exe) = entry.gizmondo_guest_exe_path(library_root) {
+            emu.set_module_path(&guest_exe);
+            if let Some((directory, _)) = guest_exe.rsplit_once('\\') {
+                emu.set_default_dir(&format!("{directory}\\"));
+            }
+            log::info!("Gizmondo module path: {guest_exe}");
+            summary_lines.push(format!("Module path: {guest_exe}"));
         }
     }
     // Match the desktop GUI: a real user is in the loop, so don't

@@ -1190,6 +1190,46 @@ impl Controls {
         }
     }
 
+    /// Reorder a child among siblings, stored bottom to top for painting and
+    /// reverse hit testing. HWND_TOP/TOPMOST/NOTOPMOST raise; HWND_BOTTOM lowers.
+    pub fn set_child_z_order(&mut self, hwnd: u32, insert_after: u32) -> bool {
+        let Some(index) = self.children.iter().position(|c| c.hwnd == hwnd) else {
+            return false;
+        };
+        let parent = self.children[index].parent;
+        if insert_after == hwnd {
+            return false;
+        }
+        if !matches!(insert_after, 0 | 1 | 0xffff_ffff | 0xffff_fffe)
+            && !self
+                .children
+                .iter()
+                .any(|c| c.hwnd == insert_after && c.parent == parent)
+        {
+            return false;
+        }
+        let child = self.children.remove(index);
+        let target = match insert_after {
+            1 => self
+                .children
+                .iter()
+                .position(|c| c.parent == parent)
+                .unwrap_or(self.children.len()),
+            0 | 0xffff_ffff | 0xffff_fffe => self
+                .children
+                .iter()
+                .rposition(|c| c.parent == parent)
+                .map_or(self.children.len(), |i| i + 1),
+            _ => self
+                .children
+                .iter()
+                .position(|c| c.hwnd == insert_after)
+                .unwrap(),
+        };
+        self.children.insert(target, child);
+        true
+    }
+
     pub fn layout_choice_popups(&mut self, screen_h: i32) {
         let positions: Vec<_> = self
             .children
@@ -1752,24 +1792,14 @@ impl Controls {
         layer: &mut impl FnMut(u32, &mut Surface<'_>),
     ) {
         layer(0, surf);
-        self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi);
-        for child in &self.children {
-            if self.panel(child.parent).is_none() && self.is_showing(child) {
-                layer(child.hwnd, surf);
-            }
-        }
+        self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi, layer);
         self.render_open_choices(surf, |parent| self.panel(parent).is_none());
         for panel in &self.panels {
             panel.render(surf);
             if panel.visible {
                 layer(panel.hwnd, surf);
             }
-            self.render_children_of(surf, |parent| parent == panel.hwnd, gdi);
-            for child in &self.children {
-                if child.parent == panel.hwnd && self.is_showing(child) {
-                    layer(child.hwnd, surf);
-                }
-            }
+            self.render_children_of(surf, |parent| parent == panel.hwnd, gdi, layer);
             self.render_open_choices(surf, |parent| parent == panel.hwnd);
         }
     }
@@ -1797,6 +1827,7 @@ impl Controls {
         surf: &mut Surface<'_>,
         owned: impl Fn(u32) -> bool,
         gdi: Option<&crate::gdi::GdiState>,
+        layer: &mut impl FnMut(u32, &mut Surface<'_>),
     ) {
         for pass in 0..3 {
             for child in &self.children {
@@ -1821,6 +1852,9 @@ impl Controls {
                     moved.y += oy;
                     moved.render_with_images(surf, focused, gdi);
                 }
+                // A sibling is one compositing unit: its native backing pixels
+                // must not be replayed after all later siblings have painted.
+                layer(child.hwnd, surf);
             }
         }
     }
@@ -1852,6 +1886,65 @@ mod tests {
 
     const PUSH: u32 = WS_VISIBLE;
     const PARENT: u32 = 0xDEAD_0001;
+
+    #[test]
+    fn native_backing_is_painted_before_the_next_hle_sibling() {
+        let mut controls = Controls::default();
+        let background = controls.create(
+            PARENT,
+            ControlClass::Static,
+            1,
+            String::new(),
+            WS_VISIBLE,
+            0,
+            0,
+            100,
+            80,
+        );
+        let _button = button(&mut controls, 2, 10, 10);
+        let mut bitmap = Bitmap::new(140, 90);
+        controls.render_composited(&mut Surface::Bitmap(&mut bitmap), |hwnd, surface| {
+            if hwnd == background {
+                surface.fill_rect(0, 0, 100, 80, 0xf800);
+            }
+        });
+        let offset = (15 * 140 + 15) * 2;
+        assert_ne!(
+            u16::from_le_bytes([bitmap.pixels[offset], bitmap.pixels[offset + 1]]),
+            0xf800
+        );
+    }
+
+    #[test]
+    fn child_z_order_controls_native_layers_and_pointer_targets() {
+        let mut controls = Controls::default();
+        let first = button(&mut controls, 1, 0, 0);
+        let second = button(&mut controls, 2, 0, 0);
+        let background = controls.create(
+            PARENT,
+            ControlClass::Static,
+            3,
+            String::new(),
+            WS_VISIBLE,
+            0,
+            0,
+            120,
+            26,
+        );
+        assert!(controls.set_child_z_order(background, 1));
+        let mut layers = Vec::new();
+        let mut bitmap = Bitmap::new(120, 26);
+        controls.render_composited(&mut Surface::Bitmap(&mut bitmap), |hwnd, _| {
+            layers.push(hwnd)
+        });
+        assert_eq!(layers, [0, background, first, second]);
+        assert!(controls.set_child_z_order(first, 0));
+        assert_eq!(controls.hit_test(10, 10), Some(first));
+        assert!(controls.set_child_z_order(first, second));
+        assert_eq!(controls.hit_test(10, 10), Some(second));
+        assert!(!controls.set_child_z_order(first, 0x1234));
+        assert!(!controls.set_child_z_order(first, first));
+    }
 
     fn button(ctrls: &mut Controls, id: u32, x: i32, y: i32) -> u32 {
         ctrls.create(

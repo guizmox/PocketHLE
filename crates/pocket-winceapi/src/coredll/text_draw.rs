@@ -1,14 +1,14 @@
 //! DrawText measurement and rendering share the same small bitmap-font layout.
 use super::*;
-use pocket_kernel::font::{draw_char_clipped, GLYPH_H, GLYPH_W};
+use pocket_kernel::font::draw_char_sized_clipped;
 
-fn lines(chars: &[u16], width: i32, format: u32) -> Vec<Vec<u16>> {
+fn lines(chars: &[u16], width: i32, format: u32, cell_w: i32) -> Vec<Vec<u16>> {
     if chars.is_empty() {
         return Vec::new();
     }
     let single = format & 0x20 != 0;
     let wrap = !single && format & 0x10 != 0;
-    let capacity = (width.max(GLYPH_W) / GLYPH_W) as usize;
+    let capacity = (width.max(cell_w) / cell_w) as usize;
     let mut result = Vec::new();
     let mut line = Vec::new();
     let mut i = 0;
@@ -90,13 +90,14 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
             String::from_utf16_lossy(&chars)
         );
     }
-    let layout = lines(&chars, r[2].saturating_sub(r[0]), format);
-    let height = layout.len() as i32 * GLYPH_H;
+    let (cell_w, cell_h) = selected_font_cell(ctx.kernel, dc);
+    let layout = lines(&chars, r[2].saturating_sub(r[0]), format, cell_w);
+    let height = layout.len() as i32 * cell_h;
     if format & 0x400 != 0 {
         if rect != 0 {
             let width = layout
                 .iter()
-                .map(|l| l.len() as i32 * GLYPH_W)
+                .map(|l| l.len() as i32 * cell_w)
                 .max()
                 .unwrap_or(0);
             let measured = [
@@ -137,7 +138,7 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         // Keep the existing top placement for DT_BOTTOM until native font
         // metrics and sibling clipping are supported consistently.
         for line in layout {
-            let width = line.len() as i32 * GLYPH_W;
+            let width = line.len() as i32 * cell_w;
             let x = if format & 1 != 0 {
                 r[0].saturating_add((r[2].saturating_sub(r[0]) - width) / 2)
             } else if format & 2 != 0 {
@@ -150,7 +151,7 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
                     x.max(clip[0]),
                     y.max(clip[1]),
                     x.saturating_add(width).min(clip[2]),
-                    y.saturating_add(GLYPH_H).min(clip[3]),
+                    y.saturating_add(cell_h).min(clip[3]),
                 );
                 if right > left && bottom > top {
                     surf.fill_rect(
@@ -163,16 +164,18 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
                 }
             }
             for (i, c) in line.into_iter().enumerate() {
-                draw_char_clipped(
+                draw_char_sized_clipped(
                     &mut surf,
-                    x.saturating_add(i as i32 * GLYPH_W),
+                    x.saturating_add(i as i32 * cell_w),
                     y,
                     char::from_u32(c as u32).unwrap_or('?'),
                     colorref_to_rgb565(meta.text_color),
+                    cell_w,
+                    cell_h,
                     clip,
                 );
             }
-            y = y.saturating_add(GLYPH_H);
+            y = y.saturating_add(cell_h);
         }
         surf.mark_dirty();
     }

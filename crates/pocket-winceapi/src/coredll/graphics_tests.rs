@@ -2640,3 +2640,217 @@ fn custom_native_child_surface_survives_dialog_and_control_compositing() {
     ctx.kernel.composite_controls();
     assert_eq!(pixel(ctx.kernel, 105, 65), 0x07e0);
 }
+
+#[test]
+fn native_pointer_uses_hit_window_and_client_origin_instead_of_key_focus() {
+    let mut kernel = fresh_kernel();
+    let panel = 0xdead1000;
+    let map = 0xdead1001;
+    kernel
+        .controls
+        .add_panel(pocket_kernel::controls::DialogPanel {
+            hwnd: panel,
+            x: 20,
+            y: 30,
+            w: 200,
+            h: 150,
+            visible: true,
+            border: true,
+            caption: Some("Map".into()),
+            ok_pressed: false,
+        });
+    kernel.active_window = panel;
+    kernel.window_rects.insert(map, (5, 7, 100, 80));
+    kernel.window_styles.insert(map, (0x50000000, 0));
+    kernel.window_parents.insert(map, panel);
+    kernel.window_visibility.insert(map, true);
+    let button = kernel.controls.create(
+        panel,
+        ControlClass::Button,
+        1,
+        String::new(),
+        0x50000000,
+        110,
+        100,
+        50,
+        20,
+    );
+    kernel.controls.focus = button;
+    let origin = kernel.controls.panel(panel).unwrap().client_origin();
+    let x = (origin.0 + 5 + 10) as u16;
+    let y = (origin.1 + 7 + 11) as u16;
+    assert_eq!(
+        coordinates::origin(&kernel, map),
+        Some((origin.0 + 5, origin.1 + 7))
+    );
+    assert_eq!(
+        addressed_input(&kernel, InputEvent::PointerDown { x, y }),
+        Some((map, WM_LBUTTONDOWN, MK_LBUTTON, (11 << 16) | 10))
+    );
+    assert_eq!(
+        addressed_input(&kernel, InputEvent::KeyDown { vk: 37 })
+            .unwrap()
+            .0,
+        button
+    );
+    kernel.window_visibility.insert(map, false);
+    assert_eq!(
+        addressed_input(&kernel, InputEvent::PointerUp { x, y }),
+        Some((panel, WM_LBUTTONUP, 0, (18 << 16) | 15))
+    );
+}
+
+#[test]
+fn child_z_order_apis_respect_nozorder_and_do_not_move_controls() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let first = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Button,
+        1,
+        String::new(),
+        0x50000000,
+        10,
+        10,
+        40,
+        20,
+    );
+    let second = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Button,
+        2,
+        String::new(),
+        0x50000000,
+        10,
+        10,
+        40,
+        20,
+    );
+    let thunk = thunk_at(0x70000100);
+    let sp = cpu.read_reg(ArmReg::Sp).unwrap();
+    let stack = sp + cpu.stack_arg_offset();
+    let mut invoke = |kernel: &mut KernelState, flags: u32| {
+        cpu.write_reg(ArmReg::R0, first).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 999).unwrap();
+        cpu.write_reg(ArmReg::R3, 999).unwrap();
+        cpu.write_mem(stack, &999u32.to_le_bytes()).unwrap();
+        cpu.write_mem(stack + 4, &999u32.to_le_bytes()).unwrap();
+        cpu.write_mem(stack + 8, &flags.to_le_bytes()).unwrap();
+        set_window_pos(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
+    };
+    invoke(&mut kernel, 7); // SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+    assert_eq!(kernel.controls.hit_test(20, 15), Some(second));
+    invoke(&mut kernel, 3);
+    assert_eq!(kernel.controls.hit_test(20, 15), Some(first));
+    let c = kernel.controls.get(first).unwrap();
+    assert_eq!((c.x, c.y, c.w, c.h), (10, 10, 40, 20));
+    drop(invoke);
+    cpu.write_reg(ArmReg::R0, second).unwrap();
+    bring_window_to_top(&mut CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    })
+    .unwrap();
+    assert_eq!(kernel.controls.hit_test(20, 15), Some(second));
+}
+
+#[test]
+fn font_height_drives_extent_and_textout_without_changing_stock_metrics() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x70000100);
+    let dc = kernel.gdi.create_memory_dc();
+    let bitmap = kernel.gdi.create_compatible_bitmap(100, 40);
+    kernel.gdi.select_into(dc, bitmap);
+    assert_eq!(selected_font_cell(&kernel, dc), (6, 8));
+    cpu.write_mem(0x1100, &(-24i32).to_le_bytes()).unwrap();
+    write_wide_str(&mut cpu, 0x1200, 16, "WW").unwrap();
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let font = call(&mut ctx, create_font_indirect, &[0x1100]);
+    ctx.kernel.gdi.select_into(dc, font);
+    assert_eq!(selected_font_cell(ctx.kernel, dc), (18, 24));
+    assert_eq!(
+        call(
+            &mut ctx,
+            get_text_extent_ex_point_w,
+            &[dc, 0x1200, 2, 20, 0x1300, 0x1400, 0x1500]
+        ),
+        1
+    );
+    assert_eq!(
+        ctx.cpu.read_mem(0x1500, 8).unwrap(),
+        [36u32.to_le_bytes(), 24u32.to_le_bytes()].concat()
+    );
+    assert_eq!(ctx.cpu.read_mem(0x1300, 4).unwrap(), 1u32.to_le_bytes());
+    assert_eq!(
+        ctx.cpu.read_mem(0x1400, 8).unwrap(),
+        [18u32.to_le_bytes(), 36u32.to_le_bytes()].concat()
+    );
+    call(&mut ctx, get_object_w, &[font, 92, 0x1600]);
+    assert_eq!(ctx.cpu.read_mem(0x1600, 4).unwrap(), (-24i32).to_le_bytes());
+    ctx.kernel.gdi.dc_mut(dc).unwrap().text_color = 0x00ffffff;
+    ctx.kernel.gdi.dc_mut(dc).unwrap().bk_transparent = true;
+    call(&mut ctx, text_out_w, &[dc, 0, 0, 0x1200, 2]);
+    let bm = ctx.kernel.gdi.bitmap(bitmap).unwrap();
+    assert!(bm.pixels[8 * 100 * 2..24 * 100 * 2].iter().any(|&b| b != 0));
+    assert!(bm.pixels[24 * 100 * 2..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn font_height_drawtext_wraps_and_measures_the_same_cells() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x70000100);
+    let dc = kernel.gdi.create_memory_dc();
+    let bitmap = kernel.gdi.create_compatible_bitmap(60, 40);
+    kernel.gdi.select_into(dc, bitmap);
+    let font = kernel.gdi.create_font(-16);
+    kernel.gdi.select_into(dc, font);
+    kernel.gdi.dc_mut(dc).unwrap().text_color = 0x00ffffff;
+    kernel.gdi.dc_mut(dc).unwrap().bk_transparent = true;
+    write_wide_str(&mut cpu, 0x1200, 16, "WWWWWW").unwrap();
+    cpu.write_mem(
+        0x1400,
+        &[
+            0i32.to_le_bytes(),
+            0i32.to_le_bytes(),
+            36i32.to_le_bytes(),
+            40i32.to_le_bytes(),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(
+        call(&mut ctx, draw_text_w, &[dc, 0x1200, 6, 0x1400, 0x410]),
+        32
+    );
+    assert_eq!(
+        ctx.cpu.read_mem(0x1400 + 8, 8).unwrap(),
+        [36i32.to_le_bytes(), 32i32.to_le_bytes()].concat()
+    );
+    assert_eq!(
+        call(&mut ctx, draw_text_w, &[dc, 0x1200, 6, 0x1400, 0x10]),
+        32
+    );
+    let bm = ctx.kernel.gdi.bitmap(bitmap).unwrap();
+    assert!(bm.pixels[16 * 60 * 2..32 * 60 * 2].iter().any(|&b| b != 0));
+    for row in bm.pixels.chunks_exact(120) {
+        assert!(row[72..].iter().all(|&b| b == 0));
+    }
+}

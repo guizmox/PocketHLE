@@ -1899,7 +1899,11 @@ impl Library {
         }
         let mut entry = entry;
         if !is_demo_card {
-            if let Some(code) = detect_gizmondo_title_id(&extracted_dir) {
+            if let Some(code) = detect_gizmondo_title_id(&extracted_dir).or_else(|| {
+                // A flat card ZIP may carry its only explicit title ID in the
+                // archive name (Android normalizes that name to lowercase).
+                is_gizmondo_title_id(&id).then(|| id.to_ascii_uppercase())
+            }) {
                 entry.id = code;
                 entry.display_name = gizmondo_titles::lookup(&entry.id)
                     .unwrap_or(&entry.id)
@@ -4573,6 +4577,41 @@ mod tests {
                 reopened.import_zip(&path).unwrap().display_name,
                 "Mon titre personnel"
             );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_flat_card_imports_use_archive_title_id() {
+        use std::io::Write;
+        let root = tmpdir("prepared_flat_card_names");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.exe");
+        write_pe_importing(&fixture, &[]);
+        let pe = fs::read(fixture).unwrap();
+        for (id, title) in [
+            ("GZAP200001", "Gizmondo Navigator (UK)"),
+            ("GZAP250006", "Gizmondo Navigator (USA West Coast)"),
+            ("GZGA200096", "Skystriker"),
+        ] {
+            let path = root.join(format!("{}.zip", id.to_ascii_lowercase()));
+            let mut archive = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            archive
+                .start_file("Autorun.exe", zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(&pe).unwrap();
+            archive.finish().unwrap();
+            let mut lib = Library::open(root.join(id)).unwrap();
+            let pending = lib.prepare_import(&path).unwrap();
+            assert_eq!(pending.entries[0].id, id);
+            assert_eq!(pending.entries[0].display_name, title);
+            assert!(lib.games().is_empty());
+            let imported = lib.apply_prepared_import(pending, false).unwrap();
+            assert_eq!(imported[0].display_name, title);
+            lib.rename_game(id, "Mon titre").unwrap();
+            let pending = lib.prepare_import(&path).unwrap();
+            let imported = lib.apply_prepared_import(pending, true).unwrap();
+            assert_eq!(imported[0].display_name, "Mon titre");
         }
         fs::remove_dir_all(root).unwrap();
     }

@@ -480,7 +480,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     // PPC2002 apps disable the IME on the very first line of WinMain.
     // There is no IME here, so "already disabled" is the honest answer.
     d.register_constant(dll, "ImmDisableIME", 1, one_returning);
-    d.register_handler(dll, "BringWindowToTop", set_foreground_window);
+    d.register_handler(dll, "BringWindowToTop", bring_window_to_top);
     d.register_handler(dll, "SetActiveWindow", set_active_window);
     d.register_handler(dll, "GetKeyState", get_key_state);
     d.register_handler(dll, "GetAsyncKeyState", get_async_key_state);
@@ -6904,7 +6904,9 @@ fn render_printf(
                 } else {
                     0xff
                 };
-                if let Some(ch) = char::from_u32(v & mask) {
+                if mask == 0xff {
+                    piece = crate::crt_ansi::decode(&[v as u8]);
+                } else if let Some(ch) = char::from_u32(v & mask) {
                     piece.push(ch);
                 }
             }
@@ -6921,7 +6923,7 @@ fn render_printf(
                     piece = String::from_utf16_lossy(&w);
                 } else {
                     let b = read_crt_cstr(ctx, p)?;
-                    piece = String::from_utf8_lossy(&b).into_owned();
+                    piece = crate::crt_ansi::decode(&b);
                 }
             }
             'S' => {
@@ -6935,7 +6937,7 @@ fn render_printf(
                     piece = String::from_utf16_lossy(&w);
                 } else {
                     let b = read_crt_cstr(ctx, p)?;
-                    piece = String::from_utf8_lossy(&b).into_owned();
+                    piece = crate::crt_ansi::decode(&b);
                 }
             }
             'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
@@ -6994,10 +6996,12 @@ fn render_printf(
 /// `int printf(const char *fmt, ...)`.
 fn printf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let fmt_p = ctx.arg_u32(0)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf(ctx, &fmt, false, 1)?;
     log::debug!("guest printf: {s}");
-    Ok(DispatchOutcome::ReturnedR0(s.len() as u32))
+    Ok(DispatchOutcome::ReturnedR0(
+        crate::crt_ansi::encode(&s).len() as u32,
+    ))
 }
 
 /// Pseudo-`FILE *` handles handed out by `_getstdfilex(0|1|2)`.
@@ -7061,7 +7065,7 @@ fn freopen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let path_p = ctx.arg_u32(0)?;
     let mode_p = ctx.arg_u32(1)?;
     let stream = ctx.arg_u32(2)?;
-    let path = read_cstr_string(ctx, path_p, 260)?;
+    let path = read_ansi_file_path(ctx, path_p)?;
     let mode = read_cstr_string(ctx, mode_p, 8)?;
     reopen_common(ctx, &path, &mode, stream)
 }
@@ -7070,10 +7074,12 @@ fn freopen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn crt_fprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let stream = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf(ctx, &fmt, false, 2)?;
     emit_stream_text(ctx, stream, &s)?;
-    Ok(DispatchOutcome::ReturnedR0(s.len() as u32))
+    Ok(DispatchOutcome::ReturnedR0(
+        crate::crt_ansi::encode(&s).len() as u32,
+    ))
 }
 
 /// `int vfprintf(FILE *stream, const char *fmt, va_list ap)`.
@@ -7081,10 +7087,12 @@ fn crt_vfprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let stream = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
     let va_p = ctx.arg_u32(2)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf_va(ctx, &fmt, false, va_p)?;
     emit_stream_text(ctx, stream, &s)?;
-    Ok(DispatchOutcome::ReturnedR0(s.len() as u32))
+    Ok(DispatchOutcome::ReturnedR0(
+        crate::crt_ansi::encode(&s).len() as u32,
+    ))
 }
 
 /// Route text produced by `fprintf` / `vfprintf` either into the
@@ -7095,7 +7103,7 @@ fn emit_stream_text(ctx: &mut CallCtx<'_>, stream: u32, text: &str) -> Result<()
         return Ok(());
     }
     if ctx.kernel.vfs.is_open(stream) {
-        ctx.kernel.vfs.write(stream, text.as_bytes());
+        ctx.kernel.vfs.write(stream, &crate::crt_ansi::encode(text));
     } else {
         log::debug!("guest fprintf to unknown stream 0x{stream:08x}: {text}");
     }
@@ -7106,9 +7114,9 @@ fn emit_stream_text(ctx: &mut CallCtx<'_>, stream: u32, text: &str) -> Result<()
 fn sprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf(ctx, &fmt, false, 2)?;
-    let mut bytes = s.into_bytes();
+    let mut bytes = crate::crt_ansi::encode(&s);
     bytes.push(0);
     ctx.cpu.write_mem(dst, &bytes)?;
     Ok(DispatchOutcome::ReturnedR0(bytes.len() as u32 - 1))
@@ -7123,9 +7131,9 @@ fn vsprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
     let va_p = ctx.arg_u32(2)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf_va(ctx, &fmt, false, va_p)?;
-    let mut bytes = s.into_bytes();
+    let mut bytes = crate::crt_ansi::encode(&s);
     bytes.push(0);
     if dst != 0 {
         ctx.cpu.write_mem(dst, &bytes)?;
@@ -7139,9 +7147,9 @@ fn vsnprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let cap = ctx.arg_u32(1)?;
     let fmt_p = ctx.arg_u32(2)?;
     let va_p = ctx.arg_u32(3)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf_va(ctx, &fmt, false, va_p)?;
-    let mut bytes = s.into_bytes();
+    let mut bytes = crate::crt_ansi::encode(&s);
     bytes.push(0);
     if dst != 0 && cap > 0 {
         let n = (bytes.len() as u32).min(cap) as usize;
@@ -7155,9 +7163,9 @@ fn snprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dst = ctx.arg_u32(0)?;
     let cap = ctx.arg_u32(1)?;
     let fmt_p = ctx.arg_u32(2)?;
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, fmt_p)?).into_owned();
+    let fmt = crate::crt_ansi::decode(&read_crt_cstr(ctx, fmt_p)?);
     let s = render_printf(ctx, &fmt, false, 3)?;
-    let mut bytes = s.into_bytes();
+    let mut bytes = crate::crt_ansi::encode(&s);
     bytes.push(0);
     if dst != 0 && cap > 0 {
         let n = (bytes.len() as u32).min(cap) as usize;
@@ -7970,7 +7978,9 @@ fn render_printf_va(
                 } else {
                     0xff
                 };
-                if let Some(ch) = char::from_u32(v & mask) {
+                if mask == 0xff {
+                    piece = crate::crt_ansi::decode(&[v as u8]);
+                } else if let Some(ch) = char::from_u32(v & mask) {
                     piece.push(ch);
                 }
             }
@@ -7985,7 +7995,7 @@ fn render_printf_va(
                     piece = String::from_utf16_lossy(&w);
                 } else {
                     let b = read_crt_cstr(ctx, p)?;
-                    piece = String::from_utf8_lossy(&b).into_owned();
+                    piece = crate::crt_ansi::decode(&b);
                 }
             }
             'S' => {
@@ -7999,7 +8009,7 @@ fn render_printf_va(
                     piece = String::from_utf16_lossy(&w);
                 } else {
                     let b = read_crt_cstr(ctx, p)?;
-                    piece = String::from_utf8_lossy(&b).into_owned();
+                    piece = crate::crt_ansi::decode(&b);
                 }
             }
             'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
@@ -8601,6 +8611,15 @@ fn read_cstr_string(ctx: &mut CallCtx<'_>, p: u32, max: u32) -> Result<String, K
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+// File APIs using char* take CP_ACP. Keep this separate from the existing
+// text helper so this fix does not change scanf or unrelated UI string paths.
+fn read_ansi_file_path(ctx: &mut CallCtx<'_>, p: u32) -> Result<String, KernelError> {
+    if p == 0 {
+        return Ok(String::new());
+    }
+    Ok(crate::crt_ansi::decode(&read_cstr(ctx, p, 260)?))
+}
+
 fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     use pocket_kernel::vfs::Access;
     let access = if mode.contains('+') {
@@ -8729,7 +8748,7 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
 fn crt_fopen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let name_p = ctx.arg_u32(0)?;
     let mode_p = ctx.arg_u32(1)?;
-    let name = read_cstr_string(ctx, name_p, 260)?;
+    let name = read_ansi_file_path(ctx, name_p)?;
     let mode = read_cstr_string(ctx, mode_p, 8)?;
     let h = open_cstr_path(ctx, &name, &mode);
     // Opt-in CoPilot diagnostic: a failed fopen can cause a silent startup exit.
@@ -11900,12 +11919,16 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     const SWP_NOMOVE: u32 = 0x0002;
 
     let hwnd = ctx.arg_u32(0)?;
+    let insert_after = ctx.arg_u32(1)?;
     let x = ctx.arg_u32(2)? as i32;
     let y = ctx.arg_u32(3)? as i32;
     let w = ctx.arg_u32(4)? as i32;
     let h = ctx.arg_u32(5)? as i32;
     let flags = ctx.arg_u32(6).unwrap_or(0);
-    log::debug!("SetWindowPos(0x{hwnd:08x}, ({x},{y},{w},{h}), flags=0x{flags:04x})");
+    if flags & 0x0004 == 0 {
+        ctx.kernel.controls.set_child_z_order(hwnd, insert_after);
+    }
+    log::debug!("SetWindowPos(0x{hwnd:08x}, after=0x{insert_after:08x}, ({x},{y},{w},{h}), flags=0x{flags:04x})");
     let moved = flags & SWP_NOMOVE == 0;
     let sized = flags & SWP_NOSIZE == 0;
     if flags & 0xc0 != 0 {
@@ -12241,8 +12264,8 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
                 None => continue,
             }
         }
-        if let Some((msg, wp, lp)) = input_to_message(ev) {
-            return (input_window(ctx.kernel), msg, wp, lp);
+        if let Some(addressed) = addressed_input(ctx.kernel, ev) {
+            return addressed;
         }
     }
     // Same ordering as `next_message_if_due`: posted driver / guest
@@ -12256,6 +12279,60 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
         return (input_window(ctx.kernel), msg, wp, lp);
     }
     synthetic_message_for(ctx)
+}
+
+/// Keyboard input follows focus. Unclaimed pointer input belongs to the
+/// native child under the pointer, in that child's client coordinates.
+fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32, u32, u32)> {
+    let (message, wp, lp) = input_to_message(event)?;
+    let (x, y) = match event {
+        InputEvent::PointerDown { x, y }
+        | InputEvent::PointerUp { x, y }
+        | InputEvent::PointerMove { x, y } => (i32::from(x), i32::from(y)),
+        _ => return Some((input_window(kernel), message, wp, lp)),
+    };
+    let active = active_window(kernel);
+    let mut candidates = Vec::new();
+    for (&hwnd, rect) in &kernel.window_rects {
+        if kernel.controls.get(hwnd).is_some()
+            || kernel.controls.panel(hwnd).is_some()
+            || !focus_belongs_to_window(kernel, hwnd, active)
+            || !window_is_visible(kernel, hwnd)
+        {
+            continue;
+        }
+        let Some((ox, oy)) = coordinates::origin(kernel, hwnd) else {
+            continue;
+        };
+        if x < ox || y < oy || x >= ox.saturating_add(rect.2) || y >= oy.saturating_add(rect.3) {
+            continue;
+        }
+        let mut depth = 0;
+        let mut current = hwnd;
+        for _ in 0..64 {
+            if current == active {
+                break;
+            }
+            let Some(parent) = kernel.window_parents.get(&current).copied() else {
+                break;
+            };
+            if parent == current {
+                break;
+            }
+            depth += 1;
+            current = parent;
+        }
+        candidates.push((depth, hwnd, ox, oy));
+    }
+    candidates.sort_unstable();
+    let (hwnd, ox, oy) = if let Some((_, hwnd, ox, oy)) = candidates.last().copied() {
+        (hwnd, ox, oy)
+    } else {
+        let (ox, oy) = coordinates::origin(kernel, active).unwrap_or((0, 0));
+        (active, ox, oy)
+    };
+    let local = (((y - oy) as u32 & 0xffff) << 16) | ((x - ox) as u32 & 0xffff);
+    Some((hwnd, message, wp, local))
 }
 
 /// Pop one queued host input event, rewriting its virtual key for GAPI
@@ -12405,8 +12482,8 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
                 None => continue,
             }
         }
-        if let Some((msg, wp, lp)) = input_to_message(ev) {
-            return Some((input_window(ctx.kernel), msg, wp, lp));
+        if let Some(addressed) = addressed_input(ctx.kernel, ev) {
+            return Some(addressed);
         }
     }
     // Driver notifications (`MM_WOM_DONE`) outrank the synthetic
@@ -13575,10 +13652,33 @@ fn draw_points(ctx: &mut CallCtx<'_>, closed: bool) -> Result<DispatchOutcome, K
 }
 
 fn create_font_indirect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // We ignore the LOGFONT contents; just allocate a font handle so
-    // the caller can SelectObject it. Default height 0 is fine.
-    let h = ctx.kernel.gdi.create_font(0);
+    let pointer = ctx.arg_u32(0)?;
+    if pointer == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let height = i32::from_le_bytes(ctx.cpu.read_mem(pointer, 4)?.try_into().unwrap());
+    let h = ctx.kernel.gdi.create_font(height);
     Ok(DispatchOutcome::ReturnedR0(h))
+}
+
+// Preserve the stock fallback used by existing games; honor explicit LOGFONT
+// heights consistently in measurement and rasterization.
+fn selected_font_cell(kernel: &KernelState, dc: u32) -> (i32, i32) {
+    let height = kernel
+        .gdi
+        .dc(dc)
+        .filter(|d| d.selected_font != STOCK_SYSTEM_FONT)
+        .and_then(|d| kernel.gdi.get(d.selected_font))
+        .and_then(|object| match object {
+            pocket_kernel::gdi::GdiObject::Font(font) if font.height != 0 => {
+                Some(font.height.unsigned_abs().clamp(1, 96) as i32)
+            }
+            _ => None,
+        });
+    height.map_or(
+        (pocket_kernel::font::GLYPH_W, pocket_kernel::font::GLYPH_H),
+        |h| (((h * 6 + 4) / 8).max(1), h),
+    )
 }
 
 fn get_stock_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -17416,7 +17516,8 @@ fn stretch_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// `lpnFit` gets the number of chars that fit `nMaxExtent` and
 /// `alpDx` (when non-NULL) the cumulative advance per char.
 fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _hdc = ctx.arg_u32(0)?;
+    let hdc = ctx.arg_u32(0)?;
+    let (cell_w, cell_h) = selected_font_cell(ctx.kernel, hdc);
     let str_p = ctx.arg_u32(1)?;
     let cch = ctx.arg_u32(2)? as i32;
     let max_extent = ctx.arg_u32(3)? as i32;
@@ -17442,13 +17543,13 @@ fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
         }
     }
     let n = chars.len() as i32;
-    let cx = n * pocket_kernel::font::GLYPH_W;
-    let cy = pocket_kernel::font::GLYPH_H;
+    let cx = n * cell_w;
+    let cy = cell_h;
     ctx.cpu.write_mem(lp_size, &cx.to_le_bytes())?;
     ctx.cpu.write_mem(lp_size + 4, &cy.to_le_bytes())?;
     if lpn_fit != 0 {
         let fit = if max_extent >= 0 {
-            (max_extent / pocket_kernel::font::GLYPH_W).min(n)
+            (max_extent / cell_w).min(n)
         } else {
             n
         };
@@ -17456,7 +17557,7 @@ fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     }
     if alp_dx != 0 {
         for (i, _) in chars.iter().enumerate() {
-            let dx = (i as i32 + 1) * pocket_kernel::font::GLYPH_W;
+            let dx = (i as i32 + 1) * cell_w;
             ctx.cpu
                 .write_mem(alp_dx + (i * 4) as u32, &dx.to_le_bytes())?;
         }
@@ -17554,13 +17655,27 @@ fn blit_text_at(
     }
     let color = colorref_to_rgb565(dc_meta.text_color);
     let bk_color = colorref_to_rgb565(dc_meta.bk_color);
-    let pixel_w = chars.len() as i32 * pocket_kernel::font::GLYPH_W;
-    let (x, y) = aligned_text_origin(&dc_meta, x, y, pixel_w, pocket_kernel::font::GLYPH_H);
+    let (cell_w, cell_h) = selected_font_cell(ctx.kernel, hdc);
+    let pixel_w = chars.len() as i32 * cell_w;
+    let (x, y) = aligned_text_origin(&dc_meta, x, y, pixel_w, cell_h);
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
         if !dc_meta.bk_transparent {
-            surf.fill_rect(x, y, pixel_w, pocket_kernel::font::GLYPH_H, bk_color);
+            surf.fill_rect(x, y, pixel_w, cell_h, bk_color);
         }
-        pocket_kernel::font::draw_str_u16(&mut surf, x, y, &chars, color);
+        let (w, h) = surf.dimensions();
+        let clip = [0, 0, w as i32, h as i32];
+        for (i, ch) in chars.iter().enumerate() {
+            pocket_kernel::font::draw_char_sized_clipped(
+                &mut surf,
+                x.saturating_add(i as i32 * cell_w),
+                y,
+                char::from_u32(u32::from(*ch)).unwrap_or('?'),
+                color,
+                cell_w,
+                cell_h,
+                clip,
+            );
+        }
         surf.mark_dirty();
     }
     sync_dst_dib_to_guest(ctx, hdc)?;
@@ -21291,6 +21406,12 @@ fn set_active_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 fn set_foreground_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     set_active_window(ctx)?;
     Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn bring_window_to_top(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    ctx.kernel.controls.set_child_z_order(hwnd, 0);
+    set_foreground_window(ctx)
 }
 
 fn get_parent(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -26039,6 +26160,132 @@ mod tests {
         };
         assert_eq!(qsort(&mut c).unwrap(), DispatchOutcome::ReturnedR0(0));
         assert!(kernel.qsort_frames.is_empty());
+    }
+
+    #[test]
+    fn agaju_ansi_speech_paths_survive_all_narrow_formatters_and_fopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let speech = dir.path().join("Audio/Speech/New");
+        std::fs::create_dir_all(&speech).unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount_read_only("\\SD Card\\", dir.path());
+        let thunk = dummy_thunk();
+        let format = b"\\SD Card\\audio\\speech\\new\\%s.lsf\0";
+        cpu.write_mem(0x1000, format).unwrap();
+        cpu.write_mem(0x1400, b"rb\0").unwrap();
+        for name in [b"\xe4ren".as_slice(), b"tr\xe4d", b"s\xf6", b"pla"] {
+            std::fs::write(
+                speech.join(format!("{}.lsf", crate::crt_ansi::decode(name))),
+                b"n1nj4n!\x02",
+            )
+            .unwrap();
+            let mut argument = name.to_vec();
+            argument.push(0);
+            cpu.write_mem(0x1800, &argument).unwrap();
+            let mut expected = b"\\SD Card\\audio\\speech\\new\\".to_vec();
+            expected.extend_from_slice(name);
+            expected.extend_from_slice(b".lsf\0");
+            for kind in 0..4 {
+                cpu.write_mem(0x2000, &0x1800u32.to_le_bytes()).unwrap();
+                cpu.write_reg(ArmReg::R0, 0x3000).unwrap();
+                if kind < 2 {
+                    cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
+                    cpu.write_reg(ArmReg::R2, if kind == 0 { 0x1800 } else { 0x2000 })
+                        .unwrap();
+                } else {
+                    cpu.write_reg(ArmReg::R1, 256).unwrap();
+                    cpu.write_reg(ArmReg::R2, 0x1000).unwrap();
+                    cpu.write_reg(ArmReg::R3, if kind == 2 { 0x1800 } else { 0x2000 })
+                        .unwrap();
+                }
+                let result = {
+                    let mut ctx = CallCtx {
+                        cpu: &mut cpu,
+                        kernel: &mut kernel,
+                        thunk: &thunk,
+                    };
+                    match kind {
+                        0 => sprintf(&mut ctx),
+                        1 => vsprintf(&mut ctx),
+                        2 => snprintf(&mut ctx),
+                        _ => vsnprintf(&mut ctx),
+                    }
+                    .unwrap()
+                };
+                assert_eq!(
+                    result,
+                    DispatchOutcome::ReturnedR0(expected.len() as u32 - 1)
+                );
+                assert_eq!(
+                    cpu.read_mem(0x3000, expected.len() as u32).unwrap(),
+                    expected
+                );
+                cpu.write_reg(ArmReg::R0, 0x3000).unwrap();
+                cpu.write_reg(ArmReg::R1, 0x1400).unwrap();
+                let result = crt_fopen(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                })
+                .unwrap();
+                let DispatchOutcome::ReturnedR0(handle) = result else {
+                    panic!("unexpected fopen result: {result:?}");
+                };
+                assert_ne!(handle, 0, "formatter {kind}, name {name:?}");
+                assert!(kernel.vfs.is_open(handle));
+                let mut header = [0; 8];
+                assert_eq!(kernel.vfs.read(handle, &mut header), Some(8));
+                assert_eq!(&header, b"n1nj4n!\x02");
+                kernel.vfs.close(handle);
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_printf_preserves_bytes_and_wide_printf_decodes_ansi_arguments() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        // Literal bytes, string precision, padding and %c must count ANSI bytes.
+        cpu.write_mem(0x1000, b"\xe4:%4.2s:%c\0").unwrap();
+        cpu.write_mem(0x1800, b"\xe4\xf6x\0").unwrap();
+        cpu.write_reg(ArmReg::R0, 0x3000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::R3, 0x80).unwrap();
+        assert_eq!(
+            sprintf(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(8)
+        );
+        assert_eq!(cpu.read_mem(0x3000, 9).unwrap(), b"\xe4:  \xe4\xf6:\x80\0");
+        // Raw UTF-8-looking byte pairs are also preserved, without transcoding.
+        cpu.write_mem(0x1000, b"%s\0").unwrap();
+        cpu.write_mem(0x1800, b"\xc3\xa4\x81\0").unwrap();
+        sprintf(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
+        assert_eq!(cpu.read_mem(0x3000, 4).unwrap(), b"\xc3\xa4\x81\0");
+        write_wide_str(&mut cpu, 0x1000, 32, "%hs").unwrap();
+        cpu.write_mem(0x1800, b"\xe4\x80\0").unwrap();
+        swprintf(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
+        assert_eq!(
+            cpu.read_mem(0x3000, 6).unwrap(),
+            [0xe4, 0, 0xac, 0x20, 0, 0]
+        );
     }
 
     #[test]

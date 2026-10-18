@@ -83,6 +83,32 @@ fn main() -> anyhow::Result<()> {
                     if let Some(path) = line.strip_prefix("snapshot ") {
                         let _ = std::fs::write(path, state.framebuffer.snapshot_ppm());
                     }
+                    if let Some(value) = line.strip_prefix("tap ") {
+                        if let Some((x, y)) = value.split_once(' ') {
+                            if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
+                                state.pending_input.push_back(InputEvent::PointerDown { x, y });
+                                state.pending_input.push_back(InputEvent::PointerUp { x, y });
+                            }
+                        }
+                    }
+                    if let Some(path) = line.strip_prefix("dump ") {
+                        let mut details = format!("active={:x} focus={:x}\ncontrols={:#?}\n", state.active_window, state.controls.focus, state.controls);
+                        let mut windows: Vec<_> = state.window_dcs.iter().collect();
+                        windows.sort_by_key(|(h, _)| **h);
+                        for (&hwnd, &dc) in windows {
+                            details.push_str(&format!("hwnd={hwnd:08x} dc={dc:08x} rect={:?} parent={:?} visible={:?} class={:?} dcmeta={:?}\n", state.window_rects.get(&hwnd), state.window_parents.get(&hwnd), state.window_visibility.get(&hwnd), state.window_classes.get(&hwnd), state.gdi.dc(dc)));
+                            if let Some(bm) = state.gdi.dc(dc).and_then(|d| d.selected_bitmap).and_then(|b| state.gdi.bitmap(b)) {
+                                let mut ppm = format!("P6\n{} {}\n255\n", bm.width, bm.height).into_bytes();
+                                for pair in bm.pixels.chunks_exact(2) {
+                                    let c = u16::from_le_bytes([pair[0], pair[1]]);
+                                    ppm.extend_from_slice(&[(((c >> 11) * 255 / 31) as u8), ((((c >> 5) & 63) * 255 / 63) as u8), (((c & 31) * 255 / 31) as u8)]);
+                                }
+                                let _ = std::fs::write(format!("{path}-{hwnd:08x}.ppm"), ppm);
+                            }
+                        }
+                        let _ = std::fs::write(format!("{path}.txt"), details);
+                        let _ = std::fs::write(format!("{path}.ppm"), state.framebuffer.snapshot_ppm());
+                    }
                     if *line == "windows" {
                         log::info!(
                             "active={:x} focus={:x} controls={:#?}",

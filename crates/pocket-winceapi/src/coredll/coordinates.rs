@@ -1,21 +1,40 @@
 //! Coordinate conversion uses the same client origins as control composition.
 use super::*;
-fn origin(kernel: &KernelState, hwnd: u32) -> Option<(i32, i32)> {
-    if hwnd == 0 || hwnd == FAKE_DESKTOP_HWND {
-        return Some((0, 0));
+pub(super) fn origin(kernel: &KernelState, mut hwnd: u32) -> Option<(i32, i32)> {
+    let (mut x, mut y) = (0i32, 0i32);
+    for _ in 0..64 {
+        if hwnd == 0 || hwnd == FAKE_DESKTOP_HWND || hwnd == FAKE_HWND {
+            return Some((x, y));
+        }
+        if let Some(panel) = kernel.controls.panel(hwnd) {
+            let (px, py) = panel.client_origin();
+            return Some((x.saturating_add(px), y.saturating_add(py)));
+        }
+        if let Some(control) = kernel.controls.get(hwnd) {
+            x = x.saturating_add(control.x);
+            y = y.saturating_add(control.y);
+            hwnd = control.parent;
+            continue;
+        }
+        let rect = kernel.window_rects.get(&hwnd)?;
+        x = x.saturating_add(rect.0);
+        y = y.saturating_add(rect.1);
+        if !kernel
+            .window_styles
+            .get(&hwnd)
+            .is_some_and(|s| s.0 & 0x4000_0000 != 0)
+        {
+            return Some((x, y));
+        }
+        let parent = kernel.window_parents.get(&hwnd).copied()?;
+        if parent == hwnd {
+            return None;
+        }
+        hwnd = parent;
     }
-    if let Some(panel) = kernel.controls.panel(hwnd) {
-        return Some(panel.client_origin());
-    }
-    if let Some((x, y, _, _)) = kernel.controls.screen_rect(hwnd) {
-        return Some((x, y));
-    }
-    kernel
-        .window_rects
-        .get(&hwnd)
-        .map(|r| (r.0, r.1))
-        .or_else(|| (hwnd == FAKE_HWND).then_some((0, 0)))
+    None
 }
+
 fn convert(
     ctx: &mut CallCtx<'_>,
     from: u32,
