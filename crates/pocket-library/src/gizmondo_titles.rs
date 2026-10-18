@@ -45,6 +45,12 @@ mod tests {
     use super::*;
     #[test]
     fn known_ids_and_user_correction_are_exact_and_unknown_ids_are_not_guessed() {
+        assert_eq!(lookup("GZAP200001"), Some("Gizmondo Navigator (UK)"));
+        assert_eq!(
+            lookup("gzap250006"),
+            Some("Gizmondo Navigator (USA West Coast)")
+        );
+        assert_eq!(lookup("GZGA200096"), Some("Skystriker"));
         assert_eq!(lookup("gzga200016"), Some("Chicane"));
         assert_eq!(lookup("GZGA270016"), Some("Chicane"));
         assert_eq!(lookup("GZGA200015"), Some("Colors"));

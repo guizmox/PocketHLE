@@ -1,3 +1,5 @@
+Cargo.lock
+Cargo.toml
 crates/pocket-kernel/src/controls.rs
 crates/pocket-kernel/src/font.rs
 crates/pocket-kernel/src/gdi.rs
@@ -5,6 +7,9 @@ crates/pocket-kernel/src/imaging.rs
 crates/pocket-kernel/src/lib.rs
 crates/pocket-kernel/src/serial.rs
 crates/pocket-kernel/src/shell_keyboard.rs
+crates/pocket-library/data/gizmondo-titles.json
+crates/pocket-library/src/gizmondo_titles.rs
+crates/pocket-library/src/lib.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/coredll/choice_controls.rs
 crates/pocket-winceapi/src/coredll/coordinates.rs
@@ -17,5 +22,7 @@ crates/pocket-winceapi/src/lib.rs
 crates/pocket-winceapi/src/shell.rs
 crates/pocket-winceapi/src/shell_keyboard.rs
 docs/AGENTS.md
+docs/RELEASE-0.3.4.md
+frontends/pocket-android/app/build.gradle.kts
 frontends/pocket-cli/examples/navigator_gui_probe.rs
 frontends/pocket-cli/src/main.rs

@@ -1213,9 +1213,9 @@ impl Library {
             // Other user-edited names are preserved.
             if let Some(id) = game_gizmondo_title_id(game, &self.root) {
                 let corrected_date = match id.as_str() {
-                    "GZAP200001" => game
-                        .display_name
-                        .eq_ignore_ascii_case("Copilot Navigation 2005"),
+                    "GZAP200001" => ["Copilot Navigation 2005", "Copilot UK"]
+                        .iter()
+                        .any(|old| game.display_name.eq_ignore_ascii_case(old)),
                     "GZGA900069" => game
                         .display_name
                         .eq_ignore_ascii_case("Catapult (may 2005)"),
@@ -3975,7 +3975,10 @@ mod tests {
             cartridge_artwork(&root, &extracted.join("CoPilot.exe")),
             None
         );
-        assert_eq!(gizmondo_titles::lookup("GZAP200001"), Some("Copilot UK"));
+        assert_eq!(
+            gizmondo_titles::lookup("GZAP200001"),
+            Some("Gizmondo Navigator (UK)")
+        );
         assert_eq!(
             gizmondo_titles::lookup("GZAP200006"),
             Some("Gizmondo Navigator USA West")
@@ -4523,6 +4526,83 @@ mod tests {
             "My custom Chicane"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn navigator_and_skystriker_imports_use_catalogue_names_and_keep_custom_renames() {
+        use std::io::Write;
+        let root = tmpdir("navigator_skystriker_names");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.exe");
+        write_pe_importing(&fixture, &[]);
+        let pe = fs::read(fixture).unwrap();
+        for (id, title) in [
+            ("GZAP200001", "Gizmondo Navigator (UK)"),
+            ("GZAP250006", "Gizmondo Navigator (USA West Coast)"),
+            ("GZGA200096", "Skystriker"),
+        ] {
+            let path = root.join(format!("{id}.zip"));
+            let mut archive = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            archive
+                .start_file(
+                    format!("{id}/Autorun.exe"),
+                    zip::write::FileOptions::default(),
+                )
+                .unwrap();
+            archive.write_all(&pe).unwrap();
+            archive
+                .start_file(format!("{id}/{id}"), zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(b"serial").unwrap();
+            archive.finish().unwrap();
+            let library_root = root.join(id);
+            let mut lib = Library::open(&library_root).unwrap();
+            let entry = lib.import_zip(&path).unwrap().clone();
+            assert_eq!(entry.id, id);
+            assert_eq!(entry.display_name, title);
+            assert!(is_gizmondo_game(&entry, &library_root));
+            let manifest: GameEntry = serde_json::from_slice(
+                &fs::read(library_root.join("games").join(id).join("game.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest.display_name, title);
+            let mut reopened = Library::open(&library_root).unwrap();
+            assert_eq!(reopened.get(id).unwrap().display_name, title);
+            reopened.rename_game(id, "Mon titre personnel").unwrap();
+            assert_eq!(
+                reopened.import_zip(&path).unwrap().display_name,
+                "Mon titre personnel"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn navigator_old_default_is_updated_without_replacing_a_personal_name() {
+        let root = tmpdir("navigator_name_migration");
+        let mut lib = Library::open(&root).unwrap();
+        let mut entry = entry_with_install_dir(None);
+        entry.id = "GZAP200001".into();
+        entry.display_name = "Copilot UK".into();
+        entry.executable = "extracted/CoPilot.exe".into();
+        write_pe_importing(&entry.executable_path(&root), &[]);
+        lib.library.games.push(entry);
+        lib.save().unwrap();
+        let mut loaded = Library::open(&root).unwrap();
+        assert_eq!(
+            loaded.get("GZAP200001").unwrap().display_name,
+            "Gizmondo Navigator (UK)"
+        );
+        loaded.rename_game("GZAP200001", "Mon Navigator").unwrap();
+        assert_eq!(
+            Library::open(&root)
+                .unwrap()
+                .get("GZAP200001")
+                .unwrap()
+                .display_name,
+            "Mon Navigator"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
