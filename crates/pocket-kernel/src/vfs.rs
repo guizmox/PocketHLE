@@ -1388,6 +1388,31 @@ impl Vfs {
         of.file.write(buf).ok()
     }
 
+    /// FILETIME values for an existing file handle. Zero denotes unavailable
+    /// timestamps (including the RAM filesystem), rather than invented times.
+    pub fn file_times(&self, handle: u32) -> Option<[u64; 3]> {
+        if self.ram_handles.contains_key(&handle) {
+            return Some([0; 3]);
+        }
+        let file = self.handles.get(&handle)?.lock().ok()?;
+        let metadata = file.file.metadata().ok()?;
+        let convert = |time: std::io::Result<std::time::SystemTime>| -> u64 {
+            let Ok(time) = time else {
+                return 0;
+            };
+            let epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(11_644_473_600);
+            time.duration_since(epoch)
+                .ok()
+                .and_then(|d| u64::try_from(d.as_nanos() / 100).ok())
+                .unwrap_or(0)
+        };
+        Some([
+            convert(metadata.created()),
+            convert(metadata.accessed()),
+            convert(metadata.modified()),
+        ])
+    }
+
     pub fn size(&mut self, handle: u32) -> Option<u64> {
         if let Some(open) = self.ram_handles.get(&handle) {
             return Some(open.lock().ok()?.file.lock().ok()?.data.len() as u64);

@@ -286,6 +286,11 @@ pub struct ChildWindow {
     /// `BM_SETCHECK` state of a check box or radio button.
     pub checked: bool,
     pub list_items: Vec<(String, u32)>,
+    pub list_images: Vec<i32>,
+    pub list_image_lists: [u32; 3],
+    pub list_image_sizes: [(u32, u32); 3],
+    pub list_scroll_y: i32,
+    pub image: u32,
     pub list_selected: Option<usize>,
     pub list_column_count: u32,
     pub font: u32,
@@ -294,6 +299,76 @@ pub struct ChildWindow {
 const LIST_VIEW_ROW_HEIGHT: i32 = 14;
 
 impl ChildWindow {
+    pub fn list_image_list(&self) -> (u32, u32, u32) {
+        let preferred = usize::from(self.style & 3 != 0);
+        let slot = if self.list_image_lists[preferred] != 0 {
+            preferred
+        } else {
+            1 - preferred
+        };
+        let (w, h) = self.list_image_sizes[slot];
+        (self.list_image_lists[slot], w, h)
+    }
+    pub fn list_row_height(&self) -> i32 {
+        LIST_VIEW_ROW_HEIGHT.max(self.list_image_list().2.min(4096) as i32 + 2)
+    }
+    pub fn list_item_at(&self, y: i32) -> Option<usize> {
+        if y < 0 || y >= self.h {
+            return None;
+        }
+        let index =
+            (i64::from(y) + i64::from(self.list_scroll_y)) / i64::from(self.list_row_height());
+        usize::try_from(index)
+            .ok()
+            .filter(|i| *i < self.list_items.len())
+    }
+    fn render_list(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
+        surf.fill_rect(self.x, self.y, self.w, self.h, Self::WINDOW);
+        let row_height = self.list_row_height();
+        let (handle, iw, ih) = self.list_image_list();
+        let first = (self.list_scroll_y.max(0) / row_height) as usize;
+        for (index, (text, _)) in self.list_items.iter().enumerate().skip(first) {
+            let y = i64::from(self.y) + index as i64 * i64::from(row_height)
+                - i64::from(self.list_scroll_y);
+            if y >= i64::from(self.y) + i64::from(self.h) {
+                break;
+            }
+            let y = y as i32;
+            let top = y.max(self.y);
+            let bottom = (y + row_height).min(self.y + self.h);
+            let selected = self.list_selected == Some(index);
+            if selected {
+                surf.fill_rect(self.x, top, self.w, bottom - top, 0x001f);
+            }
+            if let Some(image) = gdi.and_then(|g| g.image_lists.get(&handle)).and_then(|l| {
+                self.list_images
+                    .get(index)
+                    .and_then(|i| usize::try_from(*i).ok())
+                    .and_then(|i| l.images.get(i))
+            }) {
+                image.draw(
+                    surf,
+                    self.x + 2,
+                    y + (row_height - ih as i32) / 2,
+                    iw,
+                    ih,
+                    [self.x, self.y, self.x + self.w, self.y + self.h],
+                );
+            }
+            let ty = y + (row_height - font::GLYPH_H) / 2;
+            if ty >= self.y && ty + font::GLYPH_H <= self.y + self.h {
+                draw_clipped(
+                    surf,
+                    self.x + 2 + if iw > 0 { iw as i32 + 3 } else { 0 },
+                    ty,
+                    text,
+                    if selected { Self::WINDOW } else { Self::TEXT },
+                    self.x + self.w - 1,
+                );
+            }
+        }
+    }
+
     /// Face colour — `COLOR_BTNFACE`, the same light grey the status
     /// bar uses.
     const FACE: u16 = 0xC618;
@@ -396,6 +471,14 @@ impl ChildWindow {
     /// Paint the control. `focused` drives the focus rectangle and the
     /// edit caret; the caller knows which control holds the focus.
     pub fn render(&self, surf: &mut Surface<'_>, focused: bool) {
+        self.render_with_images(surf, focused, None);
+    }
+    fn render_with_images(
+        &self,
+        surf: &mut Surface<'_>,
+        focused: bool,
+        gdi: Option<&crate::gdi::GdiState>,
+    ) {
         if !self.visible || self.w <= 0 || self.h <= 0 {
             return;
         }
@@ -403,24 +486,34 @@ impl ChildWindow {
             ControlClass::Button => self.render_button(surf, focused),
             ControlClass::Edit => self.render_edit(surf, focused),
             ControlClass::Static => self.render_static(surf),
-            ControlClass::ListView => {
-                surf.fill_rect(self.x, self.y, self.w, self.h, Self::WINDOW);
-                for (index, (text, _)) in self.list_items.iter().enumerate() {
-                    let y = self.y + index as i32 * LIST_VIEW_ROW_HEIGHT;
-                    if y + LIST_VIEW_ROW_HEIGHT > self.y + self.h {
-                        break;
-                    }
-                    let selected = self.list_selected == Some(index);
-                    if selected {
-                        surf.fill_rect(self.x, y, self.w, LIST_VIEW_ROW_HEIGHT, 0x001f);
-                    }
-                    draw_clipped(
+            ControlClass::ListView => self.render_list(surf, gdi),
+        }
+        if self.image != 0 {
+            if let Some(gdi) = gdi {
+                let bitmap_image = gdi
+                    .bitmap(self.image)
+                    .and_then(crate::imaging::Image::from_bitmap);
+                if let Some(image) = gdi.icons.get(&self.image).or(bitmap_image.as_ref()) {
+                    let centered = self.class == ControlClass::Button || self.style & 0x200 != 0;
+                    let x = self.x
+                        + if centered {
+                            (self.w - image.width as i32) / 2
+                        } else {
+                            0
+                        };
+                    let y = self.y
+                        + if centered {
+                            (self.h - image.height as i32) / 2
+                        } else {
+                            0
+                        };
+                    image.draw(
                         surf,
-                        self.x + 2,
-                        y + 3,
-                        text,
-                        if selected { Self::WINDOW } else { Self::TEXT },
-                        self.x + self.w - 1,
+                        x,
+                        y,
+                        image.width,
+                        image.height,
+                        [self.x, self.y, self.x + self.w, self.y + self.h],
                     );
                 }
             }
@@ -461,6 +554,9 @@ impl ChildWindow {
         let text_w = font::str_width(&self.text);
         let tx = x + ((w - text_w) / 2).max(1) + nudge;
         let ty = y + ((h - font::GLYPH_H) / 2).max(0) + nudge;
+        if self.image != 0 {
+            return;
+        }
         self.draw_caption(surf, tx, ty, x + w - 2);
 
         if focused {
@@ -574,6 +670,9 @@ impl ChildWindow {
     }
 
     fn render_static(&self, surf: &mut Surface<'_>) {
+        if self.image != 0 {
+            return;
+        }
         let ty = self.y + ((self.h - font::GLYPH_H) / 2).max(0);
         self.draw_caption(surf, self.x, ty, self.x + self.w);
     }
@@ -731,6 +830,11 @@ impl Controls {
             pressed: false,
             checked: false,
             list_items: Vec::new(),
+            list_images: Vec::new(),
+            list_image_lists: [0; 3],
+            list_image_sizes: [(0, 0); 3],
+            list_scroll_y: 0,
+            image: 0,
             list_selected: None,
             list_column_count: 0,
             font: crate::gdi::STOCK_SYSTEM_FONT,
@@ -894,8 +998,7 @@ impl Controls {
             .unwrap_or((0, 0));
         let child = self.get_mut(hwnd)?;
         if child.class == ControlClass::ListView && child.enabled {
-            let index = ((y - origin.1 - child.y).max(0) / LIST_VIEW_ROW_HEIGHT) as usize;
-            if index < child.list_items.len() {
+            if let Some(index) = child.list_item_at(y - origin.1 - child.y) {
                 child.list_selected = Some(index);
             }
         }
@@ -1115,6 +1218,13 @@ impl Controls {
                     None => 0,
                 };
                 child.list_selected = Some(next);
+                let row = child.list_row_height();
+                let top = (next as i64 * i64::from(row)).min(i64::from(i32::MAX)) as i32;
+                if top < child.list_scroll_y {
+                    child.list_scroll_y = top;
+                } else if top.saturating_add(row) > child.list_scroll_y.saturating_add(child.h) {
+                    child.list_scroll_y = top.saturating_add(row).saturating_sub(child.h).max(0);
+                }
                 Some(ControlAction::Notify {
                     parent: child.parent,
                     id: child.id,
@@ -1177,11 +1287,30 @@ impl Controls {
         surf: &mut Surface<'_>,
         mut layer: impl FnMut(u32, &mut Surface<'_>),
     ) {
-        self.render_children_of(surf, |parent| self.panel(parent).is_none());
+        self.render_layers(surf, None, &mut layer);
+    }
+    pub fn render_composited_with_images(
+        &self,
+        surf: &mut Surface<'_>,
+        gdi: &crate::gdi::GdiState,
+        mut layer: impl FnMut(u32, &mut Surface<'_>),
+    ) {
+        self.render_layers(surf, Some(gdi), &mut layer);
+    }
+    pub fn render_with_images(&self, surf: &mut Surface<'_>, gdi: &crate::gdi::GdiState) {
+        self.render_composited_with_images(surf, gdi, |_, _| {});
+    }
+    fn render_layers(
+        &self,
+        surf: &mut Surface<'_>,
+        gdi: Option<&crate::gdi::GdiState>,
+        layer: &mut impl FnMut(u32, &mut Surface<'_>),
+    ) {
+        self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi);
         layer(0, surf);
         for panel in &self.panels {
             panel.render(surf);
-            self.render_children_of(surf, |parent| parent == panel.hwnd);
+            self.render_children_of(surf, |parent| parent == panel.hwnd, gdi);
             if panel.visible {
                 layer(panel.hwnd, surf);
             }
@@ -1190,7 +1319,12 @@ impl Controls {
 
     /// Paint every visible child whose parent satisfies `owned`, group
     /// boxes first.
-    fn render_children_of(&self, surf: &mut Surface<'_>, owned: impl Fn(u32) -> bool) {
+    fn render_children_of(
+        &self,
+        surf: &mut Surface<'_>,
+        owned: impl Fn(u32) -> bool,
+        gdi: Option<&crate::gdi::GdiState>,
+    ) {
         for group_pass in [true, false] {
             for child in &self.children {
                 if child.is_group_box() != group_pass
@@ -1202,13 +1336,13 @@ impl Controls {
                 let (ox, oy) = self.parent_origin(child.parent);
                 let focused = child.hwnd == self.focus;
                 if (ox, oy) == (0, 0) {
-                    child.render(surf, focused);
+                    child.render_with_images(surf, focused, gdi);
                 } else {
                     // Cheap: the translated copy lives only for the call.
                     let mut moved = child.clone();
                     moved.x += ox;
                     moved.y += oy;
-                    moved.render(surf, focused);
+                    moved.render_with_images(surf, focused, gdi);
                 }
             }
         }

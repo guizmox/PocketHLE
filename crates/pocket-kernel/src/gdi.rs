@@ -256,6 +256,11 @@ pub enum GdiObject {
 pub struct GdiState {
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,
+    pub class_values: HashMap<(String, i32), u32>,
+    pub regions: HashMap<u32, Vec<[i32; 4]>>,
+    pub scroll_erases: HashMap<u32, Vec<[i32; 4]>>,
+    pub icons: HashMap<u32, crate::imaging::Image>,
+    pub image_lists: HashMap<u32, crate::imaging::ImageList>,
 }
 
 impl GdiState {
@@ -263,6 +268,11 @@ impl GdiState {
         let mut s = Self {
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,
+            class_values: HashMap::new(),
+            regions: HashMap::new(),
+            scroll_erases: HashMap::new(),
+            icons: HashMap::new(),
+            image_lists: HashMap::new(),
         };
         // Pre-register stock objects so SelectObject(GetStockObject(...))
         // resolves through the same code path as user-created handles.
@@ -334,6 +344,26 @@ impl GdiState {
         h
     }
 
+    pub fn register_icon(&mut self, image: crate::imaging::Image) -> u32 {
+        let handle = self.alloc_handle();
+        self.icons.insert(handle, image);
+        handle
+    }
+    pub fn create_image_list(&mut self, width: u32, height: u32) -> u32 {
+        let Some(list) = crate::imaging::ImageList::new(width, height) else {
+            return 0;
+        };
+        let handle = self.alloc_handle();
+        self.image_lists.insert(handle, list);
+        handle
+    }
+
+    pub fn create_region(&mut self, rects: Vec<[i32; 4]>) -> u32 {
+        let handle = self.alloc_handle();
+        self.regions.insert(handle, rects);
+        handle
+    }
+
     pub fn create_memory_dc(&mut self) -> u32 {
         let h = self.alloc_handle();
         self.objects.insert(h, GdiObject::Dc(Dc::default()));
@@ -379,7 +409,7 @@ impl GdiState {
         if is_stock_handle(handle) {
             return true;
         }
-        self.objects.remove(&handle).is_some()
+        self.regions.remove(&handle).is_some() || self.objects.remove(&handle).is_some()
     }
 
     pub fn get(&self, handle: u32) -> Option<&GdiObject> {

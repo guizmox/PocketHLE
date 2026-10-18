@@ -48,6 +48,7 @@ pub mod gps;
 pub mod gz;
 pub mod handles;
 pub mod image_memory;
+pub mod imaging;
 pub mod internet;
 pub mod memory_division;
 pub mod msgbox;
@@ -1698,6 +1699,7 @@ impl KernelState {
         if self.controls.is_empty() && self.modal.is_none() {
             return;
         }
+        let frame_counter = self.framebuffer.frame_counter;
         let controls = self.controls.clone();
         let modal = self.modal.clone();
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
@@ -1745,7 +1747,7 @@ impl KernelState {
             }
         }
         layers.sort_by_key(|layer| layer.0);
-        controls.render_composited(&mut surf, |owner, surface| {
+        controls.render_composited_with_images(&mut surf, &self.gdi, |owner, surface| {
             for (_, parent, x, y, bm) in &layers {
                 if *parent == owner {
                     surface.blit_from_bytes(
@@ -1767,6 +1769,8 @@ impl KernelState {
         if let Some(modal) = modal {
             modal.render(&mut surf);
         }
+        // Presentation must not manufacture another guest frame.
+        self.framebuffer.frame_counter = frame_counter;
     }
 
     /// Look up an already-loaded runtime module by its `HMODULE`.

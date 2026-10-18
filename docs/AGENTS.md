@@ -3052,3 +3052,9 @@ load. The path helper is shared with the headless GUI-mount probe; nested
 install prefixes also use install_mount_dir instead of hiding the real
 application folder with the extraction root. Child process guest paths still
 have final precedence. Runtime Windows remains untested in this environment.
+
+## Navigator graphics cumulative build 27 (2026-10-18)
+
+Retain the build26 startup/module-path/modal/input fixes. Resource-backed images are in kernel::imaging and winceapi::coredll::images, shared by named COREDLL/COMMCTRL APIs; never restore constant image-list or LoadIcon application handles. Resolve resources through resource_scope(hinstance), including native DLLs. List-view LVIF_IMAGE values and associated normal/small image lists participate in composition and row hit testing; maintain DIB readback/writeback and the compositor frame_counter invariant. Tests live in coredll/graphics_tests.rs and kernel/imaging.rs. ScrollWindowEx is in coredll/window_graphics.rs: overlap-safe pixel movement, uncovered region output, child movement and deferred erasure; do not replace it with unconditional zero or blanket repaint. GetFileTime exposes available VFS dates, CompareFileTime is unsigned FILETIME ordering, class graphics attributes are shared by class. Full Win32 image-list flags and icon-grid layout remain partial; see NAVIGATOR-RENDU-BUILD27.md.
+
+RAMTEST native import/paging tests require the original tools/ramtest/dist/GZRT999999 DLLs, shipped by the upstream tools/ramtest/dist/PocketHLE-RAMTEST.zip. Missing fixtures can masquerade as loader/LastError regressions: restore original fixtures rather than weakening tests. This source-only reprise has no Navigator game data; menu appearance/navigation/Gizmondo buttons still require actual game replay.

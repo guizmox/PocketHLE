@@ -87,7 +87,14 @@ fn is_live_hwnd(hwnd: u32) -> bool {
 }
 const PAINTSTRUCT_BYTES: u32 = 32;
 
+#[cfg(test)]
+mod graphics_tests;
+pub(crate) mod images;
+mod window_graphics;
+
 pub fn register(d: &mut WinCeDispatcher) {
+    images::register(d);
+    window_graphics::register(d);
     let dll = "coredll.dll";
     crate::wavein::register(d);
 
@@ -430,7 +437,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "LockResource", lock_resource);
     d.register_handler(dll, "SizeofResource", sizeof_resource);
     d.register_handler(dll, "LoadBitmapW", load_bitmap_w);
-    d.register_handler(dll, "LoadImageW", load_bitmap_w);
+    d.register_handler(dll, "LoadImageW", images::load_image);
     d.register_handler(dll, "SHLoadDIBitmap", sh_load_dibitmap);
     d.register_handler(dll, "GetObjectW", get_object_w);
     d.register_handler(dll, "LoadStringW", load_string_w);
@@ -593,7 +600,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "ClientToScreen", 1, one_returning);
     d.register_constant(dll, "ScreenToClient", 1, one_returning);
     d.register_handler(dll, "LoadIconW", load_icon_w);
-    d.register_handler(dll, "LoadCursorW", load_icon_w);
+    d.register_handler(dll, "LoadCursorW", images::load_cursor);
     crate::accelerators::register(d);
     crate::datetime::register(d);
     d.register_handler(dll, "GetNumberFormatW", crate::number_format::get);
@@ -9672,6 +9679,29 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
                             {
                                 ctx.kernel.window_class_controls.insert(name.clone(), kind);
                             }
+                            for (index, offset) in [
+                                (-26, 0),
+                                (-24, 4),
+                                (-20, 8),
+                                (-18, 12),
+                                (-16, 16),
+                                (-14, 20),
+                                (-12, 24),
+                                (-10, 28),
+                                (-8, 32),
+                            ] {
+                                if let Ok(value) = ctx.cpu.read_u32_le(lpwc + offset) {
+                                    let value = if index == -16 && value == 0 {
+                                        FAKE_MODULE_HANDLE
+                                    } else {
+                                        value
+                                    };
+                                    ctx.kernel
+                                        .gdi
+                                        .class_values
+                                        .insert((name.to_lowercase(), index), value);
+                                }
+                            }
                             ctx.kernel.window_class_procs.insert(name, proc_va);
                         }
                     }
@@ -10574,7 +10604,7 @@ fn repaint_controls(ctx: &mut CallCtx<'_>) {
     }
     let controls = ctx.kernel.controls.clone();
     let mut surf = Surface::Screen(&mut ctx.kernel.framebuffer);
-    controls.render(&mut surf);
+    controls.render_with_images(&mut surf, &ctx.kernel.gdi);
     ctx.kernel.framebuffer.mark_dirty();
 }
 
@@ -10588,6 +10618,60 @@ fn list_view_message(
     lp: u32,
 ) -> Result<u32, KernelError> {
     let result = match message {
+        0x1002 => {
+            if wp > 2 {
+                return Ok(0);
+            }
+            let size = ctx
+                .kernel
+                .gdi
+                .image_lists
+                .get(&lp)
+                .map(|l| (l.width, l.height));
+            if lp != 0 && size.is_none() {
+                return Ok(0);
+            }
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            let slot = wp as usize;
+            let old = c.list_image_lists[slot];
+            c.list_image_lists[slot] = lp;
+            c.list_image_sizes[slot] = size.unwrap_or((0, 0));
+            repaint_controls(ctx);
+            old
+        }
+        0x1003 => ctx
+            .kernel
+            .controls
+            .get(hwnd)
+            .unwrap()
+            .list_image_lists
+            .get(wp as usize)
+            .copied()
+            .unwrap_or(0),
+        0x1014 => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            let max = (c.list_items.len() as i64 * i64::from(c.list_row_height()) - i64::from(c.h))
+                .max(0);
+            c.list_scroll_y = (i64::from(c.list_scroll_y) + i64::from(lp as i32))
+                .clamp(0, max.min(i64::from(i32::MAX))) as i32;
+            repaint_controls(ctx);
+            1
+        }
+        0x1012 => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            if wp as usize >= c.list_items.len() {
+                return Ok(0);
+            }
+            let row = c.list_row_height();
+            let top = (u64::from(wp) * row as u64).min(i32::MAX as u64) as i32;
+            if top < c.list_scroll_y {
+                c.list_scroll_y = top;
+            } else if top.saturating_add(row) > c.list_scroll_y.saturating_add(c.h) {
+                c.list_scroll_y = top.saturating_add(row).saturating_sub(c.h).max(0);
+            }
+            repaint_controls(ctx);
+            1
+        }
         0x1004 => ctx.kernel.controls.get(hwnd).unwrap().list_items.len() as u32,
         0x1005 | 0x104b | 0x102d | 0x1073 => {
             // MFC GetItemData uses LVIF_PARAM; returning zero without writing
@@ -10622,6 +10706,18 @@ fn list_view_message(
                     value.push(0);
                     ctx.cpu.write_mem(field(20), &value)?;
                 }
+            }
+            if mask & 2 != 0 {
+                let image = ctx
+                    .kernel
+                    .controls
+                    .get(hwnd)
+                    .unwrap()
+                    .list_images
+                    .get(index as usize)
+                    .copied()
+                    .unwrap_or(-1);
+                ctx.cpu.write_mem(lp + 28, &image.to_le_bytes())?;
             }
             if mask & 4 != 0 {
                 ctx.cpu.write_mem(lp + 32, &param.to_le_bytes())?;
@@ -10661,6 +10757,10 @@ fn list_view_message(
             let control = ctx.kernel.controls.get_mut(hwnd).unwrap();
             if message == 0x1007 || message == 0x104d {
                 let index = index.min(control.list_items.len());
+                control.list_images.resize(control.list_items.len(), -1);
+                control
+                    .list_images
+                    .insert(index, if mask & 2 != 0 { field(28) as i32 } else { -1 });
                 control.list_items.insert(index, (text, field(32)));
                 index as u32
             } else if let Some(item) = control.list_items.get_mut(index) {
@@ -10669,6 +10769,10 @@ fn list_view_message(
                 }
                 if mask & 4 != 0 {
                     item.1 = field(32);
+                }
+                if mask & 2 != 0 {
+                    control.list_images.resize(control.list_items.len(), -1);
+                    control.list_images[index] = field(28) as i32;
                 }
                 1
             } else {
@@ -10679,6 +10783,9 @@ fn list_view_message(
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             if (wp as usize) < c.list_items.len() {
                 c.list_items.remove(wp as usize);
+                if (wp as usize) < c.list_images.len() {
+                    c.list_images.remove(wp as usize);
+                }
                 c.list_selected = None;
                 1
             } else {
@@ -10688,6 +10795,8 @@ fn list_view_message(
         0x1009 => {
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             c.list_items.clear();
+            c.list_images.clear();
+            c.list_scroll_y = 0;
             c.list_selected = None;
             1
         }
@@ -10768,6 +10877,23 @@ fn control_message(
         && message >= 0x1000
     {
         return list_view_message(ctx, hwnd, message, wparam, lparam);
+    }
+    if matches!(message, 0xF7 | 0x172 | 0x170) {
+        let handle = if message == 0x170 { wparam } else { lparam };
+        if handle != 0
+            && !ctx.kernel.gdi.icons.contains_key(&handle)
+            && ctx.kernel.gdi.bitmap(handle).is_none()
+        {
+            return Ok(0);
+        }
+        let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+        let old = c.image;
+        c.image = handle;
+        repaint_controls(ctx);
+        return Ok(old);
+    }
+    if matches!(message, 0xF6 | 0x173 | 0x171) {
+        return Ok(ctx.kernel.controls.get(hwnd).unwrap().image);
     }
     const WM_SETTEXT: u32 = 0x000C;
     const WM_GETTEXT: u32 = 0x000D;
@@ -12601,7 +12727,11 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let message = ctx.arg_u32(1)?;
     match message {
         WM_ERASEBKGND => {
-            erase_window_background(ctx);
+            let hwnd = ctx.arg_u32(0)?;
+            let dc = window_dc(ctx, hwnd);
+            if !window_graphics::erase_scroll_region(ctx, hwnd, dc)? {
+                erase_window_background(ctx);
+            }
             Ok(DispatchOutcome::ReturnedR0(1))
         }
         WM_PAINT => {
@@ -12733,11 +12863,12 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if erase {
         erase_window_background(ctx);
     }
+    let scroll_erased = window_graphics::erase_scroll_region(ctx, hwnd, dc)?;
     if lp_paint != 0 {
         let mut buf = [0u8; PAINTSTRUCT_BYTES as usize];
         // hdc
         buf[0..4].copy_from_slice(&dc.to_le_bytes());
-        buf[4..8].copy_from_slice(&u32::from(erase).to_le_bytes());
+        buf[4..8].copy_from_slice(&u32::from(erase || scroll_erased).to_le_bytes());
         // rcPaint = (0,0, screen width, screen height)
         buf[8..12].copy_from_slice(&0u32.to_le_bytes());
         buf[12..16].copy_from_slice(&0u32.to_le_bytes());
@@ -14275,7 +14406,12 @@ fn decode_dib_to_rgb565(raw: &[u8]) -> Option<DecodedDib> {
     let bpp = u16::from_le_bytes(raw[14..16].try_into().ok()?);
     let compression = u32::from_le_bytes(raw[16..20].try_into().ok()?);
     let used_colors = u32::from_le_bytes(raw[32..36].try_into().ok()?);
-    if width <= 0 || height_raw == 0 || compression != 0 {
+    if width <= 0
+        || height_raw == 0
+        || compression != 0
+        || u64::from(width as u32) * u64::from(height_raw.unsigned_abs())
+            > pocket_kernel::imaging::MAX_IMAGE_PIXELS
+    {
         return None;
     }
     let bottom_up = height_raw > 0;
@@ -15468,8 +15604,8 @@ fn get_window_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 const FAKE_ICON: u32 = 0xDEAD_1C01;
 const FAKE_TIMER_BASE: u32 = 0xDEAD_7100;
 
-fn load_icon_w(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(FAKE_ICON))
+fn load_icon_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    images::load_icon(ctx)
 }
 
 /// `DialogBoxIndirectParamW(hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam)`
@@ -18722,6 +18858,26 @@ fn get_class_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         wnd_class[4..8].copy_from_slice(&wnd_proc.to_le_bytes());
         wnd_class[16..20].copy_from_slice(&FAKE_MODULE_HANDLE.to_le_bytes());
         wnd_class[36..40].copy_from_slice(&name_ptr.to_le_bytes());
+        for (index, offset) in [
+            (-26, 0),
+            (-24, 4),
+            (-20, 8),
+            (-18, 12),
+            (-16, 16),
+            (-14, 20),
+            (-12, 24),
+            (-10, 28),
+            (-8, 32),
+        ] {
+            if let Some(value) = ctx
+                .kernel
+                .gdi
+                .class_values
+                .get(&(class_name.to_lowercase(), index))
+            {
+                wnd_class[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
         ctx.cpu.write_mem(info, &wnd_class)?;
         if let Some(kind) = control {
             ctx.kernel
@@ -23004,7 +23160,7 @@ mod tests {
         bytes
     }
 
-    fn lifecycle_test_module(base: u32, entry: u32) -> pocket_kernel::LoadedModule {
+    pub(super) fn lifecycle_test_module(base: u32, entry: u32) -> pocket_kernel::LoadedModule {
         pocket_kernel::LoadedModule {
             dependencies: vec![],
             attached: true,
@@ -24351,7 +24507,7 @@ mod tests {
         );
     }
 
-    fn fresh_kernel() -> KernelState {
+    pub(super) fn fresh_kernel() -> KernelState {
         use pocket_kernel::audio::{AudioEngine, GuestFormat};
         use pocket_kernel::{Framebuffer, GdiState};
 
@@ -28040,7 +28196,7 @@ mod tests {
         }
     }
 
-    fn scanf_cpu() -> StubCpu {
+    pub(super) fn scanf_cpu() -> StubCpu {
         let mut cpu = StubCpu::new();
         cpu.map_region(0x1000, 0x4000, Prot::READ | Prot::WRITE)
             .unwrap();
@@ -28294,7 +28450,7 @@ mod tests {
     ///
     /// `resolve_handler` memoizes by `thunk_va` including negative
     /// results, so every thunk a test builds needs its own address.
-    fn thunk_at(va: u32) -> Thunk {
+    pub(super) fn thunk_at(va: u32) -> Thunk {
         let mut t = dummy_thunk();
         t.thunk_va = va;
         t
