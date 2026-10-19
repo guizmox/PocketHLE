@@ -10,24 +10,25 @@ use std::{
 };
 struct Logger;
 impl log::Log for Logger {
- fn enabled(&self, m: &log::Metadata<'_>) -> bool { m.level() <= log::Level::Info }
- fn log(&self, r: &log::Record<'_>) { if self.enabled(r.metadata()) { eprintln!("{} {}", r.level(), r.args()); } }
- fn flush(&self) {}
+    fn enabled(&self, m: &log::Metadata<'_>) -> bool {
+        m.level() <= log::Level::Info
+    }
+    fn log(&self, r: &log::Record<'_>) {
+        if self.enabled(r.metadata()) {
+            eprintln!("{} {}", r.level(), r.args());
+        }
+    }
+    fn flush(&self) {}
 }
 fn main() -> anyhow::Result<()> {
-    log::set_logger(&Logger).unwrap(); log::set_max_level(log::LevelFilter::Info);
+    log::set_logger(&Logger).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
     let args: Vec<_> = std::env::args().collect();
     let root = PathBuf::from(args.get(1).expect("library root"));
     let legacy = args.get(2).is_some_and(|s| s == "legacy");
     let out = args.get(3).expect("snapshot path");
     let mut emu = Emulator::with_unicorn_cpu()?;
     emu.load_pe(root.join("CoPilot.exe"))?;
-    for va in [0x115c8, 0x13574, 0x1c128, 0x20924, 0x20ea8, 0x22c00,
-        0x24ddc, 0x25694, 0x273e8, 0x2934c, 0x2a974, 0x31170,
-        0x47e00, 0x47f74, 0x4adc0, 0x591ec, 0x59c80, 0x5b4d8,
-        0x5c408, 0x5d764, 0x639cc, 0x66e68, 0x6bbf0] {
-        emu.add_register_trace(va, "Back-key comparison")?;
-    }
     emu.set_memory_division(Some(
         pocket_core::kernel::memory_division::MemoryDivision::gizmondo_sdk_default(),
     ));
@@ -56,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     emu.set_module_path(&module);
     emu.set_default_dir(&format!("{}\\", module.rsplit_once('\\').unwrap().0));
     emu.set_synthetic_message_budget(0);
-    emu.set_trace_sink(Box::new(std::io::BufWriter::new(std::fs::File::create("runtime-nav/api.trace")?)));
+
     emu.max_slices = 0;
     let gps = emu.process().unwrap().state.vfs.gps_service();
     gps.set_fixed_position(Some((47.6062, -122.3321))).unwrap();
@@ -67,9 +68,11 @@ fn main() -> anyhow::Result<()> {
     let mut stage = 0;
     let input = args.get(4).map(PathBuf::from);
     let mut consumed = 0;
+    let mut last_poll = Duration::ZERO;
     emu.run_with_hook(&mut |state: &mut KernelState| {
         let elapsed = start.elapsed();
-        if let Some(input) = &input {
+        if let Some(input) = input.as_ref().filter(|_| elapsed.saturating_sub(last_poll) >= Duration::from_millis(20)) {
+            last_poll = elapsed;
             if let Ok(text) = std::fs::read_to_string(input) {
                 let lines: Vec<_> = text.lines().collect();
                 for line in lines.iter().skip(consumed) {
@@ -90,6 +93,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     if let Some(path) = line.strip_prefix("dump ") {
                         let mut details = format!("active={:x} focus={:x}\ncontrols={:#?}\n", state.active_window, state.controls.focus, state.controls);
+                        details.push_str(&format!("list_frames={:?}\ncolor_frames={:?}\nposted={:?}\n",state.gdi.list_paint_frames,state.gdi.control_color_frames,state.posted_messages));
                         let mut windows: Vec<_> = state.window_dcs.iter().collect();
                         windows.sort_by_key(|(h, _)| **h);
                         for (&hwnd, &dc) in windows {

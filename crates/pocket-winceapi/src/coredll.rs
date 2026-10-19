@@ -23,8 +23,12 @@
 
 #[path = "coredll/choice_controls.rs"]
 mod choice_controls;
+#[path = "coredll/control_color.rs"]
+mod control_color;
 #[path = "coredll/coordinates.rs"]
 mod coordinates;
+#[path = "coredll/list_paint.rs"]
+mod list_paint;
 mod trackbar;
 use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
@@ -10684,6 +10688,52 @@ fn list_view_message(
     lp: u32,
 ) -> Result<u32, KernelError> {
     let result = match message {
+        0x100e => {
+            // LVM_GETITEMRECT: RECT.left is the requested LVIR_* part on
+            // entry. Native custom-draw handlers use these local bounds.
+            let part = ctx.cpu.read_u32_le(lp)?;
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            if wp as usize >= c.list_items.len() || part > 3 {
+                return Ok(0);
+            }
+            let (x, y) = c.list_item_position(wp as usize);
+            let y = y.saturating_sub(c.list_scroll_y);
+            let (_, iw, ih) = c.list_image_list();
+            let (width, height) = if c.list_icon_view() {
+                c.list_spacing
+            } else {
+                (c.w, c.list_row_height())
+            };
+            let mut rect = [x, y, x.saturating_add(width), y.saturating_add(height)];
+            if part == 1 {
+                rect[0] = x.saturating_add(if c.list_icon_view() {
+                    (width - iw as i32) / 2
+                } else {
+                    2
+                });
+                rect[1] = y.saturating_add(if c.list_icon_view() {
+                    2
+                } else {
+                    (height - ih as i32) / 2
+                });
+                rect[2] = rect[0].saturating_add(iw as i32);
+                rect[3] = rect[1].saturating_add(ih as i32);
+            } else if part == 2 {
+                if c.list_icon_view() {
+                    rect[1] = y.saturating_add(ih as i32 + 5);
+                } else {
+                    rect[0] = x.saturating_add(iw as i32 + 5);
+                }
+            }
+            ctx.cpu.write_mem(
+                lp,
+                &rect
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )?;
+            1
+        }
         0x1000 | 0x1023 => {
             let c = ctx.kernel.controls.get(hwnd).unwrap();
             if message == 0x1000 {
@@ -12980,6 +13030,7 @@ fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
     }
     let dc = ctx.kernel.gdi.create_memory_dc();
     let bitmap = ctx.kernel.gdi.create_compatible_bitmap(w, h);
+    ctx.kernel.gdi.bitmap_mut(bitmap).unwrap().painted = Some(vec![0; (w * h) as usize]);
     ctx.kernel.gdi.dc_mut(dc).unwrap().selected_bitmap = Some(bitmap);
     ctx.kernel.window_dcs.insert(hwnd, dc);
     ctx.kernel.gdi.pending_window_erases.insert(hwnd);
@@ -13167,6 +13218,12 @@ fn paint_owner_draw(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome,
 }
 
 fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = control_color::resume(ctx)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = list_paint::resume(ctx)? {
+        return Ok(outcome);
+    }
     if let Some(outcome) = finish_owner_draw(ctx)? {
         return Ok(outcome);
     }
@@ -13202,7 +13259,15 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         _ => {}
     }
     if ctx.arg_u32(1)? == WM_ERASEBKGND {
-        let dc = window_dc(ctx, hwnd);
+        if ctx.kernel.controls.panel(hwnd).is_some() {
+            return control_color::paint(ctx, hwnd, true);
+        }
+        let requested_dc = ctx.arg_u32(2)?;
+        let dc = if requested_dc != 0 && ctx.kernel.gdi.dc(requested_dc).is_some() {
+            requested_dc
+        } else {
+            window_dc(ctx, hwnd)
+        };
         let erased = if window_graphics::erase_scroll_region(ctx, hwnd, dc)? {
             true
         } else if dc == GDI_SCREEN_DC {
@@ -13222,11 +13287,23 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 .kernel
                 .controls
                 .get(hwnd)
+                .is_some_and(|c| c.class == ControlClass::ListView)
+        {
+            return list_paint::paint(ctx, hwnd);
+        }
+        if message == WM_PAINT
+            && ctx
+                .kernel
+                .controls
+                .get(hwnd)
                 .is_some_and(|c| c.class == ControlClass::Button && c.style & 0xf == 0xb)
         {
             return paint_owner_draw(ctx, hwnd);
         }
         let before = ctx.kernel.controls.get(hwnd).unwrap().text.clone();
+        if message == WM_PAINT {
+            return control_color::paint(ctx, hwnd, false);
+        }
         let result = control_message(ctx, hwnd, message, wp, lp)?;
         let control = ctx.kernel.controls.get(hwnd).unwrap();
         let notify = control.class == ControlClass::Edit
@@ -13255,6 +13332,9 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let message = ctx.arg_u32(1)?;
     match message {
         WM_PAINT => {
+            if ctx.kernel.controls.panel(hwnd).is_some() {
+                return control_color::paint(ctx, hwnd, true);
+            }
             if ctx.kernel.window_background_erase_pending {
                 erase_window_background(ctx);
             }
@@ -13275,6 +13355,14 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// subclassing the default dialog window; preserve that distinction and
 /// return through a saved frame before applying default processing.
 fn def_dlg_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // A default dialog paint can enter a native colour/custom-draw callback.
+    // Its return value is not a fresh HWND/argument list.
+    if let Some(outcome) = control_color::resume(ctx)? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = list_paint::resume(ctx)? {
+        return Ok(outcome);
+    }
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
     if ctx
         .kernel
@@ -14063,6 +14151,11 @@ fn bit_blt_inner(
     y1: i32,
     rop: u32,
 ) -> Result<(), KernelError> {
+    if std::env::var_os("POCKETHLE_CONTROL_PAINT_TRACE").is_some() {
+        log::info!(
+            "GDI blit dst={hdc_dst:x} ({x},{y},{cx},{cy}) src={hdc_src:x} ({x1},{y1}) rop={rop:x}"
+        );
+    }
     // Materialise the source pixels into a kernel-level scratch
     // `Vec<u8>` instead of cloning the full source surface every
     // call. Derby is a particularly egregious case: the previous
@@ -15545,6 +15638,8 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.window_rects.remove(hwnd);
     ctx.kernel.gdi.pending_window_erases.remove(hwnd);
     ctx.kernel.gdi.owner_draw_states.remove(hwnd);
+    ctx.kernel.gdi.list_paint_stamps.remove(hwnd);
+    ctx.kernel.gdi.dialog_backgrounds.remove(hwnd);
     if ctx.kernel.pending_message.is_some_and(|m| m.0 == *hwnd) {
         ctx.kernel.pending_message = None;
     }
@@ -15824,6 +15919,8 @@ fn set_control_text(ctx: &mut CallCtx<'_>, hwnd: u32, text: &str) {
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         child.text = text.to_string();
         ctx.kernel.gdi.owner_draw_states.remove(&hwnd);
+        ctx.kernel.gdi.list_paint_stamps.remove(&hwnd);
+        ctx.kernel.gdi.dialog_backgrounds.remove(&hwnd);
         ctx.kernel.gdi.pending_window_erases.insert(hwnd);
         repaint_controls(ctx);
     }
@@ -17464,6 +17561,9 @@ fn pat_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let w = ctx.arg_u32(3)? as i32;
     let h = ctx.arg_u32(4)? as i32;
     let rop = ctx.arg_u32(5)?;
+    if std::env::var_os("POCKETHLE_CONTROL_PAINT_TRACE").is_some() {
+        log::info!("GDI PatBlt dst={hdc:x} ({x},{y},{w},{h}) rop={rop:x}");
+    }
     let dc_meta = match ctx.kernel.gdi.dc(hdc).cloned() {
         Some(d) => d,
         None => return Ok(DispatchOutcome::ReturnedR0(0)),
@@ -25600,7 +25700,7 @@ mod tests {
         }
     }
 
-    fn dummy_thunk() -> Thunk {
+    pub(super) fn dummy_thunk() -> Thunk {
         Thunk {
             thunk_va: 0x70000000,
             iat_va: 0x20000,

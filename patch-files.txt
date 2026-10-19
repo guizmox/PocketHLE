@@ -43,3 +43,17 @@
 .\crates\pocket-core\examples\navigator_input_probe.rs
 .\verification\navigator-gdi-20261019.txt
 .\verification\navigator-going-to-back.txt
+.\crates\pocket-winceapi\src\coredll\list_paint.rs
+.\crates\pocket-winceapi\src\coredll\control_color.rs
+.\verification\navigator-accueil-corrige-20261019.txt
+.\verification\Navigator-Accueil.png
+.\verification\Navigator-Accueil-Selection.png
+.\verification\navigator-skin-tests.log
+.\verification\navigator-skin-build.log
+.\verification\navigator-premier-affichage-20261019.txt
+.\verification\Navigator-Premier-Affichage.png
+.\verification\navigator-first-paint-tests.log
+.\verification\navigator-first-paint-build.log
+.\verification\Navigator-Premier-Affichage-Selection.png
+.\verification\navigator-coins-transparents-20261019.txt
+.\verification\navigator-corners-build.log

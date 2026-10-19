@@ -1667,6 +1667,10 @@ impl KernelState {
         }
         self.message_frames.clear();
         self.gdi.owner_draw_frames.clear();
+        self.gdi.list_paint_frames.clear();
+        self.gdi.control_color_frames.clear();
+        self.gdi.dialog_backgrounds.clear();
+        self.gdi.list_paint_stamps.clear();
         self.gdi.paint_erase_frames.clear();
         self.gdi.pending_window_erases.clear();
         self.gdi.owner_draw_states.clear();
@@ -1709,6 +1713,122 @@ impl KernelState {
         }
         // Owner-drawn controls belong to the guest. Queue their normal paint
         // notification; the presentation hook must never call guest code itself.
+        // A real ListView sends NM_CUSTOMDRAW even when it uses the OS
+        // procedure. Schedule a normal WM_PAINT; never run guest code here.
+        for c in self.controls.visible_list_views() {
+            use std::hash::{Hash, Hasher};
+            let proc = self.window_procs.get(&c.parent).copied().unwrap_or(0);
+            if proc == 0 {
+                continue;
+            }
+            let mut ancestor = c.parent;
+            let mut visible = true;
+            for _ in 0..64 {
+                if ancestor == 0 {
+                    break;
+                }
+                if self.window_visibility.get(&ancestor) == Some(&false)
+                    || self.controls.is_visible(ancestor) == Some(false)
+                {
+                    visible = false;
+                    break;
+                }
+                let next = self.window_parents.get(&ancestor).copied().unwrap_or(0);
+                if next == ancestor {
+                    visible = false;
+                    break;
+                }
+                ancestor = next;
+            }
+            if !visible {
+                continue;
+            }
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            (
+                proc,
+                c.x,
+                c.y,
+                c.w,
+                c.h,
+                c.style,
+                c.font,
+                c.list_selected,
+                c.list_scroll_y,
+                c.list_spacing,
+            )
+                .hash(&mut hash);
+            (
+                c.list_background,
+                c.list_text_color,
+                self.controls.focus == c.hwnd,
+            )
+                .hash(&mut hash);
+            c.list_items.hash(&mut hash);
+            c.list_images.hash(&mut hash);
+            c.list_image_lists.hash(&mut hash);
+            c.list_positions.hash(&mut hash);
+            let stamp = hash.finish();
+            if self.gdi.list_paint_stamps.get(&c.hwnd) != Some(&stamp)
+                && self.posted_messages.len() < 256
+            {
+                self.gdi.list_paint_stamps.insert(c.hwnd, stamp);
+                if !self
+                    .posted_messages
+                    .iter()
+                    .any(|m| m.0 == c.hwnd && m.1 == 0xf)
+                {
+                    self.posted_messages.push_back((c.hwnd, 0xf, 0, 0));
+                }
+            }
+        }
+        for c in self.controls.visible_color_controls() {
+            use std::hash::{Hash, Hasher};
+            let proc = self.window_procs.get(&c.parent).copied().unwrap_or(0);
+            if proc == 0 {
+                continue;
+            }
+            let mut ancestor = c.parent;
+            let mut visible = true;
+            for _ in 0..64 {
+                if ancestor == 0 {
+                    break;
+                }
+                if self.window_visibility.get(&ancestor) == Some(&false)
+                    || self.controls.is_visible(ancestor) == Some(false)
+                {
+                    visible = false;
+                    break;
+                }
+                let next = self.window_parents.get(&ancestor).copied().unwrap_or(0);
+                if next == ancestor {
+                    visible = false;
+                    break;
+                }
+                ancestor = next;
+            }
+            if !visible {
+                continue;
+            }
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            (
+                proc, c.x, c.y, c.w, c.h, c.style, c.font, c.image, c.enabled, c.checked, c.pressed,
+            )
+                .hash(&mut hash);
+            c.text.hash(&mut hash);
+            let stamp = hash.finish();
+            if self.gdi.list_paint_stamps.get(&c.hwnd) != Some(&stamp)
+                && self.posted_messages.len() < 256
+            {
+                self.gdi.list_paint_stamps.insert(c.hwnd, stamp);
+                if !self
+                    .posted_messages
+                    .iter()
+                    .any(|m| m.0 == c.hwnd && m.1 == 0xf)
+                {
+                    self.posted_messages.push_back((c.hwnd, 0xf, 0, 0));
+                }
+            }
+        }
         for c in self.controls.owner_draw_controls() {
             let mut ancestor = c.parent;
             let mut visible = true;
@@ -1809,17 +1929,7 @@ impl KernelState {
                         && controls.get(*hwnd).is_none()
                         && controls.panel(*hwnd).is_none())
                 {
-                    surface.blit_from_bytes(
-                        *x,
-                        *y,
-                        0,
-                        0,
-                        bm.width as i32,
-                        bm.height as i32,
-                        &bm.pixels,
-                        bm.width,
-                        bm.height,
-                    );
+                    surface.blit_window(*x, *y, bm);
                 }
             }
         });

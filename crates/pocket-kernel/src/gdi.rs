@@ -90,6 +90,10 @@ pub struct Bitmap {
     /// pixel buffer at [`Bitmap::dib_bits_va`] — `BitBlt` re-reads
     /// the guest VA on demand to stay current.
     pub pixels: Vec<u8>,
+    /// Window backing stores retain only pixels actually painted by GDI.
+    /// Unpainted pixels must reveal the underlying window, not allocation zeros.
+    /// Ordinary compatible bitmaps and guest DIBs remain opaque (`None`).
+    pub painted: Option<Vec<u8>>,
     /// If `Some`, this bitmap was created via `CreateDIBSection` and
     /// the guest can write its pixels directly into the mapped guest
     /// VA at `dib_bits_va`. Source-side `BitBlt`s and `GetObjectW`
@@ -130,6 +134,7 @@ impl Bitmap {
             height: height.max(1),
             bpp: 16,
             pixels: vec![0u8; (width.max(1) * height.max(1) * 2) as usize],
+            painted: None,
             dib_bits_va: None,
             dib_palette: Vec::new(),
             dib_bottom_up: false,
@@ -159,6 +164,7 @@ impl Bitmap {
             height: height.max(1),
             bpp,
             pixels: vec![0u8; (width.max(1) * height.max(1) * 2) as usize],
+            painted: None,
             dib_bits_va: Some(bits_va),
             dib_palette: palette,
             dib_bottom_up: bottom_up,
@@ -287,6 +293,30 @@ pub struct OwnerDrawFrame {
 }
 
 #[derive(Debug, Clone)]
+pub struct ControlColorFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub hwnd: u32,
+    pub dc: u32,
+    pub dialog: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListPaintFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub hwnd: u32,
+    pub dc: u32,
+    pub scratch: u32,
+    pub stage: u32,
+    pub item: usize,
+    pub flags: u32,
+    pub item_flags: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct PaintEraseFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -304,6 +334,10 @@ pub struct GdiState {
     pub image_lists: HashMap<u32, crate::imaging::ImageList>,
     pub system_brushes: HashMap<i32, u32>,
     pub owner_draw_frames: Vec<OwnerDrawFrame>,
+    pub list_paint_frames: Vec<ListPaintFrame>,
+    pub control_color_frames: Vec<ControlColorFrame>,
+    pub dialog_backgrounds: HashMap<u32, u32>,
+    pub list_paint_stamps: HashMap<u32, u64>,
     pub paint_erase_frames: Vec<PaintEraseFrame>,
     pub pending_window_erases: std::collections::HashSet<u32>,
     pub owner_draw_states: HashMap<u32, (bool, bool, bool, i32, i32)>,
@@ -321,6 +355,10 @@ impl GdiState {
             image_lists: HashMap::new(),
             system_brushes: HashMap::new(),
             owner_draw_frames: Vec::new(),
+            list_paint_frames: Vec::new(),
+            control_color_frames: Vec::new(),
+            dialog_backgrounds: HashMap::new(),
+            list_paint_stamps: HashMap::new(),
             paint_erase_frames: Vec::new(),
             pending_window_erases: std::collections::HashSet::new(),
             owner_draw_states: HashMap::new(),
@@ -639,6 +677,60 @@ impl<'a> Surface<'a> {
         let pix = self.pixels_mut();
         pix[off] = bytes[0];
         pix[off + 1] = bytes[1];
+        self.cover_rect(x as u32, y as u32, x as u32 + 1, y as u32 + 1);
+    }
+
+    fn cover_rect(&mut self, x0: u32, y0: u32, x1: u32, y1: u32) {
+        if let Surface::Bitmap(bitmap) = self {
+            if let Some(painted) = &mut bitmap.painted {
+                for y in y0..y1 {
+                    let start = (y * bitmap.width + x0) as usize;
+                    painted[start..start + (x1 - x0) as usize].fill(1);
+                }
+            }
+        }
+    }
+
+    /// Present a retained window, preserving holes left by keyed drawing.
+    pub fn blit_window(&mut self, x: i32, y: i32, bitmap: &Bitmap) {
+        let Some(painted) = bitmap.painted.as_ref().filter(|p| p.contains(&0)) else {
+            self.blit_from_bytes(
+                x,
+                y,
+                0,
+                0,
+                bitmap.width as i32,
+                bitmap.height as i32,
+                &bitmap.pixels,
+                bitmap.width,
+                bitmap.height,
+            );
+            return;
+        };
+        for row in 0..bitmap.height {
+            let mut col = 0;
+            while col < bitmap.width {
+                if painted[(row * bitmap.width + col) as usize] == 0 {
+                    col += 1;
+                    continue;
+                }
+                let start = col;
+                while col < bitmap.width && painted[(row * bitmap.width + col) as usize] != 0 {
+                    col += 1;
+                }
+                self.blit_from_bytes(
+                    x + start as i32,
+                    y + row as i32,
+                    start as i32,
+                    row as i32,
+                    (col - start) as i32,
+                    1,
+                    &bitmap.pixels,
+                    bitmap.width,
+                    bitmap.height,
+                );
+            }
+        }
     }
 
     /// Clip before rasterization: native map coordinates can be far outside
@@ -868,6 +960,7 @@ impl<'a> Surface<'a> {
             let off = row as usize * stride + x0 as usize;
             words[off..off + row_len].fill(color_le);
         }
+        self.cover_rect(x0, y0, x1, y1);
         self.mark_dirty();
     }
 
@@ -875,16 +968,8 @@ impl<'a> Surface<'a> {
         if w <= 0 || h <= 0 {
             return;
         }
-        let bytes = color.to_le_bytes();
         let put = |this: &mut Self, px: i32, py: i32| {
-            let (sw, sh) = this.dimensions();
-            if px < 0 || py < 0 || (px as u32) >= sw || (py as u32) >= sh {
-                return;
-            }
-            let off = (py as u32 * sw + px as u32) as usize * 2;
-            let pix = this.pixels_mut();
-            pix[off] = bytes[0];
-            pix[off + 1] = bytes[1];
+            this.put_pixel(px, py, color);
         };
         for i in 0..w {
             put(self, x + i, y);
@@ -999,6 +1084,7 @@ impl<'a> Surface<'a> {
                 pix[dst_off + col + 1] = out[1];
             }
         }
+        self.cover_rect(dx0, dy0, dx1, dy1);
         self.mark_dirty();
     }
 
@@ -1035,6 +1121,7 @@ impl<'a> Surface<'a> {
                 *word = rop3::apply(rop, pat, 0, d).to_le();
             }
         }
+        self.cover_rect(x0, y0, x1, y1);
         self.mark_dirty();
     }
 }
@@ -1140,6 +1227,30 @@ pub mod rop3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_paint_tracks_primitive_coverage_and_clips_partial_layers() {
+        let mut window = Bitmap::new(5, 5);
+        window.painted = Some(vec![0; 25]);
+        let mut surface = Surface::Bitmap(&mut window);
+        surface.put_pixel(1, 1, 0);
+        surface.fill_rect(2, 2, 1, 1, 0);
+        surface.stroke_rect(3, 3, 1, 1, 0);
+        surface.blit_from_bytes(4, 4, 0, 0, 1, 1, &[0, 0], 1, 1);
+        surface.fill_rect_rop(0, 0, 1, 1, 0, rop3::BLACKNESS);
+        let mut background = Bitmap::new(4, 4);
+        let mut surface = Surface::Bitmap(&mut background);
+        surface.fill_rect(0, 0, 4, 4, 0x07e0);
+        surface.blit_window(-1, -1, &window);
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let at = (y * 4 + x) * 2;
+                let color = u16::from_le_bytes(background.pixels[at..at + 2].try_into().unwrap());
+                assert_eq!(color, if x == y { 0 } else { 0x07e0 });
+            }
+        }
+        assert!(Bitmap::new(1, 1).painted.is_none());
+    }
 
     /// Cross-check the generic 8-minterm evaluator against independent
     /// hand-written implementations of the named ROP codes. Every

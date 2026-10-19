@@ -277,6 +277,8 @@ pub struct ChildWindow {
     pub style: u32,
     /// Current caption / edit contents.
     pub text: String,
+    pub text_color: u32,
+    pub background_color: Option<u32>,
     /// Rectangle in parent-client coordinates. Controls are routinely
     /// created `0x0` and positioned later from the parent's `WM_SIZE`
     /// handler via `MoveWindow`, which is exactly what BlankApp does.
@@ -388,7 +390,12 @@ impl ChildWindow {
             self.list_scroll_y = top.saturating_add(height).saturating_sub(self.h).max(0);
         }
     }
-    fn render_icon_list(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
+    fn render_icon_list(
+        &self,
+        surf: &mut Surface<'_>,
+        gdi: Option<&crate::gdi::GdiState>,
+        only: Option<usize>,
+    ) {
         let face = gdi.and_then(|g| crate::text::selected(g, self.font));
         let face = face.as_ref();
 
@@ -400,6 +407,9 @@ impl ChildWindow {
             self.y.saturating_add(self.h),
         ];
         for (index, (text, _)) in self.list_items.iter().enumerate() {
+            if only.is_some_and(|i| i != index) {
+                continue;
+            }
             let (left, top) = self.list_item_position(index);
             let x = self.x.saturating_add(left);
             let y = self
@@ -487,6 +497,36 @@ impl ChildWindow {
             }
         }
     }
+    /// Default item paint following an item's NM_CUSTOMDRAW prepaint.
+    /// In icon mode do not erase the background already painted by the guest.
+    pub fn render_custom_draw_item(
+        &self,
+        surf: &mut Surface<'_>,
+        gdi: &crate::gdi::GdiState,
+        index: usize,
+    ) {
+        if self.list_icon_view() {
+            self.render_icon_list(surf, Some(gdi), Some(index));
+        } else {
+            let mut item = self.clone();
+            item.list_items = self.list_items.get(index).cloned().into_iter().collect();
+            item.list_images = self.list_images.get(index).copied().into_iter().collect();
+            item.list_selected = (self.list_selected == Some(index)).then_some(0);
+            let y =
+                index as i64 * i64::from(self.list_row_height()) - i64::from(self.list_scroll_y);
+            item.y = self
+                .y
+                .saturating_add(y.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+            item.h = self
+                .list_row_height()
+                .min(self.h.saturating_sub(item.y - self.y));
+            item.list_scroll_y = 0;
+            if item.y >= self.y && item.h > 0 {
+                item.render_list(surf, Some(gdi));
+            }
+        }
+    }
+
     pub fn list_item_at(&self, y: i32) -> Option<usize> {
         if y < 0 || y >= self.h {
             return None;
@@ -509,7 +549,7 @@ impl ChildWindow {
             crate::framebuffer::colorref_to_rgb565(self.list_background),
         );
         if self.list_icon_view() {
-            self.render_icon_list(surf, gdi);
+            self.render_icon_list(surf, gdi, None);
             return;
         }
         let row_height = self.list_row_height();
@@ -807,7 +847,14 @@ impl ChildWindow {
     ) {
         if face.is_none() {
             if self.enabled {
-                draw_clipped(surf, x, y, &self.text, Self::TEXT, right);
+                draw_clipped(
+                    surf,
+                    x,
+                    y,
+                    &self.text,
+                    crate::framebuffer::colorref_to_rgb565(self.text_color),
+                    right,
+                );
             } else {
                 draw_clipped(surf, x + 1, y + 1, &self.text, Self::LIGHT, right + 1);
                 draw_clipped(surf, x, y, &self.text, Self::SHADOW, right);
@@ -817,7 +864,13 @@ impl ChildWindow {
         let line = crate::text::layout(face, &self.text.encode_utf16().collect::<Vec<_>>());
         let clip = [self.x, self.y, right, self.y.saturating_add(self.h)];
         if self.enabled {
-            line.draw(surf, x, y, Self::TEXT, clip);
+            line.draw(
+                surf,
+                x,
+                y,
+                crate::framebuffer::colorref_to_rgb565(self.text_color),
+                clip,
+            );
         } else {
             line.draw(surf, x + 1, y + 1, Self::LIGHT, clip);
             line.draw(surf, x, y, Self::SHADOW, clip);
@@ -837,6 +890,15 @@ impl ChildWindow {
     ) {
         if !self.visible || self.w <= 0 || self.h <= 0 {
             return;
+        }
+        if let Some(color) = self.background_color {
+            surf.fill_rect(
+                self.x,
+                self.y,
+                self.w,
+                self.h,
+                crate::framebuffer::colorref_to_rgb565(color),
+            );
         }
         let face = gdi.and_then(|g| crate::text::selected(g, self.font));
         match self.class {
@@ -1234,6 +1296,8 @@ impl Controls {
             id,
             style,
             text,
+            text_color: 0,
+            background_color: None,
             x,
             y,
             w,
@@ -1456,6 +1520,20 @@ impl Controls {
     /// visible before showing them; a handle that always claims to be
     /// visible makes the app skip its own `ShowWindow` and the Time and
     /// Score fields never appear.
+    pub fn visible_color_controls(&self) -> impl Iterator<Item = &ChildWindow> {
+        self.children.iter().filter(|c| {
+            c.class != ControlClass::ListView
+                && self.is_showing(c)
+                && c.w > 0
+                && c.h > 0
+                && !(c.class == ControlClass::Button && c.style & 0xf == 0xb)
+        })
+    }
+    pub fn visible_list_views(&self) -> impl Iterator<Item = &ChildWindow> {
+        self.children.iter().filter(|c| {
+            c.class == ControlClass::ListView && self.is_showing(c) && c.w > 0 && c.h > 0
+        })
+    }
     pub fn owner_draw_controls(&self) -> impl Iterator<Item = &ChildWindow> {
         self.children.iter().filter(|c| {
             self.is_showing(c)
@@ -1890,6 +1968,20 @@ impl Controls {
         for panel in &self.panels {
             panel.render(surf);
             if panel.visible {
+                if let Some(color) = gdi
+                    .and_then(|g| g.dialog_backgrounds.get(&panel.hwnd))
+                    .copied()
+                {
+                    let (x, y) = panel.client_origin();
+                    surf.fill_rect(
+                        x,
+                        y,
+                        panel.w - 2 * i32::from(panel.border),
+                        panel.h - 2 * i32::from(panel.border) - panel.caption_h(),
+                        crate::framebuffer::colorref_to_rgb565(color),
+                    );
+                }
+
                 layer(panel.hwnd, surf);
             }
             self.render_children_of(surf, |parent| parent == panel.hwnd, gdi, layer);

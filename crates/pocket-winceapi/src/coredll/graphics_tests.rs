@@ -1071,6 +1071,76 @@ fn transparent_image_preserves_keyed_pixels_and_scales_bitmap_or_dc_sources() {
 }
 
 #[test]
+fn window_paint_keyed_corners_reveal_current_map_but_painted_black_stays_opaque() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let child = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Static,
+        1097,
+        String::new(),
+        0x50000000,
+        3,
+        4,
+        2,
+        1,
+    );
+    kernel.window_rects.insert(child, (3, 4, 2, 1));
+    kernel.window_parents.insert(child, FAKE_HWND);
+    let source = kernel.gdi.create_compatible_bitmap(2, 1);
+    kernel
+        .gdi
+        .bitmap_mut(source)
+        .unwrap()
+        .pixels
+        .copy_from_slice(&[0x1f, 0xf8, 0, 0]);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let dc = window_dc(&mut ctx, child);
+    assert_eq!(
+        call(
+            &mut ctx,
+            transparent_image,
+            &[dc, 0, 0, 2, 1, source, 0, 0, 2, 1, 0xff00ff]
+        ),
+        1
+    );
+    let target = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
+    assert_eq!(
+        ctx.kernel.gdi.bitmap(target).unwrap().painted.as_deref(),
+        Some(&[0, 1][..])
+    );
+    for map in [0x07e0u16, 0xf800] {
+        ctx.kernel
+            .framebuffer
+            .pixels
+            .chunks_exact_mut(2)
+            .for_each(|p| p.copy_from_slice(&map.to_le_bytes()));
+        ctx.kernel.composite_controls();
+        assert_eq!(pixel(ctx.kernel, 3, 4), map);
+        assert_eq!(pixel(ctx.kernel, 4, 4), 0);
+    }
+    surface_for_dc(ctx.kernel, dc)
+        .unwrap()
+        .fill_rect(0, 0, 2, 1, 0);
+    assert_eq!(
+        call(
+            &mut ctx,
+            transparent_image,
+            &[dc, 0, 0, 2, 1, source, 0, 0, 2, 1, 0xff00ff]
+        ),
+        1
+    );
+    ctx.kernel.framebuffer.pixels.fill(255);
+    ctx.kernel.composite_controls();
+    assert_eq!(pixel(ctx.kernel, 3, 4), 0);
+}
+
+#[test]
 fn static_bitmap_uses_image_size_instead_of_clipping_to_dialog_units() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
