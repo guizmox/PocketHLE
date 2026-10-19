@@ -38,5 +38,6 @@
   "MessageBoxW",
   "GlobalMemoryStatus",
   "VirtualAlloc",
-  "VirtualFree"
+  "VirtualFree",
+  "fflush"
 ]

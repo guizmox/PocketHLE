@@ -196,7 +196,7 @@ fn run_guest(executable: &[u8], expected_code: u32) {
         }
     }
     assert!(
-        report.contains("RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000"),
+        report.contains("RAMTEST_RESULT PASS checks=0x00000091 failures=0x00000000"),
         "{report}"
     );
     assert!(
@@ -443,7 +443,10 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
             .unwrap();
         let report = fs::read_to_string(path).unwrap();
         println!("{report}");
-        assert!(report.contains("VFSTEST_RESULT PASS"), "{report}");
+        assert!(
+            report.contains("VFSTEST_RESULT PASS checks=0x00000082 failures=0x00000000"),
+            "{report}"
+        );
         assert!(
             report.contains("PASS cycles.64_duplicate_flush_close_delete"),
             "{report}"

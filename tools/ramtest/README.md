@@ -9,7 +9,7 @@ requiring a proprietary SDK or commercial assets.
 3. Launch it. The final dialog must display **PASS** .
    Press Enter to close it.
 4. Read `RAMTEST.TXT`. Its final line must be
-   `RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000` (136 checks).
+   `RAMTEST_RESULT PASS checks=0x00000091 failures=0x00000000` (145 checks).
 5. After closing the dialog, check `flash/DLLTEST.TXT` for a final
    `DLLTEST_RESULT PASS`. Process exit callbacks write it after acknowledgment. The guest dialog is in English.
 6. Check `flash/DEPTEST.TXT` for `DEPTEST_RESULT PASS` (dependency order and rollback).
@@ -90,3 +90,17 @@ afterward. Production games do not enable diagnostic logging.
 The `dist/fixtures` tests also execute ExitProcess(77), and a case where main calls
 ExitThread(11) before the last worker returns 33. They are not included in the
 importable ZIP. All three variants are tested with Unicorn.
+
+
+## Version 9: boundaries, fragmentation and pressure
+
+The complete successful run now has **145 checks (0x91)**. Adds 32 mixed-size
+allocations around 8-byte and 4 KiB boundaries, full zero/data verification,
+interleaved free/reallocation, bounded progressive 1 MiB allocations until OOM,
+verification that existing allocations survive the failure, full RAM/address
+space restitution, and all-byte zero verification after decommit/recommit.
+The OOM test stops after at most 32 attempts and uses only guest VirtualAlloc
+budgets. It does not intentionally exhaust Android/Windows host memory.
+
+See `../TEST-COVERAGE.md` for host-side regression tests and the remaining
+platform checks. Rebuild the diagnostic ZIP to obtain these new scenarios.

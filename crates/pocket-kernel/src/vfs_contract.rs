@@ -1033,6 +1033,77 @@ mod tests {
         assert_eq!(std::fs::read(d.path().join("save")).unwrap(), b"ram data");
         assert!(v.open_handles().is_empty());
     }
+
+    #[test]
+    fn diagnostic_seeded_file_operations_match_byte_model_on_flash_and_ram() {
+        for ram in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut v = mounted(dir.path());
+            let path = if ram {
+                v = Vfs::new();
+                v.attach_ram(Some(crate::memory_division::MemoryDivision::default()));
+                assert!(v.create_dir("/test"));
+                "/test/model"
+            } else {
+                "\\Flash Disk\\model"
+            };
+            let h = v.open_file(path, 3, 3, 1, false, 0).unwrap().handle;
+            let mut expected = Vec::<u8>::new();
+            let mut position = 0usize;
+            let mut seed = 0x9c0a1c11u32;
+            for step in 0..1024 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                match (seed >> 24) % 4 {
+                    0 => {
+                        let target = ((seed >> 8) as usize) % 32769;
+                        assert_eq!(
+                            v.seek(h, target as i64, SeekKind::Begin),
+                            Some(target as u64)
+                        );
+                        position = target;
+                    }
+                    1 => {
+                        let len = [0, 1, 4095, 4096, 4097][(seed >> 16) as usize % 5];
+                        let bytes: Vec<u8> =
+                            (0..len).map(|i| (seed as usize + i * 13) as u8).collect();
+                        assert_eq!(v.write(h, &bytes), Some(len), "step {step}");
+                        if len != 0 {
+                            expected.resize(expected.len().max(position + len), 0);
+                            expected[position..position + len].copy_from_slice(&bytes);
+                            position += len;
+                        }
+                    }
+                    2 => {
+                        let mut bytes = [0xcc; 4097];
+                        let n = expected.len().saturating_sub(position).min(bytes.len());
+                        assert_eq!(v.read(h, &mut bytes), Some(n), "step {step}");
+                        if n != 0 {
+                            assert_eq!(&bytes[..n], &expected[position..position + n]);
+                        }
+                        assert!(bytes[n..].iter().all(|b| *b == 0xcc));
+                        position += n;
+                    }
+                    _ => {
+                        assert!(v.set_end_of_file(h));
+                        expected.resize(position, 0);
+                    }
+                }
+                assert_eq!(v.size(h), Some(expected.len() as u64), "step {step}");
+                assert_eq!(v.seek(h, 0, SeekKind::Current), Some(position as u64));
+                if step % 31 == 0 {
+                    v.flush(h).unwrap();
+                }
+            }
+            assert!(v.close(h));
+            let h = v.open_file(path, 1, 3, 3, false, 0).unwrap().handle;
+            let mut actual = vec![0; expected.len() + 1];
+            assert_eq!(v.read(h, &mut actual), Some(expected.len()));
+            assert_eq!(&actual[..expected.len()], expected);
+            assert!(v.close(h));
+            assert!(v.delete_file(path));
+        }
+    }
+
     #[test]
     fn creation_dispositions_preserve_or_truncate_on_host_and_ram() {
         let d = tempfile::tempdir().unwrap();

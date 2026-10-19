@@ -73,10 +73,47 @@ static void repeated_files(void) {
     after.length=sizeof(after);GlobalMemoryStatus(&after);check("cycles.exact_ram_refund",before.avail==after.avail);
     GetDiskFreeSpaceExW(L"\\Flash Disk\\",free_after,total,dummy);check("cycles.exact_flash_space_refund",free_before[0]==free_after[0]&&free_before[1]==free_after[1]);
 }
+
+/* Deliberately crosses 4 KiB/8 KiB boundaries; compare every byte, not just sizes. */
+static char bulk[12291], verify[12291];
+static void extended_stdio(void) {
+ U32 i,f,ok=1;for(i=0;i<sizeof(bulk);i++)bulk[i]=(char)((i*37u+11u)&255u);
+ f=fopen("\\Flash Disk\\PocketHLE-VFS-PROBE\\stdio.bin","w+b");
+ check("stdio.bulk_open",f!=0);if(!f)return;
+ check("stdio.bulk_write_elements",fwrite(bulk,3,sizeof(bulk)/3,f)==sizeof(bulk)/3);
+ check("stdio.bulk_tell",ftell(f)==sizeof(bulk));
+ check("stdio.flush",fflush(f)==0);
+ check("stdio.invalid_seek_preserves_position",fseek(f,0,99)!=0&&ftell(f)==sizeof(bulk));
+ check("stdio.rewind",fseek(f,0,0)==0);
+ check("stdio.bulk_read_integrity",fread(verify,3,sizeof(verify)/3,f)==sizeof(verify)/3&&eq(bulk,verify,sizeof(bulk)));
+ check("stdio.eof",fread(verify,1,1,f)==0);
+ check("stdio.overwrite_boundary_seek",fseek(f,4095,0)==0);
+ check("stdio.overwrite_boundary_write",fwrite("PATCH",1,5,f)==5);
+ for(i=0;i<5;i++)bulk[4095+i]="PATCH"[i];
+ check("stdio.close",fclose(f)==0);
+ check("stdio.closed_flush_error",fflush(f)!=0);
+ check("stdio.double_close_error",fclose(f)!=0);
+ f=fopen("\\Flash Disk\\PocketHLE-VFS-PROBE\\stdio.bin","rb");
+ if(!f)ok=0;else{check("stdio.readonly_write_refused",fwrite("BAD",1,3,f)==0);if(fread(verify,1,sizeof(verify),f)!=sizeof(verify)||!eq(bulk,verify,sizeof(bulk)))ok=0;if(fclose(f)!=0)ok=0;}
+ check("stdio.reopen_complete_integrity",ok);
+ check("stdio.cleanup",DeleteFileW(ROOT L"\\stdio.bin"));
+}
+static void extended_paths(void) {
+ U32 h,n=999;char b[8];
+ h=open_file(ROOT L"\\caf\u00e9.bin",R|W,3,1);
+ check("paths.unicode_create",h!=BAD);if(h!=BAD){
+ check("io.zero_write",WriteFile(h,"",0,&n,0)&&n==0&&GetFileSize(h,0)==0);
+ n=999;check("io.zero_read",ReadFile(h,b,0,&n,0)&&n==0);
+ SetFilePointer(h,4095,0,0);check("io.sparse_write",io_write(h,"AB",2)&&GetFileSize(h,0)==4097);
+ SetFilePointer(h,4093,0,0);check("io.sparse_gap_zero",ReadFile(h,b,4,&n,0)&&n==4&&b[0]==0&&b[1]==0&&b[2]=='A'&&b[3]=='B');
+ CloseHandle(h);
+ }else{check("io.zero_write",0);check("io.zero_read",0);check("io.sparse_write",0);check("io.sparse_gap_zero",0);}
+ check("paths.unicode_cleanup",DeleteFileW(ROOT L"\\caf\u00e9.bin"));
+}
 __attribute__((section(".text.entry"))) U32 entry(void){
  U32 h,j,n=0,alias=0,ready,release,f,free0[2],free1[2],total[2],dummy[2],found[150],count=0;char b[16];Info info;Mem before,after;void *protected_out;
  {extern char __image_start[],__image_end[];const volatile unsigned char*p=(const volatile unsigned char*)__image_start;volatile unsigned char sink=0;while(p<(const volatile unsigned char*)__image_end){sink^=*p;p+=4096;}(void)sink;}
- line("PocketHLE native ARM VFS test v3\r\n");
+ line("PocketHLE native ARM VFS test v4\r\n");
  DeleteFileW(L"\\Flash Disk\\VFSTEST.TXT");
  if(GetFileAttributesW(ROOT)!=BAD){line("FAIL fixture.directory_already_exists; no existing files touched\r\n");failures++;goto finish;}
  check("persistence.read_previous_run",persistence_read());if(failures)goto finish;
@@ -163,7 +200,7 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  SetLastError(123);check("quota.write_refused_no_growth",!WriteFile(h,"X",1,&n,0)&&GetLastError()==112&&GetFileSize(h,0)==free0[0]);
  after.length=sizeof(after);GlobalMemoryStatus(&after);line("INFO quota.ram_before=");hex(before.avail);line(" ram_after=");hex(after.avail);line(" total_before=");hex(before.total);line(" total_after=");hex(after.total);line("\r\n");check("quota.nand_not_ram",before.avail==after.avail);
  SetFilePointer(h,0,0,0);check("quota.truncate_refunds",SetEndOfFile(h)&&GetDiskFreeSpaceExW(L"\\Flash Disk\\",free1,total,dummy)&&free1[0]==free0[0]);CloseHandle(h);
- check("cleanup.file",DeleteFileW(FILE));repeated_files();check("cleanup.directory",RemoveDirectoryW(ROOT));
+ check("cleanup.file",DeleteFileW(FILE));extended_stdio();extended_paths();repeated_files();check("cleanup.directory",RemoveDirectoryW(ROOT));
  if(!failures)persistence_write();
 finish:
  line(failures?"VFSTEST_RESULT FAIL checks=":"VFSTEST_RESULT PASS checks=");hex(checks);line(" failures=");hex(failures);line("\r\n");

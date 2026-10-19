@@ -2251,6 +2251,232 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_concurrent_shared_cursor_preserves_every_record() {
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = Vfs::new();
+        owner.mount("\\Data\\", dir.path());
+        let h = owner
+            .open("\\Data\\records", Access::ReadWrite, true)
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(5));
+        let mut workers = Vec::new();
+        for tag in 0u8..4 {
+            let object = owner.export_handle(h).unwrap();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut v = Vfs::new();
+                assert!(v.import_handle(123, object));
+                barrier.wait();
+                for sequence in 0u8..128 {
+                    let mut record = [tag; 64];
+                    record[1] = sequence;
+                    assert_eq!(v.write(123, &record), Some(64));
+                    std::thread::yield_now();
+                }
+                assert!(v.close(123));
+            }));
+        }
+        barrier.wait();
+        assert!(owner.close(h)); // aliases must retain the open description
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let data = std::fs::read(dir.path().join("records")).unwrap();
+        assert_eq!(data.len(), 4 * 128 * 64);
+        let mut seen = [[false; 128]; 4];
+        for record in data.chunks_exact(64) {
+            let tag = record[0] as usize;
+            let sequence = record[1] as usize;
+            assert!(tag < 4 && sequence < 128);
+            assert!(!seen[tag][sequence], "duplicate record");
+            seen[tag][sequence] = true;
+            assert!(record[2..].iter().all(|&b| b as usize == tag), "torn write");
+        }
+        assert!(seen.iter().flatten().all(|v| *v));
+    }
+
+    #[test]
+    fn diagnostic_storage_flush_reports_poisoned_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", dir.path());
+        let h = v.open("\\Data\\save", Access::Write, true).unwrap();
+        assert_eq!(v.write(h, b"previous bytes"), Some(14));
+        let file = v.handles.get(&h).unwrap().clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = file.lock().unwrap();
+            panic!("intentional backend failure injection");
+        })
+        .join()
+        .is_err());
+        assert!(v.flush(h).is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("save")).unwrap(),
+            b"previous bytes"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn diagnostic_real_host_write_failure_is_not_success() {
+        let mut v = Vfs::new();
+        v.mount("\\Device\\", "/dev");
+        let h = v.open("\\Device\\full", Access::Write, false).unwrap();
+        assert_eq!(v.write(h, b"cannot fit"), None);
+        assert!(v.close(h));
+    }
+
+    // Invoked in a separate test process by the parent below. Nothing runs in
+    // the ordinary suite unless the private child environment is supplied.
+    #[test]
+    fn diagnostic_forced_exit_writer_child() {
+        let Some(root) = std::env::var_os("POCKETHLE_VFS_KILL_CHILD") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("POCKETHLE_VFS_SHORT_WRITE").is_some() {
+            let mut v = Vfs::new();
+            v.mount_save_dir("\\Flash Disk\\", &root);
+            let h = v
+                .open_file("\\Flash Disk\\partial", 3, 3, 1, false, 0)
+                .unwrap()
+                .handle;
+            let bytes = vec![0x5a; 16387];
+            let n = v
+                .write(h, &bytes)
+                .expect("expected a genuine short host write");
+            assert!(n > 0 && n < bytes.len(), "file-size limit was not applied");
+            assert_eq!(v.size(h), Some(n as u64));
+            assert_eq!(v.seek(h, 0, SeekKind::Current), Some(n as u64));
+            assert_eq!(
+                v.disk_space("\\Flash Disk\\").unwrap().1,
+                32 * 1024 * 1024 - n as u64
+            );
+            assert_eq!(v.write(h, b"X"), None);
+            assert_eq!(v.size(h), Some(n as u64));
+            assert_eq!(
+                v.disk_space("\\Flash Disk\\").unwrap().1,
+                32 * 1024 * 1024 - n as u64
+            );
+            assert!(v.close(h));
+            assert_eq!(std::fs::read(root.join("partial")).unwrap(), bytes[..n]);
+            return;
+        }
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", &root);
+        let h = v.open("\\Data\\save", Access::Write, true).unwrap();
+        let bytes: Vec<u8> = (0..16387).map(|i| (i * 37 + 11) as u8).collect();
+        assert_eq!(v.write(h, &bytes), Some(bytes.len()));
+        v.flush(h).unwrap();
+        // Still-open handle: killing this process must bypass Vfs::drop/close.
+        std::fs::write(root.join("ready"), b"ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn diagnostic_host_partial_write_accounts_only_persisted_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from(std::env::args_os().next().unwrap()));
+        // Apply RLIMIT_FSIZE only to a fresh child; never alter the test runner's
+        // limits or signal handlers. The shell's $@ passes paths without interpolation.
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "trap '' 25; ulimit -f 4 || exit 90; exec \"$@\"",
+                "pockethle-short-write",
+            ])
+            .arg(executable)
+            .args([
+                "--exact",
+                "vfs::tests::diagnostic_forced_exit_writer_child",
+                "--nocapture",
+            ])
+            .env("POCKETHLE_VFS_KILL_CHILD", dir.path())
+            .env("POCKETHLE_VFS_SHORT_WRITE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_symlink_escape_cannot_read_or_mutate_external_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("original"), b"untouched").unwrap();
+        std::os::unix::fs::symlink(external.path(), dir.path().join("escape")).unwrap();
+        let mut v = Vfs::new();
+        v.mount_save_dir("\\Data\\", dir.path());
+        assert!(v
+            .open_file("\\Data\\escape\\original", 1, 3, 3, false, 0)
+            .is_err());
+        assert!(v
+            .open_file("\\Data\\escape\\new", 2, 3, 2, false, 0)
+            .is_err());
+        assert!(v.delete("\\Data\\escape\\original").is_err());
+        assert_eq!(
+            std::fs::read(external.path().join("original")).unwrap(),
+            b"untouched"
+        );
+        assert!(!external.path().join("new").exists());
+    }
+
+    #[test]
+    fn diagnostic_forced_host_exit_preserves_flushed_prefix() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe()
+            .or_else(|_| {
+                std::env::args_os()
+                    .next()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "test executable unavailable",
+                        )
+                    })
+            })
+            .unwrap();
+        let mut child = std::process::Command::new(executable)
+            .args([
+                "--exact",
+                "vfs::tests::diagnostic_forced_exit_writer_child",
+                "--nocapture",
+            ])
+            .env("POCKETHLE_VFS_KILL_CHILD", dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !dir.path().join("ready").exists() && Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ready = dir.path().join("ready").exists();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(ready, "child did not reach the open-handle checkpoint");
+        let expected: Vec<u8> = (0..16387).map(|i| (i * 37 + 11) as u8).collect();
+        assert_eq!(std::fs::read(dir.path().join("save")).unwrap(), expected);
+    }
+
+    #[test]
     fn vfs_duplicate_file_shares_position_and_survives_independent_close() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("stream.bin"), b"abcdef").unwrap();

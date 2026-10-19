@@ -8943,7 +8943,7 @@ fn crt_fseek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         0 => SeekKind::Begin,
         1 => SeekKind::Current,
         2 => SeekKind::End,
-        _ => SeekKind::Begin,
+        _ => return Ok(DispatchOutcome::ReturnedR0(u32::MAX)),
     };
     let r = ctx.kernel.vfs.seek(h, off, kind);
     log::trace!("fseek(0x{h:08x}, {off}, {whence}) -> {r:?}");
@@ -23615,6 +23615,143 @@ mod tests {
         assert!(!ctx.kernel.events.get(&first).unwrap().signalled);
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn diagnostic_stdio_bulk_update_and_reopen_preserves_all_bytes() {
+        use pocket_kernel::vfs::Access;
+        let dir = tempfile::tempdir().unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount("\\Data\\", dir.path());
+        let h = kernel
+            .vfs
+            .open("\\Data\\bulk", Access::ReadWrite, true)
+            .unwrap();
+        let mut cpu = scanf_cpu();
+        cpu.map_region(0x10000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut expected: Vec<u8> = (0..12291).map(|i| (i * 37 + 11) as u8).collect();
+        cpu.write_mem(0x10000, &expected).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (reg, value) in [
+            (ArmReg::R0, 0x10000),
+            (ArmReg::R1, 3),
+            (ArmReg::R2, 4097),
+            (ArmReg::R3, h),
+        ] {
+            ctx.cpu.write_reg(reg, value).unwrap();
+        }
+        assert_eq!(
+            crt_fwrite(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(4097)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+        assert_eq!(
+            crt_fflush(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.cpu.write_reg(ArmReg::R1, 4095).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
+        assert_eq!(crt_fseek(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        ctx.cpu.write_mem(0x10000, b"PATCH").unwrap();
+        for (reg, value) in [
+            (ArmReg::R0, 0x10000),
+            (ArmReg::R1, 1),
+            (ArmReg::R2, 5),
+            (ArmReg::R3, h),
+        ] {
+            ctx.cpu.write_reg(reg, value).unwrap();
+        }
+        assert_eq!(
+            crt_fwrite(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(5)
+        );
+        expected[4095..4100].copy_from_slice(b"PATCH");
+        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+        assert_eq!(
+            crt_fclose(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(!ctx.kernel.vfs.is_open(h));
+        assert_eq!(
+            crt_fflush(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(
+            crt_fclose(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        let h = ctx
+            .kernel
+            .vfs
+            .open("\\Data\\bulk", Access::Read, false)
+            .unwrap();
+        for (reg, value) in [
+            (ArmReg::R0, 0x10000),
+            (ArmReg::R1, 3),
+            (ArmReg::R2, 4097),
+            (ArmReg::R3, h),
+        ] {
+            ctx.cpu.write_reg(reg, value).unwrap();
+        }
+        assert_eq!(
+            crt_fread(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(4097)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x10000, expected.len() as u32).unwrap(),
+            expected
+        );
+        // No hidden extra bytes after the final partial page.
+        assert_eq!(crt_fread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+        assert_eq!(
+            crt_fclose(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(std::fs::read(dir.path().join("bulk")).unwrap(), expected);
+    }
+
+    #[test]
+    fn diagnostic_stdio_invalid_seek_preserves_position_and_file() {
+        use pocket_kernel::vfs::{Access, SeekKind};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("save"), b"original").unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount("\\Data\\", dir.path());
+        let h = kernel
+            .vfs
+            .open("\\Data\\save", Access::ReadWrite, false)
+            .unwrap();
+        assert_eq!(kernel.vfs.seek(h, 3, SeekKind::Begin), Some(3));
+        let mut cpu = scanf_cpu();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 99).unwrap();
+        assert_eq!(
+            crt_fseek(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(ctx.kernel.vfs.seek(h, 0, SeekKind::Current), Some(3));
+        ctx.cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
+        assert_eq!(
+            crt_fseek(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(ctx.kernel.vfs.seek(h, 0, SeekKind::Current), Some(3));
+        assert_eq!(std::fs::read(dir.path().join("save")).unwrap(), b"original");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# VFSTEST v3 — ARM virtual filesystem diagnostic
+# VFSTEST v4 — ARM virtual filesystem diagnostic
 
 Import `PocketHLE-VFSTEST.zip` into PocketHLE and run it twice. Each time, wait
 for **PASS** , then press Enter to close
@@ -8,7 +8,7 @@ The report is `\Flash Disk\VFSTEST.TXT`, normally
 `C:\Users\gtristant\Documents\PocketHLE\flash\VFSTEST.TXT`:
 
 ```text
-VFSTEST_RESULT PASS checks=0x0000006c failures=0x00000000
+VFSTEST_RESULT PASS checks=0x00000082 failures=0x00000000
 ```
 
 The original 103 checks cover CreateFileW dispositions, CRT r+/w+/a/a+ modes, local/remote
@@ -69,3 +69,18 @@ Only a fully successful run advances the marker. To reset the diagnostic,
 remove only its marker after inspecting the report; no game save is used.
 The updated complete run has 108 checks (0x6c). A first successful run alone
 does not establish restart persistence.
+
+
+## Version 4: integrity and boundary checks
+
+The complete successful run now has **130 checks (0x82)**, retaining v3's
+persistence marker for compatibility. Adds a 12,291-byte patterned binary
+stdio round trip, element counts, position, explicit flush, EOF, a patch
+crossing a 4 KiB boundary, invalid seek without cursor movement, closed-stream
+errors, write refusal through a read-only stream and full verification after
+reopening. Also tests a Unicode filename, zero-length I/O and a sparse gap
+across a page boundary. No game save is modified.
+
+See `../TEST-COVERAGE.md` for the host failure/forced-exit tests, execution
+status and remaining platform checks. These guest additions require rebuilding
+the diagnostic; an older installed ZIP does not acquire them from a GUI rebuild.

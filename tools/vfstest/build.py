@@ -21,6 +21,7 @@ ADDITIONAL={
 'FindClose':('unsigned int','unsigned int'),
 'fopen':('unsigned int','const char*,const char*'),
 'fclose':('unsigned int','unsigned int'),
+'fflush':('int','unsigned int'),
 'fwrite':('unsigned int','const void*,unsigned int,unsigned int,unsigned int'),
 'fread':('unsigned int','void*,unsigned int,unsigned int,unsigned int'),
 'fseek':('unsigned int','unsigned int,int,int'),

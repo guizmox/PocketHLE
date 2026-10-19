@@ -4380,6 +4380,62 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_heap_fragmentation_reclaims_arena_without_overlap() {
+        let ram = memory_division::MemoryDivision::new(256 * 4096, 128).unwrap();
+        let mut heap = Heap::new(0x100000, 0x80000);
+        assert!(heap.attach_ram(Some(ram.clone())));
+        let free = heap.free_bytes();
+        let mut slots = [None; 64];
+        let mut seed = 0x51a7u32;
+        for _ in 0..4096 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let slot = (seed >> 16) as usize % slots.len();
+            if let Some((p, _)) = slots[slot].take() {
+                heap.free(p);
+            }
+            let size = [1, 7, 8, 4095, 4096, 4097, 8191, 8193][(seed >> 8) as usize % 8];
+            if let Some(p) = heap.alloc(size) {
+                for &(q, n) in slots.iter().flatten() {
+                    assert!(p + size <= q || q + n <= p, "overlapping live allocations");
+                }
+                assert_eq!(heap.msize(p), Some(size));
+                slots[slot] = Some((p, size));
+            }
+        }
+        for (p, _) in slots.into_iter().flatten() {
+            heap.free(p);
+        }
+        assert_eq!(heap.free_bytes(), free);
+        assert_eq!(ram.snapshot().program_used, 0);
+        let large = heap
+            .alloc(free - 8)
+            .expect("free fragments were not coalesced");
+        heap.free(large);
+        assert_eq!(heap.free_bytes(), free);
+    }
+
+    #[test]
+    fn diagnostic_virtual_commit_oom_is_atomic_and_recovers() {
+        let ram = memory_division::MemoryDivision::new(16 * 4096, 8).unwrap();
+        let mut heap = Heap::new(0x100000, 0x20000);
+        assert!(heap.attach_ram(Some(ram.clone())));
+        let free = heap.free_bytes();
+        let base = heap.virtual_alloc(0, 0x10000, true, false).unwrap();
+        assert_eq!(heap.virtual_alloc(base, 4097, false, true), Some(base));
+        let committed = heap.virtual_block(base).unwrap().2;
+        let used = ram.snapshot().program_used;
+        assert_eq!(used, 2);
+        assert_eq!(heap.virtual_alloc(base, 0x10000, false, true), None);
+        assert_eq!(heap.virtual_block(base).unwrap().2, committed);
+        assert_eq!(ram.snapshot().program_used, used);
+        assert!(heap.virtual_free(base, 0, true));
+        assert_eq!(ram.snapshot().program_used, 0);
+        assert_eq!(heap.free_bytes(), free);
+        let next = heap.virtual_alloc(0, 8 * 4096, true, true).unwrap();
+        assert!(heap.virtual_free(next, 0, true));
+    }
+
+    #[test]
     fn released_stack_restores_budget_and_coalesces_the_heap() {
         let ram = memory_division::MemoryDivision::new(32 * 4096, 8).unwrap();
         let mut heap = Heap::new(0x100000, 0x10000);

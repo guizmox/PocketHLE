@@ -30,6 +30,36 @@ static void test_virtual(void) {
     check("virtual.release",VirtualFree(p,0,0x8000)!=0);after=status("virtual.released");check("virtual.release_restores_physical",after.avail==before.avail);check("virtual.release_restores_address_space",after.virtual_avail==before.virtual_avail);
     SetLastError(123);p=VirtualAlloc(0,4096,0x3000,0xDEAD);check("virtual.invalid_protection_error",p==0&&GetLastError()==87);
 }
+
+/* Fragmentation + all-byte integrity + bounded exhaustion, without crashing the guest. */
+static void test_boundaries_and_pressure(void) {
+ static const U32 sizes[8]={1,7,8,4095,4096,4097,8191,8193};
+ void *blocks[32]={0},*pressure[32]={0};U32 i,j,good=1,count=0,failed=0;MemStatus before=status("boundaries.before"),after;
+ for(i=0;i<32;i++){
+  U32 n=sizes[i&7];blocks[i]=LocalAlloc(0x40,n);if(!blocks[i]){good=0;continue;}
+  for(j=0;j<n;j++){if(((unsigned char*)blocks[i])[j]!=0)good=0;((unsigned char*)blocks[i])[j]=(unsigned char)(i*17+j);}
+ }
+ check("boundaries.allocate_and_full_zero_fill",good);
+ for(i=0;i<32;i+=2)if(blocks[i]){LocalFree(blocks[i]);blocks[i]=0;}
+ for(i=0;i<32;i+=2){blocks[i]=LocalAlloc(0x40,sizes[(i+3)&7]);if(!blocks[i])good=0;}
+ for(i=1;i<32;i+=2)if(blocks[i])for(j=0;j<sizes[i&7];j++)if(((unsigned char*)blocks[i])[j]!=(unsigned char)(i*17+j))good=0;
+ check("boundaries.fragmentation_preserves_live_bytes",good);
+ for(i=0;i<32;i++)if(blocks[i])LocalFree(blocks[i]);
+ after=status("boundaries.freed");check("boundaries.exact_ram_refund",after.avail==before.avail);
+ /* Reserve + commit in 1 MiB blocks. 32 attempts bound time and memory usage. */
+ for(i=0;i<32;i++){SetLastError(123);pressure[i]=VirtualAlloc(0,0x100000,0x3000,4);if(!pressure[i]){failed=GetLastError()==8;break;}count++;((volatile U32*)pressure[i])[0]=0xC0000000u+i;}
+ check("pressure.reaches_bounded_oom",failed&&count>0&&count<32);
+ good=1;for(i=0;i<count;i++)if(((volatile U32*)pressure[i])[0]!=0xC0000000u+i)good=0;
+ check("pressure.oom_preserves_existing_data",good);
+ for(i=0;i<count;i++)if(!VirtualFree(pressure[i],0,0x8000))good=0;
+ check("pressure.release_all",good);
+ after=status("pressure.freed");check("pressure.ram_and_virtual_refund",after.avail==before.avail&&after.virtual_avail==before.virtual_avail);
+ {void *p=VirtualAlloc(0,8192,0x3000,4);good=p!=0;if(p){for(i=0;i<8192;i++)((unsigned char*)p)[i]=0xA5;
+ if(!VirtualFree(p,8192,0x4000)||VirtualAlloc(p,8192,0x1000,4)!=p)good=0;
+ else for(i=0;i<8192;i++)if(((unsigned char*)p)[i]!=0)good=0;
+ if(!VirtualFree(p,0,0x8000))good=0;}check("virtual.recommit_zeroes_all_decommitted_bytes",good);}
+ after=status("boundaries.final");check("boundaries.final_exact_refund",after.avail==before.avail&&after.virtual_avail==before.virtual_avail);
+}
 static void test_local(void) {
     MemStatus before=status("local.before"),after;void *p=LocalAlloc(0x40,0x10000);check("local.allocate",p!=0);if(!p)return;
     check("local.zero_fill",((volatile U32*)p)[0]==0);after=status("local.allocated");check("local.physical_charge",after.avail+0x10000<=before.avail);
@@ -390,11 +420,11 @@ __attribute__((section(".text.entry"))) U32 entry(void) {
     {const W16 *name=L"\\Flash Disk\\RAMTEST.TXT";while(name[n]&&n<259){report_path[n]=name[n];n++;}report_path[n]=0;}
     report=CreateFileW(report_path,0x40000000,0,0,2,0x80,0);
     if(report==0xFFFFFFFF){MessageBoxW(0,L"Cannot write RAMTEST.TXT.",L"PocketHLE RAM test",0);return 2;}
-    note("PocketHLE native ARM RAM + image paging + TLS + processes test v8");
+    note("PocketHLE native ARM RAM + image paging + TLS + processes test v9");
     if(!GetSystemMemoryDivision(&store,&ram,&page)){check("gizmondo.profile_present",0);note("STOP: import this ZIP as a Gizmondo title; no RAM profile configured.");}
     else {
         check("gizmondo.profile_present",1);s=status("baseline");check("status.structure_and_page_size",s.length==32&&page==4096);check("status.total_matches_division",s.total==ram*page);check("status.no_swap",s.page_total==0&&s.page_avail==0);check("status.private_slot",s.virtual_total==0x2000000);
-        test_virtual();test_local();test_heap_errors();test_tls();test_wait_errors();test_threads();test_processes();test_dlls();test_mixed_lifetimes();test_process_repetition();test_division(store,ram,page);test_native_dependencies();test_image_paging();test_lifecycle();
+        test_virtual();test_boundaries_and_pressure();test_local();test_heap_errors();test_tls();test_wait_errors();test_threads();test_processes();test_dlls();test_mixed_lifetimes();test_process_repetition();test_division(store,ram,page);test_native_dependencies();test_image_paging();test_lifecycle();
     }
     {U32 n=0;n+=text(line_buffer+n,(failures||io_failed)?"RAMTEST_RESULT FAIL checks=0x":"RAMTEST_RESULT PASS checks=0x");n+=hex(line_buffer+n,checks);n+=text(line_buffer+n," failures=0x");n+=hex(line_buffer+n,failures);line_buffer[n++]='\r';line_buffer[n++]='\n';emit(line_buffer,n);}
     CloseHandle(report);
