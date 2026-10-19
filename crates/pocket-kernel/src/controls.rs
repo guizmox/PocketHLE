@@ -389,6 +389,9 @@ impl ChildWindow {
         }
     }
     fn render_icon_list(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
+        let face = gdi.and_then(|g| crate::text::selected(g, self.font));
+        let face = face.as_ref();
+
         let (handle, iw, ih) = self.list_image_list();
         let clip = [
             self.x,
@@ -403,7 +406,9 @@ impl ChildWindow {
                 .y
                 .saturating_add(top)
                 .saturating_sub(self.list_scroll_y);
-            if y < self.y || y.saturating_add(ih as i32 + font::GLYPH_H + 6) > clip[3] {
+            if y < self.y
+                || y.saturating_add(ih as i32 + crate::text::layout(face, &[]).height + 6) > clip[3]
+            {
                 continue;
             }
             let cell = self.list_spacing.0;
@@ -422,12 +427,16 @@ impl ChildWindow {
                     clip,
                 );
             }
-            let limit = ((cell - 4) / font::GLYPH_W).max(1) as usize;
             let mut lines = vec![String::new()];
             for word in text.split_whitespace() {
                 let line = lines.last_mut().unwrap();
                 if !line.is_empty()
-                    && line.chars().count() + 1 + word.chars().count() > limit
+                    && crate::text::layout(
+                        face,
+                        &format!("{line} {word}").encode_utf16().collect::<Vec<_>>(),
+                    )
+                    .width
+                        > cell - 4
                     && self.style & 0x80 == 0
                     && lines.len() < 2
                 {
@@ -442,24 +451,27 @@ impl ChildWindow {
             }
             let selected = self.list_selected == Some(index);
             for (row, line) in lines.iter().enumerate() {
-                let count = line.chars().count().min(limit) as i32;
-                let tx = x
-                    .saturating_add((cell - count * font::GLYPH_W) / 2)
-                    .max(self.x);
-                let ty = y.saturating_add(ih as i32 + 5 + row as i32 * (font::GLYPH_H + 1));
-                if ty < self.y || ty + font::GLYPH_H > clip[3] {
+                let text_width =
+                    crate::text::layout(face, &line.encode_utf16().collect::<Vec<_>>())
+                        .width
+                        .min(cell - 4);
+                let tx = x.saturating_add((cell - text_width) / 2).max(self.x);
+                let ty = y.saturating_add(
+                    ih as i32 + 5 + row as i32 * (crate::text::layout(face, &[]).height + 1),
+                );
+                if ty < self.y || ty + crate::text::layout(face, &[]).height > clip[3] {
                     continue;
                 }
                 if selected {
                     surf.fill_rect(
                         tx - 1,
                         ty - 1,
-                        (count * font::GLYPH_W + 2).min(clip[2] - tx + 1).max(0),
-                        font::GLYPH_H + 2,
+                        (text_width + 2).min(clip[2] - tx + 1).max(0),
+                        crate::text::layout(face, &[]).height + 2,
                         0x001f,
                     );
                 }
-                draw_clipped(
+                draw_clipped_font(
                     surf,
                     tx,
                     ty,
@@ -470,6 +482,7 @@ impl ChildWindow {
                         crate::framebuffer::colorref_to_rgb565(self.list_text_color)
                     },
                     x.saturating_add(cell - 2).min(clip[2]),
+                    face,
                 );
             }
         }
@@ -485,6 +498,9 @@ impl ChildWindow {
             .filter(|i| *i < self.list_items.len())
     }
     fn render_list(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
+        let face = gdi.and_then(|g| crate::text::selected(g, self.font));
+        let face = face.as_ref();
+
         surf.fill_rect(
             self.x,
             self.y,
@@ -527,15 +543,16 @@ impl ChildWindow {
                     [self.x, self.y, self.x + self.w, self.y + self.h],
                 );
             }
-            let ty = y + (row_height - font::GLYPH_H) / 2;
-            if ty >= self.y && ty + font::GLYPH_H <= self.y + self.h {
-                draw_clipped(
+            let ty = y + (row_height - crate::text::layout(face, &[]).height) / 2;
+            if ty >= self.y && ty + crate::text::layout(face, &[]).height <= self.y + self.h {
+                draw_clipped_font(
                     surf,
                     self.x + 2 + if iw > 0 { iw as i32 + 3 } else { 0 },
                     ty,
                     text,
                     if selected { Self::WINDOW } else { Self::TEXT },
                     self.x + self.w - 1,
+                    face,
                 );
             }
         }
@@ -693,7 +710,12 @@ impl ChildWindow {
         }
     }
 
-    fn render_choice(&self, surf: &mut Surface<'_>, focused: bool) {
+    fn render_choice(
+        &self,
+        surf: &mut Surface<'_>,
+        focused: bool,
+        face: Option<&crate::gdi::Font>,
+    ) {
         let combo = self.class == ControlClass::ComboBox;
         let height = if combo { self.h.min(20) } else { self.h };
         surf.fill_rect(self.x, self.y, self.w, height, Self::WINDOW);
@@ -704,13 +726,14 @@ impl ChildWindow {
                 .and_then(|i| self.list_items.get(i))
                 .map(|i| i.0.as_str())
                 .unwrap_or(&self.text);
-            draw_clipped(
+            draw_clipped_font(
                 surf,
                 self.x + 3,
                 self.y + 5,
                 value,
                 Self::TEXT,
                 self.x + self.w - 18,
+                face,
             );
             font::draw_str(surf, self.x + self.w - 12, self.y + 5, "v", Self::TEXT);
         }
@@ -737,13 +760,14 @@ impl ChildWindow {
                 if selected {
                     surf.fill_rect(self.x + 1, y, self.w - 2, 16, 0x001f);
                 }
-                draw_clipped(
+                draw_clipped_font(
                     surf,
                     self.x + 3,
                     y + 4,
                     text,
                     if selected { Self::WINDOW } else { Self::TEXT },
                     self.x + self.w - 2,
+                    face,
                 );
             }
         }
@@ -773,13 +797,31 @@ impl ChildWindow {
     /// right and then in `COLOR_BTNSHADOW` on top. The result reads as
     /// engraved into the face rather than merely faint, which is what
     /// makes Solitaire's disabled Undo button obviously dead.
-    fn draw_caption(&self, surf: &mut Surface<'_>, x: i32, y: i32, right: i32) {
-        if self.enabled {
-            draw_clipped(surf, x, y, &self.text, Self::TEXT, right);
+    fn draw_caption(
+        &self,
+        surf: &mut Surface<'_>,
+        x: i32,
+        y: i32,
+        right: i32,
+        face: Option<&crate::gdi::Font>,
+    ) {
+        if face.is_none() {
+            if self.enabled {
+                draw_clipped(surf, x, y, &self.text, Self::TEXT, right);
+            } else {
+                draw_clipped(surf, x + 1, y + 1, &self.text, Self::LIGHT, right + 1);
+                draw_clipped(surf, x, y, &self.text, Self::SHADOW, right);
+            }
             return;
         }
-        draw_clipped(surf, x + 1, y + 1, &self.text, Self::LIGHT, right + 1);
-        draw_clipped(surf, x, y, &self.text, Self::SHADOW, right);
+        let line = crate::text::layout(face, &self.text.encode_utf16().collect::<Vec<_>>());
+        let clip = [self.x, self.y, right, self.y.saturating_add(self.h)];
+        if self.enabled {
+            line.draw(surf, x, y, Self::TEXT, clip);
+        } else {
+            line.draw(surf, x + 1, y + 1, Self::LIGHT, clip);
+            line.draw(surf, x, y, Self::SHADOW, clip);
+        }
     }
 
     /// Paint the control. `focused` drives the focus rectangle and the
@@ -796,13 +838,16 @@ impl ChildWindow {
         if !self.visible || self.w <= 0 || self.h <= 0 {
             return;
         }
+        let face = gdi.and_then(|g| crate::text::selected(g, self.font));
         match self.class {
             ControlClass::TrackBar => self.render_track(surf, focused),
-            ControlClass::Button => self.render_button(surf, focused),
-            ControlClass::Edit => self.render_edit(surf, focused),
-            ControlClass::Static => self.render_static(surf),
+            ControlClass::Button => self.render_button(surf, focused, face.as_ref()),
+            ControlClass::Edit => self.render_edit(surf, focused, face.as_ref()),
+            ControlClass::Static => self.render_static(surf, face.as_ref()),
             ControlClass::ListView => self.render_list(surf, gdi),
-            ControlClass::ListBox | ControlClass::ComboBox => self.render_choice(surf, focused),
+            ControlClass::ListBox | ControlClass::ComboBox => {
+                self.render_choice(surf, focused, face.as_ref())
+            }
         }
         if self.image != 0 {
             if let Some(gdi) = gdi {
@@ -840,12 +885,17 @@ impl ChildWindow {
         }
     }
 
-    fn render_button(&self, surf: &mut Surface<'_>, focused: bool) {
+    fn render_button(
+        &self,
+        surf: &mut Surface<'_>,
+        focused: bool,
+        face: Option<&crate::gdi::Font>,
+    ) {
         if self.is_group_box() {
-            return self.render_group_box(surf);
+            return self.render_group_box(surf, face);
         }
         if self.is_check_like() {
-            return self.render_check(surf, focused);
+            return self.render_check(surf, focused, face);
         }
         let (mut x, mut y, mut w, mut h) = (self.x, self.y, self.w, self.h);
         if self.is_default() {
@@ -871,13 +921,13 @@ impl ChildWindow {
         draw_edge(surf, x, y, w, h, tl, br);
 
         let nudge = i32::from(self.pressed);
-        let text_w = font::str_width(&self.text);
+        let text_w = crate::text::layout(face, &self.text.encode_utf16().collect::<Vec<_>>()).width;
         let tx = x + ((w - text_w) / 2).max(1) + nudge;
-        let ty = y + ((h - font::GLYPH_H) / 2).max(0) + nudge;
+        let ty = y + ((h - crate::text::layout(face, &[]).height) / 2).max(0) + nudge;
         if self.image != 0 {
             return;
         }
-        self.draw_caption(surf, tx, ty, x + w - 2);
+        self.draw_caption(surf, tx, ty, x + w - 2, face);
 
         if focused {
             dotted_rect(surf, x + 3, y + 3, w - 6, h - 6, Self::TEXT);
@@ -892,9 +942,9 @@ impl ChildWindow {
     /// border for the caption rather than drawing the text over it. The
     /// frame's top runs along the middle of the caption's line, so the
     /// enclosed controls start below it.
-    fn render_group_box(&self, surf: &mut Surface<'_>) {
-        let top = self.y + font::GLYPH_H / 2;
-        let h = self.h - font::GLYPH_H / 2;
+    fn render_group_box(&self, surf: &mut Surface<'_>, face: Option<&crate::gdi::Font>) {
+        let top = self.y + crate::text::layout(face, &[]).height / 2;
+        let h = self.h - crate::text::layout(face, &[]).height / 2;
         if h <= 0 || self.w <= 0 {
             return;
         }
@@ -908,7 +958,9 @@ impl ChildWindow {
         }
         // Break the border under the caption, then stamp the text into
         // the gap. `Self::GROUP_LABEL_X` is Win32's indent.
-        let text_w = font::str_width(&self.text).min(self.w - Self::GROUP_LABEL_X - 2);
+        let text_w = crate::text::layout(face, &self.text.encode_utf16().collect::<Vec<_>>())
+            .width
+            .min(self.w - Self::GROUP_LABEL_X - 2);
         if text_w <= 0 {
             return;
         }
@@ -924,10 +976,11 @@ impl ChildWindow {
             self.x + Self::GROUP_LABEL_X,
             self.y,
             self.x + self.w - 1,
+            face,
         );
     }
 
-    fn render_check(&self, surf: &mut Surface<'_>, focused: bool) {
+    fn render_check(&self, surf: &mut Surface<'_>, focused: bool, face: Option<&crate::gdi::Font>) {
         let box_y = self.y + ((self.h - Self::CHECK_BOX) / 2).max(0);
         let side = Self::CHECK_BOX.min(self.h);
         surf.fill_rect(self.x, box_y, side, side, Self::WINDOW);
@@ -938,14 +991,14 @@ impl ChildWindow {
             surf.fill_rect(self.x + 3, box_y + 3, side - 6, side - 6, Self::TEXT);
         }
         let tx = self.x + side + 4;
-        let ty = self.y + ((self.h - font::GLYPH_H) / 2).max(0);
-        self.draw_caption(surf, tx, ty, self.x + self.w);
+        let ty = self.y + ((self.h - crate::text::layout(face, &[]).height) / 2).max(0);
+        self.draw_caption(surf, tx, ty, self.x + self.w, face);
         if focused {
             dotted_rect(surf, tx - 2, self.y, self.w - side - 2, self.h, Self::TEXT);
         }
     }
 
-    fn render_edit(&self, surf: &mut Surface<'_>, focused: bool) {
+    fn render_edit(&self, surf: &mut Surface<'_>, focused: bool, face: Option<&crate::gdi::Font>) {
         // A disabled edit takes the button face rather than the window
         // colour, which is how Win32 says "read-only" without changing
         // the text.
@@ -972,34 +1025,74 @@ impl ChildWindow {
         }
         // `ES_AUTOHSCROLL` behaviour: once the text outruns the field
         // the caret stays visible, so it is the *tail* that shows.
-        let max_chars = (inner_w / font::GLYPH_W).max(0) as usize;
-        let len = self.text.chars().count();
-        let shown: String = if len > max_chars {
-            self.text.chars().skip(len - max_chars).collect()
-        } else {
-            self.text.clone()
-        };
-        let ty = self.y + ((self.h - font::GLYPH_H) / 2).max(1);
-        font::draw_str(surf, self.x + 3, ty, &shown, Self::TEXT);
+        let mut shown = self.text.clone();
+        while !shown.is_empty()
+            && crate::text::layout(face, &shown.encode_utf16().collect::<Vec<_>>()).width > inner_w
+        {
+            shown.remove(0);
+        }
+        let line = crate::text::layout(face, &shown.encode_utf16().collect::<Vec<_>>());
+        let ty = self.y + ((self.h - crate::text::layout(face, &[]).height) / 2).max(1);
+        line.draw(
+            surf,
+            self.x + 3,
+            ty,
+            Self::TEXT,
+            [
+                self.x + 3,
+                self.y + 1,
+                self.x + self.w - 2,
+                self.y + self.h - 1,
+            ],
+        );
         if focused {
-            let caret_x = self.x + 3 + font::str_width(&shown);
+            let caret_x = self.x + 3 + line.width;
             if caret_x < self.x + self.w - 1 {
-                surf.fill_rect(caret_x, ty, 1, font::GLYPH_H, Self::TEXT);
+                surf.fill_rect(
+                    caret_x,
+                    ty,
+                    1,
+                    crate::text::layout(face, &[]).height,
+                    Self::TEXT,
+                );
             }
         }
     }
 
-    fn render_static(&self, surf: &mut Surface<'_>) {
+    fn render_static(&self, surf: &mut Surface<'_>, face: Option<&crate::gdi::Font>) {
         if self.image != 0 {
             return;
         }
-        let ty = self.y + ((self.h - font::GLYPH_H) / 2).max(0);
-        self.draw_caption(surf, self.x, ty, self.x + self.w);
+        let ty = self.y + ((self.h - crate::text::layout(face, &[]).height) / 2).max(0);
+        self.draw_caption(surf, self.x, ty, self.x + self.w, face);
     }
 }
 
 /// Draw `text` but stop before `right`, so a caption never bleeds out
 /// of its control.
+fn draw_clipped_font(
+    surf: &mut Surface<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: u16,
+    right: i32,
+    face: Option<&crate::gdi::Font>,
+) {
+    if face.is_none() {
+        return draw_clipped(surf, x, y, text, color, right);
+    }
+    let line = crate::text::layout(face, &text.encode_utf16().collect::<Vec<_>>());
+    let (_, h) = surf.dimensions();
+    line.draw(
+        surf,
+        x,
+        y,
+        color,
+        [x, y, right, y.saturating_add(line.height).min(h as i32)],
+    );
+}
+
 fn draw_clipped(surf: &mut Surface<'_>, x: i32, y: i32, text: &str, color: u16, right: i32) {
     let room = (right - x).max(0);
     let max_chars = (room / font::GLYPH_W) as usize;
@@ -1793,18 +1886,23 @@ impl Controls {
     ) {
         layer(0, surf);
         self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi, layer);
-        self.render_open_choices(surf, |parent| self.panel(parent).is_none());
+        self.render_open_choices(surf, |parent| self.panel(parent).is_none(), gdi);
         for panel in &self.panels {
             panel.render(surf);
             if panel.visible {
                 layer(panel.hwnd, surf);
             }
             self.render_children_of(surf, |parent| parent == panel.hwnd, gdi, layer);
-            self.render_open_choices(surf, |parent| parent == panel.hwnd);
+            self.render_open_choices(surf, |parent| parent == panel.hwnd, gdi);
         }
     }
 
-    fn render_open_choices(&self, surf: &mut Surface<'_>, owned: impl Fn(u32) -> bool) {
+    fn render_open_choices(
+        &self,
+        surf: &mut Surface<'_>,
+        owned: impl Fn(u32) -> bool,
+        gdi: Option<&crate::gdi::GdiState>,
+    ) {
         for child in &self.children {
             if child.class == ControlClass::ComboBox
                 && child.choice_open
@@ -1815,7 +1913,8 @@ impl Controls {
                 let mut moved = child.clone();
                 moved.x += ox;
                 moved.y += oy;
-                moved.render_choice(surf, child.hwnd == self.focus);
+                let face = gdi.and_then(|g| crate::text::selected(g, child.font));
+                moved.render_choice(surf, child.hwnd == self.focus, face.as_ref());
             }
         }
     }

@@ -13656,29 +13656,17 @@ fn create_font_indirect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     if pointer == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let height = i32::from_le_bytes(ctx.cpu.read_mem(pointer, 4)?.try_into().unwrap());
-    let h = ctx.kernel.gdi.create_font(height);
+    let raw = ctx.cpu.read_mem(pointer, 92)?;
+    let font = pocket_kernel::gdi::Font::from_logfont(raw.try_into().unwrap());
+    let h = ctx.kernel.gdi.create_logfont(font);
     Ok(DispatchOutcome::ReturnedR0(h))
 }
 
-// Preserve the stock fallback used by existing games; honor explicit LOGFONT
-// heights consistently in measurement and rasterization.
-fn selected_font_cell(kernel: &KernelState, dc: u32) -> (i32, i32) {
-    let height = kernel
+fn selected_text_font(kernel: &KernelState, dc: u32) -> Option<pocket_kernel::gdi::Font> {
+    kernel
         .gdi
         .dc(dc)
-        .filter(|d| d.selected_font != STOCK_SYSTEM_FONT)
-        .and_then(|d| kernel.gdi.get(d.selected_font))
-        .and_then(|object| match object {
-            pocket_kernel::gdi::GdiObject::Font(font) if font.height != 0 => {
-                Some(font.height.unsigned_abs().clamp(1, 96) as i32)
-            }
-            _ => None,
-        });
-    height.map_or(
-        (pocket_kernel::font::GLYPH_W, pocket_kernel::font::GLYPH_H),
-        |h| (((h * 6 + 4) / 8).max(1), h),
-    )
+        .and_then(|d| pocket_kernel::text::selected(&kernel.gdi, d.selected_font))
 }
 
 fn get_stock_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -15265,9 +15253,7 @@ fn get_object_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         if cb < LOGFONTW_SIZE {
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
-        let mut logfont = [0u8; LOGFONTW_SIZE as usize];
-        logfont[..4].copy_from_slice(&font.height.to_le_bytes());
-        ctx.cpu.write_mem(p, &logfont)?;
+        ctx.cpu.write_mem(p, &font.logfont)?;
         return Ok(DispatchOutcome::ReturnedR0(LOGFONTW_SIZE));
     }
     let (w, ht, bpp, bits_va) = match ctx.kernel.gdi.bitmap(h) {
@@ -17506,18 +17492,14 @@ fn stretch_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 ///                   int nMaxExtent, LPINT lpnFit, LPINT alpDx,
 ///                   LPSIZE lpSize)`
 ///
-/// Report the extent of `cchString` wide chars under our fixed 6x8
-/// font — every glyph advances `GLYPH_W` pixels, and the line is
-/// `GLYPH_H` pixels tall, matching what `ExtTextOutW`/`DrawTextW`
-/// actually draw. Games center and wrap their menus with this, so a
-/// stub returning 0 leaves the text off-screen (Bubble Breaker's
-/// "Score:" counter and bottom soft-key bar both vanish).
+/// Measure UTF-16 with the selected LOGFONT and the same proportional
+/// advances as TextOut/DrawText. Unselected stock fonts retain 6x8 metrics.
 ///
 /// `lpnFit` gets the number of chars that fit `nMaxExtent` and
 /// `alpDx` (when non-NULL) the cumulative advance per char.
 fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hdc = ctx.arg_u32(0)?;
-    let (cell_w, cell_h) = selected_font_cell(ctx.kernel, hdc);
+    let selected_font = selected_text_font(ctx.kernel, hdc);
     let str_p = ctx.arg_u32(1)?;
     let cch = ctx.arg_u32(2)? as i32;
     let max_extent = ctx.arg_u32(3)? as i32;
@@ -17536,28 +17518,28 @@ fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
                 break;
             }
             let u = u16::from_le_bytes([raw[i], raw[i + 1]]);
-            if u == 0 {
-                break;
-            }
             chars.push(u);
         }
     }
-    let n = chars.len() as i32;
-    let cx = n * cell_w;
-    let cy = cell_h;
+    let layout = pocket_kernel::text::layout(selected_font.as_ref(), &chars);
+    let cx = layout.width;
+    let cy = layout.height;
     ctx.cpu.write_mem(lp_size, &cx.to_le_bytes())?;
     ctx.cpu.write_mem(lp_size + 4, &cy.to_le_bytes())?;
     if lpn_fit != 0 {
         let fit = if max_extent >= 0 {
-            (max_extent / cell_w).min(n)
+            layout
+                .advances
+                .iter()
+                .take_while(|&&dx| dx <= max_extent)
+                .count() as i32
         } else {
-            n
+            chars.len() as i32
         };
         ctx.cpu.write_mem(lpn_fit, &fit.to_le_bytes())?;
     }
     if alp_dx != 0 {
-        for (i, _) in chars.iter().enumerate() {
-            let dx = (i as i32 + 1) * cell_w;
+        for (i, dx) in layout.advances.iter().enumerate() {
             ctx.cpu
                 .write_mem(alp_dx + (i * 4) as u32, &dx.to_le_bytes())?;
         }
@@ -17567,22 +17549,21 @@ fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
 
 /// `int DrawTextW(HDC hdc, LPCWSTR text, int n, LPRECT rc, UINT fmt)`
 /// — render the supplied UTF-16 string into the destination DC's
-/// surface using a built-in 6×8 ASCII font. `n` may be `-1`, in which
+/// surface using the selected font. `n` may be `-1`, in which
 /// case the string is NUL-terminated.
 fn draw_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     text_draw::draw(ctx)
 }
 
 /// `BOOL TextOutW(HDC, int x, int y, LPCWSTR text, int len)` — render a
-/// short UTF-16 string at the given pixel coordinates using the same
-/// 6×8 font as `DrawTextW`.
+/// short UTF-16 string using the same font layout as `DrawTextW`.
 fn text_out_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hdc = ctx.arg_u32(0)?;
     let x = ctx.arg_u32(1)? as i32;
     let y = ctx.arg_u32(2)? as i32;
     let text_p = ctx.arg_u32(3)?;
     let len = ctx.arg_u32(4)? as i32;
-    blit_text_at(ctx, hdc, x, y, text_p, len)?;
+    blit_text_at(ctx, hdc, x, y, text_p, len, 0, None, None)?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -17592,12 +17573,32 @@ fn ext_text_out_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let hdc = ctx.arg_u32(0)?;
     let x = ctx.arg_u32(1)? as i32;
     let y = ctx.arg_u32(2)? as i32;
-    let _opts = ctx.arg_u32(3)?;
+    let opts = ctx.arg_u32(3)?;
     // The 5th and 6th args go on the stack; arg_u32(4)/(5) handle that.
-    let _rc = ctx.arg_u32(4).unwrap_or(0);
+    let rc = ctx.arg_u32(4)?;
     let text_p = ctx.arg_u32(5).unwrap_or(0);
     let len = ctx.arg_u32(6).unwrap_or(0) as i32;
-    blit_text_at(ctx, hdc, x, y, text_p, len)?;
+    let rect = if rc != 0 && opts & 6 != 0 {
+        let bytes = ctx.cpu.read_mem(rc, 16)?;
+        Some(std::array::from_fn(|i| {
+            i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+        }))
+    } else {
+        None
+    };
+    let dx_p = ctx.arg_u32(7)?;
+    let dx = if dx_p != 0 {
+        let bytes = ctx.cpu.read_mem(dx_p, (len.max(0) as u32).min(1024) * 4)?;
+        Some(
+            bytes
+                .chunks_exact(4)
+                .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    blit_text_at(ctx, hdc, x, y, text_p, len, opts, rect, dx.as_deref())?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -17628,6 +17629,9 @@ fn blit_text_at(
     y: i32,
     text_p: u32,
     len: i32,
+    opts: u32,
+    rect: Option<[i32; 4]>,
+    dx: Option<&[i32]>,
 ) -> Result<(), KernelError> {
     sync_dib_from_guest(ctx, hdc)?;
     let dc_meta = match ctx.kernel.gdi.dc(hdc).cloned() {
@@ -17655,27 +17659,48 @@ fn blit_text_at(
     }
     let color = colorref_to_rgb565(dc_meta.text_color);
     let bk_color = colorref_to_rgb565(dc_meta.bk_color);
-    let (cell_w, cell_h) = selected_font_cell(ctx.kernel, hdc);
-    let pixel_w = chars.len() as i32 * cell_w;
-    let (x, y) = aligned_text_origin(&dc_meta, x, y, pixel_w, cell_h);
+    let selected_font = selected_text_font(ctx.kernel, hdc);
+    let layout = pocket_kernel::text::layout_dx(selected_font.as_ref(), &chars, dx);
+    let (x, mut y) = aligned_text_origin(&dc_meta, x, y, layout.width, layout.height);
+    // TA_BASELINE uses ascent, TA_BOTTOM uses the complete cell.
+    if dc_meta.text_align & 0x18 == 0x18 {
+        y += layout.height - layout.ascent;
+    } else if dc_meta.text_align & 0x18 == 8 {
+        y -= layout.height;
+    }
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
-        if !dc_meta.bk_transparent {
-            surf.fill_rect(x, y, pixel_w, cell_h, bk_color);
-        }
         let (w, h) = surf.dimensions();
-        let clip = [0, 0, w as i32, h as i32];
-        for (i, ch) in chars.iter().enumerate() {
-            pocket_kernel::font::draw_char_sized_clipped(
-                &mut surf,
-                x.saturating_add(i as i32 * cell_w),
-                y,
-                char::from_u32(u32::from(*ch)).unwrap_or('?'),
-                color,
-                cell_w,
-                cell_h,
-                clip,
-            );
+        let mut clip = [0, 0, w as i32, h as i32];
+        if opts & 4 != 0 {
+            if let Some(r) = rect {
+                clip = [
+                    r[0].max(0),
+                    r[1].max(0),
+                    r[2].min(w as i32),
+                    r[3].min(h as i32),
+                ];
+            }
         }
+        if opts & 2 != 0 {
+            if let Some(r) = rect {
+                surf.fill_rect(
+                    r[0],
+                    r[1],
+                    r[2].saturating_sub(r[0]),
+                    r[3].saturating_sub(r[1]),
+                    bk_color,
+                );
+            }
+        } else if !dc_meta.bk_transparent {
+            let left = x.max(clip[0]);
+            let top = y.max(clip[1]);
+            let right = x.saturating_add(layout.width).min(clip[2]);
+            let bottom = y.saturating_add(layout.height).min(clip[3]);
+            if right > left && bottom > top {
+                surf.fill_rect(left, top, right - left, bottom - top, bk_color);
+            }
+        }
+        layout.draw(&mut surf, x, y, color, clip);
         surf.mark_dirty();
     }
     sync_dst_dib_to_guest(ctx, hdc)?;
@@ -19663,7 +19688,30 @@ fn build_dialog_from_template_for(
     ctx.kernel
         .window_visibility
         .insert(owner_hwnd, modal || tmpl.style & WS_VISIBLE != 0);
-    let dlu = Dlu::default();
+    let dialog_font = tmpl.font.as_ref().map(|(points, name)| {
+        let mut raw = [0u8; 92];
+        // WinCE reports 96 logical DPI. A dialog point size specifies EM height.
+        let height = -((i32::from(*points).clamp(1, 192) * 96 + 36) / 72);
+        raw[..4].copy_from_slice(&height.to_le_bytes());
+        raw[16..20].copy_from_slice(&400i32.to_le_bytes());
+        for (i, u) in name.encode_utf16().take(31).enumerate() {
+            raw[28 + i * 2..30 + i * 2].copy_from_slice(&u.to_le_bytes());
+        }
+        let font = pocket_kernel::gdi::Font::from_logfont(raw);
+        ctx.kernel.gdi.create_dialog_font(font)
+    });
+    let dlu = dialog_font
+        .and_then(|handle| pocket_kernel::text::selected(&ctx.kernel.gdi, handle))
+        .map_or_else(Dlu::default, |font| {
+            let alphabet: Vec<_> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                .encode_utf16()
+                .collect();
+            let line = pocket_kernel::text::layout(Some(&font), &alphabet);
+            Dlu {
+                base_x: ((line.width / 26 + 1) / 2).max(1),
+                base_y: line.height.max(1),
+            }
+        });
     let (px, py, pw, ph) = dlu.to_px(tmpl.x as i32, tmpl.y as i32, tmpl.cx as i32, tmpl.cy as i32);
     // Custom modal dialogs may deliberately omit the caption and draw
     // their own buttons. Modal ownership does not add window styles.
@@ -19746,6 +19794,11 @@ fn build_dialog_from_template_for(
             iw,
             ih,
         );
+        if let Some(font) = dialog_font {
+            if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
+                child.font = font;
+            }
+        }
         if modal {
             ctx.kernel.window_rects.insert(hwnd, (ix, iy, iw, ih));
             ctx.kernel.window_parents.insert(hwnd, owner_hwnd);

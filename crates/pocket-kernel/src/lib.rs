@@ -60,6 +60,7 @@ pub mod sdl;
 pub mod serial;
 pub mod shared_objects;
 pub mod shell_keyboard;
+pub mod text;
 mod tls;
 pub mod tracker;
 pub mod vfs;

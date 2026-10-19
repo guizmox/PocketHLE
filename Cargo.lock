@@ -2952,6 +2952,7 @@ dependencies = [
 name = "pocket-kernel"
 version = "0.3.4"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "bytemuck",
  "byteorder",

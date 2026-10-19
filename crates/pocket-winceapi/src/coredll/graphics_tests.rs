@@ -2769,8 +2769,14 @@ fn font_height_drives_extent_and_textout_without_changing_stock_metrics() {
     let dc = kernel.gdi.create_memory_dc();
     let bitmap = kernel.gdi.create_compatible_bitmap(100, 40);
     kernel.gdi.select_into(dc, bitmap);
-    assert_eq!(selected_font_cell(&kernel, dc), (6, 8));
-    cpu.write_mem(0x1100, &(-24i32).to_le_bytes()).unwrap();
+    assert!(selected_text_font(&kernel, dc).is_none());
+    let mut raw = [0u8; 92];
+    raw[..4].copy_from_slice(&(-24i32).to_le_bytes());
+    raw[16..20].copy_from_slice(&700i32.to_le_bytes());
+    for (i, u) in "Arial".encode_utf16().enumerate() {
+        raw[28 + i * 2..30 + i * 2].copy_from_slice(&u.to_le_bytes());
+    }
+    cpu.write_mem(0x1100, &raw).unwrap();
     write_wide_str(&mut cpu, 0x1200, 16, "WW").unwrap();
     let mut ctx = CallCtx {
         cpu: &mut cpu,
@@ -2779,32 +2785,33 @@ fn font_height_drives_extent_and_textout_without_changing_stock_metrics() {
     };
     let font = call(&mut ctx, create_font_indirect, &[0x1100]);
     ctx.kernel.gdi.select_into(dc, font);
-    assert_eq!(selected_font_cell(ctx.kernel, dc), (18, 24));
+    assert_eq!(
+        selected_text_font(ctx.kernel, dc).unwrap().face_name(),
+        "Arial"
+    );
     assert_eq!(
         call(
             &mut ctx,
             get_text_extent_ex_point_w,
-            &[dc, 0x1200, 2, 20, 0x1300, 0x1400, 0x1500]
+            &[dc, 0x1200, 2, 30, 0x1300, 0x1400, 0x1500]
         ),
         1
     );
-    assert_eq!(
-        ctx.cpu.read_mem(0x1500, 8).unwrap(),
-        [36u32.to_le_bytes(), 24u32.to_le_bytes()].concat()
-    );
+    let size = ctx.cpu.read_mem(0x1500, 8).unwrap();
+    let width = i32::from_le_bytes(size[..4].try_into().unwrap());
+    let height = i32::from_le_bytes(size[4..].try_into().unwrap());
+    assert!((40..=50).contains(&width));
+    assert!((24..=32).contains(&height));
     assert_eq!(ctx.cpu.read_mem(0x1300, 4).unwrap(), 1u32.to_le_bytes());
-    assert_eq!(
-        ctx.cpu.read_mem(0x1400, 8).unwrap(),
-        [18u32.to_le_bytes(), 36u32.to_le_bytes()].concat()
-    );
+    assert_eq!(ctx.cpu.read_mem(0x1404, 4).unwrap(), width.to_le_bytes());
     call(&mut ctx, get_object_w, &[font, 92, 0x1600]);
-    assert_eq!(ctx.cpu.read_mem(0x1600, 4).unwrap(), (-24i32).to_le_bytes());
+    assert_eq!(ctx.cpu.read_mem(0x1600, 92).unwrap(), raw);
     ctx.kernel.gdi.dc_mut(dc).unwrap().text_color = 0x00ffffff;
     ctx.kernel.gdi.dc_mut(dc).unwrap().bk_transparent = true;
     call(&mut ctx, text_out_w, &[dc, 0, 0, 0x1200, 2]);
     let bm = ctx.kernel.gdi.bitmap(bitmap).unwrap();
     assert!(bm.pixels[8 * 100 * 2..24 * 100 * 2].iter().any(|&b| b != 0));
-    assert!(bm.pixels[24 * 100 * 2..].iter().all(|&b| b == 0));
+    assert!(bm.pixels[32 * 100 * 2..].iter().all(|&b| b == 0));
 }
 
 #[test]
@@ -2836,17 +2843,18 @@ fn font_height_drawtext_wraps_and_measures_the_same_cells() {
         kernel: &mut kernel,
         thunk: &thunk,
     };
+    let height = call(&mut ctx, draw_text_w, &[dc, 0x1200, 6, 0x1400, 0x410]);
+    assert!((50..=60).contains(&height)); // Three lines of two proportional W glyphs.
+    let bounds = ctx.cpu.read_mem(0x1400 + 8, 8).unwrap();
+    let width = i32::from_le_bytes(bounds[..4].try_into().unwrap());
+    assert!((28..=36).contains(&width));
     assert_eq!(
-        call(&mut ctx, draw_text_w, &[dc, 0x1200, 6, 0x1400, 0x410]),
-        32
-    );
-    assert_eq!(
-        ctx.cpu.read_mem(0x1400 + 8, 8).unwrap(),
-        [36i32.to_le_bytes(), 32i32.to_le_bytes()].concat()
+        i32::from_le_bytes(bounds[4..].try_into().unwrap()),
+        height as i32
     );
     assert_eq!(
         call(&mut ctx, draw_text_w, &[dc, 0x1200, 6, 0x1400, 0x10]),
-        32
+        height
     );
     let bm = ctx.kernel.gdi.bitmap(bitmap).unwrap();
     assert!(bm.pixels[16 * 60 * 2..32 * 60 * 2].iter().any(|&b| b != 0));

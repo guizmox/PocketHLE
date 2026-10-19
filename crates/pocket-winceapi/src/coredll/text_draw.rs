@@ -1,14 +1,19 @@
-//! DrawText measurement and rendering share the same small bitmap-font layout.
+//! DrawText measurement and rendering share TrueType advances.
 use super::*;
-use pocket_kernel::font::draw_char_sized_clipped;
+use pocket_kernel::text;
 
-fn lines(chars: &[u16], width: i32, format: u32, cell_w: i32) -> Vec<Vec<u16>> {
+fn lines(
+    chars: &[u16],
+    width: i32,
+    format: u32,
+    face: Option<&pocket_kernel::gdi::Font>,
+) -> Vec<Vec<u16>> {
     if chars.is_empty() {
         return Vec::new();
     }
     let single = format & 0x20 != 0;
     let wrap = !single && format & 0x10 != 0;
-    let capacity = (width.max(cell_w) / cell_w) as usize;
+
     let mut result = Vec::new();
     let mut line = Vec::new();
     let mut i = 0;
@@ -22,7 +27,11 @@ fn lines(chars: &[u16], width: i32, format: u32, cell_w: i32) -> Vec<Vec<u16>> {
             result.push(std::mem::take(&mut line));
             continue;
         }
-        if wrap && line.len() >= capacity {
+        if wrap && !line.is_empty() && {
+            let mut candidate = line.clone();
+            candidate.push(c);
+            text::layout(face, &candidate).width > width.max(1)
+        } {
             if c == 32 {
                 result.push(std::mem::take(&mut line));
                 continue;
@@ -90,14 +99,15 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
             String::from_utf16_lossy(&chars)
         );
     }
-    let (cell_w, cell_h) = selected_font_cell(ctx.kernel, dc);
-    let layout = lines(&chars, r[2].saturating_sub(r[0]), format, cell_w);
+    let face = selected_text_font(ctx.kernel, dc);
+    let cell_h = text::layout(face.as_ref(), &[]).height;
+    let layout = lines(&chars, r[2].saturating_sub(r[0]), format, face.as_ref());
     let height = layout.len() as i32 * cell_h;
     if format & 0x400 != 0 {
         if rect != 0 {
             let width = layout
                 .iter()
-                .map(|l| l.len() as i32 * cell_w)
+                .map(|l| text::layout(face.as_ref(), l).width)
                 .max()
                 .unwrap_or(0);
             let measured = [
@@ -135,10 +145,12 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
                 y = y.saturating_add((r[3].saturating_sub(r[1]) - height) / 2);
             }
         }
-        // Keep the existing top placement for DT_BOTTOM until native font
-        // metrics and sibling clipping are supported consistently.
+        if format & 0x20 != 0 && format & 8 != 0 {
+            y = r[3].saturating_sub(height);
+        }
         for line in layout {
-            let width = line.len() as i32 * cell_w;
+            let rendered = text::layout(face.as_ref(), &line);
+            let width = rendered.width;
             let x = if format & 1 != 0 {
                 r[0].saturating_add((r[2].saturating_sub(r[0]) - width) / 2)
             } else if format & 2 != 0 {
@@ -163,18 +175,7 @@ pub(super) fn draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
                     );
                 }
             }
-            for (i, c) in line.into_iter().enumerate() {
-                draw_char_sized_clipped(
-                    &mut surf,
-                    x.saturating_add(i as i32 * cell_w),
-                    y,
-                    char::from_u32(c as u32).unwrap_or('?'),
-                    colorref_to_rgb565(meta.text_color),
-                    cell_w,
-                    cell_h,
-                    clip,
-                );
-            }
+            rendered.draw(&mut surf, x, y, colorref_to_rgb565(meta.text_color), clip);
             y = y.saturating_add(cell_h);
         }
         surf.mark_dirty();

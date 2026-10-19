@@ -60,6 +60,7 @@ pub struct DialogTemplate {
     pub cy: i16,
     pub title: String,
     pub items: Vec<DialogItem>,
+    pub font: Option<(u16, String)>,
 }
 
 /// Dialog-unit to pixel conversion.
@@ -209,10 +210,11 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
     let _menu = r.sz_or_ord()?;
     let _class = r.sz_or_ord()?;
     let title = r.sz()?;
-    if style & DS_SETFONT != 0 {
-        let _point_size = r.u16()?;
-        let _typeface = r.sz()?;
-    }
+    let font = if style & DS_SETFONT != 0 {
+        Some((r.u16()?, r.sz()?))
+    } else {
+        None
+    };
 
     let mut items = Vec::with_capacity(cdit as usize);
     for _ in 0..cdit {
@@ -254,6 +256,7 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
         cy,
         title,
         items,
+        font,
     })
 }
 
@@ -429,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dsetfont_header_skips_the_typeface() {
+    fn font_dialog_template_preserves_typeface_and_point_size() {
         let mut b = Builder::new();
         b.u32(0x5000_0040) // DS_SETFONT
             .u32(0)
@@ -458,6 +461,7 @@ mod tests {
 
         let t = parse(&b.0).expect("template parses");
         assert_eq!(t.title, "Options");
+        assert_eq!(t.font, Some((9, "Tahoma".to_string())));
         assert_eq!(t.items.len(), 1);
         assert_eq!(t.items[0].id, 42);
         assert_eq!(t.items[0].title, "&Vegas");

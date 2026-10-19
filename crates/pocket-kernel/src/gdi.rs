@@ -241,6 +241,32 @@ pub struct Pen {
 #[derive(Debug, Clone, Copy)]
 pub struct Font {
     pub height: i32,
+    /// Original CE LOGFONTW, including face name, weight, charset and quality.
+    pub logfont: [u8; 92],
+}
+impl Font {
+    pub fn new(height: i32) -> Self {
+        let mut raw = [0; 92];
+        raw[..4].copy_from_slice(&height.to_le_bytes());
+        Self::from_logfont(raw)
+    }
+    pub fn from_logfont(logfont: [u8; 92]) -> Self {
+        Self {
+            height: i32::from_le_bytes(logfont[..4].try_into().unwrap()),
+            logfont,
+        }
+    }
+    pub fn field(&self, offset: usize) -> i32 {
+        i32::from_le_bytes(self.logfont[offset..offset + 4].try_into().unwrap())
+    }
+    pub fn face_name(&self) -> String {
+        let units: Vec<_> = self.logfont[28..]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .take_while(|&u| u != 0)
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -338,7 +364,7 @@ impl GdiState {
             GdiObject::Brush(Brush { color: 0x0040_4040 }),
         );
         s.objects
-            .insert(STOCK_SYSTEM_FONT, GdiObject::Font(Font { height: 12 }));
+            .insert(STOCK_SYSTEM_FONT, GdiObject::Font(Font::new(12)));
         // Every memory DC starts with a 1x1 monochrome bitmap selected.
         // We never draw through it; it exists so the first
         // SelectObject(memdc, hbm) can return a non-NULL "previous".
@@ -421,9 +447,28 @@ impl GdiState {
         h
     }
 
+    /// Fonts owned by the HLE dialog manager are shared across identical
+    /// templates. Guest CreateFontIndirectW still creates independent objects.
+    pub fn create_dialog_font(&mut self, font: Font) -> u32 {
+        if let Some((&handle, _)) = self
+            .objects
+            .iter()
+            .find(|(_, object)| matches!(object, GdiObject::Font(f) if f.logfont == font.logfont))
+        {
+            return handle;
+        }
+        self.create_logfont(font)
+    }
+
+    pub fn create_logfont(&mut self, font: Font) -> u32 {
+        let h = self.alloc_handle();
+        self.objects.insert(h, GdiObject::Font(font));
+        h
+    }
+
     pub fn create_font(&mut self, height: i32) -> u32 {
         let h = self.alloc_handle();
-        self.objects.insert(h, GdiObject::Font(Font { height }));
+        self.objects.insert(h, GdiObject::Font(Font::new(height)));
         h
     }
 
