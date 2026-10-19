@@ -66,3 +66,10 @@
 .\verification\standard-controls-cargo-fmt.log
 .\verification\standard-controls-preview.log
 .\verification\Standard-Controls-Renderer.png
+.\verification\navigator-language-pinceau-20261019.txt
+.\verification\language-brush-before-test.log
+.\verification\language-brush-tests.log
+.\verification\language-brush-rustfmt.log
+.\verification\Language-Brush-Before.png
+.\verification\Language-Brush-After.png
+.\verification\Language-Buttons-After.png

@@ -983,11 +983,18 @@ impl ChildWindow {
             return;
         }
         if let Some(color) = self.background_color {
+            // A combo's template height reserves space for its dropdown.
+            // Its parent brush must not erase the siblings beneath the closed field.
+            let height = if self.class == ControlClass::ComboBox {
+                self.choice_closed_height()
+            } else {
+                self.h
+            };
             surf.fill_rect(
                 self.x,
                 self.y,
                 self.w,
-                self.h,
+                height,
                 crate::framebuffer::colorref_to_rgb565(color),
             );
         }
@@ -2246,6 +2253,109 @@ fn vk_to_char(vk: u16) -> Option<char> {
 mod tests {
     use super::*;
     use crate::gdi::Bitmap;
+
+    #[test]
+    fn combo_parent_brush_does_not_erase_buttons_created_before_it() {
+        let mut controls = Controls::default();
+        // Dialog templates may declare the bottom buttons before the combo.
+        controls.create(
+            PARENT,
+            ControlClass::Button,
+            1,
+            "OK".into(),
+            WS_VISIBLE,
+            62,
+            190,
+            80,
+            34,
+        );
+        controls.create(
+            PARENT,
+            ControlClass::Button,
+            2,
+            "Cancel".into(),
+            WS_VISIBLE,
+            182,
+            190,
+            80,
+            34,
+        );
+        let mut gdi = crate::gdi::GdiState::new();
+        let font = gdi.create_font(18);
+        controls.create(
+            PARENT,
+            ControlClass::Button,
+            4,
+            "Use Default Device Language".into(),
+            WS_VISIBLE | 3,
+            12,
+            8,
+            290,
+            24,
+        );
+        controls.create(
+            PARENT,
+            ControlClass::Static,
+            5,
+            "Language".into(),
+            WS_VISIBLE,
+            4,
+            40,
+            64,
+            20,
+        );
+        for child in &mut controls.children {
+            child.font = font;
+        }
+        let mut bitmap = standard_canvas(320, 240);
+        Surface::Bitmap(&mut bitmap).fill_rect(
+            0,
+            0,
+            320,
+            240,
+            crate::framebuffer::colorref_to_rgb565(0x00efe2d6),
+        );
+        controls.render_with_images(&mut Surface::Bitmap(&mut bitmap), &gdi);
+        let before = bitmap.pixels.clone();
+        let combo = controls.create(
+            PARENT,
+            ControlClass::ComboBox,
+            3,
+            "UK English".into(),
+            WS_VISIBLE | 3,
+            72,
+            40,
+            150,
+            180,
+        );
+        // WM_CTLCOLORSTATIC/WM_CTLCOLORLISTBOX returns the dialog's blue brush.
+        controls.get_mut(combo).unwrap().background_color = Some(0x00efe2d6);
+        controls.get_mut(combo).unwrap().font = font;
+        controls.update_choice_fonts(&gdi);
+        controls.render_with_images(&mut Surface::Bitmap(&mut bitmap), &gdi);
+        if let Ok(path) = std::env::var("POCKETHLE_LANGUAGE_PREVIEW") {
+            let mut fb = crate::Framebuffer::new(320, 240);
+            fb.pixels.copy_from_slice(&bitmap.pixels);
+            std::fs::write(path, fb.snapshot_ppm()).unwrap();
+        }
+        for (x, y) in [(75usize, 210usize), (210, 210)] {
+            let offset = (y * 320 + x) * 2;
+            assert_eq!(
+                &bitmap.pixels[offset..offset + 2],
+                &before[offset..offset + 2],
+                "closed combo must preserve the button beneath ({x},{y})"
+            );
+        }
+        // Every pixel below the closed field remains untouched by the combo.
+        let top = 40 + controls.get(combo).unwrap().choice_closed_height() as usize;
+        for y in top..240usize {
+            let row = (y * 320 + 72) * 2;
+            assert_eq!(
+                &bitmap.pixels[row..row + 150 * 2],
+                &before[row..row + 150 * 2]
+            );
+        }
+    }
 
     fn standard_test_control(
         class: ControlClass,
