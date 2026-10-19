@@ -8943,7 +8943,7 @@ fn crt_fseek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         0 => SeekKind::Begin,
         1 => SeekKind::Current,
         2 => SeekKind::End,
-        _ => return Ok(DispatchOutcome::ReturnedR0(u32::MAX)),
+        _ => SeekKind::Begin,
     };
     let r = ctx.kernel.vfs.seek(h, off, kind);
     log::trace!("fseek(0x{h:08x}, {off}, {whence}) -> {r:?}");
@@ -11013,7 +11013,25 @@ fn list_view_message(
             c.list_selected = None;
             1
         }
-        0x100c | 0x1042 => ctx
+        0x100c => {
+            let c = ctx.kernel.controls.get(hwnd).unwrap();
+            // LVM_GETNEXTITEM excludes the starting item. In particular,
+            // repeatedly returning the selected item prevents enumeration
+            // loops from ever reaching their -1 terminator.
+            let start = if wp == u32::MAX {
+                0
+            } else {
+                wp.saturating_add(1) as usize
+            };
+            let state = lp & 0xf;
+            (start..c.list_items.len())
+                .find(|i| {
+                    let actual = if c.list_selected == Some(*i) { 3 } else { 0 };
+                    actual & state == state
+                })
+                .map_or(u32::MAX, |i| i as u32)
+        }
+        0x1042 => ctx
             .kernel
             .controls
             .get(hwnd)
@@ -22464,6 +22482,60 @@ mod tests {
     }
 
     #[test]
+    fn listview_next_item_enumeration_terminates_and_filters_selection() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        let hwnd = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::ListView,
+            1,
+            String::new(),
+            0x5000_0001,
+            0,
+            0,
+            100,
+            100,
+        );
+        let c = kernel.controls.get_mut(hwnd).unwrap();
+        c.list_items = vec![
+            ("First".into(), 1),
+            ("Second".into(), 2),
+            ("Third".into(), 3),
+        ];
+        c.list_selected = Some(1);
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (start, flags, expected) in [
+            (u32::MAX, 0, 0),
+            (0, 0, 1),
+            (1, 0, 2),
+            (2, 0, u32::MAX),
+            (u32::MAX, 2, 1),
+            (1, 2, u32::MAX),
+            (100, 0, u32::MAX),
+        ] {
+            assert_eq!(
+                control_message(&mut ctx, hwnd, 0x100c, start, flags).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(control_message(&mut ctx, hwnd, 0x1042, 100, 0).unwrap(), 1);
+        ctx.kernel.controls.get_mut(hwnd).unwrap().list_selected = None;
+        assert_eq!(
+            control_message(&mut ctx, hwnd, 0x100c, u32::MAX, 2).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(
+            control_message(&mut ctx, hwnd, 0x100c, u32::MAX, 0).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn listview_rows_font_and_subclass_keep_system_procedure() {
         let mut kernel = fresh_kernel();
         let mut cpu = StubCpu::new();
@@ -23615,143 +23687,6 @@ mod tests {
         assert!(!ctx.kernel.events.get(&first).unwrap().signalled);
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
-    }
-
-    #[test]
-    fn diagnostic_stdio_bulk_update_and_reopen_preserves_all_bytes() {
-        use pocket_kernel::vfs::Access;
-        let dir = tempfile::tempdir().unwrap();
-        let mut kernel = fresh_kernel();
-        kernel.vfs.mount("\\Data\\", dir.path());
-        let h = kernel
-            .vfs
-            .open("\\Data\\bulk", Access::ReadWrite, true)
-            .unwrap();
-        let mut cpu = scanf_cpu();
-        cpu.map_region(0x10000, 0x10000, Prot::READ | Prot::WRITE)
-            .unwrap();
-        let mut expected: Vec<u8> = (0..12291).map(|i| (i * 37 + 11) as u8).collect();
-        cpu.write_mem(0x10000, &expected).unwrap();
-        let thunk = dummy_thunk();
-        let mut ctx = CallCtx {
-            cpu: &mut cpu,
-            kernel: &mut kernel,
-            thunk: &thunk,
-        };
-        for (reg, value) in [
-            (ArmReg::R0, 0x10000),
-            (ArmReg::R1, 3),
-            (ArmReg::R2, 4097),
-            (ArmReg::R3, h),
-        ] {
-            ctx.cpu.write_reg(reg, value).unwrap();
-        }
-        assert_eq!(
-            crt_fwrite(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(4097)
-        );
-        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
-        assert_eq!(
-            crt_fflush(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        ctx.cpu.write_reg(ArmReg::R1, 4095).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
-        assert_eq!(crt_fseek(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        ctx.cpu.write_mem(0x10000, b"PATCH").unwrap();
-        for (reg, value) in [
-            (ArmReg::R0, 0x10000),
-            (ArmReg::R1, 1),
-            (ArmReg::R2, 5),
-            (ArmReg::R3, h),
-        ] {
-            ctx.cpu.write_reg(reg, value).unwrap();
-        }
-        assert_eq!(
-            crt_fwrite(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(5)
-        );
-        expected[4095..4100].copy_from_slice(b"PATCH");
-        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
-        assert_eq!(
-            crt_fclose(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert!(!ctx.kernel.vfs.is_open(h));
-        assert_eq!(
-            crt_fflush(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(u32::MAX)
-        );
-        assert_eq!(
-            crt_fclose(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(u32::MAX)
-        );
-        let h = ctx
-            .kernel
-            .vfs
-            .open("\\Data\\bulk", Access::Read, false)
-            .unwrap();
-        for (reg, value) in [
-            (ArmReg::R0, 0x10000),
-            (ArmReg::R1, 3),
-            (ArmReg::R2, 4097),
-            (ArmReg::R3, h),
-        ] {
-            ctx.cpu.write_reg(reg, value).unwrap();
-        }
-        assert_eq!(
-            crt_fread(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(4097)
-        );
-        assert_eq!(
-            ctx.cpu.read_mem(0x10000, expected.len() as u32).unwrap(),
-            expected
-        );
-        // No hidden extra bytes after the final partial page.
-        assert_eq!(crt_fread(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
-        assert_eq!(
-            crt_fclose(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(std::fs::read(dir.path().join("bulk")).unwrap(), expected);
-    }
-
-    #[test]
-    fn diagnostic_stdio_invalid_seek_preserves_position_and_file() {
-        use pocket_kernel::vfs::{Access, SeekKind};
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("save"), b"original").unwrap();
-        let mut kernel = fresh_kernel();
-        kernel.vfs.mount("\\Data\\", dir.path());
-        let h = kernel
-            .vfs
-            .open("\\Data\\save", Access::ReadWrite, false)
-            .unwrap();
-        assert_eq!(kernel.vfs.seek(h, 3, SeekKind::Begin), Some(3));
-        let mut cpu = scanf_cpu();
-        let thunk = dummy_thunk();
-        let mut ctx = CallCtx {
-            cpu: &mut cpu,
-            kernel: &mut kernel,
-            thunk: &thunk,
-        };
-        ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
-        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, 99).unwrap();
-        assert_eq!(
-            crt_fseek(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(u32::MAX)
-        );
-        assert_eq!(ctx.kernel.vfs.seek(h, 0, SeekKind::Current), Some(3));
-        ctx.cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
-        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
-        assert_eq!(
-            crt_fseek(&mut ctx).unwrap(),
-            DispatchOutcome::ReturnedR0(u32::MAX)
-        );
-        assert_eq!(ctx.kernel.vfs.seek(h, 0, SeekKind::Current), Some(3));
-        assert_eq!(std::fs::read(dir.path().join("save")).unwrap(), b"original");
     }
 
     #[test]

@@ -1711,6 +1711,9 @@ impl KernelState {
         if self.controls.is_empty() && self.modal.is_none() {
             return;
         }
+        // Measure before notification stamps/item rectangles, not only before
+        // the final render: native list painting must use the same row height.
+        self.controls.update_choice_fonts(&self.gdi);
         // Owner-drawn controls belong to the guest. Queue their normal paint
         // notification; the presentation hook must never call guest code itself.
         // A real ListView sends NM_CUSTOMDRAW even when it uses the OS
@@ -1872,7 +1875,6 @@ impl KernelState {
                 }
             }
         }
-        self.controls.update_choice_fonts(&self.gdi);
         self.controls
             .layout_choice_popups(self.framebuffer.height as i32);
         let frame_counter = self.framebuffer.frame_counter;

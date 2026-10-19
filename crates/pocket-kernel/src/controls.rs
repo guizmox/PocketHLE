@@ -300,6 +300,8 @@ pub struct ChildWindow {
     pub list_images: Vec<i32>,
     pub list_image_lists: [u32; 3],
     pub list_image_sizes: [(u32, u32); 3],
+    /// Cached selected-font cell height, shared by row layout and hit testing.
+    pub list_font_height: i32,
     pub list_scroll_y: i32,
     pub list_positions: Vec<Option<(i32, i32)>>,
     pub list_spacing: (i32, i32),
@@ -335,7 +337,9 @@ impl ChildWindow {
         (self.list_image_lists[slot], w, h)
     }
     pub fn list_row_height(&self) -> i32 {
-        LIST_VIEW_ROW_HEIGHT.max(self.list_image_list().2.min(4096) as i32 + 2)
+        LIST_VIEW_ROW_HEIGHT
+            .max(self.list_font_height.saturating_add(2))
+            .max(self.list_image_list().2.min(4096) as i32 + 2)
     }
     pub fn list_icon_view(&self) -> bool {
         self.style & 3 == 0 && self.list_image_list().0 != 0
@@ -1475,6 +1479,7 @@ impl Controls {
             list_images: Vec::new(),
             list_image_lists: [0; 3],
             list_image_sizes: [(0, 0); 3],
+            list_font_height: 0,
             list_scroll_y: 0,
             list_positions: Vec::new(),
             list_spacing: (75, 75),
@@ -1557,6 +1562,10 @@ impl Controls {
 
     pub fn update_choice_fonts(&mut self, gdi: &crate::gdi::GdiState) {
         for child in &mut self.children {
+            if child.class == ControlClass::ListView {
+                let face = crate::text::selected(gdi, child.font);
+                child.list_font_height = crate::text::layout(face.as_ref(), &[]).height;
+            }
             if matches!(child.class, ControlClass::ComboBox | ControlClass::ListBox) {
                 let face = crate::text::selected(gdi, child.font);
                 child.choice_row_height =
@@ -1736,6 +1745,16 @@ impl Controls {
     /// a frame that answered a hit test would shadow every radio inside
     /// it whenever the z-order put it on top.
     pub fn hit_test(&self, x: i32, y: i32) -> Option<u32> {
+        // A modeless dialog can be raised above a newer dialog without
+        // recreating its children. Use the same panel order as painting;
+        // reverse child creation order alone targets the covered dialog.
+        let panel = self.panels.iter().rev().find(|p| {
+            p.visible
+                && x >= p.x
+                && y >= p.y
+                && x < p.x.saturating_add(p.w)
+                && y < p.y.saturating_add(p.h)
+        });
         self.children
             .iter()
             .rev()
@@ -1748,7 +1767,10 @@ impl Controls {
             )
             .find(|c| {
                 let (ox, oy) = self.parent_origin(c.parent);
-                !c.is_group_box() && self.is_showing(c) && c.contains(x - ox, y - oy)
+                panel.map_or(true, |p| c.parent == p.hwnd)
+                    && !c.is_group_box()
+                    && self.is_showing(c)
+                    && c.contains(x - ox, y - oy)
             })
             .map(|c| c.hwnd)
     }
@@ -2463,6 +2485,54 @@ mod tests {
     const PARENT: u32 = 0xDEAD_0001;
 
     #[test]
+    fn report_list_rows_fit_selected_font_and_native_default_text() {
+        let mut controls = Controls::default();
+        let mut gdi = crate::gdi::GdiState::new();
+        let font = gdi.create_font(18);
+        let face = crate::text::selected(&gdi, font);
+        let height = crate::text::layout(face.as_ref(), &[]).height;
+        assert!(height > LIST_VIEW_ROW_HEIGHT);
+        let hwnd = controls.create(
+            PARENT,
+            ControlClass::ListView,
+            1,
+            String::new(),
+            WS_VISIBLE | 1,
+            0,
+            0,
+            200,
+            80,
+        );
+        let c = controls.get_mut(hwnd).unwrap();
+        c.font = font;
+        c.list_items = vec![("Washington".into(), 123), ("Oregon".into(), 456)];
+        controls.update_choice_fonts(&gdi);
+        let c = controls.get(hwnd).unwrap();
+        assert!(c.list_row_height() >= height + 2);
+        let row = c.list_row_height();
+        assert_eq!(c.list_item_at(row - 1), Some(0));
+        assert_eq!(c.list_item_at(row), Some(1));
+        let mut bitmap = Bitmap::new(200, 80);
+        Surface::Bitmap(&mut bitmap).fill_rect(0, 0, 200, 80, 0xffff);
+        c.render_custom_draw_item(&mut Surface::Bitmap(&mut bitmap), &gdi, 0);
+        c.render_custom_draw_item(&mut Surface::Bitmap(&mut bitmap), &gdi, 1);
+        for index in 0..2 {
+            let first = index * row as usize * 200 * 2;
+            let end = (index + 1) * row as usize * 200 * 2;
+            assert!(
+                bitmap.pixels[first..end]
+                    .chunks_exact(2)
+                    .any(|p| u16::from_le_bytes([p[0], p[1]]) != 0xffff),
+                "row text disappeared"
+            );
+        }
+        let smaller = gdi.create_font(10);
+        controls.get_mut(hwnd).unwrap().font = smaller;
+        controls.update_choice_fonts(&gdi);
+        assert!(controls.get(hwnd).unwrap().list_row_height() < row);
+    }
+
+    #[test]
     fn native_backing_is_painted_before_the_next_hle_sibling() {
         let mut controls = Controls::default();
         let background = controls.create(
@@ -3041,6 +3111,50 @@ mod tests {
             caption: Some("Options".into()),
             ok_pressed: false,
         }
+    }
+
+    #[test]
+    fn raised_dialog_receives_clicks_above_newer_children() {
+        let mut controls = Controls::default();
+        let older = 0xdead_0100;
+        let newer = 0xdead_0101;
+        controls.add_panel(captioned_panel(older));
+        let first = controls.create(
+            older,
+            ControlClass::Button,
+            1,
+            "Drive".into(),
+            WS_VISIBLE,
+            10,
+            10,
+            60,
+            24,
+        );
+        controls.add_panel(captioned_panel(newer));
+        let second = controls.create(
+            newer,
+            ControlClass::Button,
+            2,
+            "Other".into(),
+            WS_VISIBLE,
+            10,
+            10,
+            60,
+            24,
+        );
+        let (x, y, _, _) = controls.screen_rect(first).unwrap();
+        assert_eq!(controls.hit_test(x + 5, y + 5), Some(second));
+        controls.raise_panel(older);
+        assert_eq!(controls.hit_test(x + 5, y + 5), Some(first));
+        controls.pointer_down(x + 5, y + 5);
+        assert!(
+            matches!(controls.pointer_up(x + 5, y + 5), Some(ControlAction::Clicked { parent, id: 1, hwnd }) if parent == older && hwnd == first)
+        );
+        // Empty foreground client space must not expose a covered control.
+        controls.get_mut(first).unwrap().visible = false;
+        assert_eq!(controls.hit_test(x + 5, y + 5), None);
+        controls.panel_mut(older).unwrap().visible = false;
+        assert_eq!(controls.hit_test(x + 5, y + 5), Some(second));
     }
 
     #[test]
