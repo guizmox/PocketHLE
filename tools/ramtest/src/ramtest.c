@@ -8,6 +8,15 @@ static W16 report_path[260];
 static char line_buffer[256];
 void *memset(void *p, int v, unsigned int n) { unsigned char *s=p; while(n--) *s++=(unsigned char)v; return p; }
 void *memcpy(void *d,const void *s,unsigned int n) { unsigned char *a=d; const unsigned char *b=s; while(n--) *a++=*b++; return d; }
+/* Compiler-emitted ARM EABI helpers; this image intentionally has no runtime.
+ * Volatile stores prevent the optimizer from turning this back into a call
+ * to memset/__aeabi_memclr4. The length is in bytes for all three variants. */
+void __aeabi_memclr(void *p, unsigned int n) {
+    volatile unsigned char *s=(volatile unsigned char*)p;
+    while(n--) *s++=0;
+}
+void __aeabi_memclr4(void *p, unsigned int n) { __aeabi_memclr(p,n); }
+void __aeabi_memclr8(void *p, unsigned int n) { __aeabi_memclr(p,n); }
 static U32 text(char *out, const char *in) { U32 n=0; while(in[n]) {out[n]=in[n]; n++;} return n; }
 static U32 hex(char *out,U32 v) { U32 i; const char *digits="0123456789ABCDEF"; for(i=0;i<8;i++) out[i]=digits[(v >> (28-4*i))&15]; return 8; }
 static void emit(const char *s,U32 len) { U32 written=0; if(!WriteFile(report,s,len,&written,0) || written!=len) io_failed=1; }
