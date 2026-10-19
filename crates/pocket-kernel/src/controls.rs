@@ -2225,6 +2225,11 @@ impl Controls {
                 // A sibling is one compositing unit: its native backing pixels
                 // must not be replayed after all later siblings have painted.
                 layer(child.hwnd, surf);
+                // WS_BORDER is non-client decoration, outside the guest's
+                // ListView paint. Replay it after the native client bitmap.
+                if child.class == ControlClass::ListView && child.style & 0x0080_0000 != 0 {
+                    stroke(surf, child.x + ox, child.y + oy, child.w, child.h, 0);
+                }
             }
         }
     }

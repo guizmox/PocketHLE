@@ -1905,11 +1905,27 @@ impl KernelState {
                     owner = current;
                     break;
                 }
+                let child = controls.get(current);
+                if child.is_some_and(|c| !c.visible) {
+                    visible = false;
+                    break;
+                }
                 if let Some(rect) = self.window_rects.get(&current) {
                     x = x.saturating_add(rect.0);
                     y = y.saturating_add(rect.1);
+                } else if let Some(child) = child {
+                    x = x.saturating_add(child.x);
+                    y = y.saturating_add(child.y);
                 }
-                let Some(parent) = self.window_parents.get(&current).copied() else {
+                // Dialog-template controls live in Controls; unlike windows
+                // created through CreateWindowEx, they may have no entry in
+                // window_parents. Their backing pixels still use client coords.
+                let Some(parent) = self
+                    .window_parents
+                    .get(&current)
+                    .copied()
+                    .or_else(|| child.map(|c| c.parent))
+                else {
                     break;
                 };
                 if parent == current {
@@ -1919,16 +1935,28 @@ impl KernelState {
                 current = parent;
             }
             if visible {
-                let clip = controls.get(hwnd).map(|c| {
-                    (
-                        c.w.max(0) as u32,
-                        (if c.class == controls::ControlClass::ComboBox {
-                            c.choice_closed_height()
-                        } else {
-                            c.h.max(0)
-                        }) as u32,
-                    )
-                });
+                let clip = controls
+                    .get(hwnd)
+                    .map(|c| {
+                        (
+                            c.w.max(0) as u32,
+                            (if c.class == controls::ControlClass::ComboBox {
+                                c.choice_closed_height()
+                            } else {
+                                c.h.max(0)
+                            }) as u32,
+                        )
+                    })
+                    .or_else(|| {
+                        // A native child may keep a larger backing bitmap after a
+                        // resize. Never replay pixels outside its current window.
+                        controls
+                            .panel(hwnd)
+                            .is_none()
+                            .then(|| self.window_rects.get(&hwnd))
+                            .flatten()
+                            .map(|r| (r.2.max(0) as u32, r.3.max(0) as u32))
+                    });
                 layers.push((hwnd, owner, x, y, bitmap.clone(), clip));
             }
         }
@@ -4377,6 +4405,76 @@ mod tests {
         assert!(heap.virtual_free(base, 0, true));
         assert_eq!(ram.snapshot().program_used, 0);
         assert_eq!(heap.free_bytes(), initial);
+    }
+
+    #[test]
+    fn dialog_native_layers_use_client_origin_clip_and_preserve_list_frame() {
+        use crate::controls::{ControlClass, DialogPanel};
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let state = &mut process.state;
+        let parent = 0xdead3000;
+        state.controls.add_panel(DialogPanel {
+            hwnd: parent,
+            x: 20,
+            y: 30,
+            w: 200,
+            h: 150,
+            visible: true,
+            border: true,
+            caption: Some("Test".into()),
+            ok_pressed: false,
+        });
+        let list = state.controls.create(
+            parent,
+            ControlClass::ListView,
+            1011,
+            String::new(),
+            0x10800001,
+            5,
+            10,
+            80,
+            40,
+        );
+        state.window_rects.insert(list, (5, 10, 80, 40));
+        assert!(!state.window_parents.contains_key(&list));
+        let dc = state.gdi.create_memory_dc();
+        let bm = state.gdi.create_compatible_bitmap(100, 70);
+        state.gdi.select_into(dc, bm);
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0, 0, 100, 70, 0xf800);
+        state.window_dcs.insert(list, dc);
+        let native = 0xdead4000;
+        state.window_rects.insert(native, (110, 10, 20, 20));
+        state.window_parents.insert(native, parent);
+        let dc = state.gdi.create_memory_dc();
+        let bm = state.gdi.create_compatible_bitmap(60, 60);
+        state.gdi.select_into(dc, bm);
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0, 0, 60, 60, 0x07e0);
+        state.window_dcs.insert(native, dc);
+        state.composite_controls();
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * state.framebuffer.width as usize + x) * 2;
+            u16::from_le_bytes([
+                state.framebuffer.pixels[offset],
+                state.framebuffer.pixels[offset + 1],
+            ])
+        };
+        // Client origin is (21,45), not the screen origin or window origin.
+        assert_eq!(pixel(27, 56), 0xf800);
+        assert_eq!(pixel(26, 55), 0, "native paint erased WS_BORDER");
+        assert_eq!(pixel(105, 94), 0);
+        assert_ne!(pixel(5, 10), 0xf800);
+        assert_ne!(pixel(106, 56), 0xf800);
+        assert_ne!(pixel(27, 95), 0xf800);
+        assert_eq!(pixel(132, 56), 0x07e0);
+        assert_ne!(pixel(151, 56), 0x07e0);
+        assert_ne!(pixel(132, 75), 0x07e0);
     }
 
     #[test]
