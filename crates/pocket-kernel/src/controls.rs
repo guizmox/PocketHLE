@@ -310,12 +310,15 @@ pub struct ChildWindow {
     pub list_column_count: u32,
     pub font: u32,
     pub choice_open: bool,
+    pub choice_row_height: i32,
     pub choice_popup_y: i32,
     pub choice_popup_h: i32,
     pub track_range: (i32, i32),
     pub track_pos: i32,
     pub track_line: i32,
     pub track_page: i32,
+    pub track_tick_freq: u32,
+    pub track_ticks: Vec<i32>,
 }
 
 const LIST_VIEW_ROW_HEIGHT: i32 = 14;
@@ -620,7 +623,7 @@ impl ChildWindow {
     pub fn contains(&self, px: i32, py: i32) -> bool {
         let y = py - self.y;
         let inside_y = if self.class == ControlClass::ComboBox {
-            (0..self.h.min(20)).contains(&y)
+            (0..self.choice_closed_height()).contains(&y)
                 || (self.choice_open
                     && (self.choice_popup_y..self.choice_popup_y + self.choice_popup_h)
                         .contains(&y))
@@ -683,12 +686,16 @@ impl ChildWindow {
         self.button_type() == Some(BS_DEFPUSHBUTTON)
     }
 
+    pub fn choice_closed_height(&self) -> i32 {
+        self.h.min(self.choice_row_height.max(20)).max(0)
+    }
+
     pub fn choice_height(&self) -> i32 {
         if self.class == ControlClass::ComboBox {
             if self.choice_open {
-                20 + self.choice_popup_h
+                self.choice_closed_height() + self.choice_popup_h
             } else {
-                self.h.min(20)
+                self.choice_closed_height()
             }
         } else {
             self.h
@@ -696,8 +703,10 @@ impl ChildWindow {
     }
     /// Position a dropdown inside the display without moving its header.
     pub fn layout_choice_popup(&mut self, screen_y: i32, screen_h: i32) {
-        let wanted = 2 + self.list_items.len().min(6) as i32 * 16;
-        let below = screen_h.saturating_sub(screen_y.saturating_add(20)).max(0);
+        let wanted = 2 + self.list_items.len().min(6) as i32 * self.choice_row_height;
+        let below = screen_h
+            .saturating_sub(screen_y.saturating_add(self.choice_closed_height()))
+            .max(0);
         let above = screen_y.max(0);
         let upwards = below < wanted && above > below;
         let available = if upwards { above } else { below };
@@ -705,9 +714,13 @@ impl ChildWindow {
             .list_items
             .len()
             .min(6)
-            .min(available.saturating_sub(2) as usize / 16);
-        self.choice_popup_h = (2 + rows as i32 * 16).min(available);
-        self.choice_popup_y = if upwards { -self.choice_popup_h } else { 20 };
+            .min(available.saturating_sub(2) as usize / self.choice_row_height as usize);
+        self.choice_popup_h = (2 + rows as i32 * self.choice_row_height).min(available);
+        self.choice_popup_y = if upwards {
+            -self.choice_popup_h
+        } else {
+            self.choice_closed_height()
+        };
         if let Some(selected) = self.list_selected {
             let first = self.list_scroll_y.max(0) as usize;
             if selected < first {
@@ -728,6 +741,53 @@ impl ChildWindow {
         } else {
             0
         };
+        if self.style & 0x10 == 0 && length >= 10 {
+            let travel = i64::from(length - 10);
+            let mut positions = std::collections::BTreeSet::new();
+            positions.insert(5);
+            positions.insert(length - 5);
+            let mut add_tick = |value: i32| {
+                if span > 0 && value > self.track_range.0 && value < self.track_range.1 {
+                    positions.insert(
+                        5 + ((i64::from(value) - i64::from(self.track_range.0)) * travel / span)
+                            as i32,
+                    );
+                }
+            };
+            for &value in &self.track_ticks {
+                add_tick(value);
+            }
+            if self.style & 1 != 0 && self.track_tick_freq != 0 && span > 0 {
+                let freq = i64::from(self.track_tick_freq);
+                let count = (span - 1) / freq;
+                // Bound raster work even for an application supplying a huge range.
+                let stride = ((count + 4095) / 4096).max(1);
+                let mut index = 1;
+                while index <= count {
+                    add_tick((i64::from(self.track_range.0) + index * freq) as i32);
+                    index += stride;
+                }
+            }
+            let before = self.style & (4 | 8) != 0;
+            let after = self.style & 4 == 0 || self.style & 8 != 0;
+            for pos in positions {
+                if vertical {
+                    if before {
+                        surf.fill_rect(self.x, self.y + pos, 3, 1, Self::TEXT);
+                    }
+                    if after {
+                        surf.fill_rect(self.x + self.w - 3, self.y + pos, 3, 1, Self::TEXT);
+                    }
+                } else {
+                    if before {
+                        surf.fill_rect(self.x + pos, self.y, 1, 3, Self::TEXT);
+                    }
+                    if after {
+                        surf.fill_rect(self.x + pos, self.y + self.h - 3, 1, 3, Self::TEXT);
+                    }
+                }
+            }
+        }
         let color = if focused { 0x001f } else { 0x7bef };
         if vertical {
             surf.fill_rect(
@@ -757,7 +817,11 @@ impl ChildWindow {
         face: Option<&crate::gdi::Font>,
     ) {
         let combo = self.class == ControlClass::ComboBox;
-        let height = if combo { self.h.min(20) } else { self.h };
+        let height = if combo {
+            self.choice_closed_height()
+        } else {
+            self.h
+        };
         surf.fill_rect(self.x, self.y, self.w, height, Self::WINDOW);
         stroke(surf, self.x, self.y, self.w, height, Self::SHADOW);
         if combo {
@@ -766,16 +830,39 @@ impl ChildWindow {
                 .and_then(|i| self.list_items.get(i))
                 .map(|i| i.0.as_str())
                 .unwrap_or(&self.text);
-            draw_clipped_font(
+            let line = crate::text::layout(face, &value.encode_utf16().collect::<Vec<_>>());
+            line.draw(
                 surf,
                 self.x + 3,
-                self.y + 5,
-                value,
+                self.y + (height - line.height).max(0) / 2,
                 Self::TEXT,
-                self.x + self.w - 18,
-                face,
+                [
+                    self.x + 2,
+                    self.y + 1,
+                    self.x + self.w - 18,
+                    self.y + height - 1,
+                ],
             );
-            font::draw_str(surf, self.x + self.w - 12, self.y + 5, "v", Self::TEXT);
+            let arrow_x = self.x + self.w - 17;
+            surf.fill_rect(arrow_x, self.y + 1, 16, height - 2, Self::FACE);
+            draw_edge(
+                surf,
+                arrow_x,
+                self.y + 1,
+                16,
+                height - 2,
+                Self::LIGHT,
+                Self::SHADOW,
+            );
+            for row in 0..4 {
+                surf.fill_rect(
+                    arrow_x + 4 + row,
+                    self.y + height / 2 - 2 + row,
+                    7 - row * 2,
+                    1,
+                    Self::TEXT,
+                );
+            }
         }
         if !combo || self.choice_open {
             let (top, bottom) = if combo {
@@ -792,22 +879,26 @@ impl ChildWindow {
                 .enumerate()
                 .skip(self.list_scroll_y.max(0) as usize)
             {
-                let y = top + (i as i32 - self.list_scroll_y.max(0)) * 16;
-                if y + 16 > bottom {
+                let y = top + (i as i32 - self.list_scroll_y.max(0)) * self.choice_row_height;
+                if y + self.choice_row_height > bottom {
                     break;
                 }
                 let selected = self.list_selected == Some(i);
                 if selected {
-                    surf.fill_rect(self.x + 1, y, self.w - 2, 16, 0x001f);
+                    surf.fill_rect(self.x + 1, y, self.w - 2, self.choice_row_height, 0x001f);
                 }
-                draw_clipped_font(
+                let line = crate::text::layout(face, &text.encode_utf16().collect::<Vec<_>>());
+                line.draw(
                     surf,
                     self.x + 3,
-                    y + 4,
-                    text,
+                    y + (self.choice_row_height - line.height).max(0) / 2,
                     if selected { Self::WINDOW } else { Self::TEXT },
-                    self.x + self.w - 2,
-                    face,
+                    [
+                        self.x + 2,
+                        y,
+                        self.x + self.w - 2,
+                        (y + self.choice_row_height).min(bottom),
+                    ],
                 );
             }
         }
@@ -817,7 +908,7 @@ impl ChildWindow {
                 self.x + 1,
                 self.y + 1,
                 self.w - 2,
-                if combo { 18 } else { height - 2 },
+                height - 2,
                 Self::TEXT,
             );
         }
@@ -1122,11 +1213,78 @@ impl ChildWindow {
     }
 
     fn render_static(&self, surf: &mut Surface<'_>, face: Option<&crate::gdi::Font>) {
-        if self.image != 0 {
+        if self.image != 0 || self.w <= 0 || self.h <= 0 {
             return;
         }
-        let ty = self.y + ((self.h - crate::text::layout(face, &[]).height) / 2).max(0);
-        self.draw_caption(surf, self.x, ty, self.x + self.w, face);
+        let kind = self.style & 0x1f;
+        if !matches!(kind, 0 | 1 | 2 | 11 | 12) {
+            return;
+        }
+        let wrap = matches!(kind, 0 | 1 | 2);
+        let measure =
+            |text: &str| crate::text::layout(face, &text.encode_utf16().collect::<Vec<_>>()).width;
+        let mut lines = Vec::new();
+        let text = self.text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = if kind == 11 {
+            text.replace('\n', " ")
+        } else {
+            text
+        };
+        for paragraph in text.split('\n') {
+            if !wrap {
+                lines.push(paragraph.to_string());
+                continue;
+            }
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if line.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{line} {word}")
+                };
+                if !line.is_empty() && measure(&candidate) > self.w {
+                    lines.push(std::mem::take(&mut line));
+                    line.push_str(word);
+                } else {
+                    line = candidate;
+                }
+            }
+            lines.push(line);
+        }
+        let line_height = crate::text::layout(face, &[]).height.max(1);
+        let height = line_height.saturating_mul(lines.len() as i32);
+        let mut y = self.y
+            + if self.style & 0x200 != 0 && lines.len() == 1 {
+                (self.h - height).max(0) / 2
+            } else {
+                0
+            };
+        let clip = [self.x, self.y, self.x + self.w, self.y + self.h];
+        for text in lines {
+            if y >= clip[3] {
+                break;
+            }
+            let line = crate::text::layout(face, &text.encode_utf16().collect::<Vec<_>>());
+            let x = self.x
+                + match kind {
+                    1 => (self.w - line.width) / 2,
+                    2 => self.w - line.width,
+                    _ => 0,
+                };
+            if self.enabled || kind == 11 {
+                line.draw(
+                    surf,
+                    x,
+                    y,
+                    crate::framebuffer::colorref_to_rgb565(self.text_color),
+                    clip,
+                );
+            } else {
+                line.draw(surf, x + 1, y + 1, Self::LIGHT, clip);
+                line.draw(surf, x, y, Self::SHADOW, clip);
+            }
+            y = y.saturating_add(line_height);
+        }
     }
 }
 
@@ -1320,12 +1478,15 @@ impl Controls {
             list_column_count: 0,
             font: crate::gdi::STOCK_SYSTEM_FONT,
             choice_open: false,
+            choice_row_height: 16,
             choice_popup_y: 20,
             choice_popup_h: 98,
             track_range: (0, 100),
             track_pos: 0,
             track_line: 1,
             track_page: 20,
+            track_tick_freq: 1,
+            track_ticks: Vec::new(),
         });
         hwnd
     }
@@ -1385,6 +1546,16 @@ impl Controls {
         };
         self.children.insert(target, child);
         true
+    }
+
+    pub fn update_choice_fonts(&mut self, gdi: &crate::gdi::GdiState) {
+        for child in &mut self.children {
+            if matches!(child.class, ControlClass::ComboBox | ControlClass::ListBox) {
+                let face = crate::text::selected(gdi, child.font);
+                child.choice_row_height =
+                    (crate::text::layout(face.as_ref(), &[]).height + 4).max(16);
+            }
+        }
     }
 
     pub fn layout_choice_popups(&mut self, screen_h: i32) {
@@ -1588,11 +1759,12 @@ impl Controls {
             let child = self.get_mut(hwnd).unwrap();
             let combo = child.class == ControlClass::ComboBox;
             let local_y = y - origin.1 - child.y;
-            if combo && (0..20).contains(&local_y) {
+            if combo && (0..child.choice_closed_height()).contains(&local_y) {
                 child.choice_open = !child.choice_open;
                 return Some(ControlAction::Consumed);
             }
-            let index = ((local_y - if combo { child.choice_popup_y + 1 } else { 1 }).max(0) / 16
+            let index = ((local_y - if combo { child.choice_popup_y + 1 } else { 1 }).max(0)
+                / child.choice_row_height
                 + child.list_scroll_y.max(0)) as usize;
             if index < child.list_items.len() {
                 child.list_selected = Some(index);
@@ -2074,6 +2246,103 @@ fn vk_to_char(vk: u16) -> Option<char> {
 mod tests {
     use super::*;
     use crate::gdi::Bitmap;
+
+    fn standard_test_control(
+        class: ControlClass,
+        style: u32,
+        text: &str,
+        w: i32,
+        h: i32,
+    ) -> ChildWindow {
+        let mut controls = Controls::default();
+        let hwnd = controls.create(
+            PARENT,
+            class,
+            1,
+            text.to_string(),
+            WS_VISIBLE | style,
+            0,
+            0,
+            w,
+            h,
+        );
+        controls.get(hwnd).unwrap().clone()
+    }
+
+    fn standard_canvas(w: u32, h: u32) -> Bitmap {
+        let mut bitmap = Bitmap::new(w, h);
+        Surface::Bitmap(&mut bitmap).fill_rect(0, 0, w as i32, h as i32, 0xffff);
+        bitmap
+    }
+
+    #[test]
+    fn standard_static_wraps_centers_and_clips_near_route() {
+        let c = standard_test_control(ControlClass::Static, 1, "Near Route", 34, 16);
+        let mut actual = standard_canvas(40, 24);
+        c.render_static(&mut Surface::Bitmap(&mut actual), None);
+        let mut expected = standard_canvas(40, 24);
+        let mut surf = Surface::Bitmap(&mut expected);
+        font::draw_str(&mut surf, 5, 0, "Near", 0);
+        font::draw_str(&mut surf, 2, 8, "Route", 0);
+        assert_eq!(actual.pixels, expected.pixels);
+        let mut short = c;
+        short.h = 8;
+        let mut clipped = standard_canvas(40, 24);
+        short.render_static(&mut Surface::Bitmap(&mut clipped), None);
+        assert!(clipped.pixels[40 * 8 * 2..].iter().all(|&p| p == 255));
+    }
+
+    #[test]
+    fn standard_static_respects_right_top_nowrap_and_vertical_center() {
+        for (style, x, y) in [(2, 18, 0), (1, 9, 0), (0x200, 0, 8), (12, 0, 0)] {
+            let c = standard_test_control(ControlClass::Static, style, "Type", 42, 24);
+            let mut actual = standard_canvas(42, 24);
+            c.render_static(&mut Surface::Bitmap(&mut actual), None);
+            let mut expected = standard_canvas(42, 24);
+            font::draw_str(&mut Surface::Bitmap(&mut expected), x, y, "Type", 0);
+            assert_eq!(actual.pixels, expected.pixels, "style={style:x}");
+        }
+        let c = standard_test_control(ControlClass::Static, 12, "Near Route", 34, 24);
+        let mut bitmap = standard_canvas(40, 24);
+        c.render_static(&mut Surface::Bitmap(&mut bitmap), None);
+        assert!(bitmap.pixels[40 * 8 * 2..].iter().all(|&p| p == 255));
+    }
+
+    #[test]
+    fn standard_trackbar_draws_frequency_explicit_ticks_and_style_sides() {
+        let mut c = standard_test_control(ControlClass::TrackBar, 1, "", 100, 30);
+        c.track_range = (0, 10);
+        c.track_tick_freq = 2;
+        c.track_ticks.push(1);
+        let color = |b: &Bitmap, x: usize, y: usize| {
+            u16::from_le_bytes(
+                b.pixels[(y * b.width as usize + x) * 2..][..2]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let mut b = standard_canvas(100, 30);
+        c.render_track(&mut Surface::Bitmap(&mut b), false);
+        for x in [5, 14, 23, 41, 59, 77, 95] {
+            assert_eq!(color(&b, x, 29), 0);
+        }
+        assert_eq!(color(&b, 32, 29), 0xffff);
+        c.style |= 4;
+        let mut top = standard_canvas(100, 30);
+        c.render_track(&mut Surface::Bitmap(&mut top), false);
+        assert_eq!(color(&top, 23, 0), 0);
+        assert_eq!(color(&top, 23, 29), 0xffff);
+        c.style |= 8;
+        let mut both = standard_canvas(100, 30);
+        c.render_track(&mut Surface::Bitmap(&mut both), false);
+        assert_eq!(color(&both, 23, 0), 0);
+        assert_eq!(color(&both, 23, 29), 0);
+        c.style |= 0x10;
+        let mut none = standard_canvas(100, 30);
+        c.render_track(&mut Surface::Bitmap(&mut none), false);
+        assert_eq!(color(&none, 23, 0), 0xffff);
+        assert_eq!(color(&none, 23, 29), 0xffff);
+    }
 
     const PUSH: u32 = WS_VISIBLE;
     const PARENT: u32 = 0xDEAD_0001;

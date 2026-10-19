@@ -693,29 +693,43 @@ impl<'a> Surface<'a> {
 
     /// Present a retained window, preserving holes left by keyed drawing.
     pub fn blit_window(&mut self, x: i32, y: i32, bitmap: &Bitmap) {
+        self.blit_window_clipped(x, y, bitmap, bitmap.width, bitmap.height);
+    }
+
+    /// A backing bitmap can outlive a resize; never present it outside its window.
+    pub fn blit_window_clipped(
+        &mut self,
+        x: i32,
+        y: i32,
+        bitmap: &Bitmap,
+        width: u32,
+        height: u32,
+    ) {
+        let width = width.min(bitmap.width);
+        let height = height.min(bitmap.height);
         let Some(painted) = bitmap.painted.as_ref().filter(|p| p.contains(&0)) else {
             self.blit_from_bytes(
                 x,
                 y,
                 0,
                 0,
-                bitmap.width as i32,
-                bitmap.height as i32,
+                width as i32,
+                height as i32,
                 &bitmap.pixels,
                 bitmap.width,
                 bitmap.height,
             );
             return;
         };
-        for row in 0..bitmap.height {
+        for row in 0..height {
             let mut col = 0;
-            while col < bitmap.width {
+            while col < width {
                 if painted[(row * bitmap.width + col) as usize] == 0 {
                     col += 1;
                     continue;
                 }
                 let start = col;
-                while col < bitmap.width && painted[(row * bitmap.width + col) as usize] != 0 {
+                while col < width && painted[(row * bitmap.width + col) as usize] != 0 {
                     col += 1;
                 }
                 self.blit_from_bytes(

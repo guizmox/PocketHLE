@@ -57,3 +57,12 @@
 .\verification\Navigator-Premier-Affichage-Selection.png
 .\verification\navigator-coins-transparents-20261019.txt
 .\verification\navigator-corners-build.log
+.\verification\navigator-language-20261019.txt
+.\crates\pocket-kernel\examples\standard_controls_preview.rs
+.\crates\pocket-winceapi\src\coredll\trackbar.rs
+.\verification\navigator-controles-standard-20261019.txt
+.\verification\standard-controls-tests.log
+.\verification\standard-controls-rustfmt.log
+.\verification\standard-controls-cargo-fmt.log
+.\verification\standard-controls-preview.log
+.\verification\Standard-Controls-Renderer.png

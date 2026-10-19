@@ -1872,6 +1872,7 @@ impl KernelState {
                 }
             }
         }
+        self.controls.update_choice_fonts(&self.gdi);
         self.controls
             .layout_choice_popups(self.framebuffer.height as i32);
         let frame_counter = self.framebuffer.frame_counter;
@@ -1918,18 +1919,29 @@ impl KernelState {
                 current = parent;
             }
             if visible {
-                layers.push((hwnd, owner, x, y, bitmap.clone()));
+                let clip = controls.get(hwnd).map(|c| {
+                    (
+                        c.w.max(0) as u32,
+                        (if c.class == controls::ControlClass::ComboBox {
+                            c.choice_closed_height()
+                        } else {
+                            c.h.max(0)
+                        }) as u32,
+                    )
+                });
+                layers.push((hwnd, owner, x, y, bitmap.clone(), clip));
             }
         }
         layers.sort_by_key(|layer| layer.0);
         controls.render_composited_with_images(&mut surf, &self.gdi, |owner, surface| {
-            for (hwnd, parent, x, y, bm) in &layers {
+            for (hwnd, parent, x, y, bm, clip) in &layers {
                 if *hwnd == owner
                     || (*parent == owner
                         && controls.get(*hwnd).is_none()
                         && controls.panel(*hwnd).is_none())
                 {
-                    surface.blit_window(*x, *y, bm);
+                    let (w, h) = clip.unwrap_or((bm.width, bm.height));
+                    surface.blit_window_clipped(*x, *y, bm, w, h);
                 }
             }
         });

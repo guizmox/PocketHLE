@@ -11270,6 +11270,7 @@ fn control_message(
             if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
                 child.font = wparam;
             }
+            ctx.kernel.controls.update_choice_fonts(&ctx.kernel.gdi);
             Ok(0)
         }
         0x0031 => Ok(ctx.kernel.controls.get(hwnd).map(|c| c.font).unwrap_or(0)),
@@ -16340,7 +16341,14 @@ fn get_client_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     let hwnd = ctx.arg_u32(0)?;
     let lp_rect = ctx.arg_u32(1)?;
     let (w, h) = match ctx.kernel.controls.get(hwnd) {
-        Some(child) => (child.w, child.h),
+        Some(child) => (
+            child.w,
+            if child.class == ControlClass::ComboBox {
+                child.choice_closed_height()
+            } else {
+                child.h
+            },
+        ),
         None => match ctx.kernel.controls.panel(hwnd) {
             Some(panel) => {
                 let frame = 2 * i32::from(panel.border);
@@ -19910,6 +19918,7 @@ fn build_dialog_from_template_for(
                 child.font = font;
             }
         }
+        ctx.kernel.controls.update_choice_fonts(&ctx.kernel.gdi);
         if modal {
             ctx.kernel.window_rects.insert(hwnd, (ix, iy, iw, ih));
             ctx.kernel.window_parents.insert(hwnd, owner_hwnd);
@@ -24750,6 +24759,119 @@ mod tests {
         assert!(ctx.cpu.read_mem(0x62000000 - 0x40000, 1).is_err());
     }
 
+    // Self-contained loader fixtures: source ZIPs intentionally exclude tools/*/dist.
+    // These tests exercise PE parsing, paging and imports, not execution of ARM C.
+    fn loader_fixture_dll(import: Option<(&str, &str)>) -> Vec<u8> {
+        fn u16_at(bytes: &mut [u8], at: usize, value: u16) {
+            bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        fn u32_at(bytes: &mut [u8], at: usize, value: u32) {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        fn rva(value: usize) -> usize {
+            0x400 + value - 0x1000
+        }
+        let mut bytes = vec![0; 0x2400];
+        bytes[..2].copy_from_slice(b"MZ");
+        u32_at(&mut bytes, 0x3c, 0x80);
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        u16_at(&mut bytes, 0x84, pocket_pe::machine::ARM);
+        u16_at(&mut bytes, 0x86, 2);
+        u16_at(&mut bytes, 0x94, 224);
+        u16_at(&mut bytes, 0x96, 0x2102);
+        let opt = 0x98;
+        u16_at(&mut bytes, opt, 0x10b);
+        for (offset, value) in [
+            (16, 0x1000),
+            (20, 0x1000),
+            (28, 0x30000000),
+            (32, 0x1000),
+            (36, 0x200),
+            (56, 0x23000),
+            (60, 0x400),
+            (92, 16),
+            (96, 0x1800),
+            (100, 0x100),
+            (136, 0x1e00),
+            (140, 12),
+        ] {
+            u32_at(&mut bytes, opt + offset, value);
+        }
+        u16_at(&mut bytes, opt + 68, 9);
+        for (index, name, size, address, raw, pointer, flags) in [
+            (0, b".text", 0x2000, 0x1000, 0x2000, 0x400, 0x60000020),
+            (1, b".data", 0x20000, 0x3000, 0, 0, 0xc0000040),
+        ] {
+            let section = 0x178 + index * 40;
+            bytes[section..section + 5].copy_from_slice(name);
+            for (offset, value) in [
+                (8, size),
+                (12, address),
+                (16, raw),
+                (20, pointer),
+                (36, flags),
+            ] {
+                u32_at(&mut bytes, section + offset, value);
+            }
+        }
+        for address in [0x1000, 0x1010, 0x1018] {
+            u32_at(&mut bytes, rva(address), 0xe3a00001); // mov r0,#1
+            u32_at(&mut bytes, rva(address) + 4, 0xe12fff1e); // bx lr
+        }
+        for (offset, value) in [
+            (12, 0x1860),
+            (16, 1),
+            (20, 2),
+            (24, 2),
+            (28, 0x1828),
+            (32, 0x1830),
+            (36, 0x1838),
+        ] {
+            u32_at(&mut bytes, rva(0x1800) + offset, value);
+        }
+        for (address, value) in [
+            (0x1828, 0x1010),
+            (0x182c, 0x1018),
+            (0x1830, 0x1880),
+            (0x1834, 0x1890),
+        ] {
+            u32_at(&mut bytes, rva(address), value);
+        }
+        u16_at(&mut bytes, rva(0x183a), 1);
+        for (address, text) in [
+            (0x1860, "loader-test.dll"),
+            (0x1880, "Helper"),
+            (0x1890, "Value"),
+        ] {
+            let at = rva(address);
+            bytes[at..at + text.len()].copy_from_slice(text.as_bytes());
+        }
+        // Position-independent code still needs a valid relocation directory
+        // when the importer is assigned a non-preferred module slot.
+        // Two IMAGE_REL_BASED_ABSOLUTE entries require no address adjustment.
+        u32_at(&mut bytes, rva(0x1e00), 0x1000);
+        u32_at(&mut bytes, rva(0x1e04), 12);
+        if let Some((dll, name)) = import {
+            for (offset, value) in [(104, 0x1a00), (108, 40), (192, 0x1c00), (196, 8)] {
+                u32_at(&mut bytes, opt + offset, value);
+            }
+            for (address, value) in [
+                (0x1a00, 0x1b00),
+                (0x1a0c, 0x1a80),
+                (0x1a10, 0x1c00),
+                (0x1b00, 0x1c80),
+                (0x1c00, 0x1c80),
+            ] {
+                u32_at(&mut bytes, rva(address), value);
+            }
+            for (address, text) in [(0x1a80, dll), (0x1c82, name)] {
+                let at = rva(address);
+                bytes[at..at + text.len()].copy_from_slice(text.as_bytes());
+            }
+        }
+        bytes
+    }
+
     #[test]
     fn image_entry_page_oom_rolls_back_loader_reservations() {
         let mut cpu = StubCpu::new();
@@ -24758,8 +24880,9 @@ mod tests {
         assert!(kernel.heap.attach_ram(Some(ram.clone())));
         let allocation = kernel.heap.alloc(1).unwrap(); // all program RAM is occupied
         let thunk = dummy_thunk();
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/ramtest/dist/GZRT999999/pageprobe.dll");
+        let fixtures = tempfile::tempdir().unwrap();
+        let fixture = fixtures.path().join("pageprobe.dll");
+        std::fs::write(&fixture, loader_fixture_dll(None)).unwrap();
         let next = kernel.next_module_base;
         let mut ctx = CallCtx {
             cpu: &mut cpu,
@@ -24778,7 +24901,7 @@ mod tests {
         assert!(ctx.cpu.read_mem(next + 0x1000, 1).is_err());
         assert_eq!(ram.snapshot().program_used, 1);
         ctx.kernel.heap.free(allocation);
-        // The full image is 35 pages, but the loader needs only its entry page.
+        // The full image spans 35 pages, but the loader needs only its entry page.
         let base = map_resource_module(&mut ctx, &fixture, "pageprobe.dll")
             .unwrap()
             .unwrap();
@@ -24796,8 +24919,15 @@ mod tests {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/ramtest/dist/GZRT999999");
+        let fixtures = tempfile::tempdir().unwrap();
+        let fixture = fixtures.path();
+        for (name, import) in [
+            ("depleaf.dll", None),
+            ("depmissing.dll", Some(("does-not-exist.dll", "Value"))),
+            ("depbadexport.dll", Some(("depleaf.dll", "Missing"))),
+        ] {
+            std::fs::write(fixture.join(name), loader_fixture_dll(import)).unwrap();
+        }
         let mut ctx = CallCtx {
             cpu: &mut cpu,
             kernel: &mut kernel,

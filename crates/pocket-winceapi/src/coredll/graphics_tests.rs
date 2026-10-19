@@ -731,9 +731,10 @@ fn owner_draw_button_notifies_its_parent_with_a_real_child_dc_and_restores_the_c
     assert_eq!(&fields[..6], &[4, 77, 0, 1, 0, hwnd]);
     assert_eq!(&fields[7..11], &[0, 0, 24, 20]);
     let dc = fields[6];
-    let bitmap = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
-    ctx.kernel.gdi.bitmap_mut(bitmap).unwrap().pixels[..2]
-        .copy_from_slice(&0x07e0u16.to_le_bytes());
+    // Exercise the same drawing path as a guest GDI callback, including coverage.
+    surface_for_dc(ctx.kernel, dc)
+        .unwrap()
+        .put_pixel(0, 0, 0x07e0);
     ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
     ctx.cpu.write_reg(ArmReg::Lr, 0x8888).unwrap();
     assert!(matches!(
@@ -2691,17 +2692,9 @@ fn custom_native_child_surface_survives_dialog_and_control_compositing() {
         thunk: &thunk,
     };
     let dc = window_dc(&mut ctx, map);
-    let bm = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
-    for p in ctx
-        .kernel
-        .gdi
-        .bitmap_mut(bm)
+    surface_for_dc(ctx.kernel, dc)
         .unwrap()
-        .pixels
-        .chunks_exact_mut(2)
-    {
-        p.copy_from_slice(&0x07e0u16.to_le_bytes());
-    }
+        .fill_rect(0, 0, 280, 165, 0x07e0);
     ctx.kernel.composite_controls();
     assert_eq!(pixel(ctx.kernel, 40, 50), 0x07e0);
     assert_eq!(pixel(ctx.kernel, 319, 214), 0x07e0);
@@ -2931,4 +2924,51 @@ fn font_height_drawtext_wraps_and_measures_the_same_cells() {
     for row in bm.pixels.chunks_exact(120) {
         assert!(row[72..].iter().all(|&b| b == 0));
     }
+}
+
+#[test]
+fn standard_closed_combo_backing_cannot_cover_buttons_below_it() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let combo = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::ComboBox,
+        1,
+        "UK English".into(),
+        0x50000003,
+        72,
+        40,
+        150,
+        180,
+    );
+    kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Button,
+        2,
+        "OK".into(),
+        0x50000000,
+        62,
+        190,
+        80,
+        34,
+    );
+    kernel.window_rects.insert(combo, (72, 40, 150, 180));
+    kernel.window_parents.insert(combo, FAKE_HWND);
+    kernel.composite_controls();
+    let expected = pixel(&kernel, 100, 200);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let dc = window_dc(&mut ctx, combo);
+    surface_for_dc(ctx.kernel, dc)
+        .unwrap()
+        .fill_rect(0, 0, 150, 180, 0x001f);
+    ctx.kernel.composite_controls();
+    assert_eq!(pixel(ctx.kernel, 100, 200), expected);
+    assert_ne!(expected, 0x001f);
+    assert_eq!(call(&mut ctx, get_client_rect, &[combo, 0x1100]), 1);
+    assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), 20);
 }
