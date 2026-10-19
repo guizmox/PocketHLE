@@ -30,3 +30,7 @@ pocket-pe = { path = "../pocket-pe" }
 pocket-cpu = { path = "../pocket-cpu" }
 pocket-kernel = { path = "../pocket-kernel", default-features = false }
 pocket-winceapi = { path = "../pocket-winceapi", default-features = false }
+
+[[example]]
+name = "startup_probe"
+required-features = ["unicorn"]

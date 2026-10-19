@@ -1,5 +1,7 @@
 .\Cargo.lock
 .\Cargo.toml
+.\crates\pocket-core\Cargo.toml
+.\crates\pocket-core\examples\startup_probe.rs
 .\crates\pocket-kernel\Cargo.toml
 .\crates\pocket-kernel\assets\fonts\LICENSE-Bitstream-Vera.txt
 .\crates\pocket-kernel\assets\fonts\LICENSE-Liberation.txt
@@ -27,6 +29,7 @@
 .\crates\pocket-kernel\src\gdi.rs
 .\crates\pocket-kernel\src\lib.rs
 .\crates\pocket-kernel\src\text.rs
+.\crates\pocket-kernel\src\vfs_contract.rs
 .\crates\pocket-library\src\lib.rs
 .\crates\pocket-winceapi\src\coredll.rs
 .\crates\pocket-winceapi\src\coredll\coordinates.rs

@@ -6,11 +6,31 @@ pub struct VfsShared(Arc<Mutex<Shared>>);
 #[derive(Default)]
 struct Shared {
     leases: HashMap<String, Vec<Weak<Lease>>>,
+    // Shared by processes/duplicate handles, under the same gate as quota checks.
+    // Rescan at opens, namespace changes and explicit space queries; byte writes
+    // adjust the exact logical length instead of walking Flash Disk every time.
+    volume_usage: HashMap<PathBuf, u64>,
+    #[cfg(test)]
+    volume_scans: usize,
     attributes: HashMap<String, u32>,
     bluetooth: crate::bluetooth::Service,
     camera: crate::camera::Service,
     gps: crate::gps::Service,
     vibration: crate::vibration::Service,
+}
+impl Shared {
+    fn volume_used(&mut self, root: &Path) -> Result<u64, u32> {
+        if let Some(&bytes) = self.volume_usage.get(root) {
+            return Ok(bytes);
+        }
+        let bytes = used(root)?;
+        #[cfg(test)]
+        {
+            self.volume_scans += 1;
+        }
+        self.volume_usage.insert(root.to_path_buf(), bytes);
+        Ok(bytes)
+    }
 }
 #[derive(Debug)]
 pub(super) struct Lease {
@@ -196,7 +216,15 @@ impl Vfs {
         Ok(resolved.to_string_lossy().to_ascii_lowercase())
     }
     fn quota(mount: &Mount) -> Option<(PathBuf, u64)> {
-        (mount.prefix == "/flash disk/").then(|| (mount.host_dir.clone(), 32 * 1024 * 1024))
+        (mount.prefix == "/flash disk/").then(|| {
+            (
+                mount
+                    .host_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| mount.host_dir.clone()),
+                32 * 1024 * 1024,
+            )
+        })
     }
     /// Legacy internal callers retain their create-parent convenience; guest APIs use open_file.
     pub fn open(&mut self, path: &str, access: Access, create: bool) -> Option<u32> {
@@ -586,6 +614,9 @@ impl Vfs {
                 }
                 _ => {}
             }
+            // An open is a reconciliation boundary, including host-side edits
+            // between uses and truncation performed by the disposition below.
+            state.volume_usage.clear();
             // Creating a read-only handle still creates the file, without granting guest write access.
             if access & 2 == 0
                 && !existed
@@ -663,7 +694,7 @@ impl Vfs {
         }
         self.ram_handles.get(&h)?.lock().ok()?.lease.clone()
     }
-    fn growth_allowed(&self, h: u32, size: u64) -> bool {
+    fn growth_allowed(&self, h: u32, size: u64, old: u64, state: &mut Shared) -> bool {
         let Some(l) = self.lease(h) else {
             return true;
         };
@@ -673,36 +704,67 @@ impl Vfs {
         let Some((root, total)) = &l.volume else {
             return true;
         };
-        let old = self
-            .handles
-            .get(&h)
-            .and_then(|f| f.lock().ok()?.file.metadata().ok())
-            .map(|m| m.len())
-            .unwrap_or(0);
-        size <= old || used(root).is_ok_and(|u| size - old <= total.saturating_sub(u))
+        size <= old
+            || state
+                .volume_used(root)
+                .is_ok_and(|u| size - old <= total.saturating_sub(u))
+    }
+    fn account_resize(&self, h: u32, old: u64, new: u64, state: &mut Shared) {
+        if let Some(lease) = self.lease(h) {
+            if let Some((root, _)) = &lease.volume {
+                // Another alias may expose a nested/parent host volume. Its
+                // cached total must be reconciled before its next quota check.
+                state
+                    .volume_usage
+                    .retain(|cached_root, _| cached_root == root);
+                if let Some(used) = state.volume_usage.get_mut(root) {
+                    *used = used.saturating_sub(old).saturating_add(new);
+                }
+                return;
+            }
+        }
+        // A writable non-quota mount can alias files below Flash Disk too.
+        // RAM/device writes cannot change any host volume and need no rescan.
+        if self.handles.contains_key(&h) {
+            state.volume_usage.clear();
+        }
     }
     pub fn write(&mut self, h: u32, data: &[u8]) -> Option<usize> {
         let shared = self.shared.clone();
-        let _gate = shared.0.lock().unwrap();
-        let end = if let Some(f) = self.handles.get(&h) {
+        let mut state = shared.0.lock().unwrap();
+        let old = self.size(h).unwrap_or(0);
+        let pos = if let Some(f) = self.handles.get(&h) {
             let mut f = f.lock().ok()?;
-            let pos = if f.append {
-                f.file.metadata().ok()?.len()
+            if f.append {
+                old
             } else {
                 f.file.stream_position().ok()?
-            };
-            pos.checked_add(data.len() as u64)?
+            }
         } else {
             0
         };
-        if !self.growth_allowed(h, end) {
+        let end = pos.checked_add(data.len() as u64)?;
+        if !self.growth_allowed(h, end, old, &mut state) {
             return None;
         }
-        self.write_raw(h, data)
+        let result = self.write_raw(h, data);
+        if let Some(n) = result {
+            // Partial writes consume only bytes actually added. Overwrites do
+            // not spend quota; seeking beyond EOF charges the intervening gap.
+            if n != 0 {
+                self.account_resize(h, old, old.max(pos + n as u64), &mut state);
+            }
+        } else {
+            // A host I/O error may have changed the file: reconcile next time.
+            state.volume_usage.clear();
+        }
+        result
     }
+
     pub fn set_end_of_file(&mut self, h: u32) -> bool {
         let shared = self.shared.clone();
-        let _gate = shared.0.lock().unwrap();
+        let mut state = shared.0.lock().unwrap();
+        let old = self.size(h).unwrap_or(0);
         let size = if let Some(f) = self.handles.get(&h) {
             let Ok(mut f) = f.lock() else {
                 return false;
@@ -714,7 +776,15 @@ impl Vfs {
         } else {
             0
         };
-        self.growth_allowed(h, size) && self.set_end_of_file_raw(h)
+        if !self.growth_allowed(h, size, old, &mut state) {
+            return false;
+        }
+        if !self.set_end_of_file_raw(h) {
+            state.volume_usage.clear();
+            return false;
+        }
+        self.account_resize(h, old, size, &mut state);
+        true
     }
     pub fn disk_space(&self, path: &str) -> Result<(u64, u64), u32> {
         if self.is_ram_path(path) {
@@ -732,7 +802,14 @@ impl Vfs {
         if !p.is_dir() {
             return Err(3);
         }
+        let mut state = self.shared.0.lock().unwrap();
         let occupied = used(&m.host_dir)?;
+        state.volume_usage.clear();
+        let root = m
+            .host_dir
+            .canonicalize()
+            .unwrap_or_else(|_| m.host_dir.clone());
+        state.volume_usage.insert(root, occupied);
         let total = if let Some((_, total)) = Self::quota(m) {
             total
         } else {
@@ -836,6 +913,7 @@ impl Vfs {
         if busy(&mut s, &key) {
             return Err(32);
         }
+        s.volume_usage.clear();
         if !self.delete_file_raw(path) {
             return Err(5);
         }
@@ -877,6 +955,7 @@ impl Vfs {
         {
             return Err(32);
         }
+        s.volume_usage.clear();
         if !self.move_file_raw(from, to) {
             return Err(5);
         }
@@ -1043,6 +1122,56 @@ mod tests {
         let mut buf = [0; 6];
         assert_eq!(v.read(h, &mut buf), Some(6));
         assert_eq!(&buf, b"ONETWO");
+    }
+    #[test]
+    fn flash_quota_small_writes_scan_once_and_charge_shared_writers() {
+        let d = tempfile::tempdir().unwrap();
+        let mut v = mounted(d.path());
+        let a = v
+            .open_file("\\Flash Disk\\a", 3, 3, 1, false, 0)
+            .unwrap()
+            .handle;
+        let mut other = mounted(d.path());
+        other.attach_shared_context(v.shared_context());
+        let b = other
+            .open_file("\\Flash Disk\\b", 3, 3, 1, false, 0)
+            .unwrap()
+            .handle;
+        for _ in 0..2000 {
+            assert_eq!(v.write(a, b"12345678"), Some(8));
+        }
+        assert_eq!(v.shared.0.lock().unwrap().volume_scans, 1);
+        assert_eq!(
+            v.disk_space("\\Flash Disk\\").unwrap().1,
+            32 * 1024 * 1024 - 16000
+        );
+        // The second writer consumes the remaining space, including sparse gaps.
+        other.seek(b, (32 * 1024 * 1024 - 16000) as i64, SeekKind::Begin);
+        assert!(other.set_end_of_file(b));
+        assert_eq!(v.write(a, b"X"), None);
+        v.seek(a, 0, SeekKind::Begin);
+        assert_eq!(v.write(a, b"overwrite"), Some(9));
+        assert!(v.set_end_of_file(a)); // Truncation refunds space immediately.
+        assert_eq!(other.write(b, b"refunded"), Some(8));
+        v.close(a);
+        v.delete("\\Flash Disk\\a").unwrap();
+        assert_eq!(v.disk_space("\\Flash Disk\\").unwrap().1, 15992);
+    }
+    #[test]
+    fn flash_quota_observes_writes_through_another_mount_alias() {
+        let d = tempfile::tempdir().unwrap();
+        let mut v = mounted(d.path());
+        v.mount_save_dir("/alias/", d.path());
+        let a = v
+            .open_file("/flash disk/a", 3, 3, 1, false, 0)
+            .unwrap()
+            .handle;
+        let b = v.open_file("/alias/b", 3, 3, 1, false, 0).unwrap().handle;
+        assert_eq!(v.write(a, b"A"), Some(1));
+        v.seek(b, 32 * 1024 * 1024 - 1, SeekKind::Begin);
+        assert!(v.set_end_of_file(b));
+        assert_eq!(v.write(a, b"B"), None);
+        assert_eq!(v.size(a), Some(1));
     }
     #[test]
     fn flash_quota_refunds_truncation_and_refuses_overflow_atomically() {
