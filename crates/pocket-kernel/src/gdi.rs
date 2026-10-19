@@ -302,6 +302,7 @@ pub struct GdiState {
     pub scroll_erases: HashMap<u32, Vec<[i32; 4]>>,
     pub icons: HashMap<u32, crate::imaging::Image>,
     pub image_lists: HashMap<u32, crate::imaging::ImageList>,
+    pub system_brushes: HashMap<i32, u32>,
     pub owner_draw_frames: Vec<OwnerDrawFrame>,
     pub paint_erase_frames: Vec<PaintEraseFrame>,
     pub pending_window_erases: std::collections::HashSet<u32>,
@@ -318,6 +319,7 @@ impl GdiState {
             scroll_erases: HashMap::new(),
             icons: HashMap::new(),
             image_lists: HashMap::new(),
+            system_brushes: HashMap::new(),
             owner_draw_frames: Vec::new(),
             paint_erase_frames: Vec::new(),
             pending_window_erases: std::collections::HashSet::new(),
@@ -474,7 +476,7 @@ impl GdiState {
 
     pub fn delete(&mut self, handle: u32) -> bool {
         // Stock objects are immortal.
-        if is_stock_handle(handle) {
+        if is_stock_handle(handle) || self.system_brushes.values().any(|h| *h == handle) {
             return true;
         }
         self.regions.remove(&handle).is_some() || self.objects.remove(&handle).is_some()
@@ -757,6 +759,75 @@ impl<'a> Surface<'a> {
                     && inner_y > 0.0
                     && (dx / inner_x).powi(2) + (dy / inner_y).powi(2) < 1.0;
                 let color = if !inside {
+                    stroke.map(|(c, _)| c).or(fill)
+                } else {
+                    fill
+                };
+                if let Some(color) = color {
+                    self.put_pixel(x as i32, y as i32, color);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
+    /// Rounded corners use the supplied ellipse diameters, limited to the
+    /// bounding box. Iterate only visible pixels, even for huge guest bounds.
+    pub fn round_rect(
+        &mut self,
+        rect: [i32; 4],
+        corner: [i32; 2],
+        fill: Option<u16>,
+        stroke: Option<(u16, u32)>,
+    ) {
+        let [l, t, r, b] = rect.map(i64::from);
+        if r <= l || b <= t || (fill.is_none() && stroke.is_none()) {
+            return;
+        }
+        let rx = (i64::from(corner[0]).unsigned_abs().min((r - l) as u64)) as f64 / 2.0;
+        let ry = (i64::from(corner[1]).unsigned_abs().min((b - t) as u64)) as f64 / 2.0;
+        let inside = |x: f64, y: f64, inset: f64| {
+            let (left, top, right, bottom) = (
+                l as f64 + inset,
+                t as f64 + inset,
+                r as f64 - inset,
+                b as f64 - inset,
+            );
+            if x < left || y < top || x >= right || y >= bottom {
+                return false;
+            }
+            let (ax, ay) = ((rx - inset).max(0.0), (ry - inset).max(0.0));
+            if ax == 0.0 || ay == 0.0 {
+                return true;
+            }
+            let dx = if x < left + ax {
+                (left + ax - x) / ax
+            } else if x > right - ax {
+                (x - right + ax) / ax
+            } else {
+                0.0
+            };
+            let dy = if y < top + ay {
+                (top + ay - y) / ay
+            } else if y > bottom - ay {
+                (y - bottom + ay) / ay
+            } else {
+                0.0
+            };
+            dx * dx + dy * dy <= 1.0
+        };
+        let (sw, sh) = self.dimensions();
+        let pen = stroke.map_or(0.0, |(_, w)| w.clamp(1, 2048) as f64);
+        let mut changed = false;
+        for y in t.max(0)..b.min(sh as i64) {
+            for x in l.max(0)..r.min(sw as i64) {
+                if !inside(x as f64 + 0.5, y as f64 + 0.5, 0.0) {
+                    continue;
+                }
+                let color = if !inside(x as f64 + 0.5, y as f64 + 0.5, pen) {
                     stroke.map(|(c, _)| c).or(fill)
                 } else {
                     fill
@@ -1074,6 +1145,35 @@ mod tests {
     /// hand-written implementations of the named ROP codes. Every
     /// operand triple is exercised, so a wrong truth-table bit for any
     /// of these codes shows up here rather than as a rendering glitch.
+    #[test]
+    fn navigator_rendering_round_rect_preserves_corners_and_hollow_center() {
+        let mut bitmap = Bitmap::new(16, 12);
+        let mut surface = Surface::Bitmap(&mut bitmap);
+        surface.fill_rect(0, 0, 16, 12, 0x1234);
+        surface.round_rect([1, 1, 15, 11], [8, 8], Some(0x07e0), Some((0xffff, 1)));
+        let pixel = |s: &Surface<'_>, x: usize, y: usize| {
+            u16::from_le_bytes(
+                s.pixels()[(y * 16 + x) * 2..(y * 16 + x) * 2 + 2]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(pixel(&surface, 1, 1), 0x1234);
+        assert_eq!(pixel(&surface, 8, 1), 0xffff);
+        assert_eq!(pixel(&surface, 8, 6), 0x07e0);
+        surface.round_rect([1, 1, 15, 11], [8, 8], None, Some((0xf800, 2)));
+        assert_eq!(pixel(&surface, 8, 6), 0x07e0);
+        assert_eq!(pixel(&surface, 8, 2), 0xf800);
+        surface.round_rect(
+            [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
+            [0, 0],
+            Some(0xabcd),
+            None,
+        );
+        assert_eq!(pixel(&surface, 0, 0), 0xabcd);
+        assert_eq!(pixel(&surface, 15, 11), 0xabcd);
+    }
+
     #[test]
     fn rop3_matches_reference_formulas() {
         type Ref = (u32, &'static str, fn(u16, u16, u16) -> u16);

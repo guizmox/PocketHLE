@@ -40,3 +40,6 @@
 .\crates\pocket-winceapi\src\lib.rs
 .\frontends\pocket-android-jni\src\runner.rs
 .\frontends\pocket-cli\examples\navigator_gui_probe.rs
+.\crates\pocket-core\examples\navigator_input_probe.rs
+.\verification\navigator-gdi-20261019.txt
+.\verification\navigator-going-to-back.txt

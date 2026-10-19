@@ -34,3 +34,7 @@ pocket-winceapi = { path = "../pocket-winceapi", default-features = false }
 [[example]]
 name = "startup_probe"
 required-features = ["unicorn"]
+
+[[example]]
+name = "navigator_input_probe"
+required-features = ["unicorn"]

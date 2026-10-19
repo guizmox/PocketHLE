@@ -654,7 +654,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "PatBlt", pat_blt);
     d.register_handler(dll, "Rectangle", rectangle);
     d.register_handler(dll, "Ellipse", ellipse);
-    d.register_handler(dll, "RoundRect", rectangle);
+    d.register_handler(dll, "RoundRect", round_rect);
     d.register_handler(dll, "Polygon", polygon);
     d.register_handler(dll, "Polyline", polyline);
     d.register_handler(dll, "MoveToEx", move_to_ex);
@@ -13837,10 +13837,19 @@ fn fill_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn rectangle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    draw_closed_shape(ctx, false)
+    draw_closed_shape(ctx, None, false)
 }
 
-fn draw_closed_shape(ctx: &mut CallCtx<'_>, round: bool) -> Result<DispatchOutcome, KernelError> {
+fn round_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let corner = [ctx.arg_u32(5)? as i32, ctx.arg_u32(6)? as i32];
+    draw_closed_shape(ctx, Some(corner), false)
+}
+
+fn draw_closed_shape(
+    ctx: &mut CallCtx<'_>,
+    corner: Option<[i32; 2]>,
+    ellipse: bool,
+) -> Result<DispatchOutcome, KernelError> {
     let hdc = ctx.arg_u32(0)?;
     let rect = [
         ctx.arg_u32(1)? as i32,
@@ -13865,8 +13874,10 @@ fn draw_closed_shape(ctx: &mut CallCtx<'_>, round: bool) -> Result<DispatchOutco
     });
     sync_dib_from_guest(ctx, hdc)?;
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
-        if round {
+        if ellipse {
             surf.ellipse(rect, fill, stroke);
+        } else if let Some(corner) = corner {
+            surf.round_rect(rect, corner, fill, stroke);
         } else {
             let [l, t, r, b] = rect.map(i64::from);
             if r > l && b > t {
@@ -17443,7 +17454,7 @@ fn set_bitmap_bits(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 fn ellipse(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    draw_closed_shape(ctx, true)
+    draw_closed_shape(ctx, None, true)
 }
 
 fn pat_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -21258,7 +21269,7 @@ fn get_sys_color(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
 /// The system palette, as a `COLORREF`.
 fn sys_color(idx: i32) -> u32 {
-    match idx {
+    match idx & !0x4000_0000 {
         // COLOR_SCROLLBAR / COLOR_BACKGROUND / COLOR_INACTIVECAPTION
         0..=2 => 0x00C8C8C8,
         // COLOR_ACTIVECAPTION / COLOR_MENU
@@ -21279,6 +21290,12 @@ fn sys_color(idx: i32) -> u32 {
         // COLOR_BTNSHADOW / COLOR_GRAYTEXT
         16 => 0x00808080,
         17 => 0x00808080,
+        19 => 0x00C8C8C8, // COLOR_INACTIVECAPTIONTEXT
+        20 => 0x00FFFFFF, // COLOR_3DHILIGHT
+        21 => 0x00404040, // COLOR_3DDKSHADOW
+        22 => 0x00DFDFDF, // COLOR_3DLIGHT
+        23 => 0x00000000, // COLOR_INFOTEXT
+        24 => 0x00E1FFFF, // COLOR_INFOBK
         // Anything else — silver.
         _ => 0x00C8C8C8,
     }
@@ -21320,11 +21337,13 @@ fn class_background_color(ctx: &CallCtx<'_>, hbr: u32) -> Option<u32> {
 /// `HBRUSH GetSysColorBrush(int nIndex)` — return a stable stock
 /// handle so subsequent `SelectObject` calls have something to do.
 fn get_sys_color_brush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let idx = ctx.arg_u32(0)? as i32;
-    let h = match idx {
-        4 | 5 | 14 => STOCK_WHITE_BRUSH,
-        6 | 7 | 8 | 9 | 18 => STOCK_BLACK_BRUSH,
-        _ => STOCK_WHITE_BRUSH,
+    let idx = ctx.arg_u32(0)? as i32 & !0x4000_0000;
+    let h = if let Some(h) = ctx.kernel.gdi.system_brushes.get(&idx) {
+        *h
+    } else {
+        let h = ctx.kernel.gdi.create_solid_brush(sys_color(idx));
+        ctx.kernel.gdi.system_brushes.insert(idx, h);
+        h
     };
     Ok(DispatchOutcome::ReturnedR0(h))
 }
@@ -22258,6 +22277,42 @@ fn find_close_change_notification(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn navigator_rendering_system_colors_and_cached_brushes_agree() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (index, color) in [
+            (6, 0),
+            (15, 0x00c8c8c8),
+            (16, 0x00808080),
+            (18, 0),
+            (20, 0x00ffffff),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R0, index | 0x40000000).unwrap();
+            assert_eq!(
+                get_sys_color(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(color)
+            );
+            let DispatchOutcome::ReturnedR0(brush) = get_sys_color_brush(&mut ctx).unwrap() else {
+                panic!()
+            };
+            assert_eq!(ctx.kernel.gdi.brush(brush).unwrap().color, color);
+            assert!(ctx.kernel.gdi.delete(brush));
+            assert_eq!(ctx.kernel.gdi.brush(brush).unwrap().color, color);
+            ctx.cpu.write_reg(ArmReg::R0, index).unwrap();
+            assert_eq!(
+                get_sys_color_brush(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(brush)
+            );
+        }
+    }
+
     #[test]
     fn default_dialog_proc_delivers_init_once_and_restores_its_caller() {
         let mut kernel = fresh_kernel();
