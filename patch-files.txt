@@ -5,6 +5,10 @@ crates\pocket-cab\src\lib.rs
 crates\pocket-core\examples\cod2_probe.rs
 crates\pocket-core\examples\tomtom_startup_probe.rs
 crates\pocket-core\src\lib.rs
+crates\pocket-gles\Cargo.toml
+crates\pocket-gles\src\consts.rs
+crates\pocket-gles\src\context.rs
+crates\pocket-gles\src\texture.rs
 crates\pocket-kernel\src\controls.rs
 crates\pocket-kernel\src\desktop_services.rs
 crates\pocket-kernel\src\device_identity.rs
@@ -20,10 +24,12 @@ crates\pocket-library\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\coredll\graphics_tests.rs
 crates\pocket-winceapi\src\coredll\message_queue.rs
+crates\pocket-winceapi\src\gles.rs
 crates\pocket-winceapi\src\gx.rs
 crates\pocket-winceapi\src\legacy_services.rs
 crates\pocket-winceapi\src\lib.rs
 docs\AGENTS.md
+docs\GPU.md
 frontends\pocket-android-jni\src\lib.rs
 frontends\pocket-android-jni\src\runner.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
@@ -35,3 +41,7 @@ frontends\pocket-android\app\src\main\res\layout\activity_game_pocketpc.xml
 frontends\pocket-cli\examples\navigator_gui_probe.rs
 frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\runner.rs
+licenses\texture2ddecoder\COPYRIGHT
+licenses\texture2ddecoder\LICENSE-APACHE
+licenses\texture2ddecoder\LICENSE-MIT
+licenses\texture2ddecoder\README.txt

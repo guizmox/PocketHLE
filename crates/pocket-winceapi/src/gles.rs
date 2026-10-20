@@ -228,7 +228,7 @@ pub(crate) fn resume(saved: SuspendedGles) {
 
 /// Compressed formats we decode, reported through
 /// `GL_COMPRESSED_TEXTURE_FORMATS` and the extension string.
-const COMPRESSED_FORMATS: [u32; 16] = [
+const COMPRESSED_FORMATS: [u32; 20] = [
     pocket_gles::GL_ATC_RGB_AMD,
     pocket_gles::GL_ATC_RGBA_EXPLICIT_ALPHA_AMD,
     pocket_gles::GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD,
@@ -245,6 +245,10 @@ const COMPRESSED_FORMATS: [u32; 16] = [
     pocket_gles::GL_PALETTE8_R5_G6_B5_OES,
     pocket_gles::GL_PALETTE8_RGBA4_OES,
     pocket_gles::GL_PALETTE8_RGB5_A1_OES,
+    pocket_gles::GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG,
+    pocket_gles::GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG,
+    pocket_gles::GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG,
+    pocket_gles::GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG,
 ];
 
 /// Thin wrapper so `pocket_cpu::Cpu` satisfies `GuestMemory`.
@@ -1582,6 +1586,14 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     let format = ctx.arg_u32(2)?;
     let width = ctx.arg_u32(3)?;
     let height = ctx.arg_u32(4)?;
+    if (pocket_gles::GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG
+        ..=pocket_gles::GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
+        .contains(&format)
+        && ctx.arg_u32(5)? != 0
+    {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
     let size = ctx.arg_u32(6)?;
     let data = ctx.arg_u32(7)?;
     let bytes = if data == 0 || size == 0 {

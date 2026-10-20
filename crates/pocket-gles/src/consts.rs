@@ -300,3 +300,9 @@ pub const EGL_EXTENSIONS: u32 = 0x3055;
 // ---- draw/read selectors -----------------------------------------------
 pub const EGL_DRAW: u32 = 0x3059;
 pub const EGL_READ: u32 = 0x305A;
+
+// IMG_texture_compression_pvrtc (PVRTC1).
+pub const GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG: u32 = 0x8C00;
+pub const GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG: u32 = 0x8C01;
+pub const GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG: u32 = 0x8C02;
+pub const GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG: u32 = 0x8C03;

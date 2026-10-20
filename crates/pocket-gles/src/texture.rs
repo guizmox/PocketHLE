@@ -523,6 +523,17 @@ fn block_counts(width: u32, height: u32) -> (usize, usize) {
 /// Bytes `glCompressedTexImage2D` needs for an image in `format`, or
 /// `None` if the format is not one we decode.
 pub fn compressed_image_size(format: u32, width: u32, height: u32) -> Option<usize> {
+    if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG).contains(&format)
+    {
+        if !width.is_power_of_two() || !height.is_power_of_two() {
+            return None;
+        }
+        let two = format & 1 != 0;
+        let w = width.max(if two { 16 } else { 8 }) as usize;
+        let h = height.max(8) as usize;
+        return w.checked_mul(h)?.checked_div(if two { 4 } else { 2 });
+    }
+
     let per_block = match format {
         GL_ATC_RGB_AMD | GL_COMPRESSED_RGB_S3TC_DXT1_EXT | GL_COMPRESSED_RGBA_S3TC_DXT1_EXT => 8,
         GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
@@ -777,6 +788,32 @@ pub fn decode_compressed_to_rgba(
     let needed = compressed_image_size(format, width, height)?;
     if data.len() < needed {
         return None;
+    }
+
+    if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG).contains(&format)
+    {
+        let two = format & 1 != 0;
+        let w = width.max(if two { 16 } else { 8 }) as usize;
+        let h = height.max(8) as usize;
+        let mut pixels = vec![0u32; w.checked_mul(h)?];
+        texture2ddecoder::decode_pvrtc(&data[..needed], w, h, &mut pixels, two).ok()?;
+        let rgb = matches!(
+            format,
+            GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG | GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG
+        );
+        let mut out = Vec::with_capacity(
+            (width as usize)
+                .checked_mul(height as usize)?
+                .checked_mul(4)?,
+        );
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                // The decoder returns BGRA byte order; PocketHLE stores RGBA.
+                let [b, g, r, a] = pixels[y * w + x].to_le_bytes();
+                out.extend_from_slice(&[r, g, b, if rgb { 255 } else { a }]);
+            }
+        }
+        return Some(out);
     }
     if matches!(
         format,
@@ -1174,5 +1211,40 @@ mod tests {
         let out =
             decode_compressed_to_rgba(&block, 4, 4, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT).unwrap();
         assert_eq!(&out[0..4], &[0, 0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod pvrtc_tests {
+    use super::*;
+    #[test]
+    fn pvrtc_size_and_invalid_dimensions() {
+        for format in 0x8c00..=0x8c03 {
+            assert_eq!(compressed_image_size(format, 1, 1), Some(32));
+            assert_eq!(compressed_image_size(format, 8, 8), Some(32));
+            assert_eq!(compressed_image_size(format, 3, 8), None);
+            assert_eq!(compressed_image_size(format, 0, 8), None);
+            assert!(decode_compressed_to_rgba(&[0; 31], 8, 8, format).is_none());
+        }
+        assert_eq!(compressed_image_size(0x8c02, 32, 16), Some(256));
+        assert_eq!(compressed_image_size(0x8c03, 32, 16), Some(128));
+    }
+    #[test]
+    fn pvrtc_rgb_alpha_channel_order_and_small_mips() {
+        // Every word has identical opaque red endpoints. Modulation cannot
+        // alter the color: catches BGRA/RGBA conversion and cropped mip rows.
+        let mut red = Vec::new();
+        for _ in 0..4 {
+            red.extend_from_slice(&[0, 0, 0, 0, 0, 0xfc, 0, 0xfc]);
+        }
+        for format in 0x8c00..=0x8c03 {
+            let out = decode_compressed_to_rgba(&red, 1, 1, format).unwrap();
+            assert_eq!(out, vec![255, 0, 0, 255]);
+            let transparent = decode_compressed_to_rgba(&[0; 32], 1, 1, format).unwrap();
+            assert_eq!(
+                transparent,
+                vec![0, 0, 0, if format < 0x8c02 { 255 } else { 0 }]
+            );
+        }
     }
 }

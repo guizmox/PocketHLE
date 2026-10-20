@@ -1011,6 +1011,13 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
+        if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
+            .contains(&format)
+            && (!width.is_power_of_two() || !height.is_power_of_two())
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
         if texture::compressed_image_size(format, width, height).is_none() {
             self.set_error(GL_INVALID_ENUM);
             return;
@@ -4067,5 +4074,49 @@ mod tests {
         c.vertex_array.enabled = true;
         c.draw_arrays(&mut NoMem, GL_TRIANGLE_FAN, 0, 4);
         assert_eq!(covered(&c), 0, "short buffer still rendered");
+    }
+}
+
+#[cfg(test)]
+mod pvrtc_upload_tests {
+    use super::*;
+    #[test]
+    fn pvrtc_uploads_keep_small_explicit_mips_and_reject_bad_updates() {
+        let mut c = Context::new(8, 8);
+        c.bind_texture(GL_TEXTURE_2D, 7);
+        for level in 0..=3 {
+            let size = 8 >> level;
+            c.compressed_tex_image_2d(
+                GL_TEXTURE_2D,
+                level,
+                size,
+                size,
+                GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG,
+                &[0; 32],
+            );
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+        assert_eq!((c.textures[&7].width, c.textures[&7].height), (8, 8));
+        assert_eq!(c.textures[&7].mipmaps[&3].0, 1);
+        let revision = c.textures[&7].revision;
+        c.compressed_tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            3,
+            8,
+            GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG,
+            &[0; 32],
+        );
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.compressed_tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            8,
+            8,
+            GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG,
+            &[0; 31],
+        );
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.textures[&7].revision, revision);
     }
 }
