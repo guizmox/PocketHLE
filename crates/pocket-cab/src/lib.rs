@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+mod installer_resources;
+
 #[derive(Debug, Error)]
 pub enum CabError {
     #[error("io error: {0}")]
@@ -1344,6 +1346,7 @@ pub fn materialise_setup_names(root: &Path, files: &[CabFile]) -> Vec<(PathBuf, 
             ),
         }
     }
+    installer_resources::materialise(files, &created);
     created
 }
 
@@ -1433,6 +1436,7 @@ pub fn materialise_install_header_names(
             ),
         }
     }
+    installer_resources::materialise(files, &created);
     created
 }
 

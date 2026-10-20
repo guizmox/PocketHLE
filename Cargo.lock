@@ -2867,6 +2867,7 @@ version = "0.3.4"
 dependencies = [
  "anyhow",
  "cab",
+ "flate2",
  "log",
  "serde",
  "thiserror 1.0.69",

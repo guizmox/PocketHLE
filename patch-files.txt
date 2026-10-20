@@ -1,3 +1,7 @@
+Cargo.lock
+crates\pocket-cab\Cargo.toml
+crates\pocket-cab\src\installer_resources.rs
+crates\pocket-cab\src\lib.rs
 crates\pocket-core\examples\cod2_probe.rs
 crates\pocket-core\examples\tomtom_startup_probe.rs
 crates\pocket-core\src\lib.rs
