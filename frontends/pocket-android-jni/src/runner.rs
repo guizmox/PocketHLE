@@ -589,6 +589,20 @@ fn run_process(
             ));
         }
     }
+    if !is_gizmondo && entry.source_cab.to_ascii_lowercase().ends_with(".cab") {
+        if let Some(install_dir) = entry.install_dir.as_deref() {
+            match emu.complete_cab_registry_setup(&extracted, install_dir) {
+                Ok(count) if count != 0 => {
+                    summary_lines.push(format!("CAB registry setup completed: {count}"))
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("CAB registry setup failed: {error:#}");
+                    summary_lines.push(format!("CAB registry setup failed: {error:#}"));
+                }
+            }
+        }
+    }
     // Keep the executable's directory inside the card, as on desktop. Native
     // DLLs use GetModuleFileName to locate their configuration and assets.
     if is_gizmondo {

@@ -378,7 +378,7 @@ fn cmd_inspect_cab(cab: &std::path::Path, out_dir: Option<&std::path::Path>) -> 
         }
     };
     std::fs::create_dir_all(&dest)?;
-    let (files, header) = pocket_core::cab::extract_with_header(cab, &dest)?;
+    let (files, header) = pocket_core::cab::extract_for_install(cab, &dest)?;
     if let Some(h) = &header {
         println!(
             "Install header: provider={:?}, app_name={:?}",

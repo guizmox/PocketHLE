@@ -1484,7 +1484,7 @@ impl Library {
         let extracted_dir = game_dir.join("extracted");
         fs::create_dir_all(&extracted_dir)?;
 
-        let (files, header) = pocket_cab::extract_with_header(cab_path, &extracted_dir)?;
+        let (files, header) = pocket_cab::extract_for_install(cab_path, &extracted_dir)?;
         for (index, companion) in find_resource_companion_cabs(cab_path)
             .into_iter()
             .enumerate()
@@ -2700,7 +2700,7 @@ fn import_resource_companion_cab(
     if fs::create_dir_all(&staging).is_err() {
         return;
     }
-    match pocket_cab::extract_with_header(companion, &staging) {
+    match pocket_cab::extract_for_install(companion, &staging) {
         Ok((companion_files, companion_header)) => {
             if let Some(header) = companion_header.as_ref().filter(|h| h.structured) {
                 pocket_cab::materialise_install_header_names(

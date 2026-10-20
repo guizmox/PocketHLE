@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+mod install_recovery;
 mod installer_resources;
 
 #[derive(Debug, Error)]
@@ -57,8 +58,11 @@ pub fn extract_all<P: AsRef<Path>, Q: AsRef<Path>>(
     let out_dir = out_dir.as_ref();
     fs::create_dir_all(out_dir)?;
 
-    let file = File::open(cab_path)?;
-    let mut cabinet = cab::Cabinet::new(file).map_err(|e| CabError::Parse(e.to_string()))?;
+    extract_reader(File::open(cab_path)?, out_dir)
+}
+
+fn extract_reader(reader: impl Read + Seek, out_dir: &Path) -> Result<Vec<CabFile>, CabError> {
+    let mut cabinet = cab::Cabinet::new(reader).map_err(|e| CabError::Parse(e.to_string()))?;
 
     // Collect (folder_idx, file_name) up-front since we cannot hold the
     // cabinet borrow across `read_file`.
@@ -99,6 +103,36 @@ fn sanitize_name(name: &str) -> String {
     name.replace(['/', '\\'], "_")
         .trim_start_matches('.')
         .to_string()
+}
+
+/// Installation-only recovery for a single inconsistent CFDATA checksum in
+/// an uncompressed, non-spanned CAB. The original CAB/payload are never changed.
+/// Structural errors, compression errors, truncated data and multiple checksum
+/// mismatches remain fatal. Strict extract_all/extract_with_header stay strict.
+pub fn extract_for_install<P: AsRef<Path>, Q: AsRef<Path>>(
+    cab_path: P,
+    out_dir: Q,
+) -> Result<(Vec<CabFile>, Option<WinCeInstallHeader>), CabError> {
+    let cab_path = cab_path.as_ref();
+    let out_dir = out_dir.as_ref();
+    match extract_with_header(cab_path, out_dir) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            if !error.to_string().contains("Checksum error in data block")
+                || fs::metadata(cab_path)?.len() > 128 * 1024 * 1024
+            {
+                return Err(error);
+            }
+            let original = fs::read(cab_path)?;
+            let Some(recovered) = install_recovery::recover(&original) else {
+                return Err(error);
+            };
+            let files = extract_reader(io::Cursor::new(recovered), out_dir)?;
+            let header = header_from_files(&files)?;
+            log::warn!("CAB import recovered one inconsistent uncompressed-block checksum; source and payload bytes are unchanged: {}",cab_path.display());
+            Ok((files, header))
+        }
+    }
 }
 
 /// A reader for the WinCE install header — the `MSCE` file stored in
@@ -780,8 +814,13 @@ pub fn extract_with_header<P: AsRef<Path>, Q: AsRef<Path>>(
     out_dir: Q,
 ) -> Result<(Vec<CabFile>, Option<WinCeInstallHeader>), CabError> {
     let files = extract_all(&cab_path, &out_dir)?;
+    let header = header_from_files(&files)?;
+    Ok((files, header))
+}
+
+fn header_from_files(files: &[CabFile]) -> Result<Option<WinCeInstallHeader>, CabError> {
     let mut header = None;
-    for f in &files {
+    for f in files {
         // The install header is conventionally a `.000` file at the
         // root of the cabinet.
         if f.short_name.to_ascii_lowercase().ends_with(".000") {
@@ -794,7 +833,7 @@ pub fn extract_with_header<P: AsRef<Path>, Q: AsRef<Path>>(
             break;
         }
     }
-    Ok((files, header))
+    Ok(header)
 }
 
 /// Parsed `_setup.xml` shipped alongside the binary inside Pocket PC

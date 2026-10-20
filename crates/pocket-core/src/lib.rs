@@ -12,6 +12,7 @@
 //! When compiled with `--features unicorn`, [`Emulator::with_unicorn_cpu`]
 //! provides a fully working ARM backend.
 
+mod cab_setup;
 mod colors_wallet;
 
 use std::path::Path;

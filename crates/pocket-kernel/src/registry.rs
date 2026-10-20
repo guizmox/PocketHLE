@@ -116,6 +116,82 @@ pub fn canonical_key(path: &str) -> String {
 }
 
 impl Registry {
+    /// Independent values for a bounded CAB setup transaction. No live handles,
+    /// persistence target or object-store charge escape into the helper process.
+    pub fn isolated_copy(&self) -> Self {
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        Self {
+            store: Arc::new(Mutex::new(RegistryStore {
+                keys: store.keys.clone(),
+                display: store.display.clone(),
+                charge: None,
+                persistence: None,
+            })),
+            handles: HashMap::new(),
+            next_handle: HANDLE_BASE,
+        }
+    }
+
+    /// Commit only the setup's delta, atomically, preserving concurrent device
+    /// values. A conflicting write or quota failure leaves the live store intact.
+    pub fn commit_isolated(&mut self, baseline: &Self, staged: &Self) -> bool {
+        if Arc::ptr_eq(&self.store, &staged.store)
+            || Arc::ptr_eq(&self.store, &baseline.store)
+            || Arc::ptr_eq(&baseline.store, &staged.store)
+        {
+            return false;
+        }
+        let baseline = baseline.store.lock().unwrap_or_else(|e| e.into_inner());
+        let staged = staged.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut keys = store.keys.clone();
+        for key in baseline.keys.keys().chain(staged.keys.keys()) {
+            let before = baseline.keys.get(key);
+            let after = staged.keys.get(key);
+            // This transaction API supports value changes and key creation;
+            // deleting whole keys is deliberately outside the setup profile.
+            if after.is_none() {
+                return false;
+            }
+            let dest = keys.entry(key.clone()).or_default();
+            for name in before
+                .into_iter()
+                .flat_map(|v| v.keys())
+                .chain(after.into_iter().flat_map(|v| v.keys()))
+            {
+                let old = before.and_then(|v| v.get(name));
+                let new = after.and_then(|v| v.get(name));
+                if old == new {
+                    continue;
+                }
+                // Compare against live, not the delta already applied above.
+                if store.keys.get(key).and_then(|v| v.get(name)) != old {
+                    return false;
+                }
+                if let Some(value) = new {
+                    dest.insert(name.clone(), value.clone());
+                } else {
+                    dest.remove(name);
+                }
+            }
+        }
+        if store
+            .charge
+            .as_mut()
+            .is_some_and(|charge| !charge.resize(Self::stored_pages(&keys)))
+        {
+            return false;
+        }
+        store.keys = keys;
+        for (key, display) in &staged.display {
+            store
+                .display
+                .entry(key.clone())
+                .or_insert_with(|| display.clone());
+        }
+        true
+    }
+
     /// Load only device values. Process handles and RAM charges never go on disk.
     /// A corrupt snapshot is an error, so a later flush cannot overwrite it.
     pub fn configure_persistence(&mut self, path: &std::path::Path) -> std::io::Result<()> {
@@ -566,6 +642,46 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cab_setup_transaction_isolated_delta_conflict_and_quota() {
+        let ram = crate::memory_division::MemoryDivision::new(32 * 1024 * 1024, 4096).unwrap();
+        let mut live = Registry::new();
+        assert!(live.attach_ram(Some(&ram)));
+        assert!(live.set_value("HKCU\\Setup", "old", RegistryValue::Dword(7)));
+        let handle = live.open("HKCU\\Setup").unwrap();
+        let baseline = live.isolated_copy();
+        let mut staged = baseline.isolated_copy();
+        assert!(staged.set_value("HKCU\\Setup", "new", RegistryValue::Binary(vec![1; 16])));
+        assert_eq!(live.value("HKCU\\Setup", "new"), None);
+        live.set_value("HKCU\\Other", "concurrent", RegistryValue::Dword(9));
+        assert!(live.commit_isolated(&baseline, &staged));
+        assert_eq!(
+            live.value("HKCU\\Other", "concurrent"),
+            Some(RegistryValue::Dword(9))
+        );
+        assert_eq!(live.path_for(handle).as_deref(), Some("hkcu\\setup"));
+        let baseline = live.isolated_copy();
+        let mut staged = baseline.isolated_copy();
+        staged.set_value("HKCU\\Setup", "old", RegistryValue::Dword(8));
+        live.set_value("HKCU\\Setup", "old", RegistryValue::Dword(10));
+        assert!(!live.commit_isolated(&baseline, &staged));
+        assert_eq!(
+            live.value("HKCU\\Setup", "old"),
+            Some(RegistryValue::Dword(10))
+        );
+        let baseline = live.isolated_copy();
+        let mut staged = baseline.isolated_copy();
+        staged.set_value(
+            "HKCU\\Setup",
+            "huge",
+            RegistryValue::Binary(vec![0; 32 * 1024 * 1024]),
+        );
+        let used = ram.snapshot().store_used;
+        assert!(!live.commit_isolated(&baseline, &staged));
+        assert_eq!(live.value("HKCU\\Setup", "huge"), None);
+        assert_eq!(ram.snapshot().store_used, used);
+    }
+
     #[test]
     fn nmea_serial_device_is_discoverable_in_both_persistent_profiles() {
         let dir = tempfile::tempdir().unwrap();

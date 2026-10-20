@@ -128,6 +128,9 @@ fn ensure_fb_mapped(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
 
 fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ensure_fb_mapped(ctx)?;
+    if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
+        ctx.kernel.controls.direct_surface_hwnd = ctx.arg_u32(0)?;
+    }
     let pc = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Pc).unwrap_or(0);
     let lr = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Lr).unwrap_or(0);
     log::info!(
@@ -142,7 +145,8 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-fn gx_close_display(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+fn gx_close_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.controls.direct_surface_hwnd = 0;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -272,7 +276,8 @@ fn gx_get_default_keys(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     // the frontends and the message pump all agree on which virtual key
     // is the A button.
     let sret = ctx.arg_u32(0)?;
-    let buf = pocket_kernel::gapi::key_list_with_action(ctx.kernel.gapi_action_key);
+    let options = ctx.arg_u32(1)?;
+    let buf = pocket_kernel::gapi::key_list_for_options(ctx.kernel.gapi_action_key, options);
     debug_assert_eq!(buf.len(), 0x60);
     ctx.cpu.write_mem(sret, &buf)?;
     // Record the query so legacy/Gizmondo confirm follows vkA. The Pocket
@@ -569,6 +574,38 @@ pub(crate) mod tests {
         assert!(kernel.framebuffer.frame_counter > pre_counter);
         assert_eq!(kernel.framebuffer.pixels.len(), FB_BYTES as usize);
     }
+    #[test]
+    fn landscape_query_uses_r1_after_arm_struct_return_pointer() {
+        for action in [pocket_kernel::gapi::VK_A, pocket_kernel::gapi::VK_RETURN] {
+            for options in [2, 3] {
+                let mut cpu = StubCpu::new();
+                cpu.map_region(
+                    0x1000,
+                    0x1000,
+                    pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+                )
+                .unwrap();
+                cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+                cpu.write_reg(ArmReg::R1, options).unwrap();
+                cpu.write_mem(0x1060, &[0xa5; 4]).unwrap();
+                let mut kernel = fresh_kernel();
+                kernel.gapi_action_key = action;
+                let thunk = dummy_thunk();
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                };
+                gx_get_default_keys(&mut ctx).unwrap();
+                assert_eq!(
+                    ctx.cpu.read_mem(0x1000, 0x60).unwrap(),
+                    pocket_kernel::gapi::key_list_for_options(action, options)
+                );
+                assert_eq!(ctx.cpu.read_mem(0x1060, 4).unwrap(), [0xa5; 4]);
+            }
+        }
+    }
+
     #[test]
     fn gapi_profiles_advertise_the_key_delivered_to_the_guest() {
         use pocket_kernel::{gapi, InputEvent};

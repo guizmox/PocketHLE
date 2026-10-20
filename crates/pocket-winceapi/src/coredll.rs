@@ -468,6 +468,10 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetWindowLongA", get_window_long_w);
     d.register_handler(dll, "GetClassNameW", get_class_name_w);
     d.register_handler(dll, "GetDlgItem", get_dlg_item);
+    d.register_handler(dll, "MonitorFromWindow", monitor_from_window);
+    d.register_handler(dll, "GetMonitorInfo", get_monitor_info);
+    d.register_handler(dll, "GetMonitorInfoW", get_monitor_info);
+    d.register_handler(dll, "GetDlgItemTextW", get_dlg_item_text_w);
     d.register_handler(dll, "CheckRadioButton", check_radio_button);
     d.register_handler(dll, "EnumWindows", enum_windows);
     d.register_handler(dll, "IsWindowVisible", is_window_visible);
@@ -5104,12 +5108,35 @@ pub(crate) fn lookup_resource(
     ty: &ResourceKey,
     name: &ResourceKey,
 ) -> Option<(ResourceEntry, u32)> {
+    fn find<'a>(
+        entries: &'a [ResourceEntry],
+        ty: &ResourceKey,
+        name: &ResourceKey,
+    ) -> Option<&'a ResourceEntry> {
+        // Keep existing exact matches first. Win32 resource lookup normalizes
+        // named identifiers to uppercase; NFS requests NFS.ini from a satellite
+        // whose resource compiler stored NFS.INI. Numeric IDs stay distinct.
+        fn matches(actual: &ResourceKey, requested: &ResourceKey) -> bool {
+            match (actual, requested) {
+                (ResourceKey::Name(a), ResourceKey::Name(b)) => a.eq_ignore_ascii_case(b),
+                _ => actual == requested,
+            }
+        }
+        entries
+            .iter()
+            .find(|e| e.ty == *ty && e.name == *name)
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|e| matches(&e.ty, ty) && matches(&e.name, name))
+            })
+    }
     let (scoped, scoped_base) = kernel.resource_scope(hmodule);
-    if let Some(e) = scoped.iter().find(|e| e.ty == *ty && e.name == *name) {
+    if let Some(e) = find(scoped, ty, name) {
         return Some((e.clone(), scoped_base));
     }
     for (entries, base) in kernel.resource_scopes() {
-        if let Some(e) = entries.iter().find(|e| e.ty == *ty && e.name == *name) {
+        if let Some(e) = find(entries, ty, name) {
             return Some((e.clone(), base));
         }
     }
@@ -7224,10 +7251,47 @@ fn snprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// input failure — the same `EOF`-vs-zero distinction real `sscanf`
 /// makes, which callers use to tell "nothing matched" from "the string
 /// ran out first".
+fn scanf_text_limit(src: &[u8], start: usize, width: usize, wide: bool) -> usize {
+    if !wide || width == usize::MAX {
+        return start.saturating_add(width).min(src.len());
+    }
+    let mut used = 0;
+    let mut end = start;
+    for ch in String::from_utf8_lossy(&src[start..]).chars() {
+        if used + ch.len_utf16() > width {
+            break;
+        }
+        used += ch.len_utf16();
+        end += ch.len_utf8();
+    }
+    end.min(src.len())
+}
+fn scanf_text_output(src: &[u8], wide: bool, terminate: bool, wide_input: bool) -> Vec<u8> {
+    let mut bytes = if wide {
+        (if wide_input {
+            String::from_utf8_lossy(src).into_owned()
+        } else {
+            crate::crt_ansi::decode(src)
+        })
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+    } else if wide_input {
+        crate::crt_ansi::encode(&String::from_utf8_lossy(src))
+    } else {
+        src.to_vec()
+    };
+    if terminate {
+        bytes.extend(if wide { vec![0, 0] } else { vec![0] });
+    }
+    bytes
+}
+
 fn run_scan_bytes(
     ctx: &mut CallCtx<'_>,
     src: &[u8],
     fmt: &str,
+    wide_input: bool,
     mut next_arg: impl FnMut(&mut CallCtx<'_>) -> Result<u32, KernelError>,
 ) -> Result<(i32, usize), KernelError> {
     let f = fmt.as_bytes();
@@ -7322,6 +7386,20 @@ fn run_scan_bytes(
 
             let Some(&conv) = f.get(fi) else { break };
             fi += 1;
+            let wide_dest = if short_form {
+                false
+            } else if long_count != 0 {
+                true
+            } else if matches!(conv, b'S' | b'C') {
+                !wide_input
+            } else {
+                wide_input
+            };
+            let conv = match conv {
+                b'S' => b's',
+                b'C' => b'c',
+                other => other,
+            };
 
             // Every conversion except `%c`, `%[` and `%n` skips leading
             // whitespace first.
@@ -7337,7 +7415,12 @@ fn run_scan_bytes(
                     // counts toward the return value.
                     if !suppress {
                         let addr = next_arg(ctx)?;
-                        scanf_store_int(ctx, addr, si as i64, short_form, long_long)?;
+                        let consumed = if wide_input {
+                            String::from_utf8_lossy(&src[..si]).encode_utf16().count()
+                        } else {
+                            si
+                        };
+                        scanf_store_int(ctx, addr, consumed as i64, short_form, long_long)?;
                     }
                 }
                 b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'p' => {
@@ -7449,11 +7532,19 @@ fn run_scan_bytes(
                 }
                 b'c' => {
                     let n = if width == usize::MAX { 1 } else { width };
-                    if si + n > src.len() {
+                    let end = scanf_text_limit(src, si, n, wide_input);
+                    let count = if wide_input {
+                        String::from_utf8_lossy(&src[si..end])
+                            .encode_utf16()
+                            .count()
+                    } else {
+                        end - si
+                    };
+                    if count < n {
                         return Ok(if assigned == 0 { -1 } else { assigned });
                     }
-                    let bytes = src[si..si + n].to_vec();
-                    si += n;
+                    let bytes = scanf_text_output(&src[si..end], wide_dest, false, wide_input);
+                    si = end;
                     if !suppress {
                         let addr = next_arg(ctx)?;
                         if addr != 0 {
@@ -7465,15 +7556,14 @@ fn run_scan_bytes(
                 }
                 b's' => {
                     let start = si;
-                    let limit = start.saturating_add(width);
+                    let limit = scanf_text_limit(src, start, width, wide_input);
                     while si < src.len() && si < limit && !src[si].is_ascii_whitespace() {
                         si += 1;
                     }
                     if si == start {
                         return Ok(if assigned == 0 { -1 } else { assigned });
                     }
-                    let mut bytes = src[start..si].to_vec();
-                    bytes.push(0);
+                    let bytes = scanf_text_output(&src[start..si], wide_dest, true, wide_input);
                     if !suppress {
                         let addr = next_arg(ctx)?;
                         if addr != 0 {
@@ -7497,8 +7587,7 @@ fn run_scan_bytes(
                     if si == start {
                         return Ok(if assigned == 0 { -1 } else { assigned });
                     }
-                    let mut bytes = src[start..si].to_vec();
-                    bytes.push(0);
+                    let bytes = scanf_text_output(&src[start..si], wide_dest, true, wide_input);
                     if !suppress {
                         let addr = next_arg(ctx)?;
                         if addr != 0 {
@@ -7525,7 +7614,7 @@ fn run_sscanf(
     fmt: &str,
     next_arg: impl FnMut(&mut CallCtx<'_>) -> Result<u32, KernelError>,
 ) -> Result<i32, KernelError> {
-    run_scan_bytes(ctx, input.as_bytes(), fmt, next_arg).map(|(assigned, _)| assigned)
+    run_scan_bytes(ctx, input.as_bytes(), fmt, false, next_arg).map(|(assigned, _)| assigned)
 }
 
 /// Share scanf conversions with sscanf, but retain the exact consumed stream
@@ -7570,7 +7659,7 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         offsets.push(i);
     }
     let mut arg = 2u8;
-    let result = run_scan_bytes(ctx, &input, &fmt, |ctx| {
+    let result = run_scan_bytes(ctx, &input, &fmt, false, |ctx| {
         let pointer = ctx.arg_u32(arg)?;
         arg = arg.saturating_add(1);
         Ok(pointer)
@@ -7609,9 +7698,9 @@ fn sscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 /// `int swscanf(const wchar_t *src, const wchar_t *fmt, ...)`.
-/// Widens to the same engine: every conversion Pocket PC titles use is
-/// ASCII-representable, and the `%s` / `%c` stores are narrow because
-/// the guest asked for wide chars only in the format string.
+/// Wide scanning stores %s/%c as UTF-16; %hs/%hc request narrow output.
+/// NFS parses its resource INI with this API and compares the tokens as WCHARs.
+/// Narrow stores made every keyword fail and produced a NULL asset pointer.
 fn swscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let src_p = ctx.arg_u32(0)?;
     let fmt_p = ctx.arg_u32(1)?;
@@ -7621,11 +7710,12 @@ fn swscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let input = String::from_utf16_lossy(&read_wstr(ctx, src_p, 0x4000)?);
     let fmt = String::from_utf16_lossy(&read_wstr(ctx, fmt_p, 0x4000)?);
     let mut idx = 2u8;
-    let n = run_sscanf(ctx, &input, &fmt, move |c| {
+    let n = run_scan_bytes(ctx, input.as_bytes(), &fmt, true, move |c| {
         let a = c.arg_u32(idx)?;
         idx += 1;
         Ok(a)
-    })?;
+    })?
+    .0;
     Ok(DispatchOutcome::ReturnedR0(n as u32))
 }
 
@@ -15930,6 +16020,83 @@ fn get_dlg_item(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(found))
 }
 
+/// GetDlgItemTextW resolves the child in this dialog, then sends WM_GETTEXT.
+/// NFS's registration dialog uses this API, not GetWindowTextW: a missing
+/// handler returned zero and left its code buffer empty despite visible input.
+/// Preserve native/subclassed WM_GETTEXT handling through SendMessage's route.
+const PRIMARY_MONITOR: u32 = 0xdead_4d00;
+fn monitor_from_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let flags = ctx.arg_u32(1)?;
+    if flags > 2 {
+        ctx.kernel
+            .thread_last_errors
+            .insert(ctx.kernel.current_thread, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let exists = ctx.kernel.window_rects.contains_key(&hwnd)
+        || ctx.kernel.controls.get(hwnd).is_some()
+        || ctx.kernel.controls.panel(hwnd).is_some()
+        || hwnd == FAKE_DESKTOP_HWND;
+    Ok(DispatchOutcome::ReturnedR0(if exists || flags != 0 {
+        PRIMARY_MONITOR
+    } else {
+        0
+    }))
+}
+fn get_monitor_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let monitor = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    let size = ctx.cpu.read_u32_le(output).ok().unwrap_or(0);
+    if monitor != PRIMARY_MONITOR || output == 0 || !matches!(size, 40 | 104) {
+        ctx.kernel
+            .thread_last_errors
+            .insert(ctx.kernel.current_thread, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let w = ctx.kernel.framebuffer.width;
+    let h = ctx.kernel.framebuffer.height;
+    let mut bytes = vec![0; size as usize];
+    for (at, value) in [(0, size), (12, w), (16, h), (28, w), (32, h), (36, 1)] {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    if size == 104 {
+        for (i, unit) in "DISPLAY1".encode_utf16().enumerate() {
+            bytes[40 + i * 2..42 + i * 2].copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+    if ctx.cpu.write_mem(output, &bytes).is_err() {
+        ctx.kernel
+            .thread_last_errors
+            .insert(ctx.kernel.current_thread, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn get_dlg_item_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let buffer = ctx.arg_u32(2)?;
+    let capacity = ctx.arg_u32(3)?;
+    if buffer == 0 || capacity as i32 <= 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let DispatchOutcome::ReturnedR0(child) = get_dlg_item(ctx)? else {
+        unreachable!()
+    };
+    if child == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    for (reg, value) in [
+        (ArmReg::R0, child),
+        (ArmReg::R1, 0x000d),
+        (ArmReg::R2, capacity),
+        (ArmReg::R3, buffer),
+    ] {
+        ctx.cpu.write_reg(reg, value)?;
+    }
+    send_message_w(ctx)
+}
+
 /// `CheckRadioButton(hDlg, nIDFirst, nIDLast, nIDCheckButton)`
 ///
 /// Checks one radio button in an id range and clears every other button
@@ -22947,6 +23114,244 @@ fn find_close_change_notification(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn single_monitor_reports_guest_dimensions_and_checks_buffer_size() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.framebuffer = pocket_kernel::Framebuffer::new(480, 640);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
+        assert_eq!(
+            monitor_from_window(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(PRIMARY_MONITOR)
+        );
+        for size in [40u32, 104] {
+            ctx.cpu.write_mem(0x1800, &[0xa5; 108]).unwrap();
+            ctx.cpu.write_mem(0x1800, &size.to_le_bytes()).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, PRIMARY_MONITOR).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
+            assert_eq!(
+                get_monitor_info(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            for (offset, value) in [(12, 480), (16, 640), (28, 480), (32, 640), (36, 1)] {
+                assert_eq!(ctx.cpu.read_u32_le(0x1800 + offset).unwrap(), value);
+            }
+            assert_eq!(ctx.cpu.read_mem(0x1800 + size, 4).unwrap(), [0xa5; 4]);
+        }
+        ctx.cpu.write_mem(0x1800, &39u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            get_monitor_info(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1800).unwrap(), 39);
+    }
+
+    #[test]
+    fn wide_scanf_strings_char_width_suppression_and_narrow_override() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for (input, format, expected) in [
+            ("CAR_INFO_FILE_NAME test.cif", "%s", "CAR_INFO_FILE_NAME"),
+            ("été xxx", "%2s", "ét"),
+            ("skip value", "%*s %s", "value"),
+        ] {
+            for (at, text) in [(0x1000, input), (0x1400, format)] {
+                let data: Vec<_> = text
+                    .encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect();
+                cpu.write_mem(at, &data).unwrap();
+            }
+            cpu.write_mem(0x1800, &[0xa5; 128]).unwrap();
+            for (reg, value) in [
+                (ArmReg::R0, 0x1000),
+                (ArmReg::R1, 0x1400),
+                (ArmReg::R2, 0x1800),
+            ] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(swscanf(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+            let data: Vec<_> = expected
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            assert_eq!(ctx.cpu.read_mem(0x1800, data.len() as u32).unwrap(), data);
+            assert_eq!(
+                ctx.cpu.read_mem(0x1800 + data.len() as u32, 2).unwrap(),
+                [0xa5; 2]
+            );
+        }
+        assert_eq!(
+            scanf_text_output("é".as_bytes(), false, true, true),
+            vec![0xe9, 0]
+        );
+        assert_eq!(scanf_text_output(b"A", true, false, true), vec![65, 0]);
+    }
+
+    #[test]
+    fn resource_lookup_normalizes_ascii_names_and_preserves_module_scope_and_ids() {
+        let entry = |name: &str, rva: u32| ResourceEntry {
+            ty: ResourceKey::Name("TXT".into()),
+            name: ResourceKey::Name(name.into()),
+            data_rva: rva,
+            size: 16,
+            codepage: 0,
+        };
+        let mut kernel = fresh_kernel();
+        kernel.resources = vec![entry("NFS.ini", 0x100), entry("NFS.INI", 0x200)];
+        let mut module = lifecycle_test_module(0x30000000, 0);
+        module.resources = vec![entry("NFS.INI", 0x500)];
+        kernel.modules.push(module);
+        let ty = ResourceKey::Name("TXT".into());
+        assert_eq!(
+            lookup_resource(&kernel, 0, &ty, &ResourceKey::Name("NFS.ini".into()))
+                .unwrap()
+                .0
+                .data_rva,
+            0x100
+        );
+        let (found, base) = lookup_resource(
+            &kernel,
+            0x30000000,
+            &ResourceKey::Name("txt".into()),
+            &ResourceKey::Name("nfs.ini".into()),
+        )
+        .unwrap();
+        assert_eq!((found.data_rva, base), (0x500, 0x30000000));
+        assert!(lookup_resource(&kernel, 0, &ty, &ResourceKey::Id(123)).is_none());
+        assert!(lookup_resource(
+            &kernel,
+            0,
+            &ResourceKey::Id(10),
+            &ResourceKey::Name("NFS.ini".into())
+        )
+        .is_none());
+        assert!(
+            lookup_resource(&kernel, 0, &ty, &ResourceKey::Name("absent.ini".into())).is_none()
+        );
+    }
+
+    #[test]
+    fn dialog_item_text_reads_utf16_and_routes_subclass_gettext() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = fresh_kernel();
+        let child = kernel.controls.create(
+            FAKE_DIALOG_HWND,
+            ControlClass::Edit,
+            100,
+            "Été🙂".into(),
+            0x50000000,
+            0,
+            0,
+            100,
+            20,
+        );
+        kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::Edit,
+            100,
+            "Other".into(),
+            0x50000000,
+            0,
+            0,
+            100,
+            20,
+        );
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (capacity, expected) in [(6, 5), (3, 2), (1, 0)] {
+            for (reg, value) in [
+                (ArmReg::R0, FAKE_DIALOG_HWND),
+                (ArmReg::R1, 100),
+                (ArmReg::R2, 0x1000),
+                (ArmReg::R3, capacity),
+            ] {
+                ctx.cpu.write_reg(reg, value).unwrap();
+            }
+            ctx.cpu.write_mem(0x1000, &[0xa5; 16]).unwrap();
+            assert_eq!(
+                get_dlg_item_text_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+            let text: Vec<_> = "Été🙂"
+                .encode_utf16()
+                .take(expected as usize)
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            assert_eq!(ctx.cpu.read_mem(0x1000, text.len() as u32).unwrap(), text);
+            assert_eq!(
+                ctx.cpu.read_mem(0x1000 + text.len() as u32, 2).unwrap(),
+                [0xa5; 2]
+            );
+        }
+        for (id, buffer, capacity) in [
+            (999, 0x1000, 20),
+            (100, 0, 20),
+            (100, 0x1000, 0),
+            (100, 0x1000, u32::MAX),
+        ] {
+            for (reg, value) in [
+                (ArmReg::R0, FAKE_DIALOG_HWND),
+                (ArmReg::R1, id),
+                (ArmReg::R2, buffer),
+                (ArmReg::R3, capacity),
+            ] {
+                ctx.cpu.write_reg(reg, value).unwrap();
+            }
+            ctx.cpu.write_mem(0x1000, &[0xa5; 8]).unwrap();
+            assert_eq!(
+                get_dlg_item_text_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(ctx.cpu.read_mem(0x1000, 8).unwrap(), [0xa5; 8]);
+        }
+        ctx.kernel.window_procs.insert(child, 0x45678);
+        for (reg, value) in [
+            (ArmReg::R0, FAKE_DIALOG_HWND),
+            (ArmReg::R1, 100),
+            (ArmReg::R2, 0x1000),
+            (ArmReg::R3, 24),
+            (ArmReg::Lr, 0x12345),
+        ] {
+            ctx.cpu.write_reg(reg, value).unwrap();
+        }
+        assert_eq!(
+            get_dlg_item_text_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x45678)
+        );
+        for (reg, value) in [
+            (ArmReg::R0, child),
+            (ArmReg::R1, 0xd),
+            (ArmReg::R2, 24),
+            (ArmReg::R3, 0x1000),
+            (ArmReg::Lr, 0x12345),
+        ] {
+            assert_eq!(ctx.cpu.read_reg(reg).unwrap(), value);
+        }
+    }
+
     #[test]
     fn navigator_rendering_system_colors_and_cached_brushes_agree() {
         let mut cpu = StubCpu::new();

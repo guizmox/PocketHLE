@@ -1404,6 +1404,9 @@ pub struct Controls {
     panels: Vec<DialogPanel>,
     /// Handle of the control holding the input focus, or `0`.
     pub focus: u32,
+    /// Window currently owning Pocket PC GAPI pixels. Its panel face/backing
+    /// is replaced by those pixels; ordinary child controls remain composited.
+    pub direct_surface_hwnd: u32,
     next_hwnd: u32,
     /// Push button the stylus went down on. Win32 captures the mouse
     /// here: releasing outside the button cancels the click instead of
@@ -1417,6 +1420,7 @@ impl Default for Controls {
             children: Vec::new(),
             panels: Vec::new(),
             focus: 0,
+            direct_surface_hwnd: 0,
             next_hwnd: Self::HWND_BASE,
             capture: 0,
         }
@@ -1690,6 +1694,9 @@ impl Controls {
             self.destroy(hwnd);
         }
         self.panels.retain(|p| p.hwnd != parent);
+        if self.direct_surface_hwnd == parent {
+            self.direct_surface_hwnd = 0;
+        }
     }
 
     /// Is this control on screen — itself visible, and inside a panel
@@ -2167,8 +2174,11 @@ impl Controls {
         self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi, layer);
         self.render_open_choices(surf, |parent| self.panel(parent).is_none(), gdi);
         for panel in &self.panels {
-            panel.render(surf);
-            if panel.visible {
+            let direct = self.direct_surface_hwnd != 0 && self.direct_surface_hwnd == panel.hwnd;
+            if !direct {
+                panel.render(surf);
+            }
+            if panel.visible && !direct {
                 if let Some(color) = gdi
                     .and_then(|g| g.dialog_backgrounds.get(&panel.hwnd))
                     .copied()
@@ -2530,6 +2540,51 @@ mod tests {
         controls.get_mut(hwnd).unwrap().font = smaller;
         controls.update_choice_fonts(&gdi);
         assert!(controls.get(hwnd).unwrap().list_row_height() < row);
+    }
+
+    #[test]
+    fn gapi_dialog_keeps_guest_pixels_children_and_later_modal() {
+        let mut controls = Controls::default();
+        controls.add_panel(DialogPanel {
+            hwnd: PARENT,
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 80,
+            visible: true,
+            border: false,
+            caption: None,
+            ok_pressed: false,
+        });
+        button(&mut controls, 2, 10, 10);
+        let mut bitmap = Bitmap::new(100, 80);
+        Surface::Bitmap(&mut bitmap).fill_rect(0, 0, 100, 80, 0xf800);
+        controls.render(&mut Surface::Bitmap(&mut bitmap));
+        let pixel = |bm: &Bitmap, x: usize, y: usize| {
+            let offset = (y * 100 + x) * 2;
+            u16::from_le_bytes([bm.pixels[offset], bm.pixels[offset + 1]])
+        };
+        assert_ne!(pixel(&bitmap, 90, 70), 0xf800);
+        controls.direct_surface_hwnd = PARENT;
+        Surface::Bitmap(&mut bitmap).fill_rect(0, 0, 100, 80, 0xf800);
+        controls.render(&mut Surface::Bitmap(&mut bitmap));
+        assert_eq!(pixel(&bitmap, 90, 70), 0xf800);
+        assert_ne!(pixel(&bitmap, 15, 15), 0xf800); // child still drawn
+        controls.add_panel(DialogPanel {
+            hwnd: PARENT + 1,
+            x: 80,
+            y: 60,
+            w: 20,
+            h: 20,
+            visible: true,
+            border: false,
+            caption: None,
+            ok_pressed: false,
+        });
+        controls.render(&mut Surface::Bitmap(&mut bitmap));
+        assert_ne!(pixel(&bitmap, 90, 70), 0xf800); // another dialog remains above
+        controls.destroy_children_of(PARENT);
+        assert_eq!(controls.direct_surface_hwnd, 0);
     }
 
     #[test]

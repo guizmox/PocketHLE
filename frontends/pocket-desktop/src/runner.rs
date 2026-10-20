@@ -437,6 +437,20 @@ impl Runner {
                 ));
             }
         }
+        if !is_gizmondo && game.source_cab.to_ascii_lowercase().ends_with(".cab") {
+            if let Some(install_dir) = game.install_dir.as_deref() {
+                match emu.complete_cab_registry_setup(&extracted, install_dir) {
+                    Ok(count) if count != 0 => {
+                        summary_lines.push(format!("CAB registry setup completed: {count}"))
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!("CAB registry setup failed: {error:#}");
+                        summary_lines.push(format!("CAB registry setup failed: {error:#}"));
+                    }
+                }
+            }
+        }
         // Use the real card-relative executable path after installing aliases.
         // CoPilot derives pid.cfg from GetModuleFileNameW and exits immediately
         // when a nested application is falsely reported at the card root.

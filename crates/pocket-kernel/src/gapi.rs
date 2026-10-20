@@ -62,6 +62,22 @@ pub fn key_list_with_action(action: u16) -> [u8; KEY_LIST_BYTES] {
     buf
 }
 
+/// GX_NORMALKEYS / GX_LANDSCAPEKEYS are enum values, not a bit mask.
+/// Landscape GAPI games draw in the device's 270-degree orientation. The
+/// physical Left key therefore means logical Up. Presentation rotation is
+/// applied separately by the frontend, once, to host directional input.
+/// Preserve the established Gizmondo key table (action != VK_RETURN).
+/// GeoRally EX requests 3 at both initialization and profile selection.
+pub fn key_list_for_options(action: u16, options: u32) -> [u8; KEY_LIST_BYTES] {
+    let mut buf = key_list_with_action(action);
+    if action == VK_RETURN && options == 3 {
+        for (index, vk) in [VK_LEFT, VK_RIGHT, VK_DOWN, VK_UP].iter().enumerate() {
+            buf[index * 12..index * 12 + 2].copy_from_slice(&vk.to_le_bytes());
+        }
+    }
+    buf
+}
+
 /// Rewrite a host virtual key into the code a GAPI guest listens for.
 ///
 /// Only `VK_RETURN` is touched, and only once the guest has actually
@@ -83,6 +99,25 @@ pub fn remap_host_key_with_action(vk: u16, queried: bool, action: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landscape_table_rotates_directions_only_on_pocket_pc() {
+        let normal = key_list_with_action(VK_RETURN);
+        let landscape = key_list_for_options(VK_RETURN, 3);
+        for (i, expected) in [VK_LEFT, VK_RIGHT, VK_DOWN, VK_UP].iter().enumerate() {
+            assert_eq!(
+                u16::from_le_bytes([landscape[i * 12], landscape[i * 12 + 1]]),
+                *expected
+            );
+        }
+        assert_eq!(&landscape[48..], &normal[48..]);
+        for options in [0, 1, 2, 4, u32::MAX] {
+            assert_eq!(key_list_for_options(VK_RETURN, options), normal);
+        }
+        for options in [0, 2, 3] {
+            assert_eq!(key_list_for_options(VK_A, options), default_key_list());
+        }
+    }
 
     #[test]
     fn key_list_has_gx_h_layout() {

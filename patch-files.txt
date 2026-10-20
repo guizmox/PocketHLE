@@ -1,9 +1,11 @@
 Cargo.lock
 crates\pocket-cab\Cargo.toml
+crates\pocket-cab\src\install_recovery.rs
 crates\pocket-cab\src\installer_resources.rs
 crates\pocket-cab\src\lib.rs
 crates\pocket-core\examples\cod2_probe.rs
 crates\pocket-core\examples\tomtom_startup_probe.rs
+crates\pocket-core\src\cab_setup.rs
 crates\pocket-core\src\lib.rs
 crates\pocket-gles\Cargo.toml
 crates\pocket-gles\src\consts.rs
