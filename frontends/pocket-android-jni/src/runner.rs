@@ -489,6 +489,15 @@ fn run_process(
             summary_lines.push(format!("Cannot load device registry: {e}"));
             return (summary_lines.join("\n"), 0xc0000135);
         }
+        let (preset, platform) = launcher_config.device_identity_hex(is_gizmondo);
+        if let Err(e) = pocket_core::kernel::device_identity::DeviceIdentity::configure(
+            &mut process.state.registry,
+            preset,
+            platform,
+        ) {
+            summary_lines.push(format!("Invalid device identity: {e}"));
+            return (summary_lines.join("\n"), 0xc000000d);
+        }
         if is_gizmondo {
             process
                 .state

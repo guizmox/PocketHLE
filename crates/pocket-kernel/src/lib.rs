@@ -38,6 +38,7 @@ pub mod bluetooth;
 pub mod camera;
 pub mod colors;
 pub mod controls;
+pub mod device_identity;
 pub mod device_status;
 pub mod dll_lifecycle;
 pub mod font;

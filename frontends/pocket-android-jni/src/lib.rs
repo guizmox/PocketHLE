@@ -387,7 +387,22 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_readConfig<'local>(
     };
     let result = (|| -> anyhow::Result<String> {
         let lib = Library::open(&root)?;
-        Ok(serde_json::to_string(lib.config())?)
+        let mut config = lib.config().clone();
+        for (file, platform) in [
+            ("registry-pocketpc.json", &mut config.device_platform_id),
+            ("registry-gizmondo.json", &mut config.gizmondo_platform_id),
+        ] {
+            if platform.is_empty() {
+                let mut registry = pocket_core::kernel::registry::Registry::default();
+                registry.configure_persistence(&root.join(file))?;
+                let id = pocket_core::kernel::device_identity::DeviceIdentity::load_or_create(
+                    &mut registry,
+                )
+                .map_err(anyhow::Error::msg)?;
+                *platform = pocket_core::kernel::device_identity::DeviceIdentity::hex(&id.platform);
+            }
+        }
+        Ok(serde_json::to_string(&config)?)
     })();
     match result {
         Ok(j) => new_jstring(&env, j),
@@ -413,7 +428,17 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_writeConfig<'local>(
     };
     let result = (|| -> anyhow::Result<()> {
         let mut lib = Library::open(&root)?;
-        let cfg = serde_json::from_str(&body)?;
+        let cfg: pocket_library::LauncherConfig = serde_json::from_str(&body)?;
+        for (preset, platform) in [
+            (&cfg.device_preset_id, &cfg.device_platform_id),
+            (&cfg.gizmondo_preset_id, &cfg.gizmondo_platform_id),
+        ] {
+            pocket_core::kernel::device_identity::DeviceIdentity::from_hex(
+                preset,
+                if platform.is_empty() { "00" } else { platform },
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
         *lib.config_mut() = cfg;
         lib.save()?;
         Ok(())

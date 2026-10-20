@@ -41,6 +41,29 @@ class SettingsActivity : AppCompatActivity() {
                 key = "gizmondo_options"; title = "Gizmondo options"
             }
             preferenceScreen.addPreference(giz)
+            fun identityField(screen: androidx.preference.PreferenceScreen, name: String, label: String) {
+                screen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
+                    key = name; title = label; isPersistent = false
+                    text = current.toJson().optString(name)
+                    summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
+                    dialogMessage = "Hexadecimal bytes. Changes apply at the next launch."
+                    setOnPreferenceChangeListener { _, value ->
+                        val hex = value.toString().trim()
+                        if (hex.isEmpty() || hex.length % 2 != 0 || hex.length > 8192 || !hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+                            android.widget.Toast.makeText(requireContext(), "Enter pairs of hexadecimal digits (1–4096 bytes)", android.widget.Toast.LENGTH_LONG).show()
+                            false
+                        } else {
+                            current = current.copy(originalJson = current.toJson().put(name, hex).toString())
+                            writeConfig(); true
+                        }
+                    }
+                })
+            }
+            val emulator = findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!
+            identityField(emulator, "device_preset_id", "Preset ID (WinCE)")
+            identityField(emulator, "device_platform_id", "Platform ID (WinCE)")
+            identityField(giz, "gizmondo_preset_id", "Preset ID (Gizmondo override)")
+            identityField(giz, "gizmondo_platform_id", "Platform ID (Gizmondo override)")
             fun toggle(keyName: String, label: String, checked: Boolean, update: (Boolean) -> Unit) {
                 giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                     key = keyName; title = label; isPersistent = false; isChecked = checked

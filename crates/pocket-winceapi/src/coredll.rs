@@ -782,7 +782,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     // returning 0 froze Sonic Unleashed's frame timer.
 
     // ---- Misc kernel/IPC stubs ----
-    d.register_constant(dll, "KernelIoControl", 0, zero_returning);
+    d.register_handler(dll, "KernelIoControl", kernel_io_control);
     // `SystemIdleTimerReset` tells the power manager the user is still
     // there so the backlight and suspend timers restart. There is no
     // idle timer to reset here, and the documented return is the number
@@ -12153,6 +12153,76 @@ fn queue_window_size(kernel: &mut KernelState, hwnd: u32, w: i32, h: i32) {
         ));
     }
 }
+fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const IOCTL_HAL_GET_DEVICEID: u32 = 0x0101_0054;
+    if ctx.arg_u32(0)? != IOCTL_HAL_GET_DEVICEID {
+        return vfs_api_bool(ctx, Err(50)); // ERROR_NOT_SUPPORTED
+    }
+    if ctx.arg_u32(1)? != 0 || ctx.arg_u32(2)? != 0 {
+        return vfs_api_bool(ctx, Err(87));
+    }
+    let out = ctx.arg_u32(3)?;
+    let capacity = ctx.arg_u32(4)?;
+    let returned = ctx.arg_u32(5)?;
+    if out == 0 || (returned != 0 && !vfs_probe_output(ctx, returned, 4)) {
+        return vfs_api_bool(ctx, Err(87));
+    }
+    if capacity < 4 {
+        return vfs_api_bool(ctx, Err(122));
+    }
+    if !vfs_probe_output(ctx, out, 4) || ctx.cpu.check_guest_access(out, 4, Prot::READ).is_err() {
+        return vfs_api_bool(ctx, Err(87));
+    }
+    let supplied_size = ctx.cpu.read_u32_le(out)?;
+    let identity = match pocket_kernel::device_identity::DeviceIdentity::load_or_create(
+        &mut ctx.kernel.registry,
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            log::warn!("Cannot obtain emulated device identity: {e}");
+            return vfs_api_bool(ctx, Err(31));
+        }
+    };
+    if supplied_size == 16 && identity.platform.len() == 16 {
+        if capacity < 16 {
+            return vfs_api_bool(ctx, Err(122));
+        }
+        if !vfs_probe_output(ctx, out, 16) {
+            return vfs_api_bool(ctx, Err(87));
+        }
+        ctx.cpu.write_mem(out, &identity.platform)?;
+        if returned != 0 {
+            ctx.cpu.write_mem(returned, &16u32.to_le_bytes())?;
+        }
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    let data = match identity.encode() {
+        Ok(data) => data,
+        Err(_) => return vfs_api_bool(ctx, Err(31)),
+    };
+    let required = data.len() as u32;
+    if supplied_size == 0 {
+        // WinCE's documented size query updates dwSize, not lpBytesReturned.
+        ctx.cpu.write_mem(out, &required.to_le_bytes())?;
+        return vfs_api_bool(ctx, Err(122));
+    }
+    if capacity < required {
+        return vfs_api_bool(ctx, Err(122));
+    }
+    if supplied_size < required {
+        ctx.cpu.write_mem(out, &required.to_le_bytes())?;
+        return vfs_api_bool(ctx, Err(122));
+    }
+    if !vfs_probe_output(ctx, out, required) {
+        return vfs_api_bool(ctx, Err(87));
+    }
+    ctx.cpu.write_mem(out, &data)?;
+    if returned != 0 {
+        ctx.cpu.write_mem(returned, &required.to_le_bytes())?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 fn get_capture(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(FAKE_HWND))
 }
@@ -23864,6 +23934,136 @@ mod tests {
         assert!(!ctx.kernel.events.get(&first).unwrap().signalled);
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn kernel_device_id_negotiates_size_and_returns_stable_offsets_and_bytes() {
+        use pocket_kernel::device_identity::DeviceIdentity;
+        let mut kernel = fresh_kernel();
+        let identity =
+            DeviceIdentity::from_hex("0102", "00112233445566778899AABBCCDDEEFF").unwrap();
+        identity.save(&mut kernel.registry).unwrap();
+        let expected = identity.encode().unwrap();
+        let mut cpu = scanf_cpu();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (r, v) in [
+            (ArmReg::R0, 0x01010054),
+            (ArmReg::R1, 0),
+            (ArmReg::R2, 0),
+            (ArmReg::R3, 0x2000),
+        ] {
+            ctx.cpu.write_reg(r, v).unwrap();
+        }
+        ctx.cpu.write_mem(0x9000, &64u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x9004, &0x3000u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x2000, &[0xcc; 64]).unwrap();
+        ctx.cpu.write_mem(0x2000, &0u32.to_le_bytes()).unwrap();
+        ctx.cpu
+            .write_mem(0x3000, &0xdeadbeefu32.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(122)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), expected.len() as u32);
+        assert_eq!(ctx.cpu.read_mem(0x2004, 60).unwrap(), vec![0xcc; 60]);
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 0xdeadbeef);
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x2000, expected.len() as u32).unwrap(),
+            expected
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 40);
+        assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), 20);
+        assert_eq!(ctx.cpu.read_u32_le(0x200c).unwrap(), 24);
+        assert_eq!(ctx.cpu.read_mem(0x2000 + 40, 24).unwrap(), vec![0xcc; 24]);
+        ctx.cpu.write_mem(0x2000, &20u32.to_le_bytes()).unwrap();
+        let unchanged = ctx.cpu.read_mem(0x2004, 60).unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), 40);
+        assert_eq!(ctx.cpu.read_mem(0x2004, 60).unwrap(), unchanged);
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 40);
+        ctx.cpu.write_mem(0x9004, &0u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_mem(0x2000, 40).unwrap(), expected);
+        ctx.cpu.write_mem(0x2000, &[0xcc; 64]).unwrap();
+        ctx.cpu.write_mem(0x2000, &16u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x9000, &16u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x9004, &0x3000u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_mem(0x2000, 16).unwrap(), identity.platform);
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 16);
+        assert_eq!(ctx.cpu.read_mem(0x2010, 48).unwrap(), vec![0xcc; 48]);
+    }
+
+    #[test]
+    fn kernel_device_id_rejects_bad_buffers_and_unknown_requests_without_writes() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = scanf_cpu();
+        cpu.map_region(0x6000, 4096, Prot::READ).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (code, input, out, cap, returned, error) in [
+            (0x1234u32, 0u32, 0x2000u32, 64u32, 0x3000u32, 50u32),
+            (0x01010054, 1, 0x2000, 64, 0x3000, 87),
+            (0x01010054, 0, 0, 64, 0x3000, 87),
+            (0x01010054, 0, 0x2000, 3, 0x3000, 122),
+            (0x01010054, 0, 0x2000, 20, 0x3000, 122),
+            (0x01010054, 0, 0x6000, 64, 0x3000, 87),
+            (0x01010054, 0, 0x2000, 64, 0x6000, 87),
+        ] {
+            ctx.cpu.write_mem(0x2000, &[0xcc; 64]).unwrap();
+            ctx.cpu.write_mem(0x2000, &64u32.to_le_bytes()).unwrap();
+            let before = ctx.cpu.read_mem(0x2000, 64).unwrap();
+            ctx.cpu
+                .write_mem(0x3000, &0xdeadbeefu32.to_le_bytes())
+                .unwrap();
+            for (r, v) in [
+                (ArmReg::R0, code),
+                (ArmReg::R1, input),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, out),
+            ] {
+                ctx.cpu.write_reg(r, v).unwrap();
+            }
+            ctx.cpu.write_mem(0x9000, &cap.to_le_bytes()).unwrap();
+            ctx.cpu.write_mem(0x9004, &returned.to_le_bytes()).unwrap();
+            assert_eq!(
+                kernel_io_control(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                get_last_error(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(error)
+            );
+            assert_eq!(ctx.cpu.read_mem(0x2000, 64).unwrap(), before);
+            assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 0xdeadbeef);
+        }
     }
 
     #[test]

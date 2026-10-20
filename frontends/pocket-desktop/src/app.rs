@@ -444,6 +444,7 @@ enum Screen {
     Library,
     Settings,
     GizmondoOptions,
+    InputSettings,
     GameSettings,
     Run,
 }
@@ -761,8 +762,12 @@ impl PocketLauncher {
             match ev {
                 UiEvent::ColorsUnlocked(result) => {
                     self.library_busy = false;
-                    self.colors_startup_notice = Some(("Unlock Turf Wars + Tag Editor".into(),
-                        result.unwrap_or_else(|error| format!("Could not unlock Colors menus: {error}"))));
+                    self.colors_startup_notice = Some((
+                        "Unlock Turf Wars + Tag Editor".into(),
+                        result.unwrap_or_else(|error| {
+                            format!("Could not unlock Colors menus: {error}")
+                        }),
+                    ));
                 }
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
@@ -856,7 +861,12 @@ impl PocketLauncher {
         }
         if let Some(rx) = &self.gps_notice_rx {
             while let Ok((lat, lon)) = rx.try_recv() {
-                self.gps_notice = Some((format!("Fake GPS position refreshed!\nLatitude: {lat:.6}\nLongitude: {lon:.6}"), Instant::now() + Duration::from_secs(3)));
+                self.gps_notice = Some((
+                    format!(
+                        "Fake GPS position refreshed!\nLatitude: {lat:.6}\nLongitude: {lon:.6}"
+                    ),
+                    Instant::now() + Duration::from_secs(3),
+                ));
             }
         }
         if let Some(frame) = latest {
@@ -1062,6 +1072,34 @@ impl PocketLauncher {
         self.screen = Screen::Library;
     }
 
+    fn settings_draft(&mut self) -> LauncherConfig {
+        let mut draft = self.library.config().clone();
+        for (file, platform) in [
+            ("registry-pocketpc.json", &mut draft.device_platform_id),
+            ("registry-gizmondo.json", &mut draft.gizmondo_platform_id),
+        ] {
+            if platform.is_empty() {
+                let mut registry = pocket_core::kernel::registry::Registry::default();
+                let result = registry
+                    .configure_persistence(&self.library.root().join(file))
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| {
+                        pocket_core::kernel::device_identity::DeviceIdentity::load_or_create(
+                            &mut registry,
+                        )
+                    });
+                match result {
+                    Ok(id) => {
+                        *platform =
+                            pocket_core::kernel::device_identity::DeviceIdentity::hex(&id.platform)
+                    }
+                    Err(e) => self.status = format!("Cannot load device identity: {e}"),
+                }
+            }
+        }
+        draft
+    }
+
     fn ui_settings_menu(&mut self, ui: &mut egui::Ui) {
         if self.running_game.is_some()
             && self.screen != Screen::Run
@@ -1137,15 +1175,23 @@ impl PocketLauncher {
         }
         if ui.button("Emulator Settings").clicked() {
             self.release_all_keys();
-            self.config_draft = Some(self.library.config().clone());
+            self.config_draft = Some(self.settings_draft());
             self.screen = Screen::Settings;
+            ui.close_menu();
+        }
+        if ui.button("Keyboard & Controller").clicked() {
+            self.release_all_keys();
+            self.gamepad_capture = None;
+            self.binding_capture = None;
+            self.config_draft = Some(self.settings_draft());
+            self.screen = Screen::InputSettings;
             ui.close_menu();
         }
         if ui.button("Gizmondo options").clicked() {
             self.release_all_keys();
             self.gamepad_capture = None;
             self.binding_capture = None;
-            self.config_draft = Some(self.library.config().clone());
+            self.config_draft = Some(self.settings_draft());
             self.screen = Screen::GizmondoOptions;
             ui.close_menu();
         }
@@ -1681,13 +1727,15 @@ impl PocketLauncher {
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         let gizmondo = self.screen == Screen::GizmondoOptions;
+        let input = self.screen == Screen::InputSettings;
         let scroll_id = if gizmondo {
             "gizmondo_options_scroll"
         } else {
             "emulator_options_scroll"
         };
         ScrollArea::vertical().id_source(scroll_id).auto_shrink([false,false]).show(ui,|ui| {
-        ui.heading(if gizmondo { "Gizmondo options" } else { "Emulator Settings" });
+        ui.heading(if input { "Keyboard & Controller" } else if gizmondo { "Gizmondo options" } else { "Emulator Settings" });
+        if input { self.ui_keybindings(ui, &mut draft); } else {
         if gizmondo {
         ui.checkbox(&mut draft.gps_enabled, "GPS / host location (GPS1)")
             .on_hover_text("Allow games to read the host location service where available.");
@@ -1760,9 +1808,23 @@ impl PocketLauncher {
             });
 
         ui.add_space(12.0);
-        self.ui_keybindings(ui, &mut draft);
         }
 
+        let (preset, platform) = if gizmondo {
+            (&mut draft.gizmondo_preset_id, &mut draft.gizmondo_platform_id)
+        } else {
+            (&mut draft.device_preset_id, &mut draft.device_platform_id)
+        };
+        ui.separator();
+        ui.label("Device identity (hexadecimal bytes)");
+        ui.label(if gizmondo { "Overrides the WinCE identity for Gizmondo titles. Default Preset: Gizmondo (UTF-16LE)." } else { "Used by WinCE applications outside the Gizmondo profile." });
+        ui.label("Preset ID"); ui.text_edit_singleline(preset);
+        ui.label("Platform ID"); ui.text_edit_singleline(platform);
+        if let Err(error) = pocket_core::kernel::device_identity::DeviceIdentity::from_hex(preset, platform) {
+            ui.colored_label(Color32::RED, error);
+        }
+        ui.label("Changes apply at the next launch. Platform ID identifies the emulated console.");
+        }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
@@ -1773,6 +1835,20 @@ impl PocketLauncher {
             }
         });
         });
+        if save_clicked && !input {
+            let (preset, platform) = if gizmondo {
+                (&draft.gizmondo_preset_id, &draft.gizmondo_platform_id)
+            } else {
+                (&draft.device_preset_id, &draft.device_platform_id)
+            };
+            if let Err(e) =
+                pocket_core::kernel::device_identity::DeviceIdentity::from_hex(preset, platform)
+            {
+                self.status = e;
+                self.config_draft = Some(draft);
+                return;
+            }
+        }
         if save_clicked {
             self.release_all_keys();
             self.gamepad_capture = None;
@@ -2966,7 +3042,7 @@ impl PocketLauncher {
                         self.deck_nav_repeat = None;
                         continue;
                     }
-                    if self.screen == Screen::Settings {
+                    if self.screen == Screen::InputSettings {
                         if let (Some(button), Some(draft)) =
                             (self.gamepad_capture, self.config_draft.as_mut())
                         {
@@ -3044,7 +3120,7 @@ impl PocketLauncher {
                                     self.deck_scroll_selection = true;
                                 }
                                 "Start" => {
-                                    self.config_draft = Some(self.library.config().clone());
+                                    self.config_draft = Some(self.settings_draft());
                                     self.screen = Screen::Settings;
                                 }
                                 "South" | "North" => {
@@ -3149,7 +3225,10 @@ impl PocketLauncher {
                 && self.screen == Screen::Run
                 && self.library.config().gps_fixed_enabled
                 && self.library.config().gps_fixed_random
-                && self.running_game_id.as_deref().and_then(|id| self.library.get(id))
+                && self
+                    .running_game_id
+                    .as_deref()
+                    .and_then(|id| self.library.get(id))
                     .is_some_and(|game| pocket_library::is_colors_game(game, self.library.root()))
             {
                 if pressed && !repeat {
@@ -3502,7 +3581,13 @@ impl PocketLauncher {
         let tx = self.events_tx.clone();
         let runner = self.runner.clone();
         std::thread::spawn(move || {
-            let outcome = runner.run_game(library_root, game, Some(frame_tx), Some(input_rx), Some(gps_notice_tx));
+            let outcome = runner.run_game(
+                library_root,
+                game,
+                Some(frame_tx),
+                Some(input_rx),
+                Some(gps_notice_tx),
+            );
             let _ = tx.send(UiEvent::RunFinished(outcome));
         });
         self.status = "Starting emulator...".to_string();
@@ -3737,7 +3822,9 @@ impl eframe::App for PocketLauncher {
             }
             match self.screen {
                 Screen::Library => self.ui_library(ui),
-                Screen::Settings | Screen::GizmondoOptions => self.ui_settings(ui),
+                Screen::Settings | Screen::GizmondoOptions | Screen::InputSettings => {
+                    self.ui_settings(ui)
+                }
                 Screen::GameSettings => self.ui_game_settings(ui),
                 Screen::Run => self.ui_run(ui),
             }
@@ -3764,9 +3851,13 @@ impl eframe::App for PocketLauncher {
                     .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 16.0))
                     .interactable(false)
                     .show(ctx, |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| { ui.label(message); });
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(message);
+                        });
                     });
-            } else { self.gps_notice = None; }
+            } else {
+                self.gps_notice = None;
+            }
         }
         if !console_only && !self.library_busy {
             self.ui_demo_import(ctx);

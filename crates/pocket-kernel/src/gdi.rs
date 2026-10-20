@@ -423,14 +423,20 @@ impl GdiState {
     }
 
     fn alloc_handle(&mut self) -> u32 {
-        let h = self.next_handle;
-        self.next_handle = self.next_handle.wrapping_add(1);
-        // Avoid stomping on the stock handles by stepping over them.
-        debug_assert!(
-            !is_stock_handle(h),
-            "alloc_handle collided with a stock handle"
-        );
-        h
+        loop {
+            let h = self.next_handle;
+            self.next_handle = self.next_handle.wrapping_add(1);
+            // The dynamic sequence eventually reaches the reserved stock
+            // range. Released handles may be reused after wraparound, live
+            // objects and icons must never be overwritten.
+            if h != 0
+                && !is_stock_handle(h)
+                && !self.objects.contains_key(&h)
+                && !self.icons.contains_key(&h)
+            {
+                return h;
+            }
+        }
     }
 
     pub fn register_icon(&mut self, image: crate::imaging::Image) -> u32 {
@@ -1241,6 +1247,34 @@ pub mod rop3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_handles_skip_stock_objects_and_live_handles_after_wrap() {
+        let mut gdi = GdiState::new();
+        gdi.next_handle = STOCK_WHITE_BRUSH - 1;
+        for _ in 0..64 {
+            let h = gdi.create_solid_brush(0x123456);
+            assert!(!is_stock_handle(h));
+        }
+        assert_eq!(gdi.brush(STOCK_WHITE_BRUSH).unwrap().color, 0xffffff);
+        assert_eq!(gdi.brush(STOCK_BLACK_BRUSH).unwrap().color, 0);
+        assert!(matches!(
+            gdi.objects.get(&STOCK_SYSTEM_FONT),
+            Some(GdiObject::Font(_))
+        ));
+        assert!(gdi.bitmap(STOCK_DEFAULT_BITMAP).is_some());
+        gdi.next_handle = u32::MAX;
+        let high = gdi.create_solid_brush(0x112233);
+        assert_eq!(high, u32::MAX);
+        let low = gdi.create_solid_brush(0x445566);
+        assert_ne!(low, 0);
+        gdi.next_handle = high;
+        let next = gdi.create_solid_brush(0x778899);
+        assert_ne!(next, high);
+        assert_ne!(next, low);
+        assert_eq!(gdi.brush(high).unwrap().color, 0x112233);
+        assert_eq!(gdi.brush(low).unwrap().color, 0x445566);
+    }
 
     #[test]
     fn window_paint_tracks_primitive_coverage_and_clips_partial_layers() {

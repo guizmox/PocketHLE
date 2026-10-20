@@ -718,10 +718,27 @@ fn default_gpu_renderer() -> bool {
     true
 }
 
+/// Hexadecimal opaque identifiers. A blank platform uses the persistent device registry.
+fn default_device_preset_id() -> String {
+    "506F636B6574484C452D57696E4345".into()
+}
+fn default_gizmondo_preset_id() -> String {
+    // Confirmed in the Gizmondo OAL: UTF-16LE "Gizmondo", including NUL.
+    "470069007A006D006F006E0064006F000000".into()
+}
+
 /// Persistent global configuration. Lives at
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default = "default_device_preset_id")]
+    pub device_preset_id: String,
+    #[serde(default = "String::new")]
+    pub device_platform_id: String,
+    #[serde(default = "default_gizmondo_preset_id")]
+    pub gizmondo_preset_id: String,
+    #[serde(default = "String::new")]
+    pub gizmondo_platform_id: String,
     /// Host GPU rendering is enabled by default; games may override it.
     #[serde(default = "default_gpu_renderer")]
     pub gpu_renderer: bool,
@@ -969,6 +986,10 @@ impl LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            device_preset_id: default_device_preset_id(),
+            device_platform_id: String::new(),
+            gizmondo_preset_id: default_gizmondo_preset_id(),
+            gizmondo_platform_id: String::new(),
             gpu_renderer: true,
             anisotropic_filtering: 0,
             schema_version: 1,
@@ -5317,4 +5338,37 @@ fn import_tree_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     visit(root, 0, &mut files)?;
     files.sort();
     Ok(files)
+}
+
+impl LauncherConfig {
+    /// Gizmondo IDs replace, rather than merge with, the general WinCE profile.
+    pub fn device_identity_hex(&self, gizmondo: bool) -> (&str, &str) {
+        if gizmondo {
+            (&self.gizmondo_preset_id, &self.gizmondo_platform_id)
+        } else {
+            (&self.device_preset_id, &self.device_platform_id)
+        }
+    }
+}
+
+#[cfg(test)]
+mod device_identity_config_tests {
+    use super::*;
+    #[test]
+    fn old_config_defaults_and_profile_overrides_survive_roundtrip() {
+        let mut c: LauncherConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.gizmondo_preset_id, "470069007A006D006F006E0064006F000000");
+        assert!(c.device_platform_id.is_empty());
+        c.device_platform_id = "01020304".into();
+        c.gizmondo_platform_id = "AABBCCDD".into();
+        let c: LauncherConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(
+            c.device_identity_hex(false),
+            (c.device_preset_id.as_str(), "01020304")
+        );
+        assert_eq!(
+            c.device_identity_hex(true),
+            (c.gizmondo_preset_id.as_str(), "AABBCCDD")
+        );
+    }
 }

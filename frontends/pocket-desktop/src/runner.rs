@@ -289,6 +289,21 @@ impl Runner {
                     29,
                 );
             }
+            let (preset, platform) = launcher_config.device_identity_hex(is_gizmondo);
+            if let Err(e) = pocket_core::kernel::device_identity::DeviceIdentity::configure(
+                &mut process.state.registry,
+                preset,
+                platform,
+            ) {
+                summary_lines.push(format!("Invalid device identity: {e}"));
+                return (
+                    RunOutcome {
+                        summary: summary_lines.join("\n"),
+                        framebuffer: None,
+                    },
+                    29,
+                );
+            }
             if is_gizmondo {
                 process
                     .state
@@ -403,10 +418,7 @@ impl Runner {
             emu.mount_read_only_dir(&prefix, directory);
         }
         if let Some(prefix) = game.guest_install_prefix() {
-            emu.mount_read_only_dir(
-                &prefix,
-                game.install_mount_dir(library_root, &prefix),
-            );
+            emu.mount_read_only_dir(&prefix, game.install_mount_dir(library_root, &prefix));
             summary_lines.push(format!("Mounted {} at {prefix:?}", extracted.display()));
             if let Some(guest_exe) = game.guest_exe_path() {
                 emu.set_module_path(&guest_exe);
@@ -945,8 +957,15 @@ impl FrameHook for RunHook {
         if std::mem::take(&mut self.refresh_colors_gps) && !stop_requested {
             if let Some(config) = self.colors_random_gps.as_ref() {
                 if let Some(position) = config.simulated_gps_position() {
-                    if state.vfs.gps_service().set_fixed_position(Some(position)).is_ok() {
-                        if let Some(tx) = &self.gps_notice_tx { let _ = tx.send(position); }
+                    if state
+                        .vfs
+                        .gps_service()
+                        .set_fixed_position(Some(position))
+                        .is_ok()
+                    {
+                        if let Some(tx) = &self.gps_notice_tx {
+                            let _ = tx.send(position);
+                        }
                     }
                 }
             }
@@ -1281,7 +1300,10 @@ mod geofence_refresh_tests {
         assert!(!hook.refresh_colors_gps);
         tx.send(InputCommand::Input(up)).unwrap();
         assert!(!hook.drain_input(&mut pending));
-        assert_eq!(pending.iter().copied().collect::<Vec<_>>(), vec![down, up, down, down, up]);
+        assert_eq!(
+            pending.iter().copied().collect::<Vec<_>>(),
+            vec![down, up, down, down, up]
+        );
         tx.send(InputCommand::RefreshColorsGps).unwrap();
         assert!(!hook.drain_input(&mut pending));
         assert!(hook.refresh_colors_gps);
