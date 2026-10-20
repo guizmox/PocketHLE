@@ -149,8 +149,28 @@ class SettingsActivity : AppCompatActivity() {
             val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Physical keyboard" }
             val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Physical controller" }
             input.addPreference(keyboard);input.addPreference(gamepad)
+            val controlGroups = listOf(
+                "Shared controls — Pocket PC and Gizmondo",
+                "Emulator shortcuts",
+                "Gizmondo only — console system buttons",
+                "Pocket PC only — hardware buttons"
+            )
+            fun categories(screen: androidx.preference.PreferenceScreen) = controlGroups.associateWith { group ->
+                androidx.preference.PreferenceCategory(requireContext()).apply {
+                    title = group
+                    screen.addPreference(this)
+                }
+            }
+            val keyboardGroups = categories(keyboard)
+            val gamepadGroups = categories(gamepad)
             InputBindings.buttons.forEach { (button,info) ->
-                keyboard.addPreference(Preference(requireContext()).apply {
+                val group = when {
+                    button.startsWith("pocket_pc_app") -> controlGroups[3]
+                    button.startsWith("giz_piano") -> controlGroups[2]
+                    button == "turbo" -> controlGroups[1]
+                    else -> controlGroups[0]
+                }
+                keyboardGroups.getValue(group).addPreference(Preference(requireContext()).apply {
                     key="keyboard_$button";title=info.first;isPersistent=false
                     val snapshot=InputBindings(current)
                     val existing=(0 until snapshot.keyboard.length()).map { snapshot.keyboard.getJSONObject(it) }.find { it.optString("button")==button }?.optJSONArray("keys")
@@ -168,7 +188,7 @@ class SettingsActivity : AppCompatActivity() {
                         dialog.show();true
                     }
                 })
-                gamepad.addPreference(ListPreference(requireContext()).apply {
+                gamepadGroups.getValue(group).addPreference(ListPreference(requireContext()).apply {
                     key="gamepad_$button";title=info.first;isPersistent=false
                     entries=(listOf("Unassigned")+InputBindings.controls).toTypedArray();entryValues=(listOf("")+InputBindings.controls).toTypedArray()
                     val map=InputBindings(current).controller

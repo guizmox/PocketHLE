@@ -2034,7 +2034,20 @@ impl PocketLauncher {
                 ui.label(RichText::new("Keyboard").strong());
                 ui.label(RichText::new("Controller").strong());
                 ui.end_row();
-                for button in GuestButton::ALL {
+                for (index, button) in GuestButton::ALL.into_iter().enumerate() {
+                    let section = match index {
+                        0 => Some("Shared controls — Pocket PC and Gizmondo"),
+                        10 => Some("Emulator shortcuts"),
+                        11 => Some("Gizmondo only — console system buttons"),
+                        16 => Some("Pocket PC only — hardware buttons"),
+                        _ => None,
+                    };
+                    if let Some(section) = section {
+                        ui.label(RichText::new(section).strong());
+                        ui.label("");
+                        ui.label("");
+                        ui.end_row();
+                    }
                     ui.add(egui::Label::new(button.label()).wrap(false));
                     let keys: Vec<String> = draft.keybindings.keys_for(button).to_vec();
                     ui.vertical(|ui| {
@@ -2585,7 +2598,7 @@ impl PocketLauncher {
 
     fn ui_virtual_pad(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
-            ui.label(RichText::new("Controls").strong());
+            ui.label(RichText::new("Shared controls").strong());
             ui.add_space(4.0);
             // ----- D-pad: 3x3 grid with cardinal arrows -----
             egui::Grid::new("vpad_dpad")
@@ -2619,6 +2632,15 @@ impl PocketLauncher {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 self.vbutton(ui, "Turbo", GuestButton::Turbo, 60.0);
+            });
+            ui.add_space(8.0);
+            ui.label("Pocket PC hardware")
+                .on_hover_text("Some Pocket PC games use P1–P4 instead of Action/A/B/C. Assign keys or a controller in Settings > Keyboard and controllers.");
+            ui.horizontal(|ui| {
+                self.vbutton(ui, "P1", GuestButton::PocketPcApp1, 40.0);
+                self.vbutton(ui, "P2", GuestButton::PocketPcApp2, 40.0);
+                self.vbutton(ui, "P3", GuestButton::PocketPcApp3, 40.0);
+                self.vbutton(ui, "P4", GuestButton::PocketPcApp4, 40.0);
             });
         });
     }

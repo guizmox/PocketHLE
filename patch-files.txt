@@ -15,6 +15,7 @@ crates\pocket-kernel\src\registry.rs
 crates\pocket-kernel\src\vfs.rs
 crates\pocket-kernel\src\vfs_contract.rs
 crates\pocket-library\src\analysis.rs
+crates\pocket-library\src\keybindings.rs
 crates\pocket-library\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\coredll\graphics_tests.rs
@@ -25,9 +26,12 @@ crates\pocket-winceapi\src\lib.rs
 docs\AGENTS.md
 frontends\pocket-android-jni\src\lib.rs
 frontends\pocket-android-jni\src\runner.rs
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\InputBindings.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\MainActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\NativeBridge.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
+frontends\pocket-android\app\src\main\res\layout\activity_game_pocketpc.xml
 frontends\pocket-cli\examples\navigator_gui_probe.rs
 frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\runner.rs

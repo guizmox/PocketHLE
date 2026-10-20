@@ -854,6 +854,10 @@ class GameActivity : AppCompatActivity() {
             }
         }
         if (!gizmondoGame) {
+            bindVk(R.id.btn_ppc_app1, 0xc1)
+            bindVk(R.id.btn_ppc_app2, 0xc2)
+            bindVk(R.id.btn_ppc_app3, 0xc3)
+            bindVk(R.id.btn_ppc_app4, 0xc4)
             bindVk(R.id.btn_up,VK_UP)
             bindVk(R.id.btn_down,VK_DOWN)
             bindVk(R.id.btn_left,VK_LEFT)

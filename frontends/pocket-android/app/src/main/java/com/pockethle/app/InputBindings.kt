@@ -19,9 +19,13 @@ internal class InputBindings(config: LauncherConfig) {
     fun controllerKey(name: String): Int? = buttons[controller.optString(name)]?.second
     companion object {
         val buttons=linkedMapOf(
+            "pocket_pc_app1" to ("Pocket PC P1" to 0xc1),
+            "pocket_pc_app2" to ("Pocket PC P2" to 0xc2),
+            "pocket_pc_app3" to ("Pocket PC P3" to 0xc3),
+            "pocket_pc_app4" to ("Pocket PC P4" to 0xc4),
             "dpad_up" to ("D-pad ↑" to 0x26),"dpad_down" to ("D-pad ↓" to 0x28),"dpad_left" to ("D-pad ←" to 0x25),"dpad_right" to ("D-pad →" to 0x27),
-            "action" to ("Play ▶" to 0x0d),"button_a" to ("Stop ■" to 0x11),"button_b" to ("Forward ▶▶" to 0x20),"button_c" to ("Rewind ◀◀" to 0x10),
-            "soft1" to ("L" to 0x09),"soft2" to ("R" to 0x1b),"giz_piano1" to ("Home" to 0x70),"giz_piano2" to ("Volume" to 0x71),"giz_piano3" to ("Brightness" to 0x72),"giz_piano4" to ("Geofence" to 0x73),"giz_piano5" to ("Power" to 0x7a),"turbo" to ("Turbo (PocketHLE)" to 0x72)
+            "action" to ("Action / Gizmondo Play" to 0x0d),"button_a" to ("Button A / Gizmondo Stop" to 0x11),"button_b" to ("Button B / Gizmondo Forward" to 0x20),"button_c" to ("Button C / Gizmondo Rewind" to 0x10),
+            "soft1" to ("Soft key 1 / Gizmondo L" to 0x09),"soft2" to ("Soft key 2 / Gizmondo R" to 0x1b),"giz_piano1" to ("Home" to 0x70),"giz_piano2" to ("Volume" to 0x71),"giz_piano3" to ("Brightness" to 0x72),"giz_piano4" to ("Geofence" to 0x73),"giz_piano5" to ("Power" to 0x7a),"turbo" to ("Turbo (PocketHLE)" to 0x72)
         )
         val controls=listOf("South","East","North","West","Start","Back","Guide","LeftTrigger","RightTrigger","LeftTrigger2","RightTrigger2","LeftStick","RightStick","DPadUp","DPadDown","DPadLeft","DPadRight","LeftStickUp","LeftStickDown","LeftStickLeft","LeftStickRight","RightStickUp","RightStickDown","RightStickLeft","RightStickRight")
         fun defaultController()=JSONObject().apply {

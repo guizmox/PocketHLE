@@ -75,11 +75,16 @@ pub enum GuestButton {
     GizPiano3,
     GizPiano4,
     GizPiano5,
+    /// Pocket PC application hardware keys (VK_APP1..VK_APP4).
+    PocketPcApp1,
+    PocketPcApp2,
+    PocketPcApp3,
+    PocketPcApp4,
 }
 
 impl GuestButton {
     /// Every button, in the order the settings UI lists them.
-    pub const ALL: [GuestButton; 16] = [
+    pub const ALL: [GuestButton; 20] = [
         GuestButton::DpadUp,
         GuestButton::DpadDown,
         GuestButton::DpadLeft,
@@ -96,6 +101,10 @@ impl GuestButton {
         GuestButton::GizPiano3,
         GuestButton::GizPiano4,
         GuestButton::GizPiano5,
+        GuestButton::PocketPcApp1,
+        GuestButton::PocketPcApp2,
+        GuestButton::PocketPcApp3,
+        GuestButton::PocketPcApp4,
     ];
 
     /// The virtual-key code this button sends into the guest.
@@ -118,6 +127,10 @@ impl GuestButton {
             GuestButton::GizPiano4 => vk::F4,
             // Official Gizmondo Keys SDK: Piano 5 is VK_F11, not VK_F5.
             GuestButton::GizPiano5 => vk::F11,
+            GuestButton::PocketPcApp1 => 0xC1,
+            GuestButton::PocketPcApp2 => 0xC2,
+            GuestButton::PocketPcApp3 => 0xC3,
+            GuestButton::PocketPcApp4 => 0xC4,
         }
     }
 
@@ -139,6 +152,10 @@ impl GuestButton {
             GuestButton::GizPiano3 => "Gizmondo Brightness (Piano 3)",
             GuestButton::GizPiano4 => "Gizmondo Alert (Piano 4)",
             GuestButton::GizPiano5 => "Gizmondo Power (Piano 5)",
+            GuestButton::PocketPcApp1 => "Pocket PC hardware button 1",
+            GuestButton::PocketPcApp2 => "Pocket PC hardware button 2",
+            GuestButton::PocketPcApp3 => "Pocket PC hardware button 3",
+            GuestButton::PocketPcApp4 => "Pocket PC hardware button 4",
         }
     }
 
@@ -166,6 +183,11 @@ impl GuestButton {
             GuestButton::GizPiano3 => &["F3"],
             GuestButton::GizPiano4 => &["F4"],
             GuestButton::GizPiano5 => &["F5"],
+            // Opt-in bindings: never steal an existing keyboard/controller key.
+            GuestButton::PocketPcApp1
+            | GuestButton::PocketPcApp2
+            | GuestButton::PocketPcApp3
+            | GuestButton::PocketPcApp4 => &[],
         }
     }
 }
@@ -316,12 +338,41 @@ impl KeyBindings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pocket_pc_buttons_do_not_steal_legacy_bindings_and_survive_settings() {
+        let mut bindings = super::KeyBindings::default();
+        let before: Vec<_> = super::GuestButton::ALL[..16]
+            .iter()
+            .map(|b| (*b, bindings.keys_for(*b).to_vec()))
+            .collect();
+        bindings.fill_missing_buttons();
+        for (button, keys) in before {
+            assert_eq!(bindings.keys_for(button), keys);
+        }
+        for button in super::GuestButton::ALL[16..].iter() {
+            assert!(bindings.keys_for(*button).is_empty());
+        }
+        bindings.bind(super::GuestButton::PocketPcApp3, "F8");
+        bindings.bind(super::GuestButton::PocketPcApp4, "F9");
+        let json = serde_json::to_string(&bindings).unwrap();
+        let restored: super::KeyBindings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.vk_for_key("F8"), Some(0xc3));
+        assert_eq!(restored.vk_for_key("F9"), Some(0xc4));
+        let mut pad = super::xbox_gamepad_bindings();
+        pad.insert("South".into(), super::GuestButton::PocketPcApp3);
+        let json = serde_json::to_string(&pad).unwrap();
+        let restored: std::collections::BTreeMap<String, super::GuestButton> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(restored["South"].vk(), 0xc3);
+    }
+
     use super::*;
 
     #[test]
     fn defaults_cover_every_button() {
         let bindings = KeyBindings::default();
-        for button in GuestButton::ALL {
+        assert_eq!(bindings.bindings.len(), GuestButton::ALL.len());
+        for button in GuestButton::ALL[..16].iter().copied() {
             assert!(
                 !bindings.keys_for(button).is_empty(),
                 "{button:?} has no default key"
