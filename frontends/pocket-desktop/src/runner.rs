@@ -1081,6 +1081,7 @@ mod launcher_return_tests {
         settings.max_slices = 3_000_000;
         settings.halt_on_unimplemented = true;
         let game = GameEntry {
+            platform: None,
             id: "probe".into(),
             display_name: "Process diagnostic".into(),
             provider: None,
@@ -1156,6 +1157,7 @@ mod launcher_return_tests {
         settings.max_slices = 3_000_000;
         settings.halt_on_unimplemented = true;
         let game = GameEntry {
+            platform: None,
             id: "probe".into(),
             display_name: "VFS diagnostic".into(),
             provider: None,

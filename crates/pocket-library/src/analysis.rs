@@ -156,6 +156,32 @@ fn binary_strings(bytes: &[u8]) -> Vec<String> {
     out
 }
 
+/// Serial APIs and COM8 alone may belong to a modem or Bluetooth device.
+/// Require GPS-specific vocabulary as well, including dynamically built ports.
+fn serial_gps_evidence(text: &str) -> Option<&'static str> {
+    let gps = [
+        "nmea",
+        "gpssettings",
+        "gps engine",
+        "ttgpsserportmap",
+        "ttnnmeareceiver",
+    ]
+    .iter()
+    .any(|s| text.contains(s));
+    let transport = [
+        "com8:",
+        "com%d:",
+        "setcommstate",
+        "getcommstate",
+        "setcommtimeouts",
+        "waitcommevent",
+        "clearcommerror",
+    ]
+    .iter()
+    .any(|s| text.contains(s));
+    (gps && transport).then_some("Serial/NMEA GPS (port string or serial API with GPS evidence)")
+}
+
 fn version_value(strings: &[String], key: &str) -> Option<String> {
     for (i, s) in strings.iter().enumerate() {
         if s.eq_ignore_ascii_case(key) {
@@ -355,9 +381,10 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             .iter()
             .filter(|needle| text.contains(**needle))
             .collect();
+        let serial_gps = label == "GPS" && serial_gps_evidence(&text).is_some();
         a.hardware.push((
             label.into(),
-            if evidence.is_empty() {
+            if evidence.is_empty() && !serial_gps {
                 "No static evidence (dynamic or ordinal calls may be present)".into()
             } else {
                 "✓ Detected".into()
@@ -365,6 +392,10 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
         ));
         for needle in evidence {
             a.evidence.push(format!("{label}: {needle}"));
+        }
+        if serial_gps {
+            a.evidence
+                .push(format!("GPS: {}", serial_gps_evidence(&text).unwrap()));
         }
     }
     if text.contains("vib1:") || text.contains("vibrator") || text.contains("nledsetdevice") {
@@ -580,5 +611,35 @@ mod selected_card_id_tests {
         std::fs::write(own, b"Misleading catalogue reference: GZGA200015").unwrap();
         assert!(game_gizmondo_title_id(&game, root.path()).is_none());
         assert!(analyze_game(&game, root.path()).title_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod serial_gps_detection_tests {
+    use super::*;
+    #[test]
+    fn compatibility_update_nmea_gps_requires_transport_and_gps_evidence() {
+        for text in [
+            "com8: nmea",
+            "com%d: ttgpsserportmap",
+            "setcommstate software\\tomtom\\gpssettings",
+        ] {
+            assert!(serial_gps_evidence(text).is_some());
+        }
+        for text in [
+            "com8: modem",
+            "setcommstate printer",
+            "nmea manual only",
+            "bluetooth serial port com8:",
+        ] {
+            assert!(serial_gps_evidence(text).is_none());
+        }
+        let bytes: Vec<_> = "COM%d:\0TTNNmeaReceiver\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(
+            serial_gps_evidence(&binary_strings(&bytes).join(" ").to_ascii_lowercase()).is_some()
+        );
     }
 }

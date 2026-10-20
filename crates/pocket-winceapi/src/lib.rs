@@ -40,6 +40,7 @@ pub mod gles;
 mod gps;
 pub mod gx;
 pub mod hss;
+mod legacy_services;
 #[cfg(feature = "video-static")]
 mod media_static;
 mod number_format;
@@ -251,6 +252,7 @@ impl WinCeDispatcher {
         vibration::register(&mut d);
         wininet::register(&mut d);
         ws2::register(&mut d);
+        legacy_services::register(&mut d);
         ddraw::register(&mut d);
         aygshell::register(&mut d);
         commctrl::register(&mut d);

@@ -3058,3 +3058,32 @@ have final precedence. Runtime Windows remains untested in this environment.
 Retain the build26 startup/module-path/modal/input fixes. Resource-backed images are in kernel::imaging and winceapi::coredll::images, shared by named COREDLL/COMMCTRL APIs; never restore constant image-list or LoadIcon application handles. Resolve resources through resource_scope(hinstance), including native DLLs. List-view LVIF_IMAGE values and associated normal/small image lists participate in composition and row hit testing; maintain DIB readback/writeback and the compositor frame_counter invariant. Tests live in coredll/graphics_tests.rs and kernel/imaging.rs. ScrollWindowEx is in coredll/window_graphics.rs: overlap-safe pixel movement, uncovered region output, child movement and deferred erasure; do not replace it with unconditional zero or blanket repaint. GetFileTime exposes available VFS dates, CompareFileTime is unsigned FILETIME ordering, class graphics attributes are shared by class. Full Win32 image-list flags and icon-grid layout remain partial; see NAVIGATOR-RENDU-BUILD27.md.
 
 RAMTEST native import/paging tests require the original tools/ramtest/dist/GZRT999999 DLLs, shipped by the upstream tools/ramtest/dist/PocketHLE-RAMTEST.zip. Missing fixtures can masquerade as loader/LastError regressions: restore original fixtures rather than weakening tests. This source-only reprise has no Navigator game data; menu appearance/navigation/Gizmondo buttons still require actual game replay.
+
+## TomTom local host lookup, notification icons and unknown ZIP platform (2026-10-20)
+
+Legacy WINSOCK.dll calls are handled by winceapi::legacy_services; keep the ws2.dll
+Bluetooth implementation unchanged. WSAStartup/cleanup have their own process
+reference count, independent of the Bluetooth permission/radio. gethostname returns
+the virtual device name PocketHLE. gethostbyname supports that name and localhost
+only, with a reusable per-guest-thread ARM32 HOSTENT containing loopback, guest
+pointers, an empty alias list and a terminated IPv4 address list. Unknown/external
+names return NULL and WSAHOST_NOT_FOUND; this is not DNS or IPv4 socket transport.
+Final WSACleanup frees its buffers. Never return success without writing outputs.
+Shell_NotifyIcon accepts the CE 152-byte NOTIFYICONDATA and models ADD/MODIFY/DELETE
+by (HWND,uID), copying icon pixels and applying only flagged fields. Window teardown
+removes its icons. Host tray rendering/click callbacks are not implemented; no
+synthetic clicks or fake network/location are generated.
+
+Static GPS evidence includes NMEA/serial use when a COM/serial-API indication and
+GPS-specific vocabulary coexist. A COM8 string or generic serial import alone is
+not sufficient. Existing GPS1/API detection remains available to both frontends.
+
+Prepared ZIP imports expose per-entry unresolved platform choices; CAB sources and
+recognized Gizmondo cards skip the question. Desktop and Android ask in English
+before publishing. The optional GameEntry.platform field stores an explicit choice
+and takes precedence over heuristics; existing manifests without it remain valid.
+Reimport preserves an earlier explicit choice and settings. Selection/cancellation
+operates on private staging; update confirmation remains a separate step. CLI
+import APIs retain their noninteractive default. JNI selection checks token owner
+and unresolved game ID without consuming another pending import. Diagnostics/tests
+must distinguish shared-core checks from native GUI/Android hardware validation.

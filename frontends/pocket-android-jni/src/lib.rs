@@ -175,6 +175,48 @@ fn take_prepared_import(root: &Path, token: u64) -> anyhow::Result<pocket_librar
     Ok(imports.remove(&token).unwrap().1)
 }
 
+fn prepared_import_json(token: u64, pending: &pocket_library::PreparedImport) -> String {
+    let choices: Vec<_> = pending
+        .platform_choices()
+        .into_iter()
+        .map(|(id, display_name)| serde_json::json!({"id":id,"display_name":display_name}))
+        .collect();
+    serde_json::json!({"ok":true,"token":token.to_string(),"count":pending.entries().len(),"updates":pending.updates(),"platform_choices":choices}).to_string()
+}
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportPlatform<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+    game_id: JString<'local>,
+    gizmondo: jni::sys::jboolean,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        let id: String = env.get_string(&game_id)?.into();
+        let mut imports = PREPARED_IMPORTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (owner, pending) = imports
+            .get_mut(&(token as u64))
+            .context("import no longer pending")?;
+        anyhow::ensure!(*owner == root, "import belongs to another library");
+        let platform = if gizmondo != 0 {
+            pocket_library::GamePlatform::Gizmondo
+        } else {
+            pocket_library::GamePlatform::PocketPc
+        };
+        anyhow::ensure!(
+            pending.choose_platform(&id, platform),
+            "game does not need a platform choice"
+        );
+        Ok(prepared_import_json(token as u64, pending))
+    })();
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("choosePreparedImportPlatform: {e:#}"))),
+    )
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_prepareImport<'local>(
     mut env: JNIEnv<'local>,
@@ -187,7 +229,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_prepareImport<'local>
         let path = jstring_to_path(&mut env, source).context("missing import source")?;
         let pending = Library::open(&root)?.prepare_import(path)?;
         let token = NEXT_IMPORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let json = serde_json::json!({"ok": true, "token": token.to_string(), "count": pending.entries().len(), "updates": pending.updates()});
+        let json = prepared_import_json(token, &pending);
         let mut imports = PREPARED_IMPORTS.lock().unwrap_or_else(|e| e.into_inner());
         anyhow::ensure!(imports.len() < 16, "too many pending imports");
         imports.insert(token, (root, pending));

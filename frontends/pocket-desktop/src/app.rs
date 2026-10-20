@@ -772,7 +772,7 @@ impl PocketLauncher {
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
                     self.pending_import = Some(pending);
-                    self.status = "Waiting for update confirmation...".into();
+                    self.status = "Waiting for import confirmation...".into();
                 }
                 UiEvent::ImportFinished(Ok(entries)) => {
                     self.library_busy = false;
@@ -1534,6 +1534,42 @@ impl PocketLauncher {
         let Some(pending) = self.pending_import.as_ref() else {
             return;
         };
+        if let Some((id, name)) = pending.platform_choices().first().cloned() {
+            let mut choice = None;
+            let mut cancel = false;
+            egui::Window::new("Choose game platform").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label(format!("No Gizmondo marker was found for \"{name}\". Which platform is this game for?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Gizmondo").clicked() { choice=Some(pocket_library::GamePlatform::Gizmondo); }
+                    if ui.button("Pocket PC").clicked() { choice=Some(pocket_library::GamePlatform::PocketPc); }
+                    cancel=ui.button("Cancel import").clicked();
+                });
+            });
+            if cancel {
+                self.pending_import = None;
+                self.library_busy = false;
+                self.status = "Import cancelled.".into();
+            } else if let Some(platform) = choice {
+                self.pending_import
+                    .as_mut()
+                    .unwrap()
+                    .choose_platform(&id, platform);
+            }
+            return;
+        }
+        if pending.updates().is_empty() {
+            let pending = self.pending_import.take().unwrap();
+            let root = self.library.root().to_path_buf();
+            let tx = self.events_tx.clone();
+            self.status = "Importing...".into();
+            std::thread::spawn(move || {
+                let result = Library::open(root)
+                    .and_then(|mut lib| lib.apply_prepared_import(pending, false))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(UiEvent::ImportFinished(result));
+            });
+            return;
+        }
         let names: Vec<_> = pending
             .updates()
             .iter()
@@ -3337,7 +3373,7 @@ impl PocketLauncher {
                 lib.config_mut().last_import_dir = Some(parent);
                 lib.save().map_err(|e| e.to_string())?;
                 let pending = lib.prepare_import(&path).map_err(|e| e.to_string())?;
-                if !pending.updates().is_empty() {
+                if !pending.updates().is_empty() || !pending.platform_choices().is_empty() {
                     tx.send(UiEvent::ImportPrepared(pending))
                         .map_err(|e| e.to_string())?;
                     return Ok(Vec::new());

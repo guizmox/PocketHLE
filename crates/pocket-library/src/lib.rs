@@ -82,12 +82,22 @@ fn default_schema_version() -> u32 {
     1
 }
 
+/// User classification for a ZIP whose platform cannot be identified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GamePlatform {
+    Gizmondo,
+    PocketPc,
+}
+
 /// One installed game entry. Stored both inline in `library.json`
 /// (for fast listing) and as a separate `game.json` inside the game
 /// directory (for per-game settings and so the directory is
 /// self-describing if a user copies it around).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<GamePlatform>,
     /// Stable identifier, derived from the source cab name. Used as
     /// the directory name. Always a-z 0-9 _ - .
     pub id: String,
@@ -143,6 +153,9 @@ pub struct GameEntry {
 /// the card by an exact `GZxx######` directory, including empty serial
 /// directories in repacks. The legacy Alien Hominid repack is retained as a narrow fallback.
 pub fn is_gizmondo_game(entry: &GameEntry, library_root: &Path) -> bool {
+    if let Some(platform) = entry.platform {
+        return platform == GamePlatform::Gizmondo;
+    }
     let extracted = entry.extracted_dir(library_root);
     entry.source_cab.starts_with("demo-card:")
         || entry.source_cab.starts_with("gzga-collection:")
@@ -1050,11 +1063,42 @@ pub struct Library {
 pub struct PreparedImport {
     staging: tempfile::TempDir,
     target_root: PathBuf,
+    zip_source: bool,
     entries: Vec<GameEntry>,
     updates: Vec<GameEntry>,
 }
 
 impl PreparedImport {
+    /// Ask only for unresolved ZIP games, not CABs or already classified updates.
+    pub fn platform_choices(&self) -> Vec<(String, String)> {
+        if !self.zip_source {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.platform.is_none()
+                    && !entry.source_cab.to_ascii_lowercase().ends_with(".cab")
+                    && !is_gizmondo_game(entry, self.staging.path())
+                    && !self
+                        .updates
+                        .iter()
+                        .any(|old| old.id == entry.id && old.platform.is_some())
+            })
+            .map(|entry| (entry.id.clone(), entry.display_name.clone()))
+            .collect()
+    }
+    pub fn choose_platform(&mut self, id: &str, platform: GamePlatform) -> bool {
+        if !self.platform_choices().iter().any(|(key, _)| key == id) {
+            return false;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.platform = Some(platform);
+            return true;
+        }
+        false
+    }
+
     pub fn entries(&self) -> &[GameEntry] {
         &self.entries
     }
@@ -1123,7 +1167,8 @@ impl Library {
             .and_then(|v| v.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let _imported = if count == 4 && signature[..2] == *b"PK" || ext == "zip" {
+        let zip_source = count == 4 && signature[..2] == *b"PK" || ext == "zip";
+        let _imported = if zip_source {
             provisional.import_zip_entries(path)?
         } else {
             let entry = if signature == *b"MSCF" || ext == "cab" {
@@ -1151,6 +1196,7 @@ impl Library {
         Ok(PreparedImport {
             staging,
             target_root: self.root.clone(),
+            zip_source,
             entries,
             updates,
         })
@@ -1532,6 +1578,7 @@ impl Library {
             }
         };
         let entry = GameEntry {
+            platform: None,
             id: id.clone(),
             display_name,
             provider,
@@ -1627,6 +1674,7 @@ impl Library {
             .unwrap_or_else(|_| dest_exe.clone());
 
         let entry = GameEntry {
+            platform: None,
             id: id.clone(),
             display_name: pretty_id(&id),
             provider: None,
@@ -1912,6 +1960,7 @@ impl Library {
             pretty_id(&id)
         };
         let entry = GameEntry {
+            platform: None,
             id: id.clone(),
             display_name,
             provider: None,
@@ -2004,6 +2053,9 @@ impl Library {
     ) -> Result<(), LibraryError> {
         if let Some(previous) = previous {
             entry.settings = previous.settings.clone();
+            if previous.platform.is_some() {
+                entry.platform = previous.platform;
+            }
             entry.display_name = previous.display_name.clone();
             let saves = previous.save_dir(&self.root);
             if saves.is_dir() {
@@ -2299,6 +2351,7 @@ impl Library {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| exe_abs.clone());
         let entry = GameEntry {
+            platform: None,
             id: id.clone(),
             display_name: pretty_id(&id),
             provider: None,
@@ -3495,6 +3548,7 @@ mod tests {
 
     fn entry_with_install_dir(install_dir: Option<&str>) -> GameEntry {
         GameEntry {
+            platform: None,
             id: "spore".to_string(),
             display_name: "Spore v1.0.4".to_string(),
             provider: None,
@@ -4891,6 +4945,53 @@ mod tests {
     /// one ordinal import — enough for `pocket_pe` to report the DLL,
     /// which is what tells a hardware-renderer build from a software
     /// one.
+    #[test]
+    fn compatibility_update_zip_platform_choice_persists_and_known_cards_skip_the_question() {
+        use std::io::Write;
+        for platform in [GamePlatform::Gizmondo, GamePlatform::PocketPc] {
+            let root = tempfile::tempdir().unwrap();
+            let pe = root.path().join("fixture.exe");
+            write_pe_importing(&pe, &[]);
+            let archive = root.path().join("unmarked.zip");
+            let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+            zip.start_file("Autorun.exe", zip::write::FileOptions::default())
+                .unwrap();
+            zip.write_all(&fs::read(pe).unwrap()).unwrap();
+            zip.finish().unwrap();
+            let library_path = root.path().join("library");
+            let mut lib = Library::open(&library_path).unwrap();
+            let mut pending = lib.prepare_import(&archive).unwrap();
+            let choices = pending.platform_choices();
+            assert_eq!(choices.len(), 1);
+            assert!(lib.games().is_empty());
+            assert!(pending.choose_platform(&choices[0].0, platform));
+            assert!(pending.platform_choices().is_empty());
+            let entries = lib.apply_prepared_import(pending, false).unwrap();
+            assert_eq!(entries[0].platform, Some(platform));
+            assert_eq!(
+                is_gizmondo_game(&entries[0], &library_path),
+                platform == GamePlatform::Gizmondo
+            );
+            let reopened = Library::open(&library_path).unwrap();
+            assert_eq!(reopened.games()[0].platform, Some(platform));
+            let pending = reopened.prepare_import(&archive).unwrap();
+            assert!(pending.platform_choices().is_empty()); // explicit prior choice is retained
+            let entries = lib.apply_prepared_import(pending, true).unwrap();
+            assert_eq!(entries[0].platform, Some(platform));
+            let marked = update_fixture(root.path(), b"data");
+            let pending = lib.prepare_import(marked).unwrap();
+            assert!(pending.platform_choices().is_empty());
+            // The same preparation mechanism for CAB/EXE sources does not ask.
+            let pe = root.path().join("plain.exe");
+            write_pe_importing(&pe, &[]);
+            assert!(lib
+                .prepare_import(pe)
+                .unwrap()
+                .platform_choices()
+                .is_empty());
+        }
+    }
+
     fn write_pe_importing(path: &Path, dlls: &[&str]) {
         const LFANEW: u32 = 0x80;
         const OPTIONAL_HEADER_SIZE: u16 = 0xe0;

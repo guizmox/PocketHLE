@@ -38,6 +38,7 @@ pub mod bluetooth;
 pub mod camera;
 pub mod colors;
 pub mod controls;
+pub mod desktop_services;
 pub mod device_identity;
 pub mod device_status;
 pub mod dll_lifecycle;
@@ -1278,6 +1279,8 @@ pub struct KernelState {
     /// Last-error values are isolated by guest thread, including main (0).
     pub thread_last_errors: HashMap<usize, u32>,
     /// Winsock errors belong to the calling thread and survive status reads.
+    pub legacy_winsock: desktop_services::LegacyWinsock,
+    pub notification_icons: HashMap<(u32, u32), desktop_services::NotificationIcon>,
     pub winsock_last_errors: HashMap<usize, u32>,
     pub crt_new_handler: u32,
     pub cpp_new_handler: u32,
@@ -1479,6 +1482,24 @@ impl KernelState {
     }
     pub fn reclaim_finished_stacks(&mut self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
         self.reclaim_finished_tls();
+        let dead_host_buffers: Vec<_> = self
+            .legacy_winsock
+            .hostent_buffers
+            .keys()
+            .copied()
+            .filter(|&thread| {
+                if thread == 0 {
+                    self.main_thread.exit_code.is_some()
+                } else {
+                    self.threads.get(thread - 1).is_some_and(|t| t.finished)
+                }
+            })
+            .collect();
+        for thread in dead_host_buffers {
+            if let Some(p) = self.legacy_winsock.hostent_buffers.remove(&thread) {
+                self.heap.free(p);
+            }
+        }
         let mut retired = Vec::new();
         if self.main_thread.exit_code.is_some() {
             if let Some((base, size)) = self.main_thread.stack_region {
@@ -1670,6 +1691,11 @@ impl KernelState {
     /// Record process termination without changing the suspended parent process.
     pub fn record_process_exit(&mut self, code: u32) {
         self.process_exit_code = Some(code);
+        for (_, p) in self.legacy_winsock.hostent_buffers.drain() {
+            self.heap.free(p);
+        }
+        self.legacy_winsock.startups = 0;
+        self.notification_icons.clear();
         self.tls_slots_used = 0;
         self.thread_tls.clear();
         self.dll_notification_frame = None;
@@ -3565,6 +3591,8 @@ impl Process {
                 mutexes: Default::default(),
                 current_thread: 0,
                 thread_last_errors: HashMap::new(),
+                legacy_winsock: Default::default(),
+                notification_icons: HashMap::new(),
                 winsock_last_errors: HashMap::new(),
                 crt_new_handler: 0,
                 cpp_new_handler: 0,

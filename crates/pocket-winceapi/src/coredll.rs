@@ -9626,7 +9626,7 @@ fn realloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// [`pocket_kernel::Heap`] tracks the requested size out of band, so
 /// `LocalSize` / `_msize` / `do_free` / `do_realloc` can recover it
 /// later without trusting guest memory.
-fn do_alloc(ctx: &mut CallCtx<'_>, size: u32) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn do_alloc(ctx: &mut CallCtx<'_>, size: u32) -> Result<DispatchOutcome, KernelError> {
     let user_ptr = match ctx.kernel.heap.alloc(size) {
         Some(p) => p,
         None => {
@@ -16109,6 +16109,9 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
     ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
     ctx.kernel.window_rects.remove(hwnd);
+    ctx.kernel
+        .notification_icons
+        .retain(|(owner, _), _| owner != hwnd);
     ctx.kernel.gdi.pending_window_erases.remove(hwnd);
     ctx.kernel.gdi.owner_draw_states.remove(hwnd);
     ctx.kernel.gdi.list_paint_stamps.remove(hwnd);
@@ -26690,6 +26693,8 @@ mod tests {
             mutexes: Default::default(),
             current_thread: 0,
             thread_last_errors: Default::default(),
+            legacy_winsock: Default::default(),
+            notification_icons: Default::default(),
             winsock_last_errors: Default::default(),
             crt_new_handler: 0,
             cpp_new_handler: 0,

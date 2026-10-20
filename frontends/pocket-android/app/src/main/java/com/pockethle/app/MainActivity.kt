@@ -296,6 +296,37 @@ class MainActivity : AppCompatActivity() {
     private fun showPreparedImport(raw: String) {
         val obj = JSONObject(raw)
         val token = obj.getString("token").toLong()
+        val choices = obj.optJSONArray("platform_choices")
+        if (choices != null && choices.length() > 0) {
+            val game = choices.getJSONObject(0)
+            setLibraryBusy("Waiting for platform selection…")
+            busyDialog?.dismiss()
+            busyDialog = null
+            fun choose(gizmondo: Boolean) {
+                runCatching {
+                    val next = NativeBridge.choosePreparedImportPlatform(rootDir, token, game.getString("id"), gizmondo)
+                    val result = JSONObject(next)
+                    if (!result.optBoolean("ok", false)) error(result.optString("error"))
+                    next
+                }.onSuccess { showPreparedImport(it) }.onFailure { error ->
+                    NativeBridge.cancelPreparedImport(rootDir, token)
+                    pendingImportToken = null
+                    setLibraryBusy(null)
+                    Snackbar.make(recycler, error.message ?: "Import failed", Snackbar.LENGTH_LONG).show()
+                }
+            }
+            AlertDialog.Builder(this).setTitle("Choose game platform")
+                .setMessage("No Gizmondo marker was found for ${game.getString("display_name")}. Which platform is this game for?")
+                .setCancelable(false)
+                .setPositiveButton("Gizmondo") { _, _ -> choose(true) }
+                .setNeutralButton("Pocket PC") { _, _ -> choose(false) }
+                .setNegativeButton("Cancel import") { _, _ ->
+                    NativeBridge.cancelPreparedImport(rootDir, token)
+                    pendingImportToken = null
+                    setLibraryBusy(null)
+                }.show()
+            return
+        }
         val updates = obj.getJSONArray("updates")
         if (updates.length() == 0) {
             commitPreparedImport(token, false)

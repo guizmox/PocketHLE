@@ -15,6 +15,7 @@ fn main() -> anyhow::Result<()> {
     let legacy = args.get(2).is_some_and(|s| s == "legacy");
     let out = args.get(3).expect("snapshot path");
     let game = GameEntry {
+        platform: None,
         id: "GZAP250006".into(),
         display_name: "Navigator probe".into(),
         provider: None,
