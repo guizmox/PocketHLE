@@ -11175,6 +11175,28 @@ fn control_message(
             ControlClass::ListView | ControlClass::ListBox | ControlClass::TrackBar => 0x81,
         });
     }
+    if matches!(message, 0x201 | 0x202) {
+        // A subclass calls its saved system procedure to obtain the base
+        // control behaviour. The incoming coordinates are client-local.
+        if let Some((x, y, _, _)) = ctx.kernel.controls.screen_rect(hwnd) {
+            let x = x.saturating_add(lparam as u16 as i16 as i32);
+            let y = y.saturating_add((lparam >> 16) as u16 as i16 as i32);
+            let action = if message == 0x201 {
+                ctx.kernel.controls.pointer_down(x, y)
+            } else {
+                ctx.kernel.controls.pointer_up(x, y)
+            };
+            if let Some(action) = action {
+                if let Some(Some(msg)) = control_action_message(ctx, action) {
+                    if ctx.kernel.posted_messages.len() < 256 {
+                        ctx.kernel.posted_messages.push_back(msg);
+                    }
+                }
+                repaint_controls(ctx);
+            }
+        }
+        return Ok(0);
+    }
     if message == WM_KEYDOWN {
         let class = ctx.kernel.controls.get(hwnd).map(|c| c.class);
         if matches!(
@@ -11670,6 +11692,16 @@ fn controls_take_input(
 ) -> Option<Option<(u32, u32, u32, u32)>> {
     if ctx.kernel.controls.is_empty() {
         return None;
+    }
+    if let InputEvent::PointerDown { x, y }
+    | InputEvent::PointerUp { x, y }
+    | InputEvent::PointerMove { x, y } = ev
+    {
+        if native_control_at(ctx.kernel, i32::from(x), i32::from(y)).is_some() {
+            // The guest subclass must see the original event before the
+            // system procedure changes selection or generates notifications.
+            return None;
+        }
     }
     if matches!(ev, pocket_kernel::InputEvent::KeyDown { .. })
         && has_native_input_ancestor(ctx.kernel, ctx.kernel.controls.focus)
@@ -12352,6 +12384,12 @@ fn next_message(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
 
 /// Keyboard input follows focus. Unclaimed pointer input belongs to the
 /// native child under the pointer, in that child's client coordinates.
+fn native_control_at(kernel: &KernelState, x: i32, y: i32) -> Option<u32> {
+    let hwnd = kernel.controls.hit_test(x, y)?;
+    let proc = kernel.window_procs.get(&hwnd).copied()?;
+    (proc != 0 && Some(proc) != builtin_window_proc(kernel, hwnd)).then_some(hwnd)
+}
+
 fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32, u32, u32)> {
     let (message, wp, lp) = input_to_message(event)?;
     let (x, y) = match event {
@@ -12361,6 +12399,11 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
         _ => return Some((input_window(kernel), message, wp, lp)),
     };
     let active = active_window(kernel);
+    if let Some(hwnd) = native_control_at(kernel, x, y) {
+        let (ox, oy, _, _) = kernel.controls.screen_rect(hwnd)?;
+        let local = (((y - oy) as u32 & 0xffff) << 16) | ((x - ox) as u32 & 0xffff);
+        return Some((hwnd, message, wp, local));
+    }
     let mut candidates = Vec::new();
     for (&hwnd, rect) in &kernel.window_rects {
         if kernel.controls.get(hwnd).is_some()
@@ -22479,6 +22522,50 @@ mod tests {
             get_dlg_item(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(0)
         );
+    }
+
+    #[test]
+    fn subclassed_control_receives_pointer_before_base_notifications() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        let hwnd = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::Button,
+            77,
+            "Drive".into(),
+            0x5000_0000,
+            30,
+            40,
+            90,
+            40,
+        );
+        kernel.window_procs.insert(hwnd, 0x4100);
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let down = InputEvent::PointerDown { x: 35, y: 46 };
+        assert!(controls_take_input(&mut ctx, down).is_none());
+        assert!(!ctx.kernel.controls.get(hwnd).unwrap().pressed);
+        assert_eq!(
+            addressed_input(ctx.kernel, down),
+            Some((hwnd, 0x201, 1, (6 << 16) | 5))
+        );
+        // Forwarding to the saved system procedure performs the base action
+        // once, in the control's coordinates, and posts its notification.
+        control_message(&mut ctx, hwnd, 0x201, 1, (6 << 16) | 5).unwrap();
+        assert!(ctx.kernel.controls.get(hwnd).unwrap().pressed);
+        control_message(&mut ctx, hwnd, 0x202, 0, (6 << 16) | 5).unwrap();
+        assert_eq!(
+            ctx.kernel.posted_messages.pop_front(),
+            Some((FAKE_HWND, WM_COMMAND, 77, hwnd))
+        );
+        assert!(ctx.kernel.posted_messages.is_empty());
+        ctx.kernel.window_procs.remove(&hwnd);
+        assert!(matches!(controls_take_input(&mut ctx, down), Some(None)));
+        assert!(ctx.kernel.controls.get(hwnd).unwrap().pressed);
     }
 
     #[test]
