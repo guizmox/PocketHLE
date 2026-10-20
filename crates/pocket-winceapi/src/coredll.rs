@@ -8943,7 +8943,9 @@ fn crt_fseek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         0 => SeekKind::Begin,
         1 => SeekKind::Current,
         2 => SeekKind::End,
-        _ => SeekKind::Begin,
+        // Reject before touching the stream: an invalid origin must not
+        // become a successful SEEK_SET that changes its current position.
+        _ => return Ok(DispatchOutcome::ReturnedR0(u32::MAX)),
     };
     let r = ctx.kernel.vfs.seek(h, off, kind);
     log::trace!("fseek(0x{h:08x}, {off}, {whence}) -> {r:?}");
@@ -23774,6 +23776,77 @@ mod tests {
         assert!(!ctx.kernel.events.get(&first).unwrap().signalled);
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn stdio_fseek_rejects_invalid_origin_without_changing_position_or_data() {
+        use pocket_kernel::vfs::{Access, SeekKind};
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..16384).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.path().join("seek.dat"), &data).unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.attach_ram(Some(
+            pocket_kernel::memory_division::MemoryDivision::default(),
+        ));
+        kernel.vfs.mount("\\Data\\", dir.path());
+        let host = kernel
+            .vfs
+            .open("\\Data\\seek.dat", Access::ReadWrite, false)
+            .unwrap();
+        let ram = kernel
+            .vfs
+            .open("\\seek-test.dat", Access::ReadWrite, true)
+            .unwrap();
+        assert_eq!(kernel.vfs.write(ram, &data), Some(data.len()));
+        let mut cpu = scanf_cpu();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for h in [host, ram] {
+            for origin in [3, 99, u32::MAX] {
+                assert_eq!(ctx.kernel.vfs.seek(h, 4097, SeekKind::Begin), Some(4097));
+                ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+                ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+                ctx.cpu.write_reg(ArmReg::R2, origin).unwrap();
+                assert_eq!(
+                    crt_fseek(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(u32::MAX)
+                );
+                ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+                assert_eq!(
+                    crt_ftell(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(4097)
+                );
+                assert_eq!(
+                    crt_fgetc(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(u32::from(data[4097]))
+                );
+            }
+            // A valid origin with a negative resulting position also fails atomically.
+            ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+            ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
+            assert_eq!(
+                crt_fseek(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(u32::MAX)
+            );
+            assert_eq!(ctx.kernel.vfs.seek(h, 0, SeekKind::Current), Some(4098));
+            // All three supported origins keep working.
+            for (offset, origin, expected) in [(5, 0, 5), (2, 1, 7), (u32::MAX, 2, 16383)] {
+                ctx.cpu.write_reg(ArmReg::R0, h).unwrap();
+                ctx.cpu.write_reg(ArmReg::R1, offset).unwrap();
+                ctx.cpu.write_reg(ArmReg::R2, origin).unwrap();
+                assert_eq!(crt_fseek(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+                assert_eq!(ctx.kernel.vfs.seek(h, 0, SeekKind::Current), Some(expected));
+            }
+            ctx.kernel.vfs.seek(h, 0, SeekKind::Begin).unwrap();
+            let mut after = vec![0; data.len()];
+            assert_eq!(ctx.kernel.vfs.read(h, &mut after), Some(data.len()));
+            assert_eq!(after, data);
+        }
     }
 
     #[test]
