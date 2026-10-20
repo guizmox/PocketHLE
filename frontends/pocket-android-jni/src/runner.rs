@@ -336,7 +336,7 @@ fn run_process(
     // tell the user instead of leaving them on a black screen.
     if let Ok(image) = &image {
         if let Some(runtime) = &image.managed_runtime {
-            let screen = entry.settings.screen.size();
+            let screen = entry.settings.screen.resolve_image(Some(image));
             if guest_path.is_none() && crate::managed_game::supports(&exe) {
                 summary_lines.push(
                     "Managed image: using the Android vAlienAttack compatibility renderer."
@@ -545,7 +545,7 @@ fn run_process(
     let (screen_width, screen_height) = if is_gizmondo {
         (320, 240)
     } else {
-        entry.settings.screen.size()
+        entry.settings.screen.resolve_image(image.as_ref().ok())
     };
     emu.set_screen_size(screen_width, screen_height);
     summary_lines.push(format!("Screen: {screen_width}x{screen_height}"));
@@ -658,7 +658,7 @@ fn run_process(
             if hook.foreground.load(Ordering::Acquire) == hook.pid {
                 push_frame(
                     &state,
-                    FrameSnapshot::from_framebuffer(&p.state.framebuffer),
+                    FrameSnapshot::from_framebuffer(&p.state.presentation_framebuffer()),
                 );
             }
         }
@@ -1047,8 +1047,10 @@ impl FrameHook for SessionHook {
             if let Some(phase) = presentation_phase(self.last_emit_at, now) {
                 self.last_frame = counter;
                 self.last_emit_at = Some(phase);
-                let frame =
-                    FrameSnapshot::from_framebuffer_into(&kernel.framebuffer, &mut self.scratch);
+                let frame = FrameSnapshot::from_framebuffer_into(
+                    &kernel.presentation_framebuffer(),
+                    &mut self.scratch,
+                );
                 push_frame(&self.state, frame);
             }
         }

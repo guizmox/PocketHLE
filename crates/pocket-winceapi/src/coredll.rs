@@ -1253,8 +1253,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     // trace clean.
     d.register_handler(dll, "SipGetInfo", sip_get_info);
     d.register_constant(dll, "SipSetCurrentIM", 1, one_returning);
-    d.register_constant(dll, "SipShowIM", 1, one_returning);
-    d.register_constant(dll, "SipSetInfo", 1, one_returning);
+    d.register_handler(dll, "SipShowIM", sip_show_im);
+    d.register_handler(dll, "SipSetInfo", crate::shell_keyboard::sip_set_info);
     d.register_constant(dll, "SipStatus", 0, zero_returning);
     // `AllKeys(BOOL)` toggles whether the shell forwards every key
     // (incl. Power / Today) to the foreground app. PocketHLE is
@@ -11746,6 +11746,8 @@ const BN_CLICKED: u32 = 0;
 /// would carry. Returns `None` for events we don't currently model.
 fn input_to_message(ev: pocket_kernel::InputEvent) -> Option<(u32, u32, u32)> {
     match ev {
+        InputEvent::Text { character } => Some((0x102, character as u32, 1)),
+        InputEvent::KeyboardRotation { .. } => None,
         pocket_kernel::InputEvent::PointerDown { x, y } => {
             let lparam = ((y as u32) << 16) | (x as u32);
             Some((WM_LBUTTONDOWN, MK_LBUTTON, lparam))
@@ -11803,6 +11805,12 @@ fn controls_take_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
 ) -> Option<Option<(u32, u32, u32, u32)>> {
+    if matches!(ev, InputEvent::Text { .. }) && !crate::shell_keyboard::accepts_text(ctx) {
+        return Some(None);
+    }
+    if crate::shell_keyboard::input(ctx, ev) {
+        return Some(None);
+    }
     if ctx.kernel.controls.is_empty() {
         return None;
     }
@@ -12073,6 +12081,7 @@ fn set_focus(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
     }
     remember_window_focus(ctx.kernel);
+    crate::shell_keyboard::service(ctx);
     Ok(DispatchOutcome::ReturnedR0(if previous != 0 {
         previous
     } else {
@@ -12325,7 +12334,9 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
                 ctx.kernel.key_repeat_next_ms = None;
             }
         }
-        pocket_kernel::InputEvent::PointerDown { .. }
+        pocket_kernel::InputEvent::KeyboardRotation { .. }
+        | pocket_kernel::InputEvent::Text { .. }
+        | pocket_kernel::InputEvent::PointerDown { .. }
         | pocket_kernel::InputEvent::PointerUp { .. }
         | pocket_kernel::InputEvent::PointerMove { .. } => {}
     }
@@ -12579,6 +12590,11 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
         InputEvent::PointerDown { x, y }
         | InputEvent::PointerUp { x, y }
         | InputEvent::PointerMove { x, y } => (i32::from(x), i32::from(y)),
+        InputEvent::Text { .. }
+            if kernel.shell_keyboard.sip && kernel.shell_keyboard.target != 0 =>
+        {
+            return Some((kernel.shell_keyboard.target, message, wp, lp))
+        }
         _ => return Some((input_window(kernel), message, wp, lp)),
     };
     let active = active_window(kernel);
@@ -17042,8 +17058,26 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         .as_ref()
         .map(|d| d.hwnd)
         .unwrap_or(FAKE_MODAL_HWND);
+    crate::shell_keyboard::service(ctx);
     while let Some(ev) = take_pending_input(ctx) {
         update_key_state(ctx, ev);
+        if crate::shell_keyboard::input(ctx, ev) {
+            continue;
+        }
+        if let InputEvent::Text { character } = ev {
+            if crate::shell_keyboard::accepts_text(ctx) {
+                let target = ctx.kernel.controls.focus;
+                if focus_belongs_to_window(ctx.kernel, target, modal_hwnd)
+                    && ctx.kernel.posted_messages.len() < 256
+                {
+                    ctx.kernel
+                        .posted_messages
+                        .push_back((target, 0x102, character as u32, 1));
+                }
+            }
+            continue;
+        }
+
         let action = match ev {
             InputEvent::PointerDown { x, y } => ctx
                 .kernel
@@ -20820,32 +20854,15 @@ fn ce_set_thread_quantum(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 
 // ---------- Soft-Input-Panel ----------
 //
-// Modeled as "panel hidden, full-screen visible rect". `SIPINFO`
-// layout (Windows Mobile 5/6) is `cbSize, fdwFlags, rcVisible(16),
-// rcSipRect(16), dwImDataSize, pvImData` = 44 bytes; we just zero
-// it out and stamp `cbSize`. Games (Bejeweled, Zuma, Asphalt 2)
-// only check the flags to decide whether to lay out under the SIP.
-fn sip_get_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let p = ctx.cpu.read_reg(ArmReg::R0)?;
-    if p != 0 {
-        let mut buf = [0u8; 44];
-        // Stamp `cbSize` field if the caller set it; otherwise 44.
-        let existing_size = ctx.cpu.read_mem(p, 4).unwrap_or_else(|_| vec![0; 4]);
-        let cb = if existing_size.len() == 4 {
-            u32::from_le_bytes([
-                existing_size[0],
-                existing_size[1],
-                existing_size[2],
-                existing_size[3],
-            ])
-        } else {
-            0
-        };
-        let cb = if cb == 0 { 44 } else { cb.min(44) };
-        buf[0..4].copy_from_slice(&cb.to_le_bytes());
-        let _ = ctx.cpu.write_mem(p, &buf[..cb as usize]);
-    }
+// SIPINFO is 48 bytes on WinCE ARM; shell and COREDLL share its state.
+fn sip_show_im(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let show = ctx.arg_u32(0)? != 0;
+    crate::shell_keyboard::sip_show(ctx, show);
     Ok(DispatchOutcome::ReturnedR0(1))
+}
+fn sip_get_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let p = ctx.arg_u32(0)?;
+    crate::shell_keyboard::sip_info(ctx, p)
 }
 
 // ---------- Clipboard (no-op stubs) ----------

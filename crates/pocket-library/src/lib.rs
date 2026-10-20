@@ -223,6 +223,17 @@ fn is_gizmondo_title_id(name: &str) -> bool {
 }
 
 impl GameEntry {
+    /// Device geometry used at launch and in library captions.
+    pub fn resolved_screen_size(&self, root: &Path) -> (u32, u32) {
+        if is_gizmondo_game(self, root) {
+            return (320, 240);
+        }
+        let image = (self.settings.screen == ScreenPref::Portrait)
+            .then(|| pocket_pe::load_file(self.launch_path(root)).ok())
+            .flatten();
+        self.settings.screen.resolve_image(image.as_ref())
+    }
+
     /// Path to this game's directory, relative to the library root.
     pub fn relative_dir(&self) -> PathBuf {
         PathBuf::from("games").join(&self.id)
@@ -654,10 +665,16 @@ pub enum ScreenPref {
     /// 240x320 portrait (Pocket PC / most Smartphone builds).
     #[default]
     Portrait,
+    /// Explicit QVGA override; Portrait remains the legacy automatic default.
+    Qvga,
     /// 320x240 landscape (Motorola Q / other landscape Smartphones).
     Landscape,
     /// 176x220 — the small Smartphone panel.
     SmallPortrait,
+    /// 480x640 VGA Pocket PC display.
+    Vga,
+    /// 640x480 landscape VGA Pocket PC display.
+    VgaLandscape,
     /// 480x800 WVGA Windows Phone display.
     Wvga,
     /// 480x320 — the Handheld PC / H/PC landscape panel.
@@ -671,11 +688,47 @@ pub enum ScreenPref {
 }
 
 impl ScreenPref {
+    /// CEUX/HI_RES_AWARE is the Windows Mobile declaration that a program
+    /// accepts native high-resolution coordinates. Use a VGA device for that
+    /// declaration; keep legacy QVGA for unmarked software. Explicit profiles
+    /// always win, and Gizmondo callers continue to force 320x240.
+    pub fn resolve_image(self, image: Option<&pocket_pe::LoadedImage>) -> (u32, u32) {
+        if self != Self::Portrait {
+            return self.size();
+        }
+        let high_resolution = image.is_some_and(|image| {
+            image.resources.iter().any(|resource| {
+                use pocket_pe::resources::ResourceKey;
+                if !matches!(&resource.ty,ResourceKey::Name(s) if s=="CEUX")
+                    || !matches!(&resource.name,ResourceKey::Name(s) if s=="HI_RES_AWARE")
+                    || resource.size < 2
+                {
+                    return false;
+                }
+                let va = resource.data_rva;
+                image.sections.iter().any(|section| {
+                    let Some(offset) = va.checked_sub(section.virtual_address).map(|v| v as usize)
+                    else {
+                        return false;
+                    };
+                    section.data.get(offset..offset.saturating_add(2)) == Some(&[1, 0][..])
+                })
+            })
+        });
+        if high_resolution {
+            Self::Vga.size()
+        } else {
+            Self::Portrait.size()
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
-            ScreenPref::Portrait => "240x320 (portrait)",
+            ScreenPref::Portrait => "Automatic (Pocket PC)",
+            ScreenPref::Qvga => "240x320 (QVGA portrait)",
             ScreenPref::Landscape => "320x240 (landscape)",
             ScreenPref::SmallPortrait => "176x220 (small)",
+            ScreenPref::Vga => "480x640 (VGA portrait)",
+            ScreenPref::VgaLandscape => "640x480 (VGA landscape)",
             ScreenPref::Wvga => "480x800 (WVGA)",
             ScreenPref::Hpc => "480x320 (Handheld PC)",
         }
@@ -684,9 +737,11 @@ impl ScreenPref {
     /// `(width, height)` in pixels.
     pub fn size(self) -> (u32, u32) {
         match self {
-            ScreenPref::Portrait => (240, 320),
+            ScreenPref::Portrait | ScreenPref::Qvga => (240, 320),
             ScreenPref::Landscape => (320, 240),
             ScreenPref::SmallPortrait => (176, 220),
+            ScreenPref::Vga => (480, 640),
+            ScreenPref::VgaLandscape => (640, 480),
             ScreenPref::Wvga => (480, 800),
             ScreenPref::Hpc => (480, 320),
         }
@@ -5273,6 +5328,38 @@ mod tests {
         }
         let found = find_resource_companion_cabs(&root.join("wwp.CAB"));
         assert_eq!(found, vec![root.join("wwp-res.CAB")]);
+    }
+
+    #[test]
+    fn native_resolution_uses_the_resource_value_and_preserves_explicit_overrides() {
+        use pocket_pe::resources::{ResourceEntry, ResourceKey};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("any-name.exe");
+        write_pe_importing(&path, &[]);
+        let mut image = pocket_pe::load_file(&path).unwrap();
+        assert_eq!(ScreenPref::Portrait.resolve_image(Some(&image)), (240, 320));
+        let resource = ResourceEntry {
+            ty: ResourceKey::Name("CEUX".into()),
+            name: ResourceKey::Name("HI_RES_AWARE".into()),
+            data_rva: image.sections[0].virtual_address,
+            size: 2,
+            codepage: 0,
+        };
+        image.resources.push(resource);
+        image.sections[0].data[..2].copy_from_slice(&[1, 0]);
+        assert_eq!(ScreenPref::Portrait.resolve_image(Some(&image)), (480, 640));
+        for pref in [
+            ScreenPref::Qvga,
+            ScreenPref::Landscape,
+            ScreenPref::VgaLandscape,
+            ScreenPref::Hpc,
+            ScreenPref::Wvga,
+        ] {
+            assert_eq!(pref.resolve_image(Some(&image)), pref.size());
+        }
+        image.sections[0].data[..2].copy_from_slice(&[0, 0]);
+        assert_eq!(ScreenPref::Portrait.resolve_image(Some(&image)), (240, 320));
+        assert_eq!(ScreenPref::Portrait.resolve_image(None), (240, 320));
     }
 
     #[test]

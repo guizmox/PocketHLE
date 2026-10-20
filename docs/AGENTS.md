@@ -1,5 +1,53 @@
 # PocketHLE — architecture reference for coding agents
 
+## Pocket PC SIP, display profile and library artwork (2026-10-20)
+
+The shared shell keyboard now also services COREDLL SipShowIM/SipGetInfo/SipSetInfo
+and AYGSHELL SHSipInfo/SHSipPreference. Keep its Gizmondo GMSHELL protocol and
+160-pixel controller panel unchanged. Pocket PC EDIT taps request the SIP;
+read-only/disabled/hidden controls must never become text targets. Both ordinary
+and DialogBoxIndirectParamW-owned modal pumps service the same keyboard input.
+Modal pumps otherwise bypass the ordinary message path: forgetting them makes
+SimCity registration show a caret but no keyboard. Posted WM_CHAR remains guest
+owned, including validation of registration codes. Never bypass that validation.
+SIPINFO is 48 bytes; reject undersized buffers without writing, share the actual
+state and visible desktop/panel rectangles, accept both 0xE0/E1 and 0x100E0/E1
+action encodings. Setting changes post WM_SETTINGCHANGE/SPI_SETSIPINFO.
+
+KeyboardRotation is a host presentation event, never a guest key. Desktop and
+Android send it at launch and when rotation changes. Render the SIP upright in
+display coordinates, then map to the framebuffer; map taps through the same
+transform. SIP rendering belongs to KernelState::presentation_framebuffer, a
+copy used only while the panel is visible; never burn its pixels into the guest
+framebuffer. Desktop, Android and CLI snapshots use that common presentation.
+A captured keyboard press must swallow its move/release, including
+when Done closes the panel. Pocket PC keyboard height is bounded to half the
+display and 128 pixels. Text is committed separately from game key bindings;
+desktop metadata exposes focused EDIT input and typing releases held game keys.
+Android uses the shared touch panel; host Android IME composition is not claimed.
+
+ScreenPref::Portrait retains the legacy serialized default but is now labelled
+Automatic. Its launcher policy selects a VGA device (480x640) when the PE has an
+actual CEUX/HI_RES_AWARE resource containing WORD 1, otherwise QVGA. This marker
+declares native-resolution awareness; it is not proof of a VGA-only requirement.
+Explicit Qvga, Vga, VgaLandscape and other screen choices override the policy.
+Gizmondo still forces 320x240 before guest entry. Desktop and Android runners and
+library captions share this resolution logic. Do not inspect title strings or
+change touch coordinates independently of device geometry. GeoRally EX has the
+marker and its ARM touch converter uses VGA constants: QVGA selects the wrong
+areas even though GLES scales the visual menu to the smaller framebuffer.
+
+AYGSHELL ordinal 10 and SHCloseApps share a capacity check. Racing Days requests
+0x480000 bytes and branches directly to its insufficient-RAM message on FALSE.
+Success requires available program RAM and heap capacity; the call neither
+allocates the requested bytes nor closes the running title. Cross-process
+shell memory reclamation is not implemented.
+
+Pocket PC library icons are fitted inside a common device frame, with their
+aspect ratio preserved. Missing icons keep the Pocket PC label. Gizmondo card
+artwork is unchanged. Display captions report the resolved device dimensions.
+
+
 Colors startup's explicit "Unlock Turf Wars + Tag Editor" action is shared
 through pocket-library::colors_save, called off the UI thread on desktop/Deck
 (X in the startup dialog) and Android JNI. Never apply it automatically at launch
@@ -3087,3 +3135,69 @@ operates on private staging; update confirmation remains a separate step. CLI
 import APIs retain their noninteractive default. JNI selection checks token owner
 and unresolved game ID without consuming another pending import. Diagnostics/tests
 must distinguish shared-core checks from native GUI/Android hardware validation.
+
+
+### Pocket PC action key and initial focus (2026-10-20)
+
+Desktop and Android select the Pocket PC input profile after loading every
+non-Gizmondo process. It advertises VK_RETURN as GXKeyList.vkA and delivers
+that same key in both filtered and unfiltered message retrieval. Legacy and
+Gizmondo retain their exact 0xD1 table/remapping, including direct core clients
+unless they explicitly call Emulator::set_pocket_pc_input(true). Do not infer
+that querying GAPI means a program has no explicit VK_RETURN bindings: COD2
+reads the GAPI direction keys but binds Fire to Enter.
+
+In that Pocket PC profile, initial ShowWindow sends WM_SETFOCUS through its
+existing synchronous WndProc continuation after WM_SIZE, then restores the
+original caller registers. Remove the queued startup copy at that point.
+Never leave this initial sent notification for the application PeekMessage
+loop: COD2 interprets focus gain there as restoration after a prior loss and
+restores a zero saved volume. The Gizmondo/legacy startup sequence is retained.
+Keep callback thread/SP ownership and nested continuation restoration intact.
+
+
+### Pocket PC quick rotation (2026-10-20)
+The desktop Pocket PC run pane exposes Rotate 90° next to Run output, outside
+the top toolbar so narrow windows still expose it. Cycle the existing
+RotationPref order (0/90/180/270), release held keys and pointer in the old
+orientation, persist using the existing per-game settings path, and request
+window refitting. Rendering UVs, inverse touch mapping and screenshot rotation
+remain the existing implementations. Gizmondo takes its separate UI branch.
+Do not infer image orientation from framebuffer aspect ratio: games such as
+Into Outland draw their own landscape content into a portrait GAPI buffer
+without importing WinCE display-orientation APIs. Retain explicit choices.
+Android already has its dedicated Pocket PC rotation button and persistence.
+
+
+### CAB installer-compressed resources (2026-10-20)
+Both canonical CAB name-materialization paths finalize explicitly referenced
+zlib .cmp resources (GeoRally EX's setup DLL case). Require a CAB .999 PE
+installer exporting Install_Exit with embedded zlib evidence, plus an exact
+ASCII/UTF-16 compressed basename reference. Decompress asset extensions only;
+do not execute installer code or scan ZIP imports. Verify zlib stream end,
+checksum, no trailing data and bounded per-file/import output before publishing.
+Keep compressed inputs and never replace an existing uncompressed destination.
+This is CAB installation processing, not a VFS filename alias or runtime hack.
+
+
+### Explicit Pocket PC hardware controls (2026-10-20)
+GuestButton adds pocket_pc_app1..4 (VK_APP1..4, 0xC1..0xC4). Expose P1..P4
+alongside the existing Pocket PC virtual pad on Desktop and Android, and in
+keyboard/controller assignment choices on both platforms. New keyboard entries
+start empty, and factory controller mappings stay unchanged. Do not globally
+translate Ctrl/Space/Shift or alter existing Gizmondo bindings: other titles
+use those literal keys. GAPI-advertised keys and VK_APP keys are distinct.
+Into Outland's ARM decoder accepts directions and C3/C4 but ignores Enter,
+Ctrl, Space and Shift. Its IN.REC supplied replay drives the demo instead of
+normal play; remove it only from a user-requested test copy, never silently at
+import. No game-name-based remapping or asset deletion is part of this change.
+
+Control assignment UIs group rows as Shared controls / Emulator shortcuts /
+Gizmondo only / Pocket PC only on Desktop and Android. Shared Android labels
+name both the generic control and its Gizmondo equivalent, so console playback
+symbols do not masquerade as Pocket PC action semantics. These are presentation
+groups only; stored button identifiers and all existing bindings are unchanged.
+
+PVRTC1 upload behavior and its shared Software/GPU fallback are documented in
+GPU.md under PVRTC1 texture uploads (2026-10-20). Keep decoder changes scoped
+to 0x8C00..0x8C03 and preserve existing format behavior/enumeration order.

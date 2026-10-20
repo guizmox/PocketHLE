@@ -345,6 +345,14 @@ pub enum KernelError {
 /// back to its synthetic timer / paint loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
+    /// Host presentation rotation; consumed by the SIP, never sent to the guest.
+    KeyboardRotation {
+        turns: u8,
+    },
+    /// Committed host text, independent of physical game key bindings.
+    Text {
+        character: char,
+    },
     /// Stylus down at game-space `(x, y)` (0..240, 0..320). Translated
     /// into `WM_LBUTTONDOWN` with the standard `lParam = (y << 16) | x`.
     PointerDown {
@@ -1755,6 +1763,18 @@ impl KernelState {
     /// [`Framebuffer::mark_dirty`] — it runs at the presentation
     /// boundary, and dirtying there would ask for another frame
     /// forever.
+    /// Host-owned SIP overlay. Never write its pixels into the guest's GDI/GAPI
+    /// framebuffer: hiding or rotating the keyboard must not leave stale pixels.
+    pub fn presentation_framebuffer(&self) -> std::borrow::Cow<'_, Framebuffer> {
+        if !self.shell_keyboard.sip || !self.shell_keyboard.visible {
+            return std::borrow::Cow::Borrowed(&self.framebuffer);
+        }
+        let mut frame = self.framebuffer.clone();
+        self.shell_keyboard
+            .render(&mut gdi::Surface::Screen(&mut frame));
+        std::borrow::Cow::Owned(frame)
+    }
+
     pub fn composite_controls(&mut self) {
         self.composite_window_layers(false);
     }
@@ -2034,7 +2054,9 @@ impl KernelState {
                 }
             }
         });
-        self.shell_keyboard.render(&mut surf);
+        if !self.shell_keyboard.sip {
+            self.shell_keyboard.render(&mut surf);
+        }
         // The modal goes last: it is a separate top-level window and
         // has to cover whatever the application and its children drew.
         if let Some(modal) = modal {

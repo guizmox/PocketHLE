@@ -601,3 +601,21 @@ DirectShow presentation honors AutoShow on genuine Run/Pause graph state
 changes (default enabled). Colors hides its intro window while preparing the
 graph and relies on Run to reveal it. Live explicit hiding and AutoShow false
 remain valid. No GPU shader, readback or video codec change is involved.
+
+
+### PVRTC1 texture uploads (2026-10-20)
+GeoRally EX uploads RGBA PVRTC1 2bpp/4bpp (0x8C03/0x8C02), including explicit
+mips down to 1x1. These uploads previously failed GL_INVALID_ENUM in the shared
+context before reaching either rasterizer. Add only PVRTC-specific branches;
+retain the previous ATC/DXT/paletted paths and compressed-format enumeration
+order (append new formats). CPU decoding uses pinned texture2ddecoder 0.1.2.
+Normalize its BGRA output to RGBA; force alpha 255 for RGB tokens only.
+PVRTC payloads retain at least 2x2 words (16x8 for 2bpp, 8x8 for 4bpp), including
+small mip levels; decode those physical dimensions then crop to logical size.
+Require power-of-two dimensions, reject short payloads and nonzero borders.
+The existing native compressed upload path may be used when the host supports
+the format; otherwise both backends consume the same decoded RGBA data.
+This adds full-image upload formats, not compressed subimage support; do not
+advertise the complete IMG extension until its remaining entry points conform.
+Spec: https://registry.khronos.org/OpenGL/extensions/IMG/IMG_texture_compression_pvrtc.txt
+Dependency notices are retained under licenses/texture2ddecoder/.

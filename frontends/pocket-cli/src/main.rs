@@ -957,7 +957,7 @@ fn cmd_run(
     }
 
     if let Some(p) = emu.process() {
-        let ppm = p.state.framebuffer.snapshot_ppm();
+        let ppm = p.state.presentation_framebuffer().snapshot_ppm();
         let final_path = std::env::temp_dir().join("pockethle-final.ppm");
         if let Err(e) = std::fs::write(&final_path, &ppm) {
             eprintln!("warn: could not write {} ({e})", final_path.display());
@@ -1324,8 +1324,10 @@ impl pocket_core::kernel::FrameHook for LiveInputHook {
                                 continue;
                             }
                             if let Some(path) = line.strip_prefix("snapshot ") {
-                                match std::fs::write(path.trim(), state.framebuffer.snapshot_ppm())
-                                {
+                                match std::fs::write(
+                                    path.trim(),
+                                    state.presentation_framebuffer().snapshot_ppm(),
+                                ) {
                                     Ok(()) => {
                                         log::info!("live framebuffer snapshot: {}", path.trim())
                                     }
@@ -1468,7 +1470,9 @@ impl ScheduledInputHook {
             pocket_core::kernel::InputEvent::PointerUp { x, y } => {
                 self.held_pointers.remove(&(x, y));
             }
-            pocket_core::kernel::InputEvent::PointerMove { .. } => {}
+            pocket_core::kernel::InputEvent::PointerMove { .. }
+            | pocket_core::kernel::InputEvent::Text { .. }
+            | pocket_core::kernel::InputEvent::KeyboardRotation { .. } => {}
         }
     }
 }
@@ -1605,7 +1609,7 @@ impl pocket_core::kernel::FrameHook for DumpFrameHook {
             return pocket_core::kernel::FrameAction::Continue;
         }
         let path = self.dir.join(format!("frame_{:06}.ppm", self.written));
-        let ppm = state.framebuffer.snapshot_ppm();
+        let ppm = state.presentation_framebuffer().snapshot_ppm();
         if let Err(e) = std::fs::write(&path, ppm) {
             log::warn!("failed to write {}: {e}", path.display());
             return pocket_core::kernel::FrameAction::Continue;
@@ -1691,7 +1695,7 @@ mod display_window {
                 self.last_frame = counter;
                 self.last_emit_at = Some(Instant::now());
                 for (src, px) in state
-                    .framebuffer
+                    .presentation_framebuffer()
                     .pixels
                     .chunks_exact(2)
                     .zip(self.buffer.iter_mut())

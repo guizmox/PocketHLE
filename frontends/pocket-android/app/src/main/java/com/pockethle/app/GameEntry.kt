@@ -17,12 +17,16 @@ data class GameEntry(
     val icon: String?,
     val settings: GameSettings,
     val titleId: String? = null,
+    val screenWidth: Int = 240,
+    val screenHeight: Int = 320,
 ) {
     companion object {
         fun fromJson(obj: JSONObject): GameEntry {
             val settingsObj = obj.optJSONObject("settings") ?: JSONObject()
             return GameEntry(
                 id = obj.getString("id"),
+                screenWidth = obj.optInt("screen_width",240),
+                screenHeight = obj.optInt("screen_height",320),
                 displayName = obj.getString("display_name"),
                 titleId = obj.optString("title_id").takeIf { !obj.isNull("title_id") && it.isNotEmpty() },
                 provider = obj.optString("provider").takeIf { !obj.isNull("provider") && it.isNotEmpty() },

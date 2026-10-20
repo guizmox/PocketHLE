@@ -124,6 +124,7 @@ impl UpscaleFilter {
 /// Top-level egui app.
 pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, egui::TextureHandle>,
+    screen_cache: std::collections::HashMap<String, (ScreenPref, (u32, u32))>,
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
     gizmondo_skin: Option<egui::TextureHandle>,
     upscale_x2: bool,
@@ -644,6 +645,7 @@ impl PocketLauncher {
             library,
             library_gizmondo,
             icon_cache: std::collections::HashMap::new(),
+            screen_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
             gizmondo_skin: None,
             upscale_x2: false,
@@ -886,6 +888,14 @@ impl PocketLauncher {
             if self.last_frame_snapshot.is_some() {
                 self.release_all_keys();
             }
+        }
+        if frame.text_input
+            && !self
+                .last_frame_snapshot
+                .as_ref()
+                .is_some_and(|f| f.text_input)
+        {
+            self.release_all_keys();
         }
         // Keep native pixels for input coordinates and rebuilding filtered images.
         self.last_frame_snapshot = Some(frame.clone());
@@ -1427,45 +1437,43 @@ impl PocketLauncher {
                 artwork,
             );
         } else {
-            let mut icon_ui = ui.child_ui(
-                icon_rect,
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            let device = Rect::from_center_size(icon_rect.center(), Vec2::new(82.0, 116.0));
+            let painter = ui.painter();
+            painter.rect(
+                device,
+                10.0,
+                Color32::from_rgb(98, 112, 130),
+                egui::Stroke::new(1.5, Color32::from_rgb(158, 174, 193)),
             );
-            let mut drew_icon = false;
-            if let Some(path) = game.icon_path(self.library.root()) {
-                if let Ok(bytes) = std::fs::read(path) {
-                    if let Ok(image) = load_image_bytes(&bytes) {
-                        let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
-                            icon_ui.ctx().load_texture(
-                                format!("icon-{}", game.id),
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            )
-                        });
-                        icon_ui.add(
-                            egui::Image::from_texture(&*texture)
-                                .fit_to_exact_size(Vec2::splat(120.0)),
-                        );
-                        drew_icon = true;
-                    }
-                }
-            }
-            if !drew_icon {
-                // Draw the Pocket PC fallback ourselves: emoji coverage and
-                // font metrics otherwise leave a tiny icon or a missing glyph.
-                let device = Rect::from_center_size(icon_rect.center(), Vec2::new(82.0, 116.0));
-                let painter = ui.painter();
-                painter.rect(
-                    device,
-                    10.0,
-                    Color32::from_rgb(98, 112, 130),
-                    egui::Stroke::new(1.5_f32, Color32::from_rgb(158, 174, 193)),
+            let screen = Rect::from_min_max(
+                device.min + Vec2::new(8.0, 11.0),
+                device.max - Vec2::new(8.0, 24.0),
+            );
+            painter.rect_filled(screen, 3.0, Color32::from_rgb(38, 61, 80));
+            let artwork = game
+                .icon_path(self.library.root())
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| load_image_bytes(&bytes).ok())
+                .map(|image| {
+                    let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
+                        ui.ctx().load_texture(
+                            format!("icon-{}", game.id),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                    (texture.id(), texture.size_vec2())
+                });
+            if let Some((texture, size)) = artwork {
+                let available = screen.shrink(5.0).size();
+                let scale = (available.x / size.x).min(available.y / size.y);
+                painter.image(
+                    texture,
+                    Rect::from_center_size(screen.center(), size * scale),
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
                 );
-                let screen = Rect::from_min_max(
-                    device.min + Vec2::new(8.0, 11.0),
-                    device.max - Vec2::new(8.0, 24.0),
-                );
-                painter.rect_filled(screen, 3.0, Color32::from_rgb(38, 61, 80));
+            } else {
                 painter.text(
                     screen.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1473,12 +1481,12 @@ impl PocketLauncher {
                     egui::FontId::proportional(12.0),
                     Color32::from_rgb(198, 220, 234),
                 );
-                painter.circle_filled(
-                    Pos2::new(device.center().x, device.bottom() - 12.0),
-                    5.0,
-                    Color32::from_rgb(204, 214, 225),
-                );
             }
+            painter.circle_filled(
+                Pos2::new(device.center().x, device.bottom() - 12.0),
+                5.0,
+                Color32::from_rgb(204, 214, 225),
+            );
         }
 
         let dots = menu_response.response.rect.center();
@@ -1504,14 +1512,23 @@ impl PocketLauncher {
         text_ui.add(
             egui::Label::new(RichText::new(&game.display_name).strong().size(16.0)).truncate(true),
         );
+        let (width, height) = match self.screen_cache.get(&game.id) {
+            Some((pref, size)) if *pref == game.settings.screen => *size,
+            _ => {
+                let size = game.resolved_screen_size(self.library.root());
+                self.screen_cache
+                    .insert(game.id.clone(), (game.settings.screen, size));
+                size
+            }
+        };
+        let caption = format!(
+            "{} • {width}×{height}",
+            if giz { "GIZMONDO" } else { "POCKET PC / WINCE" }
+        );
         text_ui.label(
-            RichText::new(if giz {
-                "GIZMONDO • 320×240"
-            } else {
-                "POCKET PC / WINCE"
-            })
-            .size(12.0)
-            .color(Color32::from_gray(185)),
+            RichText::new(caption)
+                .size(12.0)
+                .color(Color32::from_gray(185)),
         );
         if let Some(id) = game_gizmondo_title_id(game, self.library.root()) {
             text_ui.label(
@@ -2256,8 +2273,11 @@ impl PocketLauncher {
                     .show_ui(ui, |ui| {
                         for pref in [
                             ScreenPref::Portrait,
+                            ScreenPref::Qvga,
                             ScreenPref::Landscape,
                             ScreenPref::SmallPortrait,
+                            ScreenPref::Vga,
+                            ScreenPref::VgaLandscape,
                             ScreenPref::Wvga,
                             ScreenPref::Hpc,
                         ] {
@@ -2557,8 +2577,8 @@ impl PocketLauncher {
                 if let Some((x, y)) = self.pointer_down_at.take() {
                     self.send_input(InputEvent::PointerUp { x, y });
                 }
-                let next = RotationPref::ALL
-                    [(usize::from(rotation_turns(self.game_rotation)) + 1) % 4];
+                let next =
+                    RotationPref::ALL[(usize::from(rotation_turns(self.game_rotation)) + 1) % 4];
                 self.game_rotation = next;
                 self.persist_rotation(next);
                 self.console_fit_pending = true;
@@ -2955,6 +2975,12 @@ impl PocketLauncher {
     }
 
     fn persist_rotation(&mut self, rotation: RotationPref) {
+        if !self.running_is_gizmondo {
+            self.send_input(InputEvent::KeyboardRotation {
+                turns: rotation_turns(rotation),
+            });
+        }
+
         let Some(id) = self.running_game_id.clone() else {
             return;
         };
@@ -3294,8 +3320,47 @@ impl PocketLauncher {
         if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             return;
         }
+        let text_input = self.screen == Screen::Run
+            && !self.running_is_gizmondo
+            && self
+                .last_frame_snapshot
+                .as_ref()
+                .is_some_and(|f| f.text_input);
         let events = ctx.input(|input| input.events.clone());
         for event in events {
+            if text_input {
+                if let egui::Event::Text(text) | egui::Event::Paste(text) = &event {
+                    for character in text.chars().filter(|c| !c.is_control()) {
+                        self.send_input(InputEvent::Text { character });
+                    }
+                    continue;
+                }
+                if let egui::Event::Key { key, pressed, .. } = &event {
+                    if matches!(key, egui::Key::Backspace) {
+                        if *pressed {
+                            self.send_input(InputEvent::Text { character: '\u{8}' });
+                        }
+                        continue;
+                    }
+                    // Printable keys arrive as committed Text, never as game actions.
+                    if !matches!(
+                        key,
+                        egui::Key::Tab
+                            | egui::Key::Enter
+                            | egui::Key::Escape
+                            | egui::Key::ArrowLeft
+                            | egui::Key::ArrowRight
+                            | egui::Key::ArrowUp
+                            | egui::Key::ArrowDown
+                            | egui::Key::F10
+                            | egui::Key::F11
+                            | egui::Key::F12
+                    ) {
+                        continue;
+                    }
+                }
+            }
+
             let egui::Event::Key {
                 key,
                 pressed,
@@ -3664,6 +3729,11 @@ impl PocketLauncher {
         self.gps_notice = None;
         self.frame_rx = Some(frame_rx);
         self.input_tx = Some(input_tx);
+        if !self.running_is_gizmondo {
+            self.send_input(InputEvent::KeyboardRotation {
+                turns: rotation_turns(self.game_rotation),
+            });
+        }
         self.held = HeldButtons::default();
         self.pointer_down_at = None;
         let library_root = self.library.root().to_path_buf();

@@ -191,7 +191,9 @@ impl ManagedGame {
                 0x0d | 0x20 => self.fire(),
                 _ => {}
             },
-            InputEvent::KeyUp { .. } => {}
+            InputEvent::KeyUp { .. }
+            | InputEvent::Text { .. }
+            | InputEvent::KeyboardRotation { .. } => {}
         }
     }
 

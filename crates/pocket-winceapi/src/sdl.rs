@@ -611,6 +611,8 @@ fn pump_input(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
         };
         let mut event = [0; 20];
         match input {
+            // Committed WinCE EDIT text is not an SDL hardware-key event.
+            InputEvent::Text { .. } | InputEvent::KeyboardRotation { .. } => continue,
             InputEvent::KeyDown { vk } | InputEvent::KeyUp { vk } => {
                 let down = matches!(input, InputEvent::KeyDown { .. });
                 let sym = symbol(vk);

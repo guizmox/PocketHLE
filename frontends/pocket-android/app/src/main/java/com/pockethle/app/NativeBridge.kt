@@ -148,6 +148,8 @@ object NativeBridge {
      *   coordinate (in 240×320 game space) for POINTER_*.
      * @param b ignored for KEY_*; Y coordinate for POINTER_*.
      */
+    const val INPUT_KEYBOARD_ROTATION = 5
+
     @JvmStatic external fun nativeSendInput(
         handle: Long,
         kind: Int,

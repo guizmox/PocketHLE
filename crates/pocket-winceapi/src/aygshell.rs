@@ -29,7 +29,7 @@ pub const FAKE_MENUBAR_HWND: u32 = 0xDEAD_0B01;
 
 /// `SPI_GETSIPINFO` — the `SHSipInfo` action PPC2002 Solitaire uses
 /// to query the soft input panel before toggling it.
-const SPI_GETSIPINFO: u32 = 0x0001_00E1;
+const SPI_GETSIPINFO: u32 = 0xE1;
 
 pub fn register(d: &mut WinCeDispatcher) {
     let dll = "aygshell.dll";
@@ -53,6 +53,8 @@ pub fn register(d: &mut WinCeDispatcher) {
         let handler = match f {
             "SHCreateMenuBar" | "SHCreateMenuBarEx" => sh_create_menu_bar,
             "SHSipInfo" => sh_sip_info,
+            "SHCloseApps" => sh_close_apps,
+            "SHSipPreference" => crate::shell_keyboard::preference,
             _ => ok,
         };
         d.register_handler(dll, f, handler);
@@ -76,6 +78,8 @@ pub fn register(d: &mut WinCeDispatcher) {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
     d.register_handler(dll, "ord:75", sh_load_image_file);
+    // Racing Days requests 0x480000 bytes and treats FALSE as insufficient RAM.
+    d.register_handler(dll, "ord:10", sh_close_apps);
 
     // ---- Pocket PC 2002 ordinal space -------------------------------
     //
@@ -187,34 +191,15 @@ fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 /// `SHSipInfo(dwAction, uParam, pvParam, fWinIni)`.
 ///
-/// The SIP is never visible under PocketHLE, so report a panel that is
-/// off and takes no screen space: `fdwFlags` clear, `rcVisibleDesktop`
-/// the whole framebuffer, `rcSipRect` empty. Solitaire reads the flags
-/// back, flips `SIPF_ON`, and calls in again with `SPI_SETSIPINFO`;
-/// succeeding and ignoring the set keeps the round-trip harmless.
+/// Both historical action encodings share the real SIP state.
 fn sh_sip_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let action = ctx.arg_u32(0)?;
+    let action = ctx.arg_u32(0)? & !0x10000;
     let pv = ctx.arg_u32(2)?;
-    if action == SPI_GETSIPINFO && pv != 0 {
-        // SIPINFO { cbSize, fdwFlags, rcVisibleDesktop[4],
-        //           rcSipRect[4], dwImDataSize, pvImData } = 48 bytes.
-        let cb_size = ctx.cpu.read_u32_le(pv).unwrap_or(48);
-        let (w, h) = (
-            ctx.kernel.framebuffer.width as i32,
-            ctx.kernel.framebuffer.height as i32,
-        );
-        let mut buf = [0u8; 48];
-        buf[0..4].copy_from_slice(&cb_size.to_le_bytes());
-        buf[8..12].copy_from_slice(&0i32.to_le_bytes());
-        buf[12..16].copy_from_slice(&0i32.to_le_bytes());
-        buf[16..20].copy_from_slice(&w.to_le_bytes());
-        buf[20..24].copy_from_slice(&h.to_le_bytes());
-        // Never write past what the caller declared, and never past
-        // our own buffer even if cbSize is garbage.
-        let len = (cb_size as usize).clamp(24, buf.len());
-        ctx.cpu.write_mem(pv, &buf[..len])?;
+    match action {
+        SPI_GETSIPINFO => crate::shell_keyboard::sip_info(ctx, pv),
+        0xE0 => crate::shell_keyboard::set_info(ctx, pv),
+        _ => Ok(DispatchOutcome::ReturnedR0(0)),
     }
-    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 /// aygshell's shell-owned message box. The PPC2002 Solitaire call site
@@ -286,4 +271,68 @@ fn sh_load_image_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     }
     log::debug!("SHLoadImageFile({path:?}) -> 0x{handle:08x} ({width}x{height})");
     Ok(DispatchOutcome::ReturnedR0(handle))
+}
+
+/// Enough memory already available is success; do not allocate it, close the
+/// current title, or report success for an impossible request. Cross-process
+/// shell memory reclamation is not implemented.
+fn sh_close_apps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let requested = ctx.arg_u32(0)?;
+    let physical = ctx
+        .kernel
+        .memory_division
+        .as_ref()
+        .map(|d| d.snapshot().program_free().saturating_mul(d.page_size()))
+        .unwrap_or(24 * 1024 * 1024);
+    let available = physical.min(ctx.kernel.heap.free_bytes());
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        requested <= available,
+    )))
+}
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::bluetooth::tests::{call, setup};
+    #[test]
+    fn shell_memory_request_checks_capacity_without_allocating_or_closing() {
+        let (mut cpu, mut k, mut d) = setup();
+        // The shared API fixture deliberately has only a 64 KiB heap.
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "ord:10",
+                &[0x480000]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        ));
+        k.heap = pocket_kernel::Heap::new(0x100000, 8 * 1024 * 1024);
+        let before = k.heap.free_bytes();
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "ord:10",
+                &[0x480000]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        ));
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHCloseApps",
+                &[u32::MAX]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        ));
+        assert_eq!(k.heap.free_bytes(), before);
+        assert!(!k.should_stop);
+    }
 }

@@ -6,11 +6,37 @@ const KEYS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-'";
 #[derive(Debug, Default)]
 pub struct ShellKeyboard {
     pub visible: bool,
+    /// WinCE SIP request, independent of the Gizmondo shell protocol.
+    pub sip: bool,
+    pub pointer_captured: bool,
+    pub rotation: u8,
     pub requested: bool,
     pub target: u32,
     pub selection: usize,
 }
 impl ShellKeyboard {
+    /// Same geometry as render; last row supplies delete and dismiss.
+    pub fn tap(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<u32> {
+        let height = Self::panel_height(h);
+        let top = h - height;
+        if x < 0 || x >= w || y < top || y >= h {
+            return None;
+        }
+        if y >= h - 28 {
+            return Some(if x < w / 2 { 8 } else { 0 });
+        }
+        let col = x / (w / 10).max(1);
+        let row = (y - top - 6) / ((height - 35) / 4).max(1);
+        if y < top + 6 || col >= 10 || !(0..4).contains(&row) {
+            return Some(u32::MAX);
+        }
+        let i = (row * 10 + col) as usize;
+        if i >= KEYS.len() {
+            return Some(u32::MAX);
+        }
+        self.selection = i;
+        Some(self.character())
+    }
     pub fn navigate(&mut self, vk: u32) {
         let columns = 10;
         self.selection = match vk {
@@ -24,14 +50,57 @@ impl ShellKeyboard {
     pub fn character(&self) -> u32 {
         KEYS[self.selection.min(KEYS.len() - 1)] as u32
     }
+    pub fn panel_height(h: i32) -> i32 {
+        (h / 2).clamp(1, 128)
+    }
+    pub fn display_point(&self, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+        match self.rotation % 4 {
+            1 => (h - 1 - y, x, h, w),
+            2 => (w - 1 - x, h - 1 - y, w, h),
+            3 => (y, w - 1 - x, h, w),
+            _ => (x, y, w, h),
+        }
+    }
     pub fn render(&self, surf: &mut Surface<'_>) {
+        if !self.sip || self.rotation % 4 == 0 {
+            self.render_panel(surf);
+            return;
+        }
+        if !self.visible {
+            return;
+        }
+        let (w, h) = surf.dimensions();
+        let (_, _, dw, dh) = self.display_point(0, 0, w as i32, h as i32);
+        let mut bitmap = crate::gdi::Bitmap::new(dw as u32, dh as u32);
+        self.render_panel(&mut Surface::Bitmap(&mut bitmap));
+        for y in dh - Self::panel_height(dh)..dh {
+            for x in 0..dw {
+                let (gx, gy) = match self.rotation % 4 {
+                    1 => (y, h as i32 - 1 - x),
+                    2 => (w as i32 - 1 - x, h as i32 - 1 - y),
+                    _ => (w as i32 - 1 - y, x),
+                };
+                let i = ((y * dw + x) * 2) as usize;
+                surf.put_pixel(
+                    gx,
+                    gy,
+                    u16::from_le_bytes([bitmap.pixels[i], bitmap.pixels[i + 1]]),
+                );
+            }
+        }
+    }
+    fn render_panel(&self, surf: &mut Surface<'_>) {
         if !self.visible {
             return;
         }
         let (w, h) = surf.dimensions();
         let w = w as i32;
         let h = h as i32;
-        let height = 160.min(h);
+        let height = if self.sip {
+            Self::panel_height(h)
+        } else {
+            160.min(h)
+        };
         let top = h - height;
         let cell_w = (w / 10).max(1);
         let cell_h = ((height - 35) / 4).max(1);
@@ -65,7 +134,68 @@ impl ShellKeyboard {
                 );
             }
         }
+        if self.sip {
+            for (x, label) in [(0, "Delete"), (w / 2, "Done")] {
+                surf.fill_rect(x + 1, h - 27, w / 2 - 2, 26, 0x8410);
+                font::draw_str(
+                    surf,
+                    x + (w / 2 - label.len() as i32 * 6) / 2,
+                    h - 18,
+                    label,
+                    0xffff,
+                );
+            }
+            return;
+        }
         font::draw_str(surf, 3, h - 22, "Play: type  A: delete  B: done", 0xffff);
         font::draw_str(surf, 3, h - 11, "Soft1: field  Soft2: close", 0xffff);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sip_taps_match_key_cells_and_do_not_claim_application_area() {
+        let mut k = ShellKeyboard::default();
+        assert_eq!(k.tap(10, 100, 240, 320), None);
+        assert_eq!(k.tap(10, 202, 240, 320), Some('A' as u32));
+        assert_eq!(k.tap(35, 202, 240, 320), Some('B' as u32));
+        assert_eq!(k.tap(10, 310, 240, 320), Some(8));
+        assert_eq!(k.tap(200, 310, 240, 320), Some(0));
+        assert_eq!(k.tap(240, 310, 240, 320), None);
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    #[test]
+    fn every_rotation_maps_the_whole_panel_and_its_keys() {
+        for (w, h) in [(240, 320), (320, 240), (480, 640), (480, 800)] {
+            for rotation in 0..4 {
+                let mut k = ShellKeyboard {
+                    sip: true,
+                    visible: true,
+                    rotation,
+                    ..Default::default()
+                };
+                let (_, _, dw, dh) = k.display_point(0, 0, w, h);
+                let dx = dw / 20;
+                let dy = dh - ShellKeyboard::panel_height(dh) + 10;
+                let (gx, gy) = match rotation {
+                    1 => (dy, h - 1 - dx),
+                    2 => (w - 1 - dx, h - 1 - dy),
+                    3 => (w - 1 - dy, dx),
+                    _ => (dx, dy),
+                };
+                let (x, y, _, _) = k.display_point(gx, gy, w, h);
+                assert_eq!((x, y), (dx, dy));
+                assert_eq!(k.tap(x, y, dw, dh), Some('A' as u32));
+                let mut bitmap = crate::gdi::Bitmap::new(w as u32, h as u32);
+                k.render(&mut Surface::Bitmap(&mut bitmap));
+                assert!(bitmap.pixels.iter().any(|b| *b != 0));
+            }
+        }
     }
 }

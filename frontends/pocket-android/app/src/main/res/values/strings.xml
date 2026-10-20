@@ -80,15 +80,21 @@
         <item>unicorn</item>
     </string-array>
     <string-array name="screen_entries">
-        <item>240x320 (portrait)</item>
+        <item>Automatic (Pocket PC)</item>
+        <item>240x320 (QVGA portrait)</item>
         <item>320x240 (landscape)</item>
         <item>176x220 (small)</item>
+        <item>480x640 (VGA portrait)</item>
+        <item>640x480 (VGA landscape)</item>
         <item>480x800 (WVGA)</item>
     </string-array>
     <string-array name="screen_values">
         <item>portrait</item>
+        <item>qvga</item>
         <item>landscape</item>
         <item>small_portrait</item>
+        <item>vga</item>
+        <item>vga_landscape</item>
         <item>wvga</item>
     </string-array>
     <string-array name="rotation_entries">

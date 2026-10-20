@@ -102,7 +102,9 @@ impl Runner {
         };
         let mut summary_lines = vec![format!("Game: {}", game.display_name)];
 
-        let machine = pocket_core::pe::load_file(&exe)
+        let metadata = pocket_core::pe::load_file(&exe).ok();
+        let machine = metadata
+            .as_ref()
             .map(|image| image.machine)
             .unwrap_or(pocket_core::pe::machine::ARM);
         // The Stub CPU does not interpret instructions — it is a
@@ -336,7 +338,7 @@ impl Runner {
         let (screen_w, screen_h) = if is_gizmondo {
             (320, 240)
         } else {
-            game.settings.screen.size()
+            game.settings.screen.resolve_image(metadata.as_ref())
         };
         emu.set_screen_size(screen_w, screen_h);
         summary_lines.push(format!(
@@ -516,7 +518,7 @@ impl Runner {
 
         let framebuffer = emu.process().and_then(|p| {
             (!p.state.framebuffer.is_all_black())
-                .then(|| FrameSnapshot::from_framebuffer(&p.state.framebuffer))
+                .then(|| FrameSnapshot::from_framebuffer(&p.state.presentation_framebuffer()))
         });
         let exit_code = if run_result.is_ok() {
             emu.process()
@@ -567,11 +569,13 @@ pub struct FrameSnapshot {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub text_input: bool,
 }
 
 impl FrameSnapshot {
     fn from_framebuffer(fb: &pocket_core::kernel::Framebuffer) -> Self {
         Self {
+            text_input: false,
             width: fb.width,
             height: fb.height,
             rgba: fb.snapshot_rgba8888(),
@@ -584,6 +588,7 @@ impl FrameSnapshot {
     fn fill_from_framebuffer(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
         fb.snapshot_rgba8888_into(scratch);
         Self {
+            text_input: false,
             width: fb.width,
             height: fb.height,
             // `std::mem::take` hands ownership of the scratch buffer
@@ -1002,10 +1007,25 @@ impl FrameHook for RunHook {
                     if let Some(phase) = presentation_phase(self.last_emit_at, now) {
                         self.last_frame = counter;
                         self.last_emit_at = Some(phase);
-                        let snapshot = FrameSnapshot::fill_from_framebuffer(
-                            &state.framebuffer,
+                        let mut snapshot = FrameSnapshot::fill_from_framebuffer(
+                            &state.presentation_framebuffer(),
                             &mut self.scratch,
                         );
+                        snapshot.text_input = state.gapi_action_key
+                            == pocket_core::kernel::gapi::VK_RETURN
+                            && state
+                                .controls
+                                .get(if state.shell_keyboard.sip {
+                                    state.shell_keyboard.target
+                                } else {
+                                    state.controls.focus
+                                })
+                                .is_some_and(|c| {
+                                    c.class == pocket_core::kernel::controls::ControlClass::Edit
+                                        && c.visible
+                                        && c.enabled
+                                        && c.style & 0x800 == 0
+                                });
                         if tx.send(snapshot).is_err() {
                             // GUI thread dropped the receiver — the user
                             // closed the run screen / quit the launcher.

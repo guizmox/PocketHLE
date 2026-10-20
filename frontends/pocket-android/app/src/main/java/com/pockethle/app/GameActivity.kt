@@ -221,6 +221,7 @@ class GameActivity : AppCompatActivity() {
                 releaseHeldInput()
                 rotationDegrees=(rotationDegrees+90)%360
                 glRenderer.setRotationDegrees(rotationDegrees)
+                if(session != 0L) NativeBridge.nativeSendInput(session, NativeBridge.INPUT_KEYBOARD_ROTATION, rotationDegrees/90, 0)
                 val json=JSONObject(NativeBridge.readGameSettings(gameRoot,gameId))
                 json.put("rotation",when(rotationDegrees) {90->"cw90";180->"half";270->"ccw90";else->"none"})
                 NativeBridge.writeGameSettings(gameRoot,gameId,json.toString())
@@ -258,6 +259,7 @@ class GameActivity : AppCompatActivity() {
             return
         }
         session = handle
+        if (!gizmondoGame) NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_KEYBOARD_ROTATION, rotationDegrees/90, 0)
         startAudio(handle)
         status.text = "Backend: Unicorn (ARM)\nRunning…"
         // The spinner gets hidden the moment the first frame arrives.

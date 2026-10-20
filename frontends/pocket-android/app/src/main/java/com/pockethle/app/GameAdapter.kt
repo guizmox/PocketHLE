@@ -57,13 +57,17 @@ class GameAdapter(
             caption.isSelected = true
             val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
             val label = itemView.findViewById<View>(R.id.game_label)
-            val bitmap = if (entry.icon == "cartridge.png") BitmapFactory.decodeFile(File(libraryRoot,"games/${entry.id}/cartridge.png").absolutePath) else null
-            itemView.findViewById<View>(R.id.game_card_fallback).visibility = if (bitmap != null) View.GONE else View.VISIBLE
-            artwork.setImageBitmap(bitmap)
-            artwork.visibility = if (bitmap != null) View.VISIBLE else View.GONE
-            label.visibility = if (bitmap != null) View.GONE else View.VISIBLE
+            val gizmondo = NativeBridge.isGizmondoGame(libraryRoot, entry.id)
+            val bitmap = entry.icon?.takeIf { !gizmondo || it == "cartridge.png" }?.let {
+                BitmapFactory.decodeFile(File(libraryRoot,"games/${entry.id}/$it").absolutePath)
+            }
+            val showArtwork = !gizmondo || bitmap != null
+            itemView.findViewById<View>(R.id.game_card_fallback).visibility = if (showArtwork) View.GONE else View.VISIBLE
+            if (gizmondo) artwork.setImageBitmap(bitmap) else artwork.setImageDrawable(PocketPcArtworkDrawable(bitmap))
+            artwork.visibility = if (showArtwork) View.VISIBLE else View.GONE
+            label.visibility = if (showArtwork) View.GONE else View.VISIBLE
             itemView.contentDescription = entry.displayName
-            publisherLabel.text = if (NativeBridge.isGizmondoGame(libraryRoot, entry.id)) "GIZMONDO • 320×240" else "POCKET PC / WINCE"
+            publisherLabel.text = "${if (gizmondo) "GIZMONDO" else "POCKET PC / WINCE"} • ${entry.screenWidth}×${entry.screenHeight}"
             serial.text = entry.titleId
             serial.visibility = if (entry.titleId != null) View.VISIBLE else View.GONE
             itemView.setOnClickListener { onRun(entry) }

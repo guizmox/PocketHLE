@@ -236,6 +236,7 @@ mod tests {
             }
         }
         let native = FrameSnapshot {
+            text_input: false,
             width: 16,
             height: 16,
             rgba,
