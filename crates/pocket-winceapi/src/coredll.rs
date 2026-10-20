@@ -12691,6 +12691,12 @@ fn remap_input(ev: InputEvent, queried: bool) -> InputEvent {
 /// the main thread otherwise.
 fn take_posted_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     let front = ctx.kernel.posted_messages.front().copied()?;
+    // WM_PAINT is lower priority than mouse/keyboard input. A window may
+    // invalidate itself again while painting; treating that repaint as an
+    // ordinary posted message would prevent queued input from ever arriving.
+    if front.1 == WM_PAINT && !ctx.kernel.pending_input.is_empty() {
+        return None;
+    }
     if front.1 == MM_WOM_DONE {
         let has_mixer_thread = ctx
             .kernel
@@ -26510,6 +26516,52 @@ mod tests {
             call_class_info_w(&mut cpu, &mut kernel, NAME, INFO),
             DispatchOutcome::ReturnedR0(1)
         );
+    }
+
+    #[test]
+    fn queued_repaints_do_not_starve_mouse_input_in_get_message() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.pending_startup.clear();
+        kernel.pending_create = None;
+        kernel
+            .posted_messages
+            .push_back((FAKE_HWND, WM_PAINT, 0, 0));
+        kernel
+            .pending_input
+            .push_back(InputEvent::PointerDown { x: 265, y: 219 });
+        kernel
+            .pending_input
+            .push_back(InputEvent::PointerUp { x: 265, y: 219 });
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for expected in [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_PAINT] {
+            ctx.cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+            assert_eq!(
+                get_message_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), expected);
+        }
+        assert!(ctx.kernel.posted_messages.is_empty());
+        // Ordinary posted traffic retains its existing priority.
+        ctx.kernel
+            .posted_messages
+            .push_back((FAKE_HWND, 0x400, 1, 2));
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::PointerDown { x: 1, y: 2 });
+        ctx.cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        assert_eq!(
+            get_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), 0x400);
+        assert_eq!(ctx.kernel.pending_input.len(), 1);
     }
 
     #[test]

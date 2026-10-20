@@ -88,8 +88,25 @@ fn main() -> anyhow::Result<()> {
     }
     let mut last = Instant::now();
     let mut stage = 0;
+    let mut clicked = false;
     let result = emu.run_with_hook(&mut |state: &mut KernelState| {
         let elapsed = start.elapsed();
+        if !clicked
+            && elapsed >= Duration::from_secs(4)
+            && std::env::var_os("POCKETHLE_PROBE_CLICK_DONE").is_some()
+        {
+            clicked = true;
+            state
+                .pending_input
+                .push_back(pocket_core::kernel::InputEvent::PointerDown { x: 265, y: 219 });
+            state
+                .pending_input
+                .push_back(pocket_core::kernel::InputEvent::PointerUp { x: 265, y: 219 });
+            eprintln!(
+                "MAPDIAG CLICK DONE windows={:?} active={:x} wndproc={:x} procs={:?}",
+                state.window_rects, state.active_window, state.wnd_proc, state.window_procs
+            );
+        }
         if last.elapsed() >= Duration::from_secs(2) {
             stage += 1;
             last = Instant::now();
