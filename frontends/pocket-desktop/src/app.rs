@@ -2530,7 +2530,27 @@ impl PocketLauncher {
     /// Original PocketPC presentation: framebuffer beside the virtual controls.
     /// Rendering and input still use the shared current emulator paths.
     fn ui_pocketpc(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Run output");
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Run output");
+            if ui
+                .button("Rotate 90°")
+                .on_hover_text(format!(
+                    "Rotate clockwise; current: {}. Saved for this game.",
+                    self.game_rotation.label()
+                ))
+                .clicked()
+            {
+                self.release_all_keys();
+                if let Some((x, y)) = self.pointer_down_at.take() {
+                    self.send_input(InputEvent::PointerUp { x, y });
+                }
+                let next = RotationPref::ALL
+                    [(usize::from(rotation_turns(self.game_rotation)) + 1) % 4];
+                self.game_rotation = next;
+                self.persist_rotation(next);
+                self.console_fit_pending = true;
+            }
+        });
         if let Some(name) = self.running_game.as_ref() {
             ui.label(format!("Running {name}…"));
         }
