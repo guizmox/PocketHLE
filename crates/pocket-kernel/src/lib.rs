@@ -1146,6 +1146,8 @@ pub struct KernelState {
     /// Styles, extended styles and parent handles for each top-level HWND.
     pub window_styles: HashMap<u32, (u32, u32)>,
     pub window_parents: HashMap<u32, u32>,
+    /// Guest thread which created each window (zero is the main thread).
+    pub window_threads: HashMap<u32, usize>,
     pub window_rects: HashMap<u32, (i32, i32, i32, i32)>,
     pub window_dcs: HashMap<u32, u32>,
     /// Visibility of real top-level window instances.
@@ -1723,7 +1725,18 @@ impl KernelState {
     /// boundary, and dirtying there would ask for another frame
     /// forever.
     pub fn composite_controls(&mut self) {
-        if self.controls.is_empty() && self.modal.is_none() {
+        self.composite_window_layers(false);
+    }
+
+    /// Present completed native GDI painting even when no HLE controls exist.
+    /// Explicit GDI completion triggers this; an unrelated GLES frame must not
+    /// replay an old window backing surface over a newly presented game frame.
+    pub fn present_window_surfaces(&mut self) {
+        self.composite_window_layers(true);
+    }
+
+    fn composite_window_layers(&mut self, present_windows: bool) {
+        if !present_windows && self.controls.is_empty() && self.modal.is_none() {
             return;
         }
         // Measure before notification stamps/item rectangles, not only before
@@ -2850,6 +2863,7 @@ pub const SDLAUNCH_MODULE_HANDLE: u32 = 0x1000_0009;
 pub const OLE32_MODULE_HANDLE: u32 = 0x1000_0007;
 pub const WININET_MODULE_HANDLE: u32 = 0x1000_000b;
 pub const WS2_MODULE_HANDLE: u32 = 0x1000_000a;
+pub const NOTE_PRJ_MODULE_HANDLE: u32 = 0x1000_000c;
 /// Fake `HMODULE` for `libGLES_CM.dll`, the Common profile.
 pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
 /// Fake `HMODULE` for `libGLES_CL.dll`, the Common-Lite profile.
@@ -2927,6 +2941,11 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
             if let ImportBinding::Ordinal(ord) = &thunk.binding {
                 table.insert(format!("#{ord}"), thunk.thunk_va);
             }
+        } else if thunk.dll.eq_ignore_ascii_case("note_prj.dll") {
+            exports
+                .entry(NOTE_PRJ_MODULE_HANDLE)
+                .or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("ole32.dll") {
             ole32.insert(name.clone(), thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("libgles_cm.dll")
@@ -3221,6 +3240,7 @@ impl Process {
             "sdlaunch.dll",
             "ws2.dll",
             "wininet.dll",
+            "note_prj.dll",
         ] {
             dynamic_exports_to_add.extend(
                 dispatcher
@@ -3502,6 +3522,7 @@ impl Process {
                 control_class_prototypes: HashMap::new(),
                 window_styles: HashMap::new(),
                 window_parents: HashMap::new(),
+                window_threads: HashMap::new(),
                 window_rects: HashMap::new(),
                 window_dcs: HashMap::new(),
                 window_visibility: HashMap::new(),

@@ -396,6 +396,7 @@ pub(crate) mod tests {
             control_class_prototypes: std::collections::HashMap::new(),
             window_styles: std::collections::HashMap::new(),
             window_parents: std::collections::HashMap::new(),
+            window_threads: std::collections::HashMap::new(),
             window_rects: std::collections::HashMap::new(),
             window_dcs: std::collections::HashMap::new(),
             window_visibility: std::collections::HashMap::new(),

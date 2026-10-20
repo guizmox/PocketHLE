@@ -316,6 +316,12 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "DeviceIoControl", device_io_control);
     d.register_handler(dll, "SetFilePointer", set_file_pointer);
     d.register_handler(dll, "FindFirstFileW", find_first_file_w);
+    d.register_handler("note_prj.dll", "FindFirstFlashCard", find_first_flash_card);
+    d.register_handler("note_prj.dll", "FindNextFlashCard", find_next_file_w);
+    d.register_handler("note_prj.dll", "#7", find_first_flash_card);
+    d.register_handler("note_prj.dll", "#8", find_next_file_w);
+    d.register_handler("note_prj.dll", "ord:7", find_first_flash_card);
+    d.register_handler("note_prj.dll", "ord:8", find_next_file_w);
     d.register_handler(dll, "FindNextFileW", find_next_file_w);
     d.register_handler(dll, "FindClose", find_close);
     d.register_handler(
@@ -544,7 +550,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(
         dll,
         "MsgWaitForMultipleObjects",
-        msg_wait_for_multiple_objects,
+        msg_wait_for_multiple_objects_legacy,
     );
     d.register_constant(dll, "EnableWindow", 1, one_returning);
     d.register_constant(dll, "MessageBeep", 1, one_returning);
@@ -801,7 +807,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "ImmGetContext", 0, zero_returning);
     d.register_constant(dll, "ImmReleaseContext", 1, one_returning);
     d.register_constant(dll, "ImmSetCompositionWindow", 1, one_returning);
-    d.register_constant(dll, "SystemParametersInfoW", 1, one_returning);
+    d.register_handler(dll, "SystemParametersInfoW", system_parameters_info_w);
     d.register_handler(dll, "GetSystemPowerStatusEx", get_system_power_status_ex);
     d.register_handler(dll, "GetSystemPowerStatusEx2", get_system_power_status_ex2);
     d.register_handler(dll, "CreateEventW", create_event_w);
@@ -2216,7 +2222,11 @@ fn worker_is_ready(
         return true;
     }
     if thread.parked_wait_handles.is_empty() {
-        return !thread.messages.is_empty();
+        return !thread.messages.is_empty()
+            || kernel
+                .posted_messages
+                .iter()
+                .any(|m| kernel.window_threads.get(&m.0).copied().unwrap_or(0) == index + 1);
     }
     if thread.parked_wait_all {
         thread
@@ -3536,7 +3546,9 @@ fn create_process_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if flags & !CREATE_SUSPENDED != 0 {
+    // A GUI child has no console to inherit; CREATE_NEW_CONSOLE does not
+    // change its execution or suspension state.
+    if flags & !(CREATE_SUSPENDED | 0x10) != 0 {
         set_thread_error(ctx, ERROR_NOT_SUPPORTED);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -4101,6 +4113,8 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
         0x1000_0001
     } else if name == "commctrl.dll" || name == "commctrl" {
         0x1000_0002
+    } else if name == "note_prj.dll" || name == "note_prj" {
+        pocket_kernel::NOTE_PRJ_MODULE_HANDLE
     } else if name == "wininet.dll" || name == "wininet" {
         pocket_kernel::WININET_MODULE_HANDLE
     } else if name == "ws2.dll" || name == "ws2" {
@@ -4172,6 +4186,14 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         }
     };
     let name = String::from_utf16_lossy(&path).to_ascii_lowercase();
+    if module_file_name(&name) == "note_prj.dll" || name == "note_prj" {
+        let handle = pocket_kernel::NOTE_PRJ_MODULE_HANDLE;
+        if ctx.kernel.dynamic_exports.contains_key(&handle) {
+            return Ok(DispatchOutcome::ReturnedR0(handle));
+        }
+        set_thread_error(ctx, 126);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     if name.ends_with("sdlaunch.dll") || name == "sdlaunch" {
         let handle = if ctx.kernel.process_launch_enabled
             && ctx
@@ -4383,6 +4405,7 @@ fn runtime_hle_dll(dll: &str) -> bool {
     matches!(
         name.as_str(),
         "coredll.dll"
+            | "note_prj.dll"
             | "aygshell.dll"
             | "commctrl.dll"
             | "gx.dll"
@@ -9983,6 +10006,9 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         let id = ctx.arg_u32(9)?;
         ctx.kernel.window_ids.insert(hwnd, id);
     }
+    ctx.kernel
+        .window_threads
+        .insert(hwnd, ctx.kernel.current_thread);
     ctx.kernel.window_rects.insert(hwnd, rect);
     log::debug!("window geometry hwnd=0x{hwnd:08x} class={class_name:?} parent=0x{parent:08x} id={} style=0x{style:08x} rect={rect:?}",ctx.arg_u32(9)?);
     ctx.kernel.window_styles.insert(hwnd, (style, ex_style));
@@ -12689,25 +12715,30 @@ fn remap_input(ev: InputEvent, queried: bool) -> InputEvent {
 /// refilled and the music stops after the primed buffers. Give the
 /// notification to the mixer thread whenever the game runs one, and to
 /// the main thread otherwise.
+fn posted_message_belongs_to(
+    kernel: &KernelState,
+    message: &(u32, u32, u32, u32),
+    owner: usize,
+) -> bool {
+    if message.1 == MM_WOM_DONE {
+        let mixer = kernel.threads.iter().any(|t| t.started && !t.finished);
+        return !mixer || owner != 0;
+    }
+    kernel.window_threads.get(&message.0).copied().unwrap_or(0) == owner
+}
+
 fn take_posted_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
-    let front = ctx.kernel.posted_messages.front().copied()?;
-    // WM_PAINT is lower priority than mouse/keyboard input. A window may
-    // invalidate itself again while painting; treating that repaint as an
-    // ordinary posted message would prevent queued input from ever arriving.
-    if front.1 == WM_PAINT && !ctx.kernel.pending_input.is_empty() {
+    let i = ctx
+        .kernel
+        .posted_messages
+        .iter()
+        .position(|m| posted_message_belongs_to(ctx.kernel, m, ctx.kernel.current_thread))?;
+    let front = ctx.kernel.posted_messages[i];
+    if front.1 == WM_PAINT && !ctx.kernel.pending_input.is_empty() && ctx.kernel.current_thread == 0
+    {
         return None;
     }
-    if front.1 == MM_WOM_DONE {
-        let has_mixer_thread = ctx
-            .kernel
-            .threads
-            .iter()
-            .any(|thread| thread.started && !thread.finished);
-        if has_mixer_thread && ctx.kernel.current_thread == 0 {
-            return None;
-        }
-    }
-    ctx.kernel.posted_messages.pop_front()
+    ctx.kernel.posted_messages.remove(i)
 }
 
 fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
@@ -12816,6 +12847,10 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             ctx.cpu.read_reg(ArmReg::Sp)?,
         );
         ctx.kernel.wait_deadlines.remove(&wait_key);
+        if let Some((hwnd, msg, wp, lp)) = take_posted_message(ctx) {
+            write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(u32::from(msg != WM_QUIT)));
+        }
         let queued = ctx
             .kernel
             .threads
@@ -12916,6 +12951,20 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     // Worker threads see only what was posted to them; an empty queue
     // is a yield back to the main thread, not a window message.
     if let Some(thread_index) = ctx.kernel.current_thread.checked_sub(1) {
+        if let Some(i) = ctx
+            .kernel
+            .posted_messages
+            .iter()
+            .position(|m| posted_message_belongs_to(ctx.kernel, m, ctx.kernel.current_thread))
+        {
+            let (hwnd, msg, wp, lp) = if remove_mode & 1 != 0 {
+                ctx.kernel.posted_messages.remove(i).unwrap()
+            } else {
+                ctx.kernel.posted_messages[i]
+            };
+            write_synthetic_msg_for_hwnd(ctx.cpu, lp_msg, hwnd, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
         let queued = ctx.kernel.threads.get_mut(thread_index).and_then(|thread| {
             if remove_mode & 0x0001 != 0 {
                 thread.messages.pop_front()
@@ -13010,16 +13059,148 @@ fn post_quit_message(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
-/// `DWORD MsgWaitForMultipleObjectsEx(DWORD nCount, const HANDLE *,
-/// DWORD dwMilliseconds, DWORD dwWakeMask, DWORD dwFlags)`. Real
-/// Win32 returns `WAIT_OBJECT_0 + nCount` when "a new input event is
-/// in the queue". Since our synthetic message pump always has more
-/// messages until the budget is exhausted (and `WM_QUIT` then breaks
-/// the loop), telling the guest "input ready" lets it fall through
-/// to its `PeekMessageW` / `GetMessageW` loop normally.
+/// Wait for objects or messages. The legacy and Ex APIs have different
+/// argument layouts; neither may report an input event when its queue is empty.
+fn msg_wait_for_multiple_objects_legacy(
+    ctx: &mut CallCtx<'_>,
+) -> Result<DispatchOutcome, KernelError> {
+    let count = ctx.arg_u32(0)?;
+    let ptr = ctx.arg_u32(1)?;
+    let all = ctx.arg_u32(2)? != 0;
+    let timeout = ctx.arg_u32(3)?;
+    let mask = ctx.arg_u32(4)?;
+    msg_wait(ctx, count, ptr, timeout, mask, all)
+}
 fn msg_wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let n_count = ctx.arg_u32(0)?;
-    Ok(DispatchOutcome::ReturnedR0(n_count))
+    let count = ctx.arg_u32(0)?;
+    let ptr = ctx.arg_u32(1)?;
+    let timeout = ctx.arg_u32(2)?;
+    let mask = ctx.arg_u32(3)?;
+    let flags = ctx.arg_u32(4)?;
+    if flags & !7 != 0 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    msg_wait(ctx, count, ptr, timeout, mask, flags & 1 != 0)
+}
+fn message_wake_class(message: u32) -> u32 {
+    match message {
+        0x100..=0x109 => 1,
+        0x200 => 2,
+        0x201..=0x20e => 4,
+        WM_PAINT => 0x20,
+        0x113 => 0x10,
+        _ => 8,
+    }
+}
+fn msg_wait(
+    ctx: &mut CallCtx<'_>,
+    count: u32,
+    ptr: u32,
+    timeout: u32,
+    mask: u32,
+    all: bool,
+) -> Result<DispatchOutcome, KernelError> {
+    if count > 63 || (count != 0 && ptr == 0) {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    let raw = if count == 0 {
+        Vec::new()
+    } else {
+        match ctx.cpu.read_mem(ptr, count * 4) {
+            Ok(v) => v,
+            Err(_) => {
+                set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+                return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+            }
+        }
+    };
+    let handles: Vec<_> = raw
+        .chunks_exact(4)
+        .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+        .collect();
+    if handles.iter().any(|&h| invalid_wait_handle(ctx.kernel, h)) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    ctx.kernel.sync_power_notifications();
+    crate::shell::service(ctx);
+    let owner = ctx.kernel.current_thread;
+    if owner == 0 && mask != 0 && ctx.kernel.pending_message.is_none() {
+        if let Some(message) = next_message_if_due(ctx) {
+            ctx.kernel.pending_message = Some(message);
+        }
+    }
+    let queued = ctx.kernel.posted_messages.iter().any(|m| {
+        posted_message_belongs_to(ctx.kernel, m, owner) && message_wake_class(m.1) & mask != 0
+    }) || if owner == 0 {
+        ctx.kernel
+            .pending_message
+            .is_some_and(|m| message_wake_class(m.1) & mask != 0)
+            || ctx
+                .kernel
+                .pending_startup
+                .iter()
+                .any(|m| message_wake_class(m.0) & mask != 0)
+    } else {
+        ctx.kernel.threads.get(owner - 1).is_some_and(|t| {
+            t.messages
+                .iter()
+                .any(|m| message_wake_class(m.0) & mask != 0)
+        })
+    };
+    if !all {
+        if let Some(index) = handles
+            .iter()
+            .position(|&h| waitable_is_signalled(ctx.kernel, h))
+        {
+            let result = acquire_wait_signal(ctx.kernel, handles[index]);
+            return finish_wait(ctx, result + index as u32);
+        }
+    }
+    if queued
+        && (!all
+            || handles
+                .iter()
+                .all(|&h| waitable_is_signalled(ctx.kernel, h)))
+    {
+        let mut result = count;
+        if all {
+            for (index, &h) in handles.iter().enumerate() {
+                if acquire_wait_signal(ctx.kernel, h) == 0x80 {
+                    result = 0x80 + index as u32;
+                }
+            }
+        }
+        return finish_wait(ctx, result);
+    }
+    let key = (owner, ctx.thunk.thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    if timeout == 0 {
+        return finish_wait(ctx, 0x102);
+    }
+    if timeout != u32::MAX {
+        let now = monotonic_ms();
+        let deadline = *ctx
+            .kernel
+            .wait_deadlines
+            .entry(key)
+            .or_insert_with(|| now.saturating_add(timeout as u64));
+        if now >= deadline {
+            return finish_wait(ctx, 0x102);
+        }
+    }
+    // Reevaluate both the queue and handles after each cooperative handoff.
+    // Parking solely on handles would miss a message arriving first.
+    if let Some(outcome) = park_worker_and_reevaluate(ctx)? {
+        // This combined wait polls both sources when scheduled again.
+        ctx.kernel.threads[owner - 1].parked_in_pump = false;
+        return Ok(outcome);
+    }
+    if let Some(outcome) = resume_worker_reenter(ctx)? {
+        return Ok(outcome);
+    }
+    Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
 }
 
 /// A satisfied wait is still a cooperative scheduling boundary. A worker
@@ -13173,6 +13354,26 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     block_on_wait(ctx, &handles, wait_all, timeout)
 }
 
+/// The emulated display has no reserved host taskbar. Its work area is
+/// the full guest panel, independent of host desktop size and scaling.
+fn system_parameters_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(0)? == 0x30 {
+        // SPI_GETWORKAREA
+        let out = ctx.arg_u32(2)?;
+        if !vfs_probe_output(ctx, out, 16) {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let (w, h) = screen_dims(ctx);
+        let mut bytes = [0u8; 16];
+        bytes[8..12].copy_from_slice(&w.to_le_bytes());
+        bytes[12..16].copy_from_slice(&h.to_le_bytes());
+        ctx.cpu.write_mem(out, &bytes)?;
+    }
+    // Retain existing handling of other SPI actions in this incremental change.
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let n = ctx.arg_u32(0)?;
     let (w, h) = screen_dims(ctx);
@@ -13228,7 +13429,12 @@ fn get_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(window_dc(ctx, hwnd)))
 }
 fn release_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    ctx.kernel.composite_controls();
+    let dc = ctx.arg_u32(1)?;
+    if ctx.kernel.window_dcs.values().any(|&h| h == dc) {
+        ctx.kernel.present_window_surfaces();
+    } else {
+        ctx.kernel.composite_controls();
+    }
     ctx.kernel.framebuffer.mark_dirty();
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -13405,6 +13611,18 @@ fn paint_owner_draw(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome,
 }
 
 fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    let closing = ctx.kernel.window_destroy_frames.last().is_some_and(|f| {
+        f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
+    });
+    if closing || ctx.arg_u32(1)? == 0x10 {
+        // WM_CLOSE: default is DestroyWindow, not a no-op.
+        return destroy_window(ctx).map(|out| match out {
+            DispatchOutcome::ReturnedR0(_) => DispatchOutcome::ReturnedR0(0),
+            other => other,
+        });
+    }
+
     if let Some(outcome) = control_color::resume(ctx)? {
         return Ok(outcome);
     }
@@ -13754,6 +13972,7 @@ fn end_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // frame before the next game frame is ready. Controls are composited
     // by the frame hook at the presentation boundary instead.
     if !ctx.kernel.fb_mapped {
+        ctx.kernel.present_window_surfaces();
         repaint_controls(ctx);
         repaint_status_bar(ctx);
     }
@@ -15704,7 +15923,7 @@ fn is_window_enabled(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// One process, one UI thread: report the main thread's id and, when
 /// asked, the process id `GetCurrentProcessId` hands out.
 fn get_window_thread_process_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _hwnd = ctx.arg_u32(0)?;
+    let hwnd = ctx.arg_u32(0)?;
     let process_id_out = ctx.arg_u32(1)?;
     if process_id_out != 0 {
         ctx.cpu.write_mem(
@@ -15712,7 +15931,12 @@ fn get_window_thread_process_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome
             &ctx.kernel.object_handles.process_id().to_le_bytes(),
         )?;
     }
-    Ok(DispatchOutcome::ReturnedR0(MAIN_THREAD_ID))
+    let owner = ctx.kernel.window_threads.get(&hwnd).copied().unwrap_or(0);
+    let id = owner
+        .checked_sub(1)
+        .and_then(|i| ctx.kernel.threads.get(i))
+        .map_or(MAIN_THREAD_ID, |t| t.id);
+    Ok(DispatchOutcome::ReturnedR0(id))
 }
 
 /// `OutputDebugStringW(text)`
@@ -15844,6 +16068,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     }
     ctx.kernel.window_extra.retain(|(h, _), _| h != hwnd);
     ctx.kernel.window_styles.remove(hwnd);
+    ctx.kernel.window_threads.remove(hwnd);
     ctx.kernel.window_parents.remove(hwnd);
     ctx.kernel.window_visibility.remove(hwnd);
     ctx.kernel.window_procs.remove(hwnd);
@@ -20223,6 +20448,9 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
         .values()
         .find_map(|exports| exports.get("DefDlgProcW").copied())
         .unwrap_or(0);
+    ctx.kernel
+        .window_threads
+        .insert(hwnd, ctx.kernel.current_thread);
     ctx.kernel.window_procs.insert(hwnd, default_proc);
     ctx.kernel.window_extra.insert((hwnd, 4), dialog_proc);
     let args = [
@@ -22353,6 +22581,7 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
 /// Split `\Path\To\*.pdb` into (`\Path\To`, `*.pdb`).
 fn split_search_pattern(path: &str) -> (String, String) {
     match path.rfind(['\\', '/']) {
+        Some(0) => (path[..1].to_string(), path[1..].to_string()),
         Some(idx) => (path[..idx].to_string(), path[idx + 1..].to_string()),
         None => (".".to_string(), path.to_string()),
     }
@@ -22387,6 +22616,31 @@ fn write_find_data(
 /// find its resource databases; with the old stub returning
 /// `INVALID_HANDLE_VALUE` it wrote a settings file and exited before
 /// ever drawing a frame.
+/// NOTE_PRJ search handles share FindClose/FindNextFile's lifetime rules.
+fn find_first_flash_card(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let out = ctx.arg_u32(0)?;
+    if !vfs_probe_output(ctx, out, FIND_DATA_BYTES as u32) {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
+    }
+    let mut entries: std::collections::VecDeque<_> = ctx
+        .kernel
+        .vfs
+        .storage_cards()
+        .into_iter()
+        .map(|name| (name, 0u64, true, 0x110u32))
+        .collect();
+    let Some(first) = entries.pop_front() else {
+        set_thread_error(ctx, 18);
+        return Ok(DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE));
+    };
+    write_find_data(ctx, out, &first)?;
+    let handle = FIND_HANDLE_BASE.saturating_add(ctx.kernel.next_find_handle);
+    ctx.kernel.next_find_handle = ctx.kernel.next_find_handle.wrapping_add(1);
+    ctx.kernel.find_handles.insert(handle, entries);
+    Ok(DispatchOutcome::ReturnedR0(handle))
+}
+
 fn find_first_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let out = ctx.arg_u32(1)?;
     let pattern = match vfs_api_path(ctx, 0) {
@@ -26335,6 +26589,7 @@ mod tests {
             control_class_prototypes: std::collections::HashMap::new(),
             window_styles: std::collections::HashMap::new(),
             window_parents: std::collections::HashMap::new(),
+            window_threads: std::collections::HashMap::new(),
             window_rects: std::collections::HashMap::new(),
             window_dcs: std::collections::HashMap::new(),
             window_visibility: std::collections::HashMap::new(),
@@ -26516,6 +26771,131 @@ mod tests {
             call_class_info_w(&mut cpu, &mut kernel, NAME, INFO),
             DispatchOutcome::ReturnedR0(1)
         );
+    }
+
+    #[test]
+    fn default_close_destroys_window_and_restores_callback_arguments() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let hwnd = 0xdead1000;
+        kernel.window_classes.insert(hwnd, "Window".into());
+        kernel.window_procs.insert(hwnd, 0x11000);
+        kernel.window_threads.insert(hwnd, 0);
+        cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x10).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x12340).unwrap();
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for msg in [WM_DESTROY, 0x82] {
+            assert_eq!(
+                def_window_proc_w(&mut c).unwrap(),
+                DispatchOutcome::JumpTo(0x11000)
+            );
+            assert_eq!(c.cpu.read_reg(ArmReg::R1).unwrap(), msg);
+            c.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        }
+        assert_eq!(
+            def_window_proc_w(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(!c.kernel.window_classes.contains_key(&hwnd));
+        assert!(!c.kernel.window_threads.contains_key(&hwnd));
+        assert_eq!(c.cpu.read_reg(ArmReg::Lr).unwrap(), 0x12340);
+    }
+
+    #[test]
+    fn worker_window_messages_keep_owner_hwnd_and_wake_the_message_pump() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut worker =
+            GuestThread::new(0x11000, 0, 0x9000, 0x1000, 0x12000, 0, 0xdead7c00, [0; 17]);
+        worker.started = true;
+        worker.parked_in_pump = true;
+        worker.id = 42;
+        kernel.threads.push(worker);
+        let hwnd = 0xdead1000;
+        kernel.window_threads.insert(hwnd, 1);
+        kernel.posted_messages.push_back((hwnd, 0x10, 123, 456));
+        assert!(worker_is_ready(&kernel, 0, &kernel.threads[0], 0));
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(take_posted_message(&mut c), None); // main cannot steal it
+        c.kernel.current_thread = 1;
+        c.cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        assert_eq!(
+            get_message_w(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(c.cpu.read_u32_le(0x2000).unwrap(), hwnd);
+        assert_eq!(c.cpu.read_u32_le(0x2004).unwrap(), 0x10);
+        c.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        c.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(
+            get_window_thread_process_id(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(42)
+        );
+        c.kernel.posted_messages.push_back((hwnd, 0x111, 1, 2));
+        assert_eq!(
+            message_queue::peek(&mut c, 0x2000, hwnd, 0x111, 0x111, 2).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(c.kernel.posted_messages.len(), 1); // PM_NOREMOVE
+        assert_eq!(
+            message_queue::peek(&mut c, 0x2000, hwnd, 0x111, 0x111, 3).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(c.kernel.posted_messages.is_empty());
+    }
+
+    #[test]
+    fn flash_card_search_enumerates_real_mounts_and_validates_output_without_consuming() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.vfs.mount_read_only("\\SD Card\\", dir.path());
+        kernel.vfs.mount_read_only("\\Storage Card\\", dir.path());
+        let mut c = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        c.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(
+            find_first_flash_card(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(INVALID_HANDLE_VALUE)
+        );
+        assert!(c.kernel.find_handles.is_empty());
+        c.cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        let DispatchOutcome::ReturnedR0(handle) = find_first_flash_card(&mut c).unwrap() else {
+            panic!()
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        assert_eq!(c.cpu.read_u32_le(0x2000).unwrap(), 0x110);
+        assert_eq!(
+            String::from_utf16_lossy(&read_wstr(&mut c, 0x2028, 260).unwrap()),
+            "SD Card"
+        );
+        c.cpu.write_reg(ArmReg::R0, handle).unwrap();
+        c.cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
+        assert_eq!(
+            find_next_file_w(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut c).unwrap(),
+            DispatchOutcome::ReturnedR0(18)
+        );
+        c.cpu.write_reg(ArmReg::R0, handle).unwrap();
+        assert_eq!(find_close(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
     }
 
     #[test]
@@ -30139,6 +30519,160 @@ mod tests {
             .unwrap();
         cpu.write_reg(ArmReg::Sp, 0x9000).unwrap();
         cpu
+    }
+
+    #[test]
+    fn releasing_native_window_dc_presents_without_hle_controls() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let hwnd = 0xdead1000;
+        kernel.window_rects.insert(hwnd, (0, 0, 4, 4));
+        kernel.window_visibility.insert(hwnd, true);
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let dc = window_dc(&mut ctx, hwnd);
+        let bitmap = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
+        let bm = ctx.kernel.gdi.bitmap_mut(bitmap).unwrap();
+        for p in bm.pixels.chunks_exact_mut(2) {
+            p.copy_from_slice(&0xf800u16.to_le_bytes());
+        }
+        bm.painted.as_mut().unwrap().fill(1);
+        assert!(ctx.kernel.controls.is_empty());
+        ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, dc).unwrap();
+        release_dc(&mut ctx).unwrap();
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[..2],
+            &0xf800u16.to_le_bytes()
+        );
+        // An unrelated direct presentation is not overwritten by an idle hook.
+        ctx.kernel.framebuffer.pixels[..2].copy_from_slice(&0x07e0u16.to_le_bytes());
+        ctx.kernel.composite_controls();
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[..2],
+            &0x07e0u16.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn work_area_returns_guest_dimensions_and_rejects_bad_output() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, 0x30).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1800).unwrap();
+        let (w, h) = (kernel.framebuffer.width, kernel.framebuffer.height);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            system_parameters_info_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1800).unwrap(), 0);
+        assert_eq!(ctx.cpu.read_u32_le(0x1808).unwrap(), w);
+        assert_eq!(ctx.cpu.read_u32_le(0x180c).unwrap(), h);
+        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
+        assert_eq!(
+            system_parameters_info_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
+    #[test]
+    fn find_root_wildcard_does_not_enumerate_current_directory() {
+        let card = tempfile::tempdir().unwrap();
+        std::fs::create_dir(card.path().join("TomTom")).unwrap();
+        std::fs::write(card.path().join("TomTom/not-in-root.txt"), b"data").unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount_read_only("\\SD Card\\", card.path());
+        kernel.vfs.set_default_dir("\\SD Card\\TomTom\\");
+        write_wide_str(&mut cpu, 0x1000, 100, "\\*.*").unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert!(
+            matches!(find_first_file_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(h) if h != u32::MAX)
+        );
+        assert_eq!(
+            String::from_utf16_lossy(
+                &read_wstr(&mut ctx, 0x1800 + FIND_DATA_NAME_OFF, 260).unwrap()
+            ),
+            "SD Card"
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1800).unwrap() & 0x110, 0x110);
+    }
+
+    #[test]
+    fn message_wait_checks_objects_queue_and_legacy_argument_order() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.synthetic_paint_next_ms = u64::MAX;
+        let handle: u32 = 0xdead7000;
+        kernel.events.insert(
+            handle,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
+        cpu.write_mem(0x1400, &handle.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R0, 1).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x1400).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        cpu.write_reg(ArmReg::R3, 0x7f).unwrap();
+        cpu.write_mem(0x9000, &0u32.to_le_bytes()).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            msg_wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x102)
+        );
+        ctx.kernel.events.get_mut(&handle).unwrap().signalled = true;
+        assert_eq!(
+            msg_wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(!ctx.kernel.events.get(&handle).unwrap().signalled);
+        ctx.kernel.posted_messages.push_back((0, 0x401, 0, 0));
+        assert_eq!(
+            msg_wait_for_multiple_objects(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            ctx.kernel.posted_messages.len() + usize::from(ctx.kernel.pending_message.is_some()),
+            1
+        );
+        ctx.kernel.posted_messages.clear();
+        ctx.kernel.pending_message = None;
+        // Legacy arg2 is waitAll and arg3 is timeout, unlike Ex.
+        ctx.cpu.write_reg(ArmReg::R3, 0).unwrap();
+        ctx.cpu.write_mem(0x9000, &0x7fu32.to_le_bytes()).unwrap();
+        assert_eq!(
+            msg_wait_for_multiple_objects_legacy(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0x102)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 64).unwrap();
+        assert_eq!(
+            msg_wait_for_multiple_objects_legacy(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
     }
 
     #[test]

@@ -60,6 +60,16 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             };
             return Some((0, msg, wp, lp));
         }
+        if let Some(i) = ctx.kernel.posted_messages.iter().position(|m| {
+            posted_message_belongs_to(ctx.kernel, m, ctx.kernel.current_thread)
+                && accepts(ctx.kernel, *m)
+        }) {
+            return if remove {
+                ctx.kernel.posted_messages.remove(i)
+            } else {
+                Some(ctx.kernel.posted_messages[i])
+            };
+        }
     } else {
         if let Some((hwnd, lp)) = ctx.kernel.pending_create {
             let m = (hwnd, WM_CREATE, 0, lp);
@@ -119,12 +129,11 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             return Some(m);
         }
         let mixer = ctx.kernel.threads.iter().any(|t| t.started && !t.finished);
-        if let Some(i) = ctx
-            .kernel
-            .posted_messages
-            .iter()
-            .position(|&m| !(m.1 == MM_WOM_DONE && mixer) && accepts(ctx.kernel, m))
-        {
+        if let Some(i) = ctx.kernel.posted_messages.iter().position(|&m| {
+            !(m.1 == MM_WOM_DONE && mixer)
+                && posted_message_belongs_to(ctx.kernel, &m, ctx.kernel.current_thread)
+                && accepts(ctx.kernel, m)
+        }) {
             return if remove {
                 ctx.kernel.posted_messages.remove(i)
             } else {

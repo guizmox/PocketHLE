@@ -236,6 +236,7 @@ impl OpenVolume {
 
 #[derive(Debug, Clone)]
 struct Mount {
+    storage_card: bool,
     prefix: String,
     /// `prefix` with its original capitalisation. Enumerating a parent
     /// directory reports a nested mount point by name, and a guest that
@@ -647,7 +648,9 @@ impl Vfs {
         if !display.ends_with('/') {
             display.push('/');
         }
+        let storage_card = matches!(p.as_str(), "/sd card/" | "/storage card/");
         self.mounts.push(Mount {
+            storage_card,
             prefix: p,
             display_prefix: display,
             host_dir: host_dir.into(),
@@ -658,6 +661,39 @@ impl Vfs {
 
     pub fn mount_count(&self) -> usize {
         self.mounts.len()
+    }
+
+    /// Mark an explicitly mounted removable volume (including nonstandard names).
+    pub fn set_storage_card(&mut self, prefix: &str, enabled: bool) {
+        let p = self.normalise_guest_path(prefix);
+        for mount in &mut self.mounts {
+            if mount.prefix.trim_end_matches('/') == p.trim_end_matches('/') {
+                mount.storage_card = enabled;
+            }
+        }
+    }
+
+    /// One visible name per physical card, excluding directory overlays and aliases.
+    pub fn storage_cards(&self) -> Vec<String> {
+        // Mount overlays may share a prefix. Enumerate each visible volume
+        // once, then collapse alternate names of the same host-backed card.
+        let mut visible = std::collections::BTreeMap::new();
+        for mount in self.mounts.iter().filter(|m| m.storage_card) {
+            visible.insert(mount.prefix.clone(), mount);
+        }
+        let mut seen = std::collections::HashSet::new();
+        visible
+            .values()
+            .filter(|m| m.host_dir.is_dir())
+            .filter(|m| {
+                seen.insert(
+                    m.host_dir
+                        .canonicalize()
+                        .unwrap_or_else(|_| m.host_dir.clone()),
+                )
+            })
+            .map(|m| m.display_prefix.trim_matches(['/', '\\']).to_string())
+            .collect()
     }
 
     pub fn mounts_snapshot(&self) -> Vec<(String, PathBuf)> {
@@ -2807,5 +2843,49 @@ mod tests {
                 .any(|(name, _, is_dir)| name == "SD Card" && *is_dir),
             "root should list the card: {entries:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod storage_card_tests {
+    use super::*;
+    #[test]
+    fn removable_card_attributes_apply_only_to_volume_root() {
+        let card = tempfile::tempdir().unwrap();
+        std::fs::create_dir(card.path().join("Maps")).unwrap();
+        std::fs::write(card.path().join("Maps/test.dat"), b"map").unwrap();
+        let mut v = Vfs::default();
+        v.mount_read_only("\\SD Card\\", card.path());
+        v.mount_read_only("\\Application\\", card.path());
+        assert_eq!(v.attributes("\\SD Card").unwrap() & 0x111, 0x111);
+        assert_eq!(v.attributes("\\sd card\\Maps").unwrap() & 0x110, 0x10);
+        assert_eq!(
+            v.attributes("\\SD Card\\Maps\\test.dat").unwrap() & 0x110,
+            0
+        );
+        assert_eq!(v.attributes("\\Application").unwrap() & 0x100, 0);
+        v.mount_read_only("\\Custom MMC\\", card.path());
+        v.set_storage_card("\\Custom MMC\\", true);
+        assert_eq!(v.attributes("\\Custom MMC").unwrap() & 0x110, 0x110);
+        v.set_storage_card("\\Custom MMC\\", false);
+        assert_eq!(v.attributes("\\Custom MMC").unwrap() & 0x100, 0);
+    }
+    #[test]
+    fn cards_are_mounted_volumes_not_game_folders_and_aliases_are_unique() {
+        let old = tempfile::tempdir().unwrap();
+        let card = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut v = Vfs::default();
+        v.mount_read_only("\\SD Card\\", old.path());
+        v.mount_read_only("\\SD Card\\", card.path());
+        v.mount_read_only("\\Storage Card\\", card.path());
+        v.mount_read_only("\\Application\\", old.path());
+        v.mount_read_only("\\SD Card\\France 7.20\\", second.path());
+        assert_eq!(v.storage_cards(), vec!["SD Card"]);
+        v.mount_read_only("\\My MMC\\", second.path());
+        v.set_storage_card("\\My MMC\\", true);
+        assert_eq!(v.storage_cards(), vec!["My MMC", "SD Card"]);
+        v.set_storage_card("\\My MMC\\", false);
+        assert_eq!(v.storage_cards(), vec!["SD Card"]);
     }
 }

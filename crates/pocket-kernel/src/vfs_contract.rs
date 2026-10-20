@@ -859,7 +859,15 @@ impl Vfs {
             .get(&key)
             .copied()
             .unwrap_or(if meta.is_dir() { 0x10 } else { 0x80 });
+        // WinCE marks the root directory of a removable card TEMPORARY.
+        // Files and subdirectories on that volume retain their own attributes.
+        let card_root = self.mounts.iter().any(|mount| {
+            mount.storage_card
+                && mount.prefix.trim_end_matches('/')
+                    == self.normalise_guest_path(path).trim_end_matches('/')
+        });
         Ok(flags
+            | if card_root && meta.is_dir() { 0x100 } else { 0 }
             | if m.read_only || meta.permissions().readonly() {
                 1
             } else {
