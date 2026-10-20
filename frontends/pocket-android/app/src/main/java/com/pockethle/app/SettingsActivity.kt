@@ -44,11 +44,34 @@ class SettingsActivity : AppCompatActivity() {
             fun identityField(screen: androidx.preference.PreferenceScreen, name: String, label: String) {
                 screen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                     key = name; title = label; isPersistent = false
-                    text = current.toJson().optString(name)
+                    val preset = name.endsWith("preset_id")
+                    val gizmondo = name.startsWith("gizmondo_")
+                    val stored = current.toJson().optString(name)
+                    text = if (preset) runCatching {
+                        require(stored.length % 2 == 0)
+                        val bytes = stored.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                        if (gizmondo) {
+                            require(bytes.size % 2 == 0)
+                            val words = bytes.toString(Charsets.UTF_16LE)
+                            require(!words.contains('\uFFFD'))
+                            words.removeSuffix("\u0000").also { require(!it.contains('\u0000')) }
+                        } else {
+                            require(bytes.all { it.toInt() in 1..127 })
+                            bytes.toString(Charsets.US_ASCII)
+                        }
+                    }.getOrElse { "" } else stored
                     summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
-                    dialogMessage = "Hexadecimal bytes. Changes apply at the next launch."
+                    dialogMessage = if (preset) "Device name. Encoded automatically; applies at the next launch." else "Hexadecimal console identifier. Applies at the next launch."
                     setOnPreferenceChangeListener { _, value ->
-                        val hex = value.toString().trim()
+                        val input = value.toString()
+                        val hex = if (preset) {
+                            if (input.isEmpty() || input.contains('\u0000') || (!gizmondo && input.any { it.code > 127 })) {
+                                android.widget.Toast.makeText(requireContext(), "Enter a device name" + if (gizmondo) "" else " using ASCII characters", android.widget.Toast.LENGTH_LONG).show()
+                                return@setOnPreferenceChangeListener false
+                            }
+                            val bytes = if (gizmondo) (input + "\u0000").toByteArray(Charsets.UTF_16LE) else input.toByteArray(Charsets.US_ASCII)
+                            bytes.joinToString("") { "%02X".format(it.toInt() and 255) }
+                        } else input.trim()
                         if (hex.isEmpty() || hex.length % 2 != 0 || hex.length > 8192 || !hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
                             android.widget.Toast.makeText(requireContext(), "Enter pairs of hexadecimal digits (1–4096 bytes)", android.widget.Toast.LENGTH_LONG).show()
                             false
@@ -60,10 +83,10 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             val emulator = findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!
-            identityField(emulator, "device_preset_id", "Preset ID (WinCE)")
-            identityField(emulator, "device_platform_id", "Platform ID (WinCE)")
-            identityField(giz, "gizmondo_preset_id", "Preset ID (Gizmondo override)")
-            identityField(giz, "gizmondo_platform_id", "Platform ID (Gizmondo override)")
+            identityField(emulator, "device_preset_id", "Device name (Preset ID — WinCE)")
+            identityField(emulator, "device_platform_id", "Console identifier (Platform ID — hexadecimal, WinCE)")
+            identityField(giz, "gizmondo_preset_id", "Device name (Preset ID — Gizmondo)")
+            identityField(giz, "gizmondo_platform_id", "Console identifier (Platform ID — hexadecimal, Gizmondo)")
             fun toggle(keyName: String, label: String, checked: Boolean, update: (Boolean) -> Unit) {
                 giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                     key = keyName; title = label; isPersistent = false; isChecked = checked

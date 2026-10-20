@@ -1810,20 +1810,22 @@ impl PocketLauncher {
         ui.add_space(12.0);
         }
 
-        let (preset, platform) = if gizmondo {
-            (&mut draft.gizmondo_preset_id, &mut draft.gizmondo_platform_id)
-        } else {
-            (&mut draft.device_preset_id, &mut draft.device_platform_id)
-        };
         ui.separator();
-        ui.label("Device identity (hexadecimal bytes)");
-        ui.label(if gizmondo { "Overrides the WinCE identity for Gizmondo titles. Default Preset: Gizmondo (UTF-16LE)." } else { "Used by WinCE applications outside the Gizmondo profile." });
-        ui.label("Preset ID"); ui.text_edit_singleline(preset);
-        ui.label("Platform ID"); ui.text_edit_singleline(platform);
-        if let Err(error) = pocket_core::kernel::device_identity::DeviceIdentity::from_hex(preset, platform) {
-            ui.colored_label(Color32::RED, error);
+        ui.label("Device identity");
+        ui.label(if gizmondo { "Used instead of the WinCE identity for Gizmondo titles." } else { "Used by WinCE applications outside the Gizmondo profile." });
+        ui.label(if gizmondo { "Device name (Preset ID)" } else { "Device name (Preset ID — ASCII)" });
+        match draft.preset_text(gizmondo) {
+            Ok(mut text) => {
+                if ui.text_edit_singleline(&mut text).changed() {
+                    if let Err(e) = draft.set_preset_text(gizmondo, &text) { self.status = e; }
+                }
+            }
+            Err(e) => { ui.colored_label(Color32::RED, e); }
         }
-        ui.label("Changes apply at the next launch. Platform ID identifies the emulated console.");
+        let platform = if gizmondo { &mut draft.gizmondo_platform_id } else { &mut draft.device_platform_id };
+        ui.label("Console identifier (Platform ID — hexadecimal)");
+        ui.text_edit_singleline(platform);
+        ui.label("Device names are encoded automatically. Changes apply at the next launch.");
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -1836,6 +1838,16 @@ impl PocketLauncher {
         });
         });
         if save_clicked && !input {
+            if draft
+                .preset_text(gizmondo)
+                .map(|s| s.is_empty())
+                .unwrap_or(false)
+            {
+                self.status = "Enter a device name".into();
+                self.config_draft = Some(draft);
+                return;
+            }
+
             let (preset, platform) = if gizmondo {
                 (&draft.gizmondo_preset_id, &draft.gizmondo_platform_id)
             } else {

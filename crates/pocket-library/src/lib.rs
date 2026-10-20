@@ -727,6 +727,13 @@ fn default_gizmondo_preset_id() -> String {
     "470069007A006D006F006E0064006F000000".into()
 }
 
+fn default_gizmondo_platform_id() -> String {
+    "AD0D71F3E65E5B9A47E4773478FA926B".into()
+}
+fn identity_revision() -> u8 {
+    1
+}
+
 /// Persistent global configuration. Lives at
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -737,8 +744,10 @@ pub struct LauncherConfig {
     pub device_platform_id: String,
     #[serde(default = "default_gizmondo_preset_id")]
     pub gizmondo_preset_id: String,
-    #[serde(default = "String::new")]
+    #[serde(default = "default_gizmondo_platform_id")]
     pub gizmondo_platform_id: String,
+    #[serde(default)]
+    pub gizmondo_identity_revision: u8,
     /// Host GPU rendering is enabled by default; games may override it.
     #[serde(default = "default_gpu_renderer")]
     pub gpu_renderer: bool,
@@ -989,7 +998,8 @@ impl Default for LauncherConfig {
             device_preset_id: default_device_preset_id(),
             device_platform_id: String::new(),
             gizmondo_preset_id: default_gizmondo_preset_id(),
-            gizmondo_platform_id: String::new(),
+            gizmondo_platform_id: default_gizmondo_platform_id(),
+            gizmondo_identity_revision: identity_revision(),
             gpu_renderer: true,
             anisotropic_filtering: 0,
             schema_version: 1,
@@ -1196,6 +1206,11 @@ impl Library {
 
         let library = read_or_default::<LibraryFile>(&root.join("library.json"))?;
         let mut config = read_or_default::<LauncherConfig>(&root.join(CONFIG_FILE_NAME))?;
+        if config.gizmondo_identity_revision == 0 {
+            config.gizmondo_platform_id = default_gizmondo_platform_id();
+            config.gizmondo_identity_revision = identity_revision();
+            write_json(&root.join(CONFIG_FILE_NAME), &config)?;
+        }
         keybindings::migrate_steam_deck_gamepad_bindings(&mut config.gamepad_bindings);
         let mut this = Self {
             root,
@@ -5341,6 +5356,65 @@ fn import_tree_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 impl LauncherConfig {
+    pub fn preset_text(&self, gizmondo: bool) -> Result<String, String> {
+        let hex = self.device_identity_hex(gizmondo).0;
+        if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("Invalid stored Preset ID".into());
+        }
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        if gizmondo {
+            if bytes.len() % 2 != 0 {
+                return Err("Preset ID is not UTF-16LE text".into());
+            }
+            let mut words: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            if words.last() == Some(&0) {
+                words.pop();
+            }
+            if words.contains(&0) {
+                return Err("Preset ID contains an embedded NUL".into());
+            }
+            String::from_utf16(&words).map_err(|_| "Preset ID is not UTF-16LE text".into())
+        } else {
+            if !bytes.is_ascii() || bytes.contains(&0) {
+                return Err("Preset ID is not ASCII text".into());
+            }
+            String::from_utf8(bytes).map_err(|e| e.to_string())
+        }
+    }
+
+    pub fn set_preset_text(&mut self, gizmondo: bool, text: &str) -> Result<(), String> {
+        if text.contains('\0') {
+            return Err("Enter a device name without NUL characters".into());
+        }
+        let bytes: Vec<u8> = if gizmondo {
+            text.encode_utf16()
+                .chain(std::iter::once(0))
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        } else {
+            if !text.is_ascii() {
+                return Err("The WinCE device name must contain ASCII characters".into());
+            }
+            text.as_bytes().to_vec()
+        };
+        if bytes.len() > 4096 {
+            return Err("Device name is too long".into());
+        }
+        let hex = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        if gizmondo {
+            self.gizmondo_preset_id = hex;
+        } else {
+            self.device_preset_id = hex;
+        }
+        Ok(())
+    }
+
     /// Gizmondo IDs replace, rather than merge with, the general WinCE profile.
     pub fn device_identity_hex(&self, gizmondo: bool) -> (&str, &str) {
         if gizmondo {
@@ -5354,6 +5428,50 @@ impl LauncherConfig {
 #[cfg(test)]
 mod device_identity_config_tests {
     use super::*;
+    #[test]
+    fn readable_presets_roundtrip_without_changing_guest_bytes() {
+        let mut c = LauncherConfig::default();
+        assert_eq!(c.preset_text(true).unwrap(), "Gizmondo");
+        assert_eq!(c.preset_text(false).unwrap(), "PocketHLE-WinCE");
+        c.set_preset_text(false, "").unwrap();
+        assert_eq!(c.preset_text(false).unwrap(), "");
+        c.set_preset_text(false, "PocketHLE-WinCE").unwrap();
+        let original = c.gizmondo_preset_id.clone();
+        c.set_preset_text(true, "Gizmondo").unwrap();
+        assert_eq!(c.gizmondo_preset_id, original);
+        c.set_preset_text(true, "Console é 🚗").unwrap();
+        assert_eq!(c.preset_text(true).unwrap(), "Console é 🚗");
+        assert!(c.set_preset_text(false, "é").is_err());
+        assert!(c.set_preset_text(true, "bad\0name").is_err());
+        c.gizmondo_preset_id = "00D8".into();
+        assert!(c.preset_text(true).is_err());
+    }
+
+    #[test]
+    fn gizmondo_dump_default_migrates_once_without_changing_wince_or_future_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({"device_platform_id":"00112233445566778899AABBCCDDEEFF", "gizmondo_platform_id":"112233445566778899AABBCCDDEEFF00"});
+        std::fs::write(dir.path().join(CONFIG_FILE_NAME), config.to_string()).unwrap();
+        let mut lib = Library::open(dir.path()).unwrap();
+        assert_eq!(
+            lib.config().gizmondo_platform_id,
+            "AD0D71F3E65E5B9A47E4773478FA926B"
+        );
+        assert_eq!(
+            lib.config().device_platform_id,
+            "00112233445566778899AABBCCDDEEFF"
+        );
+        lib.config_mut().gizmondo_platform_id = "ABCDEF".into();
+        lib.save().unwrap();
+        assert_eq!(
+            Library::open(dir.path())
+                .unwrap()
+                .config()
+                .gizmondo_platform_id,
+            "ABCDEF"
+        );
+    }
+
     #[test]
     fn old_config_defaults_and_profile_overrides_survive_roundtrip() {
         let mut c: LauncherConfig = serde_json::from_str("{}").unwrap();
