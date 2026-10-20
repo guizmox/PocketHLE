@@ -834,10 +834,13 @@ fn visible_native_child_gets_an_initial_paint_after_its_size_notification() {
     kernel.window_parents.insert(hwnd, FAKE_HWND);
     kernel.create_stage = CreateStage::Create;
     kernel.create_frame_hwnd = hwnd;
-    kernel.create_frame = Some(GuestCallFrame {
-        args: [0, 0, 0, 0],
-        sp: cpu.read_reg(ArmReg::Sp).unwrap(),
-        lr: 0x4444,
+    kernel.create_frame = Some(pocket_kernel::WindowCallbackFrame {
+        frame: GuestCallFrame {
+            args: [0, 0, 0, 0],
+            sp: cpu.read_reg(ArmReg::Sp).unwrap(),
+            lr: 0x4444,
+        },
+        thread: kernel.current_thread,
     });
     cpu.write_reg(ArmReg::R0, 0).unwrap();
     let thunk = thunk_at(0x70000100);

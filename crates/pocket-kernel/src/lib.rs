@@ -713,6 +713,20 @@ pub struct GuestCallFrame {
     pub sp: u32,
 }
 
+/// A synchronous window callback belongs to the guest thread that entered it.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowCallbackFrame {
+    pub frame: GuestCallFrame,
+    pub thread: usize,
+}
+
+impl std::ops::Deref for WindowCallbackFrame {
+    type Target = GuestCallFrame;
+    fn deref(&self) -> &Self::Target {
+        &self.frame
+    }
+}
+
 /// Per-thread continuation for IsDialogMessage's synchronous guest callbacks.
 #[derive(Debug, Clone, Copy)]
 pub struct DialogKeyFrame {
@@ -1155,12 +1169,12 @@ pub struct KernelState {
     /// Registers of the `CreateWindowExW` / `ShowWindow` call we
     /// interrupted to run the guest's `WndProc` synchronously. See
     /// [`CreateStage`].
-    pub create_frame: Option<GuestCallFrame>,
+    pub create_frame: Option<WindowCallbackFrame>,
     /// HWND being initialized by the current synchronous WM_CREATE callback.
     pub create_frame_hwnd: u32,
     /// Suspended outer window callbacks when a WM_CREATE creates another window.
     /// Each entry preserves the outer API continuation, callback kind and HWND.
-    pub create_frame_stack: Vec<(GuestCallFrame, CreateStage, u32)>,
+    pub create_frame_stack: Vec<(WindowCallbackFrame, CreateStage, u32)>,
     /// Which leg of the synchronous window-creation message sequence is
     /// in flight inside the guest `WndProc`.
     pub create_stage: CreateStage,

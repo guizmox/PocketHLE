@@ -6196,6 +6196,9 @@ fn strchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let c = ctx.arg_u32(1)? as u8;
     let bytes = read_crt_cstr(ctx, s)?;
+    if c == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(s + bytes.len() as u32));
+    }
     for (i, b) in bytes.iter().enumerate() {
         if *b == c {
             return Ok(DispatchOutcome::ReturnedR0(s + i as u32));
@@ -6208,6 +6211,9 @@ fn strrchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let c = ctx.arg_u32(1)? as u8;
     let bytes = read_crt_cstr(ctx, s)?;
+    if c == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(s + bytes.len() as u32));
+    }
     let mut found = None;
     for (i, b) in bytes.iter().enumerate() {
         if *b == c {
@@ -6422,6 +6428,10 @@ fn wcschr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let c = ctx.arg_u32(1)? as u16;
     let chars = read_wstr(ctx, s, 0x10000)?;
+    // The terminating NUL is part of the string for character searches.
+    if c == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(s + chars.len() as u32 * 2));
+    }
     for (i, w) in chars.iter().enumerate() {
         if *w == c {
             return Ok(DispatchOutcome::ReturnedR0(s + i as u32 * 2));
@@ -6434,6 +6444,9 @@ fn wcsrchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let c = ctx.arg_u32(1)? as u16;
     let chars = read_wstr(ctx, s, 0x10000)?;
+    if c == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(s + chars.len() as u32 * 2));
+    }
     let mut found = None;
     for (i, w) in chars.iter().enumerate() {
         if *w == c {
@@ -9776,7 +9789,10 @@ fn begin_window_callback(
             .create_frame_stack
             .push((parent, kernel.create_stage, kernel.create_frame_hwnd));
     }
-    kernel.create_frame = Some(frame);
+    kernel.create_frame = Some(pocket_kernel::WindowCallbackFrame {
+        frame,
+        thread: kernel.current_thread,
+    });
     kernel.create_stage = stage;
     kernel.create_frame_hwnd = hwnd;
 }
@@ -9792,6 +9808,31 @@ fn finish_window_callback(kernel: &mut KernelState) {
         kernel.create_frame = None;
         kernel.create_stage = CreateStage::Idle;
         kernel.create_frame_hwnd = 0;
+    }
+}
+
+/// Sleep can switch threads while a synchronous callback remains suspended.
+/// Select this thread's continuation before interpreting its SP as a return.
+fn select_window_callback_thread(kernel: &mut KernelState) {
+    if kernel
+        .create_frame
+        .is_some_and(|f| f.thread == kernel.current_thread)
+    {
+        return;
+    }
+    if let Some(index) = kernel
+        .create_frame_stack
+        .iter()
+        .rposition(|(f, _, _)| f.thread == kernel.current_thread)
+    {
+        let selected = kernel.create_frame_stack.remove(index);
+        if let Some(other) = kernel.create_frame.replace(selected.0) {
+            kernel
+                .create_frame_stack
+                .push((other, kernel.create_stage, kernel.create_frame_hwnd));
+        }
+        kernel.create_stage = selected.1;
+        kernel.create_frame_hwnd = selected.2;
     }
 }
 
@@ -9820,6 +9861,7 @@ fn initial_window_rect(
 }
 
 fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    select_window_callback_thread(ctx.kernel);
     // Must be the first thing we do: the thunk re-fires this whole handler
     // when the hijacked `WndProc` returns, and by then R0..R3 hold the
     // callback's result rather than the original arguments.
@@ -9828,7 +9870,9 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             // A nested CreateWindowExW runs with a *lower* guest SP.
             // Only an SP back at the current frame's saved value means
             // its own WndProc has returned.
-            if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
+            if frame.thread == ctx.kernel.current_thread
+                && ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp
+            {
                 let result = ctx.cpu.read_reg(ArmReg::R0)?;
                 if result as i32 == -1 {
                     log::warn!(
@@ -10095,13 +10139,16 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 /// which runs before the game has allocated its state struct — matches
 /// the real ordering and gives the guest a laid-out board.
 fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    select_window_callback_thread(ctx.kernel);
     // Must come first: the thunk re-fires this whole handler when the
     // hijacked `WndProc` returns.
     if ctx.kernel.create_stage == CreateStage::Size {
         if let Some(frame) = ctx.kernel.create_frame {
             // A nested `ShowWindow` from inside the WM_SIZE handler runs on a
             // deeper stack; only SP back at its saved value is a real return.
-            if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
+            if frame.thread == ctx.kernel.current_thread
+                && ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp
+            {
                 finish_window_callback(ctx.kernel);
                 ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
                 ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
@@ -22917,6 +22964,47 @@ mod tests {
     }
 
     #[test]
+    fn window_callbacks_keep_their_thread_across_interleaved_stacks() {
+        let mut k = fresh_kernel();
+        let frame = |sp, lr| GuestCallFrame {
+            args: [0; 4],
+            sp,
+            lr,
+        };
+        begin_window_callback(
+            &mut k,
+            frame(0x450000, 0x33430),
+            CreateStage::Create,
+            FAKE_HWND,
+        );
+        k.current_thread = 1;
+        select_window_callback_thread(&mut k);
+        assert_ne!(k.create_frame.unwrap().thread, k.current_thread);
+        begin_window_callback(
+            &mut k,
+            frame(0x1fff000, 0x3c194),
+            CreateStage::Create,
+            0xdead1001,
+        );
+        k.current_thread = 0;
+        select_window_callback_thread(&mut k);
+        assert_eq!(k.create_frame.unwrap().thread, 0);
+        assert_eq!(k.create_frame.unwrap().lr, 0x33430);
+        k.current_thread = 1;
+        select_window_callback_thread(&mut k);
+        assert_eq!(k.create_frame.unwrap().thread, 1);
+        assert_eq!(k.create_frame.unwrap().lr, 0x3c194);
+        finish_window_callback(&mut k);
+        k.current_thread = 0;
+        select_window_callback_thread(&mut k);
+        assert_eq!(k.create_frame.unwrap().thread, 0);
+        assert_eq!(k.create_frame_hwnd, FAKE_HWND);
+        finish_window_callback(&mut k);
+        assert!(k.create_frame.is_none());
+        assert!(k.create_frame_stack.is_empty());
+    }
+
+    #[test]
     fn nested_wm_create_callbacks_resume_outer_frame_and_hwnd() {
         let mut k = fresh_kernel();
         let outer = GuestCallFrame {
@@ -23776,6 +23864,67 @@ mod tests {
         assert!(!ctx.kernel.events.get(&first).unwrap().signalled);
         assert!(!ctx.kernel.events.get(&second).unwrap().signalled);
         assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn crt_search_wide_character_includes_terminator_and_stops_at_it() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (text, needle, first, last) in [
+            (vec![0], 0, 0x1000, 0x1000),
+            (vec![65, 0x3a9, 65, 0, 90, 0], 0, 0x1006, 0x1006),
+            (vec![65, 0x3a9, 65, 0, 90, 0], 65, 0x1000, 0x1004),
+            (vec![65, 0x3a9, 65, 0, 90, 0], 0x3a9, 0x1002, 0x1002),
+            (vec![65, 0x3a9, 65, 0, 90, 0], 90, 0, 0),
+        ] {
+            ctx.cpu.write_mem(0x1000, &wide_to_bytes(&text)).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, needle).unwrap();
+            assert_eq!(
+                wcschr(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(first)
+            );
+            assert_eq!(
+                wcsrchr(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(last)
+            );
+        }
+    }
+
+    #[test]
+    fn crt_search_byte_character_includes_terminator_and_stops_at_it() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (text, needle, first, last) in [
+            (b"\0".as_slice(), 0, 0x1000, 0x1000),
+            (b"ABA\0Z\0".as_slice(), 0, 0x1003, 0x1003),
+            (b"ABA\0Z\0".as_slice(), 65, 0x1000, 0x1002),
+            (b"ABA\0Z\0".as_slice(), 90, 0, 0),
+        ] {
+            ctx.cpu.write_mem(0x1000, text).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, needle).unwrap();
+            assert_eq!(
+                strchr(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(first)
+            );
+            assert_eq!(
+                strrchr(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(last)
+            );
+        }
     }
 
     #[test]
