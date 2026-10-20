@@ -3,6 +3,7 @@ crates\pocket-kernel\src\controls.rs
 crates\pocket-kernel\src\device_identity.rs
 crates\pocket-kernel\src\gdi.rs
 crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\registry.rs
 crates\pocket-kernel\src\vfs.rs
 crates\pocket-kernel\src\vfs_contract.rs
 crates\pocket-library\src\lib.rs

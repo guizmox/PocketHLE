@@ -276,6 +276,39 @@ impl Registry {
             "SN-Key2",
             RegistryValue::Dword(0),
         );
+        // The emulated NMEA serial bridge is a real stream-interface device.
+        // WinCE applications enumerate Drivers\Active and follow Key to its
+        // configuration before attempting CreateFileW(COM8:). Both device
+        // profiles use these defaults; GPS access still obeys Service::allowed.
+        reg.create_key(r"HKLM\Drivers\Active");
+        reg.create_key(r"HKLM\Drivers\BuiltIn");
+        let serial_key = r"Drivers\BuiltIn\Serial8";
+        reg.set_value(
+            r"HKLM\Drivers\Active\08",
+            "Name",
+            RegistryValue::Sz("COM8:".into()),
+        );
+        reg.set_value(
+            r"HKLM\Drivers\Active\08",
+            "Key",
+            RegistryValue::Sz(serial_key.into()),
+        );
+        reg.set_value(
+            &format!(r"HKLM\{serial_key}"),
+            "Prefix",
+            RegistryValue::Sz("COM".into()),
+        );
+        reg.set_value(
+            &format!(r"HKLM\{serial_key}"),
+            "Index",
+            RegistryValue::Dword(8),
+        );
+        reg.set_value(
+            &format!(r"HKLM\{serial_key}"),
+            "FriendlyName",
+            RegistryValue::Sz("PocketHLE NMEA GPS".into()),
+        );
+
         // The g-sensor. Tilt-controlled titles find the accelerometer by
         // opening its driver key rather than by asking a sensor API, so
         // a device without this key reads as a device without a sensor —
@@ -451,6 +484,29 @@ impl Registry {
             .get(&name.to_ascii_lowercase())
             .cloned()
     }
+    /// Immediate children, sorted case-insensitively with their display names.
+    pub fn subkeys(&self, path: &str) -> Vec<String> {
+        let prefix = format!("{}\\", canonical_key(path).to_ascii_lowercase());
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut children = std::collections::BTreeMap::new();
+        for key in store.keys.keys() {
+            if let Some(rest) = key.strip_prefix(&prefix) {
+                if let Some(child) = rest.split('\\').next().filter(|s| !s.is_empty()) {
+                    let display = store
+                        .display
+                        .get(key)
+                        .and_then(|s| s.get(prefix.len()..))
+                        .and_then(|s| s.split('\\').next())
+                        .unwrap_or(child);
+                    children
+                        .entry(child.to_string())
+                        .or_insert_with(|| display.to_string());
+                }
+            }
+        }
+        children.into_values().collect()
+    }
+
     pub fn delete_value(&mut self, path: &str, name: &str) -> bool {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let removed = store
@@ -510,6 +566,39 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nmea_serial_device_is_discoverable_in_both_persistent_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        for profile in ["registry-pocketpc.json", "registry-gizmondo.json"] {
+            let path = dir.path().join(profile);
+            let mut old = Registry::new();
+            old.configure_persistence(&path).unwrap();
+            old.set_value(r"HKCU\User", "Choice", RegistryValue::Dword(42));
+            old.flush().unwrap();
+            let mut registry = Registry::with_device_defaults();
+            registry.configure_persistence(&path).unwrap();
+            assert!(registry.open(r"HKLM\Drivers\Active").is_some());
+            assert_eq!(registry.subkeys(r"HKLM\Drivers\Active"), vec!["08"]);
+            assert_eq!(
+                registry.value(r"HKLM\Drivers\Active\08", "Name"),
+                Some(RegistryValue::Sz("COM8:".into()))
+            );
+            assert_eq!(
+                registry.value(r"HKLM\Drivers\Active\08", "Key"),
+                Some(RegistryValue::Sz(r"Drivers\BuiltIn\Serial8".into()))
+            );
+            assert_eq!(
+                registry.value(r"HKLM\Drivers\BuiltIn\Serial8", "Index"),
+                Some(RegistryValue::Dword(8))
+            );
+            assert_eq!(
+                registry.value(r"HKCU\User", "Choice"),
+                Some(RegistryValue::Dword(42))
+            );
+            registry.flush().unwrap();
+        }
+    }
+
     #[test]
     fn gizmondo_backlight_second_position_defaults_are_queryable() {
         let registry = super::Registry::with_device_defaults();

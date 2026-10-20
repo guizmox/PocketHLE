@@ -900,6 +900,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "RegCreateKeyExW", reg_create_key_ex_w);
     d.register_handler(dll, "RegQueryValueExW", reg_query_value_ex_w);
     d.register_handler(dll, "RegQueryInfoKeyW", reg_query_info_key_w);
+    d.register_handler(dll, "RegEnumKeyExW", reg_enum_key_ex_w);
     d.register_handler(dll, "RegSetValueExW", reg_set_value_ex_w);
     d.register_handler(dll, "RegDeleteValueW", reg_delete_value_w);
     d.register_handler(dll, "RegCloseKey", reg_close_key);
@@ -13372,6 +13373,67 @@ fn system_parameters_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
     }
     // Retain existing handling of other SPI actions in this incremental change.
     Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn reg_enum_key_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    let index = ctx.arg_u32(1)?;
+    let name = ctx.arg_u32(2)?;
+    let length = ctx.arg_u32(3)?;
+    let reserved = ctx.arg_u32(4)?;
+    let class = ctx.arg_u32(5)?;
+    let class_length = ctx.arg_u32(6)?;
+    let time = ctx.arg_u32(7)?;
+    let Some(path) = ctx.kernel.registry.path_for(key) else {
+        return Ok(DispatchOutcome::ReturnedR0(6));
+    };
+    if reserved != 0
+        || !vfs_probe_output(ctx, length, 4)
+        || ctx
+            .cpu
+            .check_guest_access(length, 4, pocket_cpu::Prot::READ)
+            .is_err()
+        || (class != 0 && class_length == 0)
+    {
+        return Ok(DispatchOutcome::ReturnedR0(87));
+    }
+    let children = ctx.kernel.registry.subkeys(&path);
+    let Some(child) = children.get(index as usize) else {
+        return Ok(DispatchOutcome::ReturnedR0(259));
+    };
+    let chars: Vec<_> = child.encode_utf16().collect();
+    let capacity = ctx.cpu.read_u32_le(length)?;
+    if capacity <= chars.len() as u32 {
+        ctx.cpu
+            .write_mem(length, &((chars.len() + 1) as u32).to_le_bytes())?;
+        return Ok(DispatchOutcome::ReturnedR0(234));
+    }
+    if !vfs_probe_output(ctx, name, ((chars.len() + 1) * 2) as u32)
+        || (class_length != 0 && !vfs_probe_output(ctx, class_length, 4))
+        || (class != 0 && !vfs_probe_output(ctx, class, 2))
+        || (time != 0 && !vfs_probe_output(ctx, time, 8))
+    {
+        return Ok(DispatchOutcome::ReturnedR0(87));
+    }
+    let bytes: Vec<_> = chars
+        .iter()
+        .copied()
+        .chain(Some(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    ctx.cpu.write_mem(name, &bytes)?;
+    ctx.cpu
+        .write_mem(length, &(chars.len() as u32).to_le_bytes())?;
+    if class != 0 {
+        ctx.cpu.write_mem(class, &[0, 0])?;
+    }
+    if class_length != 0 {
+        ctx.cpu.write_mem(class_length, &0u32.to_le_bytes())?;
+    }
+    if time != 0 {
+        ctx.cpu.write_mem(time, &[0; 8])?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -30519,6 +30581,45 @@ mod tests {
             .unwrap();
         cpu.write_reg(ArmReg::Sp, 0x9000).unwrap();
         cpu
+    }
+
+    #[test]
+    fn registry_enumeration_reports_device_then_end_and_checks_capacity() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.registry = pocket_kernel::registry::Registry::with_device_defaults();
+        let handle = kernel.registry.open(r"HKLM\Drivers\Active").unwrap();
+        cpu.write_reg(ArmReg::R0, handle).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::R3, 0x1700).unwrap();
+        cpu.write_mem(0x9000, &[0; 16]).unwrap();
+        cpu.write_mem(0x1700, &1u32.to_le_bytes()).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            reg_enum_key_ex_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(234)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1700).unwrap(), 3);
+        assert_eq!(
+            reg_enum_key_ex_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            String::from_utf16_lossy(&read_wstr(&mut ctx, 0x1800, 10).unwrap()),
+            "08"
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1700).unwrap(), 2);
+        ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
+        assert_eq!(
+            reg_enum_key_ex_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(259)
+        );
     }
 
     #[test]
