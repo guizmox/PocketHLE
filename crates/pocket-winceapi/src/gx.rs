@@ -272,12 +272,12 @@ fn gx_get_default_keys(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     // the frontends and the message pump all agree on which virtual key
     // is the A button.
     let sret = ctx.arg_u32(0)?;
-    let buf = pocket_kernel::gapi::default_key_list();
+    let buf = pocket_kernel::gapi::key_list_with_action(ctx.kernel.gapi_action_key);
     debug_assert_eq!(buf.len(), 0x60);
     ctx.cpu.write_mem(sret, &buf)?;
-    // A guest that reads the key list drives its whole input layer off
-    // this table and ignores virtual keys that are not in it, so from
-    // here on a host VK_RETURN has to be delivered as `vkA`.
+    // Record the query so legacy/Gizmondo confirm follows vkA. The Pocket
+    // PC profile advertises and preserves the physical select key, Return;
+    // reading GAPI directions does not imply every binding uses the table.
     ctx.kernel.gapi_keys_queried = true;
     Ok(DispatchOutcome::ReturnedR0(sret))
 }
@@ -428,6 +428,7 @@ pub(crate) mod tests {
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             gapi_keys_queried: false,
+            gapi_action_key: pocket_kernel::gapi::VK_A,
             pending_message: None,
             threads: Vec::new(),
             events: Default::default(),
@@ -567,5 +568,46 @@ pub(crate) mod tests {
         assert_eq!(kernel.framebuffer.pixels[1], 0xf8);
         assert!(kernel.framebuffer.frame_counter > pre_counter);
         assert_eq!(kernel.framebuffer.pixels.len(), FB_BYTES as usize);
+    }
+    #[test]
+    fn gapi_profiles_advertise_the_key_delivered_to_the_guest() {
+        use pocket_kernel::{gapi, InputEvent};
+        for action in [gapi::VK_A, gapi::VK_RETURN] {
+            let mut cpu = StubCpu::new();
+            cpu.map_region(
+                0x1000,
+                0x1000,
+                pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+            )
+            .unwrap();
+            cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            cpu.write_mem(0x1060, &[0xa5; 4]).unwrap();
+            let mut kernel = fresh_kernel();
+            assert_eq!(kernel.gapi_action_key, gapi::VK_A);
+            kernel.gapi_action_key = action;
+            let t = dummy_thunk();
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                gx_get_default_keys(&mut c).unwrap(),
+                DispatchOutcome::ReturnedR0(0x1000)
+            );
+            assert_eq!(
+                c.cpu.read_mem(0x1000, 0x60).unwrap(),
+                gapi::key_list_with_action(action)
+            );
+            assert_eq!(c.cpu.read_mem(0x1060, 4).unwrap(), vec![0xa5; 4]);
+            assert!(c.kernel.gapi_keys_queried);
+            for input in [InputEvent::KeyDown { vk: 13 }, InputEvent::KeyUp { vk: 13 }] {
+                let expected = match input {
+                    InputEvent::KeyDown { .. } => InputEvent::KeyDown { vk: action },
+                    _ => InputEvent::KeyUp { vk: action },
+                };
+                assert_eq!(crate::coredll::remap_input(input, true, action), expected);
+            }
+        }
     }
 }

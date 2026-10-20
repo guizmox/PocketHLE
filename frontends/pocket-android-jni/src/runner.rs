@@ -395,6 +395,7 @@ fn run_process(
     }
 
     let is_gizmondo = is_gizmondo_game(entry, library_root);
+    emu.set_pocket_pc_input(!is_gizmondo);
     if is_gizmondo {
         if let Ok(image) = &image {
             crate::colors_trace::install(&mut emu, image);

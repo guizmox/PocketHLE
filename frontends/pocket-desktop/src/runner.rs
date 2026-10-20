@@ -177,6 +177,7 @@ impl Runner {
         // Gizmondo hardware has a native 320x240 landscape LCD. Detect the
         // platform before the title starts so GAPI sees the real geometry.
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
+        emu.set_pocket_pc_input(!is_gizmondo);
         if let Some(context) = handle_context {
             context.table.defer_process_exit();
             if let Some(process) = emu.process_mut() {

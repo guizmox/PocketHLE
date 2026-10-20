@@ -110,7 +110,11 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             .iter()
             .enumerate()
             .find_map(|(i, &event)| {
-                let event = remap_input(event, ctx.kernel.gapi_keys_queried);
+                let event = remap_input(
+                    event,
+                    ctx.kernel.gapi_keys_queried,
+                    ctx.kernel.gapi_action_key,
+                );
                 let (msg, wp, lp) = input_to_message(event)?;
                 accepts(ctx.kernel, (target, msg, wp, lp)).then_some((
                     i,

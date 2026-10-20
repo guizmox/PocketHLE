@@ -782,6 +782,8 @@ pub enum CreateStage {
     /// The `WndProc` is running `WM_SIZE`, the last message of the
     /// sequence. When it returns, `CreateWindowExW` finally does too.
     Size,
+    /// Pocket PC initial ShowWindow focus notification, sent before return.
+    InitialFocus,
 }
 
 /// A Win32 event object created by `CreateEventW`.
@@ -1258,6 +1260,9 @@ pub struct KernelState {
     /// that table names, so the host's confirm key has to be delivered
     /// as `vkA` — see [`gapi::remap_host_key`].
     pub gapi_keys_queried: bool,
+    /// Hardware action key advertised by GAPI. Legacy/Gizmondo keeps 0xD1;
+    /// Pocket PC uses the physical D-pad select key VK_RETURN.
+    pub gapi_action_key: u16,
     /// Message previewed by `PeekMessageW` with PM_NOREMOVE. The next
     /// `GetMessageW` must return the same message instead of advancing
     /// the synthetic queue a second time. Carries the target `hwnd`
@@ -3584,6 +3589,7 @@ impl Process {
                 modal_dialog: None,
                 pending_input: VecDeque::new(),
                 gapi_keys_queried: false,
+                gapi_action_key: gapi::VK_A,
                 pending_message: None,
                 threads: Vec::new(),
                 events: Default::default(),

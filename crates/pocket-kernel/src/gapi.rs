@@ -48,8 +48,15 @@ pub const DEFAULT_KEYS: [u16; 8] = [
 /// devices that emulate the D-pad with stylus regions, and reporting
 /// (0,0) is how a real device says "this button is a real button".
 pub fn default_key_list() -> [u8; KEY_LIST_BYTES] {
+    key_list_with_action(VK_A)
+}
+
+/// Device-selected action key; the Gizmondo/legacy profile keeps VK_A.
+pub fn key_list_with_action(action: u16) -> [u8; KEY_LIST_BYTES] {
+    let mut keys = DEFAULT_KEYS;
+    keys[4] = action;
     let mut buf = [0u8; KEY_LIST_BYTES];
-    for (i, vk) in DEFAULT_KEYS.iter().enumerate() {
+    for (i, vk) in keys.iter().enumerate() {
         buf[i * 12..i * 12 + 2].copy_from_slice(&vk.to_le_bytes());
     }
     buf
@@ -61,8 +68,13 @@ pub fn default_key_list() -> [u8; KEY_LIST_BYTES] {
 /// asked for the key list. A title that reads `VK_RETURN` directly
 /// never calls `GXGetDefaultKeys`, so it keeps seeing the real code.
 pub fn remap_host_key(vk: u16, gapi_keys_queried: bool) -> u16 {
-    if gapi_keys_queried && vk == VK_RETURN {
-        VK_A
+    remap_host_key_with_action(vk, gapi_keys_queried, VK_A)
+}
+
+/// Keep the delivered action key consistent with GXGetDefaultKeys.
+pub fn remap_host_key_with_action(vk: u16, queried: bool, action: u16) -> u16 {
+    if queried && vk == VK_RETURN {
+        action
     } else {
         vk
     }
@@ -88,5 +100,24 @@ mod tests {
         assert_eq!(remap_host_key(VK_RETURN, false), VK_RETURN);
         assert_eq!(remap_host_key(VK_LEFT, true), VK_LEFT);
         assert_eq!(remap_host_key(VK_A, true), VK_A);
+    }
+    #[test]
+    fn pocket_pc_action_and_legacy_gizmondo_mapping_are_separate() {
+        let legacy = default_key_list();
+        let ppc = key_list_with_action(VK_RETURN);
+        assert_eq!(&ppc[..48], &legacy[..48]);
+        assert_eq!(&ppc[50..], &legacy[50..]);
+        assert_eq!(u16::from_le_bytes([ppc[48], ppc[49]]), VK_RETURN);
+        for vk in [
+            VK_RETURN, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_A, VK_B, VK_C, VK_START, 0x11, 0x20,
+            0x10, 0x09, 0x1b, 0x70, 0x7a,
+        ] {
+            assert_eq!(
+                remap_host_key_with_action(vk, true, VK_A),
+                remap_host_key(vk, true)
+            );
+            assert_eq!(remap_host_key_with_action(vk, true, VK_RETURN), vk);
+            assert_eq!(remap_host_key_with_action(vk, false, VK_RETURN), vk);
+        }
     }
 }

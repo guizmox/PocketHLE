@@ -10169,13 +10169,50 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     select_window_callback_thread(ctx.kernel);
     // Must come first: the thunk re-fires this whole handler when the
     // hijacked `WndProc` returns.
-    if ctx.kernel.create_stage == CreateStage::Size {
+    if matches!(
+        ctx.kernel.create_stage,
+        CreateStage::Size | CreateStage::InitialFocus
+    ) {
         if let Some(frame) = ctx.kernel.create_frame {
             // A nested `ShowWindow` from inside the WM_SIZE handler runs on a
             // deeper stack; only SP back at its saved value is a real return.
             if frame.thread == ctx.kernel.current_thread
                 && ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp
             {
+                // Initial focus is a sent window notification, not a queued input
+                // event. Deliver it before returning from the first ShowWindow.
+                // COD2 saves its audio level on focus loss and restores it on
+                // focus gain: a late synthetic WM_SETFOCUS reaches its game loop
+                // without a preceding loss and restores an uninitialized zero.
+                // Keep the existing Gizmondo/legacy startup sequence unchanged.
+                let hwnd = ctx.kernel.create_frame_hwnd;
+                if ctx.kernel.create_stage == CreateStage::Size
+                    && ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
+                    && !matches!(frame.args[1], 0 | 4 | 8)
+                    && ctx
+                        .kernel
+                        .pending_startup
+                        .iter()
+                        .any(|m| m.0 == WM_SETFOCUS)
+                {
+                    if let Some(proc_va) = ctx
+                        .kernel
+                        .window_procs
+                        .get(&hwnd)
+                        .copied()
+                        .filter(|p| *p != 0)
+                    {
+                        ctx.kernel.pending_startup.retain(|m| m.0 != WM_SETFOCUS);
+                        ctx.kernel.create_stage = CreateStage::InitialFocus;
+                        ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                        ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+                        ctx.cpu.write_reg(ArmReg::R1, WM_SETFOCUS)?;
+                        ctx.cpu.write_reg(ArmReg::R2, 0)?;
+                        ctx.cpu.write_reg(ArmReg::R3, 0)?;
+                        ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+                        return Ok(DispatchOutcome::JumpTo(proc_va));
+                    }
+                }
                 finish_window_callback(ctx.kernel);
                 ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
                 ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
@@ -12596,18 +12633,20 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
 /// Pop one queued host input event, rewriting its virtual key for GAPI
 /// guests.
 ///
-/// A game that fetched its key list from `GXGetDefaultKeys` compares
-/// every `WM_KEYDOWN` against that table and drops anything else, so the
-/// host's confirm key (`VK_RETURN`) has to arrive as `vkA`. Doing the
-/// rewrite here — rather than in each frontend — keeps `--key enter`,
-/// the desktop launcher and the Android on-screen pad in agreement, and
-/// leaves non-GAPI titles that read `VK_RETURN` directly untouched.
+/// The legacy/Gizmondo profile maps confirm to the advertised vkA.
+/// Pocket PC advertises VK_RETURN for the physical select button, so a
+/// game can use the GAPI direction table and still bind Enter explicitly
+/// (COD2 binds it to Fire). Apply the same device choice in both queue paths.
 fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
     let ev = ctx.kernel.pending_input.pop_front()?;
     if matches!(ev, InputEvent::KeyDown { .. }) {
         restore_active_dialog_focus(ctx.kernel);
     }
-    Some(remap_input(ev, ctx.kernel.gapi_keys_queried))
+    Some(remap_input(
+        ev,
+        ctx.kernel.gapi_keys_queried,
+        ctx.kernel.gapi_action_key,
+    ))
 }
 
 /// A modal return can leave the saved focus in an earlier popup. Do not
@@ -12686,13 +12725,13 @@ fn remember_window_focus(kernel: &mut KernelState) {
     }
 }
 
-fn remap_input(ev: InputEvent, queried: bool) -> InputEvent {
+pub(crate) fn remap_input(ev: InputEvent, queried: bool, action: u16) -> InputEvent {
     let remapped = match ev {
         InputEvent::KeyDown { vk } => InputEvent::KeyDown {
-            vk: pocket_kernel::gapi::remap_host_key(vk, queried),
+            vk: pocket_kernel::gapi::remap_host_key_with_action(vk, queried, action),
         },
         InputEvent::KeyUp { vk } => InputEvent::KeyUp {
-            vk: pocket_kernel::gapi::remap_host_key(vk, queried),
+            vk: pocket_kernel::gapi::remap_host_key_with_action(vk, queried, action),
         },
         other => other,
     };
@@ -26588,6 +26627,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gapi_pocket_pc_focus_is_sent_before_show_returns_legacy_queue_unchanged() {
+        for action in [pocket_kernel::gapi::VK_A, pocket_kernel::gapi::VK_RETURN] {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            kernel.gapi_action_key = action;
+            let proc_va = 0x10000;
+            kernel.window_procs.insert(FAKE_HWND, proc_va);
+            kernel.pending_startup.push_back((WM_SETFOCUS, 0, 0));
+            cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+            cpu.write_reg(ArmReg::R1, 1).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x1234).unwrap();
+            cpu.write_reg(ArmReg::R3, 0x5678).unwrap();
+            cpu.write_reg(ArmReg::Sp, 0x8000).unwrap();
+            cpu.write_reg(ArmReg::Lr, 0x11223344).unwrap();
+            let thunk = dummy_thunk();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                show_window(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(proc_va)
+            );
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_SIZE);
+            ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+            let result = show_window(&mut ctx).unwrap();
+            if action == pocket_kernel::gapi::VK_RETURN {
+                assert_eq!(result, DispatchOutcome::JumpTo(proc_va));
+                assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_SETFOCUS);
+                assert!(ctx.kernel.pending_startup.is_empty());
+                ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+                assert_eq!(
+                    show_window(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(1)
+                );
+            } else {
+                assert_eq!(result, DispatchOutcome::ReturnedR0(1));
+                assert_eq!(
+                    ctx.kernel.pending_startup.front(),
+                    Some(&(WM_SETFOCUS, 0, 0))
+                );
+            }
+            assert_eq!(ctx.kernel.create_stage, CreateStage::Idle);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x11223344);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 1);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 0x1234);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0x5678);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x8000);
+        }
+    }
+
     pub(super) fn fresh_kernel() -> KernelState {
         use pocket_kernel::audio::{AudioEngine, GuestFormat};
         use pocket_kernel::{Framebuffer, GdiState};
@@ -26686,6 +26778,7 @@ mod tests {
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             gapi_keys_queried: false,
+            gapi_action_key: pocket_kernel::gapi::VK_A,
             pending_message: None,
             threads: Vec::new(),
             events: Default::default(),

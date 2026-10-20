@@ -73,6 +73,18 @@ impl Emulator {
         })
     }
 
+    /// Select the Pocket PC physical action key after loading a process.
+    /// The default and Gizmondo profile retain their legacy GAPI key mapping.
+    pub fn set_pocket_pc_input(&mut self, enabled: bool) {
+        if let Some(process) = self.process.as_mut() {
+            process.state.gapi_action_key = if enabled {
+                pocket_kernel::gapi::VK_RETURN
+            } else {
+                pocket_kernel::gapi::VK_A
+            };
+        }
+    }
+
     /// Experimental host GPU rasterizer, configured on the running thread.
     pub fn set_gpu_renderer(&mut self, enabled: bool) {
         pocket_winceapi::gles::set_gpu_renderer(enabled);
