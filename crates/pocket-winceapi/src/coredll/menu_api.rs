@@ -93,6 +93,9 @@ fn commit(k: &mut KernelState, parsed: Vec<Parsed>) -> u32 {
     k.menus.insert(h, states.into_iter().collect());
     h
 }
+pub(crate) fn from_bytes(k: &mut KernelState, bytes: &[u8]) -> Option<u32> {
+    Some(commit(k, parse(bytes)?))
+}
 pub(super) fn load(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let module = ctx.arg_u32(0)?;
     let raw = ctx.arg_u32(1)?;

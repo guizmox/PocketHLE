@@ -333,6 +333,7 @@ pub struct PaintEraseFrame {
 
 #[derive(Debug, Default)]
 pub struct GdiState {
+    pub shell_menus: crate::shell_menu::ShellMenus,
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,
     pub class_values: HashMap<(String, i32), u32>,
@@ -355,6 +356,7 @@ pub struct GdiState {
 impl GdiState {
     pub fn new() -> Self {
         let mut s = Self {
+            shell_menus: Default::default(),
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,
             class_values: HashMap::new(),

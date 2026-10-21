@@ -3507,3 +3507,124 @@ fn neutral_startup_info_reaches_process_lookup_and_real_options_are_rejected() {
     assert_eq!(ctx.kernel.thread_last_errors[&0], ERROR_NOT_SUPPORTED);
     assert!(ctx.kernel.pending_process_launch.is_none());
 }
+
+#[test]
+fn native_toolbar_erases_vacated_slots_using_its_system_face() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let hwnd = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Toolbar,
+        1,
+        String::new(),
+        0x50000000,
+        0,
+        0,
+        96,
+        37,
+    );
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let dc = window_dc(&mut ctx, hwnd);
+    surface_for_dc(ctx.kernel, dc)
+        .unwrap()
+        .fill_rect(0, 0, 96, 37, 0xf800);
+    assert!(erase_child_background(&mut ctx, hwnd, dc).unwrap());
+    let bm = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
+    let bm = ctx.kernel.gdi.bitmap(bm).unwrap();
+    let face = colorref_to_rgb565(sys_color(15)).to_le_bytes();
+    assert!(bm.pixels.chunks_exact(2).all(|p| p == face));
+    assert!(bm.painted.as_ref().unwrap().iter().all(|p| *p != 0));
+}
+
+#[test]
+fn toolbar_button_visibility_changes_request_erase_and_repaint_once() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let hwnd = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Toolbar,
+        1,
+        String::new(),
+        0x50000000,
+        0,
+        0,
+        96,
+        37,
+    );
+    kernel.window_procs.insert(hwnd, 0x1000);
+    kernel
+        .controls
+        .get_mut(hwnd)
+        .unwrap()
+        .toolbar
+        .buttons
+        .push([0, 17, 4, 0, 0]);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(
+        toolbar::message(&mut ctx, hwnd, 0x404, 17, 1).unwrap(),
+        Some(1)
+    );
+    assert!(ctx.kernel.gdi.pending_window_erases.contains(&hwnd));
+    assert!(ctx
+        .kernel
+        .posted_messages
+        .iter()
+        .any(|m| m.0 == hwnd && m.1 == WM_PAINT));
+    ctx.kernel.gdi.pending_window_erases.clear();
+    ctx.kernel.posted_messages.clear();
+    assert_eq!(
+        toolbar::message(&mut ctx, hwnd, 0x404, 17, 1).unwrap(),
+        Some(1)
+    );
+    assert!(ctx.kernel.gdi.pending_window_erases.is_empty());
+    assert!(ctx.kernel.posted_messages.is_empty());
+}
+
+#[test]
+fn indirect_rect_region_reads_signed_rect_and_supports_gdi_lifecycle() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    for rect in [[-12i32, -7, 30, 41], [0, 0, 0, 10], [20, 10, 5, 2]] {
+        let bytes: Vec<_> = rect.into_iter().flat_map(i32::to_le_bytes).collect();
+        ctx.cpu.write_mem(0x2000, &bytes).unwrap();
+        let handle = call(&mut ctx, window_graphics::create_region_indirect, &[0x2000]);
+        assert_ne!(handle, 0);
+        let nonempty = rect[0] < rect[2] && rect[1] < rect[3];
+        assert_eq!(
+            call(&mut ctx, window_graphics::get_region_box, &[handle, 0x2100]),
+            if nonempty { 2 } else { 1 }
+        );
+        let expected = if nonempty { bytes } else { vec![0; 16] };
+        assert_eq!(ctx.cpu.read_mem(0x2100, 16).unwrap(), expected);
+        assert_eq!(call(&mut ctx, delete_object, &[handle]), 1);
+        assert!(!ctx.kernel.gdi.regions.contains_key(&handle));
+    }
+    let count = ctx.kernel.gdi.regions.len();
+    for pointer in [0, 0xfffffff8] {
+        assert_eq!(
+            call(
+                &mut ctx,
+                window_graphics::create_region_indirect,
+                &[pointer]
+            ),
+            0
+        );
+    }
+    assert_eq!(ctx.kernel.gdi.regions.len(), count);
+}

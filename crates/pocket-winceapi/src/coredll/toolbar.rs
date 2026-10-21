@@ -7,6 +7,51 @@ pub(super) fn message(
     wp: u32,
     lp: u32,
 ) -> Result<Option<u32>, KernelError> {
+    if let Some(menu) = ctx.kernel.gdi.shell_menus.bars.get(&hwnd).map(|b| b.menu) {
+        let items = ctx
+            .kernel
+            .menu_items
+            .get(&menu)
+            .cloned()
+            .unwrap_or_default();
+        match msg {
+            0x592 => return Ok(Some(menu)),
+            0x591 => {
+                return Ok(Some(
+                    items.iter().find(|i| i.id == lp).map_or(0, |i| i.submenu),
+                ))
+            }
+            0x590 => {
+                let Some(item) = ctx
+                    .kernel
+                    .menu_items
+                    .get_mut(&menu)
+                    .and_then(|v| v.iter_mut().find(|i| i.id == wp))
+                else {
+                    return Ok(Some(0));
+                };
+                let old = item.submenu;
+                item.submenu = lp;
+                return Ok(Some(old));
+            }
+            0x418 => return Ok(Some(items.len() as u32)),
+            0x417 => {
+                let Some(item) = items.get(wp as usize) else {
+                    return Ok(Some(0));
+                };
+                let record = [u32::MAX - 1, item.id, 4 | (0x18 << 8), item.submenu, 0];
+                ctx.cpu.write_mem(
+                    lp,
+                    &record
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                )?;
+                return Ok(Some(1));
+            }
+            _ => {}
+        }
+    }
     if !ctx
         .kernel
         .controls
@@ -50,6 +95,12 @@ pub(super) fn message(
         None
     };
     let bar = &mut ctx.kernel.controls.get_mut(hwnd).unwrap().toolbar;
+    let before = (
+        bar.buttons.clone(),
+        bar.button_size,
+        bar.bitmap_size,
+        bar.bitmaps.clone(),
+    );
     let id = bar.buttons.iter().position(|b| b[1] == wp);
     let out = match msg {
         0x41e => u32::from(wp == 20),
@@ -181,5 +232,16 @@ pub(super) fn message(
         0x41c | 0x421 | 0x42b => 0,
         _ => return Ok(None),
     };
+    let changed = before
+        != (
+            bar.buttons.clone(),
+            bar.button_size,
+            bar.bitmap_size,
+            bar.bitmaps.clone(),
+        );
+    if changed {
+        ctx.kernel.gdi.pending_window_erases.insert(hwnd);
+        queue_window_paint(ctx.kernel, hwnd);
+    }
     Ok(Some(out))
 }

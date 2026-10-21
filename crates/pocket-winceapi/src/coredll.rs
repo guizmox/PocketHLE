@@ -31,7 +31,7 @@ mod coordinates;
 mod file_mapping;
 #[path = "coredll/list_paint.rs"]
 mod list_paint;
-mod menu_api;
+pub(crate) mod menu_api;
 #[path = "coredll/palette.rs"]
 mod palette;
 #[cfg(test)]
@@ -10458,10 +10458,14 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         let id = child.id;
+        let exposed_parent = (!show && child.visible).then_some(child.parent);
         child.visible = show;
         child.style = (child.style & !0x1000_0000) | if show { 0x1000_0000 } else { 0 };
         if show {
             queue_visible_window_paints(ctx.kernel, hwnd);
+        }
+        if let Some(parent) = exposed_parent {
+            queue_visible_window_paints(ctx.kernel, parent);
         }
         log::debug!("ShowWindow(control id={id}, cmd={cmd_show}) -> visible={show}");
         repaint_controls(ctx);
@@ -11669,6 +11673,11 @@ fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if hwnd == pocket_kernel::shell_keyboard::HWND {
         return crate::shell_keyboard::message(ctx, message, wparam, lparam);
     }
+    if ctx.kernel.gdi.shell_menus.bars.contains_key(&hwnd) {
+        if let Some(value) = toolbar::message(ctx, hwnd, message, wparam, lparam)? {
+            return Ok(DispatchOutcome::ReturnedR0(value));
+        }
+    }
     // Service Gizmondo shell requests before routing to guest windows.
     if crate::shell::message(ctx, hwnd, message, wparam)
         || crate::bluetooth::shell_message(ctx, hwnd, message, wparam)
@@ -12037,6 +12046,9 @@ fn controls_take_input(
     }
     if crate::shell_keyboard::input(ctx, ev) {
         return Some(None);
+    }
+    if let Some(result) = crate::aygshell::menu_input(ctx, ev) {
+        return Some(result);
     }
     if ctx.kernel.controls.is_empty() {
         return None;
@@ -14169,6 +14181,14 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(outcome);
     }
     let hwnd = ctx.arg_u32(0)?;
+    if ctx.kernel.gdi.shell_menus.bars.contains_key(&hwnd) {
+        let message = ctx.arg_u32(1)?;
+        let wp = ctx.arg_u32(2)?;
+        let lp = ctx.arg_u32(3)?;
+        if let Some(value) = toolbar::message(ctx, hwnd, message, wp, lp)? {
+            return Ok(DispatchOutcome::ReturnedR0(value));
+        }
+    }
     let is_toolbar = ctx
         .kernel
         .controls
@@ -14411,7 +14431,17 @@ fn erase_child_background(ctx: &mut CallCtx<'_>, hwnd: u32, dc: u32) -> Result<b
         })
         .copied()
         .unwrap_or(0);
-    let Some(color) = class_background_color(ctx, brush) else {
+    let color = class_background_color(ctx, brush).or_else(|| {
+        // A system toolbar has its own default background even when the
+        // subclass did not register a class brush. Native MFC painting draws
+        // only its icons/borders and relies on this erase for vacated slots.
+        ctx.kernel
+            .controls
+            .get(hwnd)
+            .filter(|c| c.class == ControlClass::Toolbar)
+            .map(|_| sys_color(15))
+    });
+    let Some(color) = color else {
         return Ok(false);
     };
     sync_dib_from_guest(ctx, dc)?;
@@ -16723,6 +16753,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
         }
         ctx.kernel.gdi.delete(dc);
     }
+    ctx.kernel.gdi.shell_menus.bars.remove(hwnd);
     ctx.kernel.window_classes.remove(hwnd);
     ctx.kernel.window_ids.remove(hwnd);
     ctx.kernel.scroll_info.retain(|(h, _), _| h != hwnd);

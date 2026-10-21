@@ -1,6 +1,26 @@
-crates/pocket-kernel/src/vfs.rs
-crates/pocket-kernel/src/vfs_contract.rs
-crates/pocket-library/src/lib.rs
-crates/pocket-winceapi/src/ws2.rs
-crates/pocket-winceapi/src/coredll.rs
+PocketHLE — corrections génériques affichage PocketPC/GDI
+
+Appliquer après le lot MiniKayak/Cube générique. CreateRectRgnIndirect est également inclus.
+
+Copier/remplacer les sources :
+crates/pocket-core/src/lib.rs
+crates/pocket-kernel/src/gdi.rs
+crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/shell_menu.rs
+crates/pocket-winceapi/src/aygshell.rs
 crates/pocket-winceapi/src/coredll/graphics_tests.rs
+crates/pocket-winceapi/src/coredll/menu_api.rs
+crates/pocket-winceapi/src/coredll/toolbar.rs
+crates/pocket-winceapi/src/coredll/window_graphics.rs
+crates/pocket-winceapi/src/coredll.rs
+
+SUPPRIMER impérativement l’ancien fichier spécifique :
+DELETE crates/pocket-core/src/simcity_layout.rs
+
+Le chargement PE ne référence plus simcity_layout et aucune instruction de SimCity n’est modifiée.
+
+Comportement : rafraîchissement/effacement des barres natives après modification des boutons ou masquage d’un enfant ; barre système SHCreateMenuBar avec menus, sous-menus, commandes et SIP ; véritable CreateRectRgnIndirect.
+
+Bande inférieure : SimCity réserve explicitement 26 pixels pour une barre système dont sa ressource ne fournit aucun libellé de menu. Cette zone est désormais rendue avec son bouton SIP. La hauteur du jeu n’est pas forcée à 320 pixels.
+
+Validation : 745 tests réussis (5 ignorés), compilation native Unicorn réussie ; ville atteinte sans patch de l’exécutable, déplacements répétés de la barre supérieure inspectés visuellement.

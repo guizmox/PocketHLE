@@ -63,6 +63,7 @@ pub mod sdl;
 pub mod serial;
 pub mod shared_objects;
 pub mod shell_keyboard;
+pub mod shell_menu;
 pub mod stylus_stick;
 pub mod text;
 mod tls;
@@ -1803,6 +1804,29 @@ impl KernelState {
 
     /// Walk child parents, never popup owners. The fallback preserves the
     /// caller's policy for legacy unregistered synthetic windows.
+    /// The shell bar follows its foreground owner, including owned dialogs.
+    pub fn active_shell_bar(&self) -> Option<u32> {
+        let mut owner = self.active_window;
+        for _ in 0..64 {
+            if let Some(h) = self
+                .gdi
+                .shell_menus
+                .bars
+                .iter()
+                .filter(|(h, b)| b.owner == owner && self.window_tree_visible(**h, |_| false))
+                .map(|(h, _)| *h)
+                .max()
+            {
+                return Some(h);
+            }
+            let parent = self.window_parents.get(&owner).copied().unwrap_or(0);
+            if parent == 0 || parent == owner {
+                break;
+            }
+            owner = parent;
+        }
+        None
+    }
     pub fn window_tree_visible(&self, hwnd: u32, fallback: impl Fn(u32) -> bool) -> bool {
         let mut current = hwnd;
         let mut visited = std::collections::HashSet::new();
@@ -2074,6 +2098,7 @@ impl KernelState {
         let frame_counter = self.framebuffer.frame_counter;
         let controls = self.controls.clone();
         let modal = self.modal.clone();
+        let shell_bar = self.active_shell_bar();
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
         let mut layers = Vec::new();
         for (&hwnd, &dc) in &self.window_dcs {
@@ -2169,6 +2194,15 @@ impl KernelState {
                 }
             }
         });
+        if let Some(handle) = shell_bar {
+            self.gdi.shell_menus.render(
+                handle,
+                &mut surf,
+                &self.gdi,
+                &self.menu_items,
+                &self.menus,
+            );
+        }
         if !self.shell_keyboard.sip {
             self.shell_keyboard.render(&mut surf);
         }

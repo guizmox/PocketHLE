@@ -142,28 +142,114 @@ fn zero(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 ///   +0x20 clrBk
 /// ```
 ///
-/// We have no real shell menu bar, but the caller stores `hwndMB` in a
-/// global and `SendMessageW`s to it later, so leaving it NULL would
-/// route every menu message to the default window proc. Hand back a
-/// dedicated fake HWND instead.
+fn resource(ctx: &mut CallCtx<'_>, module: u32, kind: u32, id: u32) -> Option<Vec<u8>> {
+    use pocket_pe::ResourceKey;
+    let (e, base) = crate::coredll::lookup_resource(
+        ctx.kernel,
+        module,
+        &ResourceKey::Id(kind),
+        &ResourceKey::Id(id),
+    )?;
+    if e.size > 1048576 {
+        return None;
+    }
+    ctx.cpu.read_mem(base.checked_add(e.data_rva)?, e.size).ok()
+}
 fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     let Ok(info) = ctx.cpu.read_mem(p, 32) else {
-        return Ok(DispatchOutcome::ReturnedR0(0));
+        return zero(ctx);
     };
-    let cb = u32::from_le_bytes(info[..4].try_into().unwrap());
-    if !matches!(cb, 32 | 36) {
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    let get = |o| u32::from_le_bytes(info[o..o + 4].try_into().unwrap());
+    if !matches!(get(0), 32 | 36) {
+        return zero(ctx);
     }
-    let parent = u32::from_le_bytes(info[4..8].try_into().unwrap());
-    let Some(hwnd) = (0xdead0b01..0xdead0c00).find(|h| {
-        !ctx.kernel.window_classes.contains_key(h)
-            && !ctx.kernel.window_parents.values().any(|p| p == h)
-    }) else {
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    let (parent, flags, id, module) = (get(4), get(8), get(12), get(16));
+    let Some(hwnd) = (0xdead0b01..0xdead0c00).find(|h| !ctx.kernel.window_classes.contains_key(h))
+    else {
+        return zero(ctx);
     };
+    let mut toolbar_resource = None;
+    let menu = if flags & 1 != 0 {
+        0
+    } else {
+        let menu_id = if flags & 16 != 0 {
+            id
+        } else {
+            let Some(bytes) = resource(ctx, module, 10, id) else {
+                return zero(ctx);
+            };
+            if bytes.len() < 4 {
+                return zero(ctx);
+            }
+            let menu_id = u16::from_le_bytes(bytes[..2].try_into().unwrap()) as u32;
+            toolbar_resource = Some(bytes);
+            menu_id
+        };
+        if flags & 16 != 0 && ctx.kernel.menu_items.contains_key(&menu_id) {
+            menu_id
+        } else {
+            let Some(bytes) = resource(ctx, module, 4, menu_id) else {
+                return zero(ctx);
+            };
+            let Some(h) = crate::coredll::menu_api::from_bytes(ctx.kernel, &bytes) else {
+                return zero(ctx);
+            };
+            h
+        }
+    };
+    if let Some(bytes) = toolbar_resource {
+        let count = u16::from_le_bytes(bytes[2..4].try_into().unwrap()) as usize;
+        if count > 4096 || bytes.len() < 4 + count * 14 {
+            return zero(ctx);
+        }
+        let roots = ctx
+            .kernel
+            .menu_items
+            .get(&menu)
+            .cloned()
+            .unwrap_or_default();
+        let mut buttons = Vec::new();
+        for record in bytes[4..4 + count * 14].chunks_exact(14) {
+            let word = |i| u16::from_le_bytes(record[i..i + 2].try_into().unwrap()) as u32;
+            let mut item = if word(6) & 8 != 0 {
+                roots.get(word(12) as usize).cloned().unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            item.id = word(2);
+            if item.text.is_empty() {
+                let sid = word(8);
+                if let Some(block) = resource(ctx, module, 6, (sid >> 4) + 1) {
+                    let mut offset = 0usize;
+                    for slot in 0..16 {
+                        let Some(length) = block
+                            .get(offset..offset + 2)
+                            .map(|v| u16::from_le_bytes(v.try_into().unwrap()) as usize)
+                        else {
+                            break;
+                        };
+                        offset += 2;
+                        let Some(raw) = block.get(offset..offset + length * 2) else {
+                            break;
+                        };
+                        if slot == sid & 15 {
+                            item.text = raw
+                                .chunks_exact(2)
+                                .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+                                .collect();
+                            break;
+                        }
+                        offset += length * 2;
+                    }
+                }
+            }
+            buttons.push(item);
+        }
+        ctx.kernel.menu_items.insert(menu, buttons);
+    }
     if ctx.cpu.write_mem(p + 28, &hwnd.to_le_bytes()).is_err() {
-        return Ok(DispatchOutcome::ReturnedR0(0));
+        return zero(ctx);
     }
     let proc = ctx
         .kernel
@@ -179,9 +265,77 @@ fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     ctx.kernel
         .window_threads
         .insert(hwnd, ctx.kernel.current_thread);
-    ctx.kernel.window_styles.insert(hwnd, (0x40000000, 0));
-    ctx.kernel.window_visibility.insert(hwnd, false);
-    Ok(DispatchOutcome::ReturnedR0(1))
+    // Shell-owned popup: its screen strip lies outside the application's client area.
+    let visible = flags & 2 == 0;
+    ctx.kernel
+        .window_styles
+        .insert(hwnd, (0x80000000 | if visible { 0x10000000 } else { 0 }, 0));
+    ctx.kernel.window_visibility.insert(hwnd, visible);
+    let w = ctx.kernel.framebuffer.width as i32;
+    let h = ctx.kernel.framebuffer.height as i32;
+    ctx.kernel.window_rects.insert(
+        hwnd,
+        (
+            0,
+            h - pocket_kernel::shell_menu::HEIGHT,
+            w,
+            pocket_kernel::shell_menu::HEIGHT,
+        ),
+    );
+    let color = if flags & 4 != 0 && get(0) == 36 {
+        ctx.cpu
+            .read_mem(p + 32, 4)
+            .ok()
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .unwrap_or(0xc0c0c0)
+    } else {
+        0xc0c0c0
+    };
+    let background = (((color & 255) >> 3) << 11
+        | (((color >> 8) & 255) >> 2) << 5
+        | ((color >> 16) & 255) >> 3) as u16;
+    ctx.kernel.gdi.shell_menus.bars.insert(
+        hwnd,
+        pocket_kernel::shell_menu::Bar {
+            owner: parent,
+            menu,
+            sip: flags & 8 == 0,
+            background,
+        },
+    );
+    log::debug!("window geometry shell bar hwnd={hwnd:x} owner={parent:x} flags={flags:x} resource={id:x} menu={menu:x} items={:?}",ctx.kernel.menu_items.get(&menu));
+    ctx.kernel.framebuffer.mark_dirty();
+    ok(ctx)
+}
+pub(crate) fn menu_input(
+    ctx: &mut CallCtx<'_>,
+    ev: pocket_kernel::InputEvent,
+) -> Option<Option<(u32, u32, u32, u32)>> {
+    let Some(handle) = ctx.kernel.active_shell_bar() else {
+        ctx.kernel.gdi.shell_menus.close();
+        return None;
+    };
+    let w = ctx.kernel.framebuffer.width as i32;
+    let h = ctx.kernel.framebuffer.height as i32;
+    let action = ctx.kernel.gdi.shell_menus.input(
+        handle,
+        ev,
+        w,
+        h,
+        &ctx.kernel.menu_items,
+        &ctx.kernel.menus,
+    )?;
+    ctx.kernel.framebuffer.mark_dirty();
+    use pocket_kernel::shell_menu::Action;
+    match action {
+        Action::Command(owner, id) => Some(Some((owner, 0x111, id, 0))),
+        Action::Open(owner, menu) => Some(Some((owner, 0x117, menu, 0))),
+        Action::Sip => {
+            crate::shell_keyboard::sip_show(ctx, !ctx.kernel.shell_keyboard.visible);
+            Some(None)
+        }
+        Action::Consumed => Some(None),
+    }
 }
 fn sh_init_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
@@ -323,6 +477,89 @@ fn sh_close_apps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 mod memory_tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
+    #[test]
+    fn shell_empty_bar_has_real_geometry_visibility_and_destruction() {
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut k, mut d) = setup();
+        k.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        k.active_window = 7;
+        k.window_classes.insert(7, "Frame".into());
+        k.window_visibility.insert(7, true);
+        let info = [32u32, 7, 3, 0, 0, 0, 0, 0];
+        cpu.write_mem(
+            0x2000,
+            &info
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHCreateMenuBar",
+                &[0x2000]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        ));
+        let handle = u32::from_le_bytes(cpu.read_mem(0x201c, 4).unwrap().try_into().unwrap());
+        assert_eq!(k.window_rects[&handle], (0, 294, 240, 26));
+        assert_eq!(k.active_shell_bar(), None);
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "ShowWindow",
+            &[handle, 5],
+        );
+        assert_eq!(k.active_shell_bar(), Some(handle));
+        k.menu_items.insert(
+            123,
+            vec![pocket_kernel::MenuItem {
+                id: 55,
+                submenu: 124,
+                ..Default::default()
+            }],
+        );
+        k.gdi.shell_menus.bars.get_mut(&handle).unwrap().menu = 123;
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SendMessageW",
+                &[handle, 0x592, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(123)
+        ));
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SendMessageW",
+                &[handle, 0x591, 0, 55]
+            ),
+            DispatchOutcome::ReturnedR0(124)
+        ));
+
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "DestroyWindow",
+            &[handle],
+        );
+        assert!(!k.gdi.shell_menus.bars.contains_key(&handle));
+        assert_eq!(k.active_shell_bar(), None);
+    }
     #[test]
     fn shell_memory_request_checks_capacity_without_allocating_or_closing() {
         let (mut cpu, mut k, mut d) = setup();

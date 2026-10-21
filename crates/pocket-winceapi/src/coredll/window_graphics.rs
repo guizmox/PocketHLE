@@ -9,6 +9,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         ("ScrollWindowEx", scroll_window_ex),
         ("ScrollWindow", scroll_window),
         ("CreateRectRgn", create_region),
+        ("CreateRectRgnIndirect", create_region_indirect),
         ("SetRectRgn", set_region),
         ("GetRgnBox", get_region_box),
     ] {
@@ -203,6 +204,20 @@ fn complexity(rects: &[[i32; 4]]) -> u32 {
         3
     }
 }
+pub(super) fn create_region_indirect(
+    ctx: &mut CallCtx<'_>,
+) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    if pointer == 0 {
+        return fail(ctx, 87);
+    }
+    let Ok(bytes) = ctx.cpu.read_mem(pointer, 16) else {
+        return fail(ctx, 87);
+    };
+    let rect =
+        std::array::from_fn(|i| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()));
+    create_rect_region(ctx, rect)
+}
 fn create_region(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let r = [
         ctx.arg_u32(0)? as i32,
@@ -210,6 +225,9 @@ fn create_region(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         ctx.arg_u32(2)? as i32,
         ctx.arg_u32(3)? as i32,
     ];
+    create_rect_region(ctx, r)
+}
+fn create_rect_region(ctx: &mut CallCtx<'_>, r: [i32; 4]) -> Result<DispatchOutcome, KernelError> {
     let rects = if r[0] < r[2] && r[1] < r[3] {
         vec![r]
     } else {
