@@ -3357,13 +3357,18 @@ stick. Landscape puts two tall action banks beside the screen, with an 18dp
 safety gap before the thumb controls. The actual guest framebuffer dimensions,
 including VGA, determine the image ratio; never force a title into QVGA.
 
-Android Rotate changes requested host orientation only. It does not rewrite
-GameSettings.rotation or rotate guest pixels, direction keys or the SIP again.
-Existing per-game image rotation is still honored at launch. A manual layout
-choice survives Activity saved-state restoration and suppresses automatic
-frame-aspect orientation selection. Release all held inputs before a layout
-change. Pointer mapping and GL use the same native integer rectangle. At x1
-on an undersized surface, clip rather than introduce fractional downscaling.
+Android Pocket PC host layout follows FULL_SENSOR. Rotate changes only the
+per-game image by 90 degrees; persist GameSettings.rotation, update renderer,
+SIP and touch geometry, and release held input before switching. Directional
+keys and stylus velocities use the same single inverse image turn; individual
+input sources must not rotate before the central sender. All game layouts hide
+system bars, including the PPC layout with controls, and reapply immersive mode
+on focus. Respect display-cutout safe insets.
+
+PPC presentation uses integer multiples 1..4 of the QVGA unit. VGA 640x480 or
+480x640 uses half its source dimensions as that unit; map touches back to every
+native source pixel. Other sizes and Gizmondo keep their native unit. A source
+VGA image may therefore display at 960x720 without changing its guest mode.
 
 Desktop and Deck share fixed left/right action banks around the screen, with
 small Tab/Esc/Turbo and orange Exit/Rotate above it. Rotate retains the existing
@@ -3387,3 +3392,24 @@ integer-fit tests pass, including the unchanged Gizmondo fit policy. Desktop
 and Steam Deck bins pass cargo check with --no-default-features --features
 steam-deck --locked on Linux. Native Windows/Android/Steam Deck UI, multitouch,
 fullscreen transitions and actual game play still need device validation.
+
+## SimCity dialog/GDI investigation (2026-10-21)
+
+Top-level HWND allocation reserves owner references even if their frame has
+not been registered. Reusing such an HWND can create a popup-owner cycle.
+Retain ordinal DLGTEMPLATE item titles; SS_BITMAP controls load their bitmap
+resource before WM_INITDIALOG, shared by module/resource and owned by GDI.
+Logical palettes have owned entries and per-DC selection; the RGB565 device
+still advertises no writable hardware palette. AYGSHELL ordinal69 resolves
+to the existing SHDoneButton handler.
+
+CreateBitmap copies caller-provided top-down WORD-aligned DDB bits, rather
+than retaining the pointer or creating an empty bitmap. Supported source depths
+are monochrome and 16/24/32 bit; indexed 4/8-bit DDB input is rejected rather
+than inventing a device palette. Modeless template dialogs and their children
+need local backing DCs even when window_rects has no entry; consult Controls
+geometry. Otherwise the compositor erases native drawing with dialog grey.
+
+Into Outland: actual ARM intro followed by animated 3D demo observed locally
+at 240x320 and 480x640, after about 12 seconds. Android-only black output has
+not been reproduced or established fixed. No per-title framebuffer workaround.

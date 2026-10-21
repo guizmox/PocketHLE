@@ -45,6 +45,7 @@ pub const STOCK_SYSTEM_FONT: u32 = 0xDEAD_5710;
 /// `SelectObject(memdc, hbm)` must return *this* rather than NULL for a
 /// fresh DC — guests routinely test the result and bail on NULL.
 pub const STOCK_DEFAULT_BITMAP: u32 = 0xDEAD_5720;
+pub const STOCK_DEFAULT_PALETTE: u32 = 0xDEAD_5721;
 
 /// Handles that are pre-registered in [`GdiState::new`] and must outlive
 /// every `DeleteObject`, just like real GDI stock objects.
@@ -62,6 +63,7 @@ pub fn is_stock_handle(handle: u32) -> bool {
             | STOCK_NULL_PEN
             | STOCK_DKGRAY_BRUSH
             | STOCK_SYSTEM_FONT
+            | STOCK_DEFAULT_PALETTE
             | STOCK_DEFAULT_BITMAP
     )
 }
@@ -205,6 +207,7 @@ pub struct Dc {
     pub selected_brush: u32,
     pub selected_pen: u32,
     pub selected_font: u32,
+    pub selected_palette: u32,
     pub brush_color: u32,
     pub pen_color: u32,
     pub text_color: u32,
@@ -222,6 +225,7 @@ impl Default for Dc {
             selected_brush: STOCK_WHITE_BRUSH,
             selected_pen: STOCK_BLACK_PEN,
             selected_font: STOCK_SYSTEM_FONT,
+            selected_palette: STOCK_DEFAULT_PALETTE,
             brush_color: 0x00ff_ffff,
             pen_color: 0,
             text_color: 0,
@@ -282,6 +286,7 @@ pub enum GdiObject {
     Brush(Brush),
     Pen(Pen),
     Font(Font),
+    Palette(Vec<[u8; 4]>),
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +338,7 @@ pub struct GdiState {
     pub icons: HashMap<u32, crate::imaging::Image>,
     pub image_lists: HashMap<u32, crate::imaging::ImageList>,
     pub system_brushes: HashMap<i32, u32>,
+    pub dialog_bitmaps: HashMap<(u32, u32), u32>,
     pub owner_draw_frames: Vec<OwnerDrawFrame>,
     pub list_paint_frames: Vec<ListPaintFrame>,
     pub control_color_frames: Vec<ControlColorFrame>,
@@ -354,6 +360,7 @@ impl GdiState {
             icons: HashMap::new(),
             image_lists: HashMap::new(),
             system_brushes: HashMap::new(),
+            dialog_bitmaps: HashMap::new(),
             owner_draw_frames: Vec::new(),
             list_paint_frames: Vec::new(),
             control_color_frames: Vec::new(),
@@ -419,7 +426,50 @@ impl GdiState {
                 ..Default::default()
             }),
         );
+        let colors = [
+            0x000000u32,
+            0x800000,
+            0x008000,
+            0x808000,
+            0x000080,
+            0x800080,
+            0x008080,
+            0xc0c0c0,
+            0xc0dcc0,
+            0xa6caf0,
+            0xfffbf0,
+            0xa0a0a4,
+            0x808080,
+            0xff0000,
+            0x00ff00,
+            0xffff00,
+            0x0000ff,
+            0xff00ff,
+            0x00ffff,
+            0xffffff,
+        ];
+        s.objects.insert(
+            STOCK_DEFAULT_PALETTE,
+            GdiObject::Palette(
+                colors
+                    .into_iter()
+                    .map(|c| [(c >> 16) as u8, (c >> 8) as u8, c as u8, 0])
+                    .collect(),
+            ),
+        );
         s
+    }
+
+    pub fn create_palette(&mut self, entries: Vec<[u8; 4]>) -> u32 {
+        let handle = self.alloc_handle();
+        self.objects.insert(handle, GdiObject::Palette(entries));
+        handle
+    }
+    pub fn palette(&self, handle: u32) -> Option<&[[u8; 4]]> {
+        match self.objects.get(&handle)? {
+            GdiObject::Palette(entries) => Some(entries),
+            _ => None,
+        }
     }
 
     fn alloc_handle(&mut self) -> u32 {
@@ -522,6 +572,14 @@ impl GdiState {
         // Stock objects are immortal.
         if is_stock_handle(handle) || self.system_brushes.values().any(|h| *h == handle) {
             return true;
+        }
+        if self.palette(handle).is_some()
+            && self
+                .objects
+                .values()
+                .any(|object| matches!(object,GdiObject::Dc(dc) if dc.selected_palette==handle))
+        {
+            return false;
         }
         self.regions.remove(&handle).is_some() || self.objects.remove(&handle).is_some()
     }

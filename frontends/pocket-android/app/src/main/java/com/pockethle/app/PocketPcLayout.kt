@@ -17,7 +17,7 @@ class PocketPcLayout(context: Context,attrs: AttributeSet?=null): ViewGroup(cont
         requestLayout()
     }
     private fun surfaceRect(room: ControlRect,portrait: Boolean): ControlRect {
-        val fit=displayRect(room.w,room.h,nativeWidth,nativeHeight,scaleLimit)
+        val fit=pocketPcDisplayRect(room.w,room.h,nativeWidth,nativeHeight,scaleLimit)
         // Keep x1 clipped inside its room if the device cannot fit native pixels.
         val w=minOf(room.w,fit.width);val h=minOf(room.h,fit.height)
         return ControlRect(room.x+(room.w-w)/2,room.y+if(portrait) 0 else (room.h-h)/2,w,h)

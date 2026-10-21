@@ -104,9 +104,9 @@ class SettingsActivity : AppCompatActivity() {
             })
             display.addPreference(ListPreference(requireContext()).apply {
                 key = "android_display_scale"; title = "Display scale"; isPersistent = false
-                entries = arrayOf("Auto (largest integer scale that fits)", "Native ×1", "×2", "×3", "×4")
+                entries = arrayOf("Auto (largest integer scale that fits)", "QVGA ×1", "QVGA ×2", "QVGA ×3", "QVGA ×4")
                 entryValues = arrayOf("0", "1", "2", "3", "4"); value = current.displayScale.toString()
-                summary = "Whole multiples of the native resolution. Larger scales are limited to the available space."
+                summary = "Pocket PC: multiples of the QVGA grid, including VGA games. Gizmondo: native multiples. Limited to the available space."
                 setOnPreferenceChangeListener { _, v -> current = current.copy(displayScale = v.toString().toInt()); writeConfig(); true }
             })
             giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {

@@ -5,6 +5,7 @@
     "34":  "SHRecognizeGesture",
     "56":  "SHFullScreen",
     "65":  "SHCreateMenuBar",
+    "69":  "SHDoneButton",
     "83":  "SHHandleWMActivate",
     "84":  "SHHandleWMSettingChange",
     "100": "SHInitDialog",

@@ -46,6 +46,8 @@ pub struct DialogItem {
     pub cy: i16,
     pub id: u16,
     pub class: ItemClass,
+    /// Resource identifier retained for SS_BITMAP/SS_ICON dialog items.
+    pub title_resource: Option<ItemClass>,
     pub title: String,
 }
 
@@ -227,7 +229,11 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
         let icy = r.i16()?;
         let id = r.u16()?;
         let class = r.sz_or_ord()?;
-        let ititle = r.sz()?;
+        let title_resource = r.sz_or_ord()?;
+        let ititle = match &title_resource {
+            Some(ItemClass::Named(s)) => s.clone(),
+            _ => String::new(),
+        };
         // Creation data: a counted blob handed to the control's
         // WM_CREATE. Nothing we model reads it, but it has to be
         // stepped over to reach the next item.
@@ -244,6 +250,7 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
             id,
             class: class?,
             title: ititle,
+            title_resource,
         });
     }
 
@@ -502,5 +509,40 @@ mod tests {
             .map(|d| dlu.y_to_px(*d))
             .collect();
         assert_eq!(tops, vec![3, 29, 63, 89, 115]);
+    }
+    #[test]
+    fn bitmap_item_retains_ordinal_resource_title() {
+        let mut b = Builder::new();
+        b.u32(0x10000000)
+            .u32(0)
+            .u16(1)
+            .u16(0)
+            .u16(0)
+            .u16(100)
+            .u16(100)
+            .u16(0)
+            .u16(0)
+            .u16(0);
+        b.align4()
+            .u32(0x5000000e)
+            .u32(0)
+            .u16(0)
+            .u16(0)
+            .u16(100)
+            .u16(100)
+            .u16(7)
+            .u16(0xffff)
+            .u16(class_ordinal::STATIC)
+            .u16(0xffff)
+            .u16(211)
+            .u16(0);
+        let parsed = parse(&b.0).unwrap();
+        assert_eq!(
+            parsed.items[0].title_resource,
+            Some(ItemClass::Ordinal(211))
+        );
+        assert_eq!(parsed.items[0].title, "");
+        b.0.pop();
+        assert!(parse(&b.0).is_none());
     }
 }

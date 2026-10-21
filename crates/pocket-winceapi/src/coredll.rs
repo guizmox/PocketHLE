@@ -31,6 +31,8 @@ mod coordinates;
 mod file_mapping;
 #[path = "coredll/list_paint.rs"]
 mod list_paint;
+#[path = "coredll/palette.rs"]
+mod palette;
 #[path = "coredll/registry_enumeration.rs"]
 mod registry_enumeration;
 mod trackbar;
@@ -49,9 +51,9 @@ use pocket_kernel::msgbox::MessageBox;
 use pocket_kernel::{
     module_file_name, CreateStage, DispatchOutcome, GuestCallFrame, GuestThread, InputEvent,
     KernelError, KernelState, LoadedModule, ModalDialog, QsortFrame, VectorIterFrame,
-    WaveCallbackKind, DEFAULT_STACK_TOP, FAKE_CURRENT_PROCESS_HANDLE, FAKE_CURRENT_THREAD_HANDLE,
-    HSS_MODULE_HANDLE, MODULE_REGION_END, MODULE_REGION_STRIDE, PROCESS_INSTANCE_HANDLE,
-    SLOT_ALIAS_BASE, SYNTHETIC_FRAMEBUFFER_BASE, THREAD_EXIT_TRAMPOLINE_BASE, TLS_SLOT_COUNT,
+    WaveCallbackKind, FAKE_CURRENT_PROCESS_HANDLE, FAKE_CURRENT_THREAD_HANDLE, HSS_MODULE_HANDLE,
+    MODULE_REGION_END, MODULE_REGION_STRIDE, PROCESS_INSTANCE_HANDLE, SLOT_ALIAS_BASE,
+    SYNTHETIC_FRAMEBUFFER_BASE, THREAD_EXIT_TRAMPOLINE_BASE, TLS_SLOT_COUNT,
     USER_KDATA_TLS_ARRAY_VA,
 };
 use pocket_pe::{ResourceEntry, ResourceKey};
@@ -515,8 +517,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "ClipCursor", 1, one_returning);
     d.register_constant(dll, "SetCursorPos", 1, one_returning);
     d.register_constant(dll, "GetSystemPaletteEntries", 0, zero_returning);
-    d.register_constant(dll, "RealizePalette", 1, one_returning);
-    d.register_constant(dll, "CreatePalette", 0xDEAD_5709, one_returning);
+    d.register_handler(dll, "RealizePalette", palette::realize);
+    d.register_handler(dll, "CreatePalette", palette::create);
+    d.register_handler(dll, "GetPaletteEntries", palette::get_entries);
+    d.register_handler(dll, "SetPaletteEntries", palette::set_entries);
+    d.register_handler(dll, "SelectPalette", palette::select);
     d.register_handler(dll, "SetWindowTextW", set_window_text_w);
     d.register_handler(dll, "SetWindowTextA", set_window_text_a);
     d.register_handler(dll, "GetWindowTextW", get_window_text_w);
@@ -9864,11 +9869,21 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 /// Keep the historical primary HWND, but give each additional app-defined
 /// window its own identity. CoPilot creates several instances of the same
 /// class; aliasing every instance to FAKE_HWND corrupts its per-window state.
-fn next_top_level_hwnd(existing: &std::collections::HashMap<u32, String>) -> Option<u32> {
-    if !existing.contains_key(&FAKE_HWND) {
+fn next_top_level_hwnd(
+    existing: &std::collections::HashMap<u32, String>,
+    parents: &std::collections::HashMap<u32, u32>,
+    owner: u32,
+) -> Option<u32> {
+    // MFC may pass its not-yet-registered frame as a dialog owner. Reusing
+    // that HWND for another dialog makes the two windows own each other
+    // (SimCity loops in GetParent forever after registration).
+    let free = |hwnd: &u32| {
+        !existing.contains_key(hwnd) && *hwnd != owner && !parents.values().any(|p| p == hwnd)
+    };
+    if free(&FAKE_HWND) {
         return Some(FAKE_HWND);
     }
-    (0xDEAD_1000..0xDEAD_2000).find(|hwnd| !existing.contains_key(hwnd))
+    (0xDEAD_1000..0xDEAD_2000).find(free)
 }
 
 /// Enter a synchronous window procedure callback, suspending any WM_CREATE
@@ -10046,6 +10061,7 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         );
         return Ok(DispatchOutcome::ReturnedR0(hwnd));
     }
+    let owner = ctx.arg_u32(8)?;
     let hwnd = if let Some(kind) = ctx.kernel.window_class_controls.get(&class_name).copied() {
         // A copied BUTTON/STATIC class keeps its OS control behavior while
         // still running the registered native subclass procedure below.
@@ -10066,7 +10082,11 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             .controls
             .create(parent, kind, id, text, style, x, y, w, h)
     } else {
-        let Some(hwnd) = next_top_level_hwnd(&ctx.kernel.window_classes) else {
+        let Some(hwnd) = next_top_level_hwnd(
+            &ctx.kernel.window_classes,
+            &ctx.kernel.window_parents,
+            owner,
+        ) else {
             log::warn!("CreateWindowExW: exhausted synthetic HWND space");
             return Ok(DispatchOutcome::ReturnedR0(0));
         };
@@ -13642,7 +13662,23 @@ fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
     if hwnd == 0 || hwnd == FAKE_HWND {
         return GDI_SCREEN_DC;
     }
-    let Some((_, _, w, h)) = ctx.kernel.window_rects.get(&hwnd).copied() else {
+    // Modeless template dialogs and their children live in Controls, without
+    // necessarily having a window_rects entry. Their DC must still be local
+    // and backed: painting directly into the screen gets erased by the next
+    // dialog composition (SimCity's custom Select Mode bitmap).
+    let size = ctx
+        .kernel
+        .controls
+        .panel(hwnd)
+        .map(|p| {
+            (
+                p.w - 2 * i32::from(p.border),
+                p.h - 2 * i32::from(p.border) - p.caption_h(),
+            )
+        })
+        .or_else(|| ctx.kernel.window_rects.get(&hwnd).map(|r| (r.2, r.3)))
+        .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| (c.w, c.h)));
+    let Some((w, h)) = size else {
         return GDI_SCREEN_DC;
     };
     let w = w.clamp(1, 2048) as u32;
@@ -14189,8 +14225,13 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (screen_w, screen_h) = if dc == GDI_SCREEN_DC {
         screen_dims(ctx)
     } else {
-        let rect = ctx.kernel.window_rects[&hwnd];
-        (rect.2.max(0) as u32, rect.3.max(0) as u32)
+        ctx.kernel
+            .gdi
+            .dc(dc)
+            .and_then(|d| d.selected_bitmap)
+            .and_then(|b| ctx.kernel.gdi.bitmap(b))
+            .map(|b| (b.width, b.height))
+            .unwrap_or((0, 0))
     };
     let erase = (hwnd == 0 || hwnd == FAKE_HWND) && ctx.kernel.window_background_erase_pending;
     if erase {
@@ -14414,15 +14455,16 @@ fn get_stock_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     // Map stock indices to our pre-registered handles.
     let idx = ctx.arg_u32(0)?;
     let h = match idx {
-        0 => STOCK_WHITE_BRUSH,       // WHITE_BRUSH
-        1 => STOCK_LTGRAY_BRUSH,      // LTGRAY_BRUSH
-        2 => STOCK_GRAY_BRUSH,        // GRAY_BRUSH
-        3 => STOCK_DKGRAY_BRUSH,      // DKGRAY_BRUSH
-        4 => STOCK_BLACK_BRUSH,       // BLACK_BRUSH
-        5 => STOCK_NULL_BRUSH,        // NULL_BRUSH / HOLLOW_BRUSH
-        6 => STOCK_WHITE_PEN,         // WHITE_PEN
-        7 => STOCK_BLACK_PEN,         // BLACK_PEN
-        8 => STOCK_NULL_PEN,          // NULL_PEN
+        0 => STOCK_WHITE_BRUSH,  // WHITE_BRUSH
+        1 => STOCK_LTGRAY_BRUSH, // LTGRAY_BRUSH
+        2 => STOCK_GRAY_BRUSH,   // GRAY_BRUSH
+        3 => STOCK_DKGRAY_BRUSH, // DKGRAY_BRUSH
+        4 => STOCK_BLACK_BRUSH,  // BLACK_BRUSH
+        5 => STOCK_NULL_BRUSH,   // NULL_BRUSH / HOLLOW_BRUSH
+        6 => STOCK_WHITE_PEN,    // WHITE_PEN
+        7 => STOCK_BLACK_PEN,    // BLACK_PEN
+        8 => STOCK_NULL_PEN,     // NULL_PEN
+        15 => pocket_kernel::gdi::STOCK_DEFAULT_PALETTE,
         13 | 17 => STOCK_SYSTEM_FONT, // SYSTEM_FONT / DEFAULT_GUI_FONT
         _ => STOCK_WHITE_BRUSH,
     };
@@ -14447,6 +14489,7 @@ fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         OBJ_PEN => dc.selected_pen,
         OBJ_BRUSH => dc.selected_brush,
         OBJ_FONT => dc.selected_font,
+        5 => dc.selected_palette,
         OBJ_BITMAP if matches!(dc.surface, pocket_kernel::gdi::DcSurface::Memory) => {
             dc.selected_bitmap.unwrap_or(STOCK_DEFAULT_BITMAP)
         }
@@ -14457,8 +14500,13 @@ fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
-    let _ = ctx.kernel.gdi.delete(h);
-    Ok(DispatchOutcome::ReturnedR0(1))
+    let palette = ctx.kernel.gdi.palette(h).is_some();
+    let deleted = ctx.kernel.gdi.delete(h);
+    Ok(DispatchOutcome::ReturnedR0(if palette {
+        deleted as u32
+    } else {
+        1
+    }))
 }
 
 fn delete_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -15755,31 +15803,50 @@ fn sh_load_dibitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 }
 
 fn load_bitmap_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    const RT_BITMAP: ResourceKey = ResourceKey::Id(2);
     let hinst = ctx.arg_u32(0)?;
     let name_raw = ctx.arg_u32(1)?;
     let want_name = read_wide_resource_key(ctx, name_raw)?;
-    let (entry, base) = match lookup_resource(ctx.kernel, hinst, &RT_BITMAP, &want_name) {
+    Ok(DispatchOutcome::ReturnedR0(load_bitmap_resource(
+        ctx, hinst, &want_name, false,
+    )?))
+}
+
+fn load_bitmap_resource(
+    ctx: &mut CallCtx<'_>,
+    hinst: u32,
+    want_name: &ResourceKey,
+    shared: bool,
+) -> Result<u32, KernelError> {
+    const RT_BITMAP: ResourceKey = ResourceKey::Id(2);
+    let (entry, base) = match lookup_resource(ctx.kernel, hinst, &RT_BITMAP, want_name) {
         Some(found) => found,
         None => {
             log::trace!("LoadBitmapW(name={want_name:?}) -> NULL (resource not found)");
-            return Ok(DispatchOutcome::ReturnedR0(0));
+            return Ok(0);
         }
     };
+    let cache_key = (base, entry.data_rva);
+    if shared {
+        if let Some(&handle) = ctx.kernel.gdi.dialog_bitmaps.get(&cache_key) {
+            if ctx.kernel.gdi.bitmap(handle).is_some() {
+                return Ok(handle);
+            }
+        }
+    }
     // Read the bitmap data straight out of the owning module's mapped image.
     let va = base.wrapping_add(entry.data_rva);
     let raw = match ctx.cpu.read_mem(va, entry.size) {
         Ok(b) => b,
         Err(_) => {
             log::trace!("LoadBitmapW({want_name:?}) -> NULL (image not mapped at 0x{va:08x})");
-            return Ok(DispatchOutcome::ReturnedR0(0));
+            return Ok(0);
         }
     };
     let pixels_565 = match decode_dib_to_rgb565(&raw) {
         Some(p) => p,
         None => {
             log::trace!("LoadBitmapW({want_name:?}) -> NULL (unsupported DIB)");
-            return Ok(DispatchOutcome::ReturnedR0(0));
+            return Ok(0);
         }
     };
     let (w, h) = pixels_565.dims;
@@ -15796,7 +15863,10 @@ fn load_bitmap_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         h,
         entry.size
     );
-    Ok(DispatchOutcome::ReturnedR0(handle))
+    if shared {
+        ctx.kernel.gdi.dialog_bitmaps.insert(cache_key, handle);
+    }
+    Ok(handle)
 }
 
 struct DecodedDib {
@@ -16001,6 +16071,17 @@ fn get_object_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let cb = ctx.arg_u32(1)?;
     let p = ctx.arg_u32(2)?;
+    if let Some(entries) = ctx.kernel.gdi.palette(h) {
+        if p == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(2));
+        }
+        if cb < 2 {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        ctx.cpu
+            .write_mem(p, &(entries.len() as u16).to_le_bytes())?;
+        return Ok(DispatchOutcome::ReturnedR0(2));
+    }
     if let Some(pocket_kernel::gdi::GdiObject::Font(font)) = ctx.kernel.gdi.get(h) {
         // Chopper Fight reads font height to lay out menu labels.
         const LOGFONTW_SIZE: u32 = 92;
@@ -18263,14 +18344,51 @@ fn create_dib_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
+/// Create a DDB from a COPY of the caller's top-down, WORD-aligned bits.
+/// SimCity renders its custom menus into RGB565 memory and recreates a DDB
+/// for each paint. Ignoring lpBits replaced every completed menu with black.
 fn create_bitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let w = ctx.arg_u32(0)?;
     let h = ctx.arg_u32(1)?;
-    let _planes = ctx.arg_u32(2)?;
-    let _bpp = ctx.arg_u32(3)?;
-    let _bits = ctx.arg_u32(4)?;
-    let handle = ctx.kernel.gdi.create_compatible_bitmap(w, h);
-    Ok(DispatchOutcome::ReturnedR0(handle))
+    let planes = ctx.arg_u32(2)?;
+    let bpp = ctx.arg_u32(3)?;
+    let bits = ctx.arg_u32(4)?;
+    if planes != 1
+        || !matches!(bpp, 1 | 16 | 24 | 32)
+        || w > 16384
+        || h > 16384
+        || u64::from(w) * u64::from(h) * 2 > 64 * 1024 * 1024
+    {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if w == 0 || h == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(
+            ctx.kernel.gdi.create_compatible_bitmap(1, 1),
+        ));
+    }
+    let stride = ((w * bpp + 15) / 16) * 2;
+    let mut bitmap = pocket_kernel::gdi::Bitmap::new(w, h);
+    bitmap.bpp = bpp as u16;
+    bitmap.dib_row_stride = stride;
+    if bpp == 1 {
+        bitmap.dib_palette = vec![0, 0xffff];
+    }
+    if bits != 0 {
+        let raw = match ctx.cpu.read_mem(bits, stride * h) {
+            Ok(raw) => raw,
+            Err(_) => {
+                set_thread_error(ctx, 998);
+                return Ok(DispatchOutcome::ReturnedR0(0));
+            }
+        };
+        let mut pixels = vec![0; bitmap.pixels.len()];
+        decode_dib_window(&bitmap, &raw, 0, 0, w as i32, h as i32, &mut pixels);
+        bitmap.pixels = pixels;
+    }
+    Ok(DispatchOutcome::ReturnedR0(
+        ctx.kernel.gdi.register_dib(bitmap),
+    ))
 }
 
 /// `LONG SetBitmapBits(HBITMAP hbmp, DWORD cb, const void *bits)`.
@@ -20647,6 +20765,7 @@ fn build_dialog_from_template_for(
             .window_rects
             .insert(owner_hwnd, (x, y, win_w, win_h));
     }
+    let instance = ctx.arg_u32(0).unwrap_or(FAKE_MODULE_HANDLE);
     for item in &tmpl.items {
         let class = match &item.class {
             ItemClass::Ordinal(class_ordinal::BUTTON) => ControlClass::Button,
@@ -20678,6 +20797,22 @@ fn build_dialog_from_template_for(
             iw,
             ih,
         );
+        // USER loads SS_BITMAP resources from the template before WM_INITDIALOG.
+        // Discarding the ordinal title left SimCity's bitmap-based menu grey.
+        if class == ControlClass::Static && item.style & 0x1f == 0x0e {
+            let resource = match &item.title_resource {
+                Some(ItemClass::Ordinal(id)) => Some(ResourceKey::Id(u32::from(*id))),
+                Some(ItemClass::Named(name)) => Some(ResourceKey::Name(name.clone())),
+                None => None,
+            };
+            if let Some(resource) = resource {
+                if let Ok(image) = load_bitmap_resource(ctx, instance, &resource, true) {
+                    if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
+                        child.image = image;
+                    }
+                }
+            }
+        }
         if let Some(font) = dialog_font {
             if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
                 child.font = font;
@@ -20772,16 +20907,26 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
     let dialog_proc = ctx.arg_u32(3)?;
     let init_param = ctx.arg_u32(4).unwrap_or(0);
     let lp_template = ctx.arg_u32(1)?;
-    // A shared HWND would replace the parent's panel, procedure and object
-    // while CoPilot creates its nested dialogs during WM_INITDIALOG.
-    let hwnd = if !ctx.kernel.window_classes.contains_key(&FAKE_DIALOG_HWND) {
+    // The owner need not have a registered WNDCLASS entry yet (MFC).
+    let parent = ctx.arg_u32(2)?;
+    let hwnd = if parent != FAKE_DIALOG_HWND
+        && !ctx.kernel.window_classes.contains_key(&FAKE_DIALOG_HWND)
+        && !ctx
+            .kernel
+            .window_parents
+            .values()
+            .any(|h| *h == FAKE_DIALOG_HWND)
+    {
         FAKE_DIALOG_HWND
-    } else if let Some(hwnd) = next_top_level_hwnd(&ctx.kernel.window_classes) {
+    } else if let Some(hwnd) = next_top_level_hwnd(
+        &ctx.kernel.window_classes,
+        &ctx.kernel.window_parents,
+        parent,
+    ) {
         hwnd
     } else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let parent = ctx.arg_u32(2)?;
     ctx.kernel.window_classes.insert(hwnd, "#32770".to_string());
     ctx.kernel.window_parents.insert(hwnd, parent);
     build_dialog_from_template_for(ctx, lp_template, hwnd, false);
@@ -24017,15 +24162,98 @@ mod tests {
     }
 
     #[test]
+    fn dialog_static_bitmap_loads_its_template_resource_and_reuses_owned_image() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x5000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.image_base = 0x2000;
+        kernel.resources.push(ResourceEntry {
+            ty: ResourceKey::Id(2),
+            name: ResourceKey::Id(211),
+            data_rva: 0x100,
+            size: 48,
+            codepage: 0,
+        });
+        let mut dib = vec![0u8; 48];
+        dib[..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&2u32.to_le_bytes());
+        dib[8..12].copy_from_slice(&1u32.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        dib[40..46].copy_from_slice(&[0, 0, 255, 0, 255, 0]);
+        cpu.write_mem(0x2100, &dib).unwrap();
+        let mut template = Vec::new();
+        template.extend_from_slice(&0x10000000u32.to_le_bytes());
+        template.extend_from_slice(&0u32.to_le_bytes());
+        for word in [1u16, 0, 0, 20, 20, 0, 0, 0] {
+            template.extend_from_slice(&word.to_le_bytes());
+        }
+        while template.len() % 4 != 0 {
+            template.push(0);
+        }
+        template.extend_from_slice(&0x5000000eu32.to_le_bytes());
+        template.extend_from_slice(&0u32.to_le_bytes());
+        for word in [0u16, 0, 2, 1, 7, 0xffff, 0x82, 0xffff, 211, 0] {
+            template.extend_from_slice(&word.to_le_bytes());
+        }
+        cpu.write_mem(0x1100, &template).unwrap();
+        cpu.write_reg(ArmReg::R0, FAKE_MODULE_HANDLE).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        build_dialog_from_template_for(&mut ctx, 0x1100, FAKE_DIALOG_HWND, false);
+        let image = ctx
+            .kernel
+            .controls
+            .by_id(FAKE_DIALOG_HWND, 7)
+            .unwrap()
+            .image;
+        assert_ne!(image, 0);
+        let bitmap = ctx.kernel.gdi.bitmap(image).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (2, 1));
+        assert_eq!(&bitmap.pixels[..4], &[0, 0xf8, 0xe0, 7]);
+        build_dialog_from_template_for(&mut ctx, 0x1100, FAKE_DIALOG_HWND, false);
+        assert_eq!(
+            ctx.kernel
+                .controls
+                .by_id(FAKE_DIALOG_HWND, 7)
+                .unwrap()
+                .image,
+            image
+        );
+        assert_eq!(ctx.kernel.gdi.dialog_bitmaps.len(), 1);
+    }
+
+    #[test]
+    fn modeless_dialog_cannot_reuse_its_unregistered_frame_owner() {
+        let mut classes = std::collections::HashMap::new();
+        classes.insert(super::FAKE_DIALOG_HWND, "#32770".to_string());
+        let parents =
+            std::collections::HashMap::from([(super::FAKE_DIALOG_HWND, super::FAKE_HWND)]);
+        let next = super::next_top_level_hwnd(&classes, &parents, super::FAKE_DIALOG_HWND).unwrap();
+        assert_ne!(next, super::FAKE_HWND);
+        assert_ne!(next, super::FAKE_DIALOG_HWND);
+        classes.insert(next, "#32770".into());
+        assert_ne!(
+            super::next_top_level_hwnd(&classes, &parents, next).unwrap(),
+            next
+        );
+    }
+
+    #[test]
     fn multiple_application_windows_have_distinct_handles() {
         let mut existing = std::collections::HashMap::new();
-        let first = super::next_top_level_hwnd(&existing).unwrap();
+        let first = super::next_top_level_hwnd(&existing, &Default::default(), 0).unwrap();
         assert_eq!(first, super::FAKE_HWND);
         existing.insert(first, "Main".to_string());
-        let second = super::next_top_level_hwnd(&existing).unwrap();
+        let second = super::next_top_level_hwnd(&existing, &Default::default(), 0).unwrap();
         assert_eq!(second, 0xDEAD_1000);
         existing.insert(second, "CoPilotPanel".to_string());
-        let third = super::next_top_level_hwnd(&existing).unwrap();
+        let third = super::next_top_level_hwnd(&existing, &Default::default(), 0).unwrap();
         assert_eq!(third, 0xDEAD_1001);
         assert_ne!(second, third);
     }
@@ -29438,6 +29666,113 @@ mod tests {
         // little-endian on the wire).
         let off = (7 * pocket_kernel::framebuffer::FB_WIDTH as usize + 5) * 2;
         assert_ne!(kernel.framebuffer.pixels[off], 0);
+    }
+
+    #[test]
+    fn modeless_dialog_native_paint_survives_control_composition() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        let hwnd = 0xdead1000;
+        kernel
+            .controls
+            .add_panel(pocket_kernel::controls::DialogPanel {
+                hwnd,
+                x: 10,
+                y: 20,
+                w: 40,
+                h: 50,
+                visible: true,
+                border: false,
+                caption: None,
+                ok_pressed: false,
+            });
+        assert!(!kernel.window_rects.contains_key(&hwnd));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let dc = window_dc(&mut ctx, hwnd);
+        ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(
+            begin_paint(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(dc)
+        );
+        assert_ne!(dc, GDI_SCREEN_DC);
+        surface_for_dc(ctx.kernel, dc)
+            .unwrap()
+            .fill_rect(0, 0, 40, 50, 0xf800);
+        ctx.kernel.composite_controls();
+        let at = ((20 * ctx.kernel.framebuffer.width + 10) * 2) as usize;
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[at..at + 2],
+            &0xf800u16.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn create_bitmap_copies_top_down_word_aligned_pixels() {
+        let mut kernel = fresh_kernel();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let thunk = dummy_thunk();
+        for (w, h, bpp, data, expected) in [
+            (
+                2,
+                2,
+                16,
+                vec![0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0xff, 0xff],
+                vec![0xf800u16, 0x07e0, 0x001f, 0xffff],
+            ),
+            // Monochrome rows are WORD aligned, not DWORD aligned or bottom-up.
+            (
+                3,
+                2,
+                1,
+                vec![0xa0, 0, 0x40, 0],
+                vec![0xffff, 0, 0xffff, 0, 0xffff, 0],
+            ),
+            (
+                2,
+                2,
+                24,
+                vec![0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255],
+                vec![0xf800, 0x07e0, 0x001f, 0xffff],
+            ),
+        ] {
+            cpu.write_mem(0x1200, &data).unwrap();
+            cpu.write_mem(0x1100, &0x1200u32.to_le_bytes()).unwrap();
+            for (r, v) in [
+                (ArmReg::R0, w),
+                (ArmReg::R1, h),
+                (ArmReg::R2, 1),
+                (ArmReg::R3, bpp),
+                (ArmReg::Sp, 0x1100),
+            ] {
+                cpu.write_reg(r, v).unwrap();
+            }
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let DispatchOutcome::ReturnedR0(handle) = create_bitmap(&mut ctx).unwrap() else {
+                panic!("bitmap handle");
+            };
+            assert_ne!(handle, 0);
+            ctx.cpu.write_mem(0x1200, &vec![0; data.len()]).unwrap();
+            let bitmap = ctx.kernel.gdi.bitmap(handle).unwrap();
+            assert_eq!(bitmap.dib_bits_va, None);
+            let actual: Vec<u16> = bitmap
+                .pixels
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

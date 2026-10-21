@@ -20,7 +20,7 @@ internal class StylusBindings(config: LauncherConfig) {
     fun velocity(s:FloatArray,turns:Int):Pair<Int,Int> {
         if(!enabled) return 0 to 0
         var x=(s[3]-s[2]).coerceIn(-1f,1f); var y=(s[1]-s[0]).coerceIn(-1f,1f)
-        val v=when(turns%4) { 1->y to -x;2->-x to -y;3->-y to x;else->x to y }
+        val v=displayVectorToGuest(x,y,turns)
         x=v.first;y=v.second;val scale=speed/hypot(x,y).coerceAtLeast(1f)
         return kotlin.math.round(x*scale).toInt() to kotlin.math.round(y*scale).toInt()
     }

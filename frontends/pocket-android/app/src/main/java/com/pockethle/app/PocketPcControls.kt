@@ -31,7 +31,8 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         }
         actions.zip(listOf("A","P2","Action","P1","P4","C","P3","B")).forEach { (id,label)->button(id,label) }
         auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
-        keys.getValue(R.id.btn_rotate_game).contentDescription="Rotate control layout"
+        keys.getValue(R.id.btn_rotate_game).contentDescription="Rotate game screen"
+        keys.getValue(R.id.btn_rotate_game).textSize=24f
         addView(dpad);addView(aim)
     }
     fun clearPressedControls() { keys.values.forEach { it.isPressed=false }; dpad.clearInput(); aim.clearInput() }

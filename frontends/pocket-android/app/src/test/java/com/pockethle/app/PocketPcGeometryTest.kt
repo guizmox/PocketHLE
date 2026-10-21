@@ -30,4 +30,36 @@ class PocketPcGeometryTest {
             }
         }
     }
+    @Test fun vgaUsesQvgaMultiplesAndStillMapsToEveryNativePixel() {
+        val rect=pocketPcDisplayRect(1400,800,640,480,0)
+        assertEquals(960,rect.width);assertEquals(720,rect.height)
+        assertEquals(0 to 0,displayPointToGuest(rect.left.toFloat(),rect.top.toFloat(),1400,800,640,480,0,0,true))
+        assertEquals(639 to 479,displayPointToGuest((rect.left+rect.width-1).toFloat(),(rect.top+rect.height-1).toFloat(),1400,800,640,480,0,0,true))
+        for(turn in listOf(0,90,180,270)) {
+            val w=if(turn%180==0) 640 else 480;val h=if(turn%180==0) 480 else 640
+            val fit=pocketPcDisplayRect(1080,1920,w,h,0)
+            assertEquals(0,fit.width%(w/2));assertEquals(0,fit.height%(h/2))
+            val pos=displayPointToGuest((fit.left+fit.width-1).toFloat(),(fit.top+fit.height-1).toFloat(),1080,1920,640,480,turn,0,true)!!
+            assertTrue(pos.first in 0..639);assertTrue(pos.second in 0..479)
+        }
+        // Gizmondo / old callers retain the original native-pixel scale policy.
+        assertEquals(640,displayRect(1400,800,640,480,0).width)
+    }
+
+    @Test fun arrowsAndStylusUseTheSameSingleInverseImageTurn() {
+        val keys=listOf(0x26,0x27,0x28,0x25)
+        val vectors=listOf(0f to -1f,1f to 0f,0f to 1f,-1f to 0f)
+        for(turn in 0..3) for(index in keys.indices) {
+            val expected=(index-turn+4)%4
+            assertEquals(keys[expected],displayDirectionToGuest(keys[index],turn))
+            val v=vectors[index]
+            val actual=displayVectorToGuest(v.first,v.second,turn)
+            assertEquals(vectors[expected].first,actual.first,0f)
+            assertEquals(vectors[expected].second,actual.second,0f)
+            assertEquals(keys[index],displayDirectionToGuest(displayDirectionToGuest(keys[index],turn),(4-turn)%4))
+            assertEquals(0x0d,displayDirectionToGuest(0x0d,turn))
+        }
+        assertEquals(0x25,displayDirectionToGuest(0x26,1))
+    }
+
 }
