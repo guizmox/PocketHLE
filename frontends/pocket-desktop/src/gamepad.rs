@@ -18,6 +18,11 @@ use std::{
 };
 
 pub enum Event {
+    AimAxis {
+        device: usize,
+        horizontal: bool,
+        value: f32,
+    },
     Devices(Vec<(usize, String)>),
     Input {
         device: usize,
@@ -437,7 +442,16 @@ fn worker(
                 }
                 SdlEvent::ControllerAxisMotion {
                     which, axis, value, ..
-                } => changes = state.controller_axis(which as usize, axis, value),
+                } => {
+                    changes = state.controller_axis(which as usize, axis, value);
+                    if matches!(axis, Axis::RightX | Axis::RightY) {
+                        changes.push(Event::AimAxis {
+                            device: which as usize,
+                            horizontal: axis == Axis::RightX,
+                            value: (value as f32 / 32767.0).clamp(-1.0, 1.0),
+                        });
+                    }
+                }
                 SdlEvent::JoyButtonDown {
                     which, button_idx, ..
                 }

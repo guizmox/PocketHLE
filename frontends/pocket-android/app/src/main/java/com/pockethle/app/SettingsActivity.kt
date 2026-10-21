@@ -163,6 +163,65 @@ class SettingsActivity : AppCompatActivity() {
             }
             val keyboardGroups = categories(keyboard)
             val gamepadGroups = categories(gamepad)
+            val stylusScreen=androidx.preference.PreferenceScreen(requireContext(),null).apply {
+                title="Pocket PC only — stylus stick";key="stylus_options"
+            }
+            input.addPreference(stylusScreen)
+            fun stylusJson()=current.toJson().optJSONObject("stylus_stick") ?: org.json.JSONObject().apply {
+                put("enabled",true);put("speed",240)
+                put("keyboard",org.json.JSONArray().apply { listOf("O","L","K","M").forEach { put(org.json.JSONArray().put(it)) } })
+                put("controller",org.json.JSONArray().apply { StylusBindings.directions.forEach { put(org.json.JSONArray().put("RightStick$it")) } })
+            }
+            fun saveStylus(value:org.json.JSONObject) {
+                current=current.copy(originalJson=current.toJson().put("stylus_stick",value).toString());writeConfig()
+            }
+            stylusScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                title="Enable stylus stick";summary="Emulates stylus drags; lifts and recentres at screen edges. Pocket PC only."
+                isPersistent=false;isChecked=stylusJson().optBoolean("enabled",true)
+                setOnPreferenceChangeListener { _,v -> saveStylus(stylusJson().put("enabled",v as Boolean));true }
+            })
+            stylusScreen.addPreference(androidx.preference.SeekBarPreference(requireContext()).apply {
+                title="Stylus speed (pixels/s)";min=30;max=1200;showSeekBarValue=true;isPersistent=false
+                value=stylusJson().optInt("speed",240)
+                setOnPreferenceChangeListener { _,v -> saveStylus(stylusJson().put("speed",v as Int));true }
+            })
+            StylusBindings.directions.forEachIndexed { i,direction ->
+                stylusScreen.addPreference(Preference(requireContext()).apply {
+                    title="Stylus $direction — keyboard";isPersistent=false
+                    summary=stylusJson().getJSONArray("keyboard").getJSONArray(i).join(", ")
+                    setOnPreferenceClickListener {
+                        val dialog=androidx.appcompat.app.AlertDialog.Builder(requireContext()).setTitle("Press a key")
+                            .setNegativeButton("Cancel",null).setNeutralButton("Clear") { _,_ ->
+                                val j=stylusJson();j.getJSONArray("keyboard").put(i,org.json.JSONArray());saveStylus(j);summary="Unbound"
+                            }.create()
+                        dialog.setOnKeyListener { _,code,event ->
+                            val name=InputBindings.keyName(event)
+                            if(code==android.view.KeyEvent.KEYCODE_BACK) false
+                            else if(event.action==android.view.KeyEvent.ACTION_DOWN && name!=null && name!="F10") {
+                                val j=stylusJson();val a=j.getJSONArray("keyboard")
+                                for(k in 0..3) {
+                                    val old=a.getJSONArray(k);val next=org.json.JSONArray()
+                                    for(n in 0 until old.length()) if(!InputBindings.canonical(old.getString(n)).equals(InputBindings.canonical(name),true)) next.put(old.getString(n))
+                                    a.put(k,next)
+                                }
+                                a.put(i,org.json.JSONArray().put(name));saveStylus(j);summary=name;dialog.dismiss();true
+                            } else false
+                        };dialog.show();true
+                    }
+                })
+                stylusScreen.addPreference(ListPreference(requireContext()).apply {
+                    title="Stylus $direction — controller";isPersistent=false
+                    val names=listOf("")+InputBindings.controls
+                    entries=names.map { if(it.isEmpty()) "Unbound" else it }.toTypedArray();entryValues=names.toTypedArray()
+                    value=stylusJson().getJSONArray("controller").getJSONArray(i).optString(0,"")
+                    summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
+                    setOnPreferenceChangeListener { _,v ->
+                        val j=stylusJson();val a=j.getJSONArray("controller");val name=v.toString()
+                        for(k in 0..3) { val old=a.getJSONArray(k);val next=org.json.JSONArray();for(n in 0 until old.length()) if(old.getString(n)!=name) next.put(old.getString(n));a.put(k,next) }
+                        a.put(i,org.json.JSONArray().apply { if(name.isNotEmpty()) put(name) });saveStylus(j);true
+                    }
+                })
+            }
             InputBindings.buttons.forEach { (button,info) ->
                 val group = when {
                     button.startsWith("pocket_pc_app") -> controlGroups[3]

@@ -63,6 +63,7 @@ pub mod sdl;
 pub mod serial;
 pub mod shared_objects;
 pub mod shell_keyboard;
+pub mod stylus_stick;
 pub mod text;
 mod tls;
 pub mod tracker;
@@ -346,6 +347,11 @@ pub enum KernelError {
 /// back to its synthetic timer / paint loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
+    /// Host-only Pocket PC stylus velocity, in guest pixels/second. Never a VK.
+    StylusAim {
+        x: i16,
+        y: i16,
+    },
     /// Host presentation rotation; consumed by the SIP, never sent to the guest.
     KeyboardRotation {
         turns: u8,
@@ -1265,6 +1271,7 @@ pub struct KernelState {
     /// any synthetic timer / paint message is fabricated, so real
     /// user input always wins over the synthetic pump.
     pub pending_input: VecDeque<InputEvent>,
+    pub stylus_stick: stylus_stick::StylusStick,
     /// Set once the guest has fetched the GAPI key list through
     /// `GXGetDefaultKeys`. Such a guest only reacts to the virtual keys
     /// that table names, so the host's confirm key has to be delivered
@@ -3662,6 +3669,7 @@ impl Process {
                 message_box_spins: 0,
                 modal_dialog: None,
                 pending_input: VecDeque::new(),
+                stylus_stick: Default::default(),
                 gapi_keys_queried: false,
                 gapi_action_key: gapi::VK_A,
                 pending_message: None,

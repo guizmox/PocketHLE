@@ -497,6 +497,14 @@ Colors performance remain device validation tasks. No temporary instrumentation.
 
 ## EGL display cadence (2026-10-11)
 
+GAPI GXEndDraw now shares this modeled display clock (2026-10-21). Wait
+before framebuffer readback, including unchanged frames, retain the deadline
+across cooperative retries, and record completion after publication. Preserve
+DirectDraw's one-shot explicit-blank credit. Snails previously rendered its
+timer-driven menu hundreds of times per second. This is the existing 60 Hz
+presentation policy, not a claim that the original GXEndDraw ABI guarantees
+vertical synchronization. Do not scale the guest clock or rewrite its timers.
+
 Battlestations imports eglSwapBuffers (static call site 0x25b6c). Frontend
 snapshot throttling does not constrain the guest simulation; the old EGL
 handler completed as fast as rendering allowed. Window swaps now use the same

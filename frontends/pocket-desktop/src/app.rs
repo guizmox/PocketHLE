@@ -212,6 +212,11 @@ pub struct PocketLauncher {
     /// should drive it, while the keybinding editor is in "press a
     /// key" mode.
     binding_capture: Option<GuestButton>,
+    stylus_capture: Option<usize>,
+    stylus_keyboard: std::collections::HashSet<String>,
+    stylus_gamepad: std::collections::HashMap<(usize, String), f32>,
+    stylus_touch: [f32; 4],
+    stylus_last: (i16, i16),
 }
 
 fn rotation_turns(rotation: RotationPref) -> u8 {
@@ -458,6 +463,7 @@ enum Screen {
 enum ControllerCapture {
     Guest(GuestButton),
     Fullscreen,
+    Stylus(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -712,6 +718,11 @@ impl PocketLauncher {
             running_game_id: None,
             running_is_gizmondo: false,
             binding_capture: None,
+            stylus_capture: None,
+            stylus_keyboard: Default::default(),
+            stylus_gamepad: Default::default(),
+            stylus_touch: [0.0; 4],
+            stylus_last: (0, 0),
         }
     }
 
@@ -1193,6 +1204,7 @@ impl PocketLauncher {
             self.release_all_keys();
             self.gamepad_capture = None;
             self.binding_capture = None;
+            self.stylus_capture = None;
             self.config_draft = Some(self.settings_draft());
             self.screen = Screen::InputSettings;
             ui.close_menu();
@@ -1201,6 +1213,7 @@ impl PocketLauncher {
             self.release_all_keys();
             self.gamepad_capture = None;
             self.binding_capture = None;
+            self.stylus_capture = None;
             self.config_draft = Some(self.settings_draft());
             self.screen = Screen::GizmondoOptions;
             ui.close_menu();
@@ -1918,6 +1931,7 @@ impl PocketLauncher {
             self.release_all_keys();
             self.gamepad_capture = None;
             self.binding_capture = None;
+            self.stylus_capture = None;
             self.runner
                 .set_missing_api_logging(draft.log_unimplemented_apis);
             *self.library.config_mut() = draft;
@@ -1934,6 +1948,7 @@ impl PocketLauncher {
         } else if cancel_clicked {
             self.gamepad_capture = None;
             self.binding_capture = None;
+            self.stylus_capture = None;
             self.screen = if self.running_game.is_some() {
                 Screen::Run
             } else {
@@ -2208,6 +2223,87 @@ impl PocketLauncher {
             draft.keybindings = pocket_library::KeyBindings::default();
             capture = None;
         }
+        ui.separator();
+        ui.heading("Pocket PC only — stylus stick");
+        ui.checkbox(
+            &mut draft.stylus_stick.enabled,
+            "Enable stylus stick (right stick by default)",
+        );
+        ui.label("Emulates held-stylus drags; lifts and recentres at screen edges. Physical touch takes priority.");
+        ui.add(
+            egui::Slider::new(&mut draft.stylus_stick.speed, 30..=1200)
+                .text("Stylus speed (pixels/s)"),
+        );
+        if let Some(direction) = self.stylus_capture {
+            if let Some(key) = ui.ctx().input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } => Some(*key),
+                    _ => None,
+                })
+            }) {
+                for names in &mut draft.stylus_stick.keyboard {
+                    names.retain(|n| !pocket_library::keybindings::keys_match(n, key.name()));
+                }
+                draft.stylus_stick.keyboard[direction].push(key.name().into());
+                self.stylus_capture = None;
+            }
+        }
+        egui::Grid::new("stylus_bindings").show(ui, |ui| {
+            for (i, name) in pocket_library::stylus::DIRECTIONS.iter().enumerate() {
+                ui.label(format!("Stylus {name}"));
+                ui.label(draft.stylus_stick.keyboard[i].join(", "));
+                if ui
+                    .button(if self.stylus_capture == Some(i) {
+                        "Press a key…"
+                    } else {
+                        "Assign key"
+                    })
+                    .clicked()
+                {
+                    self.stylus_capture = if self.stylus_capture == Some(i) {
+                        None
+                    } else {
+                        Some(i)
+                    };
+                    capture = None;
+                    self.gamepad_capture = None;
+                }
+                if ui.small_button("Clear key").clicked() {
+                    draft.stylus_stick.keyboard[i].clear();
+                    self.stylus_capture = None;
+                }
+                ui.label(draft.stylus_stick.controller[i].join(", "));
+                if ui
+                    .button(
+                        if self.gamepad_capture == Some(ControllerCapture::Stylus(i)) {
+                            "Move controller…"
+                        } else {
+                            "Assign controller"
+                        },
+                    )
+                    .clicked()
+                {
+                    self.gamepad_capture =
+                        if self.gamepad_capture == Some(ControllerCapture::Stylus(i)) {
+                            None
+                        } else {
+                            Some(ControllerCapture::Stylus(i))
+                        };
+                    self.stylus_capture = None;
+                    capture = None;
+                }
+                if ui.small_button("Clear controller").clicked() {
+                    draft.stylus_stick.controller[i].clear();
+                    self.gamepad_capture = None;
+                }
+                ui.end_row();
+            }
+        });
         self.binding_capture = capture;
     }
 
@@ -2370,6 +2466,7 @@ impl PocketLauncher {
         } else if cancel_clicked {
             self.gamepad_capture = None;
             self.binding_capture = None;
+            self.stylus_capture = None;
             self.screen = if self.running_game.is_some() {
                 Screen::Run
             } else {
@@ -2530,6 +2627,31 @@ impl PocketLauncher {
             [frame.width, frame.height]
         };
         let available = ui.available_rect_before_wrap();
+        if !self.running_is_gizmondo && self.library.config().fullscreen_mode != "without_controls"
+        {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui(Vec2::new(196.0, available.height()), |ui| {
+                    self.ui_virtual_pad(ui);
+                });
+                let room = Vec2::new((available.width() - 340.0).max(1.0), available.height());
+                ui.allocate_ui(room, |ui| {
+                    let dpi = ui.ctx().pixels_per_point();
+                    let fit = crate::fullscreen_layout::integer_fit(
+                        [(room.x * dpi) as u32, (room.y * dpi) as u32],
+                        native,
+                    );
+                    let rect = Rect::from_min_size(
+                        ui.min_rect().min + Vec2::new(fit.left as f32, fit.top as f32) / dpi,
+                        Vec2::new(fit.width as f32, fit.height as f32) / dpi,
+                    );
+                    self.paint_guest_frame(ui, rect);
+                    self.handle_pointer(ui.ctx(), &rect, guest_size);
+                });
+                self.ui_stylus_pad(ui);
+            });
+            return;
+        }
+        self.stylus_touch = [0.0; 4];
         let dpi = ui.ctx().pixels_per_point();
         let fit = crate::fullscreen_layout::integer_fit(
             [
@@ -2589,9 +2711,11 @@ impl PocketLauncher {
         }
         ui.add_space(6.0);
         ui.horizontal_top(|ui| {
+            self.ui_virtual_pad(ui);
+            ui.add_space(12.0);
             self.ui_pocketpc_screen(ui);
             ui.add_space(12.0);
-            self.ui_virtual_pad(ui);
+            self.ui_stylus_pad(ui);
         });
         if let Some(status) = self.last_frame_status.as_ref() {
             ui.add_space(8.0);
@@ -2616,10 +2740,43 @@ impl PocketLauncher {
         self.handle_pointer(ui.ctx(), &rect, guest_size);
     }
 
+    fn ui_stylus_pad(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.label("Stylus / look");
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(100.0), Sense::drag());
+            let mut offset = Vec2::ZERO;
+            if response.is_pointer_button_down_on() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    offset = (pos - rect.center()) / 40.0;
+                    if offset.length() > 1.0 {
+                        offset = offset.normalized();
+                    }
+                }
+            }
+            self.stylus_touch = [
+                (-offset.y).max(0.0),
+                offset.y.max(0.0),
+                (-offset.x).max(0.0),
+                offset.x.max(0.0),
+            ];
+            ui.painter()
+                .circle_filled(rect.center(), 46.0, Color32::from_gray(35));
+            ui.painter()
+                .circle_stroke(rect.center(), 46.0, egui::Stroke::new(1.0, Color32::GRAY));
+            ui.painter().circle_filled(
+                rect.center() + offset * 30.0,
+                16.0,
+                Color32::from_rgb(60, 150, 200),
+            );
+        });
+    }
+
     fn ui_virtual_pad(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
-            ui.label(RichText::new("Shared controls").strong());
+            ui.label(RichText::new("Pocket PC controls").strong());
+            ui.horizontal(|ui| { ui.add_space(76.0); self.vbutton(ui, "Turbo", GuestButton::Turbo, 60.0); });
             ui.add_space(4.0);
+            ui.label("Move");
             // ----- D-pad: 3x3 grid with cardinal arrows -----
             egui::Grid::new("vpad_dpad")
                 .spacing(Vec2::new(2.0, 2.0))
@@ -2650,9 +2807,6 @@ impl PocketLauncher {
                 self.vbutton(ui, "2", GuestButton::Soft2, 52.0);
             });
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "Turbo", GuestButton::Turbo, 60.0);
-            });
             ui.add_space(8.0);
             ui.label("Pocket PC hardware")
                 .on_hover_text("Some Pocket PC games use P1–P4 instead of Action/A/B/C. Assign keys or a controller in Settings > Keyboard and controllers.");
@@ -2993,6 +3147,51 @@ impl PocketLauncher {
         }
     }
 
+    fn update_stylus_input(&mut self, ctx: &egui::Context) {
+        let mut strengths = self.stylus_touch;
+        let config = &self.library.config().stylus_stick;
+        for i in 0..4 {
+            if config.keyboard[i].iter().any(|name| {
+                self.stylus_keyboard
+                    .iter()
+                    .any(|k| pocket_library::keybindings::keys_match(k, name))
+            }) {
+                strengths[i] = 1.0;
+            }
+            for ((_, name), value) in &self.stylus_gamepad {
+                if config.controller[i].contains(name) {
+                    strengths[i] = strengths[i].max(*value);
+                }
+            }
+        }
+        let active = self.screen == Screen::Run
+            && !self.running_is_gizmondo
+            && self.running_game.is_some()
+            && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+            && !self
+                .last_frame_snapshot
+                .as_ref()
+                .is_some_and(|f| f.text_input)
+            && self.pointer_down_at.is_none();
+        if !active {
+            self.stylus_keyboard.clear();
+            self.stylus_gamepad.clear();
+            self.stylus_touch = [0.0; 4];
+        }
+        let vector = if active {
+            config.velocity(strengths, rotation_turns(self.game_rotation))
+        } else {
+            (0, 0)
+        };
+        if vector != self.stylus_last {
+            self.send_input(InputEvent::StylusAim {
+                x: vector.0,
+                y: vector.1,
+            });
+            self.stylus_last = vector;
+        }
+    }
+
     fn send_input(&self, ev: InputEvent) {
         if let Some(tx) = self.input_tx.as_ref() {
             let _ = tx.send(InputCommand::Input(ev));
@@ -3000,6 +3199,13 @@ impl PocketLauncher {
     }
 
     fn release_all_keys(&mut self) {
+        self.stylus_keyboard.clear();
+        self.stylus_gamepad.clear();
+        self.stylus_touch = [0.0; 4];
+        if self.stylus_last != (0, 0) {
+            self.send_input(InputEvent::StylusAim { x: 0, y: 0 });
+        }
+        self.stylus_last = (0, 0);
         self.deck_start_press = None;
         self.deck_piano_release = None;
         self.deck_filter_press = None;
@@ -3025,12 +3231,40 @@ impl PocketLauncher {
     fn handle_gamepads(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.gamepad_rx.rx.try_recv() {
             match event {
+                crate::gamepad::Event::AimAxis {
+                    device,
+                    horizontal,
+                    value,
+                } => {
+                    if self.screen == Screen::Run
+                        && !self.running_is_gizmondo
+                        && Some(device) == self.gamepad_selected
+                    {
+                        let (negative, positive) = if horizontal {
+                            ("RightStickLeft", "RightStickRight")
+                        } else {
+                            ("RightStickUp", "RightStickDown")
+                        };
+                        for (name, strength) in [(negative, -value), (positive, value)] {
+                            let key = (device, name.to_string());
+                            let strength = ((strength - 0.18) / 0.82).clamp(0.0, 1.0);
+                            if strength > 0.0 {
+                                self.stylus_gamepad.insert(key, strength);
+                            } else {
+                                self.stylus_gamepad.remove(&key);
+                            }
+                        }
+                    }
+                }
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
                 crate::gamepad::Event::Devices(devices) => {
                     self.deck_nav_repeat = None;
                     self.deck_filter_press = None;
                     self.deck_start_press = None;
                     self.gamepad_devices = devices;
+                    self.stylus_gamepad.retain(|(id, _), _| {
+                        self.gamepad_devices.iter().any(|(device, _)| device == id)
+                    });
                     if !self
                         .gamepad_devices
                         .iter()
@@ -3170,6 +3404,12 @@ impl PocketLauncher {
                                     }
                                     draft.gamepad_bindings.insert(control.clone(), button);
                                 }
+                                ControllerCapture::Stylus(direction) => {
+                                    for names in &mut draft.stylus_stick.controller {
+                                        names.retain(|n| n != &control);
+                                    }
+                                    draft.stylus_stick.controller[direction].push(control.clone());
+                                }
                                 ControllerCapture::Fullscreen => {
                                     draft.gamepad_bindings.remove(&control);
                                     draft.gamepad_fullscreen = Some(control.clone());
@@ -3214,6 +3454,7 @@ impl PocketLauncher {
                             self.game_settings_draft = None;
                             self.gamepad_capture = None;
                             self.binding_capture = None;
+                            self.stylus_capture = None;
                             self.screen = if self.running_game.is_some() {
                                 Screen::Run
                             } else {
@@ -3257,6 +3498,19 @@ impl PocketLauncher {
                     if self.screen != Screen::Run {
                         continue;
                     }
+                    if !self.running_is_gizmondo
+                        && self.library.config().stylus_stick.enabled
+                        && self
+                            .library
+                            .config()
+                            .stylus_stick
+                            .controller
+                            .iter()
+                            .any(|names| names.contains(&control))
+                    {
+                        self.stylus_gamepad.insert(key, 1.0);
+                        continue;
+                    }
                     let Some(button) = self.library.config().gamepad_bindings.get(&control) else {
                         continue;
                     };
@@ -3276,6 +3530,7 @@ impl PocketLauncher {
     }
 
     fn release_gamepad_control(&mut self, key: &(usize, String)) {
+        self.stylus_gamepad.remove(key);
         if let Some(vk) = self.gamepad_held.remove(key) {
             if !self.gamepad_held.values().any(|other| *other == vk)
                 && self.held.release(InputSource::Gamepad, vk)
@@ -3410,6 +3665,28 @@ impl PocketLauncher {
                 continue;
             }
             if self.screen != Screen::Run {
+                continue;
+            }
+            if !self.running_is_gizmondo
+                && !text_input
+                && self.library.config().stylus_stick.enabled
+                && self
+                    .library
+                    .config()
+                    .stylus_stick
+                    .keyboard
+                    .iter()
+                    .any(|names| {
+                        names
+                            .iter()
+                            .any(|n| pocket_library::keybindings::keys_match(n, key.name()))
+                    })
+            {
+                if pressed {
+                    self.stylus_keyboard.insert(key.name().into());
+                } else {
+                    self.stylus_keyboard.remove(key.name());
+                }
                 continue;
             }
             // Both PocketPC and Gizmondo use the same configurable host-key map.
@@ -3888,6 +4165,7 @@ impl eframe::App for PocketLauncher {
             return;
         }
         self.handle_physical_keyboard(ctx);
+        self.update_stylus_input(ctx);
         self.drain_events(ctx);
         if let Some(result) = self
             .screenshot

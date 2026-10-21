@@ -15,10 +15,9 @@
 //! All four are dispatched through a single [`WinCeDispatcher`] that
 //! implements [`pocket_kernel::Dispatcher`].
 //!
-//! Bundled third-party libraries we have no intention of emulating are
-//! not given a submodule at all — they get one entry in [`IGNORED_DLLS`]
-//! naming the start of the file name, and every call into them is
-//! answered generically.
+//! Bundled third-party middleware in [`IGNORED_DLLS`] uses its native guest
+//! DLL when supplied. The old generic fallback remains only when that DLL
+//! is absent, for compatibility with incomplete distributions.
 
 mod accelerators;
 pub mod aygshell;
@@ -136,6 +135,13 @@ fn ignored_dll(dll: &str) -> Option<&'static IgnoredDll> {
 /// capture into; the table is three entries long, so the scan costs
 /// nothing next to the dispatch itself.
 fn ignored_dll_stub(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // A supplied middleware DLL contains the actual decoder/mixer. The legacy
+    // constant fallback is only meaningful when that implementation is absent.
+    // Use the normal dependency/attach/IAT path; never fake successful audio
+    // initialization while ignoring the application's bundled FMOD CE library.
+    if coredll::native_import_available(ctx.kernel, ctx.thunk) {
+        return coredll::native_import(ctx);
+    }
     let value =
         ignored_dll(&ctx.thunk.dll).map_or(0, |i| i.value_for(import_name(ctx.thunk).as_ref()));
     Ok(DispatchOutcome::ReturnedR0(value))

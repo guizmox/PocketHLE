@@ -15,4 +15,9 @@
 <item name="btn_piano4" type="id"/>
 <item name="btn_piano5" type="id"/>
 <item name="btn_stop_emulation" type="id"/>
+<item name="btn_turbo" type="id"/>
+<item name="btn_ppc_app1" type="id"/>
+<item name="btn_ppc_app2" type="id"/>
+<item name="btn_ppc_app3" type="id"/>
+<item name="btn_ppc_app4" type="id"/>
 </resources>

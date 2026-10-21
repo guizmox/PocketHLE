@@ -98,10 +98,34 @@ fn main() -> anyhow::Result<()> {
         }));
     }
     let mut last = Instant::now();
+    let capture_audio = std::env::var_os("POCKETHLE_PROBE_AUDIO").is_some();
+    let mut audio_last = Instant::now();
+    let mut audio_samples = Vec::<i16>::new();
+    let mut audio_format = None;
+    if std::env::var_os("POCKETHLE_PROBE_AUDIO").is_some() {
+        emu.process_mut()
+            .unwrap()
+            .state
+            .audio
+            .capture_to(&out.join("audio.wav"))?;
+    }
     let mut stage = 0;
     let mut consumed = 0;
     let mut release: Option<(Instant, InputEvent)> = None;
     let result = emu.run_with_hook(&mut |state: &mut KernelState| {
+        if capture_audio && audio_last.elapsed() >= Duration::from_millis(10) {
+            let tap = state.audio.tap();
+            if tap.format_ready() {
+                let fmt = tap.guest_format();
+                let elapsed = audio_last.elapsed().min(Duration::from_millis(100));
+                let count = (elapsed.as_secs_f64() * f64::from(fmt.sample_rate)) as usize * usize::from(fmt.channels);
+                let mut samples = vec![0; count];
+                let n = tap.drain_into(&mut samples);
+                audio_samples.extend_from_slice(&samples[..n]);
+                audio_format = Some(fmt);
+            }
+            audio_last = Instant::now();
+        }
         if release
             .as_ref()
             .is_some_and(|(time, _)| time.elapsed() >= Duration::from_millis(150))
@@ -113,6 +137,11 @@ fn main() -> anyhow::Result<()> {
             for line in lines.iter().skip(consumed) {
                 let fields: Vec<_> = line.split_whitespace().collect();
                 match fields.as_slice() {
+                    ["aim", x, y] => {
+                        if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
+                            state.pending_input.push_back(InputEvent::StylusAim { x, y });
+                        }
+                    }
                     ["key", vk] => {
                         if let Ok(vk) = u16::from_str_radix(vk, 16) {
                             state.pending_input.push_back(InputEvent::KeyDown { vk });
@@ -159,5 +188,25 @@ fn main() -> anyhow::Result<()> {
         }
     });
     eprintln!("END {:?} result={result:?}", start.elapsed());
+    if let Some(fmt) = audio_format {
+        let mut wav = Vec::new();
+        let size = (audio_samples.len() * 2) as u32;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + size).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&fmt.channels.to_le_bytes());
+        wav.extend_from_slice(&fmt.sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(fmt.sample_rate * u32::from(fmt.channels) * 2).to_le_bytes());
+        wav.extend_from_slice(&(fmt.channels * 2).to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&size.to_le_bytes());
+        for sample in audio_samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(out.join("output-audio.wav"), wav)?;
+    }
     result
 }

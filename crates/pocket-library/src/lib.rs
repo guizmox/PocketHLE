@@ -40,6 +40,7 @@ pub use analysis::{analyze_game, detect_gizmondo_title_id, game_gizmondo_title_i
 pub mod gizmondo_titles;
 pub mod keybindings;
 pub mod save_data;
+pub mod stylus;
 pub mod updates;
 
 pub use keybindings::{GuestButton, KeyBinding, KeyBindings};
@@ -895,6 +896,8 @@ pub struct LauncherConfig {
     /// the D-pad to match their keyboard once, not once per title.
     #[serde(default)]
     pub keybindings: KeyBindings,
+    #[serde(default)]
+    pub stylus_stick: stylus::StylusBindings,
     /// Physical controller inputs, independent of keyboard bindings.
     #[serde(default = "keybindings::default_gamepad_bindings")]
     pub gamepad_bindings: std::collections::BTreeMap<String, GuestButton>,
@@ -1093,6 +1096,7 @@ impl Default for LauncherConfig {
             fullscreen_mode: default_fullscreen_mode(),
             orientation: default_orientation(),
             keybindings: KeyBindings::default(),
+            stylus_stick: Default::default(),
             gamepad_bindings: keybindings::default_gamepad_bindings(),
             gamepad_fullscreen: keybindings::default_gamepad_fullscreen(),
             show_backend_log: default_show_backend_log(),

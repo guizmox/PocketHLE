@@ -796,6 +796,7 @@ fn init_logger() {
 // not pass it back into any of the methods above.
 
 /// `kind` ordinals exchanged with Kotlin. See `NativeBridge.kt`.
+const INPUT_KIND_STYLUS_AIM: jint = 6;
 const INPUT_KIND_KEY_DOWN: jint = 0;
 const INPUT_KIND_KEY_UP: jint = 1;
 const INPUT_KIND_POINTER_DOWN: jint = 2;
@@ -988,6 +989,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSendInput<'loca
         return 0;
     };
     let event = match kind {
+        INPUT_KIND_STYLUS_AIM => InputEvent::StylusAim {
+            x: a.clamp(-1200, 1200) as i16,
+            y: b.clamp(-1200, 1200) as i16,
+        },
         INPUT_KIND_KEYBOARD_ROTATION => InputEvent::KeyboardRotation {
             turns: (a as u8) % 4,
         },

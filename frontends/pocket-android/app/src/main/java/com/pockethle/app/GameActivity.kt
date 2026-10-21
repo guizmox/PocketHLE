@@ -103,11 +103,25 @@ class GameActivity : AppCompatActivity() {
     private val heldVirtualKeys = HashSet<Int>()
     /** Guest keys currently asserted by a gamepad stick or hat. */
     private val heldAxisKeys = HashMap<String, Int>()
+    private lateinit var stylusBindings: StylusBindings
+    private val stylusKeys = HashMap<Pair<Int,Int>,Int>()
+    private val stylusAxes = HashMap<Pair<Int,String>,Pair<Int,Float>>()
+    private var stylusTouch = floatArrayOf(0f,0f,0f,0f)
+    private var stylusSent = 0 to 0
     private var surfacePointerDown = false
     private var lastPointerX = 0
     private var lastPointerY = 0
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val stylusDeviceListener=object: android.hardware.input.InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(id:Int) {}
+        override fun onInputDeviceChanged(id:Int) {}
+        override fun onInputDeviceRemoved(id:Int) {
+            stylusKeys.keys.removeAll { it.first==id }
+            stylusAxes.keys.removeAll { it.first==id }
+            updateStylusAim()
+        }
+    }
 
     /** Polling tick. ~30 Hz keeps the SurfaceView smooth without
      * burning the CPU on a phone. */
@@ -115,6 +129,7 @@ class GameActivity : AppCompatActivity() {
         override fun run() {
             if (session == 0L) return
             updateCameraOrientation()
+            updateStylusAim()
             val raw = NativeBridge.nativePollFrame(session)
             if (raw != null) {
                 decodeFrame(raw)?.let { frame ->
@@ -141,6 +156,7 @@ class GameActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         val config = readLauncherConfig()
         bindings = InputBindings(config)
+        stylusBindings = StylusBindings(config)
         showFps = config.showFps
         displayScale = config.displayScale
         controlsOpacity = config.controlsOpacity
@@ -304,6 +320,7 @@ class GameActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).registerInputDeviceListener(stylusDeviceListener,mainHandler)
         activityResumed = true
         if (::glRenderer.isInitialized) fpsMeter.reset(glRenderer.presentedFrameCount, System.nanoTime())
         if (::surface.isInitialized) surface.onResume()
@@ -316,6 +333,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).unregisterInputDeviceListener(stylusDeviceListener)
         activityResumed = false
         if (::fpsOverlay.isInitialized) fpsOverlay.visibility = View.GONE
         if (::surface.isInitialized) surface.onPause()
@@ -329,6 +347,7 @@ class GameActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) releaseHeldInput()
         if (hasFocus && (gizmondoGame || pocketPcFullscreen)) hideSystemBars()
     }
 
@@ -659,6 +678,16 @@ class GameActivity : AppCompatActivity() {
         }
         val sources = event.device?.sources ?: event.source
         val isController = sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD || sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+        if (!gizmondoGame && ::stylusBindings.isInitialized && stylusBindings.enabled && session != 0L) {
+            val key=event.deviceId to event.keyCode
+            val name=if(isController) InputBindings.controllerName(event.keyCode) else InputBindings.keyName(event)
+            val direction=name?.let { if(isController) stylusBindings.pad(it) else stylusBindings.key(it) }
+            if(event.action==KeyEvent.ACTION_UP && stylusKeys.remove(key)!=null) { updateStylusAim();return true }
+            if(direction!=null) {
+                if(event.action==KeyEvent.ACTION_DOWN) stylusKeys[key]=direction
+                updateStylusAim();return true
+            }
+        }
         val vk = (if (isController) InputBindings.controllerName(event.keyCode)?.let { bindings.controllerKey(it) }
             else if (InputBindings.keyName(event) != null) bindings.keyboardKey(event) else virtualKeyFor(event.keyCode)) ?: return super.dispatchKeyEvent(event)
         val handle = session
@@ -719,11 +748,20 @@ class GameActivity : AppCompatActivity() {
             return super.onGenericMotionEvent(event)
         }
         val desired = linkedMapOf<String,Int>()
+        val aimDesired=linkedMapOf<String,Pair<Int,Float>>()
         fun axis(name: String,value: Float,negative: String,positive: String) {
+            if(!gizmondoGame && stylusBindings.enabled) {
+                listOf(name+negative to -value, name+positive to value).forEach { (control,v) ->
+                    stylusBindings.pad(control)?.let { direction ->
+                        val strength=((v-.18f)/.82f).coerceIn(0f,1f)
+                        if(strength>0f) aimDesired[control]=direction to strength
+                    }
+                }
+            }
             fun active(v: Float, control: String) = if (name == "DPad") v >= 0.5f
                 else dpadDeadzone.active(v, heldAxisKeys.containsKey(control))
-            if(active(-value, name+negative)) bindings.controllerKey(name+negative)?.let { desired[name+negative]=it }
-            if(active(value, name+positive)) bindings.controllerKey(name+positive)?.let { desired[name+positive]=it }
+            if(stylusBindings.pad(name+negative).let { gizmondoGame || !stylusBindings.enabled || it==null } && active(-value, name+negative)) bindings.controllerKey(name+negative)?.let { desired[name+negative]=it }
+            if(stylusBindings.pad(name+positive).let { gizmondoGame || !stylusBindings.enabled || it==null } && active(value, name+positive)) bindings.controllerKey(name+positive)?.let { desired[name+positive]=it }
         }
         axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_X),"Left","Right")
         axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_Y),"Up","Down")
@@ -732,8 +770,14 @@ class GameActivity : AppCompatActivity() {
         axis("RightStick",event.getAxisValue(MotionEvent.AXIS_Z),"Left","Right")
         axis("RightStick",event.getAxisValue(MotionEvent.AXIS_RZ),"Up","Down")
         listOf("LeftTrigger2" to MotionEvent.AXIS_LTRIGGER,"RightTrigger2" to MotionEvent.AXIS_RTRIGGER).forEach { (name,axis) ->
-            if(event.getAxisValue(axis)>.60f) bindings.controllerKey(name)?.let { desired[name]=it }
+            val value=event.getAxisValue(axis)
+            val aim=if(!gizmondoGame && stylusBindings.enabled) stylusBindings.pad(name) else null
+            if(aim!=null && value>.18f) aimDesired[name]=aim to ((value-.18f)/.82f).coerceIn(0f,1f)
+            else if(aim==null && value>.60f) bindings.controllerKey(name)?.let { desired[name]=it }
         }
+        stylusAxes.keys.removeAll { it.first==event.deviceId }
+        aimDesired.forEach { (name,value) -> stylusAxes[event.deviceId to name]=value }
+        updateStylusAim()
         heldAxisKeys.keys.toList().filter { it !in desired }.forEach { name -> heldAxisKeys.remove(name)?.let { releaseGuestKey(handle,it) } }
         desired.forEach { (name,vk) -> if (heldAxisKeys.putIfAbsent(name,vk)==null) acquireGuestKey(handle,vk) }
         return true
@@ -760,7 +804,24 @@ class GameActivity : AppCompatActivity() {
     }
 
     /** Release keys and pointer state before the native session can outlive the UI. */
+    private fun updateStylusAim() {
+        if(gizmondoGame || session==0L || !::stylusBindings.isInitialized) return
+        val strengths=stylusTouch.copyOf()
+        stylusKeys.values.forEach { strengths[it]=1f }
+        stylusAxes.values.forEach { (i,v) -> strengths[i]=maxOf(strengths[i],v) }
+        val vector=if(!activityResumed || !hasWindowFocus() || surfacePointerDown) 0 to 0
+            else stylusBindings.velocity(strengths,rotationDegrees/90)
+        if(vector!=stylusSent) {
+            NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,vector.first,vector.second)
+            stylusSent=vector
+        }
+    }
+
     private fun releaseHeldInput() {
+        stylusKeys.clear();stylusAxes.clear();stylusTouch.fill(0f)
+        if(session!=0L && stylusSent!=(0 to 0)) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,0,0)
+        stylusSent=0 to 0
+        (gameControls as? PocketPcControls)?.aim?.clearInput()
         val handle = session
         if (handle != 0L) {
             for (vk in heldGuestKeys.keys.toList()) {
@@ -834,6 +895,10 @@ class GameActivity : AppCompatActivity() {
      * counts as hardware input; a diagonal uses two existing directional keys.
      */
     private fun wireVirtualGamepad() {
+        (gameControls as? PocketPcControls)?.aim?.apply {
+            visibility=if(stylusBindings.enabled) View.VISIBLE else View.GONE
+            onAim={ x,y -> stylusTouch=floatArrayOf(maxOf(-y,0f),maxOf(y,0f),maxOf(-x,0f),maxOf(x,0f));updateStylusAim() }
+        }
         val dpad=(gameControls as? GizmondoControls)?.dpad
         dpad?.onDirectionsChanged = { view, mask ->
             val handle = session

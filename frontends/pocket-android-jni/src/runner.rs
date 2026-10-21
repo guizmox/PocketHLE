@@ -918,6 +918,9 @@ impl SessionHook {
             // Repaint the preserved parent frame even if its counter is static.
             state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
             state.pending_input.clear();
+            if let Some(up) = state.stylus_stick.cancel() {
+                state.pending_input.push_back(up);
+            }
             state.pressed_keys.fill(false);
             state.held_keys.clear();
             state.key_repeat_next_ms = None;

@@ -11820,7 +11820,7 @@ const BN_CLICKED: u32 = 0;
 fn input_to_message(ev: pocket_kernel::InputEvent) -> Option<(u32, u32, u32)> {
     match ev {
         InputEvent::Text { character } => Some((0x102, character as u32, 1)),
-        InputEvent::KeyboardRotation { .. } => None,
+        InputEvent::KeyboardRotation { .. } | InputEvent::StylusAim { .. } => None,
         pocket_kernel::InputEvent::PointerDown { x, y } => {
             let lparam = ((y as u32) << 16) | (x as u32);
             Some((WM_LBUTTONDOWN, MK_LBUTTON, lparam))
@@ -12407,7 +12407,8 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
                 ctx.kernel.key_repeat_next_ms = None;
             }
         }
-        pocket_kernel::InputEvent::KeyboardRotation { .. }
+        pocket_kernel::InputEvent::StylusAim { .. }
+        | pocket_kernel::InputEvent::KeyboardRotation { .. }
         | pocket_kernel::InputEvent::Text { .. }
         | pocket_kernel::InputEvent::PointerDown { .. }
         | pocket_kernel::InputEvent::PointerUp { .. }
@@ -12752,7 +12753,37 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
 /// game can use the GAPI direction table and still bind Enter explicitly
 /// (COD2 binds it to Fire). Apply the same device choice in both queue paths.
 fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
-    let ev = ctx.kernel.pending_input.pop_front()?;
+    let ev = loop {
+        match ctx.kernel.pending_input.pop_front() {
+            Some(InputEvent::StylusAim { x, y }) => {
+                if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
+                    && !ctx.kernel.shell_keyboard.visible
+                {
+                    ctx.kernel.stylus_stick.velocity(x, y);
+                }
+            }
+            Some(event @ InputEvent::PointerDown { .. }) => {
+                // A real touch owns the single stylus. Release the emulated
+                // stroke first and don't resume it without a fresh host axis.
+                if let Some(up) = ctx.kernel.stylus_stick.cancel() {
+                    ctx.kernel.pending_input.push_front(event);
+                    break up;
+                }
+                break event;
+            }
+            Some(event) => break event,
+            None => {
+                if ctx.kernel.shell_keyboard.visible {
+                    break ctx.kernel.stylus_stick.cancel()?;
+                }
+                break ctx.kernel.stylus_stick.tick(
+                    std::time::Instant::now(),
+                    ctx.kernel.framebuffer.width,
+                    ctx.kernel.framebuffer.height,
+                )?;
+            }
+        }
+    };
     ctx.kernel.refresh_control_visibility();
     if matches!(ev, InputEvent::KeyDown { .. }) {
         restore_active_dialog_focus(ctx.kernel);
@@ -25962,6 +25993,91 @@ mod tests {
     }
 
     #[test]
+    fn bundled_middleware_is_loaded_instead_of_returning_fake_success() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fmodce.dll"), b"not a PE").unwrap();
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = pocket_kernel::Thunk {
+            dll: "fmodce.dll".into(),
+            binding: pocket_pe::ImportBinding::Name("FSOUND_Init".into()),
+            friendly_name: Some("FSOUND_Init".into()),
+            ..dummy_thunk()
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            crate::ignored_dll_stub(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        ctx.kernel.module_search_dirs.push(dir.path().into());
+        assert_eq!(
+            crate::ignored_dll_stub(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(193)
+        );
+        assert!(ctx.kernel.modules.is_empty());
+    }
+
+    #[test]
+    fn stylus_velocity_is_pocketpc_only_and_real_touch_preempts_its_stroke() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::StylusAim { x: 240, y: 0 });
+        assert_eq!(take_pending_input(&mut ctx), None); // legacy/Gizmondo
+        ctx.kernel.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::StylusAim { x: 240, y: 0 });
+        assert!(matches!(
+            take_pending_input(&mut ctx),
+            Some(InputEvent::PointerDown { .. })
+        ));
+        let real = InputEvent::PointerDown { x: 5, y: 6 };
+        ctx.kernel.pending_input.push_back(real);
+        assert!(matches!(
+            take_pending_input(&mut ctx),
+            Some(InputEvent::PointerUp { .. })
+        ));
+        assert_eq!(take_pending_input(&mut ctx), Some(real));
+        assert_eq!(take_pending_input(&mut ctx), None);
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::StylusAim { x: 240, y: 0 });
+        assert!(matches!(
+            take_pending_input(&mut ctx),
+            Some(InputEvent::PointerDown { .. })
+        ));
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::StylusAim { x: 0, y: 0 });
+        assert!(matches!(
+            take_pending_input(&mut ctx),
+            Some(InputEvent::PointerUp { .. })
+        ));
+        assert_eq!(take_pending_input(&mut ctx), None);
+        ctx.kernel.shell_keyboard.visible = true;
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::StylusAim { x: 240, y: 0 });
+        assert_eq!(take_pending_input(&mut ctx), None);
+    }
+
+    #[test]
     fn invalid_runtime_image_sets_error_without_consuming_module_slot_or_ram() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("broken.dll"), b"not a PE").unwrap();
@@ -27401,6 +27517,7 @@ mod tests {
             message_frames: Default::default(),
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
+            stylus_stick: Default::default(),
             gapi_keys_queried: false,
             gapi_action_key: pocket_kernel::gapi::VK_A,
             pending_message: None,

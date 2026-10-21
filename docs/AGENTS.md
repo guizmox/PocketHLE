@@ -1,5 +1,88 @@
 # PocketHLE — architecture reference for coding agents
 
+## Modal progress dialogs and guest scheduling (2026-10-21)
+
+An idle DialogBoxIndirectParamW loop is a guest scheduling point, just like
+GetMessageW. It blocks its caller, not the whole process. Use the existing
+bounded wait_display_until continuation to park a worker at its exact thunk,
+or run a ready worker when the modal caller is main. Preserve the callback
+registers on suspension and the original GuestCallFrame until EndDialog.
+Assign the modal panel and its child controls to the creating guest thread;
+another thread's message pump must not consume their posted paints. Remove
+the modal polling deadline when restoring the original caller.
+
+Quake 3's worker shows "Partitioning Memory..." while main waits for its
+initialization and then allocates its pools. A host sleep in the modal handler
+never yielded the guest CPU, so main never reached those allocations. With
+cooperative modal waiting main proceeds and reports the separate, still
+unimplemented CreateFileForMappingW path. Do not describe this scheduling
+fix as file-mapping support, or change Quake's config/RAM to hide that gap.
+
+## CAB import recovery, wide scanf and monitor geometry (2026-10-20)
+
+Users import the original CAB unchanged. pocket-cab::extract_for_install first
+uses strict extraction, then recovers only one stale nonzero CFDATA checksum
+in an uncompressed, non-spanned, non-reserved, structurally valid CAB <=128 MiB.
+Recovery changes four checksum metadata bytes in an owned memory copy, never
+payload or the user's file. Multiple errors, truncation, compressed CAB errors
+and other parse errors remain failures. extract_all/extract_with_header stay
+strict for diagnostics. Desktop/Android library import and CLI CAB install share
+the installation API. Do not deliver a replacement Snails CAB or require a
+Python repair step. This is not cryptographic proof of the payload's provenance.
+
+swscanf uses wide string/character destinations by default, with narrow h and
+explicit wide l modifiers; sscanf/fscanf keep their byte/stream semantics.
+NFS parses its INI keywords into WCHAR strings: old narrow %s stores prevented
+all keyword matches. Preserve assignment suppression, width, numeric sizes and
+UTF-16 output termination; %c has no terminator. Wide text field widths and %n
+use UTF-16 units for supported text conversions; do not claim full locale/IME
+or arbitrary Unicode scanset support from this byte-oriented scanner.
+
+MonitorFromWindow/GetMonitorInfo model one primary guest display, using the
+actual framebuffer dimensions and bounded MONITORINFO/MONITORINFOEXW output.
+PowerVR Racer ignores the GetMonitorInfo return value, reading rcMonitor.right
+and bottom directly at 0x127f4/0x12804. Missing handlers left dimensions
+uninitialized and caused later invalid-memory cleanup. Monitor geometry is
+independent of host presentation rotation and renderer backend.
+
+## CAB registry setup, GAPI dialogs and dialog text (2026-10-20)
+
+Desktop and Android call Emulator::complete_cab_registry_setup before the first
+application instruction, only for CAB-sourced Pocket PC imports. A bounded,
+isolated ARM helper executes the package's original .999 DLL attach,
+Install_Init, Install_Exit (all seven ABI arguments), and detach. The supported
+profile is registry/time APIs only; do not execute file/GUI/service installers
+partially. Existing IonFx resource extraction remains separate. Registry values
+commit atomically as a delta after successful completion, respecting object-store
+quota and conflicting live writes. The success marker (DLL SHA256 + install
+path) is in the same persistent device registry. Never invent Racing Days' Data
+value or reset an existing installation/evaluation record. Original code creates
+its own initial state. Preserve thread-local media state around the helper.
+
+A Pocket PC GXOpenDisplay window owns its directly drawn pixels. When that
+window is an HLE dialog, its default panel face/native backing must not erase
+its GAPI frame. Keep its child controls and later dialogs composited. Close or
+destroy releases this ownership. Gizmondo's established presentation is unchanged.
+Snails uses precisely this modeless-dialog rendering path.
+
+GXGetDefaultKeys receives the ARM struct-result pointer in r0 and iOptions in
+r1. GX_NORMALKEYS=2 and GX_LANDSCAPEKEYS=3 are enum values. Pocket PC landscape
+tables map logical Up/Down/Left/Right to physical Left/Right/Down/Up, preserving
+face keys and 0x60-byte layout. Desktop/Android already inverse-rotate host
+input at presentation; never apply a second frontend rotation. The legacy
+Gizmondo key table stays unchanged. GeoRally EX explicitly queries option 3.
+
+GetDlgItemTextW resolves a child within the specified parent and sends
+WM_GETTEXT using the existing message route (including native subclasses).
+Lengths are UTF-16 units excluding the terminating zero. NFS's supplied
+registration code passes its unmodified ARM validator; a missing GetDlgItemTextW
+handler previously left the code buffer empty and caused rejection. Never patch
+that validator or manufacture a registration value. Its next resource load
+requests NFS.ini/TXT from NFS.inl, which stores NFS.INI/TXT. Resource lookup
+keeps exact matches first, then normalizes ASCII case within the same module
+before the existing cross-module fallback. Keep integer keys distinct and do
+not change language/resource data or rewrite commercial files.
+
 ## Pocket PC SIP, display profile and library artwork (2026-10-20)
 
 The shared shell keyboard now also services COREDLL SipShowIM/SipGetInfo/SipSetInfo
@@ -3201,3 +3284,63 @@ groups only; stored button identifiers and all existing bindings are unchanged.
 PVRTC1 upload behavior and its shared Software/GPU fallback are documented in
 GPU.md under PVRTC1 texture uploads (2026-10-20). Keep decoder changes scoped
 to 0x8C00..0x8C03 and preserve existing format behavior/enumeration order.
+
+### Shared sections, privilege and registry enumeration (2026-10-21)
+
+File mapping views use shared host-backed pages, not copies into private guest
+allocations. Section handles, views and CPU mappings independently retain the
+section and its VFS lease. Closing a handle must not invalidate a live view.
+CreateFileForMapping transfers its special file handle on both mapping success
+and failure; ordinary file handles are not consumed. Pinned files cannot change
+length. Preserve VFS sharing, permissions, object-store quota and RAM charges.
+MapViewOfFile uses its own address arena; VirtualFree must reject these views.
+All CPU execution and host accesses to shared mappings use the device execution
+gate. SharedMemory raw access and map_shared_region require this serialization.
+
+ARM SetKMode changes the calling thread's CPSR mode and returns the old mode.
+Restore CPSR before banked SP/LR when restoring contexts. Do not replace failed
+CPU detection with a title-specific CPU result or skip guest instructions.
+
+RegEnumValueW must terminate with ERROR_NO_MORE_ITEMS and distinguish UTF-16
+name capacities from byte data capacities. RegQueryInfoKeyW has 12 arguments,
+including lpReserved. Registry snapshots accept older snapshots without optional
+value_display metadata; this metadata preserves original value-name spelling.
+An older executable with strict snapshot parsing may reject the newer field.
+
+Visibility inherited from parents is derived, never written into a child's own
+WS_VISIBLE state. Paint and input must use the same ancestor visibility. An
+owned popup is not a WS_CHILD descendant of its owner. Hiding a parent cancels
+capture in hidden controls; showing it must preserve explicit child visibility.
+
+Modeless child-dialog panels participate in pointer targeting even without a
+window_rects entry. Their empty client area routes to their own DialogProc,
+using client coordinates (border/caption excluded). Do not send these events
+to the owner/ancestor frame or make an unrelated owned popup capture them.
+Snails uses a WS_CHILD GAPI dialog and reacts to WM_LBUTTONUP there. GAPI
+presentation cadence is documented alongside EGL in docs/GPU.md.
+
+### Pocket PC stylus stick and supplied middleware (2026-10-21)
+
+StylusAim is a host-only velocity event, never a fabricated guest VK. The
+Pocket PC input profile consumes it into bounded real stylus gestures at most
+once per 16 ms. The stick lifts/recentres at an edge so absolute-coordinate
+applications can keep dragging without a reverse jump. Clamp elapsed time
+after stalls; release on zero, focus loss, rotation, real touch takeover and
+device removal. A real touch and the SIP take priority. Gizmondo/legacy input
+must ignore this event. Child return clears the parent's parked stick state.
+
+LauncherConfig.stylus_stick is separate from guest hardware keys. Defaults are
+O=up, L=down, K=left, M=right, and RightStick directions on a controller.
+Desktop and Android preserve explicit empty bindings and apply inverse display
+rotation exactly once to the velocity. Normalize diagonals and keep independent
+keyboard, controller and touch contributions. Digital arrows remain movement;
+the touch aiming stick is on the right, on Pocket PC layouts only. Android's
+programmatic controls retain declared resource IDs in values/controls_ids.xml.
+
+Ignored middleware has a native preference when its DLL is actually supplied.
+Use the existing native-import/dependency/attach/IAT lifecycle rather than
+returning fake success. Explicit HLE handlers still win; the legacy missing-DLL
+fallback is retained. Snails' supplied fmodce.dll opens a real waveOut live ring
+and its native guest mixer produces PCM; no commercial decoder/data is copied
+into PocketHLE. This changes supplied FMOD middleware behavior generically and
+does not establish compatibility with every FMOD game or hardware audio driver.
