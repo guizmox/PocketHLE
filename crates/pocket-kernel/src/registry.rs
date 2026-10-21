@@ -64,6 +64,7 @@ const HANDLE_BASE: u32 = 0xDEAD_9100;
 pub(crate) struct RegistryStore {
     keys: HashMap<String, HashMap<String, RegistryValue>>,
     display: HashMap<String, String>,
+    value_display: HashMap<String, HashMap<String, String>>,
     charge: Option<crate::memory_division::StoreCharge>,
     persistence: Option<std::path::PathBuf>,
 }
@@ -74,6 +75,8 @@ struct RegistrySnapshot {
     version: u32,
     keys: HashMap<String, HashMap<String, RegistryValue>>,
     display: HashMap<String, String>,
+    #[serde(default)]
+    value_display: HashMap<String, HashMap<String, String>>,
 }
 #[derive(Debug, Default)]
 pub struct Registry {
@@ -124,6 +127,7 @@ impl Registry {
             store: Arc::new(Mutex::new(RegistryStore {
                 keys: store.keys.clone(),
                 display: store.display.clone(),
+                value_display: store.value_display.clone(),
                 charge: None,
                 persistence: None,
             })),
@@ -183,6 +187,23 @@ impl Registry {
             return false;
         }
         store.keys = keys;
+        let live = store.keys.clone();
+        store.value_display.retain(|key, names| {
+            names.retain(|name, _| live.get(key).is_some_and(|v| v.contains_key(name)));
+            !names.is_empty()
+        });
+        for (key, names) in &staged.value_display {
+            for (name, display) in names {
+                if live.get(key).is_some_and(|v| v.contains_key(name)) {
+                    store
+                        .value_display
+                        .entry(key.clone())
+                        .or_default()
+                        .entry(name.clone())
+                        .or_insert_with(|| display.clone());
+                }
+            }
+        }
         for (key, display) in &staged.display {
             store
                 .display
@@ -234,6 +255,18 @@ impl Registry {
                         "invalid registry snapshot version or key",
                     ));
                 }
+                if snapshot.value_display.iter().any(|(key, names)| {
+                    !snapshot.keys.contains_key(key)
+                        || names.iter().any(|(name, display)| {
+                            display.to_ascii_lowercase() != *name
+                                || !snapshot.keys[key].contains_key(name)
+                        })
+                }) {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "invalid registry value spelling",
+                    ));
+                }
                 Some(snapshot)
             }
             Err(e) if e.kind() == ErrorKind::NotFound => None,
@@ -266,6 +299,7 @@ impl Registry {
             }
             store.keys = keys;
             store.display.extend(snapshot.display);
+            store.value_display.extend(snapshot.value_display);
         }
         store.persistence = Some(path.to_owned());
         Ok(())
@@ -284,6 +318,7 @@ impl Registry {
             version: 1,
             keys: store.keys.clone(),
             display: store.display.clone(),
+            value_display: store.value_display.clone(),
         };
         let bytes = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
         let temp = path.with_extension(format!(
@@ -468,6 +503,7 @@ impl Registry {
             let store = RegistryStore {
                 keys: current.keys.clone(),
                 display: current.display.clone(),
+                value_display: current.value_display.clone(),
                 charge: None,
                 persistence: current.persistence.clone(),
             };
@@ -506,6 +542,16 @@ impl Registry {
                 .display
                 .entry(key.clone())
                 .or_insert_with(|| name.clone());
+        }
+        for (key, names) in &current.value_display {
+            for (name, display) in names {
+                target
+                    .value_display
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(name.clone())
+                    .or_insert_with(|| display.clone());
+            }
         }
         drop(target);
         drop(current);
@@ -547,6 +593,12 @@ impl Registry {
         {
             return false;
         }
+        store
+            .value_display
+            .entry(lower.clone())
+            .or_default()
+            .entry(name.to_ascii_lowercase())
+            .or_insert_with(|| name.to_string());
         store.display.entry(lower).or_insert(canonical);
         store.keys = keys;
         true
@@ -559,6 +611,28 @@ impl Registry {
             .get(&canonical_key(path).to_ascii_lowercase())?
             .get(&name.to_ascii_lowercase())
             .cloned()
+    }
+    /// Values in stable case-insensitive order, retaining the original spelling.
+    /// Old snapshots with normalized names use that existing spelling.
+    pub fn values(&self, path: &str) -> Vec<(String, RegistryValue)> {
+        let key = canonical_key(path).to_ascii_lowercase();
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(values) = store.keys.get(&key) else {
+            return Vec::new();
+        };
+        let mut names: Vec<_> = values.keys().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let display = store
+                    .value_display
+                    .get(&key)
+                    .and_then(|n| n.get(name))
+                    .unwrap_or(name);
+                (display.clone(), values[name].clone())
+            })
+            .collect()
     }
     /// Immediate children, sorted case-insensitively with their display names.
     pub fn subkeys(&self, path: &str) -> Vec<String> {
@@ -591,6 +665,12 @@ impl Registry {
             .and_then(|values| values.remove(&name.to_ascii_lowercase()))
             .is_some();
         if removed {
+            if let Some(names) = store
+                .value_display
+                .get_mut(&canonical_key(path).to_ascii_lowercase())
+            {
+                names.remove(&name.to_ascii_lowercase());
+            }
             let pages = Self::stored_pages(&store.keys);
             if let Some(charge) = &mut store.charge {
                 charge.resize(pages);
@@ -642,6 +722,43 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enumerated_value_spelling_survives_case_insensitive_updates_and_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let mut registry = Registry::new();
+        registry.configure_persistence(&path).unwrap();
+        assert!(registry.set_value("HKCU\\Example", "MiXeD🧭", RegistryValue::Dword(1)));
+        assert!(registry.set_value("hkcu\\example", "mixed🧭", RegistryValue::Dword(2)));
+        assert_eq!(
+            registry.values("HKCU\\EXAMPLE"),
+            vec![("MiXeD🧭".into(), RegistryValue::Dword(2))]
+        );
+        registry.flush().unwrap();
+        let mut reloaded = Registry::new();
+        reloaded.configure_persistence(&path).unwrap();
+        assert_eq!(
+            reloaded.values("HKCU\\Example"),
+            registry.values("HKCU\\Example")
+        );
+        let baseline = reloaded.isolated_copy();
+        let mut staged = baseline.isolated_copy();
+        staged.set_value("HKCU\\Example", "Added", RegistryValue::Dword(3));
+        staged.delete_value("HKCU\\Example", "mixed🧭");
+        assert!(reloaded.commit_isolated(&baseline, &staged));
+        assert_eq!(
+            reloaded.values("HKCU\\Example"),
+            vec![("Added".into(), RegistryValue::Dword(3))]
+        );
+        reloaded.flush().unwrap();
+        let mut again = Registry::new();
+        again.configure_persistence(&path).unwrap();
+        assert_eq!(
+            again.values("HKCU\\Example"),
+            reloaded.values("HKCU\\Example")
+        );
+    }
+
     #[test]
     fn cab_setup_transaction_isolated_delta_conflict_and_quota() {
         let ram = crate::memory_division::MemoryDivision::new(32 * 1024 * 1024, 4096).unwrap();

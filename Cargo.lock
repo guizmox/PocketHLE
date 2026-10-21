@@ -2913,6 +2913,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.11.1",
  "log",
+ "memmap2",
  "thiserror 1.0.69",
  "unicorn-engine",
 ]

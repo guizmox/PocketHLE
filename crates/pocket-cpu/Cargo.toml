@@ -21,4 +21,5 @@ anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
 bitflags = "2"
+memmap2 = "=0.9.10"
 unicorn-engine = { workspace = true, optional = true }

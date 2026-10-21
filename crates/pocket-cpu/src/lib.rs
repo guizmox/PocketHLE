@@ -18,6 +18,7 @@ use thiserror::Error;
 
 pub mod arithmetic64;
 pub mod image_pages;
+pub mod shared_memory;
 pub mod stub;
 #[cfg(feature = "unicorn")]
 pub mod unicorn;
@@ -161,7 +162,44 @@ pub trait Cpu {
         Ok(())
     }
 
+    /// CE SetKMode uses ARM System mode for privileged application code,
+    /// preserving the application stack/LR across banked-register changes.
+    /// Returns the previous mode. Other architectures must implement their
+    /// actual status register rather than mutating synthetic ARM flag slots.
+    fn set_kernel_mode(&mut self, enabled: bool) -> Result<bool, CpuError> {
+        if self.arch() != Arch::Arm {
+            return Err(CpuError::Unsupported("kernel mode on this architecture"));
+        }
+        let status = self.read_reg(regs::ArmReg::Cpsr)?;
+        let sp = self.read_reg(regs::ArmReg::Sp)?;
+        let lr = self.read_reg(regs::ArmReg::Lr)?;
+        let previous = status & 0x1f != 0x10;
+        self.write_reg(
+            regs::ArmReg::Cpsr,
+            (status & !0x1f) | if enabled { 0x1f } else { 0x10 },
+        )?;
+        self.write_reg(regs::ArmReg::Sp, sp)?;
+        self.write_reg(regs::ArmReg::Lr, lr)?;
+        Ok(previous)
+    }
+
     fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError>;
+    /// Map stable shared pages without copying them. The CPU retains the owner
+    /// until unmapping/drop, including when every guest handle has closed.
+    ///
+    /// # Safety
+    /// All execution and host reads/writes of aliases must be serialized by
+    /// the shared device execution gate. The backing file must not be truncated.
+    unsafe fn map_shared_region(
+        &mut self,
+        _va: u32,
+        _size: u32,
+        _prot: Prot,
+        _region: std::sync::Arc<shared_memory::SharedRegion>,
+        _offset: u32,
+    ) -> Result<(), CpuError> {
+        Err(CpuError::Unsupported("shared memory mapping"))
+    }
     fn supports_image_paging(&self) -> bool {
         false
     }

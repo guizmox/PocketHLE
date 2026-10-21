@@ -42,6 +42,7 @@ pub mod desktop_services;
 pub mod device_identity;
 pub mod device_status;
 pub mod dll_lifecycle;
+pub mod file_mapping;
 pub mod font;
 pub mod framebuffer;
 pub mod gapi;
@@ -1009,6 +1010,7 @@ pub struct KernelState {
     pub main_thread: MainThreadState,
     /// Closed aliases remain as tombstones to reject stale handles.
     pub object_handles: handles::HandleTable,
+    pub mapped_views: file_mapping::MappedViews,
     pub random_seed: u32,
     /// Software-rendered display the GDI/GAPI handlers paint into.
     pub framebuffer: Framebuffer,
@@ -1775,6 +1777,54 @@ impl KernelState {
         std::borrow::Cow::Owned(frame)
     }
 
+    /// Walk child parents, never popup owners. The fallback preserves the
+    /// caller's policy for legacy unregistered synthetic windows.
+    pub fn window_tree_visible(&self, hwnd: u32, fallback: impl Fn(u32) -> bool) -> bool {
+        let mut current = hwnd;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return false;
+            }
+            let visible = self
+                .controls
+                .own_visibility(current)
+                .or_else(|| self.window_visibility.get(&current).copied())
+                .or_else(|| {
+                    self.window_styles
+                        .get(&current)
+                        .map(|s| s.0 & 0x10000000 != 0)
+                })
+                .unwrap_or_else(|| fallback(current));
+            if !visible {
+                return false;
+            }
+            let parent = if let Some(child) = self.controls.get(current) {
+                Some(child.parent)
+            } else if self
+                .window_styles
+                .get(&current)
+                .is_some_and(|s| s.0 & 0x40000000 != 0)
+            {
+                self.window_parents.get(&current).copied()
+            } else {
+                None
+            };
+            match parent {
+                Some(parent) if parent != 0 => current = parent,
+                _ => return true,
+            }
+        }
+    }
+    pub fn refresh_control_visibility(&mut self) {
+        let hidden = self
+            .controls
+            .window_handles()
+            .filter(|&hwnd| !self.window_tree_visible(hwnd, |h| h != 0))
+            .collect();
+        self.controls.set_inherited_hidden(hidden);
+    }
+
     pub fn composite_controls(&mut self) {
         self.composite_window_layers(false);
     }
@@ -1787,6 +1837,7 @@ impl KernelState {
     }
 
     fn composite_window_layers(&mut self, present_windows: bool) {
+        self.refresh_control_visibility();
         if !present_windows && self.controls.is_empty() && self.modal.is_none() {
             return;
         }
@@ -1971,11 +2022,11 @@ impl KernelState {
             let (mut current, mut x, mut y, mut owner, mut visible) =
                 (hwnd, 0i32, 0i32, 0u32, true);
             for _ in 0..64 {
-                if current == 0 || current == 0xdead0001 || current == 0xdead0000 {
-                    break;
-                }
                 if self.window_visibility.get(&current) == Some(&false) {
                     visible = false;
+                    break;
+                }
+                if current == 0 || current == 0xdead0001 || current == 0xdead0000 {
                     break;
                 }
                 if let Some(panel) = controls.panel(current) {
@@ -3529,6 +3580,7 @@ impl Process {
                     ..MainThreadState::default()
                 },
                 object_handles: handles::HandleTable::default(),
+                mapped_views: Default::default(),
                 random_seed: 0x1234_abcd,
                 framebuffer: Framebuffer::default(),
                 gdi: GdiState::new(),
@@ -3922,6 +3974,7 @@ pub fn run_main_loop_with_hook(
         let stop = if pc == THREAD_SCHEDULER_IDLE_VA {
             Ok(StopReason::Hook(pc))
         } else {
+            let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
             cpu.run_until_hook(pc, instruction_budget_per_slice)
         };
         let stop = match stop {
@@ -4138,6 +4191,7 @@ pub fn run_main_loop_with_hook(
                         }
                         let thread = process.state.threads[thread_index].clone();
                         if thread.worker_saved {
+                            cpu.write_reg(ArmReg::Cpsr, thread.saved_regs[16])?;
                             for (index, value) in thread.saved_regs.iter().enumerate() {
                                 cpu.write_reg(
                                     match index {
@@ -4176,6 +4230,7 @@ pub fn run_main_loop_with_hook(
                             pc = thread.resume_pc;
                         } else {
                             let values = thread.saved_regs;
+                            cpu.write_reg(ArmReg::Cpsr, values[16])?;
                             for (index, value) in values.iter().enumerate() {
                                 cpu.write_reg(
                                     match index {

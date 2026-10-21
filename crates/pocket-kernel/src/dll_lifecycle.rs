@@ -113,6 +113,7 @@ impl KernelState {
             return Ok(Some(entry));
         }
         let frame = self.dll_notification_frame.take().unwrap();
+        cpu.write_reg(ArmReg::Cpsr, frame.regs[16])?;
         for (i, reg) in REGS.iter().enumerate() {
             cpu.write_reg(*reg, frame.regs[i])?;
         }

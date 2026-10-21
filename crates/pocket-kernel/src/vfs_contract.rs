@@ -2,10 +2,10 @@
 use super::*;
 use std::sync::Weak;
 #[derive(Clone, Default)]
-pub struct VfsShared(Arc<Mutex<Shared>>);
+pub struct VfsShared(pub(super) Arc<Mutex<Shared>>);
 #[derive(Default)]
-struct Shared {
-    leases: HashMap<String, Vec<Weak<Lease>>>,
+pub(super) struct Shared {
+    pub(super) leases: HashMap<String, Vec<Weak<Lease>>>,
     // Shared by processes/duplicate handles, under the same gate as quota checks.
     // Rescan at opens, namespace changes and explicit space queries; byte writes
     // adjust the exact logical length instead of walking Flash Disk every time.
@@ -35,6 +35,7 @@ impl Shared {
 #[derive(Debug)]
 pub(super) struct Lease {
     pub access: u32,
+    pub(super) mapped: std::sync::atomic::AtomicUsize,
     share: u32,
     pub(super) volume: Option<(PathBuf, u64)>,
 }
@@ -282,6 +283,7 @@ impl Vfs {
                 return Err(32);
             }
             let lease = Arc::new(Lease {
+                mapped: Default::default(),
                 access,
                 share,
                 volume: None,
@@ -323,6 +325,7 @@ impl Vfs {
             }
             let service = state.vibration.clone();
             let lease = Arc::new(Lease {
+                mapped: Default::default(),
                 access,
                 share,
                 volume: None,
@@ -365,6 +368,7 @@ impl Vfs {
             }
             let device = state.gps.open()?;
             let lease = Arc::new(Lease {
+                mapped: Default::default(),
                 access,
                 share,
                 volume: None,
@@ -406,6 +410,7 @@ impl Vfs {
             }
             let device = state.camera.open()?;
             let lease = Arc::new(Lease {
+                mapped: Default::default(),
                 access,
                 share,
                 volume: None,
@@ -454,6 +459,7 @@ impl Vfs {
                 return Err(32);
             }
             let lease = Arc::new(Lease {
+                mapped: Default::default(),
                 access,
                 share,
                 volume: None,
@@ -564,6 +570,16 @@ impl Vfs {
         }) {
             return Err(32);
         }
+        if (disposition == 2 || disposition == 5)
+            && state.leases.get(&key).is_some_and(|leases| {
+                leases
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .any(|l| l.mapped.load(std::sync::atomic::Ordering::Relaxed) != 0)
+            })
+        {
+            return Err(1224); // ERROR_USER_MAPPED_FILE
+        }
         let existed = if let Some(p) = &host {
             p.exists()
         } else {
@@ -587,6 +603,7 @@ impl Vfs {
             _ => Access::Read,
         };
         let lease = Arc::new(Lease {
+            mapped: Default::default(),
             access,
             share,
             volume,
@@ -642,6 +659,7 @@ impl Vfs {
                     text_mode: false,
                     lease: Some(lease.clone()),
                     append,
+                    for_mapping: false,
                 })),
             );
             handle
@@ -694,11 +712,14 @@ impl Vfs {
         }
         self.ram_handles.get(&h)?.lock().ok()?.lease.clone()
     }
-    fn growth_allowed(&self, h: u32, size: u64, old: u64, state: &mut Shared) -> bool {
+    pub(super) fn growth_allowed(&self, h: u32, size: u64, old: u64, state: &mut Shared) -> bool {
         let Some(l) = self.lease(h) else {
             return true;
         };
         if l.access & 2 == 0 {
+            return false;
+        }
+        if size > old && self.mapping_pinned(&l, state) {
             return false;
         }
         let Some((root, total)) = &l.volume else {
@@ -709,7 +730,7 @@ impl Vfs {
                 .volume_used(root)
                 .is_ok_and(|u| size - old <= total.saturating_sub(u))
     }
-    fn account_resize(&self, h: u32, old: u64, new: u64, state: &mut Shared) {
+    pub(super) fn account_resize(&self, h: u32, old: u64, new: u64, state: &mut Shared) {
         if let Some(lease) = self.lease(h) {
             if let Some((root, _)) = &lease.volume {
                 // Another alias may expose a nested/parent host volume. Its
@@ -776,6 +797,13 @@ impl Vfs {
         } else {
             0
         };
+        if size != old
+            && self
+                .lease(h)
+                .is_some_and(|l| self.mapping_pinned(&l, &state))
+        {
+            return false;
+        }
         if !self.growth_allowed(h, size, old, &mut state) {
             return false;
         }

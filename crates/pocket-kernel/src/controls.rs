@@ -1399,6 +1399,7 @@ pub enum ControlAction {
 #[derive(Debug, Clone)]
 pub struct Controls {
     children: Vec<ChildWindow>,
+    inherited_hidden: std::collections::HashSet<u32>,
     /// Dialog panels created from a `DLGTEMPLATE`. A child whose parent
     /// is one of these is positioned relative to it.
     panels: Vec<DialogPanel>,
@@ -1418,6 +1419,7 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             children: Vec::new(),
+            inherited_hidden: Default::default(),
             panels: Vec::new(),
             focus: 0,
             direct_surface_hwnd: 0,
@@ -1699,10 +1701,34 @@ impl Controls {
         }
     }
 
+    /// Recomputed from the kernel window tree before presentation/input.
+    /// Keep inherited state separate from each window's own WS_VISIBLE bit.
+    pub fn set_inherited_hidden(&mut self, hidden: std::collections::HashSet<u32>) {
+        self.inherited_hidden = hidden;
+        if self.inherited_hidden.contains(&self.capture) {
+            if let Some(child) = self.get_mut(self.capture) {
+                child.pressed = false;
+            }
+            self.capture = 0;
+        }
+    }
+    pub fn window_handles(&self) -> impl Iterator<Item = u32> + '_ {
+        self.children
+            .iter()
+            .map(|c| c.hwnd)
+            .chain(self.panels.iter().map(|p| p.hwnd))
+    }
+    pub fn own_visibility(&self, hwnd: u32) -> Option<bool> {
+        self.get(hwnd)
+            .map(|c| c.visible)
+            .or_else(|| self.panel(hwnd).map(|p| p.visible))
+    }
     /// Is this control on screen — itself visible, and inside a panel
     /// that is?
     fn is_showing(&self, child: &ChildWindow) -> bool {
-        child.visible && self.panel(child.parent).map(|p| p.visible).unwrap_or(true)
+        child.visible
+            && !self.inherited_hidden.contains(&child.hwnd)
+            && self.panel(child.parent).map(|p| p.visible).unwrap_or(true)
     }
 
     /// `IsWindowVisible` for anything we own: a control, or a dialog
@@ -1741,7 +1767,8 @@ impl Controls {
         if let Some(child) = self.get(hwnd) {
             return Some(self.is_showing(child));
         }
-        self.panel(hwnd).map(|p| p.visible)
+        self.panel(hwnd)
+            .map(|p| p.visible && !self.inherited_hidden.contains(&hwnd))
     }
 
     /// Topmost visible control under `(x, y)`, in screen coordinates.
@@ -1757,6 +1784,7 @@ impl Controls {
         // reverse child creation order alone targets the covered dialog.
         let panel = self.panels.iter().rev().find(|p| {
             p.visible
+                && !self.inherited_hidden.contains(&p.hwnd)
                 && x >= p.x
                 && y >= p.y
                 && x < p.x.saturating_add(p.w)
@@ -1962,7 +1990,10 @@ impl Controls {
                 .children
                 .iter()
                 .filter(|c| {
-                    c.parent == parent && c.visible && c.is_focusable() && c.style & 0x00010000 != 0
+                    c.parent == parent
+                        && self.is_showing(c)
+                        && c.is_focusable()
+                        && c.style & 0x00010000 != 0
                 })
                 .map(|c| c.hwnd)
                 .collect();
@@ -1978,12 +2009,15 @@ impl Controls {
         }
         if vk == 0x0D {
             let focused = self.get(self.focus).filter(|c| {
-                c.parent == parent && c.visible && c.enabled && c.class == ControlClass::Button
+                c.parent == parent
+                    && self.is_showing(c)
+                    && c.enabled
+                    && c.class == ControlClass::Button
             });
             let button = focused.or_else(|| {
-                self.children
-                    .iter()
-                    .find(|c| c.parent == parent && c.visible && c.enabled && c.is_default())
+                self.children.iter().find(|c| {
+                    c.parent == parent && self.is_showing(c) && c.enabled && c.is_default()
+                })
             });
             if let Some(button) = button {
                 let hwnd = button.hwnd;
@@ -2020,6 +2054,9 @@ impl Controls {
         const VK_SPACE: u16 = 0x20;
 
         let focus = self.focus;
+        if !self.get(focus).is_some_and(|c| self.is_showing(c)) {
+            return None;
+        }
         let child = self.get_mut(focus)?;
         if !child.enabled {
             // `SetFocus` on a disabled control is not something Win32
@@ -2174,6 +2211,9 @@ impl Controls {
         self.render_children_of(surf, |parent| self.panel(parent).is_none(), gdi, layer);
         self.render_open_choices(surf, |parent| self.panel(parent).is_none(), gdi);
         for panel in &self.panels {
+            if self.inherited_hidden.contains(&panel.hwnd) {
+                continue;
+            }
             let direct = self.direct_surface_hwnd != 0 && self.direct_surface_hwnd == panel.hwnd;
             if !direct {
                 panel.render(surf);

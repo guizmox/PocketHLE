@@ -12,6 +12,7 @@ use crate::{regs::ArmReg, Arch, Cpu, CpuError, Prot, StopReason};
 #[derive(Debug, Default, Clone)]
 struct Page {
     bytes: Vec<u8>,
+    shared: Option<(std::sync::Arc<crate::shared_memory::SharedRegion>, u32)>,
     #[allow(dead_code)]
     prot: Prot,
 }
@@ -49,6 +50,7 @@ impl StubCpu {
                     address,
                     Page {
                         bytes,
+                        shared: None,
                         prot: image.prot,
                     },
                 );
@@ -115,6 +117,7 @@ impl Cpu for StubCpu {
         while p < end {
             self.pages.entry(p).or_insert_with(|| Page {
                 bytes: vec![0; PAGE_SIZE as usize],
+                shared: None,
                 prot,
             });
             p = p.saturating_add(PAGE_SIZE);
@@ -125,6 +128,33 @@ impl Cpu for StubCpu {
         Ok(())
     }
 
+    unsafe fn map_shared_region(
+        &mut self,
+        va: u32,
+        size: u32,
+        prot: Prot,
+        region: std::sync::Arc<crate::shared_memory::SharedRegion>,
+        offset: u32,
+    ) -> Result<(), CpuError> {
+        region.validate(va, size, offset, prot)?;
+        if (va..va + size)
+            .step_by(4096)
+            .any(|p| self.pages.contains_key(&p) || self.images.pages.contains_key(&p))
+        {
+            return Err(CpuError::BadMemory { va, size });
+        }
+        for p in (va..va + size).step_by(4096) {
+            self.pages.insert(
+                p,
+                Page {
+                    bytes: Vec::new(),
+                    prot,
+                    shared: Some((region.clone(), offset + p - va)),
+                },
+            );
+        }
+        Ok(())
+    }
     fn unmap_region(&mut self, va: u32, size: u32) -> Result<(), CpuError> {
         let end = va
             .checked_add(size)
@@ -147,6 +177,15 @@ impl Cpu for StubCpu {
         Ok(())
     }
     fn protect_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError> {
+        if prot.contains(Prot::WRITE)
+            && self
+                .pages
+                .range((va & !4095)..va.saturating_add(size))
+                .any(|(_, p)| p.shared.as_ref().is_some_and(|(r, _)| !r.memory.writable()))
+        {
+            return Err(CpuError::BadMemory { va, size });
+        }
+
         self.page_in(va, size)?;
         let end = va
             .checked_add(size)
@@ -188,7 +227,13 @@ impl Cpu for StubCpu {
                 .get_mut(&page_va)
                 .ok_or(CpuError::BadMemory { va: cur, size: 1 })?;
             let off = (cur - page_va) as usize;
-            page.bytes[off] = *byte;
+            if let Some((region, offset)) = &page.shared {
+                unsafe {
+                    region.memory.write(*offset + off as u32, &[*byte])?;
+                }
+            } else {
+                page.bytes[off] = *byte;
+            }
             cur = cur.wrapping_add(1);
         }
         Ok(())
@@ -204,7 +249,15 @@ impl Cpu for StubCpu {
                 .pages
                 .get(&page_va)
                 .ok_or(CpuError::BadMemory { va: cur, size: 1 })?;
-            out.push(page.bytes[(cur - page_va) as usize]);
+            if let Some((region, offset)) = &page.shared {
+                let mut byte = [0];
+                unsafe {
+                    region.memory.read(*offset + cur - page_va, &mut byte)?;
+                }
+                out.push(byte[0]);
+            } else {
+                out.push(page.bytes[(cur - page_va) as usize]);
+            }
         }
         Ok(out)
     }

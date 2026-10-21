@@ -27,7 +27,10 @@ use std::sync::{Arc, Mutex};
 
 #[path = "vfs_contract.rs"]
 mod contracts;
+#[path = "vfs_mapping.rs"]
+mod mapping;
 pub use contracts::{OpenResult, VfsShared};
+pub use mapping::MappedFile;
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
 pub const INVALID_HANDLE_VALUE: u32 = 0xFFFF_FFFF;
@@ -74,6 +77,7 @@ pub struct OpenFile {
     pub text_mode: bool,
     lease: Option<Arc<contracts::Lease>>,
     append: bool,
+    for_mapping: bool,
 }
 
 // MPEG Layer III frame size, used to retain a split frame until the next
@@ -261,29 +265,87 @@ pub(crate) struct RamStore {
 }
 #[derive(Debug)]
 struct RamFile {
-    data: Vec<u8>,
+    data: RamData,
     charge: crate::memory_division::StoreCharge,
     name_bytes: u64,
 }
+#[derive(Debug)]
+enum RamData {
+    Bytes(Vec<u8>),
+    Shared(Arc<pocket_cpu::shared_memory::SharedMemory>),
+}
+impl RamData {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(v) => v.len(),
+            Self::Shared(m) => m.len() as usize,
+        }
+    }
+    fn read(&self, offset: usize, out: &mut [u8]) -> bool {
+        match self {
+            Self::Bytes(v) => {
+                out.copy_from_slice(&v[offset..offset + out.len()]);
+                true
+            }
+            // VFS I/O and all guest CPU slices hold the device execution gate.
+            Self::Shared(m) => unsafe { m.read(offset as u32, out).is_ok() },
+        }
+    }
+    fn write(&mut self, offset: usize, input: &[u8]) -> bool {
+        match self {
+            Self::Bytes(v) => {
+                v[offset..offset + input.len()].copy_from_slice(input);
+                true
+            }
+            Self::Shared(m) => unsafe { m.write(offset as u32, input).is_ok() },
+        }
+    }
+}
 impl RamFile {
     fn set_len(&mut self, len: usize) -> bool {
+        let old = self.data.len();
+        if old == len {
+            return true;
+        }
         let Some(bytes) = (len as u64).checked_add(self.name_bytes) else {
             return false;
         };
-        let pages = crate::memory_division::pages(bytes);
-        if !self.charge.resize(pages) {
+        if !self.charge.resize(crate::memory_division::pages(bytes)) {
             return false;
         }
-        if len > self.data.len() && self.data.try_reserve(len - self.data.len()).is_err() {
-            self.charge.resize(crate::memory_division::pages(
-                self.data.len() as u64 + self.name_bytes,
-            ));
+        let success = match &mut self.data {
+            RamData::Bytes(data) => {
+                if len > data.len() && data.try_reserve(len - data.len()).is_err() {
+                    false
+                } else {
+                    data.resize(len, 0);
+                    true
+                }
+            }
+            RamData::Shared(_) => {
+                let mut data = Vec::new();
+                if data.try_reserve_exact(len).is_err() {
+                    false
+                } else {
+                    data.resize(len, 0);
+                    if self.data.read(0, &mut data[..old.min(len)]) {
+                        self.data = RamData::Bytes(data);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+        if !success {
+            self.charge
+                .resize(crate::memory_division::pages(old as u64 + self.name_bytes));
             return false;
         }
-        self.data.resize(len, 0);
         true
     }
 }
+
 #[derive(Debug)]
 struct OpenRamFile {
     file: Arc<Mutex<RamFile>>,
@@ -292,6 +354,7 @@ struct OpenRamFile {
     text_mode: bool,
     lease: Option<Arc<contracts::Lease>>,
     append: bool,
+    for_mapping: bool,
 }
 
 static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 =
@@ -475,7 +538,7 @@ impl Vfs {
             let name_bytes = (key.encode_utf16().count() as u64 + 1) * 2;
             let charge = ram.store_charge(crate::memory_division::pages(name_bytes))?;
             let file = Arc::new(Mutex::new(RamFile {
-                data: Vec::new(),
+                data: RamData::Bytes(Vec::new()),
                 charge,
                 name_bytes,
             }));
@@ -494,6 +557,7 @@ impl Vfs {
                 text_mode: false,
                 lease: None,
                 append: false,
+                for_mapping: false,
             })),
         );
         Some(handle)
@@ -506,6 +570,16 @@ impl Vfs {
         }
     }
     pub fn write_failure_error(&self, handle: u32) -> u32 {
+        if let Some(lease) = self.lease(handle) {
+            if lease.access & 2 == 0 {
+                return 5;
+            }
+            let state = self.shared.0.lock().unwrap();
+            if self.mapping_pinned(&lease, &state) {
+                return 1224;
+            }
+        }
+
         if let Some(open) = self.ram_handles.get(&handle) {
             if open.lock().is_ok_and(|open| open.access == Access::Read) {
                 return 5;
@@ -1355,6 +1429,7 @@ impl Vfs {
                 text_mode: false,
                 lease: None,
                 append: false,
+                for_mapping: false,
             })),
         );
         Some(h)
@@ -1372,7 +1447,9 @@ impl Vfs {
                 let file = open.file.lock().ok()?;
                 let start = usize::try_from(open.position).ok()?.min(file.data.len());
                 let n = buf.len().min(file.data.len() - start);
-                buf[..n].copy_from_slice(&file.data[start..start + n]);
+                if !file.data.read(start, &mut buf[..n]) {
+                    return None;
+                }
                 n
             };
             open.position += n as u64;
@@ -1409,7 +1486,9 @@ impl Vfs {
                 if end > file.data.len() && !file.set_len(end) {
                     return None;
                 }
-                file.data[start..end].copy_from_slice(buf);
+                if !file.data.write(start, buf) {
+                    return None;
+                }
             }
             open.position = end as u64;
             return Some(buf.len());

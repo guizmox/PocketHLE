@@ -126,6 +126,8 @@ pub struct UnicornCpu {
     inline_arithmetic: std::collections::HashMap<u32, crate::arithmetic64::Arithmetic64>,
     images: Rc<RefCell<crate::image_pages::ImagePages>>,
     scheduler_timeout_us: u64,
+    shared_regions:
+        std::collections::BTreeMap<u32, (u32, std::sync::Arc<crate::shared_memory::SharedRegion>)>,
 }
 
 impl UnicornCpu {
@@ -188,6 +190,7 @@ impl UnicornCpu {
             inline_arithmetic: std::collections::HashMap::new(),
             images,
             scheduler_timeout_us: 0,
+            shared_regions: Default::default(),
             scheduler_timer: None,
         })
     }
@@ -592,10 +595,55 @@ impl Cpu for UnicornCpu {
         Ok(())
     }
 
+    unsafe fn map_shared_region(
+        &mut self,
+        va: u32,
+        size: u32,
+        prot: Prot,
+        region: std::sync::Arc<crate::shared_memory::SharedRegion>,
+        offset: u32,
+    ) -> Result<(), CpuError> {
+        region.validate(va, size, offset, prot)?;
+        if self
+            .images
+            .borrow()
+            .pages
+            .range(va..va + size)
+            .next()
+            .is_some()
+        {
+            return Err(CpuError::BadMemory { va, size });
+        }
+        // SAFETY: region.validate checked page alignment and host bounds;
+        // shared_regions retains the backing until after mem_unmap/uc_close.
+        unsafe {
+            self.uc
+                .mem_map_ptr(
+                    va as u64,
+                    size as u64,
+                    map_prot(prot),
+                    region.memory.pointer(offset).cast(),
+                )
+                .map_err(|e| CpuError::Backend(format!("mem_map_ptr: {e:?}")))?;
+        }
+        if let Some(map) = &self.guest_map {
+            let mut map = map.borrow_mut();
+            map.insert(va as u64, size as u64, prot.contains(Prot::EXEC));
+            map.protected.push((va as u64, (va + size) as u64, prot));
+        }
+        self.shared_regions.insert(va, (size, region));
+        let _ = self.uc.ctl_flush_tlb();
+        Ok(())
+    }
     fn unmap_region(&mut self, va: u32, size: u32) -> Result<(), CpuError> {
         let end_va = va
             .checked_add(size)
             .ok_or(CpuError::BadMemory { va, size })?;
+        if self.shared_regions.iter().any(|(&base, (len, _))| {
+            base < end_va && base + *len > va && (base != va || *len != size)
+        }) {
+            return Err(CpuError::BadMemory { va, size });
+        }
         let lazy = self
             .images
             .borrow()
@@ -627,6 +675,7 @@ impl Cpu for UnicornCpu {
                 .mem_unmap(va as u64, size as u64)
                 .map_err(|e| CpuError::Backend(format!("mem_unmap: {e:?}")))?;
         }
+        self.shared_regions.remove(&va);
         if let Some(map) = &self.guest_map {
             map.borrow_mut().remove(va as u64, size as u64);
         }
@@ -648,6 +697,16 @@ impl Cpu for UnicornCpu {
         Ok(())
     }
     fn protect_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError> {
+        if prot.contains(Prot::WRITE)
+            && self.shared_regions.iter().any(|(&base, (len, region))| {
+                u64::from(base) < u64::from(va) + u64::from(size)
+                    && base + *len > va
+                    && !region.memory.writable()
+            })
+        {
+            return Err(CpuError::BadMemory { va, size });
+        }
+
         materialize_images(&mut self.uc, &self.images, va, size)?;
         self.uc
             .mem_protect(va as u64, size as u64, map_prot(prot))
@@ -688,6 +747,17 @@ impl Cpu for UnicornCpu {
         Ok(())
     }
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError> {
+        if self.shared_regions.iter().any(|(&base, (len, region))| {
+            u64::from(base) < u64::from(va) + data.len() as u64
+                && base + *len > va
+                && !region.memory.writable()
+        }) {
+            return Err(CpuError::BadMemory {
+                va,
+                size: data.len() as u32,
+            });
+        }
+
         materialize_images(&mut self.uc, &self.images, va, data.len() as u32)?;
         self.uc
             .mem_write(va as u64, data)

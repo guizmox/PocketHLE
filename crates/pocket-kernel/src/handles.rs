@@ -13,6 +13,7 @@ pub enum HandleObject {
     Semaphore(u32),
     Mutex(u32),
     File(u32),
+    Mapping(u32),
     Device(u32),
     RemoteThread(u32, usize),
     RemoteProcess(u32),
@@ -46,6 +47,9 @@ struct Domain {
     deferred_process_exits: HashSet<u32>,
     child_ids: HashMap<u32, u32>,
     files: HashMap<HandleObject, VfsObject>,
+    mappings: HashMap<u32, std::sync::Weak<crate::file_mapping::FileMapping>>,
+    mapping_names: HashMap<String, std::sync::Weak<crate::file_mapping::FileMapping>>,
+    mapping_refs: HashMap<(u32, u32), Arc<crate::file_mapping::FileMapping>>,
     imports: HashMap<(u32, u32), VfsObject>,
 }
 #[derive(Clone)]
@@ -277,6 +281,17 @@ impl HandleTable {
     pub fn bind_in(&mut self, pid: u32, handle: u32, object: HandleObject) {
         let mut d = self.domain.lock().unwrap();
         let object = self.canonical(object, &d);
+        if d.entries
+            .get(&(pid, handle))
+            .is_some_and(|entry| *entry != Some(object))
+        {
+            return;
+        }
+        if let HandleObject::Mapping(key) = object {
+            if let Some(mapping) = d.mappings.get(&key).and_then(std::sync::Weak::upgrade) {
+                d.mapping_refs.insert((pid, handle), mapping);
+            }
+        }
         d.entries.entry((pid, handle)).or_insert(Some(object));
     }
     pub fn reserve(&mut self) -> Option<u32> {
@@ -301,6 +316,7 @@ impl HandleTable {
         let mut d = self.domain.lock().unwrap();
         let object = d.entries.get_mut(&(pid, handle))?.take()?;
         d.imports.remove(&(pid, handle));
+        d.mapping_refs.remove(&(pid, handle));
         let last = !d.entries.values().any(|o| *o == Some(object));
         if last {
             d.names.retain(|_, o| *o != object);
@@ -432,6 +448,39 @@ impl HandleTable {
             .unwrap()
             .imports
             .insert((pid, handle), file);
+    }
+    pub fn named_mapping(&self, name: &str) -> Option<Arc<crate::file_mapping::FileMapping>> {
+        self.domain
+            .lock()
+            .unwrap()
+            .mapping_names
+            .get(name)?
+            .upgrade()
+    }
+    pub fn mapping(&self, handle: u32) -> Option<Arc<crate::file_mapping::FileMapping>> {
+        self.domain
+            .lock()
+            .unwrap()
+            .mapping_refs
+            .get(&(self.pid, handle))
+            .cloned()
+    }
+    pub fn insert_mapping(
+        &mut self,
+        handle: u32,
+        name: Option<String>,
+        object: Arc<crate::file_mapping::FileMapping>,
+    ) {
+        let mut d = self.domain.lock().unwrap();
+        d.mappings.retain(|_, m| m.strong_count() != 0);
+        d.mapping_names.retain(|_, m| m.strong_count() != 0);
+        if let Some(name) = name {
+            d.mapping_names.insert(name, Arc::downgrade(&object));
+        }
+        d.mappings.insert(object.key, Arc::downgrade(&object));
+        d.entries
+            .insert((self.pid, handle), Some(HandleObject::Mapping(object.key)));
+        d.mapping_refs.insert((self.pid, handle), object);
     }
     pub fn take_files(&self) -> Vec<(u32, VfsObject)> {
         let mut d = self.domain.lock().unwrap();

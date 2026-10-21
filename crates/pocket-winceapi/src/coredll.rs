@@ -27,8 +27,12 @@ mod choice_controls;
 mod control_color;
 #[path = "coredll/coordinates.rs"]
 mod coordinates;
+#[path = "coredll/file_mapping.rs"]
+mod file_mapping;
 #[path = "coredll/list_paint.rs"]
 mod list_paint;
+#[path = "coredll/registry_enumeration.rs"]
+mod registry_enumeration;
 mod trackbar;
 use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
@@ -105,6 +109,7 @@ mod window_graphics;
 
 pub fn register(d: &mut WinCeDispatcher) {
     images::register(d);
+    file_mapping::register(d);
     window_graphics::register(d);
     let dll = "coredll.dll";
     crate::wavein::register(d);
@@ -856,7 +861,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "InterlockedExchangeAdd", interlocked_exchange_add);
     d.register_handler(dll, "InterlockedTestExchange", interlocked_compare_exchange);
     d.register_handler(dll, "GetSystemInfo", get_system_info);
-    d.register_constant(dll, "SetKMode", 1, one_returning);
+    d.register_handler(dll, "SetKMode", set_kmode);
     d.register_handler(
         dll,
         "InterlockedCompareExchange",
@@ -903,7 +908,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "RegOpenKeyExW", reg_open_key_ex_w);
     d.register_handler(dll, "RegCreateKeyExW", reg_create_key_ex_w);
     d.register_handler(dll, "RegQueryValueExW", reg_query_value_ex_w);
-    d.register_handler(dll, "RegQueryInfoKeyW", reg_query_info_key_w);
+    d.register_handler(dll, "RegQueryInfoKeyW", registry_enumeration::query_info);
+    d.register_handler(dll, "RegEnumValueW", registry_enumeration::enum_value);
     d.register_handler(dll, "RegEnumKeyExW", reg_enum_key_ex_w);
     d.register_handler(dll, "RegSetValueExW", reg_set_value_ex_w);
     d.register_handler(dll, "RegDeleteValueW", reg_delete_value_w);
@@ -1018,52 +1024,6 @@ pub fn register(d: &mut WinCeDispatcher) {
             return Ok(DispatchOutcome::ReturnedR0(ERROR_MORE_DATA));
         }
         ctx.cpu.write_mem(data, &bytes)?;
-        Ok(DispatchOutcome::ReturnedR0(0))
-    }
-
-    fn reg_query_info_key_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-        let key = ctx.arg_u32(0)?;
-        let class_ptr = ctx.arg_u32(1)?;
-        let class_capacity = ctx.arg_u32(2)?;
-        let subkeys_ptr = ctx.arg_u32(3)?;
-        let max_subkey_len_ptr = ctx.arg_u32(4)?;
-        let max_class_len_ptr = ctx.arg_u32(5)?;
-        let values_ptr = ctx.arg_u32(6)?;
-        let max_value_name_len_ptr = ctx.arg_u32(7)?;
-        let max_value_len_ptr = ctx.arg_u32(8)?;
-        let security_ptr = ctx.arg_u32(9)?;
-        let last_write_ptr = ctx.arg_u32(10)?;
-
-        let Some(path) = ctx.kernel.registry.path_for(key) else {
-            return Ok(DispatchOutcome::ReturnedR0(ERROR_NOT_FOUND));
-        };
-        let _ = class_ptr;
-        let _ = class_capacity;
-        let _ = security_ptr;
-        let _ = last_write_ptr;
-        let subkey_count = 0u32;
-        let max_subkey_len = 0u32;
-        let max_class_len = 0u32;
-        let value_count = if ctx.kernel.registry.contains_key(&path) {
-            1
-        } else {
-            0
-        };
-        let max_value_name_len = 0u32;
-        let max_value_len = 0u32;
-        for (ptr, value) in [
-            (subkeys_ptr, subkey_count),
-            (max_subkey_len_ptr, max_subkey_len),
-            (max_class_len_ptr, max_class_len),
-            (values_ptr, value_count),
-            (max_value_name_len_ptr, max_value_name_len),
-            (max_value_len_ptr, max_value_len),
-        ] {
-            if ptr != 0 {
-                ctx.cpu.write_mem(ptr, &value.to_le_bytes())?;
-            }
-        }
-        log::debug!("RegQueryInfoKeyW({path}) -> values={value_count}");
         Ok(DispatchOutcome::ReturnedR0(0))
     }
 
@@ -1933,6 +1893,10 @@ fn read_guest_regs(cpu: &mut dyn pocket_cpu::Cpu) -> Result<[u32; 17], KernelErr
     Ok(values)
 }
 fn write_guest_regs(cpu: &mut dyn pocket_cpu::Cpu, values: &[u32; 17]) -> Result<(), KernelError> {
+    // Activate the target register bank before restoring SP/LR. Reapply the
+    // saved status last as before so the ARM/Thumb continuation is exact.
+    cpu.write_reg(ArmReg::Cpsr, values[16])?;
+
     let regs = [
         ArmReg::R0,
         ArmReg::R1,
@@ -2164,7 +2128,9 @@ fn waitable_is_signalled_for(kernel: &KernelState, handle: u32, thread: usize) -
         }
         Some(HandleObject::Mutex(key)) => mutex_ready(kernel, key, thread),
         Some(HandleObject::File(_) | HandleObject::RemoteFile(..)) => true, // synchronous regular-file I/O
-        Some(HandleObject::Device(_) | HandleObject::RemoteDevice(..)) => false,
+        Some(
+            HandleObject::Device(_) | HandleObject::RemoteDevice(..) | HandleObject::Mapping(_),
+        ) => false,
         None if kernel.object_handles.is_closed(handle) => false,
         None => kernel
             .msg_queues
@@ -2691,6 +2657,18 @@ pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+fn set_kmode(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let enabled = ctx.arg_u32(0)? != 0;
+    match ctx.cpu.set_kernel_mode(enabled) {
+        Ok(previous) => Ok(DispatchOutcome::ReturnedR0(u32::from(previous))),
+        Err(pocket_cpu::CpuError::Unsupported(_)) => {
+            set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_NOT_SUPPORTED: u32 = 50;
@@ -2946,7 +2924,7 @@ fn close_owned_handle(kernel: &mut KernelState, handle: u32) -> bool {
             }
         }
         HandleObject::RemoteProcess(_) | HandleObject::RemoteThread(..) => {}
-        HandleObject::CurrentProcess => {}
+        HandleObject::CurrentProcess | HandleObject::Mapping(_) => {}
     }
     true
 }
@@ -9647,6 +9625,10 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
 fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let address = ctx.arg_u32(0)?;
+    if ctx.kernel.mapped_views.containing(address).is_some() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let size = ctx.arg_u32(1)?;
     let kind = ctx.arg_u32(2)?;
     if ctx.kernel.memory_division.is_none() {
@@ -10872,6 +10854,7 @@ fn repaint_status_bar(ctx: &mut CallCtx<'_>) {
 /// an application that fills the whole client rect on `WM_PAINT` — which
 /// is exactly what CERF BlankApp does — would otherwise erase them.
 fn repaint_controls(ctx: &mut CallCtx<'_>) {
+    ctx.kernel.refresh_control_visibility();
     if ctx.kernel.controls.is_empty() {
         return;
     }
@@ -12745,6 +12728,7 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
 /// (COD2 binds it to Fire). Apply the same device choice in both queue paths.
 fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
     let ev = ctx.kernel.pending_input.pop_front()?;
+    ctx.kernel.refresh_control_visibility();
     if matches!(ev, InputEvent::KeyDown { .. }) {
         restore_active_dialog_focus(ctx.kernel);
     }
@@ -16137,43 +16121,7 @@ fn enum_windows(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// probes one at 0x50fe4 during its constructor (caller 0x4d2c0). Reporting
 /// only the child's style enters 0x529a0 before object+0x1b4 is initialized.
 pub(crate) fn window_is_visible(kernel: &KernelState, hwnd: u32) -> bool {
-    let mut current = hwnd;
-    let mut visited = std::collections::HashSet::new();
-    loop {
-        if !visited.insert(current) {
-            // Malformed parent graphs must not hang an API call.
-            return false;
-        }
-        let own_visible = kernel
-            .controls
-            .is_visible(current)
-            .or_else(|| kernel.window_visibility.get(&current).copied())
-            .or_else(|| {
-                kernel
-                    .window_styles
-                    .get(&current)
-                    .map(|s| s.0 & 0x1000_0000 != 0)
-            })
-            .unwrap_or_else(|| is_live_hwnd(current));
-        if !own_visible {
-            return false;
-        }
-        let parent = if let Some(child) = kernel.controls.get(current) {
-            Some(child.parent)
-        } else if kernel
-            .window_styles
-            .get(&current)
-            .is_some_and(|s| s.0 & 0x4000_0000 != 0)
-        {
-            kernel.window_parents.get(&current).copied()
-        } else {
-            None
-        };
-        match parent {
-            Some(parent) if parent != 0 && parent != FAKE_DESKTOP_HWND => current = parent,
-            _ => return true,
-        }
-    }
+    kernel.window_tree_visible(hwnd, is_live_hwnd)
 }
 
 /// IsWindowVisible includes hidden ancestors without changing the child's
@@ -17170,6 +17118,13 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         ctx.kernel
             .window_classes
             .insert(FAKE_MODAL_HWND, "#32770".into());
+        let mut windows = ctx.kernel.controls.children_of(FAKE_MODAL_HWND);
+        windows.push(FAKE_MODAL_HWND);
+        for hwnd in windows {
+            ctx.kernel
+                .window_threads
+                .insert(hwnd, ctx.kernel.current_thread);
+        }
         ctx.kernel.active_window = FAKE_MODAL_HWND;
         ctx.kernel.modal_dialog = Some(ModalDialog {
             previous_active,
@@ -17352,9 +17307,17 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         }
     }
 
-    // Wait in host time rather than consuming the headless spin budget in
-    // less than a user's reaction time. The kernel still presents/polls input.
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    // A modal loop blocks its caller, not the other guest threads. In
+    // particular a progress dialog may run on a worker while its creator
+    // performs the operation it reports (Quake 3's memory partitioning).
+    // Keep this exact thunk/register continuation when handing off the CPU;
+    // returning from DialogBox here would prematurely dismiss the dialog.
+    if let Some(outcome) = wait_display_until(
+        ctx,
+        std::time::Instant::now() + std::time::Duration::from_millis(1),
+    )? {
+        return Ok(outcome);
+    }
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
 }
 
@@ -17362,6 +17325,11 @@ fn finish_modal_dialog(ctx: &mut CallCtx<'_>, result: u32) -> Result<DispatchOut
     let frame = ctx.kernel.modal_dialog.as_ref().map(|d| d.frame);
     close_modal_dialog(ctx);
     if let Some(frame) = frame {
+        ctx.kernel.wait_deadlines.remove(&(
+            ctx.kernel.current_thread,
+            ctx.thunk.thunk_va,
+            frame.sp,
+        ));
         for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
             .into_iter()
             .zip(frame.args)
@@ -19037,7 +19005,7 @@ fn get_system_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         data[2..4].copy_from_slice(&0u16.to_le_bytes());
         data[4..8].copy_from_slice(&4096u32.to_le_bytes()); // dwPageSize
         data[8..12].copy_from_slice(&SLOT_ALIAS_BASE.to_le_bytes()); // lpMinimumApplicationAddress
-        data[12..16].copy_from_slice(&DEFAULT_STACK_TOP.to_le_bytes()); // lpMaximumApplicationAddress
+        data[12..16].copy_from_slice(&0x7fff_ffffu32.to_le_bytes()); // user VA includes shared CE mapping arenas
         data[16..20].copy_from_slice(&1u32.to_le_bytes()); // dwActiveProcessorMask
         data[20..24].copy_from_slice(&1u32.to_le_bytes()); // dwNumberOfProcessors
                                                            // dwProcessorType = PROCESSOR_STRONGARM.
@@ -20155,6 +20123,31 @@ fn virtual_query(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let size = ctx.arg_u32(2)?;
     if info == 0 || size < 16 {
         return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if let Some((base, view)) = ctx.kernel.mapped_views.containing(address) {
+        if size < 28 || ctx.cpu.check_guest_access(info, 28, Prot::WRITE).is_err() {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let page = address & !4095;
+        let protect: u32 = if view.prot.contains(Prot::WRITE) {
+            4
+        } else {
+            2
+        };
+        let allocation_protect: u32 = if view.object.writable { 4 } else { 2 };
+        let words = [
+            page,
+            base,
+            allocation_protect,
+            base + view.mapped_len - page,
+            0x1000,
+            protect,
+            0x40000,
+        ];
+        let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        ctx.cpu.write_mem(info, &bytes)?;
+        return Ok(DispatchOutcome::ReturnedR0(28));
     }
     let (base, region_size, state, protect, kind): (u32, u32, u32, u32, u32) =
         if address < 0x0001_0000 {
@@ -24203,6 +24196,129 @@ mod tests {
     }
 
     #[test]
+    fn hidden_frame_children_neither_paint_nor_capture_input_and_reshow_preserves_own_style() {
+        let mut kernel = fresh_kernel();
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        let child = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::Button,
+            1,
+            "Visible".into(),
+            0x50010000,
+            0,
+            0,
+            50,
+            24,
+        );
+        kernel.controls.focus = child;
+        kernel.refresh_control_visibility();
+        assert_eq!(kernel.controls.hit_test(10, 10), Some(child));
+        kernel.controls.pointer_down(10, 10);
+        assert!(kernel.controls.get(child).unwrap().pressed);
+        kernel.window_visibility.insert(FAKE_HWND, false);
+        kernel.framebuffer.pixels.fill(0x17);
+        kernel.composite_controls();
+        assert!(kernel.framebuffer.pixels.iter().all(|b| *b == 0x17));
+        assert_eq!(kernel.controls.hit_test(10, 10), None);
+        assert_eq!(kernel.controls.key_down(13), None);
+        assert!(!kernel.controls.get(child).unwrap().pressed);
+        assert!(kernel.controls.get(child).unwrap().visible);
+        assert!(!window_is_visible(&kernel, child));
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        // An API query must see the new tree even before the cached render state refreshes.
+        assert!(window_is_visible(&kernel, child));
+        kernel.composite_controls();
+        assert_eq!(kernel.controls.hit_test(10, 10), Some(child));
+        assert!(kernel.framebuffer.pixels.iter().any(|b| *b != 0x17));
+        kernel.controls.get_mut(child).unwrap().visible = false;
+        kernel.window_visibility.insert(FAKE_HWND, false);
+        kernel.refresh_control_visibility();
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        kernel.refresh_control_visibility();
+        assert_eq!(kernel.controls.is_visible(child), Some(false));
+    }
+
+    #[test]
+    fn worker_modal_pump_yields_without_returning_and_retains_callback_context() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        let mut main = [0; 17];
+        main[0] = 0x12345678;
+        main[13] = 0x1900;
+        main[14] = 0x10400;
+        main[15] = 0x10400;
+        let mut worker = GuestThread::new(
+            0x10200, 0, 0x2000, 0x1000, 0x10300, 0x10400, 0xdead7c00, main,
+        );
+        worker.started = true;
+        kernel.threads.push(worker);
+        kernel.current_thread = 1;
+        let mut template = [0u8; 64];
+        template[..4].copy_from_slice(&0x10000000u32.to_le_bytes());
+        template[14..16].copy_from_slice(&100i16.to_le_bytes());
+        template[16..18].copy_from_slice(&80i16.to_le_bytes());
+        cpu.write_mem(0x2000, &template).unwrap();
+        for (reg, value) in [
+            (ArmReg::R0, 0x10000),
+            (ArmReg::R1, 0x2000),
+            (ArmReg::R2, 0),
+            (ArmReg::R3, 0x10200),
+            (ArmReg::Sp, 0x1800),
+            (ArmReg::Lr, 0x10500),
+        ] {
+            cpu.write_reg(reg, value).unwrap();
+        }
+        cpu.write_mem(0x1800, &0x55u32.to_le_bytes()).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            dialog_box_indirect_param_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10200)
+        );
+        assert_eq!(ctx.kernel.window_threads.get(&FAKE_MODAL_HWND), Some(&1));
+        // Simulate the guest DialogProc returning; no more posted work.
+        ctx.kernel.posted_messages.clear();
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        ctx.cpu.write_reg(ArmReg::Lr, thunk.thunk_va).unwrap();
+        assert_eq!(
+            dialog_box_indirect_param_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10400)
+        );
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x12345678);
+        assert!(ctx.kernel.modal_dialog.is_some());
+        let parked = ctx.kernel.threads[0].worker_regs;
+        assert_eq!(parked[0], 1);
+        assert_eq!(parked[13], 0x1800);
+        assert_eq!(parked[15], thunk.thunk_va);
+        // Main can finish the operation and signal EndDialog while the
+        // dialog thread is parked. Waking it returns to its original caller.
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_MODAL_HWND).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 7).unwrap();
+        end_dialog(&mut ctx).unwrap();
+        ctx.kernel.threads[0].sleep_until_ms = 0;
+        for deadline in ctx.kernel.wait_deadlines.values_mut() {
+            *deadline = 0;
+        }
+        assert_eq!(
+            resume_worker_reenter(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(thunk.thunk_va))
+        );
+        assert_eq!(ctx.kernel.current_thread, 1);
+        assert_eq!(
+            dialog_box_indirect_param_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(7)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10500);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0x2000);
+        assert!(ctx.kernel.modal_dialog.is_none());
+    }
+
+    #[test]
     fn dispatch_message_nested_modal_loop_preserves_both_guest_stacks() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
@@ -27125,6 +27241,7 @@ mod tests {
             memory_division: None,
             main_thread: pocket_kernel::MainThreadState::default(),
             object_handles: pocket_kernel::handles::HandleTable::default(),
+            mapped_views: Default::default(),
             random_seed: 0x1234_abcd,
             pending_startup: std::collections::VecDeque::new(),
             framebuffer: Framebuffer::default(),

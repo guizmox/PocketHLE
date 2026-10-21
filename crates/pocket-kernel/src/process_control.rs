@@ -115,6 +115,7 @@ impl KernelState {
                     && self.main_thread.suspend_count == 0
                     && self.main_thread.saved_regs.is_none()
                 {
+                    cpu.write_reg(ArmReg::Cpsr, main[16])?;
                     for (i, reg) in REGS.iter().enumerate() {
                         cpu.write_reg(*reg, main[i])?;
                     }
