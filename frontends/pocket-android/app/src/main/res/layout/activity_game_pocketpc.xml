@@ -1,16 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Pocket PC layout: movement left, actions centre, stylus aiming right.
-     PocketPcControls measures both orientations; GameActivity reserves its
-     actual height in portrait and overlays it in landscape. Host Rotate/Exit
-     controls stay at the top, away from the aiming stick. -->
-<FrameLayout
+<!-- Pocket PC reserves the game surface independently of its controls. -->
+<com.pockethle.app.PocketPcLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/game_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:keepScreenOn="true"
-    android:background="@android:color/black">
+    android:background="#080D15">
 
     <LinearLayout
         android:id="@+id/content_column"
@@ -22,6 +19,7 @@
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
+            android:visibility="gone"
             android:background="?attr/colorPrimary"
             app:popupTheme="@style/ThemeOverlay.AppCompat.Light">
 
@@ -84,16 +82,6 @@
         </FrameLayout>
     </LinearLayout>
 
-    <!-- Programmatic controls retain the existing button IDs and bindings. -->
     <com.pockethle.app.PocketPcControls android:id="@+id/game_controls"
-        android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:layout_gravity="bottom" />
-
-    <LinearLayout android:layout_width="wrap_content" android:layout_height="48dp"
-        android:layout_gravity="top|end" android:orientation="horizontal" android:background="#80000000">
-        <Button android:id="@+id/btn_rotate_game" android:layout_width="80dp" android:layout_height="48dp"
-            android:text="Rotate ↻" android:textSize="12sp" android:contentDescription="Rotate game display"/>
-        <Button android:id="@+id/btn_stop_emulation" android:layout_width="64dp" android:layout_height="48dp"
-            android:text="Exit" android:textSize="12sp" android:contentDescription="Exit emulation"/>
-    </LinearLayout>
-</FrameLayout>
+        android:layout_width="match_parent" android:layout_height="match_parent" />
+</com.pockethle.app.PocketPcLayout>

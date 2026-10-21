@@ -8,8 +8,14 @@ pub struct IntegerFit {
     pub height: u32,
 }
 pub fn integer_fit(available: [u32; 2], native: [u32; 2]) -> IntegerFit {
+    integer_fit_capped(available, native, u32::MAX)
+}
+pub fn integer_fit_capped(available: [u32; 2], native: [u32; 2], maximum: u32) -> IntegerFit {
     let [w, h] = [native[0].max(1), native[1].max(1)];
-    let factor = (available[0] / w).min(available[1] / h).max(1);
+    let factor = (available[0] / w)
+        .min(available[1] / h)
+        .max(1)
+        .min(maximum.max(1));
     let width = w * factor;
     let height = h * factor;
     IntegerFit {
@@ -39,6 +45,25 @@ mod tests {
             assert_eq!(fit.width * 3, fit.height * 4);
             assert!((factor + 1) * 320 > size[0] || (factor + 1) * 240 > size[1]);
         }
+    }
+    #[test]
+    fn pocketpc_caps_integer_scale_and_preserves_rotated_native_geometry() {
+        for native in [[240, 320], [320, 240], [480, 640], [640, 480]] {
+            for available in [
+                [1280, 800],
+                [1920, 1080],
+                [3840, 2160],
+                [700, 400],
+                [200, 200],
+            ] {
+                let fit = integer_fit_capped(available, native, 4);
+                assert!((1..=4).contains(&fit.factor));
+                assert_eq!(fit.width, native[0] * fit.factor);
+                assert_eq!(fit.height, native[1] * fit.factor);
+            }
+        }
+        assert_eq!(integer_fit_capped([7680, 4320], [240, 320], 4).factor, 4);
+        assert_eq!(integer_fit([7680, 4320], [320, 240]).factor, 18);
     }
     #[test]
     fn centering_stays_on_physical_pixels_and_never_uses_fractional_scale() {

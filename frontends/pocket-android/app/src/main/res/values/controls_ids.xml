@@ -20,4 +20,5 @@
 <item name="btn_ppc_app2" type="id"/>
 <item name="btn_ppc_app3" type="id"/>
 <item name="btn_ppc_app4" type="id"/>
+<item name="btn_rotate_game" type="id"/>
 </resources>

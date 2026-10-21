@@ -2508,8 +2508,8 @@ impl PocketLauncher {
                     Vec2::new(frame.width as f32, frame.height as f32)
                 };
                 let screen = screen * scale / ui.ctx().pixels_per_point();
-                // Original side pad is 164 points wide; captions need extra height.
-                Vec2::new(screen.x + 176.0, screen.y.max(262.0) + 70.0)
+                // Two fixed control banks surround the native integer-sized display.
+                Vec2::new((screen.x + 312.0).max(600.0), (screen.y + 36.0).max(340.0))
             };
             // Keep only the measured top/status bars around the console.
             // Measuring avoids fixed guesses about title bars or display DPI.
@@ -2629,37 +2629,20 @@ impl PocketLauncher {
         let available = ui.available_rect_before_wrap();
         if !self.running_is_gizmondo && self.library.config().fullscreen_mode != "without_controls"
         {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui(Vec2::new(196.0, available.height()), |ui| {
-                    self.ui_virtual_pad(ui);
-                });
-                let room = Vec2::new((available.width() - 340.0).max(1.0), available.height());
-                ui.allocate_ui(room, |ui| {
-                    let dpi = ui.ctx().pixels_per_point();
-                    let fit = crate::fullscreen_layout::integer_fit(
-                        [(room.x * dpi) as u32, (room.y * dpi) as u32],
-                        native,
-                    );
-                    let rect = Rect::from_min_size(
-                        ui.min_rect().min + Vec2::new(fit.left as f32, fit.top as f32) / dpi,
-                        Vec2::new(fit.width as f32, fit.height as f32) / dpi,
-                    );
-                    self.paint_guest_frame(ui, rect);
-                    self.handle_pointer(ui.ctx(), &rect, guest_size);
-                });
-                self.ui_stylus_pad(ui);
-            });
+            self.ui_pocketpc(ui);
             return;
         }
         self.stylus_touch = [0.0; 4];
         let dpi = ui.ctx().pixels_per_point();
-        let fit = crate::fullscreen_layout::integer_fit(
-            [
-                (available.width() * dpi).floor() as u32,
-                (available.height() * dpi).floor() as u32,
-            ],
-            native,
-        );
+        let physical = [
+            (available.width() * dpi).floor() as u32,
+            (available.height() * dpi).floor() as u32,
+        ];
+        let fit = if self.running_is_gizmondo {
+            crate::fullscreen_layout::integer_fit(physical, native)
+        } else {
+            crate::fullscreen_layout::integer_fit_capped(physical, native, 4)
+        };
         let rect = Rect::from_min_size(
             available.min + Vec2::new(fit.left as f32, fit.top as f32) / dpi,
             Vec2::new(fit.width as f32, fit.height as f32) / dpi,
@@ -2679,144 +2662,199 @@ impl PocketLauncher {
             return;
         }
         self.fit_console_window(ui);
-        ScrollArea::both().show(ui, |ui| self.ui_pocketpc(ui));
+        self.ui_pocketpc(ui);
     }
 
-    /// Original PocketPC presentation: framebuffer beside the virtual controls.
-    /// Rendering and input still use the shared current emulator paths.
+    /// Host presentation only: fixed controls, native pixels and the existing inverse input transform.
     fn ui_pocketpc(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("Run output");
-            if ui
-                .button("Rotate 90°")
-                .on_hover_text(format!(
-                    "Rotate clockwise; current: {}. Saved for this game.",
-                    self.game_rotation.label()
-                ))
-                .clicked()
-            {
-                self.release_all_keys();
-                if let Some((x, y)) = self.pointer_down_at.take() {
-                    self.send_input(InputEvent::PointerUp { x, y });
-                }
-                let next =
-                    RotationPref::ALL[(usize::from(rotation_turns(self.game_rotation)) + 1) % 4];
-                self.game_rotation = next;
-                self.persist_rotation(next);
-                self.console_fit_pending = true;
+        let bounds = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(bounds, 0.0, Color32::from_rgb(8, 13, 21));
+        let gap = 6.0;
+        let side = (bounds.width() * 0.19).clamp(72.0, 140.0);
+        let pad = side.min((bounds.height() - 60.0).max(30.0) * 0.45);
+        let pad_top = bounds.bottom() - pad - gap;
+        let top = bounds.top() + 36.0;
+        let cell_w = (side - gap) / 2.0;
+        let cell_h = ((pad_top - 18.0 - top - gap) / 2.0).max(20.0);
+        let banks = [
+            (
+                bounds.left() + gap,
+                [
+                    ("A", GuestButton::ButtonA),
+                    ("P2", GuestButton::PocketPcApp2),
+                    ("Action", GuestButton::Action),
+                    ("P1", GuestButton::PocketPcApp1),
+                ],
+            ),
+            (
+                bounds.right() - side - gap,
+                [
+                    ("P4", GuestButton::PocketPcApp4),
+                    ("C", GuestButton::ButtonC),
+                    ("P3", GuestButton::PocketPcApp3),
+                    ("B", GuestButton::ButtonB),
+                ],
+            ),
+        ];
+        for (x, buttons) in banks {
+            for (i, (label, guest)) in buttons.into_iter().enumerate() {
+                let rect = Rect::from_min_size(
+                    Pos2::new(
+                        x + (i % 2) as f32 * (cell_w + gap),
+                        top + (i / 2) as f32 * (cell_h + gap),
+                    ),
+                    Vec2::new(cell_w, cell_h),
+                );
+                ui.allocate_ui_at_rect(rect, |ui| self.vbutton_size(ui, label, guest, rect.size()));
             }
-        });
-        if let Some(name) = self.running_game.as_ref() {
-            ui.label(format!("Running {name}…"));
         }
-        ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
-            self.ui_virtual_pad(ui);
-            ui.add_space(12.0);
-            self.ui_pocketpc_screen(ui);
-            ui.add_space(12.0);
-            self.ui_stylus_pad(ui);
-        });
-        if let Some(status) = self.last_frame_status.as_ref() {
-            ui.add_space(8.0);
-            ui.label(RichText::new(status).small().color(Color32::from_gray(170)));
-        }
-    }
-
-    fn ui_pocketpc_screen(&mut self, ui: &mut egui::Ui) {
-        let Some(frame) = self.last_frame_snapshot.as_ref() else {
-            ui.label("Starting PocketPC…");
-            return;
-        };
-        let guest_size = Vec2::new(frame.width as f32, frame.height as f32);
-        let display_size = if self.game_rotation.is_quarter_turn() {
-            Vec2::new(guest_size.y, guest_size.x)
-        } else {
-            guest_size
-        };
-        let scale = if self.upscale_x2 { 2.0 } else { 1.0 } / ui.ctx().pixels_per_point();
-        let (rect, _) = ui.allocate_exact_size(display_size * scale, Sense::click_and_drag());
-        self.paint_guest_frame(ui, rect);
-        self.handle_pointer(ui.ctx(), &rect, guest_size);
-    }
-
-    fn ui_stylus_pad(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.label("Stylus / look");
-            let (rect, response) = ui.allocate_exact_size(Vec2::splat(100.0), Sense::drag());
-            let mut offset = Vec2::ZERO;
-            if response.is_pointer_button_down_on() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    offset = (pos - rect.center()) / 40.0;
-                    if offset.length() > 1.0 {
-                        offset = offset.normalized();
+        // Auxiliary keys are deliberately short; host actions share the orange palette.
+        let toolbar_w = 298.0;
+        let toolbar = Rect::from_min_size(
+            Pos2::new(bounds.center().x - toolbar_w / 2.0, bounds.top() + 4.0),
+            Vec2::new(toolbar_w, 26.0),
+        );
+        ui.allocate_ui_at_rect(toolbar, |ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            ui.horizontal(|ui| {
+                for (label, guest) in [
+                    ("TAB", GuestButton::Soft1),
+                    ("ESC", GuestButton::Soft2),
+                    ("TURBO", GuestButton::Turbo),
+                ] {
+                    self.vbutton_size(ui, label, guest, Vec2::new(52.0, 24.0));
+                }
+                ui.add_space(10.0);
+                let host = |label: &str| {
+                    egui::Button::new(label)
+                        .fill(Color32::from_rgb(169, 89, 45))
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(207, 139, 88)))
+                        .rounding(8.0)
+                };
+                if ui.add_sized(Vec2::new(48.0, 24.0), host("EXIT")).clicked() {
+                    self.return_to_library(ui.ctx());
+                }
+                if ui
+                    .add_sized(Vec2::new(28.0, 24.0), host("↻"))
+                    .on_hover_text("Rotate the game screen clockwise")
+                    .clicked()
+                {
+                    self.release_all_keys();
+                    if let Some((x, y)) = self.pointer_down_at.take() {
+                        self.send_input(InputEvent::PointerUp { x, y });
                     }
+                    let next = RotationPref::ALL
+                        [(usize::from(rotation_turns(self.game_rotation)) + 1) % 4];
+                    self.game_rotation = next;
+                    self.persist_rotation(next);
+                    self.console_fit_pending = true;
                 }
-            }
-            self.stylus_touch = [
-                (-offset.y).max(0.0),
-                offset.y.max(0.0),
-                (-offset.x).max(0.0),
-                offset.x.max(0.0),
-            ];
-            ui.painter()
-                .circle_filled(rect.center(), 46.0, Color32::from_gray(35));
-            ui.painter()
-                .circle_stroke(rect.center(), 46.0, egui::Stroke::new(1.0, Color32::GRAY));
-            ui.painter().circle_filled(
-                rect.center() + offset * 30.0,
-                16.0,
-                Color32::from_rgb(60, 150, 200),
-            );
+            });
         });
+        let dpad_rect =
+            Rect::from_min_size(Pos2::new(bounds.left() + gap, pad_top), Vec2::splat(pad));
+        let cell = pad / 3.0;
+        ui.painter()
+            .circle_filled(dpad_rect.center(), pad / 2.0, Color32::from_rgb(16, 24, 36));
+        for (label, guest, col, row) in [
+            ("▲", GuestButton::DpadUp, 1, 0),
+            ("▼", GuestButton::DpadDown, 1, 2),
+            ("◀", GuestButton::DpadLeft, 0, 1),
+            ("▶", GuestButton::DpadRight, 2, 1),
+        ] {
+            let rect = Rect::from_min_size(
+                dpad_rect.min + Vec2::new(col as f32 * cell, row as f32 * cell),
+                Vec2::splat(cell),
+            );
+            ui.allocate_ui_at_rect(rect, |ui| self.vbutton_size(ui, label, guest, rect.size()));
+        }
+        ui.painter().circle_filled(
+            dpad_rect.center(),
+            cell * 0.5,
+            Color32::from_rgb(23, 34, 48),
+        );
+        let stick = Rect::from_min_size(
+            Pos2::new(bounds.right() - gap - pad, pad_top),
+            Vec2::splat(pad),
+        );
+        self.ui_stylus_pad_at(ui, stick);
+        let room = Rect::from_min_max(
+            Pos2::new(bounds.left() + side + 2.0 * gap, top),
+            Pos2::new(bounds.right() - side - 2.0 * gap, bounds.bottom() - gap),
+        );
+        if let Some(frame) = self.last_frame_snapshot.as_ref() {
+            let guest = Vec2::new(frame.width as f32, frame.height as f32);
+            let native = if self.game_rotation.is_quarter_turn() {
+                [frame.height, frame.width]
+            } else {
+                [frame.width, frame.height]
+            };
+            let dpi = ui.ctx().pixels_per_point();
+            let fit = crate::fullscreen_layout::integer_fit_capped(
+                [
+                    (room.width().max(1.0) * dpi).floor() as u32,
+                    (room.height().max(1.0) * dpi).floor() as u32,
+                ],
+                native,
+                4,
+            );
+            // Physical-pixel origin as well as size: fractional host DPI must not soften x1.
+            let origin = Pos2::new(
+                (room.left() * dpi).round() / dpi,
+                (room.top() * dpi).round() / dpi,
+            );
+            let rect = Rect::from_min_size(
+                origin + Vec2::new(fit.left as f32, fit.top as f32) / dpi,
+                Vec2::new(fit.width as f32, fit.height as f32) / dpi,
+            );
+            ui.allocate_ui_at_rect(room, |ui| {
+                ui.set_clip_rect(room.intersect(ui.clip_rect()));
+                self.paint_guest_frame(ui, rect);
+                self.handle_pointer_clipped(ui.ctx(), &rect, guest, room);
+            });
+        } else {
+            ui.allocate_ui_at_rect(room, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Starting Pocket PC…");
+                });
+            });
+        }
+        ui.allocate_rect(bounds, Sense::hover());
     }
 
-    fn ui_virtual_pad(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Pocket PC controls").strong());
-            ui.horizontal(|ui| { ui.add_space(76.0); self.vbutton(ui, "Turbo", GuestButton::Turbo, 60.0); });
-            ui.add_space(4.0);
-            ui.label("Move");
-            // ----- D-pad: 3x3 grid with cardinal arrows -----
-            egui::Grid::new("vpad_dpad")
-                .spacing(Vec2::new(2.0, 2.0))
-                .show(ui, |ui| {
-                    ui.label("");
-                    self.vbutton(ui, "▲", GuestButton::DpadUp, 44.0);
-                    ui.label("");
-                    ui.end_row();
-                    self.vbutton(ui, "◀", GuestButton::DpadLeft, 44.0);
-                    ui.label("");
-                    self.vbutton(ui, "▶", GuestButton::DpadRight, 44.0);
-                    ui.end_row();
-                    ui.label("");
-                    self.vbutton(ui, "▼", GuestButton::DpadDown, 44.0);
-                    ui.label("");
-                    ui.end_row();
-                });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "Action", GuestButton::Action, 52.0);
-                self.vbutton(ui, "A", GuestButton::ButtonA, 52.0);
-                self.vbutton(ui, "B", GuestButton::ButtonB, 52.0);
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "C", GuestButton::ButtonC, 52.0);
-                self.vbutton(ui, "1", GuestButton::Soft1, 52.0);
-                self.vbutton(ui, "2", GuestButton::Soft2, 52.0);
-            });
-            ui.add_space(4.0);
-            ui.add_space(8.0);
-            ui.label("Pocket PC hardware")
-                .on_hover_text("Some Pocket PC games use P1–P4 instead of Action/A/B/C. Assign keys or a controller in Settings > Keyboard and controllers.");
-            ui.horizontal(|ui| {
-                self.vbutton(ui, "P1", GuestButton::PocketPcApp1, 40.0);
-                self.vbutton(ui, "P2", GuestButton::PocketPcApp2, 40.0);
-                self.vbutton(ui, "P3", GuestButton::PocketPcApp3, 40.0);
-                self.vbutton(ui, "P4", GuestButton::PocketPcApp4, 40.0);
-            });
-        });
+    fn ui_stylus_pad_at(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let response = ui.interact(rect, ui.id().with("ppc_aim"), Sense::drag());
+        let mut offset = Vec2::ZERO;
+        if pointer_held_in(ui.ctx(), &rect.intersect(ui.clip_rect())) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                offset = (pos - rect.center()) / (rect.width() * 0.4).max(1.0);
+                if offset.length() > 1.0 {
+                    offset = offset.normalized();
+                }
+            }
+        }
+        self.stylus_touch = [
+            (-offset.y).max(0.0),
+            offset.y.max(0.0),
+            (-offset.x).max(0.0),
+            offset.x.max(0.0),
+        ];
+        ui.painter().circle_filled(
+            rect.center(),
+            rect.width() * 0.46,
+            Color32::from_rgb(16, 24, 36),
+        );
+        ui.painter().circle_stroke(
+            rect.center(),
+            rect.width() * 0.46,
+            egui::Stroke::new(1.0, Color32::from_rgb(80, 96, 120)),
+        );
+        ui.painter().circle_filled(
+            rect.center() + offset * rect.width() * 0.28,
+            rect.width() * 0.16,
+            Color32::from_rgb(48, 58, 71),
+        );
     }
 
     /// Render one virtual button. Pressed-while-pointer-is-down
@@ -2825,16 +2863,23 @@ impl PocketLauncher {
     /// The held state comes from [`pointer_held_in`] rather than from
     /// the `Response`, because egui stops calling a still-held press a
     /// click after 0.8 s — see that function.
-    fn vbutton(&mut self, ui: &mut egui::Ui, label: &str, guest: GuestButton, size: f32) {
+    fn vbutton_size(&mut self, ui: &mut egui::Ui, label: &str, guest: GuestButton, size: Vec2) {
         let vk = rotate_direction_vk(guest.vk(), (4 - rotation_turns(self.game_rotation)) % 4);
         let was_pressed = self.held.is_held_by(InputSource::Pointer, vk);
-        let mut button = egui::Button::new(RichText::new(label).size(16.0).strong())
-            .min_size(Vec2::new(size, size));
+        let mut button = egui::Button::new(
+            RichText::new(label)
+                .size(if size.y < 30.0 { 12.0 } else { 16.0 })
+                .strong(),
+        )
+        .min_size(size)
+        .fill(Color32::from_rgb(48, 58, 71))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(80, 96, 120)))
+        .rounding(10.0);
         if self.held.is_held(vk) {
             button = button.fill(Color32::from_rgb(80, 130, 255));
         }
         let keys = self.library.config().keybindings.keys_for(guest).join(", ");
-        let response = ui.add_sized(Vec2::new(size, size), button);
+        let response = ui.add_sized(size, button);
         // Naming the keyboard shortcut on the button is how a user
         // discovers what their own bindings ended up as.
         let response = if keys.is_empty() {
@@ -3092,7 +3137,11 @@ impl PocketLauncher {
     }
 
     fn handle_pointer(&mut self, ctx: &egui::Context, rect: &Rect, size: Vec2) {
-        let held = pointer_held_in(ctx, rect);
+        self.handle_pointer_clipped(ctx, rect, size, *rect);
+    }
+
+    fn handle_pointer_clipped(&mut self, ctx: &egui::Context, rect: &Rect, size: Vec2, clip: Rect) {
+        let held = pointer_held_in(ctx, &rect.intersect(clip));
         let pos = ctx.input(|input| input.pointer.latest_pos());
         let coords = pos.map(|pos| {
             // Map UI-space coords to guest framebuffer pixels. The panel

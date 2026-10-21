@@ -15,7 +15,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /** Desktop shaders, including reference three-pass SMAA; filtering never alters guest geometry. */
-internal class AndroidFrameRenderer(context: Context, private val filter: String, private val scale: Int, private val countFps: Boolean = false) : GLSurfaceView.Renderer {
+internal class AndroidFrameRenderer(context: Context, private val filter: String, private val scale: Int, private val countFps: Boolean = false, private val pocketPc: Boolean = false) : GLSurfaceView.Renderer {
     private val frameCounter = PresentedFrameCounter()
     val presentedFrameCount: Long get() = frameCounter.total
     private val app = context.applicationContext
@@ -74,7 +74,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
             val quarter = turn == 90 || turn == 270
             val w = if (quarter) frame.height else frame.width
             val h = if (quarter) frame.width else frame.height
-            val rect = displayRect(viewW,viewH,w,h,scale)
+            val rect = displayRect(viewW,viewH,w,h,if(pocketPc) { if(scale<=0) 4 else scale.coerceAtMost(4) } else scale)
             val drawnW=rect.width;val drawnH=rect.height
             val x=rect.left;val y=viewH-rect.top-drawnH
             glViewport(x,y,drawnW,drawnH);glUseProgram(program)

@@ -3344,3 +3344,46 @@ fallback is retained. Snails' supplied fmodce.dll opens a real waveOut live ring
 and its native guest mixer produces PCM; no commercial decoder/data is copied
 into PocketHLE. This changes supplied FMOD middleware behavior generically and
 does not establish compatibility with every FMOD game or hardware audio driver.
+
+
+## Pocket PC control layout revision (2026-10-21)
+
+This section supersedes the earlier Pocket PC overlay/quick-rotation layout
+notes, not their guest input contracts. Android PocketPcLayout reserves a
+separate surface rectangle and PocketPcControls covers only its child touch
+targets. Portrait starts the 3:4 native image at the top, with two action rows
+below; the auxiliary keys sit between the left TouchDpad and right stylus
+stick. Landscape puts two tall action banks beside the screen, with an 18dp
+safety gap before the thumb controls. The actual guest framebuffer dimensions,
+including VGA, determine the image ratio; never force a title into QVGA.
+
+Android Rotate changes requested host orientation only. It does not rewrite
+GameSettings.rotation or rotate guest pixels, direction keys or the SIP again.
+Existing per-game image rotation is still honored at launch. A manual layout
+choice survives Activity saved-state restoration and suppresses automatic
+frame-aspect orientation selection. Release all held inputs before a layout
+change. Pointer mapping and GL use the same native integer rectangle. At x1
+on an undersized surface, clip rather than introduce fractional downscaling.
+
+Desktop and Deck share fixed left/right action banks around the screen, with
+small Tab/Esc/Turbo and orange Exit/Rotate above it. Rotate retains the existing
+per-game image/UV/input transform. Pocket PC window/fullscreen fitting uses
+physical pixels and factors 1..4 only; Gizmondo keeps its previous uncapped
+integer fullscreen policy and its own skin. Preserve source-aware key holds,
+native touch mapping and configurable keyboard/controller stylus bindings.
+The controls do not alter the guest display mode, CPU, renderer or sound.
+
+ConsoleControlStyle owns the exact former Gizmondo button drawable factory:
+all original gradient colors, borders, radii and pressed states are retained.
+Each child receives its own drawable. Both platforms' Exit and Rotate controls
+are orange; emulated keys remain slate. Do not tint all controls orange or
+replace Gizmondo's established input paths.
+
+Validation: full Android main Kotlin sources compile against actual API35 and
+AndroidX jars (generated resource-ID/BuildConfig stubs, not an APK); two JVM
+geometry/mapping regressions cover portrait/landscape, fractional density,
+non-overlap, thumb gaps, integer scale and rotated QVGA/VGA input. Three Rust
+integer-fit tests pass, including the unchanged Gizmondo fit policy. Desktop
+and Steam Deck bins pass cargo check with --no-default-features --features
+steam-deck --locked on Linux. Native Windows/Android/Steam Deck UI, multitouch,
+fullscreen transitions and actual game play still need device validation.
