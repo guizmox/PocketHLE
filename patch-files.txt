@@ -1,7 +1,5 @@
-crates\pocket-kernel\src\gdi.rs
-crates\pocket-winceapi\data\aygshell-ordinals.json
-crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\coredll\palette.rs
-crates\pocket-winceapi\src\dlgtemplate.rs
 docs\AGENTS.md
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcLayout.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\TouchRouting.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\TouchRoutingTest.kt

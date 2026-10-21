@@ -108,6 +108,7 @@ class GameActivity : AppCompatActivity() {
     private var stylusTouch = floatArrayOf(0f,0f,0f,0f)
     private var stylusSent = 0 to 0
     private var surfacePointerDown = false
+    private var surfacePointerId = -1
     private var lastPointerX = 0
     private var lastPointerY = 0
 
@@ -832,6 +833,7 @@ class GameActivity : AppCompatActivity() {
         heldVirtualKeys.clear()
         heldAxisKeys.clear()
         surfacePointerDown = false
+        surfacePointerId = -1
     }
 
     /**
@@ -846,12 +848,15 @@ class GameActivity : AppCompatActivity() {
             val handle = session
             if (handle == 0L) return@setOnTouchListener false
             val frame = lastFrame
-            val mapped = frame?.let { mapTouchToGame(v, event, it) }
+            val pointerIndex=if(surfacePointerId>=0) event.findPointerIndex(surfacePointerId) else event.actionIndex
+            val mapped = if(pointerIndex>=0) frame?.let { mapTouchToGame(v, event, it,pointerIndex) } else null
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     val (gx, gy) = mapped ?: return@setOnTouchListener true
                     NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_POINTER_DOWN, gx, gy)
                     surfacePointerDown = true
+                    surfacePointerId = event.getPointerId(event.actionIndex)
+                    updateStylusAim()
                     lastPointerX = gx
                     lastPointerY = gy
                 }
@@ -863,11 +868,14 @@ class GameActivity : AppCompatActivity() {
                         lastPointerY = gy
                     }
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (surfacePointerDown) {
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (surfacePointerDown && (event.actionMasked==MotionEvent.ACTION_CANCEL ||
+                            event.getPointerId(event.actionIndex)==surfacePointerId)) {
                         val (gx, gy) = mapped ?: (lastPointerX to lastPointerY)
                         NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_POINTER_UP, gx, gy)
                         surfacePointerDown = false
+                        surfacePointerId = -1
+                        updateStylusAim()
                         lastPointerX = gx
                         lastPointerY = gy
                         if (event.actionMasked == MotionEvent.ACTION_UP) v.performClick()
@@ -993,8 +1001,9 @@ class GameActivity : AppCompatActivity() {
         v: View,
         event: MotionEvent,
         frame: FrameSnapshot,
+        pointerIndex: Int = 0,
     ): Pair<Int, Int>? {
-        return displayPointToGuest(event.x,event.y,v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame)
+        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame)
     }
 
     data class FrameSnapshot(

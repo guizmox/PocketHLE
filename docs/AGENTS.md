@@ -3413,3 +3413,18 @@ geometry. Otherwise the compositor erases native drawing with dialog grey.
 Into Outland: actual ARM intro followed by animated 3D demo observed locally
 at 240x320 and 480x640, after about 12 seconds. Android-only black output has
 not been reproduced or established fixed. No per-title framebuffer workaround.
+
+## Android Pocket PC touch ownership (2026-10-21)
+
+PocketPcControls spans the entire game root, including an empty surface area.
+Ordinary Android sibling dispatch assigns additional fingers to an existing
+full-window overlay target before consulting its empty regions. PocketPcLayout
+therefore owns each pointer from its DOWN through UP/CANCEL and emits separate
+MotionEvent streams to content_column and the controls. Remap POINTER_DOWN/UP
+to DOWN/UP when a destination has only one finger; preserve IDs and coordinates.
+Do not forward the whole event to both destinations or manufacture a stylus
+release when only a button finger lifts. Native stylus input tracks its pointer
+ID, rather than assuming Android pointer index zero remains stable. Pause
+relative stick aiming during direct stylus contact and restore it on release.
+Seven JVM geometry/rotation/routing tests and full main-source Kotlin compilation
+pass; Android device multitouch and APK build remain to be validated.

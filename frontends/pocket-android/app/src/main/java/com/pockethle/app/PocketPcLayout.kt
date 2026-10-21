@@ -4,10 +4,51 @@ import android.content.Context
 import android.util.AttributeSet
 import android.view.View
 import android.view.ViewGroup
+import android.view.MotionEvent
 
 /** The surface owns only its reserved rectangle, never the controls' touch zones. */
 class PocketPcLayout(context: Context,attrs: AttributeSet?=null): ViewGroup(context,attrs) {
     init { setBackgroundColor(0xff080d15.toInt()); isMotionEventSplittingEnabled=true }
+    private val surfaceFingers=mutableSetOf<Int>()
+    private val controlFingers=mutableSetOf<Int>()
+
+    // A full-window controls overlay cannot rely on ordinary sibling hit tests:
+    // Android adds a second finger to its existing touch target even if that
+    // finger lands in the overlay's empty game area. Own fingers at this root
+    // and send independent streams to the surface and the control bank.
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val content=findViewById<View>(R.id.content_column) ?: return super.dispatchTouchEvent(event)
+        val controls=findViewById<View>(R.id.game_controls) ?: return super.dispatchTouchEvent(event)
+        val changed=event.getPointerId(event.actionIndex)
+        if(event.actionMasked==MotionEvent.ACTION_DOWN) {
+            surfaceFingers.clear();controlFingers.clear()
+        }
+        if(event.actionMasked==MotionEvent.ACTION_DOWN || event.actionMasked==MotionEvent.ACTION_POINTER_DOWN) {
+            val x=event.getX(event.actionIndex);val y=event.getY(event.actionIndex)
+            if(x>=content.left && x<content.right && y>=content.top && y<content.bottom) surfaceFingers.add(changed)
+            else if(controls.visibility==View.VISIBLE) controlFingers.add(changed)
+        }
+        fun dispatch(target: View, owned: Set<Int>) {
+            val indices=(0 until event.pointerCount).filter { event.getPointerId(it) in owned }
+            val ids=indices.map { event.getPointerId(it) }
+            val action=routedTouchAction(event.actionMasked,changed,ids) ?: return
+            val properties=Array(indices.size) { MotionEvent.PointerProperties().also { p -> event.getPointerProperties(indices[it],p) } }
+            val coords=Array(indices.size) { MotionEvent.PointerCoords().also { c -> event.getPointerCoords(indices[it],c) } }
+            val split=MotionEvent.obtain(event.downTime,event.eventTime,action,indices.size,properties,coords,
+                event.metaState,event.buttonState,event.xPrecision,event.yPrecision,event.deviceId,event.edgeFlags,event.source,event.flags)
+            split.offsetLocation(-target.left.toFloat(),-target.top.toFloat())
+            try { target.dispatchTouchEvent(split) } finally { split.recycle() }
+        }
+        dispatch(content,surfaceFingers)
+        if(controls.visibility==View.VISIBLE) dispatch(controls,controlFingers)
+        if(event.actionMasked==MotionEvent.ACTION_UP || event.actionMasked==MotionEvent.ACTION_POINTER_UP) {
+            surfaceFingers.remove(changed);controlFingers.remove(changed)
+        }
+        if(event.actionMasked==MotionEvent.ACTION_UP || event.actionMasked==MotionEvent.ACTION_CANCEL) {
+            surfaceFingers.clear();controlFingers.clear()
+        }
+        return true
+    }
     private var nativeWidth=240
     private var nativeHeight=320
     private var scaleLimit=4
