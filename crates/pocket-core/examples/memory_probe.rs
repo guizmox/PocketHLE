@@ -11,9 +11,18 @@ use std::{
 struct Trace {
     file: std::io::BufWriter<std::fs::File>,
     start: Instant,
+    filter: Vec<String>,
 }
 impl Write for Trace {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.filter.is_empty()
+            && !self
+                .filter
+                .iter()
+                .any(|name| String::from_utf8_lossy(bytes).contains(name))
+        {
+            return Ok(bytes.len());
+        }
         write!(self.file, "{} ", self.start.elapsed().as_micros())?;
         self.file.write_all(bytes)?;
         Ok(bytes.len())
@@ -48,8 +57,18 @@ fn main() -> anyhow::Result<()> {
     eprintln!("LOAD_BEGIN {:?}", start.elapsed());
     emu.load_pe(root.join(exe))?;
     eprintln!("LOAD_END {:?}", start.elapsed());
-    emu.set_screen_size(320, 240);
+    let (width, height) = std::env::var("POCKETHLE_PROBE_SIZE")
+        .ok()
+        .and_then(|s| {
+            s.split_once('x')
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        })
+        .unwrap_or((320, 240));
+    emu.set_screen_size(width, height);
     emu.set_pocket_pc_input(true);
+    if std::env::var_os("POCKETHLE_PROBE_GPU").is_some() {
+        emu.set_gpu_renderer(true);
+    }
     for prefix in [
         "\\SD Card\\Game\\",
         "\\Storage Card\\Game\\",
@@ -70,6 +89,12 @@ fn main() -> anyhow::Result<()> {
         emu.set_trace_sink(Box::new(Trace {
             file: std::io::BufWriter::new(std::fs::File::create(out.join("api.trace"))?),
             start,
+            filter: std::env::var("POCKETHLE_PROBE_TRACE_FILTER")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("\"name\":\"{s}\""))
+                .collect(),
         }));
     }
     let mut last = Instant::now();
@@ -112,6 +137,9 @@ fn main() -> anyhow::Result<()> {
         if last.elapsed() >= Duration::from_secs(2) {
             stage += 1;
             last = Instant::now();
+            if std::env::var_os("POCKETHLE_PROBE_WINDOWS").is_some() {
+                eprintln!("WINDOWS active={:08x} focus={:08x} direct={:08x} rects={:?} styles={:?} parents={:?} visible={:?} procs={:?}", state.active_window, state.controls.focus, state.controls.direct_surface_hwnd, state.window_rects, state.window_styles, state.window_parents, state.window_visibility, state.window_procs);
+            }
             eprintln!(
                 "PROGRESS {:?} frame={} windows={} threads={}",
                 elapsed,

@@ -188,6 +188,14 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !ctx.kernel.fb_mapped {
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
+    // GXEndDraw presents to the same modeled LCD as DirectDraw and EGL.
+    // Without this, a timer-driven GAPI game (Snails) advances its animation
+    // at hundreds of frames/s even though the frontend only shows 60 Hz.
+    // Wait before readback, including unchanged frames, and preserve the
+    // deadline on cooperative scheduler reentry.
+    if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
+        return Ok(outcome);
+    }
     let pitch = guest_pitch_bytes(ctx) as usize;
     let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
     let fb_len = ctx.kernel.framebuffer.pixels.len();
@@ -221,6 +229,7 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel.gx_guest_signature = Some(signature);
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
+    ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -575,6 +584,77 @@ pub(crate) mod tests {
         assert!(kernel.framebuffer.frame_counter > pre_counter);
         assert_eq!(kernel.framebuffer.pixels.len(), FB_BYTES as usize);
     }
+    #[test]
+    fn end_draw_waits_before_readback_and_paces_unchanged_frames() {
+        use pocket_kernel::framebuffer::DirectDrawTiming;
+        use std::time::{Duration, Instant};
+        for action in [pocket_kernel::gapi::VK_A, pocket_kernel::gapi::VK_RETURN] {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            kernel.gapi_action_key = action;
+            let thunk = dummy_thunk();
+            cpu.write_reg(ArmReg::Sp, 0x4000).unwrap();
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            gx_open_display(&mut c).unwrap();
+            c.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
+            let before = c.kernel.framebuffer.pixels.clone();
+            let anchor = Instant::now() + Duration::from_secs(60);
+            c.kernel.framebuffer.directdraw.last_present = Some(anchor);
+            let key = (0, thunk.thunk_va, 0x4000);
+            for _ in 0..2 {
+                assert_eq!(
+                    gx_end_draw(&mut c).unwrap(),
+                    DispatchOutcome::JumpTo(thunk.thunk_va)
+                );
+                assert_eq!(
+                    c.kernel.framebuffer.directdraw.pending[&key],
+                    anchor + DirectDrawTiming::PERIOD
+                );
+                assert_eq!(c.kernel.framebuffer.pixels, before);
+            }
+            // Simulate an elapsed deadline without a timing-sensitive sleep.
+            c.kernel
+                .framebuffer
+                .directdraw
+                .pending
+                .insert(key, Instant::now() - Duration::from_secs(1));
+            assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(&c.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
+            assert!(c.kernel.framebuffer.directdraw.pending.is_empty());
+            let counter = c.kernel.framebuffer.frame_counter;
+            c.kernel.framebuffer.directdraw.last_present = Some(anchor);
+            assert_eq!(
+                gx_end_draw(&mut c).unwrap(),
+                DispatchOutcome::JumpTo(thunk.thunk_va)
+            );
+            c.kernel
+                .framebuffer
+                .directdraw
+                .pending
+                .insert(key, Instant::now() - Duration::from_secs(1));
+            assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(c.kernel.framebuffer.frame_counter, counter);
+            // DirectDraw's explicit vertical-blank wait is a one-shot credit.
+            c.kernel.framebuffer.directdraw.last_present = Some(anchor);
+            c.kernel
+                .framebuffer
+                .directdraw
+                .recent_blank
+                .insert(0, Instant::now());
+            assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert!(!c
+                .kernel
+                .framebuffer
+                .directdraw
+                .recent_blank
+                .contains_key(&0));
+        }
+    }
+
     #[test]
     fn landscape_query_uses_r1_after_arm_struct_return_pointer() {
         for action in [pocket_kernel::gapi::VK_A, pocket_kernel::gapi::VK_RETURN] {

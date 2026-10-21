@@ -12677,9 +12677,23 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
         return Some((hwnd, message, wp, local));
     }
     let mut candidates = Vec::new();
-    for (&hwnd, rect) in &kernel.window_rects {
+    // Modeless dialogs live in Controls::panels, not necessarily in
+    // window_rects. Their empty client area is still a real mouse target:
+    // Snails handles its GAPI menu taps in the child dialog's DialogProc.
+    let panel_z: std::collections::HashMap<_, _> = kernel
+        .controls
+        .panel_handles()
+        .enumerate()
+        .map(|(i, hwnd)| (hwnd, i + 1))
+        .collect();
+    let windows: std::collections::BTreeSet<_> = kernel
+        .window_rects
+        .keys()
+        .copied()
+        .chain(kernel.controls.panel_handles())
+        .collect();
+    for hwnd in windows {
         if kernel.controls.get(hwnd).is_some()
-            || kernel.controls.panel(hwnd).is_some()
             || !focus_belongs_to_window(kernel, hwnd, active)
             || !window_is_visible(kernel, hwnd)
         {
@@ -12688,12 +12702,23 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
         let Some((ox, oy)) = coordinates::origin(kernel, hwnd) else {
             continue;
         };
-        if x < ox || y < oy || x >= ox.saturating_add(rect.2) || y >= oy.saturating_add(rect.3) {
+        let (width, height) = if let Some(panel) = kernel.controls.panel(hwnd) {
+            (
+                panel.w - 2 * i32::from(panel.border),
+                panel.h - 2 * i32::from(panel.border) - panel.caption_h(),
+            )
+        } else {
+            let rect = &kernel.window_rects[&hwnd];
+            (rect.2, rect.3)
+        };
+        if x < ox || y < oy || x >= ox.saturating_add(width) || y >= oy.saturating_add(height) {
             continue;
         }
         let mut depth = 0;
+        let mut z = 0;
         let mut current = hwnd;
         for _ in 0..64 {
+            z = z.max(panel_z.get(&current).copied().unwrap_or(0));
             if current == active {
                 break;
             }
@@ -12706,10 +12731,10 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
             depth += 1;
             current = parent;
         }
-        candidates.push((depth, hwnd, ox, oy));
+        candidates.push((z, depth, hwnd, ox, oy));
     }
     candidates.sort_unstable();
-    let (hwnd, ox, oy) = if let Some((_, hwnd, ox, oy)) = candidates.last().copied() {
+    let (hwnd, ox, oy) = if let Some((_, _, hwnd, ox, oy)) = candidates.last().copied() {
         (hwnd, ox, oy)
     } else {
         let (ox, oy) = coordinates::origin(kernel, active).unwrap_or((0, 0));
@@ -23420,6 +23445,66 @@ mod tests {
             get_dlg_item(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(0)
         );
+    }
+
+    #[test]
+    fn modeless_child_dialog_client_is_a_pointer_target_without_window_rect() {
+        use pocket_kernel::controls::DialogPanel;
+        let mut kernel = fresh_kernel();
+        kernel.active_window = FAKE_HWND;
+        kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
+        kernel
+            .window_styles
+            .insert(FAKE_DIALOG_HWND, (0x5000_0000, 0));
+        kernel.window_parents.insert(FAKE_DIALOG_HWND, FAKE_HWND);
+        kernel.window_visibility.insert(FAKE_DIALOG_HWND, true);
+        kernel.controls.add_panel(DialogPanel {
+            hwnd: FAKE_DIALOG_HWND,
+            x: 20,
+            y: 30,
+            w: 100,
+            h: 90,
+            border: true,
+            caption: Some("Panel".into()),
+            visible: true,
+            ok_pressed: false,
+        });
+        let ev = InputEvent::PointerUp { x: 25, y: 50 };
+        assert_eq!(
+            addressed_input(&kernel, ev),
+            Some((FAKE_DIALOG_HWND, WM_LBUTTONUP, 0, (5 << 16) | 4))
+        );
+        // Outside client bounds (including the caption), or a hidden child,
+        // continues to the actual ancestor rather than a stale dialog target.
+        assert_eq!(
+            addressed_input(&kernel, InputEvent::PointerUp { x: 25, y: 32 })
+                .unwrap()
+                .0,
+            FAKE_HWND
+        );
+        kernel.window_visibility.insert(FAKE_DIALOG_HWND, false);
+        kernel.controls.panel_mut(FAKE_DIALOG_HWND).unwrap().visible = false;
+        assert_eq!(addressed_input(&kernel, ev).unwrap().0, FAKE_HWND);
+        kernel.window_visibility.insert(FAKE_DIALOG_HWND, true);
+        kernel.controls.panel_mut(FAKE_DIALOG_HWND).unwrap().visible = true;
+        // An owned popup outside the active child tree cannot intercept taps.
+        kernel
+            .window_styles
+            .insert(FAKE_DIALOG_HWND, (0x9000_0000, 0));
+        assert_eq!(addressed_input(&kernel, ev).unwrap().0, FAKE_HWND);
+        // Empty overlapping dialogs use the same raised panel order as paint.
+        kernel
+            .window_styles
+            .insert(FAKE_DIALOG_HWND, (0x5000_0000, 0));
+        let other = FAKE_DIALOG_HWND + 1;
+        let mut panel = kernel.controls.panel(FAKE_DIALOG_HWND).unwrap().clone();
+        panel.hwnd = other;
+        kernel.controls.add_panel(panel);
+        kernel.window_styles.insert(other, (0x5000_0000, 0));
+        kernel.window_parents.insert(other, FAKE_HWND);
+        assert_eq!(addressed_input(&kernel, ev).unwrap().0, other);
+        kernel.controls.raise_panel(FAKE_DIALOG_HWND);
+        assert_eq!(addressed_input(&kernel, ev).unwrap().0, FAKE_DIALOG_HWND);
     }
 
     #[test]
