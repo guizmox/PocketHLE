@@ -559,6 +559,9 @@ pub const HSS_MUSIC_GROUP: u32 = 2;
 /// so this records what the parked call is waiting for.
 #[derive(Debug, Clone)]
 pub struct ModalDialog {
+    /// Modal call suspended while a nested DialogBox runs on the same thread.
+    pub parent: Option<Box<ModalDialog>>,
+    pub thread: usize,
     /// Input routing to restore when the blocking modal returns.
     pub previous_active: u32,
     pub previous_focus: u32,

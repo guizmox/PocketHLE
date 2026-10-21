@@ -11345,18 +11345,25 @@ fn list_view_message(
             let state = ctx.cpu.read_u32_le(lp + 12)?;
             let mask = ctx.cpu.read_u32_le(lp + 16)?;
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            if wp != u32::MAX && wp as usize >= c.list_items.len() {
+                return Ok(0);
+            }
             if mask & 2 != 0 {
-                c.list_selected = if state & 2 != 0 && (wp as usize) < c.list_items.len() {
-                    Some(wp as usize)
-                } else {
-                    None
-                };
+                if state & 2 != 0 {
+                    c.list_selected = if wp == u32::MAX {
+                        (!c.list_items.is_empty()).then_some(0)
+                    } else {
+                        Some(wp as usize)
+                    };
+                } else if wp == u32::MAX || c.list_selected == Some(wp as usize) {
+                    c.list_selected = None;
+                }
             }
             1
         }
         0x102c => {
             if ctx.kernel.controls.get(hwnd).unwrap().list_selected == Some(wp as usize) {
-                2
+                3 & lp
             } else {
                 0
             }
@@ -12129,13 +12136,26 @@ fn control_action_message(
                 ctx.kernel.window_extra.insert(key, ptr);
                 ptr
             };
+            // The list keyboard path moves both selection and item focus.
+            // Native LVN_ITEMCHANGED handlers use LVIS_FOCUSED to remember the
+            // current icon; omitting it makes CoPilot restore its previous item.
+            let new_state = if ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .is_some_and(|c| c.class == ControlClass::ListView)
+            {
+                3
+            } else {
+                2
+            };
             let words = [
                 hwnd,
                 id,
                 code,
                 index as u32,
                 0,
-                2,
+                new_state,
                 0,
                 8,
                 0,
@@ -12191,6 +12211,12 @@ fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
         return if down { 0x8000 } else { 0 };
     }
     let aliases = |code: usize| -> [usize; 2] {
+        // The PocketPC layout exposes APP1..4 (C1..C4) separately from the
+        // GAPI face buttons (D1..D4). Aliasing both makes a configuration
+        // wizard detect one physical press twice. Retain the legacy Gizmondo mapping.
+        if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
+            return [code, code];
+        }
         match code {
             0xC1..=0xC4 => [code, code + 0x10],
             0xD1..=0xD4 => [code, code - 0x10],
@@ -12575,7 +12601,7 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
 /// the user-visible bug we want to avoid.
 fn synthetic_paint_target(k: &KernelState) -> u32 {
     let h = active_window(k);
-    if k.window_procs.contains_key(&h) && window_is_visible(k, h) {
+    let target = if k.window_procs.contains_key(&h) && window_is_visible(k, h) {
         h
     } else if k.window_procs.is_empty()
         || (k.window_procs.contains_key(&FAKE_HWND) && window_is_visible(k, FAKE_HWND))
@@ -12593,8 +12619,18 @@ fn synthetic_paint_target(k: &KernelState) -> u32 {
             })
             .max()
             .unwrap_or(0)
+    };
+    // Gizmondo's retained shell dialogs repaint on real invalidations, not
+    // on every idle tick. Unsolicited paints re-run CoPilot's menu setup and
+    // restore the first icon. Keep PocketPC's legacy game ticks unchanged;
+    // posted/invalidation paints still take their ordinary delivery path.
+    if k.gapi_action_key != pocket_kernel::gapi::VK_RETURN && k.controls.panel(target).is_some() {
+        0
+    } else {
+        target
     }
 }
+
 fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     let now = monotonic_ms();
     let timer_next = ctx
@@ -12762,12 +12798,26 @@ fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
 }
 
 fn timer_message_if_due(ctx: &mut CallCtx<'_>, remove: bool) -> Option<(u32, u32, u32, u32)> {
+    timer_message_in_scope_if_due(ctx, remove, None)
+}
+
+fn timer_message_in_scope_if_due(
+    ctx: &mut CallCtx<'_>,
+    remove: bool,
+    root: Option<u32>,
+) -> Option<(u32, u32, u32, u32)> {
     let now = monotonic_ms();
     let due = ctx
         .kernel
         .timers
         .iter()
-        .filter(|(key, timer)| key.0 == ctx.kernel.current_thread && now >= timer.1)
+        .filter(|(key, timer)| {
+            key.0 == ctx.kernel.current_thread
+                && now >= timer.1
+                && root.map_or(true, |hwnd| {
+                    focus_belongs_to_window(ctx.kernel, key.1, hwnd)
+                })
+        })
         .min_by_key(|(key, timer)| (timer.1, **key))
         .map(|(key, _)| *key);
     if let Some(key) = due {
@@ -17443,7 +17493,11 @@ fn load_icon_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// and shows them again when the dialog's checkboxes say so.
 fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // First pass: materialise the template and register the DialogProc.
-    if ctx.kernel.modal_dialog.is_none() {
+    let nested = ctx.kernel.modal_dialog.as_ref().is_some_and(|d| {
+        d.thread == ctx.kernel.current_thread
+            && ctx.cpu.read_reg(ArmReg::Sp).is_ok_and(|sp| sp < d.frame.sp)
+    });
+    if ctx.kernel.modal_dialog.is_none() || nested {
         let lp_template = ctx.arg_u32(1)?;
         let dialog_proc = ctx.arg_u32(3)?;
         if dialog_proc == 0 {
@@ -17453,10 +17507,28 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         }
         let previous_active = ctx.kernel.active_window;
         let previous_focus = ctx.kernel.controls.focus;
-        build_dialog_from_template_for(ctx, lp_template, FAKE_MODAL_HWND, true);
+        // Each nested dialog owns its panel, children and procedure. Reusing
+        // the outer handle overwrites both its controls and its continuation.
+        let hwnd = if nested {
+            let owner = ctx.arg_u32(2)?;
+            let Some(hwnd) = (0xDEAD_1000..0xDEAD_2000).find(|h| {
+                *h != owner
+                    && !ctx.kernel.window_classes.contains_key(h)
+                    && !ctx.kernel.window_rects.contains_key(h)
+                    && !ctx.kernel.window_parents.values().any(|p| p == h)
+                    && ctx.kernel.controls.get(*h).is_none()
+                    && ctx.kernel.controls.panel(*h).is_none()
+            }) else {
+                return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+            };
+            hwnd
+        } else {
+            FAKE_MODAL_HWND
+        };
+        build_dialog_from_template_for(ctx, lp_template, hwnd, true);
         // A template we could not parse leaves no panel behind; without
         // controls the dialog can never be answered.
-        if ctx.kernel.controls.panel(FAKE_MODAL_HWND).is_none() {
+        if ctx.kernel.controls.panel(hwnd).is_none() {
             log::debug!("DialogBoxIndirectParamW: no panel materialised, reporting cancelled");
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
@@ -17470,25 +17542,24 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             sp: ctx.cpu.read_reg(ArmReg::Sp)?,
             lr: ctx.cpu.read_reg(ArmReg::Lr)?,
         };
-        ctx.kernel
-            .window_parents
-            .insert(FAKE_MODAL_HWND, frame.args[2]);
-        ctx.kernel
-            .window_classes
-            .insert(FAKE_MODAL_HWND, "#32770".into());
-        let mut windows = ctx.kernel.controls.children_of(FAKE_MODAL_HWND);
-        windows.push(FAKE_MODAL_HWND);
+        ctx.kernel.window_parents.insert(hwnd, frame.args[2]);
+        ctx.kernel.window_classes.insert(hwnd, "#32770".into());
+        let mut windows = ctx.kernel.controls.children_of(hwnd);
+        windows.push(hwnd);
         for hwnd in windows {
             ctx.kernel
                 .window_threads
                 .insert(hwnd, ctx.kernel.current_thread);
         }
-        ctx.kernel.active_window = FAKE_MODAL_HWND;
+        ctx.kernel.active_window = hwnd;
+        let parent = ctx.kernel.modal_dialog.take().map(Box::new);
         ctx.kernel.modal_dialog = Some(ModalDialog {
+            parent,
+            thread: ctx.kernel.current_thread,
             previous_active,
             previous_focus,
             frame,
-            hwnd: FAKE_MODAL_HWND,
+            hwnd,
             proc: dialog_proc,
             result: None,
             initialised: false,
@@ -17497,7 +17568,7 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         });
         // Route `SendMessageW` / `DispatchMessageW` for this handle at
         // the DialogProc rather than the frame window's WndProc.
-        ctx.kernel.window_procs.insert(FAKE_MODAL_HWND, dialog_proc);
+        ctx.kernel.window_procs.insert(hwnd, dialog_proc);
         ctx.kernel.framebuffer.mark_dirty();
         log::debug!("DialogBoxIndirectParamW: modal dialog up, proc=0x{dialog_proc:08x}");
     }
@@ -17540,6 +17611,7 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         .unwrap_or(FAKE_MODAL_HWND);
     crate::shell_keyboard::service(ctx);
     while let Some(ev) = take_pending_input(ctx) {
+        update_key_state(ctx, ev);
         update_key_state(ctx, ev);
         if crate::shell_keyboard::input(ctx, ev) {
             continue;
@@ -17665,6 +17737,31 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         }
     }
 
+    if let Some((hwnd, message, id, callback)) =
+        timer_message_in_scope_if_due(ctx, true, Some(modal_hwnd))
+    {
+        let proc = if callback != 0 {
+            callback
+        } else {
+            ctx.kernel.window_procs.get(&hwnd).copied().unwrap_or(0)
+        };
+        if proc != 0 {
+            ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+            ctx.cpu.write_reg(ArmReg::R1, message)?;
+            ctx.cpu.write_reg(ArmReg::R2, id)?;
+            ctx.cpu.write_reg(
+                ArmReg::R3,
+                if callback != 0 {
+                    monotonic_ms() as u32
+                } else {
+                    0
+                },
+            )?;
+            ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+            return Ok(DispatchOutcome::JumpTo(proc));
+        }
+    }
+
     // A modal loop blocks its caller, not the other guest threads. In
     // particular a progress dialog may run on a worker while its creator
     // performs the operation it reports (Quake 3's memory partitioning).
@@ -17713,6 +17810,7 @@ fn close_modal_dialog(ctx: &mut CallCtx<'_>) {
     for hwnd in windows {
         discard_window_metadata(ctx, &hwnd);
     }
+    ctx.kernel.modal_dialog = dialog.parent.map(|parent| *parent);
     ctx.kernel.active_window = dialog.previous_active;
     ctx.kernel.controls.focus = dialog.previous_focus;
     repaint_controls(ctx);
@@ -17729,10 +17827,17 @@ fn end_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let result = ctx.arg_u32(1)?;
     log::debug!("EndDialog(hwnd=0x{hwnd:08x}, result={result})");
-    if let Some(dialog) = ctx.kernel.modal_dialog.as_mut() {
-        dialog.result = Some(result);
+    // EndDialog names a dialog; never dismiss the innermost one merely
+    // because a caller supplies another window's handle.
+    let mut dialog = ctx.kernel.modal_dialog.as_mut();
+    while let Some(current) = dialog {
+        if current.hwnd == hwnd {
+            current.result = Some(result);
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
+        dialog = current.parent.as_deref_mut();
     }
-    Ok(DispatchOutcome::ReturnedR0(1))
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 /// How many times `MessageBoxW` may re-dispatch before it gives up and

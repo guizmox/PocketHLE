@@ -254,7 +254,11 @@ pub(crate) fn input(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) -> boo
                 .kernel
                 .shell_keyboard
                 .display_point(x.into(), y.into(), w, h);
+            let lowercase = ctx.kernel.shell_keyboard.lowercase;
             if let Some(ch) = ctx.kernel.shell_keyboard.tap(x, y, w, h) {
+                if ctx.kernel.shell_keyboard.lowercase != lowercase {
+                    ctx.kernel.framebuffer.mark_dirty();
+                }
                 ctx.kernel.shell_keyboard.pointer_captured = true;
                 if ch == 0 {
                     sip_show(ctx, false);
@@ -572,5 +576,64 @@ mod sip_tests {
         assert!(k.shell_keyboard.requested);
         assert!(!k.shell_keyboard.visible);
         assert_eq!(k.shell_keyboard.target, 0);
+    }
+    #[test]
+    fn sip_case_button_redraws_without_typing_and_lowercase_reaches_the_edit() {
+        let (mut cpu, mut k, mut d) = setup();
+        d.register_handler("coredll.dll", "test_pointer", pointer);
+        k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        let edit = k.controls.create(
+            0,
+            ControlClass::Edit,
+            1,
+            String::new(),
+            0x10000000,
+            10,
+            20,
+            100,
+            25,
+        );
+        k.controls.focus = edit;
+        call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[1]);
+        k.posted_messages.clear();
+        let h = k.framebuffer.height;
+        let count = k.framebuffer.frame_counter;
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "test_pointer",
+            &[10, h - 10, 0],
+        );
+        assert!(k.shell_keyboard.lowercase);
+        assert!(k.shell_keyboard.visible);
+        assert!(k.posted_messages.is_empty());
+        assert!(k.framebuffer.frame_counter > count);
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "test_pointer",
+            &[10, h - 10, 1],
+        );
+        let top = h - pocket_kernel::shell_keyboard::ShellKeyboard::panel_height(h as i32) as u32;
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "test_pointer",
+            &[10, top + 10, 0],
+        );
+        assert_eq!(
+            k.posted_messages
+                .iter()
+                .filter(|m| m.1 == 0x102)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(edit, 0x102, 'a' as u32, 1)]
+        );
     }
 }

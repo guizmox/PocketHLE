@@ -1,8 +1,5 @@
-crates/pocket-kernel/src/gdi.rs
-crates/pocket-kernel/src/vfs.rs
+crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/shell_keyboard.rs
 crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/coredll/clipping.rs
 crates/pocket-winceapi/src/coredll/graphics_tests.rs
-crates/pocket-winceapi/src/coredll/images.rs
-crates/pocket-winceapi/src/ws2.rs
-frontends/pocket-desktop/src/app.rs
+crates/pocket-winceapi/src/shell_keyboard.rs

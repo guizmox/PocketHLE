@@ -2466,6 +2466,8 @@ fn modal_pump_delivers_its_native_paint_without_draining_the_underlying_window()
     let mut kernel = fresh_kernel();
     let thunk = thunk_at(0x70000100);
     kernel.modal_dialog = Some(ModalDialog {
+        parent: None,
+        thread: kernel.current_thread,
         previous_active: FAKE_HWND,
         previous_focus: 0,
         frame: GuestCallFrame {
@@ -2563,6 +2565,8 @@ fn modal_teardown_discards_child_paints_and_native_userdata() {
         .posted_messages
         .push_back((FAKE_HWND, WM_PAINT, 0, 0));
     kernel.modal_dialog = Some(ModalDialog {
+        parent: None,
+        thread: kernel.current_thread,
         previous_active: FAKE_HWND,
         previous_focus: 0,
         frame: GuestCallFrame {
@@ -3119,4 +3123,277 @@ fn selected_clip_is_copied_and_limits_drawing_until_reset() {
         .fill_rect(0, 0, 8, 4, 0x1234);
     assert_eq!(pixel(ctx.kernel, 0, 0), 0x1234);
     assert_eq!(call(&mut ctx, select_clip_rgn, &[dc, region]), 0);
+}
+
+#[test]
+fn nested_modal_has_its_own_window_and_restores_both_callers() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    kernel.active_window = FAKE_HWND;
+    let mut template = [0u8; 64];
+    template[..4].copy_from_slice(&0x10000000u32.to_le_bytes());
+    template[14..16].copy_from_slice(&100i16.to_le_bytes());
+    template[16..18].copy_from_slice(&80i16.to_le_bytes());
+    cpu.write_mem(0x2000, &template).unwrap();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    for (reg, value) in [
+        (ArmReg::R0, 0x10000),
+        (ArmReg::R1, 0x2000),
+        (ArmReg::R2, FAKE_HWND),
+        (ArmReg::R3, 0x2300),
+        (ArmReg::Sp, 0x1800),
+        (ArmReg::Lr, 0x3333),
+    ] {
+        ctx.cpu.write_reg(reg, value).unwrap();
+    }
+    ctx.cpu.write_mem(0x1800, &0x55u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    let outer = ctx.kernel.modal_dialog.as_ref().unwrap().hwnd;
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0x55);
+    ctx.kernel.modal_dialog.as_mut().unwrap().dispatched = Some(77);
+    for (reg, value) in [
+        (ArmReg::R0, 0x10000),
+        (ArmReg::R1, 0x2000),
+        (ArmReg::R2, outer),
+        (ArmReg::R3, 0x2400),
+        (ArmReg::Sp, 0x1700),
+        (ArmReg::Lr, 0x4444),
+    ] {
+        ctx.cpu.write_reg(reg, value).unwrap();
+    }
+    ctx.cpu.write_mem(0x1700, &0x66u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2400)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_INITDIALOG);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0x66);
+    let inner = ctx.kernel.modal_dialog.as_ref().unwrap().hwnd;
+    assert_ne!(outer, inner);
+    assert!(ctx.kernel.controls.panel(outer).is_some());
+    assert!(ctx.kernel.controls.panel(inner).is_some());
+    assert_eq!(
+        ctx.kernel
+            .modal_dialog
+            .as_ref()
+            .unwrap()
+            .parent
+            .as_ref()
+            .unwrap()
+            .dispatched,
+        Some(77)
+    );
+    assert_eq!(call(&mut ctx, end_dialog, &[0x1234, 99]), 0);
+    assert_eq!(call(&mut ctx, end_dialog, &[outer, 7]), 1);
+    assert_eq!(ctx.kernel.modal_dialog.as_ref().unwrap().result, None);
+    assert_eq!(call(&mut ctx, end_dialog, &[inner, 9]), 1);
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::ReturnedR0(9)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1700);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x4444);
+    assert_eq!(ctx.kernel.active_window, outer);
+    assert!(ctx.kernel.controls.panel(inner).is_none());
+    assert!(ctx.kernel.controls.panel(outer).is_some());
+    assert_eq!(ctx.kernel.modal_dialog.as_ref().unwrap().hwnd, outer);
+    ctx.cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::ReturnedR0(7)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x1800);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x3333);
+    assert!(ctx.kernel.modal_dialog.is_none());
+    assert_eq!(ctx.kernel.active_window, FAKE_HWND);
+}
+
+#[test]
+fn modal_dialog_delivers_its_timer_and_keeps_polled_key_state_current() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let mut template = [0u8; 64];
+    template[..4].copy_from_slice(&0x10000000u32.to_le_bytes());
+    template[14..16].copy_from_slice(&100i16.to_le_bytes());
+    template[16..18].copy_from_slice(&80i16.to_le_bytes());
+    cpu.write_mem(0x2000, &template).unwrap();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    for (reg, value) in [
+        (ArmReg::R0, 0x10000),
+        (ArmReg::R1, 0x2000),
+        (ArmReg::R2, FAKE_HWND),
+        (ArmReg::R3, 0x2300),
+        (ArmReg::Sp, 0x1800),
+        (ArmReg::Lr, 0x3333),
+    ] {
+        ctx.cpu.write_reg(reg, value).unwrap();
+    }
+    ctx.cpu.write_mem(0x1800, &0u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    let hwnd = ctx.kernel.modal_dialog.as_ref().unwrap().hwnd;
+    ctx.kernel.posted_messages.clear();
+    ctx.kernel.timers.insert((0, FAKE_HWND, 1), (10, 0, 0));
+    ctx.kernel.timers.insert((0, hwnd, 2), (10, 0, 0));
+    ctx.kernel
+        .pending_input
+        .push_back(InputEvent::KeyDown { vk: 0x25 });
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_TIMER);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 2);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0);
+    assert!(ctx.kernel.pressed_keys[0x25]);
+    assert_eq!(ctx.kernel.timers[&(0, FAKE_HWND, 1)].1, 0);
+    ctx.kernel.timers.get_mut(&(0, hwnd, 2)).unwrap().1 = 0;
+    ctx.kernel.timers.get_mut(&(0, hwnd, 2)).unwrap().2 = 0x2500;
+    ctx.kernel
+        .pending_input
+        .push_back(InputEvent::KeyUp { vk: 0x25 });
+    assert_eq!(
+        dialog_box_indirect_param_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2500)
+    );
+    assert!(!ctx.kernel.pressed_keys[0x25]);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), hwnd);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_TIMER);
+}
+
+#[test]
+fn list_selection_notification_reports_focused_item_and_clearing_another_keeps_it() {
+    let mut cpu = scanf_cpu();
+    cpu.map_region(
+        0x50000000,
+        0x10000,
+        pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+    )
+    .unwrap();
+    let mut kernel = fresh_kernel();
+    let hwnd = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::ListView,
+        1558,
+        String::new(),
+        0x50000004,
+        0,
+        0,
+        320,
+        100,
+    );
+    let c = kernel.controls.get_mut(hwnd).unwrap();
+    c.list_items = vec![("Going To".into(), 0), ("Options".into(), 0)];
+    c.list_selected = Some(0);
+    c.list_image_lists[0] = 1;
+    kernel.controls.focus = hwnd;
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let action = ctx.kernel.controls.key_down(0x27).unwrap();
+    let Some(Some((parent, msg, _, ptr))) = control_action_message(&mut ctx, action) else {
+        panic!("missing list notification")
+    };
+    assert_eq!((parent, msg), (FAKE_HWND, 0x4e));
+    assert_eq!(ctx.cpu.read_u32_le(ptr + 12).unwrap(), 1);
+    assert_eq!(ctx.cpu.read_u32_le(ptr + 20).unwrap(), 3); // selected + focused
+    assert_eq!(ctx.cpu.read_u32_le(ptr + 28).unwrap(), 8); // LVIF_STATE
+    ctx.cpu.write_mem(0x210c, &0u32.to_le_bytes()).unwrap();
+    ctx.cpu.write_mem(0x2110, &3u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        list_view_message(&mut ctx, hwnd, 0x102b, 0, 0x2100).unwrap(),
+        1
+    );
+    assert_eq!(
+        ctx.kernel.controls.get(hwnd).unwrap().list_selected,
+        Some(1)
+    );
+    assert_eq!(list_view_message(&mut ctx, hwnd, 0x102c, 1, 1).unwrap(), 1);
+    assert_eq!(list_view_message(&mut ctx, hwnd, 0x102c, 1, 2).unwrap(), 2);
+    assert_eq!(
+        list_view_message(&mut ctx, hwnd, 0x102b, 99, 0x2100).unwrap(),
+        0
+    );
+    assert_eq!(
+        ctx.kernel.controls.get(hwnd).unwrap().list_selected,
+        Some(1)
+    );
+    assert_eq!(
+        list_view_message(&mut ctx, hwnd, 0x102b, u32::MAX, 0x2100).unwrap(),
+        1
+    );
+    assert_eq!(ctx.kernel.controls.get(hwnd).unwrap().list_selected, None);
+}
+
+#[test]
+fn gizmondo_dialog_idle_does_not_repaint_but_real_invalidations_still_do() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let hwnd = 0xdead1005;
+    let mut template = [0u8; 64];
+    template[..4].copy_from_slice(&0x10000000u32.to_le_bytes());
+    template[14..16].copy_from_slice(&100i16.to_le_bytes());
+    template[16..18].copy_from_slice(&80i16.to_le_bytes());
+    cpu.write_mem(0x2000, &template).unwrap();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    build_dialog_from_template_for(&mut ctx, 0x2000, hwnd, false);
+    ctx.kernel.window_procs.insert(hwnd, 0x2300);
+    ctx.kernel.active_window = hwnd;
+    assert_eq!(synthetic_paint_target(ctx.kernel), 0);
+    queue_window_paint(ctx.kernel, hwnd);
+    assert!(ctx
+        .kernel
+        .posted_messages
+        .iter()
+        .any(|m| m.0 == hwnd && m.1 == WM_PAINT));
+    ctx.kernel.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+    assert_eq!(synthetic_paint_target(ctx.kernel), hwnd);
+}
+
+#[test]
+fn pocketpc_application_and_gapi_buttons_have_independent_polled_states() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    kernel.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    ctx.kernel
+        .pending_input
+        .push_back(InputEvent::KeyDown { vk: 0xc1 });
+    assert_eq!(key_state_value(&mut ctx, 0xc1), 0x8000);
+    assert_eq!(key_state_value(&mut ctx, 0xd1), 0);
+    ctx.kernel.pending_input.clear();
+    ctx.kernel.pressed_keys[0xd1] = true;
+    ctx.kernel
+        .pending_input
+        .push_back(InputEvent::KeyUp { vk: 0xc1 });
+    assert_eq!(key_state_value(&mut ctx, 0xc1), 0);
+    assert_eq!(key_state_value(&mut ctx, 0xd1), 0x8000);
 }
