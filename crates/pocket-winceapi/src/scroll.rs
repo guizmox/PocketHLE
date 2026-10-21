@@ -23,13 +23,28 @@ fn key(ctx: &mut CallCtx<'_>) -> Result<(u32, u32), KernelError> {
 }
 fn valid(ctx: &CallCtx<'_>, (hwnd, bar): (u32, u32)) -> bool {
     hwnd != 0
-        && bar <= 1
+        && (bar <= 1
+            || (bar == 2
+                && ctx
+                    .kernel
+                    .controls
+                    .get(hwnd)
+                    .is_some_and(|c| c.class == pocket_kernel::controls::ControlClass::ScrollBar)))
         && (ctx.kernel.window_classes.contains_key(&hwnd)
             || ctx.kernel.controls.get(hwnd).is_some()
             || hwnd == 0xDEAD_0001)
 }
 fn state(ctx: &CallCtx<'_>, key: (u32, u32)) -> Option<[i32; 5]> {
     ctx.kernel.scroll_info.get(&key).copied().or_else(|| {
+        if key.1 == 2
+            && ctx
+                .kernel
+                .controls
+                .get(key.0)
+                .is_some_and(|c| c.class == pocket_kernel::controls::ControlClass::ScrollBar)
+        {
+            return Some([0, 100, 0, 0, 0]);
+        }
         let style = ctx.kernel.window_styles.get(&key.0)?.0;
         (style & if key.1 == 0 { 0x0010_0000 } else { 0x0020_0000 } != 0)
             .then_some([0, 100, 0, 0, 0])
@@ -45,6 +60,64 @@ fn clamp(s: &mut [i32; 5]) {
     let max = i64::from(s[1]) - (page - 1).max(0);
     s[3] = i64::from(s[3]).clamp(i64::from(s[0]), max) as i32;
     s[4] = s[3];
+}
+fn store(ctx: &mut CallCtx<'_>, key: (u32, u32), s: [i32; 5]) {
+    ctx.kernel.scroll_info.insert(key, s);
+    if key.1 == 2 {
+        if let Some(c) = ctx.kernel.controls.get_mut(key.0) {
+            c.track_range = (s[0], s[1]);
+            c.track_page = s[2];
+            c.track_pos = s[3];
+        }
+    }
+}
+pub(crate) fn control_message(
+    ctx: &mut CallCtx<'_>,
+    hwnd: u32,
+    msg: u32,
+    wp: u32,
+    lp: u32,
+) -> Result<Option<u32>, KernelError> {
+    if !ctx
+        .kernel
+        .controls
+        .get(hwnd)
+        .is_some_and(|c| c.class == pocket_kernel::controls::ControlClass::ScrollBar)
+    {
+        return Ok(None);
+    }
+    if msg == 0xe4 {
+        ctx.kernel.controls.get_mut(hwnd).unwrap().enabled = wp & 3 != 3;
+        return Ok(Some(1));
+    }
+    let (handler, args): (crate::Handler, [u32; 4]) = match msg {
+        0xe0 => (set_pos, [hwnd, 2, wp, lp]),
+        0xe1 => (get_pos, [hwnd, 2, 0, 0]),
+        0xe2 | 0xe6 => (set_range, [hwnd, 2, wp, lp]),
+        0xe3 => (get_range, [hwnd, 2, wp, lp]),
+        0xe9 => (set_info, [hwnd, 2, lp, wp]),
+        0xea => (get_info, [hwnd, 2, lp, 0]),
+        _ => return Ok(None),
+    };
+    use pocket_cpu::regs::ArmReg;
+    let regs = [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3];
+    let saved = regs
+        .map(|r| ctx.cpu.read_reg(r))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    for (r, v) in regs.into_iter().zip(args) {
+        ctx.cpu.write_reg(r, v)?;
+    }
+    let result = handler(ctx);
+    for (r, v) in regs.into_iter().zip(saved) {
+        ctx.cpu.write_reg(r, v)?;
+    }
+    result.map(|r| {
+        Some(match r {
+            DispatchOutcome::ReturnedR0(v) => v,
+            _ => 0,
+        })
+    })
 }
 fn get_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let k = key(ctx)?;
@@ -99,7 +172,7 @@ fn set_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         s[3] = field(20) as i32;
     }
     clamp(&mut s);
-    ctx.kernel.scroll_info.insert(k, s);
+    store(ctx, k, s);
     Ok(DispatchOutcome::ReturnedR0(s[3] as u32))
 }
 fn get_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -120,7 +193,7 @@ fn set_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let previous = s[3];
     s[3] = ctx.arg_u32(2)? as i32;
     clamp(&mut s);
-    ctx.kernel.scroll_info.insert(k, s);
+    store(ctx, k, s);
     Ok(DispatchOutcome::ReturnedR0(previous as u32))
 }
 fn get_range(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -148,7 +221,7 @@ fn set_range(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     s[0] = min;
     s[1] = max;
     clamp(&mut s);
-    ctx.kernel.scroll_info.insert(k, s);
+    store(ctx, k, s);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 

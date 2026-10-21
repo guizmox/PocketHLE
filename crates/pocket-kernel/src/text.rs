@@ -342,3 +342,69 @@ mod tests {
         assert_eq!(layout(None, &[65, 66]).width, 12);
     }
 }
+
+/// TEXTMETRICW from the face actually selected by the renderer.
+pub fn metrics_w(font: Option<&Font>) -> [u8; 60] {
+    let mut out = [0; 60];
+    let sample: Vec<u16> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        .encode_utf16()
+        .collect();
+    let m = layout(font, &sample);
+    let (mut internal, mut external, mut max_width) = (0, 0, 6);
+    let (mut first, mut last) = (32u16, 126u16);
+    let mut pitch = 0;
+    if let (Some(face), Some(glyph)) = (m.face.as_ref(), m.glyphs.first()) {
+        let sf = face.font.as_scaled(glyph.scale);
+        let em = face
+            .font
+            .units_per_em()
+            .unwrap_or(face.font.height_unscaled())
+            * sf.scale_factor().vertical;
+        internal = (sf.height() - em).ceil().max(0.0) as i32;
+        external = sf.line_gap().round().max(0.0) as i32;
+        max_width = (0..face.font.glyph_count().min(65536))
+            .map(|i| sf.h_advance(ab_glyph::GlyphId(i as u16)))
+            .fold(0f32, f32::max)
+            .ceil() as i32;
+        let points: Vec<_> = face
+            .font
+            .codepoint_ids()
+            .map(|(_, c)| c as u32)
+            .filter(|c| *c <= 65535)
+            .collect();
+        first = points.iter().copied().min().unwrap_or(32) as u16;
+        last = points.iter().copied().max().unwrap_or(126) as u16;
+        let fixed = (' '..='~')
+            .map(|c| sf.h_advance(sf.glyph_id(c)))
+            .all(|w| (w - sf.h_advance(sf.glyph_id('M'))).abs() < 0.01);
+        pitch = 4 | u8::from(!fixed);
+    }
+    let weight = font.map(|f| f.field(16)).filter(|w| *w != 0).unwrap_or(400);
+    let values = [
+        m.height,
+        m.ascent,
+        (m.height - m.ascent).max(0),
+        internal,
+        external,
+        ((m.width as f32) / 52.0).round() as i32,
+        max_width,
+        weight,
+        0,
+        96,
+        96,
+    ];
+    for (chunk, value) in out[..44].chunks_exact_mut(4).zip(values) {
+        chunk.copy_from_slice(&value.to_le_bytes());
+    }
+    for (chunk, value) in out[44..52].chunks_exact_mut(2).zip([first, last, 63, 32]) {
+        chunk.copy_from_slice(&value.to_le_bytes());
+    }
+    if let Some(f) = font {
+        out[52] = f.logfont[20];
+        out[53] = f.logfont[21];
+        out[54] = f.logfont[22];
+        out[55] = pitch | (f.logfont[27] & 0xf0);
+        out[56] = f.logfont[23];
+    }
+    out
+}

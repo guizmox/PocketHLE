@@ -43,7 +43,10 @@ pub fn register(d: &mut WinCeDispatcher) {
 
     // #2, #4 and #5 are successful no-op common-control calls in the
     // PPC2003 ordinal space used by Cubis.
-    d.register_handler(dll, "ord:2", ok);
+    d.register_handler(dll, "InitCommonControls", init_controls);
+    d.register_handler(dll, "InitCommonControlsEx", init_controls_ex);
+    d.register_handler(dll, "ord:1", init_controls);
+    d.register_handler(dll, "ord:2", init_controls_ex);
     d.register_handler(dll, "ord:4", ok);
     d.register_handler(dll, "ord:5", ok);
 
@@ -61,6 +64,35 @@ pub fn register(d: &mut WinCeDispatcher) {
     }
 }
 
+fn init_controls(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let p = ctx
+        .kernel
+        .dynamic_exports
+        .values()
+        .find_map(|e| e.get("DefWindowProcW").copied())
+        .unwrap_or(0);
+    if p != 0 {
+        ctx.kernel
+            .window_class_procs
+            .entry("ToolbarWindow32".into())
+            .or_insert(p);
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+fn init_controls_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let p = ctx.arg_u32(0)?;
+    let Ok(b) = ctx.cpu.read_mem(p, 8) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if p == 0 || u32::from_le_bytes(b[..4].try_into().unwrap()) != 8 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if u32::from_le_bytes(b[4..].try_into().unwrap()) & 4 != 0 {
+        init_controls(ctx)
+    } else {
+        Ok(DispatchOutcome::ReturnedR0(1))
+    }
+}
 /// `CreateStatusWindowW(style, lpszText, hwndParent, wID)`.
 fn create_status_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let style = ctx.arg_u32(0)?;

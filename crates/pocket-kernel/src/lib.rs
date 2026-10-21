@@ -787,6 +787,18 @@ pub struct ControlNotifyFrame {
 /// in the `WM_SIZE` arm, so a title that draws immediately after
 /// `CreateWindowExW` — before it ever reaches its message pump — sees a
 /// zeroed layout and refuses to paint.
+#[derive(Debug, Clone, Default)]
+pub struct MenuItem {
+    pub id: u32,
+    pub kind: u32,
+    pub text: Vec<u16>,
+    pub submenu: u32,
+    pub data: u32,
+    pub checked: u32,
+    pub unchecked: u32,
+    pub bitmap: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CreateStage {
     /// No detour in flight.
@@ -1431,6 +1443,8 @@ pub struct KernelState {
     /// PPcAtaxx and similar games rely on the previous value to
     /// implement toggle semantics.
     pub menus: HashMap<u32, HashMap<u32, u32>>,
+    pub menu_items: HashMap<u32, Vec<MenuItem>>,
+    pub window_menus: HashMap<u32, u32>,
     /// Next menu handle to hand out from `LoadMenuW` / `CreateMenu`.
     /// Starts in the same `0xDEAD_xxxx` range as the rest of the
     /// synthetic handles so logs stay legible.
@@ -1823,7 +1837,47 @@ impl KernelState {
             }
         }
     }
+    pub fn window_client_origin(&self, mut hwnd: u32) -> Option<(i32, i32)> {
+        let (mut x, mut y) = (0i32, 0i32);
+        for _ in 0..64 {
+            if matches!(hwnd, 0 | 0xdeadde5c | 0xdead0001) {
+                return Some((x, y));
+            }
+            if let Some(p) = self.controls.panel(hwnd) {
+                let (a, b) = p.client_origin();
+                return Some((x.saturating_add(a), y.saturating_add(b)));
+            }
+            if let Some(c) = self.controls.get(hwnd) {
+                x = x.saturating_add(c.x);
+                y = y.saturating_add(c.y);
+                hwnd = c.parent;
+                continue;
+            }
+            let r = self.window_rects.get(&hwnd)?;
+            x = x.saturating_add(r.0);
+            y = y.saturating_add(r.1);
+            if !self
+                .window_styles
+                .get(&hwnd)
+                .is_some_and(|s| s.0 & 0x40000000 != 0)
+            {
+                return Some((x, y));
+            }
+            let parent = *self.window_parents.get(&hwnd)?;
+            if parent == hwnd {
+                return None;
+            }
+            hwnd = parent;
+        }
+        None
+    }
     pub fn refresh_control_visibility(&mut self) {
+        let origins = self
+            .window_rects
+            .keys()
+            .filter_map(|&h| self.window_client_origin(h).map(|p| (h, p)))
+            .collect();
+        self.controls.set_native_origins(origins);
         let hidden = self
             .controls
             .window_handles()
@@ -3716,6 +3770,8 @@ impl Process {
                 power_notifications: Default::default(),
                 battery_alerts: Default::default(),
                 menus: HashMap::new(),
+                menu_items: HashMap::new(),
+                window_menus: HashMap::new(),
                 next_menu_handle: 0xDEAD_2000,
                 sub_menus: HashMap::new(),
             },

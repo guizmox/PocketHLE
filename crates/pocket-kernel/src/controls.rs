@@ -31,6 +31,8 @@ pub enum ControlClass {
     ListBox,
     ComboBox,
     TrackBar,
+    Toolbar,
+    ScrollBar,
 }
 
 impl ControlClass {
@@ -51,6 +53,10 @@ impl ControlClass {
             Some(Self::ComboBox)
         } else if name.eq_ignore_ascii_case("msctls_trackbar32") {
             Some(Self::TrackBar)
+        } else if name.eq_ignore_ascii_case("ToolbarWindow32") {
+            Some(Self::Toolbar)
+        } else if name.eq_ignore_ascii_case("SCROLLBAR") {
+            Some(Self::ScrollBar)
         } else if name.eq_ignore_ascii_case("SysListView32") {
             Some(Self::ListView)
         } else {
@@ -321,8 +327,30 @@ pub struct ChildWindow {
     pub track_page: i32,
     pub track_tick_freq: u32,
     pub track_ticks: Vec<i32>,
+    pub toolbar: ToolbarState,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolbarState {
+    pub buttons: Vec<[u32; 5]>,
+    pub button_size: (i32, i32),
+    pub bitmap_size: (i32, i32),
+    pub bitmaps: Vec<(u32, u32)>,
+    pub native_paint: bool,
+    pub pressed: Option<usize>,
+}
+impl Default for ToolbarState {
+    fn default() -> Self {
+        Self {
+            buttons: Vec::new(),
+            button_size: (24, 22),
+            bitmap_size: (16, 15),
+            bitmaps: Vec::new(),
+            native_paint: false,
+            pressed: None,
+        }
+    }
+}
 const LIST_VIEW_ROW_HEIGHT: i32 = 14;
 
 impl ChildWindow {
@@ -734,6 +762,136 @@ impl ChildWindow {
             }
         }
     }
+    fn toolbar_item_at(&self, x: i32, y: i32) -> Option<usize> {
+        if y < 0 || y >= self.toolbar.button_size.1 {
+            return None;
+        }
+        let mut left = 0;
+        for (i, b) in self.toolbar.buttons.iter().enumerate() {
+            if b[2] & 8 != 0 {
+                continue;
+            }
+            let sep = b[2] & 0x100 != 0;
+            let w = if sep {
+                (b[0] as i32).max(1)
+            } else {
+                self.toolbar.button_size.0
+            };
+            if x >= left && x < left + w {
+                return (!sep && b[2] & 4 != 0).then_some(i);
+            }
+            left += w;
+        }
+        None
+    }
+    fn render_toolbar(&self, surf: &mut Surface<'_>, gdi: Option<&crate::gdi::GdiState>) {
+        if self.toolbar.native_paint {
+            return;
+        }
+        surf.fill_rect(self.x, self.y, self.w, self.h, Self::FACE);
+        let mut x = self.x;
+        for b in &self.toolbar.buttons {
+            if b[2] & 8 != 0 {
+                continue;
+            }
+            let sep = b[2] & 0x100 != 0;
+            let width = if sep {
+                (b[0] as i32).max(1)
+            } else {
+                self.toolbar.button_size.0
+            };
+            if !sep {
+                let pressed = b[2] & 3 != 0;
+                let (tl, br) = if pressed {
+                    (Self::SHADOW, Self::LIGHT)
+                } else {
+                    (Self::LIGHT, Self::SHADOW)
+                };
+                draw_edge(surf, x, self.y, width, self.toolbar.button_size.1, tl, br);
+                let mut index = b[0];
+                for &(handle, count) in &self.toolbar.bitmaps {
+                    if index >= count {
+                        index -= count;
+                        continue;
+                    }
+                    if let Some(image) = gdi
+                        .and_then(|g| g.bitmap(handle))
+                        .and_then(crate::imaging::Image::from_bitmap)
+                    {
+                        let (iw, ih) = self.toolbar.bitmap_size;
+                        let sx = index as i32 * iw;
+                        let (dx, dy) = (
+                            x + (width - iw) / 2 + i32::from(pressed),
+                            self.y + (self.toolbar.button_size.1 - ih) / 2 + i32::from(pressed),
+                        );
+                        for yy in 0..ih.min(image.height as i32) {
+                            for xx in 0..iw.min(image.width as i32) {
+                                if sx + xx >= 0 && sx + xx < image.width as i32 {
+                                    let pixel = image.pixels
+                                        [(yy as u32 * image.width + (sx + xx) as u32) as usize];
+                                    if pixel != Self::FACE {
+                                        surf.put_pixel(dx + xx, dy + yy, pixel);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            x += width;
+        }
+    }
+    fn render_scrollbar(&self, surf: &mut Surface<'_>) {
+        let vertical = self.style & 1 != 0;
+        let (length, breadth) = if vertical {
+            (self.h, self.w)
+        } else {
+            (self.w, self.h)
+        };
+        let arrow = breadth.max(0).min(length.max(0) / 2);
+        let track = (length - 2 * arrow).max(0);
+        let span = (i64::from(self.track_range.1) - i64::from(self.track_range.0) + 1).max(1);
+        let page = i64::from(self.track_page.max(0)).min(span);
+        let thumb = if page > 0 {
+            (i64::from(track) * page / span) as i32
+        } else {
+            breadth
+        };
+        let thumb = thumb.max(8).min(track);
+        let max =
+            (i64::from(self.track_range.1) - (page - 1).max(0)).max(i64::from(self.track_range.0));
+        let pos = i64::from(self.track_pos).clamp(i64::from(self.track_range.0), max);
+        let start = arrow
+            + if max > i64::from(self.track_range.0) {
+                ((pos - i64::from(self.track_range.0)) * i64::from(track - thumb)
+                    / (max - i64::from(self.track_range.0))) as i32
+            } else {
+                0
+            };
+        surf.fill_rect(self.x, self.y, self.w, self.h, Self::SHADOW);
+        for (at, size) in [(0, arrow), (length - arrow, arrow), (start, thumb)] {
+            let (x, y, w, h) = if vertical {
+                (self.x, self.y + at, self.w, size)
+            } else {
+                (self.x + at, self.y, size, self.h)
+            };
+            surf.fill_rect(x, y, w, h, Self::FACE);
+            draw_edge(surf, x, y, w, h, Self::LIGHT, Self::SHADOW);
+        }
+        for (at, sign) in [(arrow / 2, -1), (length - arrow / 2 - 1, 1)] {
+            for row in 0..3 {
+                for col in -row..=row {
+                    let (x, y) = if vertical {
+                        (self.x + self.w / 2 + col, self.y + at + sign * row)
+                    } else {
+                        (self.x + at + sign * row, self.y + self.h / 2 + col)
+                    };
+                    surf.put_pixel(x, y, Self::TEXT);
+                }
+            }
+        }
+    }
     fn render_track(&self, surf: &mut Surface<'_>, focused: bool) {
         let vertical = self.style & 2 != 0;
         let length = if vertical { self.h } else { self.w };
@@ -983,7 +1141,11 @@ impl ChildWindow {
         focused: bool,
         gdi: Option<&crate::gdi::GdiState>,
     ) {
-        if !self.visible || self.w <= 0 || self.h <= 0 {
+        if !self.visible
+            || self.w <= 0
+            || self.h <= 0
+            || (self.class == ControlClass::Toolbar && self.toolbar.native_paint)
+        {
             return;
         }
         if let Some(color) = self.background_color {
@@ -1004,6 +1166,8 @@ impl ChildWindow {
         }
         let face = gdi.and_then(|g| crate::text::selected(g, self.font));
         match self.class {
+            ControlClass::Toolbar => self.render_toolbar(surf, gdi),
+            ControlClass::ScrollBar => self.render_scrollbar(surf),
             ControlClass::TrackBar => self.render_track(surf, focused),
             ControlClass::Button => self.render_button(surf, focused, face.as_ref()),
             ControlClass::Edit => self.render_edit(surf, focused, face.as_ref()),
@@ -1400,6 +1564,7 @@ pub enum ControlAction {
 pub struct Controls {
     children: Vec<ChildWindow>,
     inherited_hidden: std::collections::HashSet<u32>,
+    native_origins: std::collections::HashMap<u32, (i32, i32)>,
     /// Dialog panels created from a `DLGTEMPLATE`. A child whose parent
     /// is one of these is positioned relative to it.
     panels: Vec<DialogPanel>,
@@ -1420,6 +1585,7 @@ impl Default for Controls {
         Self {
             children: Vec::new(),
             inherited_hidden: Default::default(),
+            native_origins: Default::default(),
             panels: Vec::new(),
             focus: 0,
             direct_surface_hwnd: 0,
@@ -1505,6 +1671,7 @@ impl Controls {
             track_page: 20,
             track_tick_freq: 1,
             track_ticks: Vec::new(),
+            toolbar: ToolbarState::default(),
         });
         hwnd
     }
@@ -1610,10 +1777,28 @@ impl Controls {
     /// Screen-space origin a child's coordinates are relative to: its
     /// panel's client origin, or `(0, 0)` for a control parented
     /// straight to a full-screen frame window.
-    fn parent_origin(&self, parent: u32) -> (i32, i32) {
-        self.panel(parent)
-            .map(DialogPanel::client_origin)
-            .unwrap_or((0, 0))
+    pub fn set_native_origins(&mut self, origins: std::collections::HashMap<u32, (i32, i32)>) {
+        self.native_origins = origins;
+    }
+    fn parent_origin(&self, mut parent: u32) -> (i32, i32) {
+        let (mut x, mut y) = (0i32, 0i32);
+        for _ in 0..64 {
+            if let Some(p) = self.panel(parent) {
+                let (a, b) = p.client_origin();
+                return (x.saturating_add(a), y.saturating_add(b));
+            }
+            if let Some(c) = self.get(parent) {
+                x = x.saturating_add(c.x);
+                y = y.saturating_add(c.y);
+                parent = c.parent;
+                continue;
+            }
+            if let Some(&(a, b)) = self.native_origins.get(&parent) {
+                return (x.saturating_add(a), y.saturating_add(b));
+            }
+            break;
+        }
+        (x, y)
     }
 
     /// A child's rectangle in screen coordinates.
@@ -1843,6 +2028,41 @@ impl Controls {
             }
             return Some(ControlAction::Consumed);
         }
+        if child.class == ControlClass::ScrollBar && child.enabled {
+            let vertical = child.style & 1 != 0;
+            let at = if vertical {
+                y - origin.1 - child.y
+            } else {
+                x - origin.0 - child.x
+            };
+            let len = if vertical { child.h } else { child.w };
+            let arrow = if vertical { child.w } else { child.h };
+            let code = if at < arrow {
+                0
+            } else if at >= len - arrow {
+                1
+            } else if at < len / 2 {
+                2
+            } else {
+                3
+            };
+            return Some(ControlAction::Notify {
+                parent: child.parent,
+                id: child.id,
+                hwnd,
+                code,
+                index: child.track_pos,
+            });
+        }
+        if child.class == ControlClass::Toolbar && child.enabled {
+            let i = child.toolbar_item_at(x - origin.0 - child.x, y - origin.1 - child.y);
+            child.toolbar.pressed = i;
+            if let Some(i) = i {
+                child.toolbar.buttons[i][2] |= 2;
+                self.capture = hwnd;
+            }
+            return Some(ControlAction::Consumed);
+        }
         if child.class == ControlClass::ListView && child.enabled {
             if let Some(index) =
                 child.list_item_at_point(x - origin.0 - child.x, y - origin.1 - child.y)
@@ -1893,6 +2113,25 @@ impl Controls {
             .unwrap_or((0, 0));
         let child = self.get_mut(captured)?;
         child.pressed = false;
+        if child.class == ControlClass::Toolbar {
+            if let Some(i) = child.toolbar.pressed.take() {
+                if let Some(b) = child.toolbar.buttons.get_mut(i) {
+                    b[2] &= !2;
+                }
+                if child.toolbar_item_at(x - ox - child.x, y - oy - child.y) == Some(i) {
+                    let b = &mut child.toolbar.buttons[i];
+                    if b[2] & 0x200 != 0 {
+                        b[2] ^= 1;
+                    }
+                    return Some(ControlAction::Clicked {
+                        parent: child.parent,
+                        id: b[1],
+                        hwnd: child.hwnd,
+                    });
+                }
+            }
+            return Some(ControlAction::Consumed);
+        }
         if !child.contains(x - ox, y - oy) {
             return Some(ControlAction::Consumed);
         }

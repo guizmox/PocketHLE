@@ -31,10 +31,14 @@ mod coordinates;
 mod file_mapping;
 #[path = "coredll/list_paint.rs"]
 mod list_paint;
+mod menu_api;
 #[path = "coredll/palette.rs"]
 mod palette;
+#[cfg(test)]
+mod recovery_tests;
 #[path = "coredll/registry_enumeration.rs"]
 mod registry_enumeration;
+mod toolbar;
 mod trackbar;
 use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
@@ -110,6 +114,7 @@ mod text_draw;
 mod window_graphics;
 
 pub fn register(d: &mut WinCeDispatcher) {
+    d.register_handler("coredll.dll", "EqualRect", equal_rect);
     images::register(d);
     file_mapping::register(d);
     window_graphics::register(d);
@@ -251,6 +256,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "wcschr", wcschr);
     d.register_handler(dll, "wcsrchr", wcsrchr);
     d.register_handler(dll, "wcspbrk", wcspbrk);
+    d.register_handler(dll, "wcsspn", wcsspn);
+    d.register_handler(dll, "wcscspn", wcscspn);
     d.register_handler(dll, "wcstok", wcstok);
     d.register_handler(dll, "wcsstr", wcsstr);
     d.register_handler(dll, "_wtol", wtol);
@@ -687,6 +694,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "FrameRect", fill_rect);
     d.register_handler(dll, "DrawTextW", draw_text_w);
     d.register_handler(dll, "GetTextExtentExPointW", get_text_extent_ex_point_w);
+    d.register_handler(dll, "GetTextMetricsW", get_text_metrics_w);
     d.register_constant(dll, "DrawEdge", 1, one_returning);
     d.register_constant(dll, "DrawFocusRect", 1, one_returning);
     d.register_handler(dll, "SetBkMode", set_bk_mode);
@@ -752,10 +760,10 @@ pub fn register(d: &mut WinCeDispatcher) {
     // so `GetSubMenu` returns a stable handle and `CheckMenuItem`
     // remembers the bit so a follow-up `GetMenuState` agrees.
     d.register_handler(dll, "LoadMenuW", load_menu_w);
-    d.register_handler(dll, "LoadMenuA", load_menu_w);
-    d.register_handler(dll, "LoadMenuIndirectW", load_menu_w);
-    d.register_constant(dll, "GetMenu", 0, null_returning);
-    d.register_constant(dll, "SetMenu", 1, one_returning);
+    d.register_handler(dll, "LoadMenuA", menu_api::load);
+    d.register_handler(dll, "LoadMenuIndirectW", menu_api::indirect);
+    d.register_handler(dll, "GetMenu", menu_api::get_menu);
+    d.register_handler(dll, "SetMenu", menu_api::set_menu);
     d.register_handler(dll, "DestroyMenu", destroy_menu);
     d.register_handler(dll, "GetSubMenu", get_sub_menu);
     d.register_handler(dll, "CreateMenu", create_menu);
@@ -767,16 +775,16 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "EnableMenuItem", enable_menu_item);
     d.register_handler(dll, "AppendMenuW", append_menu);
     d.register_handler(dll, "AppendMenuA", append_menu);
-    d.register_handler(dll, "InsertMenuW", append_menu);
-    d.register_handler(dll, "InsertMenuA", append_menu);
+    d.register_handler(dll, "InsertMenuW", menu_api::insert);
+    d.register_handler(dll, "InsertMenuA", menu_api::insert);
     d.register_handler(dll, "ModifyMenuW", modify_menu_w);
     d.register_handler(dll, "ModifyMenuA", modify_menu_w);
     d.register_handler(dll, "RemoveMenu", remove_menu_item);
     d.register_handler(dll, "DeleteMenu", remove_menu_item);
     d.register_handler(dll, "TrackPopupMenu", track_popup_menu);
     d.register_handler(dll, "TrackPopupMenuEx", track_popup_menu);
-    d.register_constant(dll, "SetMenuItemInfoW", 1, one_returning);
-    d.register_constant(dll, "GetMenuItemInfoW", 1, one_returning);
+    d.register_handler(dll, "SetMenuItemInfoW", menu_api::set_info);
+    d.register_handler(dll, "GetMenuItemInfoW", menu_api::get_info);
     d.register_constant(dll, "DrawMenuBar", 1, one_returning);
 
     // ---- Random / time ----
@@ -1290,10 +1298,6 @@ pub(crate) fn zero_returning(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
 
 pub(crate) fn one_returning(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(1))
-}
-
-pub(crate) fn null_returning(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 // ---------- C++ EH vector iterators (`??_L` / `??_M`) ----------
@@ -6576,6 +6580,24 @@ fn parse_wcstod_prefix(text: &str) -> (f64, usize) {
     (value, consumed_units)
 }
 
+fn wide_span(ctx: &mut CallCtx<'_>, include: bool) -> Result<DispatchOutcome, KernelError> {
+    let p = ctx.arg_u32(0)?;
+    let set = ctx.arg_u32(1)?;
+    let text = read_wstr(ctx, p, 0x10000)?;
+    let members: std::collections::HashSet<u16> =
+        read_wstr(ctx, set, 0x10000)?.into_iter().collect();
+    Ok(DispatchOutcome::ReturnedR0(
+        text.iter()
+            .take_while(|c| members.contains(c) == include)
+            .count() as u32,
+    ))
+}
+fn wcsspn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    wide_span(ctx, true)
+}
+fn wcscspn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    wide_span(ctx, false)
+}
 fn wcspbrk(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let s = ctx.arg_u32(0)?;
     let accept = ctx.arg_u32(1)?;
@@ -9973,10 +9995,24 @@ fn initial_window_rect(
 
 fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     select_window_callback_thread(ctx.kernel);
+    if ctx.kernel.window_destroy_frames.last().is_some_and(|f| {
+        f.thread == ctx.kernel.current_thread
+            && f.thunk == ctx.thunk.thunk_va
+            && ctx.cpu.read_reg(ArmReg::Sp).ok() == Some(f.frame.sp)
+    }) {
+        return destroy_window(ctx).map(|o| match o {
+            DispatchOutcome::ReturnedR0(_) => DispatchOutcome::ReturnedR0(0),
+            o => o,
+        });
+    }
+
     // Must be the first thing we do: the thunk re-fires this whole handler
     // when the hijacked `WndProc` returns, and by then R0..R3 hold the
     // callback's result rather than the original arguments.
-    if ctx.kernel.create_stage == CreateStage::Create {
+    if matches!(
+        ctx.kernel.create_stage,
+        CreateStage::Create | CreateStage::Size
+    ) {
         if let Some(frame) = ctx.kernel.create_frame {
             // A nested CreateWindowExW runs with a *lower* guest SP.
             // Only an SP back at the current frame's saved value means
@@ -9984,6 +10020,17 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             if frame.thread == ctx.kernel.current_thread
                 && ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp
             {
+                if ctx.kernel.create_stage == CreateStage::Size {
+                    let hwnd = ctx.kernel.create_frame_hwnd;
+                    ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                    ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
+                    ctx.cpu.write_reg(ArmReg::R2, frame.args[2])?;
+                    ctx.cpu.write_reg(ArmReg::R3, frame.args[3])?;
+                    ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
+                    finish_window_callback(ctx.kernel);
+                    queue_window_paint(ctx.kernel, hwnd);
+                    return Ok(DispatchOutcome::ReturnedR0(hwnd));
+                }
                 let result = ctx.cpu.read_reg(ArmReg::R0)?;
                 if result as i32 == -1 {
                     log::warn!(
@@ -9996,9 +10043,37 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
                 ctx.cpu.write_reg(ArmReg::R3, frame.args[3])?;
                 ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
                 let hwnd = ctx.kernel.create_frame_hwnd;
+                if result as i32 != -1 && ctx.kernel.window_visibility.get(&hwnd) == Some(&true) {
+                    if let (Some(rect), Some(proc)) = (
+                        ctx.kernel.window_rects.get(&hwnd).copied(),
+                        ctx.kernel
+                            .window_procs
+                            .get(&hwnd)
+                            .copied()
+                            .filter(|p| *p != 0),
+                    ) {
+                        ctx.kernel.create_stage = CreateStage::Size;
+                        if hwnd == FAKE_HWND {
+                            ctx.kernel.pending_startup.retain(|m| m.0 != WM_SIZE);
+                        }
+                        ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+                        ctx.cpu.write_reg(ArmReg::R1, WM_SIZE)?;
+                        ctx.cpu.write_reg(ArmReg::R2, 0)?;
+                        ctx.cpu.write_reg(
+                            ArmReg::R3,
+                            (rect.2.max(0) as u32 & 65535) | ((rect.3.max(0) as u32 & 65535) << 16),
+                        )?;
+                        ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+                        return Ok(DispatchOutcome::JumpTo(proc));
+                    }
+                }
                 finish_window_callback(ctx.kernel);
-                if let Some(rect) = ctx.kernel.window_rects.get(&hwnd).copied() {
-                    queue_window_size(ctx.kernel, hwnd, rect.2, rect.3);
+                if result as i32 == -1 {
+                    ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+                    return destroy_window(ctx).map(|o| match o {
+                        DispatchOutcome::ReturnedR0(_) => DispatchOutcome::ReturnedR0(0),
+                        o => o,
+                    });
                 }
                 // Visible children need their first paint even when the app
                 // never calls ShowWindow again after WS_VISIBLE creation.
@@ -10078,9 +10153,19 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         let h = rect.3;
         let parent = ctx.arg_u32(8)?;
         let id = ctx.arg_u32(9)?;
-        ctx.kernel
+        let hwnd = ctx
+            .kernel
             .controls
-            .create(parent, kind, id, text, style, x, y, w, h)
+            .create(parent, kind, id, text, style, x, y, w, h);
+        if kind == ControlClass::Toolbar {
+            ctx.kernel
+                .controls
+                .get_mut(hwnd)
+                .unwrap()
+                .toolbar
+                .native_paint = true;
+        }
+        hwnd
     } else {
         let Some(hwnd) = next_top_level_hwnd(
             &ctx.kernel.window_classes,
@@ -10095,6 +10180,12 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let ex_style = ctx.arg_u32(0)?;
     let style = ctx.arg_u32(3)?;
     let parent = ctx.arg_u32(8)?;
+    if style & 0x40000000 == 0 {
+        let menu = ctx.arg_u32(9)?;
+        if ctx.kernel.menu_items.contains_key(&menu) {
+            ctx.kernel.window_menus.insert(hwnd, menu);
+        }
+    }
     if style & 0x4000_0000 != 0 {
         let id = ctx.arg_u32(9)?;
         ctx.kernel.window_ids.insert(hwnd, id);
@@ -10359,7 +10450,7 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             queue_visible_window_paints(ctx.kernel, hwnd);
         }
         if ctx.kernel.wnd_proc != 0 {
-            ctx.kernel.pending_message = Some((FAKE_HWND, WM_PAINT, 0, 0));
+            ctx.kernel.pending_message = Some((synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0));
         }
         repaint_controls(ctx);
         return Ok(DispatchOutcome::ReturnedR0(1));
@@ -11306,6 +11397,12 @@ fn control_message(
     wparam: u32,
     lparam: u32,
 ) -> Result<u32, KernelError> {
+    if let Some(v) = toolbar::message(ctx, hwnd, message, wparam, lparam)? {
+        return Ok(v);
+    }
+    if let Some(v) = crate::scroll::control_message(ctx, hwnd, message, wparam, lparam)? {
+        return Ok(v);
+    }
     if let Some(result) = trackbar::message(ctx, hwnd, message, wparam, lparam) {
         return Ok(result);
     }
@@ -11370,7 +11467,7 @@ fn control_message(
         return Ok(match c.class {
             ControlClass::Edit => 0x81 | if c.style & 0x1004 == 0x1004 { 4 } else { 0 },
             ControlClass::Button => 0x2000 | if c.style & 0xf == 1 { 0x10 } else { 0x20 },
-            ControlClass::Static => 0x100,
+            ControlClass::Static | ControlClass::Toolbar | ControlClass::ScrollBar => 0x100,
             ControlClass::ComboBox => {
                 0x81 | if wparam == 0x0d || (wparam == 0x1b && c.choice_open) {
                     4
@@ -11700,7 +11797,13 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         .get(&hwnd)
         .copied()
         .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
-        .unwrap_or(ctx.kernel.wnd_proc))
+        .unwrap_or_else(|| {
+            if hwnd == FAKE_HWND && ctx.kernel.window_procs.is_empty() {
+                ctx.kernel.wnd_proc
+            } else {
+                0
+            }
+        }))
         & !1;
     if lp_msg == 0 {
         // No registered WndProc / no message → behave like the old
@@ -11898,6 +12001,7 @@ fn controls_take_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
 ) -> Option<Option<(u32, u32, u32, u32)>> {
+    ctx.kernel.refresh_control_visibility();
     if matches!(ev, InputEvent::Text { .. }) && !crate::shell_keyboard::accepts_text(ctx) {
         return Some(None);
     }
@@ -11977,12 +12081,27 @@ fn control_action_message(
                 .kernel
                 .controls
                 .get(hwnd)
-                .filter(|c| c.class == ControlClass::TrackBar)
+                .filter(|c| matches!(c.class, ControlClass::TrackBar | ControlClass::ScrollBar))
             {
                 return Some(Some((
                     parent,
-                    if c.style & 2 != 0 { 0x115 } else { 0x114 },
-                    code,
+                    if c.style
+                        & if c.class == ControlClass::ScrollBar {
+                            1
+                        } else {
+                            2
+                        }
+                        != 0
+                    {
+                        0x115
+                    } else {
+                        0x114
+                    },
+                    if c.class == ControlClass::ScrollBar {
+                        code | ((index as u32 & 65535) << 16)
+                    } else {
+                        code
+                    },
                     hwnd,
                 )));
             }
@@ -12296,7 +12415,7 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         // repaint too — the controls alone would leave the old panel
         // face behind.
         if ctx.kernel.wnd_proc != 0 {
-            ctx.kernel.pending_message = Some((FAKE_HWND, WM_PAINT, 0, 0));
+            ctx.kernel.pending_message = Some((synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0));
         }
         repaint_controls(ctx);
     }
@@ -12306,7 +12425,7 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-fn queue_window_size(kernel: &mut KernelState, hwnd: u32, w: i32, h: i32) {
+pub(crate) fn queue_window_size(kernel: &mut KernelState, hwnd: u32, w: i32, h: i32) {
     if hwnd != FAKE_HWND && kernel.posted_messages.len() < 256 {
         kernel
             .posted_messages
@@ -12449,6 +12568,26 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
 /// never synthesise user input here. Doing so would mean the game
 /// "presses buttons by itself" between real presses, which is exactly
 /// the user-visible bug we want to avoid.
+fn synthetic_paint_target(k: &KernelState) -> u32 {
+    let h = active_window(k);
+    if k.window_procs.contains_key(&h) && window_is_visible(k, h) {
+        h
+    } else if k.window_procs.contains_key(&FAKE_HWND) || k.window_procs.is_empty() {
+        FAKE_HWND
+    } else {
+        k.window_procs
+            .keys()
+            .copied()
+            .filter(|h| {
+                window_is_visible(k, *h)
+                    && k.window_styles
+                        .get(h)
+                        .map_or(true, |s| s.0 & 0x40000000 == 0)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
 fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     let now = monotonic_ms();
     let timer_next = ctx
@@ -12475,7 +12614,7 @@ fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     // Nothing was due even after the wait (clock granularity) — fall
     // back to a paint so a blocking `GetMessageW` never stalls.
     ctx.kernel.synthetic_paint_next_ms = monotonic_ms().saturating_add(SYNTHETIC_PAINT_INTERVAL_MS);
-    (FAKE_HWND, WM_PAINT, 0, 0)
+    (synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0)
 }
 
 /// How long a key must be held before the guest starts seeing repeats,
@@ -12610,7 +12749,7 @@ fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
             SYNTHETIC_PAINT_INTERVAL_MS,
             now,
         );
-        return Some((FAKE_HWND, WM_PAINT, 0, 0));
+        return Some((synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0));
     }
     None
 }
@@ -13651,6 +13790,7 @@ fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let v = match n {
         0 | 16 | 61 | 78 => w, // SM_CXSCREEN, SM_CXFULLSCREEN, SM_CXMAXIMIZED, SM_CXVIRTUALSCREEN
         1 | 17 | 62 | 79 => h, // SM_CYSCREEN, SM_CYFULLSCREEN, SM_CYMAXIMIZED, SM_CYVIRTUALSCREEN
+        2 | 3 | 9 | 10 | 20 | 21 => 16,
         _ => 0,
     };
     Ok(DispatchOutcome::ReturnedR0(v))
@@ -13919,8 +14059,13 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(outcome);
     }
     let hwnd = ctx.arg_u32(0)?;
+    let is_toolbar = ctx
+        .kernel
+        .controls
+        .get(hwnd)
+        .is_some_and(|c| c.class == ControlClass::Toolbar);
     match ctx.arg_u32(1)? {
-        0x400 => {
+        0x400 if !is_toolbar => {
             let id = ctx
                 .kernel
                 .window_extra
@@ -13939,7 +14084,7 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 id.map_or(0, |id| 0x534b0000 | (id & 0xffff)),
             ));
         }
-        0x401 => {
+        0x401 if !is_toolbar => {
             let id = ctx.arg_u32(2)?;
             ctx.kernel.window_extra.insert((hwnd, -1200), id);
             return Ok(DispatchOutcome::ReturnedR0(1));
@@ -16284,7 +16429,9 @@ fn is_window_visible(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// User" name entry) drop the input they just received.
 fn is_window_enabled(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
-    Ok(DispatchOutcome::ReturnedR0(is_live_hwnd(hwnd) as u32))
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        is_live_hwnd(hwnd) || ctx.kernel.window_classes.contains_key(&hwnd),
+    )))
 }
 
 /// `GetWindowThreadProcessId(hwnd, lpdwProcessId)`
@@ -16416,6 +16563,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
     ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
     ctx.kernel.window_rects.remove(hwnd);
+    ctx.kernel.window_menus.remove(hwnd);
     ctx.kernel
         .notification_icons
         .retain(|(owner, _), _| owner != hwnd);
@@ -16987,7 +17135,7 @@ fn get_version(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// for guests that write the mapping directly — so nothing needs this
 /// one to notice a repaint. `bErase = TRUE` is remembered for the next
 /// paint; fabricated periodic paints alone do not erase the screen.
-fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
+pub(crate) fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
     if kernel.window_procs.contains_key(&hwnd)
         && window_is_visible(kernel, hwnd)
         && kernel.posted_messages.len() < 256
@@ -17077,6 +17225,8 @@ fn get_class_name_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
                     ControlClass::TrackBar => "msctls_trackbar32",
                     ControlClass::ListBox => "LISTBOX",
                     ControlClass::ComboBox => "COMBOBOX",
+                    ControlClass::Toolbar => "ToolbarWindow32",
+                    ControlClass::ScrollBar => "SCROLLBAR",
                 }
                 .to_string()
             })
@@ -17169,7 +17319,18 @@ fn get_client_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+fn equal_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let a = ctx.arg_u32(0)?;
+    let b = ctx.arg_u32(1)?;
+    Ok(DispatchOutcome::ReturnedR0(
+        match (ctx.cpu.read_mem(a, 16), ctx.cpu.read_mem(b, 16)) {
+            (Ok(a), Ok(b)) => u32::from(a == b),
+            _ => 0,
+        },
+    ))
+}
 fn get_window_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.refresh_control_visibility();
     let hwnd = ctx.arg_u32(0)?;
     let lp_rect = ctx.arg_u32(1)?;
     // A control's window rect is where it sits on screen, which for a
@@ -17180,7 +17341,27 @@ fn get_window_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
             .panel(hwnd)
             .map(|p| (p.x, p.y, p.w, p.h))
     });
-    let rect = rect.or_else(|| ctx.kernel.window_rects.get(&hwnd).copied());
+    let rect = rect.or_else(|| {
+        ctx.kernel.window_rects.get(&hwnd).copied().map(|mut r| {
+            if ctx
+                .kernel
+                .window_styles
+                .get(&hwnd)
+                .is_some_and(|s| s.0 & 0x40000000 != 0)
+            {
+                if let Some(o) = ctx
+                    .kernel
+                    .window_parents
+                    .get(&hwnd)
+                    .and_then(|p| ctx.kernel.window_client_origin(*p))
+                {
+                    r.0 = r.0.saturating_add(o.0);
+                    r.1 = r.1.saturating_add(o.1);
+                }
+            }
+            r
+        })
+    });
     if let Some((x, y, w, h)) = rect {
         if lp_rect != 0 {
             let mut buf = [0u8; 16];
@@ -18474,6 +18655,18 @@ fn stretch_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 ///
 /// `lpnFit` gets the number of chars that fit `nMaxExtent` and
 /// `alpDx` (when non-NULL) the cumulative advance per char.
+fn get_text_metrics_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let h = ctx.arg_u32(0)?;
+    let p = ctx.arg_u32(1)?;
+    let Some(dc) = ctx.kernel.gdi.dc(h) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let f = pocket_kernel::text::selected(&ctx.kernel.gdi, dc.selected_font);
+    let b = pocket_kernel::text::metrics_w(f.as_ref());
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        p != 0 && ctx.cpu.write_mem(p, &b).is_ok(),
+    )))
+}
 fn get_text_extent_ex_point_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hdc = ctx.arg_u32(0)?;
     let selected_font = selected_text_font(ctx.kernel, hdc);
@@ -20773,6 +20966,7 @@ fn build_dialog_from_template_for(
             ItemClass::Ordinal(class_ordinal::STATIC) => ControlClass::Static,
             ItemClass::Ordinal(class_ordinal::LISTBOX) => ControlClass::ListBox,
             ItemClass::Ordinal(class_ordinal::COMBOBOX) => ControlClass::ComboBox,
+            ItemClass::Ordinal(class_ordinal::SCROLLBAR) => ControlClass::ScrollBar,
             ItemClass::Named(name) if ControlClass::from_class_name(name).is_some() => {
                 ControlClass::from_class_name(name).unwrap()
             }
@@ -20983,7 +21177,9 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 fn is_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
-    Ok(DispatchOutcome::ReturnedR0(is_live_hwnd(hwnd) as u32))
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        is_live_hwnd(hwnd) || ctx.kernel.window_classes.contains_key(&hwnd),
+    )))
 }
 
 fn create_semaphore_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -22807,75 +23003,30 @@ pub(crate) fn civil_from_days(z: i64) -> (i32, i32, i32) {
 /// register the handle in `KernelState::menus` so later state queries
 /// work.
 fn load_menu_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _hinst = ctx.arg_u32(0)?;
-    let _name = ctx.arg_u32(1)?;
-    let h = ctx.kernel.next_menu_handle;
-    ctx.kernel.next_menu_handle = ctx.kernel.next_menu_handle.wrapping_add(1);
-    ctx.kernel.menus.insert(h, std::collections::HashMap::new());
-    Ok(DispatchOutcome::ReturnedR0(h))
+    menu_api::load(ctx)
 }
 
 fn create_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.kernel.next_menu_handle;
-    ctx.kernel.next_menu_handle = ctx.kernel.next_menu_handle.wrapping_add(1);
-    ctx.kernel.menus.insert(h, std::collections::HashMap::new());
-    Ok(DispatchOutcome::ReturnedR0(h))
+    menu_api::create(ctx)
 }
 
 fn destroy_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let removed = ctx.kernel.menus.remove(&h).is_some();
-    // Drop any cached sub-menu mappings whose parent is `h`, but keep
-    // sub-menu state itself around — the guest may still hold the
-    // child handle and CheckMenuItem it.
-    ctx.kernel.sub_menus.retain(|(k, _), _| *k != h);
-    Ok(DispatchOutcome::ReturnedR0(if removed { 1 } else { 0 }))
+    menu_api::destroy(ctx)
 }
 
 /// `HMENU GetSubMenu(HMENU, int nPos)` — return a stable child
 /// handle. Cached so successive calls with the same `(menu, pos)`
 /// give the same value.
 fn get_sub_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let pos = ctx.arg_u32(1)?;
-    if let Some(&cached) = ctx.kernel.sub_menus.get(&(h, pos)) {
-        return Ok(DispatchOutcome::ReturnedR0(cached));
-    }
-    let new = ctx.kernel.next_menu_handle;
-    ctx.kernel.next_menu_handle = ctx.kernel.next_menu_handle.wrapping_add(1);
-    ctx.kernel
-        .menus
-        .insert(new, std::collections::HashMap::new());
-    ctx.kernel.sub_menus.insert((h, pos), new);
-    Ok(DispatchOutcome::ReturnedR0(new))
+    menu_api::submenu(ctx)
 }
 
 fn get_menu_item_count(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let n = ctx
-        .kernel
-        .menus
-        .get(&h)
-        .map(|m| m.len() as u32)
-        .unwrap_or(0);
-    Ok(DispatchOutcome::ReturnedR0(n))
+    menu_api::count(ctx)
 }
 
 fn get_menu_item_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let pos = ctx.arg_u32(1)?;
-    let m = match ctx.kernel.menus.get(&h) {
-        Some(m) => m,
-        None => return Ok(DispatchOutcome::ReturnedR0(0xFFFF_FFFF)),
-    };
-    let mut keys: Vec<&u32> = m.keys().collect();
-    keys.sort();
-    let id = keys
-        .get(pos as usize)
-        .copied()
-        .copied()
-        .unwrap_or(0xFFFF_FFFF);
-    Ok(DispatchOutcome::ReturnedR0(id))
+    menu_api::id(ctx)
 }
 
 /// `BOOL CheckMenuItem(HMENU, UINT uIDCheckItem, UINT uCheck)` —
@@ -22883,54 +23034,23 @@ fn get_menu_item_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 /// is unknown. We implement the toggle by remembering the latest
 /// MF_CHECKED bit per (menu, id).
 fn check_menu_item(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let id = ctx.arg_u32(1)?;
-    let new = ctx.arg_u32(2)?;
-    let prev = ctx
-        .kernel
-        .menus
-        .get(&h)
-        .and_then(|m| m.get(&id))
-        .copied()
-        .unwrap_or(0);
-    ctx.kernel.menus.entry(h).or_default().insert(id, new);
-    Ok(DispatchOutcome::ReturnedR0(prev))
+    menu_api::check(ctx)
 }
 
 fn enable_menu_item(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // Pretend the previous state was "enabled".
-    check_menu_item(ctx)
+    menu_api::enable(ctx)
 }
 
 fn get_menu_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let id = ctx.arg_u32(1)?;
-    let _flags = ctx.arg_u32(2)?;
-    let v = ctx
-        .kernel
-        .menus
-        .get(&h)
-        .and_then(|m| m.get(&id))
-        .copied()
-        .unwrap_or(0);
-    Ok(DispatchOutcome::ReturnedR0(v))
+    menu_api::state(ctx)
 }
 
 fn append_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let _flags = ctx.arg_u32(1)?;
-    let id = ctx.arg_u32(2)?;
-    ctx.kernel.menus.entry(h).or_default().insert(id, 0);
-    Ok(DispatchOutcome::ReturnedR0(1))
+    menu_api::append(ctx)
 }
 
 fn remove_menu_item(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let id = ctx.arg_u32(1)?;
-    if let Some(m) = ctx.kernel.menus.get_mut(&h) {
-        m.remove(&id);
-    }
-    Ok(DispatchOutcome::ReturnedR0(1))
+    menu_api::remove(ctx)
 }
 
 fn track_popup_menu(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -22938,11 +23058,7 @@ fn track_popup_menu(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 
 fn modify_menu_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let id = ctx.arg_u32(1)?;
-    let _flags = ctx.arg_u32(2)?;
-    ctx.kernel.menus.entry(h).or_default().insert(id, 0);
-    Ok(DispatchOutcome::ReturnedR0(1))
+    menu_api::modify(ctx)
 }
 
 /// WinCE TransparentImage accepts either a source DC or an unselected bitmap.
@@ -27792,6 +27908,8 @@ mod tests {
             power_notifications: Default::default(),
             battery_alerts: Default::default(),
             menus: std::collections::HashMap::new(),
+            menu_items: std::collections::HashMap::new(),
+            window_menus: std::collections::HashMap::new(),
             next_menu_handle: 0xDEAD_2000,
             sub_menus: std::collections::HashMap::new(),
             modal: None,

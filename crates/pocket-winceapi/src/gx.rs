@@ -489,6 +489,8 @@ pub(crate) mod tests {
             power_notifications: Default::default(),
             battery_alerts: Default::default(),
             menus: std::collections::HashMap::new(),
+            menu_items: std::collections::HashMap::new(),
+            window_menus: std::collections::HashMap::new(),
             next_menu_handle: 0xDEAD_2000,
             sub_menus: std::collections::HashMap::new(),
             modal: None,

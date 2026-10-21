@@ -1,14 +1,18 @@
 {
   "dll": "aygshell.dll",
-  "_comment": "Partial ordinal map for Pocket PC 2003 / Windows Mobile 5+ aygshell.dll. Subset covering SHFullScreen, SHHandleWMSettingChange and the menu bar APIs.",
   "ordinals": {
-    "34":  "SHRecognizeGesture",
-    "56":  "SHFullScreen",
-    "65":  "SHCreateMenuBar",
-    "69":  "SHDoneButton",
-    "83":  "SHHandleWMActivate",
-    "84":  "SHHandleWMSettingChange",
-    "100": "SHInitDialog",
-    "108": "SHSipPreference"
+    "4": "SHSipInfo",
+    "9": "SHInitExtraControls",
+    "10": "SHCloseApps",
+    "21": "SHSipPreference",
+    "34": "SHCreateMenuBar",
+    "40": "SHRecognizeGesture",
+    "56": "SHInitDialog",
+    "65": "SHFullScreen",
+    "69": "SHDoneButton",
+    "74": "SHCreateMenuBarInternal",
+    "75": "SHLoadImageFile",
+    "83": "SHHandleWMSettingChange",
+    "84": "SHHandleWMActivate"
   }
 }

@@ -1,21 +1,6 @@
 //! Pocket PC shell extensions (`aygshell.dll`).
 //!
-//! Two generations of Pocket PC use *different* ordinal spaces for
-//! this DLL, and neither publishes the mapping in a public SDK:
-//!
-//! * Pocket PC 2003 / WM5+ — `SHFullScreen` is #56, `SHCreateMenuBar`
-//!   #65, `SHInitDialog` #100 (see `data/aygshell-ordinals.json`).
-//! * Pocket PC 2002 — everything sits much lower. `Solitaire` for
-//!   PPC2002 imports 4, 9, 22, 32, 33, 53, 54, 56 and 74, and the
-//!   only one that resolves through the PPC2003 table is #56, as
-//!   `SHFullScreen` — which is wrong for this generation: the call
-//!   site at RVA 0x11dd4 hands it a `SHINITDLGINFO`, so on PPC2002
-//!   #56 is `SHInitDialog`.
-//!
-//! Because the two spaces collide we can't name the PPC2002 ordinals
-//! in the shared JSON table. Instead each ordinal a known PPC2002
-//! title imports gets a handler here, documented with the call-site
-//! evidence that pinned down its signature.
+//! SDK ordinals and owned shell window identities.
 
 use pocket_kernel::gdi::STOCK_SYSTEM_FONT;
 use pocket_kernel::{DispatchOutcome, KernelError};
@@ -37,6 +22,8 @@ pub fn register(d: &mut WinCeDispatcher) {
         "SHFullScreen",
         "SHCreateMenuBar",
         "SHCreateMenuBarEx",
+        "SHCreateMenuBarInternal",
+        "SHLoadImageFile",
         "SHHandleWMActivate",
         "SHHandleWMSettingChange",
         "SHInitDialog",
@@ -51,7 +38,11 @@ pub fn register(d: &mut WinCeDispatcher) {
         "SHSetAppKeyWndAssoc",
     ] {
         let handler = match f {
-            "SHCreateMenuBar" | "SHCreateMenuBarEx" => sh_create_menu_bar,
+            "SHCreateMenuBar" | "SHCreateMenuBarEx" | "SHCreateMenuBarInternal" => {
+                sh_create_menu_bar
+            }
+            "SHInitDialog" => sh_init_dialog,
+            "SHLoadImageFile" => sh_load_image_file,
             "SHSipInfo" => sh_sip_info,
             "SHCloseApps" => sh_close_apps,
             "SHSipPreference" => crate::shell_keyboard::preference,
@@ -121,7 +112,9 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ord:33", zero);
     d.register_handler(dll, "ord:53", sh_get_ui_font);
     d.register_handler(dll, "ord:54", ok);
-    d.register_handler(dll, "ord:56", ok);
+    d.register_handler(dll, "ord:34", sh_create_menu_bar);
+    d.register_handler(dll, "ord:56", sh_init_dialog);
+    d.register_handler(dll, "ord:21", crate::shell_keyboard::preference);
     d.register_handler(dll, "ord:74", sh_create_menu_bar);
 }
 
@@ -154,38 +147,75 @@ fn zero(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// route every menu message to the default window proc. Hand back a
 /// dedicated fake HWND instead.
 fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let pmb = ctx.arg_u32(0)?;
-    if pmb == 0 {
+    let p = ctx.arg_u32(0)?;
+    let Ok(info) = ctx.cpu.read_mem(p, 32) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let cb = u32::from_le_bytes(info[..4].try_into().unwrap());
+    if !matches!(cb, 32 | 36) {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if pmb >= 0xDEAD_0000 {
-        log::debug!(
-            "SHCreateMenuBar received HWND-like argument 0x{pmb:08x}; treating it as the legacy shell fullscreen call"
+    let parent = u32::from_le_bytes(info[4..8].try_into().unwrap());
+    let Some(hwnd) = (0xdead0b01..0xdead0c00).find(|h| {
+        !ctx.kernel.window_classes.contains_key(h)
+            && !ctx.kernel.window_parents.values().any(|p| p == h)
+    }) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if ctx.cpu.write_mem(p + 28, &hwnd.to_le_bytes()).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let proc = ctx
+        .kernel
+        .dynamic_exports
+        .values()
+        .find_map(|e| e.get("DefWindowProcW").copied())
+        .unwrap_or(0);
+    ctx.kernel
+        .window_classes
+        .insert(hwnd, "ToolbarWindow32".into());
+    ctx.kernel.window_procs.insert(hwnd, proc);
+    ctx.kernel.window_parents.insert(hwnd, parent);
+    ctx.kernel
+        .window_threads
+        .insert(hwnd, ctx.kernel.current_thread);
+    ctx.kernel.window_styles.insert(hwnd, (0x40000000, 0));
+    ctx.kernel.window_visibility.insert(hwnd, false);
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+fn sh_init_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let p = ctx.arg_u32(0)?;
+    let Ok(b) = ctx.cpu.read_mem(p, 12) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let get = |o| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let (mask, hwnd, flags) = (get(0), get(4), get(8));
+    if !ctx.kernel.window_classes.contains_key(&hwnd) && ctx.kernel.controls.panel(hwnd).is_none() {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if mask & 1 != 0 && flags & 8 != 0 {
+        crate::shell_keyboard::sip_show(ctx, false);
+    }
+    if mask & 1 != 0 && flags & 0x14 != 0 {
+        let (w, h) = (
+            ctx.kernel.framebuffer.width as i32,
+            ctx.kernel.framebuffer.height as i32,
         );
-        return Ok(DispatchOutcome::ReturnedR0(1));
-    }
-    let cb_size = match ctx.cpu.read_u32_le(pmb) {
-        Ok(size) => size,
-        Err(_) => {
-            log::debug!(
-                "SHCreateMenuBar received non-pointer argument 0x{pmb:08x}; treating it as an alternate shell call"
-            );
-            return Ok(DispatchOutcome::ReturnedR0(1));
+        ctx.kernel.window_rects.insert(hwnd, (0, 0, w, h));
+        if let Some(s) = ctx.kernel.window_styles.get_mut(&hwnd) {
+            s.0 &= !0x00c00000;
         }
-    };
-    // The 32-byte (WM5) layout puts hwndMB at +0x18, the 36-byte
-    // (PPC2002) one at +0x1c. Pick by cbSize; for an unrecognised
-    // size write both so the caller finds a handle either way.
-    let offsets: &[u32] = match cb_size {
-        32 => &[0x18],
-        36 => &[0x1c],
-        _ => &[0x18, 0x1c],
-    };
-    for off in offsets {
-        ctx.cpu
-            .write_mem(pmb + off, &FAKE_MENUBAR_HWND.to_le_bytes())?;
+        if let Some(p) = ctx.kernel.controls.panel_mut(hwnd) {
+            p.x = 0;
+            p.y = 0;
+            p.w = w;
+            p.h = h;
+            p.border = false;
+            p.caption = None;
+        }
+        crate::coredll::queue_window_size(ctx.kernel, hwnd, w, h);
+        crate::coredll::queue_window_paint(ctx.kernel, hwnd);
     }
-    log::debug!("SHCreateMenuBar(cbSize={cb_size}) -> hwndMB=0x{FAKE_MENUBAR_HWND:08x}");
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
