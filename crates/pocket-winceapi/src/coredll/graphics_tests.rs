@@ -3397,3 +3397,77 @@ fn pocketpc_application_and_gapi_buttons_have_independent_polled_states() {
     assert_eq!(key_state_value(&mut ctx, 0xc1), 0);
     assert_eq!(key_state_value(&mut ctx, 0xd1), 0x8000);
 }
+
+#[test]
+fn hiding_and_showing_a_toolbar_updates_the_style_used_by_native_layout() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let hwnd = kernel.controls.create(
+        FAKE_HWND,
+        ControlClass::Toolbar,
+        1,
+        String::new(),
+        0x50000000,
+        0,
+        0,
+        240,
+        34,
+    );
+    kernel.window_styles.insert(hwnd, (0x50000000, 0));
+    kernel.window_visibility.insert(hwnd, true);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    for (flags, visible) in [(0x93, false), (0x53, true)] {
+        assert_eq!(
+            call(&mut ctx, set_window_pos, &[hwnd, 0, 0, 0, 0, 0, flags]),
+            1
+        );
+        assert_eq!(
+            call(&mut ctx, get_window_long_w, &[hwnd, (-16i32) as u32]) & 0x10000000 != 0,
+            visible
+        );
+        assert_eq!(ctx.kernel.window_visibility[&hwnd], visible);
+        assert_eq!(ctx.kernel.window_styles[&hwnd].0 & 0x10000000 != 0, visible);
+    }
+    call(&mut ctx, show_window, &[hwnd, 0]);
+    assert_eq!(
+        call(&mut ctx, get_window_long_w, &[hwnd, (-16i32) as u32]) & 0x10000000,
+        0
+    );
+}
+
+#[test]
+fn moving_a_native_child_repaints_its_exposed_parent_but_no_redraw_does_not() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let parent = 0xdead2001;
+    let child = 0xdead2002;
+    for hwnd in [parent, child] {
+        kernel.window_visibility.insert(hwnd, true);
+        kernel.window_procs.insert(hwnd, 0x1000);
+    }
+    kernel.window_parents.insert(child, parent);
+    kernel.window_rects.insert(child, (0, 0, 100, 30));
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    call(&mut ctx, set_window_pos, &[child, 0, 20, 0, 100, 30, 5]);
+    assert!(ctx
+        .kernel
+        .posted_messages
+        .iter()
+        .any(|m| m.0 == parent && m.1 == WM_PAINT));
+    assert!(ctx.kernel.gdi.pending_window_erases.contains(&parent));
+    ctx.kernel.posted_messages.clear();
+    ctx.kernel.gdi.pending_window_erases.clear();
+    call(&mut ctx, set_window_pos, &[child, 0, 30, 0, 100, 30, 13]);
+    assert!(!ctx.kernel.posted_messages.iter().any(|m| m.1 == WM_PAINT));
+    assert!(ctx.kernel.gdi.pending_window_erases.is_empty());
+}

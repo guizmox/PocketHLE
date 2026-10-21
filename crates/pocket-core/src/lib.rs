@@ -14,6 +14,7 @@
 
 mod cab_setup;
 mod colors_wallet;
+mod simcity_layout;
 
 use std::path::Path;
 
@@ -122,6 +123,7 @@ impl Emulator {
         let mut image = pe::load_bytes(&raw).context("loading PE")?;
         image.source_path = path.display().to_string();
         colors_wallet::apply(&raw, &mut image).context("Colors wallet compatibility")?;
+        simcity_layout::apply(&raw, &mut image).context("SimCity shell layout compatibility")?;
         pocket_winceapi::reset_media_backends();
         let process = Process::map_into(
             image,

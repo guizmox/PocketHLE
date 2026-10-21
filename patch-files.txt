@@ -1,5 +1,4 @@
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/shell_keyboard.rs
+crates/pocket-core/src/lib.rs
+crates/pocket-core/src/simcity_layout.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/coredll/graphics_tests.rs
-crates/pocket-winceapi/src/shell_keyboard.rs

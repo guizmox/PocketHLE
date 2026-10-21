@@ -10442,6 +10442,7 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         let id = child.id;
         child.visible = show;
+        child.style = (child.style & !0x1000_0000) | if show { 0x1000_0000 } else { 0 };
         if show {
             queue_visible_window_paints(ctx.kernel, hwnd);
         }
@@ -12391,6 +12392,13 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let w = ctx.arg_u32(4)? as i32;
     let h = ctx.arg_u32(5)? as i32;
     let flags = ctx.arg_u32(6).unwrap_or(0);
+    let old_rect = ctx
+        .kernel
+        .window_rects
+        .get(&hwnd)
+        .copied()
+        .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| (c.x, c.y, c.w, c.h)));
+    let was_visible = window_is_visible(ctx.kernel, hwnd);
     if flags & 0x0004 == 0 {
         ctx.kernel.controls.set_child_z_order(hwnd, insert_after);
     }
@@ -12400,11 +12408,15 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if flags & 0xc0 != 0 {
         let visible = flags & 0x40 != 0;
         ctx.kernel.window_visibility.insert(hwnd, visible);
+        if let Some((style, _)) = ctx.kernel.window_styles.get_mut(&hwnd) {
+            *style = (*style & !0x1000_0000) | if visible { 0x1000_0000 } else { 0 };
+        }
         if sized && ctx.kernel.controls.panel(hwnd).is_some() {
             queue_window_size(ctx.kernel, hwnd, w, h);
         }
         if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
             child.visible = visible;
+            child.style = (child.style & !0x1000_0000) | if visible { 0x1000_0000 } else { 0 };
         }
         if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
             panel.visible = visible;
@@ -12449,6 +12461,30 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             ctx.kernel.pending_message = Some((synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0));
         }
         repaint_controls(ctx);
+    }
+    let new_rect = ctx
+        .kernel
+        .window_rects
+        .get(&hwnd)
+        .copied()
+        .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| (c.x, c.y, c.w, c.h)));
+    let visible = window_is_visible(ctx.kernel, hwnd);
+    if flags & 0x8 == 0 && (old_rect != new_rect || was_visible != visible) {
+        // Moving/hiding a native child exposes its parent. Compositing only
+        // the new position leaves the previous pixels in the display and in
+        // the parent's backing surface. Request normal guest erasure/painting.
+        let parent = ctx
+            .kernel
+            .window_parents
+            .get(&hwnd)
+            .copied()
+            .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| c.parent));
+        if let Some(parent) = parent.filter(|p| *p != 0 && *p != hwnd) {
+            queue_visible_window_paints(ctx.kernel, parent);
+        }
+        if visible {
+            queue_visible_window_paints(ctx.kernel, hwnd);
+        }
     }
     if flags & 0x40 != 0 && flags & 0x8 == 0 {
         queue_visible_window_paints(ctx.kernel, hwnd);
