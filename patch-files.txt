@@ -1,4 +1,6 @@
-crates/pocket-core/src/lib.rs
-crates/pocket-core/src/simcity_layout.rs
+crates/pocket-kernel/src/vfs.rs
+crates/pocket-kernel/src/vfs_contract.rs
+crates/pocket-library/src/lib.rs
+crates/pocket-winceapi/src/ws2.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/coredll/graphics_tests.rs

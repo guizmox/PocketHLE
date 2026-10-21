@@ -3471,3 +3471,39 @@ fn moving_a_native_child_repaints_its_exposed_parent_but_no_redraw_does_not() {
     assert!(!ctx.kernel.posted_messages.iter().any(|m| m.1 == WM_PAINT));
     assert!(ctx.kernel.gdi.pending_window_erases.is_empty());
 }
+
+#[test]
+fn neutral_startup_info_reaches_process_lookup_and_real_options_are_rejected() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    kernel.process_launch_enabled = true;
+    write_wide_str(&mut cpu, 0x1000, 100, "\\missing.exe").unwrap();
+    cpu.write_mem(0x1800, &[0; 68]).unwrap();
+    cpu.write_mem(0x1800, &68u32.to_le_bytes()).unwrap();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(
+        call(
+            &mut ctx,
+            create_process_w,
+            &[0x1000, 0, 0, 0, 0, 0, 0, 0, 0x1800, 0x2000]
+        ),
+        0
+    );
+    assert_eq!(ctx.kernel.thread_last_errors[&0], 2);
+    ctx.cpu.write_mem(0x1800 + 44, &1u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        call(
+            &mut ctx,
+            create_process_w,
+            &[0x1000, 0, 0, 0, 0, 0, 0, 0, 0x1800, 0x2000]
+        ),
+        0
+    );
+    assert_eq!(ctx.kernel.thread_last_errors[&0], ERROR_NOT_SUPPORTED);
+    assert!(ctx.kernel.pending_process_launch.is_none());
+}

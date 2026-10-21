@@ -3536,12 +3536,30 @@ fn create_process_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     }
     if app == 0
         || ctx.arg_u32(9)? == 0
-        || [2, 3, 4, 6, 7, 8]
+        || [2, 3, 4, 6, 7]
             .iter()
             .any(|&arg| ctx.arg_u32(arg).map_or(true, |v| v != 0))
     {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    // CE has no desktop startup options. A neutral STARTUPINFOW from
+    // shared Win32/CE code is equivalent to NULL; reject actual unsupported
+    // options rather than rejecting an otherwise executable child launch.
+    let startup = ctx.arg_u32(8)?;
+    if startup != 0 {
+        let Ok(info) = ctx.cpu.read_mem(startup, 68) else {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        if u32::from_le_bytes(info[..4].try_into().unwrap()) != 68 {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        if info[4..].iter().any(|byte| *byte != 0) {
+            set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
     }
     // A GUI child has no console to inherit; CREATE_NEW_CONSOLE does not
     // change its execution or suspension state.
@@ -9246,13 +9264,12 @@ fn crt_fgetws(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let text_mode = ctx.kernel.vfs.is_text_mode(h);
-    let mut out = read_stdio_line(ctx, h, n as usize, text_mode);
+    let out = read_stdio_line(ctx, h, n as usize, text_mode);
     if out.is_empty() {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if out.last() == Some(&b'\n') {
-        out.pop();
-    }
+    // Like fgets, fgetws retains a newline when it fits in the buffer.
+    // Dropping it joins lines when guest parsers rewrite property files.
     let mut wide = Vec::with_capacity(out.len() + 1);
     for byte in out {
         wide.extend_from_slice(&(byte as u16).to_le_bytes());
@@ -25800,6 +25817,52 @@ mod tests {
         let count = read_stdio_bytes(&mut ctx, handle, &mut output);
         assert_eq!(count, boundary.len() - 1);
         assert_eq!(&output[4095..count], b"\nY\rZ");
+    }
+
+    #[test]
+    fn wide_line_reads_keep_the_newline_and_preserve_the_next_line() {
+        use pocket_kernel::vfs::Access;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lines"), b"# comment\r\nkey=value\r\nlast").unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount("\\Data\\", dir.path());
+        let h = kernel
+            .vfs
+            .open("\\Data\\lines", Access::Read, false)
+            .unwrap();
+        kernel.vfs.mark_text_mode(h);
+        let mut cpu = scanf_cpu();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (capacity, expected) in [
+            (32, "# comment\n"),
+            (5, "key="),
+            (32, "value\n"),
+            (32, "last"),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, capacity).unwrap();
+            ctx.cpu.write_reg(ArmReg::R2, h).unwrap();
+            assert_eq!(
+                crt_fgetws(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0x1000)
+            );
+            assert_eq!(
+                String::from_utf16_lossy(&read_wstr(&mut ctx, 0x1000, 32).unwrap()),
+                expected
+            );
+        }
+        ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 32).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, h).unwrap();
+        assert_eq!(
+            crt_fgetws(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
 
     #[test]

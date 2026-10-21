@@ -481,12 +481,26 @@ impl GameEntry {
     }
 
     /// Path `GetModuleFileNameW` should report for this game, derived
-    /// from [`Self::guest_install_prefix`] and the executable's file
-    /// name. Relative guest paths resolve against its directory.
+    /// from [`Self::guest_install_prefix`] and its path inside the extracted
+    /// installation. Preserve subdirectories such as bin/: games resolve
+    /// sibling resource directories relative to their executable.
     pub fn guest_exe_path(&self) -> Option<String> {
         let prefix = self.guest_install_prefix()?;
-        let name = self.executable.file_name()?.to_str()?;
-        Some(format!("{prefix}{name}"))
+        let relative = self
+            .executable
+            .strip_prefix("extracted")
+            .unwrap_or(&self.executable);
+        let parts: Vec<_> = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        if parts.is_empty() {
+            return None;
+        }
+        Some(format!("{prefix}{}", parts.join("\\")))
     }
 
     pub fn guest_save_prefix(&self) -> Option<String> {
@@ -3748,6 +3762,18 @@ mod tests {
             entry.guest_exe_path().as_deref(),
             Some("\\Program Files\\EA\\Spore v1.0.4\\spore.exe")
         );
+    }
+
+    #[test]
+    fn guest_executable_preserves_installed_subdirectories() {
+        let mut entry = entry_with_install_dir(Some("\\Program Files\\Vendor\\Game\\"));
+        entry.executable = PathBuf::from("extracted/bin/game.exe");
+        assert_eq!(
+            entry.guest_exe_path().as_deref(),
+            Some("\\Program Files\\Vendor\\Game\\bin\\game.exe")
+        );
+        entry.executable = PathBuf::from("extracted/../other.exe");
+        assert!(entry.guest_exe_path().is_none());
     }
 
     #[test]

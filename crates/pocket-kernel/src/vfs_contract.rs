@@ -544,6 +544,77 @@ impl Vfs {
             {
                 return Err(5);
             }
+            // Copy-on-write: OPEN_ALWAYS/OPEN_EXISTING with write access
+            // must preserve an installed file from the read-only lower layer.
+            // Creating an empty overlay file instead silently destroys the
+            // guest's view of archives and databases opened read/write.
+            let normal = self.normalise_guest_path(path);
+            let lower = if !read_only && !target.exists() {
+                self.matching_mounts(&normal)
+                    .into_iter()
+                    .filter(|m| m.read_only && m.prefix == mount.prefix)
+                    .find_map(|m| {
+                        let candidate = self.host_path_for_mount(m, &normal)?;
+                        candidate.is_file().then(|| (candidate, &m.host_dir))
+                    })
+            } else {
+                None
+            };
+            if lower.is_some() && disposition == 1 {
+                return Err(80);
+            }
+            // Materialize only directories which already exist in the merged
+            // guest filesystem. An actually missing parent still fails.
+            if !read_only && (matches!(disposition, 1 | 2 | 4) || lower.is_some()) {
+                if let Some(parent) = target.parent().filter(|p| !p.exists()) {
+                    if let Some((guest_parent, _)) = normal.rsplit_once('/') {
+                        let exists = self.matching_mounts(guest_parent).iter().any(|m| {
+                            self.host_path_for_mount(m, guest_parent)
+                                .is_some_and(|p| p.is_dir())
+                        });
+                        if exists {
+                            std::fs::create_dir_all(parent).map_err(|e| io_error(&e))?;
+                        }
+                    }
+                }
+            }
+            if let Some((source, source_root)) = lower {
+                let source = source.canonicalize().map_err(|e| io_error(&e))?;
+                let source_root = source_root.canonicalize().map_err(|e| io_error(&e))?;
+                if !source.starts_with(source_root) {
+                    return Err(5);
+                }
+                let source_key = source.to_string_lossy().to_ascii_lowercase();
+                let mut state = self.shared.0.lock().unwrap();
+                busy(&mut state, &source_key);
+                if state.leases.get(&source_key).is_some_and(|leases| {
+                    leases
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .any(|l| access & !l.share != 0 || l.access & !share != 0)
+                }) {
+                    return Err(32);
+                }
+                if access & 2 != 0
+                    && state
+                        .attributes
+                        .get(&source_key)
+                        .is_some_and(|a| a & 1 != 0)
+                {
+                    return Err(5);
+                }
+                if matches!(disposition, 2 | 5)
+                    && state.leases.get(&source_key).is_some_and(|leases| {
+                        leases
+                            .iter()
+                            .filter_map(Weak::upgrade)
+                            .any(|l| l.mapped.load(std::sync::atomic::Ordering::Relaxed) != 0)
+                    })
+                {
+                    return Err(1224);
+                }
+                std::fs::copy(source, &target).map_err(|e| io_error(&e))?;
+            }
             let k = if target.exists() {
                 target.canonicalize().map_err(|e| io_error(&e))?
             } else {
@@ -1008,6 +1079,89 @@ impl Vfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn creates_files_in_existing_lower_layer_directories_without_inventing_guest_parents() {
+        let lower = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(lower.path().join("resources/scenes")).unwrap();
+        std::fs::write(lower.path().join("resources/scenes/original"), b"asset").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", lower.path());
+        v.mount_save_dir("\\Game\\", saves.path());
+        let path = "\\Game\\resources\\scenes\\preview.jpg";
+        let h = v.open_file(path, 2, 3, 2, false, 0).unwrap().handle;
+        assert_eq!(v.write(h, b"preview"), Some(7));
+        v.close(h);
+        assert_eq!(
+            std::fs::read(saves.path().join("resources/scenes/preview.jpg")).unwrap(),
+            b"preview"
+        );
+        assert!(!lower.path().join("resources/scenes/preview.jpg").exists());
+        let h = v.open_file(path, 1, 3, 3, false, 0).unwrap().handle;
+        let mut bytes = [0; 7];
+        assert_eq!(v.read(h, &mut bytes), Some(7));
+        assert_eq!(&bytes, b"preview");
+        v.close(h);
+        assert_eq!(
+            v.open_file("\\Game\\missing\\preview.jpg", 2, 3, 2, false, 0),
+            Err(3)
+        );
+        assert!(!saves.path().join("missing").exists());
+    }
+
+    #[test]
+    fn writable_overlay_preserves_existing_assets_for_open_always_and_overrides_reads() {
+        let lower = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(lower.path().join("maps")).unwrap();
+        std::fs::write(lower.path().join("maps/level.gz"), b"original").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", lower.path());
+        v.mount_save_dir("\\Game\\", saves.path());
+        let path = "\\Game\\maps\\level.gz";
+        assert_eq!(v.open_file(path, 3, 3, 1, false, 0), Err(80));
+        let open = v.open_file(path, 3, 3, 4, false, 0).unwrap();
+        assert!(open.existed);
+        let mut bytes = [0; 8];
+        assert_eq!(v.read(open.handle, &mut bytes), Some(8));
+        assert_eq!(&bytes, b"original");
+        v.seek(open.handle, 0, SeekKind::Begin);
+        assert_eq!(v.write(open.handle, b"modified"), Some(8));
+        v.close(open.handle);
+        let h = v.open_file(path, 1, 3, 3, false, 0).unwrap().handle;
+        assert_eq!(v.read(h, &mut bytes), Some(8));
+        assert_eq!(&bytes, b"modified");
+        v.close(h);
+        assert_eq!(
+            std::fs::read(lower.path().join("maps/level.gz")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(saves.path().join("maps/level.gz")).unwrap(),
+            b"modified"
+        );
+    }
+
+    #[test]
+    fn copying_an_installed_file_into_the_overlay_respects_existing_share_denials() {
+        let lower = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join("data"), b"asset").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", lower.path());
+        v.mount_save_dir("\\Game\\", saves.path());
+        let h = v
+            .open_file("\\Game\\data", 1, 0, 3, false, 0)
+            .unwrap()
+            .handle;
+        assert_eq!(v.open_file("\\Game\\data", 3, 3, 4, false, 0), Err(32));
+        assert!(!saves.path().join("data").exists());
+        v.close(h);
+        let open = v.open_file("\\Game\\data", 3, 3, 3, false, 0).unwrap();
+        assert!(open.existed);
+        v.close(open.handle);
+    }
+
     fn mounted(dir: &Path) -> Vfs {
         let mut v = Vfs::new();
         v.mount_save_dir("\\Flash Disk\\", dir);

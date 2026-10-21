@@ -802,7 +802,9 @@ impl Vfs {
                 normalised == root || normalised.starts_with(&mount.prefix)
             })
             .collect();
-        mounts.sort_by_key(|mount| std::cmp::Reverse(mount.prefix.len()));
+        // Saved/modified files override installed assets at the same guest
+        // prefix. Specific read-only mounts still outrank broader writes.
+        mounts.sort_by_key(|mount| std::cmp::Reverse((mount.prefix.len(), !mount.read_only)));
         mounts
     }
 

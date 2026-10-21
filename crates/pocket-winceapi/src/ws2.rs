@@ -4,7 +4,6 @@ mod sockets;
 use pocket_kernel::{DispatchOutcome, KernelError};
 
 const SOCKET_ERROR: u32 = u32::MAX;
-const WSASYSNOTREADY: u32 = 10091;
 const WSANOTINITIALISED: u32 = 10093;
 
 pub fn register(dispatcher: &mut WinCeDispatcher) {
@@ -29,9 +28,8 @@ pub fn register(dispatcher: &mut WinCeDispatcher) {
 }
 
 fn startup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.kernel.vfs.bluetooth.service.backend().is_err() {
-        return Ok(DispatchOutcome::ReturnedR0(WSASYSNOTREADY));
-    }
+    // Winsock initialization is independent of adapter availability.
+    // Bluetooth permission/readiness is checked when an RFCOMM socket opens.
     let version = ctx.arg_u32(0)?;
     let ptr = ctx.arg_u32(1)?;
     if !matches!(version, 0x0101 | 0x0002 | 0x0102 | 0x0202) {
@@ -51,7 +49,7 @@ fn startup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let mut data = [0u8; 400];
     data[..2].copy_from_slice(&(version as u16).to_le_bytes());
     data[2..4].copy_from_slice(&0x0202u16.to_le_bytes());
-    let label = b"PocketHLE Bluetooth RFCOMM";
+    let label = b"PocketHLE Winsock 2.2";
     data[4..4 + label.len()].copy_from_slice(label);
     ctx.cpu.write_mem(ptr, &data)?;
     ctx.kernel.vfs.bluetooth.startups += 1;
@@ -353,6 +351,56 @@ mod tests {
     }
 
     #[test]
+    fn winsock_initializes_without_a_bluetooth_adapter_and_balances_cleanup() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel
+            .vfs
+            .set_bluetooth_service(pocket_kernel::bluetooth::Service::offline());
+        for _ in 0..2 {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "ws2.dll",
+                    "WSAStartup",
+                    &[0x0101, 0x1800]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+        }
+        assert_eq!(cpu.read_mem(0x1800, 4).unwrap(), [1, 1, 2, 2]);
+        assert_eq!(kernel.vfs.bluetooth.startups, 2);
+        assert!(!kernel.vfs.bluetooth.service.is_enabled());
+        for remaining in [1, 0] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "ws2.dll",
+                    "WSACleanup",
+                    &[]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(kernel.vfs.bluetooth.startups, remaining);
+        }
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ws2.dll",
+                "WSACleanup",
+                &[]
+            ),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+    }
+
+    #[test]
     fn bluetooth_inquiry_reports_size_without_consuming_and_writes_guest_pointers() {
         use crate::bluetooth::tests::{call, setup};
         let (mut cpu, mut kernel, mut dispatcher) = setup();
@@ -525,7 +573,7 @@ mod tests {
         };
         assert_eq!(
             dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
-            DispatchOutcome::ReturnedR0(WSASYSNOTREADY)
+            DispatchOutcome::ReturnedR0(10092)
         );
     }
 
@@ -580,7 +628,7 @@ mod tests {
         kernel.current_thread = 0;
         assert_eq!(
             call("WSAStartup", &mut dispatcher, &mut cpu, &mut kernel),
-            DispatchOutcome::ReturnedR0(WSASYSNOTREADY)
+            DispatchOutcome::ReturnedR0(10092)
         );
         assert_eq!(
             call("WSACleanup", &mut dispatcher, &mut cpu, &mut kernel),
