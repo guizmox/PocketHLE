@@ -385,6 +385,10 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "fputc", crt_fputc);
     d.register_handler(dll, "fgets", crt_fgets);
     d.register_handler(dll, "fputs", crt_fputs);
+    d.register_handler(dll, "puts", crt_puts);
+    d.register_handler(dll, "_fileno", crt_fileno);
+    d.register_handler(dll, "_setmode", crt_setmode);
+    d.register_handler(dll, "SendDlgItemMessageW", send_dlg_item_message_w);
     d.register_handler(dll, "fputws", crt_fputws);
     d.register_handler(dll, "fgetws", crt_fgetws);
     d.register_handler(dll, "rewind", crt_rewind);
@@ -673,6 +677,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "CreatePen", create_pen);
     d.register_handler(dll, "CreatePenIndirect", create_pen_indirect);
     d.register_handler(dll, "GetClipBox", get_clip_box);
+    d.register_handler(dll, "SelectClipRgn", select_clip_rgn);
     d.register_handler(dll, "CreateFontIndirectW", create_font_indirect);
     d.register_handler(dll, "GetStockObject", get_stock_object);
     d.register_handler(dll, "SelectObject", select_object);
@@ -12572,7 +12577,9 @@ fn synthetic_paint_target(k: &KernelState) -> u32 {
     let h = active_window(k);
     if k.window_procs.contains_key(&h) && window_is_visible(k, h) {
         h
-    } else if k.window_procs.contains_key(&FAKE_HWND) || k.window_procs.is_empty() {
+    } else if k.window_procs.is_empty()
+        || (k.window_procs.contains_key(&FAKE_HWND) && window_is_visible(k, FAKE_HWND))
+    {
         FAKE_HWND
     } else {
         k.window_procs
@@ -14469,19 +14476,47 @@ fn get_clip_box(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let (w, h) = surface.dimensions();
+    drop(surface);
+    let mut bounds = [0, 0, w as i32, h as i32];
+    let mut complexity = if w == 0 || h == 0 { 1 } else { 2 };
+    if let Some(rects) = &ctx.kernel.gdi.dc(dc).unwrap().clip_rects {
+        let clipped: Vec<_> = rects
+            .iter()
+            .map(|r| {
+                [
+                    r[0].max(0),
+                    r[1].max(0),
+                    r[2].min(w as i32),
+                    r[3].min(h as i32),
+                ]
+            })
+            .filter(|r| r[0] < r[2] && r[1] < r[3])
+            .collect();
+        bounds = clipped
+            .iter()
+            .fold([i32::MAX, i32::MAX, i32::MIN, i32::MIN], |b, r| {
+                [
+                    b[0].min(r[0]),
+                    b[1].min(r[1]),
+                    b[2].max(r[2]),
+                    b[3].max(r[3]),
+                ]
+            });
+        complexity = clipping::region_kind(&clipped);
+        if complexity == 1 {
+            bounds = [0; 4];
+        }
+    }
     ctx.cpu.write_mem(
         out,
-        &[0u32, 0, w, h]
+        &bounds
             .into_iter()
-            .flat_map(u32::to_le_bytes)
+            .flat_map(i32::to_le_bytes)
             .collect::<Vec<_>>(),
     )?;
-    Ok(DispatchOutcome::ReturnedR0(if w == 0 || h == 0 {
-        1
-    } else {
-        2
-    }))
+    Ok(DispatchOutcome::ReturnedR0(complexity))
 }
+
 fn move_to_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dc = ctx.arg_u32(0)?;
     let next = (ctx.arg_u32(1)? as i32, ctx.arg_u32(2)? as i32);
@@ -14736,15 +14771,20 @@ fn set_text_align(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 
 /// Borrow either the framebuffer or a memory bitmap as a writable
 /// surface, given a DC handle.
-fn surface_for_dc<'a>(state: &'a mut pocket_kernel::KernelState, dc: u32) -> Option<Surface<'a>> {
+mod clipping;
+fn surface_for_dc<'a>(
+    state: &'a mut pocket_kernel::KernelState,
+    dc: u32,
+) -> Option<clipping::ClippedSurface<'a>> {
     let dc_meta = state.gdi.dc(dc)?.clone();
-    match dc_meta.surface {
-        pocket_kernel::gdi::DcSurface::Screen => Some(Surface::Screen(&mut state.framebuffer)),
+    let surface = match dc_meta.surface {
+        pocket_kernel::gdi::DcSurface::Screen => Surface::Screen(&mut state.framebuffer),
         pocket_kernel::gdi::DcSurface::Memory => {
             let bm = dc_meta.selected_bitmap?;
-            state.gdi.bitmap_mut(bm).map(Surface::Bitmap)
+            Surface::Bitmap(state.gdi.bitmap_mut(bm)?)
         }
-    }
+    };
+    Some(clipping::ClippedSurface::new(surface, dc_meta.clip_rects))
 }
 
 fn fill_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -35107,4 +35147,95 @@ fn cpp_set_new_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 }
 fn crt_query_new_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(ctx.kernel.crt_new_handler))
+}
+
+fn crt_puts(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let ptr = ctx.arg_u32(0)?;
+    let mut bytes = read_crt_cstr(ctx, ptr)?;
+    bytes.push(b'\n');
+    emit_stream_text(ctx, STD_FILE_BASE + 1, &crate::crt_ansi::decode(&bytes))?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn send_dlg_item_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = finish_control_notify(ctx)? {
+        return Ok(outcome);
+    }
+    let message = ctx.arg_u32(2)?;
+    let wparam = ctx.arg_u32(3)?;
+    let lparam = ctx.arg_u32(4)?;
+    let DispatchOutcome::ReturnedR0(child) = get_dlg_item(ctx)? else {
+        unreachable!()
+    };
+    if child == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    for (reg, value) in [
+        (ArmReg::R0, child),
+        (ArmReg::R1, message),
+        (ArmReg::R2, wparam),
+        (ArmReg::R3, lparam),
+    ] {
+        ctx.cpu.write_reg(reg, value)?;
+    }
+    send_message_w(ctx)
+}
+
+// FILE* values are VFS handles in this emulator; file descriptors retain that
+// identity, while the three standard streams use the CRT descriptor IDs 0..2.
+fn crt_fileno(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let stream = ctx.arg_u32(0)?;
+    let fd = if std_file_label(stream).is_some() {
+        stream - STD_FILE_BASE
+    } else if ctx.kernel.vfs.is_open(stream) {
+        stream
+    } else {
+        u32::MAX
+    };
+    Ok(DispatchOutcome::ReturnedR0(fd))
+}
+fn crt_setmode(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let fd = ctx.arg_u32(0)?;
+    let mode = ctx.arg_u32(1)?;
+    if !matches!(mode, 0x4000 | 0x8000) {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    let text = mode == 0x4000;
+    let old = if fd < 3 {
+        Some(std::mem::replace(
+            &mut ctx.kernel.vfs.stdio_text_modes[fd as usize],
+            text,
+        ))
+    } else {
+        ctx.kernel.vfs.set_text_mode(fd, text)
+    };
+    Ok(DispatchOutcome::ReturnedR0(match old {
+        Some(true) => 0x4000,
+        Some(false) => 0x8000,
+        None => u32::MAX,
+    }))
+}
+
+fn select_clip_rgn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let dc = ctx.arg_u32(0)?;
+    let region = ctx.arg_u32(1)?;
+    if ctx.kernel.gdi.dc(dc).is_none() {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let rects = if region == 0 {
+        None
+    } else {
+        let Some(rects) = ctx.kernel.gdi.regions.get(&region).cloned() else {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        Some(
+            rects
+                .into_iter()
+                .filter(|r| r[0] < r[2] && r[1] < r[3])
+                .collect::<Vec<_>>(),
+        )
+    };
+    let complexity = rects.as_deref().map_or(2, clipping::region_kind);
+    ctx.kernel.gdi.dc_mut(dc).unwrap().clip_rects = rects;
+    Ok(DispatchOutcome::ReturnedR0(complexity))
 }

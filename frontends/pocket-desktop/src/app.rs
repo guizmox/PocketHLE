@@ -2627,11 +2627,6 @@ impl PocketLauncher {
             [frame.width, frame.height]
         };
         let available = ui.available_rect_before_wrap();
-        if !self.running_is_gizmondo && self.library.config().fullscreen_mode != "without_controls"
-        {
-            self.ui_pocketpc(ui);
-            return;
-        }
         self.stylus_touch = [0.0; 4];
         let dpi = ui.ctx().pixels_per_point();
         let physical = [

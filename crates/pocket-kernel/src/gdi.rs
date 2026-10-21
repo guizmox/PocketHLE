@@ -199,6 +199,8 @@ pub fn rgb565_to_rgb555(p: u16) -> u16 {
 
 #[derive(Debug, Clone)]
 pub struct Dc {
+    /// Application clipping region, copied by SelectClipRgn; None means unrestricted.
+    pub clip_rects: Option<Vec<[i32; 4]>>,
     pub surface: DcSurface,
     pub selected_bitmap: Option<u32>,
     /// Handles currently selected into the DC. Kept alongside the cached
@@ -220,6 +222,7 @@ pub struct Dc {
 impl Default for Dc {
     fn default() -> Self {
         Self {
+            clip_rects: None,
             surface: DcSurface::Memory,
             selected_bitmap: None,
             selected_brush: STOCK_WHITE_BRUSH,

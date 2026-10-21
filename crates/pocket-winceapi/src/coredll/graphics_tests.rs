@@ -849,8 +849,21 @@ fn visible_native_child_gets_an_initial_paint_after_its_size_notification() {
         kernel: &mut kernel,
         thunk: &thunk,
     };
-    assert!(
-        matches!(create_window_ex_w(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(v) if v==hwnd)
+    assert_eq!(
+        create_window_ex_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_SIZE);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 298 | (183 << 16));
+    assert!(!ctx
+        .kernel
+        .posted_messages
+        .iter()
+        .any(|m| m.0 == hwnd && m.1 == WM_PAINT));
+    ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+    assert_eq!(
+        create_window_ex_w(&mut ctx).unwrap(),
+        DispatchOutcome::ReturnedR0(hwnd)
     );
     let messages: Vec<_> = ctx
         .kernel
@@ -859,7 +872,7 @@ fn visible_native_child_gets_an_initial_paint_after_its_size_notification() {
         .filter(|m| m.0 == hwnd)
         .map(|m| m.1)
         .collect();
-    assert_eq!(messages, vec![WM_SIZE, WM_PAINT]);
+    assert_eq!(messages, vec![WM_PAINT]);
     ctx.kernel.posted_messages.clear();
     call(&mut ctx, move_window, &[hwnd, 12, 14, 100, 80, 1]);
     assert!(ctx
@@ -1685,16 +1698,19 @@ fn default_overlapped_geometry_reaches_create_size_and_window_rect() {
     ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
     assert_eq!(
         create_window_ex_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x3100)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_SIZE);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 320 | (240 << 16));
+    ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+    assert_eq!(
+        create_window_ex_w(&mut ctx).unwrap(),
         DispatchOutcome::ReturnedR0(hwnd)
     );
     assert_eq!(call(&mut ctx, get_window_rect, &[hwnd, 0x2100]), 1);
     assert_eq!(ctx.cpu.read_u32_le(0x2108).unwrap(), 320);
     assert_eq!(ctx.cpu.read_u32_le(0x210c).unwrap(), 240);
-    assert!(ctx
-        .kernel
-        .pending_startup
-        .iter()
-        .any(|m| m.0 == WM_SIZE && m.2 == (320 | (240 << 16))));
+    assert!(!ctx.kernel.pending_startup.iter().any(|m| m.0 == WM_SIZE));
 }
 
 #[test]
@@ -2974,4 +2990,133 @@ fn standard_closed_combo_backing_cannot_cover_buttons_below_it() {
     assert_ne!(expected, 0x001f);
     assert_eq!(call(&mut ctx, get_client_rect, &[combo, 0x1100]), 1);
     assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), 20);
+}
+
+#[test]
+fn crt_descriptors_preserve_stream_mode_and_reject_invalid_values() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    for fd in 0..3 {
+        assert_eq!(call(&mut ctx, crt_fileno, &[STD_FILE_BASE + fd]), fd);
+        assert_eq!(call(&mut ctx, crt_setmode, &[fd, 0x8000]), 0x4000);
+        assert_eq!(call(&mut ctx, crt_setmode, &[fd, 0x4000]), 0x8000);
+        assert_eq!(call(&mut ctx, crt_setmode, &[fd, 0]), u32::MAX);
+        assert!(ctx.kernel.vfs.stdio_text_modes[fd as usize]);
+    }
+    assert_eq!(call(&mut ctx, crt_fileno, &[0]), u32::MAX);
+    assert_eq!(call(&mut ctx, crt_setmode, &[999, 0x8000]), u32::MAX);
+}
+
+#[test]
+fn dialog_item_message_resolves_child_and_forwards_fifth_argument() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let child = 0xdead1008;
+    kernel.window_ids.insert(child, 1003);
+    kernel.window_parents.insert(child, FAKE_HWND);
+    kernel.window_procs.insert(child, 0x2300);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
+    ctx.cpu.write_mem(sp, &0x12345678u32.to_le_bytes()).unwrap();
+    for (r, v) in [
+        (ArmReg::R0, FAKE_HWND),
+        (ArmReg::R1, 1003),
+        (ArmReg::R2, 0xf1),
+        (ArmReg::R3, 1),
+    ] {
+        ctx.cpu.write_reg(r, v).unwrap();
+    }
+    assert_eq!(
+        send_dlg_item_message_w(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    for (r, v) in [
+        (ArmReg::R0, child),
+        (ArmReg::R1, 0xf1),
+        (ArmReg::R2, 1),
+        (ArmReg::R3, 0x12345678),
+    ] {
+        assert_eq!(ctx.cpu.read_reg(r).unwrap(), v);
+    }
+}
+
+#[test]
+fn synthetic_paints_skip_hidden_primary_and_child_windows() {
+    let mut kernel = fresh_kernel();
+    let main = 0xdead1001;
+    let child = 0xdead1002;
+    kernel.active_window = FAKE_HWND;
+    for hwnd in [FAKE_HWND, main, child] {
+        kernel.window_procs.insert(hwnd, 0x2300);
+        kernel.window_styles.insert(
+            hwnd,
+            (
+                if hwnd == child {
+                    0x50000000
+                } else {
+                    0x10000000
+                },
+                0,
+            ),
+        );
+        kernel.window_visibility.insert(hwnd, hwnd != FAKE_HWND);
+    }
+    kernel.window_parents.insert(child, main);
+    assert_eq!(synthetic_paint_target(&kernel), main);
+    kernel.window_visibility.insert(main, false);
+    assert_eq!(synthetic_paint_target(&kernel), 0);
+}
+
+#[test]
+fn selected_clip_is_copied_and_limits_drawing_until_reset() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    kernel.framebuffer = Framebuffer::new(8, 4);
+    kernel.framebuffer.fill(0xffff);
+    let dc = pocket_kernel::gdi::GDI_SCREEN_DC;
+    let region = kernel.gdi.create_region(vec![[1, 1, 3, 3], [5, 0, 7, 2]]);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(call(&mut ctx, select_clip_rgn, &[dc, region]), 3);
+    ctx.kernel.gdi.delete(region);
+    {
+        let mut surface = surface_for_dc(ctx.kernel, dc).unwrap();
+        surface.fill_rect(0, 0, 8, 4, 0);
+    }
+    for y in 0..4 {
+        for x in 0..8 {
+            let inside =
+                ((1..3).contains(&x) && (1..3).contains(&y)) || ((5..7).contains(&x) && y < 2);
+            assert_eq!(pixel(ctx.kernel, x, y), if inside { 0 } else { 0xffff });
+        }
+    }
+    assert_eq!(call(&mut ctx, get_clip_box, &[dc, 0x2100]), 3);
+    assert_eq!(
+        ctx.cpu.read_mem(0x2100, 16).unwrap(),
+        [1i32, 0, 7, 3]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(call(&mut ctx, select_clip_rgn, &[dc, 0]), 2);
+    surface_for_dc(ctx.kernel, dc)
+        .unwrap()
+        .fill_rect(0, 0, 8, 4, 0x1234);
+    assert_eq!(pixel(ctx.kernel, 0, 0), 0x1234);
+    assert_eq!(call(&mut ctx, select_clip_rgn, &[dc, region]), 0);
 }

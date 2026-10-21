@@ -9,6 +9,11 @@ const WSANOTINITIALISED: u32 = 10093;
 
 pub fn register(dispatcher: &mut WinCeDispatcher) {
     sockets::register(dispatcher);
+    for name in ["htons", "ntohs"] {
+        dispatcher.register_handler("ws2.dll", name, swap_short);
+    }
+    dispatcher.register_handler("ws2.dll", "inet_addr", inet_addr);
+
     dispatcher.register_handler("ws2.dll", "WSAStartup", startup);
     dispatcher.register_handler("ws2.dll", "WSACleanup", cleanup);
     dispatcher.register_handler("ws2.dll", "WSAGetLastError", get_last_error);
@@ -586,5 +591,94 @@ mod tests {
             DispatchOutcome::ReturnedR0(WSANOTINITIALISED)
         );
         assert!(kernel.thread_last_errors.is_empty());
+    }
+}
+
+// Guest ARM is little endian, independently of the host running the emulator.
+fn swap_short(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(
+        (ctx.arg_u32(0)? as u16).swap_bytes() as u32,
+    ))
+}
+
+fn parse_ipv4(text: &str) -> Option<u32> {
+    let parts: Option<Vec<u32>> = text
+        .split('.')
+        .map(|part| {
+            if part.is_empty() {
+                return None;
+            }
+            let (digits, radix) = if part.starts_with("0x") || part.starts_with("0X") {
+                (&part[2..], 16)
+            } else if part.len() > 1 && part.starts_with('0') {
+                (&part[1..], 8)
+            } else {
+                (part, 10)
+            };
+            if !digits.chars().all(|c| c.is_digit(radix)) {
+                return None;
+            }
+            u32::from_str_radix(digits, radix).ok()
+        })
+        .collect();
+    let parts = parts?;
+    let address = match parts.as_slice() {
+        [a] => *a,
+        [a, b] if *a <= 255 && *b <= 0xffffff => (a << 24) | b,
+        [a, b, c] if *a <= 255 && *b <= 255 && *c <= 65535 => (a << 24) | (b << 16) | c,
+        [a, b, c, d] if [*a, *b, *c, *d].iter().all(|v| *v <= 255) => {
+            (a << 24) | (b << 16) | (c << 8) | d
+        }
+        _ => return None,
+    };
+    Some(address.swap_bytes())
+}
+
+fn inet_addr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let ptr = ctx.arg_u32(0)?;
+    let mut bytes = Vec::new();
+    if ptr != 0 {
+        for offset in 0..256u32 {
+            let Some(addr) = ptr.checked_add(offset) else {
+                break;
+            };
+            let Ok(byte) = ctx.cpu.read_mem(addr, 1) else {
+                break;
+            };
+            if byte[0] == 0 {
+                let value = std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(parse_ipv4)
+                    .unwrap_or(u32::MAX);
+                return Ok(DispatchOutcome::ReturnedR0(value));
+            }
+            bytes.push(byte[0]);
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(u32::MAX))
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::parse_ipv4;
+    #[test]
+    fn winsock_ipv4_notations_and_guest_byte_order() {
+        for text in ["127.0.0.1", "127.1", "127.0.1", "0x7f000001", "0177.0.0.01"] {
+            assert_eq!(parse_ipv4(text), Some(0x0100007f), "{text}");
+        }
+        assert_eq!(parse_ipv4("255.255.255.255"), Some(u32::MAX));
+        for text in [
+            "",
+            "1.2.3.256",
+            "256.1",
+            "1.16777216",
+            "1..2",
+            "1.2.3.4.5",
+            "09.0.0.1",
+            "+1",
+            "4294967296",
+        ] {
+            assert_eq!(parse_ipv4(text), None, "{text}");
+        }
     }
 }

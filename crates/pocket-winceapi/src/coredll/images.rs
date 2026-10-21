@@ -649,6 +649,7 @@ fn paint(
     }
     image.draw(&mut surf, x, y, w, h, [0, 0, sw as i32, sh as i32]);
     surf.mark_dirty();
+    drop(surf);
     sync_dst_dib_to_guest(ctx, dc)?;
     Ok(true)
 }

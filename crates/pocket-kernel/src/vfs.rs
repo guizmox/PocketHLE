@@ -415,6 +415,7 @@ pub struct BluetoothOpen {
 
 /// Mount-point + open-handle table.
 pub struct Vfs {
+    pub stdio_text_modes: [bool; 3],
     pub bluetooth: crate::bluetooth::State,
     bluetooth_handles: HashMap<u32, Arc<BluetoothOpen>>,
     bluetooth_driver_handles: HashMap<u32, Arc<BluetoothDriverOpen>>,
@@ -458,6 +459,7 @@ impl Default for Vfs {
 impl Vfs {
     pub fn new() -> Self {
         let mut vfs = Self {
+            stdio_text_modes: [true; 3],
             bluetooth: Default::default(),
             bluetooth_handles: HashMap::new(),
             bluetooth_driver_handles: HashMap::new(),
@@ -1759,6 +1761,16 @@ impl Vfs {
                 file.text_mode = true;
             }
         }
+    }
+
+    /// Change the translation mode of an existing CRT stream, retaining its position.
+    pub fn set_text_mode(&mut self, handle: u32, text: bool) -> Option<bool> {
+        if let Some(file) = self.ram_handles.get(&handle) {
+            let mut file = file.lock().ok()?;
+            return Some(std::mem::replace(&mut file.text_mode, text));
+        }
+        let mut file = self.handles.get(&handle)?.lock().ok()?;
+        Some(std::mem::replace(&mut file.text_mode, text))
     }
 
     /// Whether a handle was opened by `fopen`/`_wfopen` in text mode
