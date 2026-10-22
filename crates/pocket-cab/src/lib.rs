@@ -1495,78 +1495,6 @@ pub fn materialise_install_header_names(
     created
 }
 
-/// Restore missing non-ASCII install names from retained CAB payloads.
-/// Existing files (including saves) are never overwritten or removed.
-pub fn repair_install_header_names(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let files: HashMap<u16, PathBuf> = entries
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            if !e.file_type().ok()?.is_file() {
-                return None;
-            }
-            let path = e.path();
-            let id = path.extension()?.to_str()?.parse::<u16>().ok()?;
-            Some((id, path))
-        })
-        .collect();
-    let Some(header_path) = files.get(&0) else {
-        return Vec::new();
-    };
-    let Ok(header) = WinCeInstallHeader::parse_file(header_path) else {
-        return Vec::new();
-    };
-    let install_root = header
-        .install_dir
-        .as_deref()
-        .map(|d| d.trim_end_matches('\\'));
-    let mut restored = Vec::new();
-    for entry in &header.files {
-        if entry.destination.is_ascii() {
-            continue;
-        }
-        let Some(relative) = relative_to_root(&entry.destination, install_root) else {
-            continue;
-        };
-        let dest = join_guest_relative(root, relative);
-        if dest.exists() {
-            continue;
-        }
-        let Some(src) = files.get(&entry.file_id) else {
-            continue;
-        };
-        let Ok(mut input) = fs::File::open(src) else {
-            continue;
-        };
-        if let Some(parent) = dest.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                continue;
-            }
-        }
-        let Ok(mut output) = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&dest)
-        else {
-            continue;
-        };
-        match io::copy(&mut input, &mut output) {
-            Ok(_) => restored.push(dest),
-            Err(error) => {
-                drop(output);
-                let _ = fs::remove_file(&dest);
-                log::warn!(
-                    "Could not restore CAB install name {}: {error}",
-                    dest.display()
-                );
-            }
-        }
-    }
-    restored
-}
-
 /// Strip `root` from a guest destination, rejecting traversal.
 ///
 /// Files installed outside the install root (a shared DLL dropped in
@@ -1606,7 +1534,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ansi_install_names_and_non_destructive_repair() {
+    fn ansi_install_names_are_materialised_on_import() {
         assert_eq!(decode_ascii(b"r\xe9veil \x80\0ignored"), "réveil €");
         assert_eq!(decode_ascii("réveil €".as_bytes()), "réveil €");
         let mut raw = synthetic_msce();
@@ -1619,14 +1547,17 @@ mod tests {
             .any(|f| f.destination.ends_with("lÉvel.dat")));
         let root = std::env::temp_dir().join(format!("pocket-cab-ansi-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("setup.000"), raw).unwrap();
-        fs::write(root.join("asset.002"), b"original").unwrap();
-        let paths = repair_install_header_names(&root);
+        let payload = root.join("asset.002");
+        fs::write(&payload, b"original").unwrap();
+        let files = [CabFile {
+            short_name: "asset.002".to_owned(),
+            extracted_path: payload,
+            size: 8,
+        }];
+        let paths = materialise_install_header_names(&root, &files, &header);
         assert_eq!(paths.len(), 1);
-        assert_eq!(fs::read(&paths[0]).unwrap(), b"original");
-        fs::write(&paths[0], b"modified").unwrap();
-        assert!(repair_install_header_names(&root).is_empty());
-        assert_eq!(fs::read(&paths[0]).unwrap(), b"modified");
+        assert_eq!(paths[0].1.file_name().unwrap(), "lÉvel.dat");
+        assert_eq!(fs::read(&paths[0].1).unwrap(), b"original");
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -561,15 +561,6 @@ fn run_process(
     emu.set_screen_size(screen_width, screen_height);
     summary_lines.push(format!("Screen: {screen_width}x{screen_height}"));
     let extracted = entry.extracted_dir(library_root);
-    if entry.source_cab.to_ascii_lowercase().ends_with(".cab") {
-        let repaired = pocket_core::cab::repair_install_header_names(&extracted);
-        if !repaired.is_empty() {
-            log::info!(
-                "Restored {} missing non-ASCII CAB install names",
-                repaired.len()
-            );
-        }
-    }
 
     emu.mount_read_only_dir("\\Application\\", &extracted);
     emu.mount_read_only_dir("\\Program Files\\", &extracted);
