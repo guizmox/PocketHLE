@@ -130,8 +130,8 @@ pub struct PocketLauncher {
     upscale_x2: bool,
     upscale_filter: UpscaleFilter,
     deck_filter_notice: Option<(String, Instant)>,
-    deck_filter_press: Option<(usize, Instant)>,
-    deck_start_press: Option<(usize, Instant)>,
+    deck_menu_press: Option<(usize, Instant)>,
+    deck_view_press: Option<(usize, Instant)>,
     deck_piano_release: Option<(usize, Instant)>,
     upscale_window_size: Option<Vec2>,
     console_fit_pending: bool,
@@ -657,8 +657,8 @@ impl PocketLauncher {
             upscale_x2: false,
             upscale_filter,
             deck_filter_notice: None,
-            deck_filter_press: None,
-            deck_start_press: None,
+            deck_menu_press: None,
+            deck_view_press: None,
             deck_piano_release: None,
             upscale_window_size: None,
             console_fit_pending: false,
@@ -1987,8 +1987,8 @@ impl PocketLauncher {
                 });
             if old != self.gamepad_selected {
                 self.deck_nav_repeat = None;
-                self.deck_filter_press = None;
-                self.deck_start_press = None;
+                self.deck_menu_press = None;
+                self.deck_view_press = None;
                 let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
                 for key in keys {
                     self.release_gamepad_control(&key);
@@ -2187,6 +2187,7 @@ impl PocketLauncher {
                     }
                 }
             });
+            ui.label("In game: View = fullscreen / hold ESC (PocketPC) or brightness (Gizmondo); Menu = filter / hold exit. Gizmondo L1 = volume.");
             if ui.button("Apply Steam Deck preset").clicked() {
                 draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
                 draft.gamepad_fullscreen =
@@ -2590,14 +2591,19 @@ impl PocketLauncher {
             (available.width() * dpi).floor() as u32,
             (available.height() * dpi).floor() as u32,
         ];
-        let fit = if self.running_is_gizmondo {
-            crate::fullscreen_layout::integer_fit(physical, native)
+        let [left, top, width, height] = if cfg!(feature = "steam-deck") {
+            crate::fullscreen_layout::aspect_fit(physical, native)
         } else {
-            crate::fullscreen_layout::integer_fit_capped(physical, native, 4)
+            let fit = if self.running_is_gizmondo {
+                crate::fullscreen_layout::integer_fit(physical, native)
+            } else {
+                crate::fullscreen_layout::integer_fit_capped(physical, native, 4)
+            };
+            [fit.left, fit.top, fit.width, fit.height]
         };
         let rect = Rect::from_min_size(
-            available.min + Vec2::new(fit.left as f32, fit.top as f32) / dpi,
-            Vec2::new(fit.width as f32, fit.height as f32) / dpi,
+            available.min + Vec2::new(left as f32, top as f32) / dpi,
+            Vec2::new(width as f32, height as f32) / dpi,
         );
         self.paint_guest_frame(ui, rect);
         self.handle_pointer(ui.ctx(), &rect, guest_size);
@@ -3207,9 +3213,9 @@ impl PocketLauncher {
             self.send_input(InputEvent::StylusAim { x: 0, y: 0 });
         }
         self.stylus_last = (0, 0);
-        self.deck_start_press = None;
+        self.deck_view_press = None;
         self.deck_piano_release = None;
-        self.deck_filter_press = None;
+        self.deck_menu_press = None;
         self.gamepad_held.clear();
         for vk in self.held.drain_all() {
             self.send_input(InputEvent::KeyUp { vk });
@@ -3260,8 +3266,8 @@ impl PocketLauncher {
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
                 crate::gamepad::Event::Devices(devices) => {
                     self.deck_nav_repeat = None;
-                    self.deck_filter_press = None;
-                    self.deck_start_press = None;
+                    self.deck_menu_press = None;
+                    self.deck_view_press = None;
                     self.gamepad_devices = devices;
                     self.stylus_gamepad.retain(|(id, _), _| {
                         self.gamepad_devices.iter().any(|(device, _)| device == id)
@@ -3296,53 +3302,40 @@ impl PocketLauncher {
                     let key = (device, control.clone());
                     if !down {
                         if cfg!(feature = "steam-deck")
-                            && control == "Start"
+                            && control == "Select"
                             && self
-                                .deck_start_press
+                                .deck_view_press
                                 .as_ref()
                                 .is_some_and(|(id, _)| *id == device)
                         {
-                            if let Some((_, pressed_at)) = self.deck_start_press.take() {
+                            if let Some((_, pressed_at)) = self.deck_view_press.take() {
                                 if self.screen == Screen::Run
-                                    && self.running_is_gizmondo
                                     && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                                 {
-                                    let button = match crate::deck_navigation::start_action(
-                                        pressed_at.elapsed(),
-                                        true,
-                                    ) {
-                                        Some(crate::deck_navigation::StartAction::Volume) => {
-                                            GuestButton::GizPiano2
-                                        }
-                                        Some(crate::deck_navigation::StartAction::Brightness) => {
-                                            GuestButton::GizPiano3
-                                        }
-                                        None => unreachable!("released Start always has an action"),
-                                    };
-                                    self.pulse_deck_piano(device, button);
+                                    self.handle_deck_view(ctx, device, pressed_at.elapsed(), true);
                                 }
                             }
                         }
                         if cfg!(feature = "steam-deck")
-                            && control == "Select"
+                            && control == "Start"
                             && self
-                                .deck_filter_press
+                                .deck_menu_press
                                 .as_ref()
                                 .is_some_and(|(id, _)| *id == device)
                         {
-                            if let Some((_, pressed_at)) = self.deck_filter_press.take() {
+                            if let Some((_, pressed_at)) = self.deck_menu_press.take() {
                                 if self.screen == Screen::Run
                                     && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                                 {
-                                    match crate::deck_navigation::select_action(
+                                    match crate::deck_navigation::menu_action(
                                         pressed_at.elapsed(),
                                         true,
                                     ) {
-                                        Some(crate::deck_navigation::SelectAction::NextFilter) => {
+                                        Some(crate::deck_navigation::MenuAction::NextFilter) => {
                                             self.cycle_deck_upscale_filter(ctx, true)
                                         }
                                         Some(
-                                            crate::deck_navigation::SelectAction::ReturnToLibrary,
+                                            crate::deck_navigation::MenuAction::ReturnToLibrary,
                                         ) => self.return_to_library(ctx),
                                         None => {}
                                     }
@@ -3420,7 +3413,16 @@ impl PocketLauncher {
                             continue;
                         }
                     }
-                    if self.library.config().gamepad_toggles_fullscreen(&control) {
+                    let deck_reserved = cfg!(feature = "steam-deck")
+                        && self.screen == Screen::Run
+                        && (matches!(control.as_str(), "Start" | "Select")
+                            || pocket_library::keybindings::steam_deck_guest_button(
+                                &control,
+                                self.running_is_gizmondo,
+                            )
+                            .is_some());
+                    if !deck_reserved && self.library.config().gamepad_toggles_fullscreen(&control)
+                    {
                         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                         self.set_fullscreen(ctx, !fullscreen);
                         continue;
@@ -3430,24 +3432,12 @@ impl PocketLauncher {
                             self.deck_library_actions.push(control);
                             continue;
                         }
-                        if self.screen == Screen::Run
-                            && control == "Select"
-                            && !self
-                                .library
-                                .config()
-                                .gamepad_bindings
-                                .contains_key("Select")
-                        {
-                            self.deck_filter_press = Some((device, Instant::now()));
+                        if self.screen == Screen::Run && control == "Start" {
+                            self.deck_menu_press = Some((device, Instant::now()));
                             continue;
                         }
-                        if self.screen == Screen::Run
-                            && self.running_is_gizmondo
-                            && control == "Start"
-                            && self.library.config().gamepad_bindings.get("Start")
-                                == Some(&GuestButton::GizPiano2)
-                        {
-                            self.deck_start_press = Some((device, Instant::now()));
+                        if self.screen == Screen::Run && control == "Select" {
+                            self.deck_view_press = Some((device, Instant::now()));
                             continue;
                         }
                         if self.screen != Screen::Run && control == "East" {
@@ -3499,7 +3489,16 @@ impl PocketLauncher {
                     if self.screen != Screen::Run {
                         continue;
                     }
-                    if !self.running_is_gizmondo
+                    let deck_button = if cfg!(feature = "steam-deck") {
+                        pocket_library::keybindings::steam_deck_guest_button(
+                            &control,
+                            self.running_is_gizmondo,
+                        )
+                    } else {
+                        None
+                    };
+                    if deck_button.is_none()
+                        && !self.running_is_gizmondo
                         && self.library.config().stylus_stick.enabled
                         && self
                             .library
@@ -3512,7 +3511,13 @@ impl PocketLauncher {
                         self.stylus_gamepad.insert(key, 1.0);
                         continue;
                     }
-                    let Some(button) = self.library.config().gamepad_bindings.get(&control) else {
+                    let Some(button) = deck_button.or_else(|| {
+                        self.library
+                            .config()
+                            .gamepad_bindings
+                            .get(&control)
+                            .copied()
+                    }) else {
                         continue;
                     };
                     let vk = button.vk();
@@ -3541,15 +3546,41 @@ impl PocketLauncher {
         }
     }
 
+    fn handle_deck_view(
+        &mut self,
+        ctx: &egui::Context,
+        device: usize,
+        elapsed: Duration,
+        released: bool,
+    ) {
+        match crate::deck_navigation::view_action(elapsed, released) {
+            Some(crate::deck_navigation::ViewAction::ToggleFullscreen) => {
+                let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                self.set_fullscreen(ctx, !fullscreen);
+            }
+            Some(crate::deck_navigation::ViewAction::SecondaryKey) => {
+                self.pulse_deck_piano(
+                    device,
+                    if self.running_is_gizmondo {
+                        GuestButton::GizPiano3
+                    } else {
+                        GuestButton::Soft2
+                    },
+                );
+            }
+            None => {}
+        }
+    }
+
     fn pulse_deck_piano(&mut self, device: usize, button: GuestButton) {
         // Keep the press visible across frontend/guest polling slices. An
         // immediate down/up pair can otherwise disappear before the game polls.
         if let Some((previous_device, _)) = self.deck_piano_release.take() {
-            self.release_gamepad_control(&(previous_device, "DeckStartPulse".into()));
+            self.release_gamepad_control(&(previous_device, "DeckHostPulse".into()));
         }
         let vk = button.vk();
         self.gamepad_held
-            .insert((device, "DeckStartPulse".into()), vk);
+            .insert((device, "DeckHostPulse".into()), vk);
         if self.held.press(InputSource::Gamepad, vk) {
             self.send_input(InputEvent::KeyDown { vk });
         }
@@ -4098,25 +4129,21 @@ impl eframe::App for PocketLauncher {
         if let Some((device, release_at)) = self.deck_piano_release {
             if Instant::now() >= release_at {
                 self.deck_piano_release = None;
-                self.release_gamepad_control(&(device, "DeckStartPulse".into()));
-            }
-        }
-        if cfg!(feature = "steam-deck") && self.screen == Screen::Run && self.running_is_gizmondo {
-            if let Some((device, pressed_at)) = self.deck_start_press {
-                if crate::deck_navigation::start_action(pressed_at.elapsed(), false)
-                    == Some(crate::deck_navigation::StartAction::Brightness)
-                {
-                    self.deck_start_press = None;
-                    self.pulse_deck_piano(device, GuestButton::GizPiano3);
-                }
+                self.release_gamepad_control(&(device, "DeckHostPulse".into()));
             }
         }
         if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
-            if let Some((_, pressed_at)) = self.deck_filter_press {
-                if crate::deck_navigation::select_action(pressed_at.elapsed(), false)
-                    == Some(crate::deck_navigation::SelectAction::ReturnToLibrary)
+            if let Some((device, pressed_at)) = self.deck_view_press {
+                if crate::deck_navigation::view_action(pressed_at.elapsed(), false).is_some() {
+                    self.deck_view_press = None;
+                    self.handle_deck_view(ctx, device, pressed_at.elapsed(), false);
+                }
+            }
+            if let Some((_, pressed_at)) = self.deck_menu_press {
+                if crate::deck_navigation::menu_action(pressed_at.elapsed(), false)
+                    == Some(crate::deck_navigation::MenuAction::ReturnToLibrary)
                 {
-                    self.deck_filter_press = None;
+                    self.deck_menu_press = None;
                     self.return_to_library(ctx);
                 }
             }

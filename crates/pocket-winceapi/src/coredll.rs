@@ -36184,6 +36184,17 @@ mod pointer_capture_tests {
         wav.extend_from_slice(&(-12345i16).to_le_bytes());
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("select.wav"), &wav).unwrap();
+        // Capture submitted PCM: CPAL builds queue voices separately from the
+        // raw ring used by AudioTap, so draining that ring is not a sound test.
+        let capture = dir.path().join("submitted.wav");
+        k.audio.capture_to(&capture).unwrap();
+        let assert_pcm = |plays: usize| {
+            let bytes = std::fs::read(&capture).unwrap();
+            assert_eq!(&bytes[..4], b"RIFF");
+            assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 8000);
+            assert_eq!(&bytes[44..], wav[44..].repeat(plays));
+        };
+
         k.vfs.mount("\\", dir.path());
         cpu.write_mem(
             0x1000,
@@ -36207,9 +36218,7 @@ mod pointer_capture_tests {
             ),
             DispatchOutcome::ReturnedR0(1)
         );
-        let mut pcm = [0i16; 2];
-        assert_eq!(k.audio.tap().drain_into(&mut pcm), 2);
-        assert_eq!(pcm, [12345, -12345]);
+        assert_pcm(1);
         assert_eq!(
             call(
                 &mut cpu,
@@ -36221,8 +36230,7 @@ mod pointer_capture_tests {
             ),
             DispatchOutcome::ReturnedR0(1)
         );
-        assert_eq!(k.audio.tap().drain_into(&mut pcm), 2);
-        assert_eq!(pcm, [12345, -12345]);
+        assert_pcm(2);
         cpu.write_mem(0x1000, b"\\select.wav\0").unwrap();
         assert_eq!(
             call(
@@ -36235,8 +36243,7 @@ mod pointer_capture_tests {
             ),
             DispatchOutcome::ReturnedR0(1)
         );
-        assert_eq!(k.audio.tap().drain_into(&mut pcm), 2);
-        assert_eq!(pcm, [12345, -12345]);
+        assert_pcm(3);
     }
     #[test]
     fn wide_long_obeys_bases_limits_and_exact_end_pointer() {

@@ -489,6 +489,26 @@ pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, Guest
     bindings
 }
 
+/// Platform-specific Deck bindings override only the newly assigned controls.
+/// All other Gizmondo controls keep the user's saved mapping.
+pub fn steam_deck_guest_button(control: &str, gizmondo: bool) -> Option<GuestButton> {
+    use GuestButton::*;
+    if gizmondo {
+        return (control == "LeftTrigger").then_some(GizPiano2);
+    }
+    match control {
+        "RightTrigger2" => Some(Action),
+        "LeftTrigger2" => Some(PocketPcApp2),
+        "RightTrigger" => Some(PocketPcApp3),
+        "LeftTrigger" => Some(PocketPcApp4),
+        "South" => Some(ButtonA),
+        "East" => Some(ButtonB),
+        "West" => Some(ButtonC),
+        "North" => Some(Soft1), // TAB
+        _ => None,
+    }
+}
+
 /// Upgrade only the exact first factory Deck preset, preserving user mappings.
 pub fn migrate_steam_deck_gamepad_bindings(
     bindings: &mut std::collections::BTreeMap<String, GuestButton>,
@@ -511,6 +531,36 @@ pub fn default_gamepad_fullscreen() -> Option<String> {
 #[cfg(test)]
 mod controller_tests {
     use super::*;
+    #[test]
+    fn deck_pocketpc_keys_and_gizmondo_volume_are_separate() {
+        use GuestButton::*;
+        for (control, button) in [
+            ("RightTrigger2", Action),
+            ("LeftTrigger2", PocketPcApp2),
+            ("RightTrigger", PocketPcApp3),
+            ("LeftTrigger", PocketPcApp4),
+            ("South", ButtonA),
+            ("East", ButtonB),
+            ("West", ButtonC),
+            ("North", Soft1),
+        ] {
+            assert_eq!(steam_deck_guest_button(control, false), Some(button));
+            assert_eq!(
+                steam_deck_guest_button(control, true),
+                if control == "LeftTrigger" {
+                    Some(GizPiano2)
+                } else {
+                    None
+                }
+            );
+        }
+        for control in ["Start", "Select", "DPadUp", "RightStickLeft"] {
+            assert_eq!(steam_deck_guest_button(control, false), None);
+            assert_eq!(steam_deck_guest_button(control, true), None);
+        }
+        assert_eq!(steam_deck_guest_button("North", false).unwrap().vk(), 0x09);
+    }
+
     #[test]
     fn legacy_deck_factory_preset_migrates_without_overwriting_custom_controls() {
         let current = steam_deck_gamepad_bindings();

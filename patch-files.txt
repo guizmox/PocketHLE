@@ -33,3 +33,6 @@ frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivit
 frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
 crates\pocket-winceapi\src\copilot.rs
 frontends\pocket-android-jni\src\runner_tests.rs
+frontends\pocket-desktop\src\fullscreen_layout.rs
+crates\pocket-library\src\keybindings.rs
+frontends\pocket-desktop\src\deck_navigation.rs

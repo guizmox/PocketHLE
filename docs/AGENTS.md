@@ -3559,3 +3559,24 @@ FAIL checks=0x81 failures=0x19. Keep exact counters and zero-failure
 assertions in positive runner tests, including desktop VFSTEST.
 CoPilot config priority uses only the first available config; use iterator
 next rather than a for loop with unconditional break (clippy never_loop).
+
+## Steam Deck fullscreen and sound CI (2026-10-22)
+
+Deck fullscreen fills the largest aspect-preserving rectangle with fractional
+scaling, including downscaling VGA; do not cap it at whole multiples. Other
+desktop editions retain their integer policy. Guest dimensions/stylus transform
+stay unchanged. New Deck button mappings are only proposed diagrams pending
+user validation; no input mapping changes in this patch.
+The legacy PlaySound regression test checks captured submitted PCM rather
+than draining AudioTap's raw ring: CPAL queues voices separately. Assert all
+three API calls' exact PCM and sample rate with both feature configurations.
+
+## Approved Deck controls (2026-10-22)
+
+View (left/Select): release before 650ms toggles fullscreen; hold sends ESC
+for PocketPC or Piano3 brightness for Gizmondo. Menu (right/Start): tap cycles
+filter, hold exits to library. Hold consumes tap; no guest Start/Select leaks.
+Gizmondo L1 sends Piano2 volume; all other saved Gizmondo bindings stay.
+PocketPC R2=Action,L2=APP2,R1=APP3,L1=APP4,A=A,B=B,X=C,Y=TAB. These reserved
+controls take precedence over older L1 fullscreen assignments and stylus
+bindings; stick/dpad mappings and inverse pointer transform remain unchanged.
