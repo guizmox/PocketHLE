@@ -91,7 +91,7 @@ fn android_runner_ramtest_processes_and_orphan_complete() {
     for (name, result) in [
         (
             "RAMTEST.TXT",
-            "RAMTEST_RESULT PASS checks=0x00000088 failures=0x00000000",
+            "RAMTEST_RESULT PASS checks=0x00000091 failures=0x00000000",
         ),
         ("PROCTEST.TXT", "PROCTEST_RESULT PASS"),
         ("ORPHANTEST.TXT", "ORPHANTEST_RESULT PASS"),
@@ -121,7 +121,7 @@ fn android_runner_vfstest_sharing_rename_quota_and_repeat_cleanup() {
         let text = report(&files.0, "VFSTEST.TXT");
         println!("{text}");
         assert!(
-            text.contains("VFSTEST_RESULT PASS checks=0x0000006c failures=0x00000000"),
+            text.contains("VFSTEST_RESULT PASS checks=0x00000082 failures=0x00000000"),
             "{text}"
         );
         assert!(!text.lines().any(|l| l.starts_with("FAIL ")), "{text}");
@@ -207,15 +207,15 @@ fn disabled_process_launch_reproduces_android_vfs_report() {
     .unwrap();
     let text = report(&files.0, "VFSTEST.TXT");
     println!("{text}");
-    // VFSTEST v3 adds a failing lifecycle-cycle check to this deliberately
-    // broken no-process-launch path: 25 failures, not the previous 24.
+    // VFSTEST v4 includes 129 checks on this deliberately broken
+    // no-process-launch path; its expected 25 failures remain unchanged.
     assert!(
         text.lines()
             .any(|line| line == "FAIL cycles.64_duplicate_flush_close_delete"),
         "{text}"
     );
     assert!(
-        text.contains("VFSTEST_RESULT FAIL checks=0x0000006b failures=0x00000019"),
+        text.contains("VFSTEST_RESULT FAIL checks=0x00000081 failures=0x00000019"),
         "{text}"
     );
 }

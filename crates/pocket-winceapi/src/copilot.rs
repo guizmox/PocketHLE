@@ -300,14 +300,13 @@ fn find_data_from_config(vfs: &Vfs, selected_config: Option<&str>) -> DataCheck 
             .iter()
             .filter_map(|path| read_guest_file(vfs, path)),
     );
-    for cfg in configs {
+    if let Some(cfg) = configs.into_iter().next() {
         if let Some(version) = cfg_value(&cfg, "Version", "Major") {
             expected_version = Some(version.to_string());
         }
         if let Some(dir) = cfg_value(&cfg, "Directories", "LRGeoDir").and_then(guest_dir) {
             dirs.push(dir);
         }
-        break;
     }
     dirs.extend(DEFAULT_DATA_DIRS.iter().map(|path| (*path).to_string()));
 

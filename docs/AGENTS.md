@@ -3550,3 +3550,12 @@ in normal settings. Preserve serialized values; this is a UI-only change.
 Hide game screen geometry when the shared Gizmondo classifier identifies
 the title, leaving PocketPC's display profiles accessible. GPU labels no
 longer say experimental in global or per-game settings.
+
+## CI diagnostic fixture counters (2026-10-22)
+
+Uploaded CI logs show current RAMTEST v9 PASS checks=0x91, VFSTEST v4
+PASS checks=0x82, and intentionally disabled process-launch VFSTEST
+FAIL checks=0x81 failures=0x19. Keep exact counters and zero-failure
+assertions in positive runner tests, including desktop VFSTEST.
+CoPilot config priority uses only the first available config; use iterator
+next rather than a for loop with unconditional break (clippy never_loop).

@@ -1275,7 +1275,7 @@ mod launcher_return_tests {
             .unwrap();
         let report = std::fs::read_to_string(report_path).unwrap();
         assert!(
-            report.contains("VFSTEST_RESULT PASS checks=0x0000006c failures=0x00000000")
+            report.contains("VFSTEST_RESULT PASS checks=0x00000082 failures=0x00000000")
                 && !report.lines().any(|line| line.starts_with("FAIL ")),
             "{report}"
         );
