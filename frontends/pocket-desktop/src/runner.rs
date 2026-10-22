@@ -279,11 +279,22 @@ impl Runner {
                 ));
             }
 
-            if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
+            let registry_result = (|| {
+                process
+                    .state
+                    .registry
+                    .configure_persistence(&registry_path)?;
+                if is_gizmondo && guest_path.is_none() {
+                    process.state.registry.reset_gizmondo_backlight()?;
+                    process.state.sync_backlight();
+                }
+                Ok::<(), std::io::Error>(())
+            })();
+            if let Err(e) = registry_result {
                 if let Some(startup) = startup.as_mut() {
                     startup.error = 29;
                 }
-                summary_lines.push(format!("Cannot load device registry: {e}"));
+                summary_lines.push(format!("Cannot initialize device registry: {e}"));
                 return (
                     RunOutcome {
                         summary: summary_lines.join("\n"),

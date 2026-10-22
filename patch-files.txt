@@ -1,22 +1,21 @@
-PocketHLE — lancement générique des applications PocketPC sans installation CAB
+PocketHLE — Gizmondo : deuxième cran de luminosité à chaque lancement
 
-Copier ces TROIS fichiers à leur emplacement dans le dépôt, puis recompiler :
+Lot cumulatif par rapport aux sources crates(7).zip : conserve également le correctif générique de lancement ZIP PocketPC livré précédemment.
+
+Copier/remplacer les quatre fichiers puis recompiler :
+crates/pocket-kernel/src/registry.rs
 crates/pocket-library/src/lib.rs
-frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-desktop/src/runner.rs
+frontends/pocket-android-jni/src/runner.rs
 
-Les deux fichiers frontends/ font partie du correctif. Remplacer uniquement pocket-library ne modifie pas le lancement du GUI.
+Au lancement d'un jeu Gizmondo depuis les lanceurs PC ou Android, après chargement du registre persistant et avant exécution du programme :
+HKCU\ControlPanel\Backlight
+  Level = DWORD 11
+  OnLevel = DWORD 11
+  DimLevel = DWORD 0
 
-Cause : les applications ZIP sans install_dir ne recevaient pas de montage de sauvegarde au-dessus de leurs fichiers installés. Une ouverture en lecture/écriture pouvait échouer malgré la copie sur écriture déjà présente dans le VFS. Le nom de module et le répertoire courant pouvaient également rester ceux du programme fictif Game.exe.
+Ces valeurs correspondent au CRAN 2. Le numéro de cran n'est pas la valeur brute de OnLevel. Les valeurs sont réécrites et le registre sauvegardé. Le rétroéclairage du framebuffer est synchronisé immédiatement.
 
-Correction : chemin de module réel, répertoire courant du véritable exécutable (y compris les sous-dossiers), montage de sauvegarde isolé pour les applications PocketPC portables. Chemins CAB et emplacements de sauvegarde déclarés conservés. Les cartes Gizmondo sans install_dir gardent leurs montages SD/Flash Disk.
+La remise à zéro intervient une fois au lancement principal. Les processus enfants héritent des réglages vivants. Les jeux restent libres de changer la luminosité pendant leur session ; le prochain lancement Gizmondo rétablit le cran 2. Aucun reset ajouté aux lancements PocketPC.
 
-Aucune détection de Cube, modification d'exécutable, adaptation de carte ou modification du moteur OpenGL. Les entrées déjà importées bénéficient du correctif au prochain lancement : aucune réimportation requise.
-
-Validation :
-- 106 tests pocket-library réussis, aucun ignoré (dont quatre nouveaux tests de chemins et de compatibilité).
-- cargo check -p pocket-android-jni --no-default-features réussi sur l'hôte ; aucune exécution sur appareil Android revendiquée.
-- ZIP Cube fourni importé via Library, puis lancé par le véritable runner PC, avec Unicorn et le rendu OpenGL actif (Mesa llvmpipe).
-- Carte metl3.cgz chargée, scène texturée affichée en 640x480, arrêt propre après 35 secondes.
-- Copie de sauvegarde de metl3.cgz de 8602 octets identique à la carte originale ; exécutable original inchangé.
-- Vérifications effectuées dans un profil local de diagnostic ; les ajustements temporaires de compilation et les sondes ne sont pas livrés.
+Validation : 13 tests du registre réussis, dont le nouveau test de remise à zéro sur plusieurs lancements persistants et de conservation des autres valeurs ; test API registre/événement/luminosité réussi. Vérification de compilation du runner PC via une sonde sans GUI et cargo check Android --no-default-features réussis. Les sondes et ajustements temporaires de compilation ne sont pas inclus.

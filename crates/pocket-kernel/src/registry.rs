@@ -305,6 +305,25 @@ impl Registry {
         Ok(())
     }
 
+    /// Start a Gizmondo game at the second brightness notch, overriding
+    /// values persisted by the preceding game. Call after loading persistence,
+    /// once for the root launch; child processes inherit the live settings.
+    pub fn reset_gizmondo_backlight(&mut self) -> std::io::Result<()> {
+        for (name, value) in [("Level", 11), ("OnLevel", 11), ("DimLevel", 0)] {
+            if !self.set_value(
+                r"HKCU\ControlPanel\Backlight",
+                name,
+                RegistryValue::Dword(value),
+            ) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "Cannot reset Gizmondo backlight in the device registry",
+                ));
+            }
+        }
+        self.flush()
+    }
+
     /// Publish a complete snapshot using a temporary file on the same volume.
     /// Keep the previous snapshot intact if writing or renaming fails.
     pub fn flush(&self) -> std::io::Result<()> {
@@ -911,6 +930,47 @@ mod tests {
             );
             assert_eq!(loaded.value(key, "DimLevel"), Some(RegistryValue::Dword(0)));
             assert!(loaded.handles.is_empty());
+        }
+    }
+
+    #[test]
+    fn gizmondo_launch_resets_persisted_brightness_each_time_without_touching_other_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let key = r"HKCU\ControlPanel\Backlight";
+        let mut previous = Registry::with_device_defaults();
+        previous.configure_persistence(&path).unwrap();
+        previous.set_value(r"HKCU\Game", "Keep", RegistryValue::Dword(42));
+        for level in [31, 1, 21] {
+            previous.set_value(key, "OnLevel", RegistryValue::Dword(level));
+            previous.set_value(key, "Level", RegistryValue::Dword(level));
+            previous.set_value(key, "DimLevel", RegistryValue::Dword(20));
+            previous.flush().unwrap();
+            let mut launched = Registry::with_device_defaults();
+            launched.configure_persistence(&path).unwrap();
+            assert_eq!(
+                launched.value(key, "OnLevel"),
+                Some(RegistryValue::Dword(level))
+            );
+            launched.reset_gizmondo_backlight().unwrap();
+            for name in ["Level", "OnLevel"] {
+                assert_eq!(launched.value(key, name), Some(RegistryValue::Dword(11)));
+            }
+            assert_eq!(
+                launched.value(key, "DimLevel"),
+                Some(RegistryValue::Dword(0))
+            );
+            assert_eq!(
+                launched.value(r"HKCU\Game", "Keep"),
+                Some(RegistryValue::Dword(42))
+            );
+            let mut reloaded = Registry::with_device_defaults();
+            reloaded.configure_persistence(&path).unwrap();
+            assert_eq!(
+                reloaded.value(key, "OnLevel"),
+                Some(RegistryValue::Dword(11))
+            );
+            previous = launched;
         }
     }
 

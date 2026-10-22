@@ -486,8 +486,19 @@ fn run_process(
             gps.set_allowed(true);
             log::info!("GPS1 fixed simulation activated on Android");
         }
-        if let Err(e) = process.state.registry.configure_persistence(&registry_path) {
-            summary_lines.push(format!("Cannot load device registry: {e}"));
+        let registry_result = (|| {
+            process
+                .state
+                .registry
+                .configure_persistence(&registry_path)?;
+            if is_gizmondo && guest_path.is_none() {
+                process.state.registry.reset_gizmondo_backlight()?;
+                process.state.sync_backlight();
+            }
+            Ok::<(), std::io::Error>(())
+        })();
+        if let Err(e) = registry_result {
+            summary_lines.push(format!("Cannot initialize device registry: {e}"));
             return (summary_lines.join("\n"), 0xc0000135);
         }
         let (preset, platform) = launcher_config.device_identity_hex(is_gizmondo);
