@@ -3490,3 +3490,24 @@ GetCursorPos returns the consumed stylus screen position. MSG.pt and per-thread
 GetMessagePos preserve screen coordinates independently of client-relative
 mouse LPARAM, including negative captured coordinates. Keyboard messages use
 the current stylus point; querying another thread must not reuse its last MSG.
+
+IMGDECMP bitmap outputs are DIB sections: honor iBitDepth, DWORD-aligned
+bottom-up rows and guest-readable bmBits returned by GetObject. Keep a separate
+RGB565 host cache, and release the DIB heap allocation on DeleteObject. Never
+return a DDB with NULL bits to a caller requesting decoded pixel data.
+
+sndPlaySound takes two arguments; PlaySound takes three. Keep separate ANSI
+and Unicode wrappers. SND_MEMORY is a RIFF/WAVE image, independent of PE
+resources. Test the complete SND_RESOURCE mask, not its shared MEMORY bit.
+
+## Posted broadcasts and Gizmondo data notifications (2026-10-22)
+
+HWND_BROADCAST (0xffff) is a recipient set, never a window that can be passed
+to DispatchMessageW. enqueue_window_message snapshots all registered top-level
+windows, including hidden/pop-up windows, excludes WS_CHILD, and posts one
+copy with the real HWND to each owning thread. PostMessageW and the Gizmondo
+shell's GPRS_STATUS/GT_STATUS notifications share this generic route. Keep the
+256-message queue bound and reject a guest broadcast atomically if it cannot fit.
+Do not restore fallback dispatch to arbitrary WndProc for invalid/desktop HWNDs;
+that caused the CoPilot startup crash. This fixes notification delivery, not
+HTTP/TLS or a proof that a remote server is reachable.

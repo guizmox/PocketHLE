@@ -14,14 +14,9 @@ pub(crate) fn message(ctx: &mut CallCtx<'_>, hwnd: u32, message: u32, value: u32
         if let Some(available) = ctx.kernel.internet.gprs_shell_network_available() {
             let connected = available && value != 0;
             ctx.kernel.internet.gprs_connected = connected;
-            if ctx.kernel.posted_messages.len() < 256 {
-                ctx.kernel.posted_messages.push_back((
-                    0xffff,
-                    crate::coredll::registered_window_message_id("GPRS_STATUS"),
-                    if connected { 0x1f9c } else { 0x1f9d },
-                    u32::from(connected),
-                ));
-            }
+            crate::coredll::enqueue_window_message(ctx.kernel, 0xffff,
+                crate::coredll::registered_window_message_id("GPRS_STATUS"),
+                if connected { 0x1f9c } else { 0x1f9d }, u32::from(connected));
             return true;
         }
     }
@@ -29,17 +24,9 @@ pub(crate) fn message(ctx: &mut CallCtx<'_>, hwnd: u32, message: u32, value: u32
         return false;
     }
     let flags = status(ctx);
-    ctx.kernel.shell_status = Some(if ctx.kernel.posted_messages.len() < 256 {
-        flags
-    } else {
-        u32::MAX
-    });
     let reply = crate::coredll::registered_window_message_id("GT_STATUS");
-    if ctx.kernel.posted_messages.len() < 256 {
-        ctx.kernel
-            .posted_messages
-            .push_back((0xffff, reply, flags, 0));
-    }
+    let queued = crate::coredll::enqueue_window_message(ctx.kernel, 0xffff, reply, flags, 0);
+    ctx.kernel.shell_status = Some(if queued { flags } else { u32::MAX });
     true
 }
 
@@ -49,13 +36,8 @@ pub(crate) fn service(ctx: &mut CallCtx<'_>) {
         return;
     };
     let flags = status(ctx);
-    if flags != previous && ctx.kernel.posted_messages.len() < 256 {
-        ctx.kernel.posted_messages.push_back((
-            0xffff,
-            crate::coredll::registered_window_message_id("GT_STATUS"),
-            flags,
-            0,
-        ));
+    if flags != previous && crate::coredll::enqueue_window_message(ctx.kernel, 0xffff,
+        crate::coredll::registered_window_message_id("GT_STATUS"), flags, 0) {
         ctx.kernel.shell_status = Some(flags);
     }
 }
@@ -67,6 +49,7 @@ mod tests {
     #[test]
     fn shell_status_tracks_services_without_fabricating_gsm_or_sim() {
         let (mut cpu, mut k, mut d) = setup();
+        k.window_procs.insert(0x1234, 0x2000);
         k.vfs.gps_service().set_allowed(true);
         let request = crate::coredll::registered_window_message_id("GT_GETSTATUS");
         let reply = crate::coredll::registered_window_message_id("GT_STATUS");
@@ -81,7 +64,7 @@ mod tests {
             ),
             DispatchOutcome::ReturnedR0(0)
         );
-        assert_eq!(k.posted_messages.pop_front(), Some((0xffff, reply, 10, 0)));
+        assert_eq!(k.posted_messages.pop_front(), Some((0x1234, reply, 10, 0)));
         k.vfs.bluetooth.service.enable(false);
         let thunk = pocket_kernel::Thunk {
             thunk_va: 0,
@@ -99,7 +82,7 @@ mod tests {
         service(&mut ctx);
         assert_eq!(
             ctx.kernel.posted_messages.pop_front(),
-            Some((0xffff, reply, 2, 0))
+            Some((0x1234, reply, 2, 0))
         );
         assert!(ctx.kernel.posted_messages.is_empty());
     }

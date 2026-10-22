@@ -42,7 +42,6 @@ mod toolbar;
 mod file_dialog;
 mod trackbar;
 mod tab_control;
-use image::GenericImageView;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
 use pocket_kernel::controls::{ControlAction, ControlClass, Controls};
@@ -587,9 +586,9 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "EnableWindow", 1, one_returning);
     d.register_constant(dll, "MessageBeep", 1, one_returning);
     d.register_handler(dll, "PlaySoundW", play_sound_w);
-    d.register_handler(dll, "PlaySoundA", play_sound_w);
-    d.register_handler(dll, "sndPlaySoundW", play_sound_w);
-    d.register_handler(dll, "sndPlaySoundA", play_sound_w);
+    d.register_handler(dll, "PlaySoundA", play_sound_a);
+    d.register_handler(dll, "sndPlaySoundW", snd_play_sound_w);
+    d.register_handler(dll, "sndPlaySoundA", snd_play_sound_a);
     // Real-time audio backend (cpal). When the host has no output
     // device or the `audio-cpal` feature is disabled these silently
     // act as no-ops, so games keep running. Otherwise PCM samples
@@ -10563,6 +10562,29 @@ fn call_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 /// `GetMessageW` / `PeekMessageW` later. The wave-out driver uses the
 /// same queue to report finished buffers, so a real implementation
 /// here is what lets `MM_WOM_DONE` reach a game's message loop.
+/// HWND_BROADCAST is a destination set, never a dispatchable window handle.
+/// Snapshot the top-level recipients at posting time, including hidden/pop-up
+/// windows, and let each recipient's owning thread retrieve its own copy.
+pub(crate) fn enqueue_window_message(kernel: &mut KernelState, hwnd: u32, message: u32, wp: u32, lp: u32) -> bool {
+    let mut recipients = if hwnd == 0xffff {
+        let mut windows: Vec<u32> = kernel.window_procs.iter()
+            .filter(|(window, proc)| **proc != 0
+                && kernel.window_styles.get(window).is_none_or(|style| style.0 & 0x4000_0000 == 0)
+                && !kernel.controls.get(**window).is_some_and(|control| control.style & 0x4000_0000 != 0))
+            .map(|(&window, _)| window).collect();
+        // Preserve the legacy single-window representation until a real HWND
+        // is registered; never fall back when explicit recipients exist.
+        if windows.is_empty() && kernel.window_procs.is_empty() && kernel.wnd_proc != 0 {
+            windows.push(FAKE_HWND);
+        }
+        windows
+    } else { vec![hwnd] };
+    recipients.sort_unstable();
+    if kernel.posted_messages.len().saturating_add(recipients.len()) > 256 { return false; }
+    kernel.posted_messages.extend(recipients.into_iter().map(|window| (window, message, wp, lp)));
+    true
+}
+
 fn post_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let message = ctx.arg_u32(1)?;
@@ -10571,12 +10593,9 @@ fn post_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if crate::shell::message(ctx, hwnd, message, wparam) {
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
-    // Bound the queue: a guest that posts faster than it pumps would
-    // otherwise grow it without limit.
-    if ctx.kernel.posted_messages.len() < 256 {
-        ctx.kernel
-            .posted_messages
-            .push_back((hwnd, message, wparam, lparam));
+    if !enqueue_window_message(ctx.kernel, hwnd, message, wparam, lparam) {
+        set_thread_error(ctx, 1816); // ERROR_NOT_ENOUGH_QUOTA; no partial broadcast.
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -11936,6 +11955,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 /// Build a synthetic `MSG` blob (28 bytes on 32-bit Windows) and write
 /// it into the guest pointer. `message` selects which window message
 /// (e.g. `WM_PAINT = 0x000F` or `WM_QUIT = 0x0012`).
+#[cfg(test)]
 fn write_synthetic_msg(
     cpu: &mut dyn pocket_cpu::Cpu,
     lp_msg: u32,
@@ -14947,7 +14967,11 @@ fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let palette = ctx.kernel.gdi.palette(h).is_some();
+    let dib_bits = ctx.kernel.gdi.bitmap(h).and_then(|b| b.dib_bits_va);
     let deleted = ctx.kernel.gdi.delete(h);
+    if deleted && ctx.kernel.gdi.bitmap(h).is_none() {
+        if let Some(bits) = dib_bits {ctx.kernel.heap.free(bits);}
+    }
     Ok(DispatchOutcome::ReturnedR0(if palette {
         deleted as u32
     } else {
@@ -17212,6 +17236,22 @@ fn get_window_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// old implementation returned TRUE without decoding anything, which made
 /// every resource-backed effect silently disappear.
 fn play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (sound,module,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?,ctx.arg_u32(2)?);
+    play_sound_impl(ctx,sound,module,flags,true)
+}
+fn play_sound_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (sound,module,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?,ctx.arg_u32(2)?);
+    play_sound_impl(ctx,sound,module,flags,false)
+}
+fn snd_play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (sound,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?);
+    play_sound_impl(ctx,sound,0,flags,true)
+}
+fn snd_play_sound_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (sound,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?);
+    play_sound_impl(ctx,sound,0,flags,false)
+}
+fn play_sound_impl(ctx: &mut CallCtx<'_>, sound:u32, module:u32, flags:u32, wide:bool) -> Result<DispatchOutcome, KernelError> {
     const SND_ASYNC: u32 = 0x0001;
     const SND_LOOP: u32 = 0x0008;
     const SND_NOSTOP: u32 = 0x0010;
@@ -17219,9 +17259,6 @@ fn play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     const SND_RESOURCE: u32 = 0x0004_0004;
     const SND_MEMORY: u32 = 0x0004;
 
-    let sound = ctx.arg_u32(0)?;
-    let _hmod = ctx.arg_u32(1)?;
-    let flags = ctx.arg_u32(2)?;
     if sound == 0 {
         if flags & SND_PURGE != 0 || flags == 0 {
             ctx.kernel.audio.flush();
@@ -17229,10 +17266,11 @@ fn play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
-    if flags & SND_RESOURCE != 0 {
-        let name = read_wide_resource_key(ctx, sound)?;
+    if flags & SND_RESOURCE == SND_RESOURCE {
+        let name = if wide {read_wide_resource_key(ctx,sound)?} else {if sound<=0xffff {ResourceKey::Id(sound)} else {ResourceKey::Name(crate::crt_ansi::decode(&read_cstr(ctx,sound,260)?))}};
         if let Some((resource, base)) =
-            lookup_resource(ctx.kernel, _hmod, &ResourceKey::Id(10), &name)
+            lookup_resource(ctx.kernel, module, &ResourceKey::Name("WAVE".into()), &name)
+                .or_else(|| lookup_resource(ctx.kernel, module, &ResourceKey::Id(10), &name))
         {
             let va = base.wrapping_add(resource.data_rva);
             let bytes = ctx.cpu.read_mem(va, resource.size)?;
@@ -17249,22 +17287,16 @@ fn play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let bytes = if flags & SND_MEMORY != 0 {
-        let size = ctx
-            .kernel
-            .resources
-            .iter()
-            .find(|e| e.ty == ResourceKey::Id(10))
-            .map(|e| e.size)
-            .unwrap_or(0);
-        if size == 0 {
-            Vec::new()
-        } else {
-            ctx.cpu.read_mem(sound, size)?
-        }
+        // SND_MEMORY points at a RIFF/WAVE image, not a resource-table entry.
+        let header=ctx.cpu.read_mem(sound,12)?;
+        if &header[..4]!=b"RIFF" || &header[8..12]!=b"WAVE" {return Ok(DispatchOutcome::ReturnedR0(0));}
+        let Some(size)=u32::from_le_bytes(header[4..8].try_into().unwrap()).checked_add(8)
+            .filter(|n| (12..=64*1024*1024).contains(n)) else {return Ok(DispatchOutcome::ReturnedR0(0));};
+        ctx.cpu.read_mem(sound,size)?
     } else {
-        let path = read_wstr(ctx, sound, 260).unwrap_or_default();
-        let path = String::from_utf16_lossy(&path);
-        read_guest_file(ctx, &path).unwrap_or_default()
+        let path=if wide {String::from_utf16_lossy(&read_wstr(ctx,sound,260)?)}
+            else {crate::crt_ansi::decode(&read_cstr(ctx,sound,260)?)};
+        read_guest_file(ctx,&path).unwrap_or_default()
     };
     let ok = if bytes.is_empty() {
         false
@@ -24854,15 +24886,16 @@ mod tests {
         }
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
+        kernel.window_procs.insert(FAKE_HWND, 0x1000);
         let thunk = dummy_thunk();
         kernel.internet = internet::State::with_backend(std::sync::Arc::new(Host));
         let connect = registered_window_message_id("GPRS_CONNECT");
         let status = registered_window_message_id("GPRS_STATUS");
         assert_eq!(connect, 59280); // ID observed in the original Colors client.
         for (gizmondo, request, expected) in [
-            (false, 1, (0xffff, connect, 1, 0)),
-            (true, 1, (0xffff, status, 0x1f9c, 1)),
-            (true, 0, (0xffff, status, 0x1f9d, 0)),
+            (false, 1, (FAKE_HWND, connect, 1, 0)),
+            (true, 1, (FAKE_HWND, status, 0x1f9c, 1)),
+            (true, 0, (FAKE_HWND, status, 0x1f9d, 0)),
         ] {
             if gizmondo {
                 kernel.internet.set_gprs_enabled(true);
@@ -24905,7 +24938,7 @@ mod tests {
         post_message_w(&mut ctx).unwrap();
         assert_eq!(
             ctx.kernel.posted_messages.pop_front(),
-            Some((0xffff, status, 0x1f9d, 0))
+            Some((FAKE_HWND, status, 0x1f9d, 0))
         );
     }
     use super::*;
@@ -35747,6 +35780,26 @@ mod pocket_menu_tests {
 mod pointer_capture_tests {
     use super::*;
     #[test]
+    fn legacy_sound_uses_two_arguments_and_memory_wav_is_not_a_resource() {
+        use crate::bluetooth::tests::{call,setup};use pocket_cpu::Cpu;
+        let (mut cpu,mut k,mut d)=setup();
+        let mut wav=Vec::new();wav.extend_from_slice(b"RIFF");wav.extend_from_slice(&40u32.to_le_bytes());wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());wav.extend_from_slice(&1u16.to_le_bytes());wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());wav.extend_from_slice(&16000u32.to_le_bytes());wav.extend_from_slice(&2u16.to_le_bytes());wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");wav.extend_from_slice(&4u32.to_le_bytes());wav.extend_from_slice(&12345i16.to_le_bytes());wav.extend_from_slice(&(-12345i16).to_le_bytes());
+        let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("select.wav"),&wav).unwrap();k.vfs.mount("\\",dir.path());
+        cpu.write_mem(0x1000,&"\\select.wav".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();
+        cpu.write_mem(0x1800,&wav).unwrap();
+        // R2 contains unrelated caller data: sndPlaySound must never read it as flags.
+        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","sndPlaySoundW",&[0x1000,3,0x40004]),DispatchOutcome::ReturnedR0(1));
+        let mut pcm=[0i16;2];assert_eq!(k.audio.tap().drain_into(&mut pcm),2);assert_eq!(pcm,[12345,-12345]);
+        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","PlaySoundW",&[0x1800,0,5]),DispatchOutcome::ReturnedR0(1));
+        assert_eq!(k.audio.tap().drain_into(&mut pcm),2);assert_eq!(pcm,[12345,-12345]);
+        cpu.write_mem(0x1000,b"\\select.wav\0").unwrap();
+        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","sndPlaySoundA",&[0x1000,3,0x40004]),DispatchOutcome::ReturnedR0(1));
+        assert_eq!(k.audio.tap().drain_into(&mut pcm),2);assert_eq!(pcm,[12345,-12345]);
+    }
+    #[test]
     fn wide_long_obeys_bases_limits_and_exact_end_pointer() {
         for (text,base,value,end) in [("  -75%",10,-75,5),("0x2a!",0,42,4),("0779",0,63,3),("xyz",10,0,0),(" +",10,0,0),("0x",0,0,1),("12",1,0,0),("2147483648!",10,i32::MAX,10),("-2147483649x",10,i32::MIN,11),("z!",36,35,1)] {
             assert_eq!(parse_wide_long(&text.encode_utf16().collect::<Vec<_>>(),base),(value,end),"{text}");
@@ -35878,5 +35931,46 @@ mod pointer_capture_tests {
         assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(123));
         discard_window_metadata(&mut ctx,&123);
         assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+    }
+}
+
+#[cfg(test)]
+mod broadcast_delivery_tests {
+    use super::*;
+    use super::tests::{fresh_kernel, dummy_thunk};
+    use pocket_cpu::stub::StubCpu;
+
+    #[test]
+    fn posted_broadcast_reaches_each_top_level_window_on_its_own_thread() {
+        let mut kernel = fresh_kernel();
+        kernel.pending_startup.clear(); kernel.pending_create = None;
+        for (window, thread, style) in [(0x101,0,0), (0x102,1,0x80000000), (0x103,0,0x40000000)] {
+            kernel.window_procs.insert(window, 0x2000 + window);
+            kernel.window_styles.insert(window,(style,0));
+            kernel.window_threads.insert(window,thread);
+        }
+        assert!(enqueue_window_message(&mut kernel,0xffff,0xc123,7,9));
+        assert_eq!(kernel.posted_messages.len(),2);
+        let mut cpu=StubCpu::new(); let thunk=dummy_thunk();
+        let mut ctx=CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        assert_eq!(take_posted_message(&mut ctx),Some((0x101,0xc123,7,9)));
+        assert_eq!(take_posted_message(&mut ctx),None);
+        ctx.kernel.current_thread=1;
+        assert_eq!(take_posted_message(&mut ctx),Some((0x102,0xc123,7,9)));
+        assert_eq!(take_posted_message(&mut ctx),None);
+    }
+
+    #[test]
+    fn broadcast_never_dispatches_the_pseudo_handle_or_partially_fills_the_queue() {
+        let mut kernel=fresh_kernel();
+        kernel.window_procs.insert(0x101,0x2000);
+        kernel.window_procs.insert(0x102,0x3000);
+        kernel.posted_messages.extend(std::iter::repeat((0,1,2,3)).take(255));
+        assert!(!enqueue_window_message(&mut kernel,0xffff,0xc123,7,9));
+        assert_eq!(kernel.posted_messages.len(),255);
+        kernel.posted_messages.clear();
+        kernel.window_procs.clear(); kernel.wnd_proc=0;
+        assert!(enqueue_window_message(&mut kernel,0xffff,0xc123,7,9));
+        assert!(kernel.posted_messages.is_empty());
     }
 }
