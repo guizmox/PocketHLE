@@ -572,22 +572,20 @@ fn run_process(
     for (prefix, directory) in entry.install_mounts(library_root) {
         emu.mount_read_only_dir(&prefix, directory);
     }
-    if let Some(prefix) = entry.guest_install_prefix() {
-        emu.mount_read_only_dir(&prefix, entry.install_mount_dir(library_root, &prefix));
-        // Report the installed path so a game that builds absolute
-        // asset paths off its own module name finds its archive.
-        if let Some(guest_exe) = entry.guest_exe_path() {
-            emu.set_module_path(&guest_exe);
-            emu.set_default_dir(&prefix);
-        }
-        if let Some(save_prefix) = entry.guest_save_prefix() {
-            let save_dir = entry.save_dir(library_root);
-            emu.mount_save_dir(&save_prefix, &save_dir);
-            summary_lines.push(format!(
-                "Save data: {} -> {save_prefix:?}",
-                save_dir.display()
-            ));
-        }
+    if let Some(paths) = entry.guest_launch_paths(library_root) {
+        emu.mount_read_only_dir(
+            &paths.install_prefix,
+            entry.install_mount_dir(library_root, &paths.install_prefix),
+        );
+        emu.set_module_path(&paths.module_path);
+        emu.set_default_dir(&paths.working_dir);
+        let save_dir = entry.save_dir(library_root);
+        emu.mount_save_dir(&paths.save_prefix, &save_dir);
+        summary_lines.push(format!(
+            "Save data: {} -> {:?}",
+            save_dir.display(),
+            paths.save_prefix
+        ));
     }
     if !is_gizmondo && entry.source_cab.to_ascii_lowercase().ends_with(".cab") {
         if let Some(install_dir) = entry.install_dir.as_deref() {

@@ -1,26 +1,22 @@
-PocketHLE — corrections génériques affichage PocketPC/GDI
+PocketHLE — lancement générique des applications PocketPC sans installation CAB
 
-Appliquer après le lot MiniKayak/Cube générique. CreateRectRgnIndirect est également inclus.
+Copier ces TROIS fichiers à leur emplacement dans le dépôt, puis recompiler :
+crates/pocket-library/src/lib.rs
+frontends/pocket-android-jni/src/runner.rs
+frontends/pocket-desktop/src/runner.rs
 
-Copier/remplacer les sources :
-crates/pocket-core/src/lib.rs
-crates/pocket-kernel/src/gdi.rs
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/shell_menu.rs
-crates/pocket-winceapi/src/aygshell.rs
-crates/pocket-winceapi/src/coredll/graphics_tests.rs
-crates/pocket-winceapi/src/coredll/menu_api.rs
-crates/pocket-winceapi/src/coredll/toolbar.rs
-crates/pocket-winceapi/src/coredll/window_graphics.rs
-crates/pocket-winceapi/src/coredll.rs
+Les deux fichiers frontends/ font partie du correctif. Remplacer uniquement pocket-library ne modifie pas le lancement du GUI.
 
-SUPPRIMER impérativement l’ancien fichier spécifique :
-DELETE crates/pocket-core/src/simcity_layout.rs
+Cause : les applications ZIP sans install_dir ne recevaient pas de montage de sauvegarde au-dessus de leurs fichiers installés. Une ouverture en lecture/écriture pouvait échouer malgré la copie sur écriture déjà présente dans le VFS. Le nom de module et le répertoire courant pouvaient également rester ceux du programme fictif Game.exe.
 
-Le chargement PE ne référence plus simcity_layout et aucune instruction de SimCity n’est modifiée.
+Correction : chemin de module réel, répertoire courant du véritable exécutable (y compris les sous-dossiers), montage de sauvegarde isolé pour les applications PocketPC portables. Chemins CAB et emplacements de sauvegarde déclarés conservés. Les cartes Gizmondo sans install_dir gardent leurs montages SD/Flash Disk.
 
-Comportement : rafraîchissement/effacement des barres natives après modification des boutons ou masquage d’un enfant ; barre système SHCreateMenuBar avec menus, sous-menus, commandes et SIP ; véritable CreateRectRgnIndirect.
+Aucune détection de Cube, modification d'exécutable, adaptation de carte ou modification du moteur OpenGL. Les entrées déjà importées bénéficient du correctif au prochain lancement : aucune réimportation requise.
 
-Bande inférieure : SimCity réserve explicitement 26 pixels pour une barre système dont sa ressource ne fournit aucun libellé de menu. Cette zone est désormais rendue avec son bouton SIP. La hauteur du jeu n’est pas forcée à 320 pixels.
-
-Validation : 745 tests réussis (5 ignorés), compilation native Unicorn réussie ; ville atteinte sans patch de l’exécutable, déplacements répétés de la barre supérieure inspectés visuellement.
+Validation :
+- 106 tests pocket-library réussis, aucun ignoré (dont quatre nouveaux tests de chemins et de compatibilité).
+- cargo check -p pocket-android-jni --no-default-features réussi sur l'hôte ; aucune exécution sur appareil Android revendiquée.
+- ZIP Cube fourni importé via Library, puis lancé par le véritable runner PC, avec Unicorn et le rendu OpenGL actif (Mesa llvmpipe).
+- Carte metl3.cgz chargée, scène texturée affichée en 640x480, arrêt propre après 35 secondes.
+- Copie de sauvegarde de metl3.cgz de 8602 octets identique à la carte originale ; exécutable original inchangé.
+- Vérifications effectuées dans un profil local de diagnostic ; les ajustements temporaires de compilation et les sondes ne sont pas livrés.

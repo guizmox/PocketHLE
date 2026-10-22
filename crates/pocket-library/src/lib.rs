@@ -91,6 +91,15 @@ pub enum GamePlatform {
     PocketPc,
 }
 
+/// Guest filesystem layout used by GUI launchers, including portable archives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestLaunchPaths {
+    pub install_prefix: String,
+    pub module_path: String,
+    pub working_dir: String,
+    pub save_prefix: String,
+}
+
 /// One installed game entry. Stored both inline in `library.json`
 /// (for fast listing) and as a separate `game.json` inside the game
 /// directory (for per-game settings and so the directory is
@@ -485,7 +494,10 @@ impl GameEntry {
     /// installation. Preserve subdirectories such as bin/: games resolve
     /// sibling resource directories relative to their executable.
     pub fn guest_exe_path(&self) -> Option<String> {
-        let prefix = self.guest_install_prefix()?;
+        self.executable_under_prefix(&self.guest_install_prefix()?)
+    }
+
+    fn executable_under_prefix(&self, prefix: &str) -> Option<String> {
         let relative = self
             .executable
             .strip_prefix("extracted")
@@ -501,6 +513,28 @@ impl GameEntry {
             return None;
         }
         Some(format!("{prefix}{}", parts.join("\\")))
+    }
+
+    /// ZIP/loose Pocket PC applications have no CAB install directory. Give
+    /// them a normal application namespace and the same writable overlay as
+    /// installed applications. Preserve the archive-relative executable path.
+    /// Gizmondo cards without a CAB keep their existing SD/Flash Disk layout.
+    pub fn guest_launch_paths(&self, library_root: &Path) -> Option<GuestLaunchPaths> {
+        let install_prefix = self.guest_install_prefix().or_else(|| {
+            (self.install_dir.is_none() && !is_gizmondo_game(self, library_root))
+                .then(|| "\\Program Files\\Game\\".to_string())
+        })?;
+        let module_path = self.executable_under_prefix(&install_prefix)?;
+        let working_dir = module_path.rsplit_once('\\')?.0.to_string() + "\\";
+        let save_prefix = self
+            .guest_save_prefix()
+            .unwrap_or_else(|| install_prefix.clone());
+        Some(GuestLaunchPaths {
+            install_prefix,
+            module_path,
+            working_dir,
+            save_prefix,
+        })
     }
 
     pub fn guest_save_prefix(&self) -> Option<String> {
@@ -3783,6 +3817,77 @@ mod tests {
             entry.guest_exe_path().as_deref(),
             Some("\\Program Files\\Asphalt 2 3D\\spore.exe")
         );
+    }
+
+    #[test]
+    fn portable_launch_paths_preserve_archive_directories_and_enable_saves() {
+        let root = tmpdir("portable-launch");
+        fs::create_dir_all(&root).unwrap();
+        let mut entry = entry_with_install_dir(None);
+        entry.id = "portable".into();
+        entry.source_cab = "portable.zip".into();
+        entry.executable = "extracted/wrapper/bin/engine.exe".into();
+        let paths = entry.guest_launch_paths(&root).unwrap();
+        assert_eq!(paths.install_prefix, "\\Program Files\\Game\\");
+        assert_eq!(
+            paths.module_path,
+            "\\Program Files\\Game\\wrapper\\bin\\engine.exe"
+        );
+        assert_eq!(paths.working_dir, "\\Program Files\\Game\\wrapper\\bin\\");
+        assert_eq!(paths.save_prefix, paths.install_prefix);
+        // Derived at launch time: existing ZIP entries need no migration/reimport.
+        assert!(entry.install_dir.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn portable_launch_does_not_replace_gizmondo_card_storage() {
+        let root = tmpdir("portable-gizmondo");
+        let mut entry = entry_with_install_dir(None);
+        entry.id = "portable".into();
+        entry.source_cab = "card.zip".into();
+        entry.platform = Some(GamePlatform::Gizmondo);
+        assert!(entry.guest_launch_paths(&root).is_none());
+        entry.platform = None;
+        fs::create_dir_all(entry.extracted_dir(&root).join("GZGA200099")).unwrap();
+        assert!(entry.guest_launch_paths(&root).is_none());
+        // Explicit user classification retains priority over autodetection.
+        entry.platform = Some(GamePlatform::PocketPc);
+        assert!(entry.guest_launch_paths(&root).is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installed_launch_keeps_declared_storage_and_uses_executable_directory() {
+        let root = tmpdir("installed-launch");
+        fs::create_dir_all(&root).unwrap();
+        let mut entry = entry_with_install_dir(Some("\\Program Files\\Vendor\\App"));
+        entry.executable = "extracted/bin/engine.exe".into();
+        entry.save_prefix = Some("\\My Documents\\App\\".into());
+        let paths = entry.guest_launch_paths(&root).unwrap();
+        assert_eq!(paths.module_path, entry.guest_exe_path().unwrap());
+        assert_eq!(paths.working_dir, "\\Program Files\\Vendor\\App\\bin\\");
+        assert_eq!(paths.save_prefix, entry.guest_save_prefix().unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn portable_launch_rejects_paths_outside_extraction_and_invalid_install_dir() {
+        let root = tmpdir("invalid-portable-launch");
+        fs::create_dir_all(&root).unwrap();
+        let mut entry = entry_with_install_dir(None);
+        for invalid in [
+            "extracted/../escape.exe",
+            "/outside/engine.exe",
+            "extracted",
+        ] {
+            entry.executable = invalid.into();
+            assert!(entry.guest_launch_paths(&root).is_none(), "{invalid}");
+        }
+        entry.executable = "extracted/engine.exe".into();
+        entry.install_dir = Some("  ".into());
+        assert!(entry.guest_launch_paths(&root).is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
