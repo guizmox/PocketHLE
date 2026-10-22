@@ -36,3 +36,4 @@ frontends\pocket-android-jni\src\runner_tests.rs
 frontends\pocket-desktop\src\fullscreen_layout.rs
 crates\pocket-library\src\keybindings.rs
 frontends\pocket-desktop\src\deck_navigation.rs
+crates\pocket-library\src\lib.rs

@@ -3580,3 +3580,12 @@ Gizmondo L1 sends Piano2 volume; all other saved Gizmondo bindings stay.
 PocketPC R2=Action,L2=APP2,R1=APP3,L1=APP4,A=A,B=B,X=C,Y=TAB. These reserved
 controls take precedence over older L1 fullscreen assignments and stylus
 bindings; stick/dpad mappings and inverse pointer transform remain unchanged.
+
+## Deck fullscreen shortcut across launcher and game (2026-10-22)
+
+View/Select short press toggles fullscreen in the launcher UI as well as
+in game. Preserve a focused UI View timer across per-frame guest-key release;
+clear it on focus loss. UI long press must not send guest ESC/brightness.
+Migrate saved factory L1 fullscreen to View in the Steam Deck config, preserving
+other custom assignments. Never let an old L1 fullscreen intercept game volume
+or APP4; L1 must not toggle fullscreen in the UI either.

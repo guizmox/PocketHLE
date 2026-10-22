@@ -523,14 +523,44 @@ pub fn migrate_steam_deck_gamepad_bindings(
     }
 }
 
-/// Xbox LB / Steam Deck L1 toggles host fullscreen.
+/// Steam Deck View toggles host fullscreen in both UI and game.
 pub fn default_gamepad_fullscreen() -> Option<String> {
-    cfg!(feature = "steam-deck").then(|| "LeftTrigger".to_owned())
+    cfg!(feature = "steam-deck").then(|| "Select".to_owned())
+}
+
+/// Move the previous factory fullscreen shortcut; preserve other assignments.
+pub fn migrate_steam_deck_fullscreen(binding: &mut Option<String>) -> bool {
+    if cfg!(feature = "steam-deck") && binding.as_deref() == Some("LeftTrigger") {
+        *binding = default_gamepad_fullscreen();
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
 mod controller_tests {
     use super::*;
+    #[test]
+    fn legacy_fullscreen_moves_to_view_without_changing_custom_shortcuts() {
+        let mut legacy = Some("LeftTrigger".to_owned());
+        let changed = migrate_steam_deck_fullscreen(&mut legacy);
+        assert_eq!(changed, cfg!(feature = "steam-deck"));
+        assert_eq!(
+            legacy.as_deref(),
+            Some(if cfg!(feature = "steam-deck") {
+                "Select"
+            } else {
+                "LeftTrigger"
+            })
+        );
+        for binding in [None, Some("West".to_owned()), Some("Select".to_owned())] {
+            let mut saved = binding.clone();
+            assert!(!migrate_steam_deck_fullscreen(&mut saved));
+            assert_eq!(saved, binding);
+        }
+    }
+
     #[test]
     fn deck_pocketpc_keys_and_gizmondo_volume_are_separate() {
         use GuestButton::*;
@@ -583,7 +613,7 @@ mod controller_tests {
     fn build_defaults_are_scoped_to_the_deck_edition() {
         let config: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
         if cfg!(feature = "steam-deck") {
-            assert!(config.gamepad_toggles_fullscreen("LeftTrigger"));
+            assert!(config.gamepad_toggles_fullscreen("Select"));
             assert_eq!(config.gamepad_bindings, steam_deck_gamepad_bindings());
         } else {
             assert_eq!(config.gamepad_fullscreen, None);
