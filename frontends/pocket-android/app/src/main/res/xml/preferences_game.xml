@@ -3,25 +3,6 @@
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
     <ListPreference
-        android:key="cpu_backend"
-        android:title="@string/pref_cpu_backend_title"
-        android:entries="@array/cpu_backend_entries"
-        android:entryValues="@array/cpu_backend_values"
-        android:defaultValue="stub" />
-
-    <EditTextPreference
-        android:key="max_slices"
-        android:title="@string/pref_max_slices_title"
-        android:inputType="number"
-        android:defaultValue="50000000" />
-
-    <EditTextPreference
-        android:key="instructions_per_slice"
-        android:title="@string/pref_instr_per_slice_title"
-        android:inputType="number"
-        android:defaultValue="1000000" />
-
-    <ListPreference
         android:key="screen"
         android:title="@string/pref_screen_title"
         android:entries="@array/screen_entries"
@@ -48,7 +29,7 @@
         android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values"
         android:defaultValue="large" app:useSimpleSummaryProvider="true" />
 
-    <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering (experimental)"
+    <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering"
         android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
     <ListPreference android:key="anisotropic_filtering" android:title="Anisotropic filtering (GPU only)"
         android:summary="Sharper textures at oblique angles; limited by the GPU driver."

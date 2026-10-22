@@ -564,7 +564,10 @@ fn run_process(
     if entry.source_cab.to_ascii_lowercase().ends_with(".cab") {
         let repaired = pocket_core::cab::repair_install_header_names(&extracted);
         if !repaired.is_empty() {
-            log::info!("Restored {} missing non-ASCII CAB install names", repaired.len());
+            log::info!(
+                "Restored {} missing non-ASCII CAB install names",
+                repaired.len()
+            );
         }
     }
 

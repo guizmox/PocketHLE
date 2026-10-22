@@ -9,8 +9,8 @@ use egui_extras::image::load_image_bytes;
 
 use pocket_core::kernel::InputEvent;
 use pocket_library::{
-    is_gizmondo_game, CpuBackendPref, DpadDeadzone, GameEntry, GameSettings, GuestButton,
-    LauncherConfig, Library, PreparedImport, RotationPref, ScreenPref,
+    is_gizmondo_game, DpadDeadzone, GameEntry, GameSettings, GuestButton, LauncherConfig, Library,
+    PreparedImport, RotationPref, ScreenPref,
 };
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
@@ -1816,7 +1816,7 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
-                ui.label("GPU rendering (experimental)");
+                ui.label("GPU rendering");
                 ui.checkbox(&mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
                 ui.end_row();
                 ui.label("Anisotropic filtering (GPU only)");
@@ -1830,25 +1830,6 @@ impl PocketLauncher {
                         });
                 }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
                 ui.end_row();
-                ui.label("Default CPU backend");
-                egui::ComboBox::from_id_source("cpu_backend")
-                    .selected_text(draft.default_cpu_backend.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut draft.default_cpu_backend,
-                            CpuBackendPref::Stub,
-                            CpuBackendPref::Stub.label(),
-                        );
-                        if cfg!(feature = "unicorn") {
-                            ui.selectable_value(
-                                &mut draft.default_cpu_backend,
-                                CpuBackendPref::Unicorn,
-                                CpuBackendPref::Unicorn.label(),
-                            );
-                        }
-                    });
-                ui.end_row();
-
                 ui.label("Verbosity (0..3)");
                 ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
                 ui.end_row();
@@ -2316,6 +2297,10 @@ impl PocketLauncher {
             .get(&id)
             .map(|g| g.display_name.clone())
             .unwrap_or_else(|| id.clone());
+        let is_gizmondo = self
+            .library
+            .get(&id)
+            .is_some_and(|game| is_gizmondo_game(game, self.library.root()));
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         ui.heading(format!("Settings: {display_name}"));
@@ -2333,54 +2318,26 @@ impl PocketLauncher {
                         }
                     });
                 ui.end_row();
-                ui.label("CPU backend");
-                egui::ComboBox::from_id_source("game_cpu_backend")
-                    .selected_text(draft.cpu_backend.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut draft.cpu_backend,
-                            CpuBackendPref::Stub,
-                            CpuBackendPref::Stub.label(),
-                        );
-                        if cfg!(feature = "unicorn") {
-                            ui.selectable_value(
-                                &mut draft.cpu_backend,
-                                CpuBackendPref::Unicorn,
-                                CpuBackendPref::Unicorn.label(),
-                            );
-                        }
-                    });
-                ui.end_row();
-
-                ui.label("Max slices (0 = unlimited)");
-                ui.add(egui::DragValue::new(&mut draft.max_slices).clamp_range(0..=u64::MAX));
-                ui.end_row();
-
-                ui.label("Instructions / slice");
-                ui.add(
-                    egui::DragValue::new(&mut draft.instructions_per_slice)
-                        .clamp_range(1..=u64::MAX),
-                );
-                ui.end_row();
-
-                ui.label("Screen");
-                egui::ComboBox::from_id_source("game_screen")
-                    .selected_text(draft.screen.label())
-                    .show_ui(ui, |ui| {
-                        for pref in [
-                            ScreenPref::Portrait,
-                            ScreenPref::Qvga,
-                            ScreenPref::Landscape,
-                            ScreenPref::SmallPortrait,
-                            ScreenPref::Vga,
-                            ScreenPref::VgaLandscape,
-                            ScreenPref::Wvga,
-                            ScreenPref::Hpc,
-                        ] {
-                            ui.selectable_value(&mut draft.screen, pref, pref.label());
-                        }
-                    });
-                ui.end_row();
+                if !is_gizmondo {
+                    ui.label("Screen");
+                    egui::ComboBox::from_id_source("game_screen")
+                        .selected_text(draft.screen.label())
+                        .show_ui(ui, |ui| {
+                            for pref in [
+                                ScreenPref::Portrait,
+                                ScreenPref::Qvga,
+                                ScreenPref::Landscape,
+                                ScreenPref::SmallPortrait,
+                                ScreenPref::Vga,
+                                ScreenPref::VgaLandscape,
+                                ScreenPref::Wvga,
+                                ScreenPref::Hpc,
+                            ] {
+                                ui.selectable_value(&mut draft.screen, pref, pref.label());
+                            }
+                        });
+                    ui.end_row();
+                }
 
                 // Presentation-only: the guest keeps rendering into
                 // whatever `Screen` says. This is the knob for a
@@ -2398,11 +2355,11 @@ impl PocketLauncher {
                     });
                 ui.end_row();
 
-                ui.label("GPU rendering (experimental)");
-                egui::ComboBox::from_id_source("game_gpu_renderer").selected_text(match draft.gpu_renderer { None => "Emulator default", Some(false) => "Software", Some(true) => "GPU (experimental)" }).show_ui(ui, |ui| {
+                ui.label("GPU rendering");
+                egui::ComboBox::from_id_source("game_gpu_renderer").selected_text(match draft.gpu_renderer { None => "Emulator default", Some(false) => "Software", Some(true) => "GPU" }).show_ui(ui, |ui| {
                     ui.selectable_value(&mut draft.gpu_renderer, None, "Emulator default");
                     ui.selectable_value(&mut draft.gpu_renderer, Some(false), "Software");
-                    ui.selectable_value(&mut draft.gpu_renderer, Some(true), "GPU (experimental)");
+                    ui.selectable_value(&mut draft.gpu_renderer, Some(true), "GPU");
                 });
                 ui.end_row();
 

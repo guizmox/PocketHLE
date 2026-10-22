@@ -3542,3 +3542,11 @@ Fade CAB file 834 contains byte C9 in ZSSQ VÉZIMP.IFJ; lossy UTF-8 created
 a different filename. At CAB launch restore missing non-ASCII destinations
 from retained numbered payloads using create_new; never overwrite existing
 assets or saves. Do not reimport the game or add title-specific VFS aliases.
+
+## Settings visibility (2026-10-22)
+
+Desktop and Android hide the CPU backend selector and both dispatch budgets
+in normal settings. Preserve serialized values; this is a UI-only change.
+Hide game screen geometry when the shared Gizmondo classifier identifies
+the title, leaving PocketPC's display profiles accessible. GPU labels no
+longer say experimental in global or per-game settings.

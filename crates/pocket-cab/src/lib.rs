@@ -262,14 +262,19 @@ fn decode_ascii(raw: &[u8]) -> String {
         return text.to_owned();
     }
     const C1: [char; 32] = [
-        '€', '\u{0081}', '‚', 'ƒ', '„', '…', '†', '‡',
-        'ˆ', '‰', 'Š', '‹', 'Œ', '\u{008d}', 'Ž', '\u{008f}',
-        '\u{0090}', '‘', '’', '“', '”', '•', '–', '—',
-        '˜', '™', 'š', '›', 'œ', '\u{009d}', 'ž', 'Ÿ',
+        '€', '\u{0081}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{008d}', 'Ž',
+        '\u{008f}', '\u{0090}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ',
+        '\u{009d}', 'ž', 'Ÿ',
     ];
-    raw.iter().map(|&b| if (0x80..=0x9f).contains(&b) {
-        C1[(b - 0x80) as usize]
-    } else { char::from(b) }).collect()
+    raw.iter()
+        .map(|&b| {
+            if (0x80..=0x9f).contains(&b) {
+                C1[(b - 0x80) as usize]
+            } else {
+                char::from(b)
+            }
+        })
+        .collect()
 }
 
 /// The fixed-size header is exactly 100 bytes and begins with `MSCE`.
@@ -1493,34 +1498,69 @@ pub fn materialise_install_header_names(
 /// Restore missing non-ASCII install names from retained CAB payloads.
 /// Existing files (including saves) are never overwritten or removed.
 pub fn repair_install_header_names(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root) else { return Vec::new(); };
-    let files: HashMap<u16, PathBuf> = entries.filter_map(Result::ok).filter_map(|e| {
-        if !e.file_type().ok()?.is_file() { return None; }
-        let path = e.path();
-        let id = path.extension()?.to_str()?.parse::<u16>().ok()?;
-        Some((id, path))
-    }).collect();
-    let Some(header_path) = files.get(&0) else { return Vec::new(); };
-    let Ok(header) = WinCeInstallHeader::parse_file(header_path) else { return Vec::new(); };
-    let install_root = header.install_dir.as_deref().map(|d| d.trim_end_matches('\\'));
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let files: HashMap<u16, PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            if !e.file_type().ok()?.is_file() {
+                return None;
+            }
+            let path = e.path();
+            let id = path.extension()?.to_str()?.parse::<u16>().ok()?;
+            Some((id, path))
+        })
+        .collect();
+    let Some(header_path) = files.get(&0) else {
+        return Vec::new();
+    };
+    let Ok(header) = WinCeInstallHeader::parse_file(header_path) else {
+        return Vec::new();
+    };
+    let install_root = header
+        .install_dir
+        .as_deref()
+        .map(|d| d.trim_end_matches('\\'));
     let mut restored = Vec::new();
     for entry in &header.files {
-        if entry.destination.is_ascii() { continue; }
-        let Some(relative) = relative_to_root(&entry.destination, install_root) else { continue; };
-        let dest = join_guest_relative(root, relative);
-        if dest.exists() { continue; }
-        let Some(src) = files.get(&entry.file_id) else { continue; };
-        let Ok(mut input) = fs::File::open(src) else { continue; };
-        if let Some(parent) = dest.parent() {
-            if fs::create_dir_all(parent).is_err() { continue; }
+        if entry.destination.is_ascii() {
+            continue;
         }
-        let Ok(mut output) = fs::OpenOptions::new().write(true).create_new(true).open(&dest) else { continue; };
+        let Some(relative) = relative_to_root(&entry.destination, install_root) else {
+            continue;
+        };
+        let dest = join_guest_relative(root, relative);
+        if dest.exists() {
+            continue;
+        }
+        let Some(src) = files.get(&entry.file_id) else {
+            continue;
+        };
+        let Ok(mut input) = fs::File::open(src) else {
+            continue;
+        };
+        if let Some(parent) = dest.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+        }
+        let Ok(mut output) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+        else {
+            continue;
+        };
         match io::copy(&mut input, &mut output) {
             Ok(_) => restored.push(dest),
             Err(error) => {
                 drop(output);
                 let _ = fs::remove_file(&dest);
-                log::warn!("Could not restore CAB install name {}: {error}", dest.display());
+                log::warn!(
+                    "Could not restore CAB install name {}: {error}",
+                    dest.display()
+                );
             }
         }
     }
@@ -1573,7 +1613,10 @@ mod tests {
         let pos = raw.windows(9).position(|s| s == b"level.dat").unwrap();
         raw[pos + 1] = 0xc9;
         let header = WinCeInstallHeader::parse_bytes(&raw).unwrap();
-        assert!(header.files.iter().any(|f| f.destination.ends_with("lÉvel.dat")));
+        assert!(header
+            .files
+            .iter()
+            .any(|f| f.destination.ends_with("lÉvel.dat")));
         let root = std::env::temp_dir().join(format!("pocket-cab-ansi-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("setup.000"), raw).unwrap();
@@ -1586,7 +1629,6 @@ mod tests {
         assert_eq!(fs::read(&paths[0]).unwrap(), b"modified");
         fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn parses_registry_section() {

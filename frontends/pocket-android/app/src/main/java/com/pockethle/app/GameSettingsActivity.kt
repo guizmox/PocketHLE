@@ -3,7 +3,6 @@ package com.pockethle.app
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
-import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.SwitchPreferenceCompat
@@ -50,36 +49,8 @@ class GameSettingsActivity : AppCompatActivity() {
             gameId = arguments?.getString(EXTRA_GAME_ID).orEmpty()
             current = readGameSettings() ?: GameSettings.default()
             setPreferencesFromResource(R.xml.preferences_game, rootKey)
-            findPreference<ListPreference>("cpu_backend")?.apply {
-                value = current.cpuBackend
-                setOnPreferenceChangeListener { _, newValue ->
-                    current = current.copy(cpuBackend = newValue.toString())
-                    writeGameSettings()
-                    true
-                }
-            }
-            findPreference<EditTextPreference>("max_slices")?.apply {
-                text = current.maxSlices.toString()
-                setOnPreferenceChangeListener { _, newValue ->
-                    val parsed = newValue.toString().toLongOrNull()
-                    if (parsed != null && parsed > 0) {
-                        current = current.copy(maxSlices = parsed)
-                        writeGameSettings()
-                        true
-                    } else false
-                }
-            }
-            findPreference<EditTextPreference>("instructions_per_slice")?.apply {
-                text = current.instructionsPerSlice.toString()
-                setOnPreferenceChangeListener { _, newValue ->
-                    val parsed = newValue.toString().toLongOrNull()
-                    if (parsed != null && parsed > 0) {
-                        current = current.copy(instructionsPerSlice = parsed)
-                        writeGameSettings()
-                        true
-                    } else false
-                }
-            }
+            findPreference<ListPreference>("screen")?.isVisible =
+                !NativeBridge.isGizmondoGame(rootDir, gameId)
             findPreference<ListPreference>("screen")?.apply {
                 value = current.screen
                 setOnPreferenceChangeListener { _, newValue ->
@@ -120,7 +91,7 @@ class GameSettingsActivity : AppCompatActivity() {
             findPreference<ListPreference>("gpu_renderer_mode")?.apply {
                 // JSON is authoritative; do not maintain a second SharedPreferences value.
                 isPersistent = false
-                entries = arrayOf("Emulator default", "Software", "GPU (experimental)")
+                entries = arrayOf("Emulator default", "Software", "GPU")
                 entryValues = arrayOf("inherit", "software", "gpu")
                 value = when (current.gpuRenderer) { null -> "inherit"; false -> "software"; true -> "gpu" }
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()

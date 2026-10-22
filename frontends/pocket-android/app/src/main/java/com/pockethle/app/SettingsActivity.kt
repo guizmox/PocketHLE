@@ -267,7 +267,7 @@ class SettingsActivity : AppCompatActivity() {
                 setOnPreferenceChangeListener { _,v -> current=current.copy(logUnimplementedApis=v as Boolean);writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
-                key="gpu_renderer"; title="GPU rendering (experimental)"; isPersistent=false; isChecked=current.gpuRenderer
+                key="gpu_renderer"; title="GPU rendering"; isPersistent=false; isChecked=current.gpuRenderer
                 summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
                 setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("anisotropic_filtering")?.isEnabled=current.gpuRenderer;writeConfig();true }
             })
