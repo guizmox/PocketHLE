@@ -27,6 +27,7 @@ mod choice_controls;
 mod control_color;
 #[path = "coredll/coordinates.rs"]
 mod coordinates;
+mod file_dialog;
 #[path = "coredll/file_mapping.rs"]
 mod file_mapping;
 #[path = "coredll/list_paint.rs"]
@@ -38,10 +39,9 @@ mod palette;
 mod recovery_tests;
 #[path = "coredll/registry_enumeration.rs"]
 mod registry_enumeration;
-mod toolbar;
-mod file_dialog;
-mod trackbar;
 mod tab_control;
+mod toolbar;
+mod trackbar;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
 use pocket_kernel::controls::{ControlAction, ControlClass, Controls};
@@ -143,7 +143,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetProcAddressA", get_proc_address_a);
     d.register_handler(dll, "LoadLibraryW", load_library_w);
     d.register_handler(dll, "DecompressImageIndirect", crate::imgdecmp::decompress);
-    d.register_handler("imgdecmp.dll", "DecompressImageIndirect", crate::imgdecmp::decompress);
+    d.register_handler(
+        "imgdecmp.dll",
+        "DecompressImageIndirect",
+        crate::imgdecmp::decompress,
+    );
     d.register_handler("imgdecmp.dll", "ord:1", crate::imgdecmp::decompress);
     d.register_handler(dll, "#1", crate::imgdecmp::decompress);
     d.register_handler(dll, "_strupr", strupr);
@@ -10565,23 +10569,53 @@ fn call_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 /// HWND_BROADCAST is a destination set, never a dispatchable window handle.
 /// Snapshot the top-level recipients at posting time, including hidden/pop-up
 /// windows, and let each recipient's owning thread retrieve its own copy.
-pub(crate) fn enqueue_window_message(kernel: &mut KernelState, hwnd: u32, message: u32, wp: u32, lp: u32) -> bool {
+pub(crate) fn enqueue_window_message(
+    kernel: &mut KernelState,
+    hwnd: u32,
+    message: u32,
+    wp: u32,
+    lp: u32,
+) -> bool {
     let mut recipients = if hwnd == 0xffff {
-        let mut windows: Vec<u32> = kernel.window_procs.iter()
-            .filter(|(window, proc)| **proc != 0
-                && kernel.window_styles.get(window).is_none_or(|style| style.0 & 0x4000_0000 == 0)
-                && !kernel.controls.get(**window).is_some_and(|control| control.style & 0x4000_0000 != 0))
-            .map(|(&window, _)| window).collect();
+        let mut windows: Vec<u32> = kernel
+            .window_procs
+            .iter()
+            .filter(|(window, proc)| {
+                **proc != 0
+                    && kernel
+                        .window_styles
+                        .get(window)
+                        .is_none_or(|style| style.0 & 0x4000_0000 == 0)
+                    && !kernel
+                        .controls
+                        .get(**window)
+                        .is_some_and(|control| control.style & 0x4000_0000 != 0)
+            })
+            .map(|(&window, _)| window)
+            .collect();
         // Preserve the legacy single-window representation until a real HWND
         // is registered; never fall back when explicit recipients exist.
         if windows.is_empty() && kernel.window_procs.is_empty() && kernel.wnd_proc != 0 {
             windows.push(FAKE_HWND);
         }
         windows
-    } else { vec![hwnd] };
+    } else {
+        vec![hwnd]
+    };
     recipients.sort_unstable();
-    if kernel.posted_messages.len().saturating_add(recipients.len()) > 256 { return false; }
-    kernel.posted_messages.extend(recipients.into_iter().map(|window| (window, message, wp, lp)));
+    if kernel
+        .posted_messages
+        .len()
+        .saturating_add(recipients.len())
+        > 256
+    {
+        return false;
+    }
+    kernel.posted_messages.extend(
+        recipients
+            .into_iter()
+            .map(|window| (window, message, wp, lp)),
+    );
     true
 }
 
@@ -11533,11 +11567,11 @@ fn control_message(
         return Ok(match c.class {
             ControlClass::Edit => 0x81 | if c.style & 0x1004 == 0x1004 { 4 } else { 0 },
             ControlClass::Button => match c.style & 0xf {
-                0 => 0x2000 | 0x20, // BS_PUSHBUTTON: DLGC_UNDEFPUSHBUTTON
-                1 => 0x2000 | 0x10, // BS_DEFPUSHBUTTON
+                0 => 0x2000 | 0x20,     // BS_PUSHBUTTON: DLGC_UNDEFPUSHBUTTON
+                1 => 0x2000 | 0x10,     // BS_DEFPUSHBUTTON
                 4 | 9 => 0x2000 | 0x40, // BS_(AUTO)RADIOBUTTON
-                7 => 0x100, // BS_GROUPBOX: static decoration
-                _ => 0x2000, // check boxes and other button types
+                7 => 0x100,             // BS_GROUPBOX: static decoration
+                _ => 0x2000,            // check boxes and other button types
             },
             ControlClass::Static | ControlClass::Toolbar | ControlClass::ScrollBar => 0x100,
             ControlClass::ComboBox => {
@@ -11547,7 +11581,10 @@ fn control_message(
                     0
                 }
             }
-            ControlClass::ListView | ControlClass::ListBox | ControlClass::TrackBar | ControlClass::Tab => 0x81,
+            ControlClass::ListView
+            | ControlClass::ListBox
+            | ControlClass::TrackBar
+            | ControlClass::Tab => 0x81,
         });
     }
     if matches!(message, 0x201 | 0x202) {
@@ -11834,7 +11871,9 @@ fn translate_message(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 
 fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(outcome) = tab_control::resume(ctx)? { return Ok(outcome); }
+    if let Some(outcome) = tab_control::resume(ctx)? {
+        return Ok(outcome);
+    }
     // The WndProc returns through this thunk's address. On that second
     // entry the original MSG arguments have been replaced by the callback's
     // return registers, so restore the interrupted call instead of
@@ -11897,7 +11936,9 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let message = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let wparam = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
     let lparam = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
-    if let Some(outcome) = tab_control::dispatch(ctx, hwnd, message, wparam, false)? { return Ok(outcome); }
+    if let Some(outcome) = tab_control::dispatch(ctx, hwnd, message, wparam, false)? {
+        return Ok(outcome);
+    }
     let timer_callback = message == WM_TIMER && lparam != 0;
     // Thread messages (hwnd == NULL) have no window procedure. CoPilot
     // reaches these after its startup dialogs; using the latest WndProc
@@ -11990,12 +12031,20 @@ fn write_synthetic_msg_for_hwnd(
 /// MSG.pt and GetMessagePos use screen coordinates, independently of the
 /// client-relative LPARAM delivered to a captured or child window.
 fn write_retrieved_message(
-    ctx: &mut CallCtx<'_>, out: u32, hwnd: u32, message: u32, wp: u32, lp: u32,
+    ctx: &mut CallCtx<'_>,
+    out: u32,
+    hwnd: u32,
+    message: u32,
+    wp: u32,
+    lp: u32,
 ) -> Result<(), KernelError> {
     write_synthetic_msg_for_hwnd(ctx.cpu, out, hwnd, message, wp, lp)?;
     let point = if matches!(message, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP) {
         let (ox, oy) = coordinates::origin(ctx.kernel, hwnd).unwrap_or((0, 0));
-        (ox + i32::from(lp as u16 as i16), oy + i32::from((lp >> 16) as u16 as i16))
+        (
+            ox + i32::from(lp as u16 as i16),
+            oy + i32::from((lp >> 16) as u16 as i16),
+        )
     } else {
         ctx.kernel.controls.cursor_position
     };
@@ -12003,7 +12052,10 @@ fn write_retrieved_message(
         ctx.cpu.write_mem(out + 20, &point.0.to_le_bytes())?;
         ctx.cpu.write_mem(out + 24, &point.1.to_le_bytes())?;
     }
-    ctx.kernel.controls.message_positions.insert(ctx.kernel.current_thread, point);
+    ctx.kernel
+        .controls
+        .message_positions
+        .insert(ctx.kernel.current_thread, point);
     Ok(())
 }
 
@@ -12112,8 +12164,17 @@ fn controls_take_input(
     if let Some(result) = crate::aygshell::menu_input(ctx, ev) {
         return Some(result);
     }
-    if matches!(ev, InputEvent::PointerDown { .. } | InputEvent::PointerUp { .. } | InputEvent::PointerMove { .. })
-        && ctx.kernel.controls.pointer_capture.contains_key(&ctx.kernel.current_thread) {
+    if matches!(
+        ev,
+        InputEvent::PointerDown { .. }
+            | InputEvent::PointerUp { .. }
+            | InputEvent::PointerMove { .. }
+    ) && ctx
+        .kernel
+        .controls
+        .pointer_capture
+        .contains_key(&ctx.kernel.current_thread)
+    {
         return None;
     }
     if ctx.kernel.controls.is_empty() {
@@ -12185,7 +12246,13 @@ fn control_action_message(
             code,
             index,
         } => {
-            if code == (-552i32) as u32 && ctx.kernel.controls.get(hwnd).is_some_and(|c| c.class == ControlClass::Tab) {
+            if code == (-552i32) as u32
+                && ctx
+                    .kernel
+                    .controls
+                    .get(hwnd)
+                    .is_some_and(|c| c.class == ControlClass::Tab)
+            {
                 return Some(Some((hwnd, tab_control::SELECT, index as u32, 0)));
             }
             if let Some(c) = ctx
@@ -12674,58 +12741,116 @@ fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 
 fn get_capture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(ctx.kernel.controls.pointer_capture
-        .get(&ctx.kernel.current_thread).copied().unwrap_or(0)))
+    Ok(DispatchOutcome::ReturnedR0(
+        ctx.kernel
+            .controls
+            .pointer_capture
+            .get(&ctx.kernel.current_thread)
+            .copied()
+            .unwrap_or(0),
+    ))
 }
 fn finish_capture(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
-    if !ctx.kernel.controls.capture_frames.last().is_some_and(|(thread, thunk, f, _)|
-        *thread == ctx.kernel.current_thread && *thunk == ctx.thunk.thunk_va && f.sp == sp) {
+    if !ctx
+        .kernel
+        .controls
+        .capture_frames
+        .last()
+        .is_some_and(|(thread, thunk, f, _)| {
+            *thread == ctx.kernel.current_thread && *thunk == ctx.thunk.thunk_va && f.sp == sp
+        })
+    {
         return Ok(None);
     }
     let (_, _, f, result) = ctx.kernel.controls.capture_frames.pop().unwrap();
-    for (r,v) in [ArmReg::R0,ArmReg::R1,ArmReg::R2,ArmReg::R3].into_iter().zip(f.args) {
-        ctx.cpu.write_reg(r,v)?;
+    for (r, v) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+        .into_iter()
+        .zip(f.args)
+    {
+        ctx.cpu.write_reg(r, v)?;
     }
-    ctx.cpu.write_reg(ArmReg::Sp,f.sp)?;ctx.cpu.write_reg(ArmReg::Lr,f.lr)?;
+    ctx.cpu.write_reg(ArmReg::Sp, f.sp)?;
+    ctx.cpu.write_reg(ArmReg::Lr, f.lr)?;
     Ok(Some(DispatchOutcome::ReturnedR0(result)))
 }
-fn change_capture(ctx: &mut CallCtx<'_>, target: u32, release: bool) -> Result<DispatchOutcome, KernelError> {
+fn change_capture(
+    ctx: &mut CallCtx<'_>,
+    target: u32,
+    release: bool,
+) -> Result<DispatchOutcome, KernelError> {
     let thread = ctx.kernel.current_thread;
-    let old = ctx.kernel.controls.pointer_capture.get(&thread).copied().unwrap_or(0);
+    let old = ctx
+        .kernel
+        .controls
+        .pointer_capture
+        .get(&thread)
+        .copied()
+        .unwrap_or(0);
     if target != 0 {
         let known = ctx.kernel.window_classes.contains_key(&target)
             || ctx.kernel.window_rects.contains_key(&target)
             || ctx.kernel.controls.get(target).is_some()
             || ctx.kernel.controls.panel(target).is_some();
-        if !known || ctx.kernel.window_threads.get(&target).is_some_and(|t| *t != thread) {
-            set_thread_error(ctx,1400);
+        if !known
+            || ctx
+                .kernel
+                .window_threads
+                .get(&target)
+                .is_some_and(|t| *t != thread)
+        {
+            set_thread_error(ctx, 1400);
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
-        ctx.kernel.controls.pointer_capture.insert(thread,target);
-    } else { ctx.kernel.controls.pointer_capture.remove(&thread); }
-    let result = if release {u32::from(old != 0)} else {old};
+        ctx.kernel.controls.pointer_capture.insert(thread, target);
+    } else {
+        ctx.kernel.controls.pointer_capture.remove(&thread);
+    }
+    let result = if release { u32::from(old != 0) } else { old };
     if old != 0 && old != target {
-        if let Some(proc) = ctx.kernel.window_procs.get(&old).copied().filter(|p| *p != 0) {
-            let frame = GuestCallFrame { args:[ctx.arg_u32(0)?,ctx.arg_u32(1)?,ctx.arg_u32(2)?,ctx.arg_u32(3)?],
-                sp:ctx.cpu.read_reg(ArmReg::Sp)?,lr:ctx.cpu.read_reg(ArmReg::Lr)? };
-            ctx.kernel.controls.capture_frames.push((thread,ctx.thunk.thunk_va,frame,result));
-            ctx.cpu.write_reg(ArmReg::R0,old)?;ctx.cpu.write_reg(ArmReg::R1,0x215)?;
-            ctx.cpu.write_reg(ArmReg::R2,0)?;ctx.cpu.write_reg(ArmReg::R3,target)?;
-            ctx.cpu.write_reg(ArmReg::Lr,ctx.thunk.thunk_va)?;
+        if let Some(proc) = ctx
+            .kernel
+            .window_procs
+            .get(&old)
+            .copied()
+            .filter(|p| *p != 0)
+        {
+            let frame = GuestCallFrame {
+                args: [
+                    ctx.arg_u32(0)?,
+                    ctx.arg_u32(1)?,
+                    ctx.arg_u32(2)?,
+                    ctx.arg_u32(3)?,
+                ],
+                sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+                lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+            };
+            ctx.kernel
+                .controls
+                .capture_frames
+                .push((thread, ctx.thunk.thunk_va, frame, result));
+            ctx.cpu.write_reg(ArmReg::R0, old)?;
+            ctx.cpu.write_reg(ArmReg::R1, 0x215)?;
+            ctx.cpu.write_reg(ArmReg::R2, 0)?;
+            ctx.cpu.write_reg(ArmReg::R3, target)?;
+            ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
             return Ok(DispatchOutcome::JumpTo(proc));
         }
     }
     Ok(DispatchOutcome::ReturnedR0(result))
 }
 fn set_capture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(out) = finish_capture(ctx)? {return Ok(out);}
-    let target=ctx.arg_u32(0)?;
-    change_capture(ctx,target,false)
+    if let Some(out) = finish_capture(ctx)? {
+        return Ok(out);
+    }
+    let target = ctx.arg_u32(0)?;
+    change_capture(ctx, target, false)
 }
 fn release_capture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(out) = finish_capture(ctx)? {return Ok(out);}
-    change_capture(ctx,0,true)
+    if let Some(out) = finish_capture(ctx)? {
+        return Ok(out);
+    }
+    change_capture(ctx, 0, true)
 }
 
 pub(crate) fn monotonic_ms() -> u64 {
@@ -12736,13 +12861,19 @@ pub(crate) fn monotonic_ms() -> u64 {
 }
 
 fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
-    if let InputEvent::PointerDown { x, y } | InputEvent::PointerMove { x, y } | InputEvent::PointerUp { x, y } = ev {
+    if let InputEvent::PointerDown { x, y }
+    | InputEvent::PointerMove { x, y }
+    | InputEvent::PointerUp { x, y } = ev
+    {
         ctx.kernel.controls.cursor_position = (i32::from(x), i32::from(y));
     }
     match ev {
         pocket_kernel::InputEvent::KeyDown { vk } => {
             if vk == 0x0d && !ctx.kernel.pressed_keys[0x0d] {
-                ctx.kernel.controls.recognized_holds.retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
+                ctx.kernel
+                    .controls
+                    .recognized_holds
+                    .retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
             }
             if (vk as usize) < ctx.kernel.pressed_keys.len() {
                 ctx.kernel.pressed_keys[vk as usize] = true;
@@ -12760,7 +12891,10 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
         }
         pocket_kernel::InputEvent::KeyUp { vk } => {
             if vk == 0x0d {
-                ctx.kernel.controls.recognized_holds.retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
+                ctx.kernel
+                    .controls
+                    .recognized_holds
+                    .retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
             }
             if (vk as usize) < ctx.kernel.pressed_keys.len() {
                 ctx.kernel.pressed_keys[vk as usize] = false;
@@ -12772,11 +12906,17 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
             }
         }
         InputEvent::PointerDown { .. } => {
-            ctx.kernel.controls.recognized_holds.retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
+            ctx.kernel
+                .controls
+                .recognized_holds
+                .retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
             ctx.kernel.pressed_keys[1] = true;
         }
         InputEvent::PointerUp { .. } => {
-            ctx.kernel.controls.recognized_holds.retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
+            ctx.kernel
+                .controls
+                .recognized_holds
+                .retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
             ctx.kernel.pressed_keys[1] = false;
         }
         pocket_kernel::InputEvent::StylusAim { .. }
@@ -13087,11 +13227,20 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
         }
         _ => return Some((input_window(kernel), message, wp, lp)),
     };
-    let wp = if message == WM_MOUSEMOVE && !kernel.pressed_keys[1] { wp & !MK_LBUTTON } else { wp };
-    if let Some(hwnd) = kernel.controls.pointer_capture.get(&kernel.current_thread).copied() {
-        let (ox,oy) = coordinates::origin(kernel,hwnd).unwrap_or((0,0));
-        let local = (((y-oy) as u32 & 0xffff)<<16) | ((x-ox) as u32 & 0xffff);
-        return Some((hwnd,message,wp,local));
+    let wp = if message == WM_MOUSEMOVE && !kernel.pressed_keys[1] {
+        wp & !MK_LBUTTON
+    } else {
+        wp
+    };
+    if let Some(hwnd) = kernel
+        .controls
+        .pointer_capture
+        .get(&kernel.current_thread)
+        .copied()
+    {
+        let (ox, oy) = coordinates::origin(kernel, hwnd).unwrap_or((0, 0));
+        let local = (((y - oy) as u32 & 0xffff) << 16) | ((x - ox) as u32 & 0xffff);
+        return Some((hwnd, message, wp, local));
     }
     let active = active_window(kernel);
     if let Some(hwnd) = native_control_at(kernel, x, y) {
@@ -13424,8 +13573,16 @@ fn quit_or_halt(
 /// host frontend (mouse / D-pad / keyboard) is delivered before any
 /// synthetic message; see [`next_message`].
 fn get_message_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (x, y) = ctx.kernel.controls.message_positions.get(&ctx.kernel.current_thread).copied().unwrap_or((0, 0));
-    Ok(DispatchOutcome::ReturnedR0((x as u32 & 0xffff) | ((y as u32 & 0xffff) << 16)))
+    let (x, y) = ctx
+        .kernel
+        .controls
+        .message_positions
+        .get(&ctx.kernel.current_thread)
+        .copied()
+        .unwrap_or((0, 0));
+    Ok(DispatchOutcome::ReturnedR0(
+        (x as u32 & 0xffff) | ((y as u32 & 0xffff) << 16),
+    ))
 }
 
 fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -14339,7 +14496,11 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     // Native toolbar procedures relay child/menu commands to their notification
     // owner. Subclasses reach this path through their saved base procedure.
     if is_toolbar && matches!(ctx.arg_u32(1)?, WM_COMMAND | 0x2b | 0x2c | 0x2e | 0x2f) {
-        let parent = ctx.kernel.window_extra.get(&(hwnd, -1201)).copied()
+        let parent = ctx
+            .kernel
+            .window_extra
+            .get(&(hwnd, -1201))
+            .copied()
             .unwrap_or_else(|| ctx.kernel.controls.get(hwnd).unwrap().parent);
         if parent != 0 && parent != hwnd {
             ctx.cpu.write_reg(ArmReg::R0, parent)?;
@@ -14970,7 +15131,9 @@ fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let dib_bits = ctx.kernel.gdi.bitmap(h).and_then(|b| b.dib_bits_va);
     let deleted = ctx.kernel.gdi.delete(h);
     if deleted && ctx.kernel.gdi.bitmap(h).is_none() {
-        if let Some(bits) = dib_bits {ctx.kernel.heap.free(bits);}
+        if let Some(bits) = dib_bits {
+            ctx.kernel.heap.free(bits);
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(if palette {
         deleted as u32
@@ -16888,7 +17051,10 @@ fn destroy_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
-    ctx.kernel.controls.pointer_capture.retain(|_, owner| owner != hwnd);
+    ctx.kernel
+        .controls
+        .pointer_capture
+        .retain(|_, owner| owner != hwnd);
     ctx.kernel.controls.destroy(*hwnd);
     ctx.kernel.controls.destroy_children_of(*hwnd);
     ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
@@ -17236,22 +17402,28 @@ fn get_window_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// old implementation returned TRUE without decoding anything, which made
 /// every resource-backed effect silently disappear.
 fn play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (sound,module,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?,ctx.arg_u32(2)?);
-    play_sound_impl(ctx,sound,module,flags,true)
+    let (sound, module, flags) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
+    play_sound_impl(ctx, sound, module, flags, true)
 }
 fn play_sound_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (sound,module,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?,ctx.arg_u32(2)?);
-    play_sound_impl(ctx,sound,module,flags,false)
+    let (sound, module, flags) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
+    play_sound_impl(ctx, sound, module, flags, false)
 }
 fn snd_play_sound_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (sound,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?);
-    play_sound_impl(ctx,sound,0,flags,true)
+    let (sound, flags) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
+    play_sound_impl(ctx, sound, 0, flags, true)
 }
 fn snd_play_sound_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (sound,flags)=(ctx.arg_u32(0)?,ctx.arg_u32(1)?);
-    play_sound_impl(ctx,sound,0,flags,false)
+    let (sound, flags) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
+    play_sound_impl(ctx, sound, 0, flags, false)
 }
-fn play_sound_impl(ctx: &mut CallCtx<'_>, sound:u32, module:u32, flags:u32, wide:bool) -> Result<DispatchOutcome, KernelError> {
+fn play_sound_impl(
+    ctx: &mut CallCtx<'_>,
+    sound: u32,
+    module: u32,
+    flags: u32,
+    wide: bool,
+) -> Result<DispatchOutcome, KernelError> {
     const SND_ASYNC: u32 = 0x0001;
     const SND_LOOP: u32 = 0x0008;
     const SND_NOSTOP: u32 = 0x0010;
@@ -17267,7 +17439,15 @@ fn play_sound_impl(ctx: &mut CallCtx<'_>, sound:u32, module:u32, flags:u32, wide
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     if flags & SND_RESOURCE == SND_RESOURCE {
-        let name = if wide {read_wide_resource_key(ctx,sound)?} else {if sound<=0xffff {ResourceKey::Id(sound)} else {ResourceKey::Name(crate::crt_ansi::decode(&read_cstr(ctx,sound,260)?))}};
+        let name = if wide {
+            read_wide_resource_key(ctx, sound)?
+        } else {
+            if sound <= 0xffff {
+                ResourceKey::Id(sound)
+            } else {
+                ResourceKey::Name(crate::crt_ansi::decode(&read_cstr(ctx, sound, 260)?))
+            }
+        };
         if let Some((resource, base)) =
             lookup_resource(ctx.kernel, module, &ResourceKey::Name("WAVE".into()), &name)
                 .or_else(|| lookup_resource(ctx.kernel, module, &ResourceKey::Id(10), &name))
@@ -17288,15 +17468,24 @@ fn play_sound_impl(ctx: &mut CallCtx<'_>, sound:u32, module:u32, flags:u32, wide
     }
     let bytes = if flags & SND_MEMORY != 0 {
         // SND_MEMORY points at a RIFF/WAVE image, not a resource-table entry.
-        let header=ctx.cpu.read_mem(sound,12)?;
-        if &header[..4]!=b"RIFF" || &header[8..12]!=b"WAVE" {return Ok(DispatchOutcome::ReturnedR0(0));}
-        let Some(size)=u32::from_le_bytes(header[4..8].try_into().unwrap()).checked_add(8)
-            .filter(|n| (12..=64*1024*1024).contains(n)) else {return Ok(DispatchOutcome::ReturnedR0(0));};
-        ctx.cpu.read_mem(sound,size)?
+        let header = ctx.cpu.read_mem(sound, 12)?;
+        if &header[..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let Some(size) = u32::from_le_bytes(header[4..8].try_into().unwrap())
+            .checked_add(8)
+            .filter(|n| (12..=64 * 1024 * 1024).contains(n))
+        else {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        ctx.cpu.read_mem(sound, size)?
     } else {
-        let path=if wide {String::from_utf16_lossy(&read_wstr(ctx,sound,260)?)}
-            else {crate::crt_ansi::decode(&read_cstr(ctx,sound,260)?)};
-        read_guest_file(ctx,&path).unwrap_or_default()
+        let path = if wide {
+            String::from_utf16_lossy(&read_wstr(ctx, sound, 260)?)
+        } else {
+            crate::crt_ansi::decode(&read_cstr(ctx, sound, 260)?)
+        };
+        read_guest_file(ctx, &path).unwrap_or_default()
     };
     let ok = if bytes.is_empty() {
         false
@@ -17743,7 +17932,9 @@ fn load_icon_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// readouts on: the app hides those statics with `ShowWindow(SW_HIDE)`
 /// and shows them again when the dialog's checkboxes say so.
 fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(outcome) = tab_control::resume(ctx)? { return Ok(outcome); }
+    if let Some(outcome) = tab_control::resume(ctx)? {
+        return Ok(outcome);
+    }
     // First pass: materialise the template and register the DialogProc.
     let nested = ctx.kernel.modal_dialog.as_ref().is_some_and(|d| {
         d.thread == ctx.kernel.current_thread
@@ -17977,7 +18168,9 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         .position(|m| focus_belongs_to_window(ctx.kernel, m.0, modal_hwnd))
     {
         let (hwnd, message, wp, lp) = ctx.kernel.posted_messages.remove(index).unwrap();
-        if let Some(outcome) = tab_control::dispatch(ctx, hwnd, message, wp, true)? { return Ok(outcome); }
+        if let Some(outcome) = tab_control::dispatch(ctx, hwnd, message, wp, true)? {
+            return Ok(outcome);
+        }
         let proc = ctx
             .kernel
             .window_procs
@@ -19656,12 +19849,16 @@ fn strrev_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let mut address = ptr;
     loop {
         let byte = ctx.cpu.read_mem(address, 1)?[0];
-        if byte == 0 { break; }
+        if byte == 0 {
+            break;
+        }
         bytes.push(byte);
         address = address.wrapping_add(1);
     }
     bytes.reverse();
-    if !bytes.is_empty() { ctx.cpu.write_mem(ptr, &bytes)?; }
+    if !bytes.is_empty() {
+        ctx.cpu.write_mem(ptr, &bytes)?;
+    }
     Ok(DispatchOutcome::ReturnedR0(ptr))
 }
 
@@ -19672,30 +19869,63 @@ fn wcstol_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let base = ctx.arg_u32(2)?;
     let text = read_wstr(ctx, ptr, 0x100000)?;
     let (value, consumed) = parse_wide_long(&text, base);
-    if end != 0 { ctx.cpu.write_mem(end, &ptr.wrapping_add(consumed as u32 * 2).to_le_bytes())?; }
+    if end != 0 {
+        ctx.cpu
+            .write_mem(end, &ptr.wrapping_add(consumed as u32 * 2).to_le_bytes())?;
+    }
     Ok(DispatchOutcome::ReturnedR0(value as u32))
 }
 fn parse_wide_long(text: &[u16], mut base: u32) -> (i32, usize) {
-    if base != 0 && !(2..=36).contains(&base) { return (0, 0); }
+    if base != 0 && !(2..=36).contains(&base) {
+        return (0, 0);
+    }
     let at = |i: usize| text.get(i).copied().unwrap_or(0);
-    let digit = |c: u16| match c { 48..=57 => Some(u32::from(c-48)), 65..=90 => Some(u32::from(c-65+10)), 97..=122 => Some(u32::from(c-97+10)), _ => None };
+    let digit = |c: u16| match c {
+        48..=57 => Some(u32::from(c - 48)),
+        65..=90 => Some(u32::from(c - 65 + 10)),
+        97..=122 => Some(u32::from(c - 97 + 10)),
+        _ => None,
+    };
     let mut i = 0;
-    while matches!(at(i), 9..=13 | 32) { i += 1; }
-    let negative = at(i) == 45;
-    if matches!(at(i), 43 | 45) { i += 1; }
-    if (base == 0 || base == 16) && at(i) == 48 && matches!(at(i+1), 88 | 120)
-        && digit(at(i+2)).is_some_and(|d| d < 16) {
-        base = 16; i += 2;
-    } else if base == 0 { base = if at(i) == 48 { 8 } else { 10 }; }
-    let start = i;
-    let limit = if negative { 2147483648u64 } else { 2147483647u64 };
-    let mut magnitude = 0u64;
-    while let Some(d) = digit(at(i)).filter(|d| *d < base) {
-        magnitude = magnitude.saturating_mul(u64::from(base)).saturating_add(u64::from(d)).min(limit);
+    while matches!(at(i), 9..=13 | 32) {
         i += 1;
     }
-    if i == start { return (0, 0); }
-    let value = if negative { -(magnitude as i64) } else { magnitude as i64 };
+    let negative = at(i) == 45;
+    if matches!(at(i), 43 | 45) {
+        i += 1;
+    }
+    if (base == 0 || base == 16)
+        && at(i) == 48
+        && matches!(at(i + 1), 88 | 120)
+        && digit(at(i + 2)).is_some_and(|d| d < 16)
+    {
+        base = 16;
+        i += 2;
+    } else if base == 0 {
+        base = if at(i) == 48 { 8 } else { 10 };
+    }
+    let start = i;
+    let limit = if negative {
+        2147483648u64
+    } else {
+        2147483647u64
+    };
+    let mut magnitude = 0u64;
+    while let Some(d) = digit(at(i)).filter(|d| *d < base) {
+        magnitude = magnitude
+            .saturating_mul(u64::from(base))
+            .saturating_add(u64::from(d))
+            .min(limit);
+        i += 1;
+    }
+    if i == start {
+        return (0, 0);
+    }
+    let value = if negative {
+        -(magnitude as i64)
+    } else {
+        magnitude as i64
+    };
     (value as i32, i)
 }
 
@@ -21120,7 +21350,6 @@ fn resolve_dynamic_export(ctx: &CallCtx<'_>, module: u32, name: &str) -> u32 {
             }
         })
 }
-
 
 fn get_cursor_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let point = ctx.arg_u32(0)?;
@@ -23467,7 +23696,12 @@ fn track_popup_menu_impl(ctx: &mut CallCtx<'_>, ex: bool) -> Result<DispatchOutc
         if t.callback {
             t.callback = false;
             let frame = t.frame;
-            for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3].into_iter().zip(frame.args) { ctx.cpu.write_reg(reg, value)?; }
+            for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+                .into_iter()
+                .zip(frame.args)
+            {
+                ctx.cpu.write_reg(reg, value)?;
+            }
             ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
         }
     } else {
@@ -23476,13 +23710,28 @@ fn track_popup_menu_impl(ctx: &mut CallCtx<'_>, ex: bool) -> Result<DispatchOutc
         let x = ctx.arg_u32(2)? as i32;
         let y = ctx.arg_u32(3)? as i32;
         let owner = ctx.arg_u32(if ex { 4 } else { 5 })?;
-        if !ctx.kernel.menu_items.contains_key(&menu) || !window_is_visible(ctx.kernel, owner) { return Ok(DispatchOutcome::ReturnedR0(0)); }
-        let frame = GuestCallFrame { args: [menu, flags, x as u32, y as u32], sp, lr: ctx.cpu.read_reg(ArmReg::Lr)? };
+        if !ctx.kernel.menu_items.contains_key(&menu) || !window_is_visible(ctx.kernel, owner) {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let frame = GuestCallFrame {
+            args: [menu, flags, x as u32, y as u32],
+            sp,
+            lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+        };
         let proc = ctx.kernel.window_procs.get(&owner).copied().unwrap_or(0);
-        ctx.kernel.gdi.shell_menus.begin_tracking(TrackingMenu {
-            thread, thunk, frame, owner, flags, point: (x, y), result: None,
-            callback: proc != 0 && flags & 0x80 == 0,
-        }, menu);
+        ctx.kernel.gdi.shell_menus.begin_tracking(
+            TrackingMenu {
+                thread,
+                thunk,
+                frame,
+                owner,
+                flags,
+                point: (x, y),
+                result: None,
+                callback: proc != 0 && flags & 0x80 == 0,
+            },
+            menu,
+        );
         ctx.kernel.framebuffer.mark_dirty();
         if proc != 0 && flags & 0x80 == 0 {
             ctx.cpu.write_reg(ArmReg::R0, owner)?;
@@ -23495,12 +23744,19 @@ fn track_popup_menu_impl(ctx: &mut CallCtx<'_>, ex: bool) -> Result<DispatchOutc
     }
     while let Some(event) = take_pending_input(ctx) {
         update_key_state(ctx, event);
-        let action = ctx.kernel.gdi.shell_menus.input(TRACKING_HANDLE, event,
-            ctx.kernel.framebuffer.width as i32, ctx.kernel.framebuffer.height as i32,
-            &ctx.kernel.menu_items, &ctx.kernel.menus);
+        let action = ctx.kernel.gdi.shell_menus.input(
+            TRACKING_HANDLE,
+            event,
+            ctx.kernel.framebuffer.width as i32,
+            ctx.kernel.framebuffer.height as i32,
+            &ctx.kernel.menu_items,
+            &ctx.kernel.menus,
+        );
         ctx.kernel.framebuffer.mark_dirty();
         match action {
-            Some(Action::Command(_, id)) => { ctx.kernel.gdi.shell_menus.tracking.as_mut().unwrap().result = Some(id); }
+            Some(Action::Command(_, id)) => {
+                ctx.kernel.gdi.shell_menus.tracking.as_mut().unwrap().result = Some(id);
+            }
             Some(Action::Open(owner, menu)) => {
                 let t = ctx.kernel.gdi.shell_menus.tracking.as_mut().unwrap();
                 let proc = ctx.kernel.window_procs.get(&owner).copied().unwrap_or(0);
@@ -23516,17 +23772,48 @@ fn track_popup_menu_impl(ctx: &mut CallCtx<'_>, ex: bool) -> Result<DispatchOutc
             }
             _ => {}
         }
-        if ctx.kernel.gdi.shell_menus.tracking.as_ref().unwrap().result.is_some() { break; }
+        if ctx
+            .kernel
+            .gdi
+            .shell_menus
+            .tracking
+            .as_ref()
+            .unwrap()
+            .result
+            .is_some()
+        {
+            break;
+        }
     }
-    if let Some(result) = ctx.kernel.gdi.shell_menus.tracking.as_ref().and_then(|t| t.result) {
+    if let Some(result) = ctx
+        .kernel
+        .gdi
+        .shell_menus
+        .tracking
+        .as_ref()
+        .and_then(|t| t.result)
+    {
         let t = ctx.kernel.gdi.shell_menus.tracking.take().unwrap();
         ctx.kernel.gdi.shell_menus.close();
         ctx.kernel.gdi.shell_menus.bars.remove(&TRACKING_HANDLE);
         ctx.kernel.framebuffer.mark_dirty();
-        if result != 0 && t.flags & (0x100 | 0x80) == 0 { ctx.kernel.posted_messages.push_back((t.owner, WM_COMMAND, result, 0)); }
-        return Ok(DispatchOutcome::ReturnedR0(if t.flags & 0x100 != 0 { result } else { u32::from(result != 0) }));
+        if result != 0 && t.flags & (0x100 | 0x80) == 0 {
+            ctx.kernel
+                .posted_messages
+                .push_back((t.owner, WM_COMMAND, result, 0));
+        }
+        return Ok(DispatchOutcome::ReturnedR0(if t.flags & 0x100 != 0 {
+            result
+        } else {
+            u32::from(result != 0)
+        }));
     }
-    if let Some(outcome) = wait_display_until(ctx, std::time::Instant::now() + std::time::Duration::from_millis(1))? { return Ok(outcome); }
+    if let Some(outcome) = wait_display_until(
+        ctx,
+        std::time::Instant::now() + std::time::Duration::from_millis(1),
+    )? {
+        return Ok(outcome);
+    }
     Ok(DispatchOutcome::JumpTo(thunk))
 }
 
@@ -35730,24 +36017,84 @@ mod pocket_menu_tests {
     #[test]
     fn legacy_mfc_menu_and_append_toolbar_keep_labels_and_submenus() {
         let (mut cpu, mut k, mut d) = setup();
-        cpu.map_region(0x10000, 0x4000, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE).unwrap();
-        k.menu_items.insert(10, vec![MenuItem { text: "&File".encode_utf16().collect(), submenu: 11, ..Default::default() }]);
+        cpu.map_region(
+            0x10000,
+            0x4000,
+            pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+        )
+        .unwrap();
+        k.menu_items.insert(
+            10,
+            vec![MenuItem {
+                text: "&File".encode_utf16().collect(),
+                submenu: 11,
+                ..Default::default()
+            }],
+        );
         k.menu_items.insert(11, vec![]);
         let mut info = [0u8; 44];
         info[4..8].copy_from_slice(&0x10u32.to_le_bytes());
         info[36..40].copy_from_slice(&0x13000u32.to_le_bytes());
         info[40..44].copy_from_slice(&16u32.to_le_bytes());
         cpu.write_mem(0x2000, &info).unwrap();
-        assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", "GetMenuItemInfoW", &[10, 0, 1, 0x2000]), DispatchOutcome::ReturnedR0(1)));
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetMenuItemInfoW",
+                &[10, 0, 1, 0x2000]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        ));
         assert_eq!(cpu.read_u32_le(0x2028).unwrap(), 5);
         k.menu_items.insert(12, vec![]);
         let hwnd = 0xdead0b01;
-        k.gdi.shell_menus.bars.insert(hwnd, pocket_kernel::shell_menu::Bar { owner: 123, menu: 12, sip: true, background: 0 });
-        cpu.write_mem(0x2200, &[u32::MAX - 1, 55, 0x9804, 11, 0x13000].into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>()).unwrap();
-        assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", "SendMessageW", &[hwnd, 0x415, 0xffff, 0x2200]), DispatchOutcome::ReturnedR0(1)));
-        assert_eq!(k.menu_items[&12][0].text, "&File".encode_utf16().collect::<Vec<_>>());
+        k.gdi.shell_menus.bars.insert(
+            hwnd,
+            pocket_kernel::shell_menu::Bar {
+                owner: 123,
+                menu: 12,
+                sip: true,
+                background: 0,
+            },
+        );
+        cpu.write_mem(
+            0x2200,
+            &[u32::MAX - 1, 55, 0x9804, 11, 0x13000]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SendMessageW",
+                &[hwnd, 0x415, 0xffff, 0x2200]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        ));
+        assert_eq!(
+            k.menu_items[&12][0].text,
+            "&File".encode_utf16().collect::<Vec<_>>()
+        );
         assert_eq!(k.menu_items[&12][0].submenu, 11);
-        assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", "SendMessageW", &[hwnd, 0x416, 0, 0]), DispatchOutcome::ReturnedR0(1)));
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SendMessageW",
+                &[hwnd, 0x416, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        ));
         assert!(k.menu_items[&12].is_empty());
     }
     #[test]
@@ -35756,21 +36103,57 @@ mod pocket_menu_tests {
             let (mut cpu, mut k, mut d) = setup();
             k.window_classes.insert(123, "Custom".into());
             k.window_visibility.insert(123, true);
-            k.menu_items.insert(11, vec![MenuItem { id: 201, text: vec![65], ..Default::default() }, MenuItem { id: 202, text: vec![66], ..Default::default() }]);
-            let name = if ex { "TrackPopupMenuEx" } else { "TrackPopupMenu" };
-            let args = if ex { vec![11, 0x100, 10, 30, 123, 0] } else { vec![11, 0x100, 10, 30, 0, 123, 0] };
-            assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args), DispatchOutcome::JumpTo(_)));
+            k.menu_items.insert(
+                11,
+                vec![
+                    MenuItem {
+                        id: 201,
+                        text: vec![65],
+                        ..Default::default()
+                    },
+                    MenuItem {
+                        id: 202,
+                        text: vec![66],
+                        ..Default::default()
+                    },
+                ],
+            );
+            let name = if ex {
+                "TrackPopupMenuEx"
+            } else {
+                "TrackPopupMenu"
+            };
+            let args = if ex {
+                vec![11, 0x100, 10, 30, 123, 0]
+            } else {
+                vec![11, 0x100, 10, 30, 0, 123, 0]
+            };
+            assert!(matches!(
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args),
+                DispatchOutcome::JumpTo(_)
+            ));
             let raw = k.framebuffer.pixels.clone();
             assert_ne!(k.presentation_framebuffer().pixels, raw);
             assert_eq!(k.framebuffer.pixels, raw);
-            k.pending_input.push_back(InputEvent::PointerDown { x: 20, y: 55 });
-            k.pending_input.push_back(InputEvent::PointerUp { x: 20, y: 55 });
-            assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args), DispatchOutcome::ReturnedR0(202)));
+            k.pending_input
+                .push_back(InputEvent::PointerDown { x: 20, y: 55 });
+            k.pending_input
+                .push_back(InputEvent::PointerUp { x: 20, y: 55 });
+            assert!(matches!(
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args),
+                DispatchOutcome::ReturnedR0(202)
+            ));
             assert!(k.posted_messages.is_empty());
             assert!(k.gdi.shell_menus.tracking.is_none());
-            assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args), DispatchOutcome::JumpTo(_)));
+            assert!(matches!(
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args),
+                DispatchOutcome::JumpTo(_)
+            ));
             k.pending_input.push_back(InputEvent::KeyDown { vk: 0x1b });
-            assert!(matches!(call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args), DispatchOutcome::ReturnedR0(0)));
+            assert!(matches!(
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args),
+                DispatchOutcome::ReturnedR0(0)
+            ));
             assert!(k.posted_messages.is_empty());
         }
     }
@@ -35781,70 +36164,245 @@ mod pointer_capture_tests {
     use super::*;
     #[test]
     fn legacy_sound_uses_two_arguments_and_memory_wav_is_not_a_resource() {
-        use crate::bluetooth::tests::{call,setup};use pocket_cpu::Cpu;
-        let (mut cpu,mut k,mut d)=setup();
-        let mut wav=Vec::new();wav.extend_from_slice(b"RIFF");wav.extend_from_slice(&40u32.to_le_bytes());wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());wav.extend_from_slice(&1u16.to_le_bytes());wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&8000u32.to_le_bytes());wav.extend_from_slice(&16000u32.to_le_bytes());wav.extend_from_slice(&2u16.to_le_bytes());wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");wav.extend_from_slice(&4u32.to_le_bytes());wav.extend_from_slice(&12345i16.to_le_bytes());wav.extend_from_slice(&(-12345i16).to_le_bytes());
-        let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("select.wav"),&wav).unwrap();k.vfs.mount("\\",dir.path());
-        cpu.write_mem(0x1000,&"\\select.wav".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();
-        cpu.write_mem(0x1800,&wav).unwrap();
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut k, mut d) = setup();
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&12345i16.to_le_bytes());
+        wav.extend_from_slice(&(-12345i16).to_le_bytes());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("select.wav"), &wav).unwrap();
+        k.vfs.mount("\\", dir.path());
+        cpu.write_mem(
+            0x1000,
+            &"\\select.wav"
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        cpu.write_mem(0x1800, &wav).unwrap();
         // R2 contains unrelated caller data: sndPlaySound must never read it as flags.
-        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","sndPlaySoundW",&[0x1000,3,0x40004]),DispatchOutcome::ReturnedR0(1));
-        let mut pcm=[0i16;2];assert_eq!(k.audio.tap().drain_into(&mut pcm),2);assert_eq!(pcm,[12345,-12345]);
-        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","PlaySoundW",&[0x1800,0,5]),DispatchOutcome::ReturnedR0(1));
-        assert_eq!(k.audio.tap().drain_into(&mut pcm),2);assert_eq!(pcm,[12345,-12345]);
-        cpu.write_mem(0x1000,b"\\select.wav\0").unwrap();
-        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","sndPlaySoundA",&[0x1000,3,0x40004]),DispatchOutcome::ReturnedR0(1));
-        assert_eq!(k.audio.tap().drain_into(&mut pcm),2);assert_eq!(pcm,[12345,-12345]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "sndPlaySoundW",
+                &[0x1000, 3, 0x40004]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        let mut pcm = [0i16; 2];
+        assert_eq!(k.audio.tap().drain_into(&mut pcm), 2);
+        assert_eq!(pcm, [12345, -12345]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "PlaySoundW",
+                &[0x1800, 0, 5]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(k.audio.tap().drain_into(&mut pcm), 2);
+        assert_eq!(pcm, [12345, -12345]);
+        cpu.write_mem(0x1000, b"\\select.wav\0").unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "sndPlaySoundA",
+                &[0x1000, 3, 0x40004]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(k.audio.tap().drain_into(&mut pcm), 2);
+        assert_eq!(pcm, [12345, -12345]);
     }
     #[test]
     fn wide_long_obeys_bases_limits_and_exact_end_pointer() {
-        for (text,base,value,end) in [("  -75%",10,-75,5),("0x2a!",0,42,4),("0779",0,63,3),("xyz",10,0,0),(" +",10,0,0),("0x",0,0,1),("12",1,0,0),("2147483648!",10,i32::MAX,10),("-2147483649x",10,i32::MIN,11),("z!",36,35,1)] {
-            assert_eq!(parse_wide_long(&text.encode_utf16().collect::<Vec<_>>(),base),(value,end),"{text}");
+        for (text, base, value, end) in [
+            ("  -75%", 10, -75, 5),
+            ("0x2a!", 0, 42, 4),
+            ("0779", 0, 63, 3),
+            ("xyz", 10, 0, 0),
+            (" +", 10, 0, 0),
+            ("0x", 0, 0, 1),
+            ("12", 1, 0, 0),
+            ("2147483648!", 10, i32::MAX, 10),
+            ("-2147483649x", 10, i32::MIN, 11),
+            ("z!", 36, 35, 1),
+        ] {
+            assert_eq!(
+                parse_wide_long(&text.encode_utf16().collect::<Vec<_>>(), base),
+                (value, end),
+                "{text}"
+            );
         }
-        use crate::bluetooth::tests::{call, setup}; use pocket_cpu::Cpu;
-        let (mut cpu,mut k,mut d)=setup();
-        cpu.write_mem(0x1000,&" 75%".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();
-        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","wcstol",&[0x1000,0x1800,10]),DispatchOutcome::ReturnedR0(75));
-        assert_eq!(cpu.read_u32_le(0x1800).unwrap(),0x1006);
-        cpu.write_mem(0x1100,b"12\x80ab\0!").unwrap();
-        assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll","_strrev",&[0x1100]),DispatchOutcome::ReturnedR0(0x1100));
-        assert_eq!(cpu.read_mem(0x1100,7).unwrap(),b"ba\x8021\0!");
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut k, mut d) = setup();
+        cpu.write_mem(
+            0x1000,
+            &" 75%"
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "wcstol",
+                &[0x1000, 0x1800, 10]
+            ),
+            DispatchOutcome::ReturnedR0(75)
+        );
+        assert_eq!(cpu.read_u32_le(0x1800).unwrap(), 0x1006);
+        cpu.write_mem(0x1100, b"12\x80ab\0!").unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "_strrev",
+                &[0x1100]
+            ),
+            DispatchOutcome::ReturnedR0(0x1100)
+        );
+        assert_eq!(cpu.read_mem(0x1100, 7).unwrap(), b"ba\x8021\0!");
     }
     #[test]
     fn wvsprintf_w_dispatch_formats_budget_values_from_a_real_va_list() {
         use crate::bluetooth::tests::{call, setup};
         use pocket_cpu::Cpu;
         let (mut cpu, mut k, mut dispatcher) = setup();
-        cpu.write_mem(0x1000, &"%3d %%".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();
+        cpu.write_mem(
+            0x1000,
+            &"%3d %%"
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         cpu.write_mem(0x1800, &75u32.to_le_bytes()).unwrap();
-        assert_eq!(call(&mut cpu, &mut k, &mut dispatcher, "coredll.dll", "wvsprintfW", &[0x2000,0x1000,0x1800]),DispatchOutcome::ReturnedR0(5));
-        assert_eq!(cpu.read_mem(0x2000,12).unwrap()," 75 %".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut dispatcher,
+                "coredll.dll",
+                "wvsprintfW",
+                &[0x2000, 0x1000, 0x1800]
+            ),
+            DispatchOutcome::ReturnedR0(5)
+        );
+        assert_eq!(
+            cpu.read_mem(0x2000, 12).unwrap(),
+            " 75 %"
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
     }
     #[test]
     fn toolbar_relays_menu_commands_to_its_notification_owner() {
-        let mut cpu = tests::scanf_cpu(); let mut kernel = tests::fresh_kernel(); let thunk = tests::dummy_thunk();
-        let bar = kernel.controls.create(FAKE_HWND,ControlClass::Toolbar,42,String::new(),0x50000000,0,0,200,30);
-        kernel.window_procs.insert(FAKE_HWND,0x123400);
-        let mut ctx = CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        for (reg,value) in [(ArmReg::R0,bar),(ArmReg::R1,WM_COMMAND),(ArmReg::R2,300),(ArmReg::R3,0)] {ctx.cpu.write_reg(reg,value).unwrap();}
-        assert_eq!(def_window_proc_w(&mut ctx).unwrap(),DispatchOutcome::JumpTo(0x123400));
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(),FAKE_HWND);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(),WM_COMMAND);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(),300);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(),0);
+        let mut cpu = tests::scanf_cpu();
+        let mut kernel = tests::fresh_kernel();
+        let thunk = tests::dummy_thunk();
+        let bar = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::Toolbar,
+            42,
+            String::new(),
+            0x50000000,
+            0,
+            0,
+            200,
+            30,
+        );
+        kernel.window_procs.insert(FAKE_HWND, 0x123400);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (reg, value) in [
+            (ArmReg::R0, bar),
+            (ArmReg::R1, WM_COMMAND),
+            (ArmReg::R2, 300),
+            (ArmReg::R3, 0),
+        ] {
+            ctx.cpu.write_reg(reg, value).unwrap();
+        }
+        assert_eq!(
+            def_window_proc_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x123400)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), FAKE_HWND);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_COMMAND);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 300);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0);
     }
     #[test]
     fn dialog_codes_distinguish_radio_buttons_from_push_buttons() {
         let mut cpu = tests::scanf_cpu();
         let mut kernel = tests::fresh_kernel();
         let thunk = tests::dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        for (style, expected) in [(0,0x2020),(1,0x2010),(4,0x2040),(9,0x2040),(3,0x2000),(7,0x100)] {
-            let hwnd = ctx.kernel.controls.create(FAKE_HWND,ControlClass::Button,42,String::new(),0x50000000 | style,0,0,80,20);
-            assert_eq!(control_message(&mut ctx,hwnd,0x87,0,0).unwrap(),expected);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (style, expected) in [
+            (0, 0x2020),
+            (1, 0x2010),
+            (4, 0x2040),
+            (9, 0x2040),
+            (3, 0x2000),
+            (7, 0x100),
+        ] {
+            let hwnd = ctx.kernel.controls.create(
+                FAKE_HWND,
+                ControlClass::Button,
+                42,
+                String::new(),
+                0x50000000 | style,
+                0,
+                0,
+                80,
+                20,
+            );
+            assert_eq!(
+                control_message(&mut ctx, hwnd, 0x87, 0, 0).unwrap(),
+                expected
+            );
         }
     }
     #[test]
@@ -35854,7 +36412,11 @@ mod pointer_capture_tests {
         let thunk = tests::dummy_thunk();
         let canvas = 0xdead0042;
         kernel.window_rects.insert(canvas, (10, 40, 200, 230));
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         update_key_state(&mut ctx, InputEvent::PointerDown { x: 50, y: 70 });
         ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
         get_cursor_pos(&mut ctx).unwrap();
@@ -35864,113 +36426,201 @@ mod pointer_capture_tests {
         // Captured client point (-5,-34) is screen point (5,6).
         let lp = ((-5i32 as u32) & 65535) | (((-34i32 as u32) & 65535) << 16);
         write_retrieved_message(&mut ctx, 0x1200, canvas, WM_MOUSEMOVE, MK_LBUTTON, lp).unwrap();
-        assert_eq!(get_message_pos(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(5 | (6 << 16)));
+        assert_eq!(
+            get_message_pos(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(5 | (6 << 16))
+        );
         let point = ctx.cpu.read_mem(0x1214, 8).unwrap();
         assert_eq!(&point[..4], &5i32.to_le_bytes());
         assert_eq!(&point[4..], &6i32.to_le_bytes());
         update_key_state(&mut ctx, InputEvent::PointerUp { x: 80, y: 90 });
         assert_eq!(ctx.kernel.controls.cursor_position, (80, 90));
-        assert_eq!(get_message_pos(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(5 | (6 << 16)));
+        assert_eq!(
+            get_message_pos(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(5 | (6 << 16))
+        );
         ctx.kernel.current_thread = 1;
-        assert_eq!(get_message_pos(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            get_message_pos(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         write_retrieved_message(&mut ctx, 0x1200, canvas, WM_KEYDOWN, 13, 0).unwrap();
-        assert_eq!(get_message_pos(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(80 | (90 << 16)));
+        assert_eq!(
+            get_message_pos(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(80 | (90 << 16))
+        );
     }
     #[test]
     fn native_drag_keeps_its_owner_over_other_controls_and_release_notifies() {
-        let mut cpu=tests::scanf_cpu();let mut kernel=tests::fresh_kernel();let thunk=tests::dummy_thunk();
-        let canvas=0xdead0042;
-        kernel.window_classes.insert(canvas,"Canvas".into());
-        kernel.window_rects.insert(canvas,(10,40,200,230));
-        kernel.window_procs.insert(canvas,0x123400);
-        let button=kernel.controls.create(FAKE_HWND,ControlClass::Button,8,String::new(),0x50000000,0,0,40,30);
-        let mut ctx=CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        ctx.cpu.write_reg(ArmReg::R0,canvas).unwrap();
-        assert_eq!(set_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(canvas));
-        let down=InputEvent::PointerDown{x:50,y:70};update_key_state(&mut ctx,down);
+        let mut cpu = tests::scanf_cpu();
+        let mut kernel = tests::fresh_kernel();
+        let thunk = tests::dummy_thunk();
+        let canvas = 0xdead0042;
+        kernel.window_classes.insert(canvas, "Canvas".into());
+        kernel.window_rects.insert(canvas, (10, 40, 200, 230));
+        kernel.window_procs.insert(canvas, 0x123400);
+        let button = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::Button,
+            8,
+            String::new(),
+            0x50000000,
+            0,
+            0,
+            40,
+            30,
+        );
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            get_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, canvas).unwrap();
+        assert_eq!(
+            set_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(canvas)
+        );
+        let down = InputEvent::PointerDown { x: 50, y: 70 };
+        update_key_state(&mut ctx, down);
         assert!(ctx.kernel.pressed_keys[1]);
-        let movement=InputEvent::PointerMove{x:5,y:6};
-        assert_eq!(controls_take_input(&mut ctx,movement),None);
-        assert_eq!(addressed_input(ctx.kernel,movement),Some((canvas,WM_MOUSEMOVE,MK_LBUTTON,(((-34i32) as u32&65535)<<16)|((-5i32) as u32&65535))));
+        let movement = InputEvent::PointerMove { x: 5, y: 6 };
+        assert_eq!(controls_take_input(&mut ctx, movement), None);
+        assert_eq!(
+            addressed_input(ctx.kernel, movement),
+            Some((
+                canvas,
+                WM_MOUSEMOVE,
+                MK_LBUTTON,
+                (((-34i32) as u32 & 65535) << 16) | ((-5i32) as u32 & 65535)
+            ))
+        );
         // One down, several moves, one up: a continuous native stylus stroke.
-        for (x,y) in [(60,80),(80,90),(110,100)] {
-            let ev=InputEvent::PointerMove{x,y}; update_key_state(&mut ctx,ev);
-            assert_eq!(controls_take_input(&mut ctx,ev),None);
-            let (owner,msg,buttons,_)=addressed_input(ctx.kernel,ev).unwrap();
-            assert_eq!((owner,msg,buttons),(canvas,WM_MOUSEMOVE,MK_LBUTTON));
+        for (x, y) in [(60, 80), (80, 90), (110, 100)] {
+            let ev = InputEvent::PointerMove { x, y };
+            update_key_state(&mut ctx, ev);
+            assert_eq!(controls_take_input(&mut ctx, ev), None);
+            let (owner, msg, buttons, _) = addressed_input(ctx.kernel, ev).unwrap();
+            assert_eq!((owner, msg, buttons), (canvas, WM_MOUSEMOVE, MK_LBUTTON));
             assert!(ctx.kernel.pressed_keys[1]);
         }
-        let up=InputEvent::PointerUp{x:5,y:6};update_key_state(&mut ctx,up);
+        let up = InputEvent::PointerUp { x: 5, y: 6 };
+        update_key_state(&mut ctx, up);
         assert!(!ctx.kernel.pressed_keys[1]);
-        assert_eq!(controls_take_input(&mut ctx,up),None);
-        assert_eq!(addressed_input(ctx.kernel,up).unwrap().0,canvas);
-        assert_eq!(addressed_input(ctx.kernel,up).unwrap().2,0);
-        ctx.cpu.write_reg(ArmReg::Lr,0x8888).unwrap();
-        assert_eq!(release_capture(&mut ctx).unwrap(),DispatchOutcome::JumpTo(0x123400));
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(),0x215);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(),0);
-        assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        ctx.cpu.write_reg(ArmReg::R0,777).unwrap();
-        assert_eq!(release_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
-        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(),0x8888);
-        assert_eq!(ctx.kernel.controls.get(button).unwrap().pressed,false);
-        assert_eq!(addressed_input(ctx.kernel,movement).unwrap().2,0);
+        assert_eq!(controls_take_input(&mut ctx, up), None);
+        assert_eq!(addressed_input(ctx.kernel, up).unwrap().0, canvas);
+        assert_eq!(addressed_input(ctx.kernel, up).unwrap().2, 0);
+        ctx.cpu.write_reg(ArmReg::Lr, 0x8888).unwrap();
+        assert_eq!(
+            release_capture(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x123400)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0x215);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0);
+        assert_eq!(
+            get_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 777).unwrap();
+        assert_eq!(
+            release_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x8888);
+        assert_eq!(ctx.kernel.controls.get(button).unwrap().pressed, false);
+        assert_eq!(addressed_input(ctx.kernel, movement).unwrap().2, 0);
     }
     #[test]
     fn capture_is_thread_owned_and_destroy_clears_it() {
-        let mut cpu=tests::scanf_cpu();let mut kernel=tests::fresh_kernel();let thunk=tests::dummy_thunk();
-        kernel.window_classes.insert(123,"Canvas".into());
-        let mut ctx=CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        ctx.cpu.write_reg(ArmReg::R0,123).unwrap();
-        assert_eq!(set_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        ctx.kernel.current_thread=1;
-        assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        ctx.kernel.current_thread=0;
-        assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(123));
-        discard_window_metadata(&mut ctx,&123);
-        assert_eq!(get_capture(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        let mut cpu = tests::scanf_cpu();
+        let mut kernel = tests::fresh_kernel();
+        let thunk = tests::dummy_thunk();
+        kernel.window_classes.insert(123, "Canvas".into());
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, 123).unwrap();
+        assert_eq!(
+            set_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.kernel.current_thread = 1;
+        assert_eq!(
+            get_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.kernel.current_thread = 0;
+        assert_eq!(
+            get_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(123)
+        );
+        discard_window_metadata(&mut ctx, &123);
+        assert_eq!(
+            get_capture(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
 }
 
 #[cfg(test)]
 mod broadcast_delivery_tests {
+    use super::tests::{dummy_thunk, fresh_kernel};
     use super::*;
-    use super::tests::{fresh_kernel, dummy_thunk};
     use pocket_cpu::stub::StubCpu;
 
     #[test]
     fn posted_broadcast_reaches_each_top_level_window_on_its_own_thread() {
         let mut kernel = fresh_kernel();
-        kernel.pending_startup.clear(); kernel.pending_create = None;
-        for (window, thread, style) in [(0x101,0,0), (0x102,1,0x80000000), (0x103,0,0x40000000)] {
+        kernel.pending_startup.clear();
+        kernel.pending_create = None;
+        for (window, thread, style) in [
+            (0x101, 0, 0),
+            (0x102, 1, 0x80000000),
+            (0x103, 0, 0x40000000),
+        ] {
             kernel.window_procs.insert(window, 0x2000 + window);
-            kernel.window_styles.insert(window,(style,0));
-            kernel.window_threads.insert(window,thread);
+            kernel.window_styles.insert(window, (style, 0));
+            kernel.window_threads.insert(window, thread);
         }
-        assert!(enqueue_window_message(&mut kernel,0xffff,0xc123,7,9));
-        assert_eq!(kernel.posted_messages.len(),2);
-        let mut cpu=StubCpu::new(); let thunk=dummy_thunk();
-        let mut ctx=CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        assert_eq!(take_posted_message(&mut ctx),Some((0x101,0xc123,7,9)));
-        assert_eq!(take_posted_message(&mut ctx),None);
-        ctx.kernel.current_thread=1;
-        assert_eq!(take_posted_message(&mut ctx),Some((0x102,0xc123,7,9)));
-        assert_eq!(take_posted_message(&mut ctx),None);
+        assert!(enqueue_window_message(&mut kernel, 0xffff, 0xc123, 7, 9));
+        assert_eq!(kernel.posted_messages.len(), 2);
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(take_posted_message(&mut ctx), Some((0x101, 0xc123, 7, 9)));
+        assert_eq!(take_posted_message(&mut ctx), None);
+        ctx.kernel.current_thread = 1;
+        assert_eq!(take_posted_message(&mut ctx), Some((0x102, 0xc123, 7, 9)));
+        assert_eq!(take_posted_message(&mut ctx), None);
     }
 
     #[test]
     fn broadcast_never_dispatches_the_pseudo_handle_or_partially_fills_the_queue() {
-        let mut kernel=fresh_kernel();
-        kernel.window_procs.insert(0x101,0x2000);
-        kernel.window_procs.insert(0x102,0x3000);
-        kernel.posted_messages.extend(std::iter::repeat((0,1,2,3)).take(255));
-        assert!(!enqueue_window_message(&mut kernel,0xffff,0xc123,7,9));
-        assert_eq!(kernel.posted_messages.len(),255);
+        let mut kernel = fresh_kernel();
+        kernel.window_procs.insert(0x101, 0x2000);
+        kernel.window_procs.insert(0x102, 0x3000);
+        kernel
+            .posted_messages
+            .extend(std::iter::repeat((0, 1, 2, 3)).take(255));
+        assert!(!enqueue_window_message(&mut kernel, 0xffff, 0xc123, 7, 9));
+        assert_eq!(kernel.posted_messages.len(), 255);
         kernel.posted_messages.clear();
-        kernel.window_procs.clear(); kernel.wnd_proc=0;
-        assert!(enqueue_window_message(&mut kernel,0xffff,0xc123,7,9));
+        kernel.window_procs.clear();
+        kernel.wnd_proc = 0;
+        assert!(enqueue_window_message(&mut kernel, 0xffff, 0xc123, 7, 9));
         assert!(kernel.posted_messages.is_empty());
     }
 }

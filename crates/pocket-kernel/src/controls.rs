@@ -357,8 +357,17 @@ pub struct TabState {
 }
 impl Default for TabState {
     fn default() -> Self {
-        Self { items: Vec::new(), selected: None, focus: None, size: (0, 20),
-            padding: (6, 3), image_list: 0, extra: 4, minimum_width: 0, extended_style: 0 }
+        Self {
+            items: Vec::new(),
+            selected: None,
+            focus: None,
+            size: (0, 20),
+            padding: (6, 3),
+            image_list: 0,
+            extra: 4,
+            minimum_width: 0,
+            extended_style: 0,
+        }
     }
 }
 #[derive(Debug, Clone)]
@@ -404,42 +413,88 @@ impl ChildWindow {
         let mut x = 2;
         let mut row = 0;
         for (i, item) in self.tab.items.iter().enumerate() {
-            let width = if self.tab.size.0 > 0 { self.tab.size.0 } else {
+            let width = if self.tab.size.0 > 0 {
+                self.tab.size.0
+            } else {
                 ((item.text.chars().count() as i32 * font::GLYPH_W) + 2 * self.tab.padding.0)
-                    .max(self.tab.minimum_width).max(20)
-            }.min((self.w - 4).max(1));
-            if multiline && x > 2 && x + width > self.w - 2 { x = 2; row += 1; }
+                    .max(self.tab.minimum_width)
+                    .max(20)
+            }
+            .min((self.w - 4).max(1));
+            if multiline && x > 2 && x + width > self.w - 2 {
+                x = 2;
+                row += 1;
+            }
             let height = self.tab.size.1.max(1);
-            let y = if self.style & 2 != 0 { self.h - (row + 1) * height - 2 }
-                    else { 2 + row * height };
-            if i == index { return Some((x, y, width, height)); }
+            let y = if self.style & 2 != 0 {
+                self.h - (row + 1) * height - 2
+            } else {
+                2 + row * height
+            };
+            if i == index {
+                return Some((x, y, width, height));
+            }
             x += width;
         }
         None
     }
     pub fn tab_rows(&self) -> i32 {
-        if self.tab.items.is_empty() { return 0; }
-        self.tab.items.iter().enumerate().filter_map(|(i, _)| self.tab_rect(i))
-            .map(|(_, y, _, h)| if self.style & 2 != 0 { (self.h - 2 - y) / h } else { (y - 2) / h + 1 })
-            .max().unwrap_or(0)
+        if self.tab.items.is_empty() {
+            return 0;
+        }
+        self.tab
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, _)| self.tab_rect(i))
+            .map(|(_, y, _, h)| {
+                if self.style & 2 != 0 {
+                    (self.h - 2 - y) / h
+                } else {
+                    (y - 2) / h + 1
+                }
+            })
+            .max()
+            .unwrap_or(0)
     }
     pub fn tab_hit(&self, x: i32, y: i32) -> Option<usize> {
-        (0..self.tab.items.len()).find(|&i| self.tab_rect(i)
-            .is_some_and(|(a,b,w,h)| x >= a && x < a+w && y >= b && y < b+h))
+        (0..self.tab.items.len()).find(|&i| {
+            self.tab_rect(i)
+                .is_some_and(|(a, b, w, h)| x >= a && x < a + w && y >= b && y < b + h)
+        })
     }
     fn render_tabs(&self, surf: &mut Surface<'_>) {
         // The display area belongs to the application's page: do not erase it.
         let rows = self.tab_rows();
         let height = rows * self.tab.size.1.max(1) + 2;
-        let y = if self.style & 2 != 0 { self.y + self.h - height } else { self.y };
+        let y = if self.style & 2 != 0 {
+            self.y + self.h - height
+        } else {
+            self.y
+        };
         surf.fill_rect(self.x, y, self.w, height, Self::FACE);
         for (i, item) in self.tab.items.iter().enumerate() {
-            if let Some((x,y,w,h)) = self.tab_rect(i) {
-                let x = self.x + x; let y = self.y + y;
-                surf.fill_rect(x, y, w, h, if self.tab.selected == Some(i) { 0xffff } else { Self::FACE });
+            if let Some((x, y, w, h)) = self.tab_rect(i) {
+                let x = self.x + x;
+                let y = self.y + y;
+                surf.fill_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    if self.tab.selected == Some(i) {
+                        0xffff
+                    } else {
+                        Self::FACE
+                    },
+                );
                 stroke(surf, x, y, w, h, Self::TEXT);
-                let label: String = item.text.chars().take(((w-4).max(0)/font::GLYPH_W) as usize).collect();
-                font::draw_str(surf, x+3, y+(h-font::GLYPH_H)/2, &label, Self::TEXT);
+                let label: String = item
+                    .text
+                    .chars()
+                    .take(((w - 4).max(0) / font::GLYPH_W) as usize)
+                    .collect();
+                font::draw_str(surf, x + 3, y + (h - font::GLYPH_H) / 2, &label, Self::TEXT);
             }
         }
     }
@@ -1237,7 +1292,10 @@ impl ChildWindow {
         {
             return;
         }
-        if let Some(color) = self.background_color.filter(|_| self.class != ControlClass::Tab) {
+        if let Some(color) = self
+            .background_color
+            .filter(|_| self.class != ControlClass::Tab)
+        {
             // A combo's template height reserves space for its dropdown.
             // Its parent brush must not erase the siblings beneath the closed field.
             let height = if self.class == ControlClass::ComboBox {
@@ -1993,7 +2051,8 @@ impl Controls {
 
     /// Drop a control and anything that referred to it.
     pub fn destroy(&mut self, hwnd: u32) {
-        self.recognized_holds.retain(|(_, owner, _, _)| *owner != hwnd);
+        self.recognized_holds
+            .retain(|(_, owner, _, _)| *owner != hwnd);
         self.pointer_capture.retain(|_, owner| *owner != hwnd);
         self.children.retain(|c| c.hwnd != hwnd);
         if self.focus == hwnd {
@@ -2141,7 +2200,9 @@ impl Controls {
             .unwrap_or((0, 0));
         let child = self.get_mut(hwnd)?;
         if child.class == ControlClass::Tab {
-            if !child.enabled { return Some(ControlAction::Consumed); }
+            if !child.enabled {
+                return Some(ControlAction::Consumed);
+            }
             let hit = child.tab_hit(x - origin.0 - child.x, y - origin.1 - child.y);
             self.focus = hwnd;
             if let Some(index) = hit {
@@ -2149,8 +2210,13 @@ impl Controls {
                 let child = self.get_mut(hwnd).unwrap();
                 child.tab.focus = Some(index);
                 if child.tab.selected != Some(index) {
-                    return Some(ControlAction::Notify { parent: child.parent, id: child.id,
-                        hwnd, code: (-552i32) as u32, index: index as i32 });
+                    return Some(ControlAction::Notify {
+                        parent: child.parent,
+                        id: child.id,
+                        hwnd,
+                        code: (-552i32) as u32,
+                        index: index as i32,
+                    });
                 }
             }
             return Some(ControlAction::Consumed);
@@ -2224,8 +2290,12 @@ impl Controls {
         }
         if child.class == ControlClass::Static {
             // STATIC is transparent to stylus input unless SS_NOTIFY is set.
-            if child.style & 0x100 == 0 { return None; }
-            if child.enabled { self.capture = hwnd; }
+            if child.style & 0x100 == 0 {
+                return None;
+            }
+            if child.enabled {
+                self.capture = hwnd;
+            }
             return Some(ControlAction::Consumed);
         }
         if !child.is_focusable() {
@@ -2262,7 +2332,9 @@ impl Controls {
         if captured == 0 {
             // Not our press — but still swallow a release over a
             // control so the parent does not act on it.
-            return self.hit_test(x, y).and_then(|h| self.get(h))
+            return self
+                .hit_test(x, y)
+                .and_then(|h| self.get(h))
                 .filter(|c| c.class != ControlClass::Static || c.style & 0x100 != 0)
                 .map(|_| ControlAction::Consumed);
         }
@@ -2275,8 +2347,13 @@ impl Controls {
         child.pressed = false;
         if child.class == ControlClass::Tab {
             return Some(match child.tab_hit(x - ox - child.x, y - oy - child.y) {
-                Some(index) => ControlAction::Notify { parent: child.parent, id: child.id,
-                    hwnd: captured, code: (-2i32) as u32, index: index as i32 },
+                Some(index) => ControlAction::Notify {
+                    parent: child.parent,
+                    id: child.id,
+                    hwnd: captured,
+                    code: (-2i32) as u32,
+                    index: index as i32,
+                },
                 None => ControlAction::Consumed,
             });
         }
@@ -2475,15 +2552,28 @@ impl Controls {
         match child.class {
             ControlClass::Tab if matches!(vk, 0x25..=0x28 | 0x24 | 0x23 | 0x20 | 0x0d) => {
                 let len = child.tab.items.len();
-                if len == 0 { return Some(ControlAction::Consumed); }
+                if len == 0 {
+                    return Some(ControlAction::Consumed);
+                }
                 let old = child.tab.focus.or(child.tab.selected).unwrap_or(0);
-                let next = match vk { 0x24 => 0, 0x23 => len-1,
+                let next = match vk {
+                    0x24 => 0,
+                    0x23 => len - 1,
                     0x25 | 0x26 => old.saturating_sub(1),
-                    0x27 | 0x28 => (old+1).min(len-1), _ => old };
+                    0x27 | 0x28 => (old + 1).min(len - 1),
+                    _ => old,
+                };
                 child.tab.focus = Some(next);
-                if child.tab.selected == Some(next) { return Some(ControlAction::Consumed); }
-                Some(ControlAction::Notify { parent: child.parent, id: child.id, hwnd: child.hwnd,
-                    code: (-552i32) as u32, index: next as i32 })
+                if child.tab.selected == Some(next) {
+                    return Some(ControlAction::Consumed);
+                }
+                Some(ControlAction::Notify {
+                    parent: child.parent,
+                    id: child.id,
+                    hwnd: child.hwnd,
+                    code: (-552i32) as u32,
+                    index: next as i32,
+                })
             }
             ControlClass::ComboBox
                 if vk == 0x0d || (vk == 0x1b && child.choice_open) || vk == 0x73 =>
@@ -3962,11 +4052,23 @@ mod tests {
     #[test]
     fn tabs_preserve_application_page_pixels_with_parent_brush() {
         let mut controls = Controls::default();
-        let hwnd = controls.create(PARENT, ControlClass::Tab, 7, String::new(),
-            0x50000200, 0, 0, 160, 100);
+        let hwnd = controls.create(
+            PARENT,
+            ControlClass::Tab,
+            7,
+            String::new(),
+            0x50000200,
+            0,
+            0,
+            160,
+            100,
+        );
         let c = controls.get_mut(hwnd).unwrap();
         c.background_color = Some(0x0000ff);
-        c.tab.items.push(TabItem { text: "Income".into(), ..Default::default() });
+        c.tab.items.push(TabItem {
+            text: "Income".into(),
+            ..Default::default()
+        });
         c.tab.selected = Some(0);
         let mut bitmap = Bitmap::new(160, 100);
         bitmap.pixels.fill(0x7b);
@@ -3974,5 +4076,4 @@ mod tests {
         assert_eq!(bitmap.pixels[2 * (60 * 160 + 70)], 0x7b);
         assert_ne!(bitmap.pixels[2 * (5 * 160 + 5)], 0x7b);
     }
-
 }

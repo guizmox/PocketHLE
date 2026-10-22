@@ -14,7 +14,12 @@ class PocketPcGeometryTest {
             for(i in zones.indices) for(j in i+1 until zones.size) assertFalse("overlap $i/$j at $size density $density",overlaps(zones[i],zones[j]))
             layout.actions.forEach { assertTrue("thumb safety gap",it.y+it.h+16*density<=layout.dpad.y) }
             if(w>h) assertEquals(layout.actions[0].y,layout.auxiliary[0].y)
-            else { assertEquals(0,layout.screen.y); assertTrue(layout.auxiliary.all { it.y>=layout.dpad.y-8*density }) }
+            else {
+                assertTrue(layout.auxiliary.all { it.y+it.h<layout.screen.y })
+                assertEquals(1,layout.auxiliary.map { it.y }.distinct().size)
+                val guestEnd=layout.auxiliary[2].let { it.x+it.w }
+                assertTrue("host action separation",layout.auxiliary[3].x-guestEnd>=18*density-3)
+            }
         }
     }
     @Test fun nativeIntegerScaleAndTouchMappingSurviveAllPresentationTurns() {

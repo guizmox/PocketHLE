@@ -3525,3 +3525,12 @@ rotation changes. It preserves equality only if guest/host pixels were already
 synchronized; do not acknowledge pending real GDI writes. Backlight changes
 follow the same rule. Do not remove sync_guest_framebuffer's real pixel guard,
 change the game's config, force a renderer, or add a title-specific exception.
+
+## Android Pocket PC portrait presentation (2026-10-22)
+
+PocketPcGeometry reserves one top row for Tab/Esc/Turbo, then a larger gap
+before the orange Exit/Rotate actions. The display room lies between that row
+and the existing bottom action/thumb controls. PocketPcLayout centers the
+scaled surface horizontally and vertically in its room in both orientations.
+Keep the content view's actual bounds as the stylus routing rectangle; no guest
+resolution/coordinate changes or Gizmondo layout changes belong in this update.

@@ -14,9 +14,13 @@ pub(crate) fn message(ctx: &mut CallCtx<'_>, hwnd: u32, message: u32, value: u32
         if let Some(available) = ctx.kernel.internet.gprs_shell_network_available() {
             let connected = available && value != 0;
             ctx.kernel.internet.gprs_connected = connected;
-            crate::coredll::enqueue_window_message(ctx.kernel, 0xffff,
+            crate::coredll::enqueue_window_message(
+                ctx.kernel,
+                0xffff,
                 crate::coredll::registered_window_message_id("GPRS_STATUS"),
-                if connected { 0x1f9c } else { 0x1f9d }, u32::from(connected));
+                if connected { 0x1f9c } else { 0x1f9d },
+                u32::from(connected),
+            );
             return true;
         }
     }
@@ -36,8 +40,15 @@ pub(crate) fn service(ctx: &mut CallCtx<'_>) {
         return;
     };
     let flags = status(ctx);
-    if flags != previous && crate::coredll::enqueue_window_message(ctx.kernel, 0xffff,
-        crate::coredll::registered_window_message_id("GT_STATUS"), flags, 0) {
+    if flags != previous
+        && crate::coredll::enqueue_window_message(
+            ctx.kernel,
+            0xffff,
+            crate::coredll::registered_window_message_id("GT_STATUS"),
+            flags,
+            0,
+        )
+    {
         ctx.kernel.shell_status = Some(flags);
     }
 }

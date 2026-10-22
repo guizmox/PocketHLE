@@ -441,9 +441,14 @@ impl Runner {
             summary_lines.push(format!("Module path: {}", paths.module_path));
             let save_dir = game.save_dir(library_root);
             emu.mount_save_dir(&paths.save_prefix, &save_dir);
-        if !is_gizmondo && !paths.save_prefix.trim_end_matches('\\').eq_ignore_ascii_case(r"\My Documents") {
-            emu.mount_save_dir(r"\My Documents\", save_dir.join("my-documents"));
-        }
+            if !is_gizmondo
+                && !paths
+                    .save_prefix
+                    .trim_end_matches('\\')
+                    .eq_ignore_ascii_case(r"\My Documents")
+            {
+                emu.mount_save_dir(r"\My Documents\", save_dir.join("my-documents"));
+            }
             summary_lines.push(format!(
                 "Save data: {} -> {:?}",
                 save_dir.display(),

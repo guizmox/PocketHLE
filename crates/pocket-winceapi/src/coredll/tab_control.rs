@@ -715,8 +715,10 @@ mod tests {
         // NM_CLICK is separate from TCN_SELCHANGE: applications can use either.
         assert!(matches!(controls.pointer_up_in(FAKE_HWND, x + 2, y + 2),
             Some(ControlAction::Notify { code, index: 1, .. }) if code == (-2i32) as u32));
-        assert!(!matches!(controls.pointer_up_in(FAKE_HWND, x + 2, y + 2),
-            Some(ControlAction::Notify { .. })));
+        assert!(!matches!(
+            controls.pointer_up_in(FAKE_HWND, x + 2, y + 2),
+            Some(ControlAction::Notify { .. })
+        ));
         controls.focus = hwnd;
         assert!(matches!(
             controls.key_down_in(FAKE_HWND, 0x27),

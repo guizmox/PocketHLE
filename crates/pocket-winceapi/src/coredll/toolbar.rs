@@ -16,29 +16,65 @@ pub(super) fn message(
             .unwrap_or_default();
         match msg {
             0x416 => {
-                let Some(items) = ctx.kernel.menu_items.get_mut(&menu) else { return Ok(Some(0)); };
-                if wp as usize >= items.len() { return Ok(Some(0)); }
+                let Some(items) = ctx.kernel.menu_items.get_mut(&menu) else {
+                    return Ok(Some(0));
+                };
+                if wp as usize >= items.len() {
+                    return Ok(Some(0));
+                }
                 items.remove(wp as usize);
                 ctx.kernel.framebuffer.mark_dirty();
                 return Ok(Some(1));
             }
             0x414 | 0x415 | 0x443 | 0x444 => {
                 let insert = matches!(msg, 0x415 | 0x443);
-                let at = if matches!(wp, 0xffff | u32::MAX) { items.len() } else { wp as usize };
+                let at = if matches!(wp, 0xffff | u32::MAX) {
+                    items.len()
+                } else {
+                    wp as usize
+                };
                 let count = if insert { 1 } else { wp };
-                if count > 4096 || items.len() + count as usize > 4096 || (insert && at > items.len()) { return Ok(Some(0)); }
-                let Ok(bytes) = ctx.cpu.read_mem(lp, count * 20) else { return Ok(Some(0)); };
+                if count > 4096
+                    || items.len() + count as usize > 4096
+                    || (insert && at > items.len())
+                {
+                    return Ok(Some(0));
+                }
+                let Ok(bytes) = ctx.cpu.read_mem(lp, count * 20) else {
+                    return Ok(Some(0));
+                };
                 let mut added = Vec::new();
                 for record in bytes.chunks_exact(20) {
                     let word = |i| u32::from_le_bytes(record[i..i + 4].try_into().unwrap());
                     let text = if word(16) > 0xffff && word(16) != u32::MAX {
-                        read_wstr(ctx, word(16), 256).unwrap_or_default().into_iter().take_while(|c| *c != 0).collect()
-                    } else { Vec::new() };
-                    let submenu = if record[9] & 8 != 0 && ctx.kernel.menu_items.contains_key(&word(12)) { word(12) } else { 0 };
-                    added.push(pocket_kernel::MenuItem { id: word(4), text, submenu, data: word(12), ..Default::default() });
+                        read_wstr(ctx, word(16), 256)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .take_while(|c| *c != 0)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let submenu =
+                        if record[9] & 8 != 0 && ctx.kernel.menu_items.contains_key(&word(12)) {
+                            word(12)
+                        } else {
+                            0
+                        };
+                    added.push(pocket_kernel::MenuItem {
+                        id: word(4),
+                        text,
+                        submenu,
+                        data: word(12),
+                        ..Default::default()
+                    });
                 }
                 let target = ctx.kernel.menu_items.entry(menu).or_default();
-                if insert { target.insert(at, added.remove(0)); } else { target.extend(added); }
+                if insert {
+                    target.insert(at, added.remove(0));
+                } else {
+                    target.extend(added);
+                }
                 ctx.kernel.framebuffer.mark_dirty();
                 return Ok(Some(1));
             }
@@ -89,9 +125,15 @@ pub(super) fn message(
     {
         return Ok(None);
     }
-    if msg == 0x425 { // TB_SETPARENT changes notifications, not the window hierarchy.
+    if msg == 0x425 {
+        // TB_SETPARENT changes notifications, not the window hierarchy.
         let parent = ctx.kernel.controls.get(hwnd).unwrap().parent;
-        return Ok(Some(ctx.kernel.window_extra.insert((hwnd, -1201), wp).unwrap_or(parent)));
+        return Ok(Some(
+            ctx.kernel
+                .window_extra
+                .insert((hwnd, -1201), wp)
+                .unwrap_or(parent),
+        ));
     }
     let records = if matches!(msg, 0x414 | 0x415) {
         let n = if msg == 0x415 { 1 } else { wp };

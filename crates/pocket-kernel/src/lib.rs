@@ -1810,12 +1810,20 @@ impl KernelState {
     /// Host-owned SIP overlay. Never write its pixels into the guest's GDI/GAPI
     /// framebuffer: hiding or rotating the keyboard must not leave stale pixels.
     pub fn presentation_framebuffer(&self) -> std::borrow::Cow<'_, Framebuffer> {
-        if (!self.shell_keyboard.sip || !self.shell_keyboard.visible) && self.gdi.shell_menus.tracking.is_none() {
+        if (!self.shell_keyboard.sip || !self.shell_keyboard.visible)
+            && self.gdi.shell_menus.tracking.is_none()
+        {
             return std::borrow::Cow::Borrowed(&self.framebuffer);
         }
         let mut frame = self.framebuffer.clone();
         if self.gdi.shell_menus.tracking.is_some() {
-            self.gdi.shell_menus.render(shell_menu::TRACKING_HANDLE, &mut gdi::Surface::Screen(&mut frame), &self.gdi, &self.menu_items, &self.menus);
+            self.gdi.shell_menus.render(
+                shell_menu::TRACKING_HANDLE,
+                &mut gdi::Surface::Screen(&mut frame),
+                &self.gdi,
+                &self.menu_items,
+                &self.menus,
+            );
         }
         self.shell_keyboard
             .render(&mut gdi::Surface::Screen(&mut frame));
@@ -4623,23 +4631,35 @@ mod tests {
     #[test]
     fn presentation_changes_keep_raw_framebuffer_polling_live() {
         let mut cpu = StubCpu::new();
-        let mut process = Process::map_into(image_based_at(0x10000, 0x1000), &mut cpu,
-            &|_, _| None, &NullDispatcher).unwrap();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
         let k = &mut process.state;
         let bytes = (k.framebuffer.byte_size() + 0xfff) & !0xfff;
-        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, bytes, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, bytes, Prot::READ | Prot::WRITE)
+            .unwrap();
         k.fb_mapped = true;
         k.guest_fb_pitch = k.framebuffer.stride_bytes();
         k.gx_last_pushed_counter = k.framebuffer.frame_counter;
         let before = k.framebuffer.frame_counter;
         k.invalidate_presentation();
         assert_ne!(k.framebuffer.frame_counter, before);
-        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes()).unwrap();
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes())
+            .unwrap();
         sync_guest_framebuffer(&mut cpu, k);
         assert_eq!(&k.framebuffer.pixels[..2], &0xf800u16.to_le_bytes());
-        k.registry.set_value(r"HKCU\ControlPanel\Backlight", "OnLevel", registry::RegistryValue::Dword(21));
+        k.registry.set_value(
+            r"HKCU\ControlPanel\Backlight",
+            "OnLevel",
+            registry::RegistryValue::Dword(21),
+        );
         k.sync_backlight();
-        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0x001fu16.to_le_bytes()).unwrap();
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0x001fu16.to_le_bytes())
+            .unwrap();
         sync_guest_framebuffer(&mut cpu, k);
         assert_eq!(&k.framebuffer.pixels[..2], &0x001fu16.to_le_bytes());
         // A real host/GDI draw still owns unsynchronized pixels. A rotation
@@ -4651,7 +4671,6 @@ mod tests {
         sync_guest_framebuffer(&mut cpu, k);
         assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
     }
-
 
     /// `SB_SETPARTS` hands us right-hand edges, with a trailing -1
     /// meaning "out to the right margin". Solitaire uses exactly

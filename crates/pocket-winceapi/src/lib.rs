@@ -39,8 +39,8 @@ pub mod gles;
 mod gps;
 pub mod gx;
 pub mod hss;
-mod legacy_services;
 mod imgdecmp;
+mod legacy_services;
 #[cfg(feature = "video-static")]
 mod media_static;
 mod number_format;
