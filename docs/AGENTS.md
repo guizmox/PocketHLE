@@ -3534,3 +3534,11 @@ and the existing bottom action/thumb controls. PocketPcLayout centers the
 scaled surface horizontally and vertically in its room in both orientations.
 Keep the content view's actual bounds as the stylus routing rectangle; no guest
 resolution/coordinate changes or Gizmondo layout changes belong in this update.
+
+## CAB ANSI install names (2026-10-22)
+
+MSCE counted strings must preserve Windows-1252 accents (and valid UTF-8).
+Fade CAB file 834 contains byte C9 in ZSSQ VÉZIMP.IFJ; lossy UTF-8 created
+a different filename. At CAB launch restore missing non-ASCII destinations
+from retained numbered payloads using create_new; never overwrite existing
+assets or saves. Do not reimport the game or add title-specific VFS aliases.

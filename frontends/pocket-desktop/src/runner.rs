@@ -393,6 +393,13 @@ impl Runner {
         }
 
         let extracted = game.extracted_dir(&library_root);
+        if game.source_cab.to_ascii_lowercase().ends_with(".cab") {
+            let repaired = pocket_core::cab::repair_install_header_names(&extracted);
+            if !repaired.is_empty() {
+                log::info!("Restored {} missing non-ASCII CAB install names", repaired.len());
+            }
+        }
+
         emu.mount_read_only_dir("\\Application\\", &extracted);
         emu.mount_read_only_dir("\\Program Files\\", &extracted);
         emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
