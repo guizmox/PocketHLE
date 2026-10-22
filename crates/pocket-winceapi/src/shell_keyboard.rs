@@ -111,7 +111,7 @@ pub(crate) fn service(ctx: &mut CallCtx<'_>) {
         if ctx.kernel.shell_keyboard.sip {
             notify(ctx);
         }
-        ctx.kernel.framebuffer.mark_dirty();
+        ctx.kernel.invalidate_presentation();
     }
 }
 
@@ -241,7 +241,7 @@ pub(crate) fn sip_show(ctx: &mut CallCtx<'_>, show: bool) {
     ctx.kernel.shell_keyboard.sip = show;
     ctx.kernel.shell_keyboard.requested = show;
     ctx.kernel.shell_keyboard.visible = false;
-    ctx.kernel.framebuffer.mark_dirty();
+    ctx.kernel.invalidate_presentation();
     if show {
         service(ctx);
     }
@@ -250,7 +250,7 @@ pub(crate) fn input(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) -> boo
     use pocket_kernel::InputEvent;
     if let InputEvent::KeyboardRotation { turns } = ev {
         ctx.kernel.shell_keyboard.rotation = turns % 4;
-        ctx.kernel.framebuffer.mark_dirty();
+        ctx.kernel.invalidate_presentation();
         return true;
     }
     if ctx.kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN {
@@ -269,7 +269,7 @@ pub(crate) fn input(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) -> boo
             let lowercase = ctx.kernel.shell_keyboard.lowercase;
             if let Some(ch) = ctx.kernel.shell_keyboard.tap(x, y, w, h) {
                 if ctx.kernel.shell_keyboard.lowercase != lowercase {
-                    ctx.kernel.framebuffer.mark_dirty();
+                    ctx.kernel.invalidate_presentation();
                 }
                 ctx.kernel.shell_keyboard.pointer_captured = true;
                 if ch == 0 {
@@ -388,6 +388,20 @@ mod sip_tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+    #[test]
+    fn startup_rotation_does_not_block_a_raw_framebuffer_game() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        k.fb_mapped = true;
+        k.gx_last_pushed_counter = k.framebuffer.frame_counter;
+        let before = k.framebuffer.frame_counter;
+        // Both frontends send this even for an unrotated screen.
+        k.pending_input.push_back(pocket_kernel::InputEvent::KeyboardRotation { turns: 0 });
+        call(&mut cpu, &mut k, &mut d, "coredll.dll", "PeekMessageW", &[0x1200, 0, 0, 0, 1]);
+        assert_ne!(k.framebuffer.frame_counter, before);
+        assert_eq!(k.framebuffer.frame_counter, k.gx_last_pushed_counter);
+        assert!(k.pending_input.is_empty());
+    }
     #[test]
     fn explicit_sip_toggles_on_custom_windows_but_not_on_gizmondo() {
         let (mut cpu, mut k, mut d) = setup();

@@ -3511,3 +3511,17 @@ shell's GPRS_STATUS/GT_STATUS notifications share this generic route. Keep the
 Do not restore fallback dispatch to arbitrary WndProc for invalid/desktop HWNDs;
 that caused the CoPilot startup crash. This fixes notification delivery, not
 HTTP/TLS or a proof that a remote server is reachable.
+
+## Raw framebuffer polling and host presentation changes (2026-10-22)
+
+Both desktop and Android queue KeyboardRotation on Pocket PC startup, including
+zero turns. Into Outland opens GAPI then writes through ExtEscape's raw buffer
+without GXBeginDraw/GXEndDraw. Marking rotation as a native-pixel write advances
+frame_counter without gx_last_pushed_counter and permanently disables raw
+readback. Native reproduction: normal image without rotation; with the exact
+frontend startup event, black with counter=1 and last_guest=0 while audio runs.
+Use KernelState::invalidate_presentation for host-only SIP visibility, case and
+rotation changes. It preserves equality only if guest/host pixels were already
+synchronized; do not acknowledge pending real GDI writes. Backlight changes
+follow the same rule. Do not remove sync_guest_framebuffer's real pixel guard,
+change the game's config, force a renderer, or add a title-specific exception.

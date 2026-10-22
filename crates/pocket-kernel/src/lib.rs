@@ -1501,6 +1501,17 @@ impl KernelState {
             }
         }
     }
+    /// Publish a host-only overlay/rotation change without claiming that GDI
+    /// wrote new pixels. Raw framebuffer polling must remain enabled when the
+    /// guest buffer was current; a pending real host draw must stay pending.
+    pub fn invalidate_presentation(&mut self) {
+        let guest_current = self.gx_last_pushed_counter == self.framebuffer.frame_counter;
+        self.framebuffer.mark_dirty();
+        if guest_current {
+            self.gx_last_pushed_counter = self.framebuffer.frame_counter;
+        }
+    }
+
     pub fn sync_backlight(&mut self) {
         let level = match self
             .registry
@@ -1509,7 +1520,11 @@ impl KernelState {
             Some(crate::registry::RegistryValue::Dword(level)) => level,
             _ => 11,
         };
+        let guest_current = self.gx_last_pushed_counter == self.framebuffer.frame_counter;
         self.framebuffer.set_backlight_level(level);
+        if guest_current {
+            self.gx_last_pushed_counter = self.framebuffer.frame_counter;
+        }
     }
 
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {
@@ -4604,6 +4619,39 @@ mod tests {
     use super::*;
     use pocket_cpu::stub::StubCpu;
     use pocket_pe::{LoadedImage, LoadedSection};
+
+    #[test]
+    fn presentation_changes_keep_raw_framebuffer_polling_live() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(image_based_at(0x10000, 0x1000), &mut cpu,
+            &|_, _| None, &NullDispatcher).unwrap();
+        let k = &mut process.state;
+        let bytes = (k.framebuffer.byte_size() + 0xfff) & !0xfff;
+        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, bytes, Prot::READ | Prot::WRITE).unwrap();
+        k.fb_mapped = true;
+        k.guest_fb_pitch = k.framebuffer.stride_bytes();
+        k.gx_last_pushed_counter = k.framebuffer.frame_counter;
+        let before = k.framebuffer.frame_counter;
+        k.invalidate_presentation();
+        assert_ne!(k.framebuffer.frame_counter, before);
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes()).unwrap();
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(&k.framebuffer.pixels[..2], &0xf800u16.to_le_bytes());
+        k.registry.set_value(r"HKCU\ControlPanel\Backlight", "OnLevel", registry::RegistryValue::Dword(21));
+        k.sync_backlight();
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0x001fu16.to_le_bytes()).unwrap();
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(&k.framebuffer.pixels[..2], &0x001fu16.to_le_bytes());
+        // A real host/GDI draw still owns unsynchronized pixels. A rotation
+        // must not allow stale guest memory to overwrite that drawing.
+        let last_guest = k.gx_last_pushed_counter;
+        k.framebuffer.fill(0x07e0);
+        k.invalidate_presentation();
+        assert_eq!(k.gx_last_pushed_counter, last_guest);
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+    }
+
 
     /// `SB_SETPARTS` hands us right-hand edges, with a trailing -1
     /// meaning "out to the right margin". Solitaire uses exactly
