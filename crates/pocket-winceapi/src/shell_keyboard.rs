@@ -33,6 +33,7 @@ pub(crate) fn find(ctx: &mut CallCtx<'_>) -> Result<bool, KernelError> {
 fn edit_target(ctx: &CallCtx<'_>) -> u32 {
     let focus = ctx.kernel.controls.focus;
     if ctx.kernel.shell_keyboard.sip {
+        if ctx.kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN { return 0; }
         for hwnd in [focus, ctx.kernel.shell_keyboard.target] {
             if ctx.kernel.controls.get(hwnd).is_some_and(|c| {
                 c.class == ControlClass::Edit
@@ -42,6 +43,17 @@ fn edit_target(ctx: &CallCtx<'_>) -> u32 {
             }) {
                 return hwnd;
             }
+        }
+        // Explicit PocketPC SIP requests also work for custom WM_CHAR windows.
+        // EDIT controls retain their stricter enabled/read-only/visibility rules.
+        for hwnd in [focus, ctx.kernel.active_window] {
+            if hwnd != 0
+                && ctx.kernel.controls.get(hwnd).map_or(
+                    ctx.kernel.window_classes.contains_key(&hwnd),
+                    |c| c.class != ControlClass::Edit && c.enabled,
+                )
+                && crate::coredll::window_is_visible(ctx.kernel, hwnd)
+            { return hwnd; }
         }
         return 0;
     }
@@ -364,12 +376,11 @@ pub(crate) fn preference(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 
 pub(crate) fn accepts_text(ctx: &CallCtx<'_>) -> bool {
     ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
-        && ctx.kernel.controls.get(edit_target(ctx)).is_some_and(|c| {
-            c.class == ControlClass::Edit
-                && c.enabled
-                && c.style & 0x800 == 0
-                && crate::coredll::window_is_visible(ctx.kernel, c.hwnd)
-        })
+        && ((ctx.kernel.shell_keyboard.sip && ctx.kernel.shell_keyboard.visible && edit_target(ctx) != 0)
+            || ctx.kernel.controls.get(edit_target(ctx)).is_some_and(|c| {
+                c.class == ControlClass::Edit && c.enabled && c.style & 0x800 == 0
+                    && crate::coredll::window_is_visible(ctx.kernel, c.hwnd)
+            }))
 }
 
 #[cfg(test)]
@@ -377,6 +388,23 @@ mod sip_tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+    #[test]
+    fn explicit_sip_toggles_on_custom_windows_but_not_on_gizmondo() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        k.active_window = 0x1234;
+        k.window_classes.insert(0x1234, "CustomGameWindow".into());
+        k.window_visibility.insert(0x1234, true);
+        call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[1]);
+        assert!(k.shell_keyboard.visible);
+        assert_eq!(k.shell_keyboard.target, 0x1234);
+        call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[0]);
+        assert!(!k.shell_keyboard.visible);
+        assert!(!k.shell_keyboard.requested);
+        k.gapi_action_key = 0x73;
+        call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[1]);
+        assert!(!k.shell_keyboard.visible);
+    }
     #[test]
     fn sip_presentation_never_changes_guest_pixels_and_hides_without_residue() {
         let (mut cpu, mut k, mut d) = setup();

@@ -31,6 +31,7 @@ pub enum ControlClass {
     ListBox,
     ComboBox,
     TrackBar,
+    Tab,
     Toolbar,
     ScrollBar,
 }
@@ -57,6 +58,8 @@ impl ControlClass {
             Some(Self::Toolbar)
         } else if name.eq_ignore_ascii_case("SCROLLBAR") {
             Some(Self::ScrollBar)
+        } else if name.eq_ignore_ascii_case("SysTabControl32") {
+            Some(Self::Tab)
         } else if name.eq_ignore_ascii_case("SysListView32") {
             Some(Self::ListView)
         } else {
@@ -328,6 +331,46 @@ pub struct ChildWindow {
     pub track_tick_freq: u32,
     pub track_ticks: Vec<i32>,
     pub toolbar: ToolbarState,
+    pub tab: TabState,
+}
+
+/// Native tab items keep guest application data separate from their labels.
+#[derive(Debug, Clone, Default)]
+pub struct TabItem {
+    pub text: String,
+    pub image: i32,
+    pub data: u32,
+    pub state: u32,
+    pub extra: Vec<u8>,
+}
+#[derive(Debug, Clone)]
+pub struct TabState {
+    pub items: Vec<TabItem>,
+    pub selected: Option<usize>,
+    pub focus: Option<usize>,
+    pub size: (i32, i32),
+    pub padding: (i32, i32),
+    pub image_list: u32,
+    pub extra: usize,
+    pub minimum_width: i32,
+    pub extended_style: u32,
+}
+impl Default for TabState {
+    fn default() -> Self {
+        Self { items: Vec::new(), selected: None, focus: None, size: (0, 20),
+            padding: (6, 3), image_list: 0, extra: 4, minimum_width: 0, extended_style: 0 }
+    }
+}
+#[derive(Debug, Clone)]
+pub struct TabNotifyFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub hwnd: u32,
+    pub index: usize,
+    pub scratch: u32,
+    pub stage: u32,
+    pub modal: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +397,52 @@ impl Default for ToolbarState {
 const LIST_VIEW_ROW_HEIGHT: i32 = 14;
 
 impl ChildWindow {
+    /// Tab rectangles are shared by painting, TCM_GETITEMRECT and hit testing.
+    pub fn tab_rect(&self, index: usize) -> Option<(i32, i32, i32, i32)> {
+        self.tab.items.get(index)?;
+        let multiline = self.style & 0x200 != 0;
+        let mut x = 2;
+        let mut row = 0;
+        for (i, item) in self.tab.items.iter().enumerate() {
+            let width = if self.tab.size.0 > 0 { self.tab.size.0 } else {
+                ((item.text.chars().count() as i32 * font::GLYPH_W) + 2 * self.tab.padding.0)
+                    .max(self.tab.minimum_width).max(20)
+            }.min((self.w - 4).max(1));
+            if multiline && x > 2 && x + width > self.w - 2 { x = 2; row += 1; }
+            let height = self.tab.size.1.max(1);
+            let y = if self.style & 2 != 0 { self.h - (row + 1) * height - 2 }
+                    else { 2 + row * height };
+            if i == index { return Some((x, y, width, height)); }
+            x += width;
+        }
+        None
+    }
+    pub fn tab_rows(&self) -> i32 {
+        if self.tab.items.is_empty() { return 0; }
+        self.tab.items.iter().enumerate().filter_map(|(i, _)| self.tab_rect(i))
+            .map(|(_, y, _, h)| if self.style & 2 != 0 { (self.h - 2 - y) / h } else { (y - 2) / h + 1 })
+            .max().unwrap_or(0)
+    }
+    pub fn tab_hit(&self, x: i32, y: i32) -> Option<usize> {
+        (0..self.tab.items.len()).find(|&i| self.tab_rect(i)
+            .is_some_and(|(a,b,w,h)| x >= a && x < a+w && y >= b && y < b+h))
+    }
+    fn render_tabs(&self, surf: &mut Surface<'_>) {
+        // The display area belongs to the application's page: do not erase it.
+        let rows = self.tab_rows();
+        let height = rows * self.tab.size.1.max(1) + 2;
+        let y = if self.style & 2 != 0 { self.y + self.h - height } else { self.y };
+        surf.fill_rect(self.x, y, self.w, height, Self::FACE);
+        for (i, item) in self.tab.items.iter().enumerate() {
+            if let Some((x,y,w,h)) = self.tab_rect(i) {
+                let x = self.x + x; let y = self.y + y;
+                surf.fill_rect(x, y, w, h, if self.tab.selected == Some(i) { 0xffff } else { Self::FACE });
+                stroke(surf, x, y, w, h, Self::TEXT);
+                let label: String = item.text.chars().take(((w-4).max(0)/font::GLYPH_W) as usize).collect();
+                font::draw_str(surf, x+3, y+(h-font::GLYPH_H)/2, &label, Self::TEXT);
+            }
+        }
+    }
     pub fn list_image_list(&self) -> (u32, u32, u32) {
         let preferred = usize::from(self.style & 3 != 0);
         let slot = if self.list_image_lists[preferred] != 0 {
@@ -1148,7 +1237,7 @@ impl ChildWindow {
         {
             return;
         }
-        if let Some(color) = self.background_color {
+        if let Some(color) = self.background_color.filter(|_| self.class != ControlClass::Tab) {
             // A combo's template height reserves space for its dropdown.
             // Its parent brush must not erase the siblings beneath the closed field.
             let height = if self.class == ControlClass::ComboBox {
@@ -1166,6 +1255,7 @@ impl ChildWindow {
         }
         let face = gdi.and_then(|g| crate::text::selected(g, self.font));
         match self.class {
+            ControlClass::Tab => self.render_tabs(surf),
             ControlClass::Toolbar => self.render_toolbar(surf, gdi),
             ControlClass::ScrollBar => self.render_scrollbar(surf),
             ControlClass::TrackBar => self.render_track(surf, focused),
@@ -1559,9 +1649,42 @@ pub enum ControlAction {
     Consumed,
 }
 
+/// Shell-owned common file dialog; caller buffers change only after acceptance.
+#[derive(Debug, Clone)]
+pub struct FileDialog {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub ofn: u32,
+    pub hwnd: u32,
+    pub previous_active: u32,
+    pub previous_focus: u32,
+    pub directory: String,
+    pub entries: Vec<(String, bool)>,
+    pub filters: Vec<String>,
+    pub extension: String,
+    pub flags: u32,
+    pub save: bool,
+    pub list: u32,
+    pub edit: u32,
+    pub path_label: u32,
+    pub status_label: u32,
+    pub overwrite: Option<String>,
+}
+
 /// Every built-in control the guest has created, plus the focus.
 #[derive(Debug, Clone)]
 pub struct Controls {
+    /// Latest consumed stylus position in screen coordinates.
+    pub cursor_position: (i32, i32),
+    /// Screen point of the last message retrieved by each guest thread.
+    pub message_positions: std::collections::HashMap<usize, (i32, i32)>,
+    /// Explicit guest SetCapture ownership, separate from host button presses.
+    pub pointer_capture: std::collections::HashMap<usize, u32>,
+    /// Recognized holds remain valid until this stroke is released.
+    pub recognized_holds: std::collections::HashSet<(usize, u32, i32, i32)>,
+    pub capture_frames: Vec<(usize, u32, crate::GuestCallFrame, u32)>,
+    pub tab_notify_frames: Vec<TabNotifyFrame>,
     children: Vec<ChildWindow>,
     inherited_hidden: std::collections::HashSet<u32>,
     native_origins: std::collections::HashMap<u32, (i32, i32)>,
@@ -1570,6 +1693,8 @@ pub struct Controls {
     panels: Vec<DialogPanel>,
     /// Handle of the control holding the input focus, or `0`.
     pub focus: u32,
+    pub file_dialog: Option<FileDialog>,
+    pub common_dialog_error: u32,
     /// Window currently owning Pocket PC GAPI pixels. Its panel face/backing
     /// is replaced by those pixels; ordinary child controls remain composited.
     pub direct_surface_hwnd: u32,
@@ -1583,11 +1708,19 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            cursor_position: (0, 0),
+            message_positions: Default::default(),
+            pointer_capture: Default::default(),
+            recognized_holds: Default::default(),
+            capture_frames: Vec::new(),
+            tab_notify_frames: Vec::new(),
             children: Vec::new(),
             inherited_hidden: Default::default(),
             native_origins: Default::default(),
             panels: Vec::new(),
             focus: 0,
+            file_dialog: None,
+            common_dialog_error: 0,
             direct_surface_hwnd: 0,
             next_hwnd: Self::HWND_BASE,
             capture: 0,
@@ -1672,6 +1805,7 @@ impl Controls {
             track_tick_freq: 1,
             track_ticks: Vec::new(),
             toolbar: ToolbarState::default(),
+            tab: TabState::default(),
         });
         hwnd
     }
@@ -1859,6 +1993,8 @@ impl Controls {
 
     /// Drop a control and anything that referred to it.
     pub fn destroy(&mut self, hwnd: u32) {
+        self.recognized_holds.retain(|(_, owner, _, _)| *owner != hwnd);
+        self.pointer_capture.retain(|_, owner| *owner != hwnd);
         self.children.retain(|c| c.hwnd != hwnd);
         if self.focus == hwnd {
             self.focus = 0;
@@ -1871,6 +2007,7 @@ impl Controls {
     /// Drop every control owned by `parent` — a top-level window going
     /// away takes its children with it, and a dialog takes its panel.
     pub fn destroy_children_of(&mut self, parent: u32) {
+        self.pointer_capture.retain(|_, owner| *owner != parent);
         let doomed: Vec<u32> = self
             .children
             .iter()
@@ -2003,6 +2140,21 @@ impl Controls {
             .map(|c| self.parent_origin(c.parent))
             .unwrap_or((0, 0));
         let child = self.get_mut(hwnd)?;
+        if child.class == ControlClass::Tab {
+            if !child.enabled { return Some(ControlAction::Consumed); }
+            let hit = child.tab_hit(x - origin.0 - child.x, y - origin.1 - child.y);
+            self.focus = hwnd;
+            if let Some(index) = hit {
+                self.capture = hwnd;
+                let child = self.get_mut(hwnd).unwrap();
+                child.tab.focus = Some(index);
+                if child.tab.selected != Some(index) {
+                    return Some(ControlAction::Notify { parent: child.parent, id: child.id,
+                        hwnd, code: (-552i32) as u32, index: index as i32 });
+                }
+            }
+            return Some(ControlAction::Consumed);
+        }
         if matches!(child.class, ControlClass::ListBox | ControlClass::ComboBox) && child.enabled {
             self.focus = hwnd;
             let child = self.get_mut(hwnd).unwrap();
@@ -2070,6 +2222,12 @@ impl Controls {
                 child.list_selected = Some(index);
             }
         }
+        if child.class == ControlClass::Static {
+            // STATIC is transparent to stylus input unless SS_NOTIFY is set.
+            if child.style & 0x100 == 0 { return None; }
+            if child.enabled { self.capture = hwnd; }
+            return Some(ControlAction::Consumed);
+        }
         if !child.is_focusable() {
             return Some(ControlAction::Consumed);
         }
@@ -2104,7 +2262,9 @@ impl Controls {
         if captured == 0 {
             // Not our press — but still swallow a release over a
             // control so the parent does not act on it.
-            return self.hit_test(x, y).map(|_| ControlAction::Consumed);
+            return self.hit_test(x, y).and_then(|h| self.get(h))
+                .filter(|c| c.class != ControlClass::Static || c.style & 0x100 != 0)
+                .map(|_| ControlAction::Consumed);
         }
         self.capture = 0;
         let (ox, oy) = self
@@ -2113,6 +2273,13 @@ impl Controls {
             .unwrap_or((0, 0));
         let child = self.get_mut(captured)?;
         child.pressed = false;
+        if child.class == ControlClass::Tab {
+            return Some(match child.tab_hit(x - ox - child.x, y - oy - child.y) {
+                Some(index) => ControlAction::Notify { parent: child.parent, id: child.id,
+                    hwnd: captured, code: (-2i32) as u32, index: index as i32 },
+                None => ControlAction::Consumed,
+            });
+        }
         if child.class == ControlClass::Toolbar {
             if let Some(i) = child.toolbar.pressed.take() {
                 if let Some(b) = child.toolbar.buttons.get_mut(i) {
@@ -2209,6 +2376,7 @@ impl Controls {
                 id,
                 hwnd,
             }),
+            Some(action @ ControlAction::Notify { parent: p, .. }) if p == parent => Some(action),
             Some(_) | None => Some(ControlAction::Consumed),
         }
     }
@@ -2278,6 +2446,7 @@ impl Controls {
                 id,
                 hwnd,
             }),
+            Some(action @ ControlAction::Notify { parent: p, .. }) if p == parent => Some(action),
             Some(_) | None => Some(ControlAction::Consumed),
         }
     }
@@ -2304,6 +2473,18 @@ impl Controls {
             return Some(ControlAction::Consumed);
         }
         match child.class {
+            ControlClass::Tab if matches!(vk, 0x25..=0x28 | 0x24 | 0x23 | 0x20 | 0x0d) => {
+                let len = child.tab.items.len();
+                if len == 0 { return Some(ControlAction::Consumed); }
+                let old = child.tab.focus.or(child.tab.selected).unwrap_or(0);
+                let next = match vk { 0x24 => 0, 0x23 => len-1,
+                    0x25 | 0x26 => old.saturating_sub(1),
+                    0x27 | 0x28 => (old+1).min(len-1), _ => old };
+                child.tab.focus = Some(next);
+                if child.tab.selected == Some(next) { return Some(ControlAction::Consumed); }
+                Some(ControlAction::Notify { parent: child.parent, id: child.id, hwnd: child.hwnd,
+                    code: (-552i32) as u32, index: next as i32 })
+            }
             ControlClass::ComboBox
                 if vk == 0x0d || (vk == 0x1b && child.choice_open) || vk == 0x73 =>
             {
@@ -3265,7 +3446,8 @@ mod tests {
             120,
             16,
         );
-        assert_eq!(ctrls.pointer_down(20, 15), Some(ControlAction::Consumed));
+        assert_eq!(ctrls.pointer_down(20, 15), None);
+        assert_eq!(ctrls.pointer_up(20, 15), None);
         assert_ne!(ctrls.focus, label);
         assert_eq!(ctrls.focus, 0);
     }
@@ -3777,4 +3959,20 @@ mod tests {
         );
         assert_eq!(ControlClass::from_class_name("CerfBlankApp"), None);
     }
+    #[test]
+    fn tabs_preserve_application_page_pixels_with_parent_brush() {
+        let mut controls = Controls::default();
+        let hwnd = controls.create(PARENT, ControlClass::Tab, 7, String::new(),
+            0x50000200, 0, 0, 160, 100);
+        let c = controls.get_mut(hwnd).unwrap();
+        c.background_color = Some(0x0000ff);
+        c.tab.items.push(TabItem { text: "Income".into(), ..Default::default() });
+        c.tab.selected = Some(0);
+        let mut bitmap = Bitmap::new(160, 100);
+        bitmap.pixels.fill(0x7b);
+        c.render(&mut Surface::Bitmap(&mut bitmap), false);
+        assert_eq!(bitmap.pixels[2 * (60 * 160 + 70)], 0x7b);
+        assert_ne!(bitmap.pixels[2 * (5 * 160 + 5)], 0x7b);
+    }
+
 }

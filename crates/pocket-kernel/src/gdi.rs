@@ -331,8 +331,19 @@ pub struct PaintEraseFrame {
     pub frame: crate::GuestCallFrame,
 }
 
+/// A streamed IMGDECMP call suspended in a guest GETDATAFUNC callback.
+#[derive(Debug)]
+pub struct ImageDecodeFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub info: [u32; 15],
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Default)]
 pub struct GdiState {
+    pub image_decode_frames: Vec<ImageDecodeFrame>,
     pub shell_menus: crate::shell_menu::ShellMenus,
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,
@@ -356,6 +367,7 @@ pub struct GdiState {
 impl GdiState {
     pub fn new() -> Self {
         let mut s = Self {
+            image_decode_frames: Vec::new(),
             shell_menus: Default::default(),
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,

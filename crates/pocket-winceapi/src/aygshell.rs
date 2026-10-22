@@ -2,6 +2,8 @@
 //!
 //! SDK ordinals and owned shell window identities.
 
+mod gesture;
+
 use pocket_kernel::gdi::STOCK_SYSTEM_FONT;
 use pocket_kernel::{DispatchOutcome, KernelError};
 
@@ -41,6 +43,7 @@ pub fn register(d: &mut WinCeDispatcher) {
             "SHCreateMenuBar" | "SHCreateMenuBarEx" | "SHCreateMenuBarInternal" => {
                 sh_create_menu_bar
             }
+            "SHRecognizeGesture" => gesture::recognize,
             "SHInitDialog" => sh_init_dialog,
             "SHLoadImageFile" => sh_load_image_file,
             "SHSipInfo" => sh_sip_info,
@@ -65,9 +68,10 @@ pub fn register(d: &mut WinCeDispatcher) {
     // real handlers in the PPC2002 block below, which still answers
     // TRUE for 9 — so Pocket DeathMatch keeps the return value its
     // startup path checks.
-    for ord in [12u16, 13, 14, 21, 40, 49, 50, 65, 71, 72, 80, 84, 341, 344] {
+    for ord in [12u16, 13, 14, 21, 49, 50, 65, 71, 72, 80, 84, 341, 344] {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
+    d.register_handler(dll, "ord:40", gesture::recognize);
     d.register_handler(dll, "ord:75", sh_load_image_file);
     // Racing Days requests 0x480000 bytes and treats FALSE as insufficient RAM.
     d.register_handler(dll, "ord:10", sh_close_apps);

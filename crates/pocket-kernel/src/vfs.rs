@@ -630,6 +630,9 @@ impl Vfs {
         open.file.set_len(position).is_ok()
     }
 
+    /// Current guest working directory, including its trailing separator.
+    pub fn default_dir(&self) -> &str { &self.default_dir }
+
     /// Set the directory bare / `.`-relative guest paths resolve
     /// against. Pass the directory of the running module.
     pub fn set_default_dir(&mut self, guest_dir: &str) {

@@ -1233,6 +1233,8 @@ pub struct KernelState {
     pub dialog_frame_stack: Vec<(GuestCallFrame, u32)>,
     pub window_destroy_frames: Vec<WindowDestroyFrame>,
     pub control_notify_frames: Vec<ControlNotifyFrame>,
+    /// Synchronous SHRecognizeGesture notification continuations.
+    pub gesture_frames: Vec<(usize, u32, GuestCallFrame, u32)>,
     pub dialog_key_frames: Vec<DialogKeyFrame>,
     pub accelerator_frames: Vec<(usize, u32, GuestCallFrame)>,
     pub shell_status: Option<u32>,
@@ -1793,10 +1795,13 @@ impl KernelState {
     /// Host-owned SIP overlay. Never write its pixels into the guest's GDI/GAPI
     /// framebuffer: hiding or rotating the keyboard must not leave stale pixels.
     pub fn presentation_framebuffer(&self) -> std::borrow::Cow<'_, Framebuffer> {
-        if !self.shell_keyboard.sip || !self.shell_keyboard.visible {
+        if (!self.shell_keyboard.sip || !self.shell_keyboard.visible) && self.gdi.shell_menus.tracking.is_none() {
             return std::borrow::Cow::Borrowed(&self.framebuffer);
         }
         let mut frame = self.framebuffer.clone();
+        if self.gdi.shell_menus.tracking.is_some() {
+            self.gdi.shell_menus.render(shell_menu::TRACKING_HANDLE, &mut gdi::Surface::Screen(&mut frame), &self.gdi, &self.menu_items, &self.menus);
+        }
         self.shell_keyboard
             .render(&mut gdi::Surface::Screen(&mut frame));
         std::borrow::Cow::Owned(frame)
@@ -3749,6 +3754,7 @@ impl Process {
                 dialog_frame_stack: Vec::new(),
                 window_destroy_frames: Vec::new(),
                 control_notify_frames: Vec::new(),
+                gesture_frames: Vec::new(),
                 dialog_key_frames: Vec::new(),
                 accelerator_frames: Vec::new(),
                 shell_status: None,

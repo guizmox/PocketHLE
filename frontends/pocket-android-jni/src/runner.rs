@@ -592,6 +592,9 @@ fn run_process(
         emu.set_default_dir(&paths.working_dir);
         let save_dir = entry.save_dir(library_root);
         emu.mount_save_dir(&paths.save_prefix, &save_dir);
+        if !is_gizmondo && !paths.save_prefix.trim_end_matches('\\').eq_ignore_ascii_case(r"\My Documents") {
+            emu.mount_save_dir(r"\My Documents\", save_dir.join("my-documents"));
+        }
         summary_lines.push(format!(
             "Save data: {} -> {:?}",
             save_dir.display(),

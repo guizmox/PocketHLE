@@ -435,6 +435,7 @@ pub(crate) mod tests {
             dialog_frame_stack: Vec::new(),
             window_destroy_frames: Vec::new(),
             control_notify_frames: Vec::new(),
+            gesture_frames: Vec::new(),
             dialog_key_frames: Vec::new(),
             accelerator_frames: Vec::new(),
             shell_status: None,

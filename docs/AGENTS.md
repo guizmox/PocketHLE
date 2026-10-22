@@ -3428,3 +3428,65 @@ ID, rather than assuming Android pointer index zero remains stable. Pause
 relative stick aiming during direct stylus contact and restore it on release.
 Seven JVM geometry/rotation/routing tests and full main-source Kotlin compilation
 pass; Android device multitouch and APK build remain to be validated.
+
+
+## Pocket PC menus, SIP and common file dialogs (2026-10-22)
+
+Shell bars support deletion/insertion of native toolbar buttons. CE MFC uses
+0xffff as the append index, text pointers and a submenu handle in dwData.
+GetMenuItemInfo accepts the legacy zero-initialized 44-byte MENUITEMINFO layout
+as well as explicit 44/48-byte layouts. Keep all menu resource ownership generic.
+
+SHRecognizeGesture waits across API boundaries; release or movement cancels
+without swallowing original input. SHRG_RETURNCMD returns GN_CONTEXTMENU after
+a hold; parent notifications restore the synchronous caller continuation.
+TrackPopupMenu and TrackPopupMenuEx have distinct owner argument positions.
+Their popups share ordered menu state, disabled items, nested menus, cancellation,
+command flags and WM_INITMENUPOPUP. Popup pixels live only in presentation copies.
+
+Explicit PocketPC SIP requests work on custom windows without native EDITs;
+disabled, read-only and hidden EDITs remain ineligible. Gizmondo's GMSHELL input
+profile is unchanged. Plain STATICs without SS_NOTIFY pass stylus input through.
+
+GetOpenFileNameW/GetSaveFileNameW use the guest VFS and real shell controls.
+Never fabricate a selected file or save: cancellation preserves caller buffers;
+acceptance returns a chosen UTF-16 guest path, leaving I/O to the guest. Trim
+filter masks, browse directories, handle wildcard filters, validate requested
+existing paths and output capacity, and confirm overwrites. Preserve filename
+and extension offsets. CE hook/template fields are reserved. PocketPC runners
+mount persistent My Documents separately from assets and Gizmondo storage.
+
+SysTabControl32 is a generic native control: Unicode item labels/data, insertion,
+deletion, programmatic selection, shared hit-test/item rectangles and multiline
+layout, TCM_ADJUSTRECT, and stylus/keyboard selection. Programmatic TCM_SETCURSEL
+must not notify. User changes call TCN_SELCHANGING before changing selection,
+honor the parent veto, then call TCN_SELCHANGE; the application owns its pages.
+Both ordinary dispatch and the modal pump preserve these notifications and
+thread/stack-local callback frames. Do not paint over the page display area or
+add title-specific Budget controls. Unsupported tab styles (vertical/owner draw)
+are not claimed as full common-controls coverage.
+
+
+## Native stylus capture (2026-10-22)
+
+SetCapture/GetCapture/ReleaseCapture maintain real guest ownership, distinct
+from the HLE button press latch. Preserve the previous owner return value,
+GetCapture's thread scope and synchronous WM_CAPTURECHANGED on release or
+transfer, including nested guest callbacks and register restoration. Route
+captured pointer events in the owner's client coordinates even over a sibling
+control, retain negative coordinates, and do not synthesize that sibling's click.
+Pointer down/up also update VK_LBUTTON; hover must not claim MK_LBUTTON after
+release. Destroying a control or dialog releases its ownership. Never emulate
+these APIs with FAKE_HWND constants or add a game-specific input route.
+
+SHRecognizeGesture caches a successfully recognized hold until the actual
+stylus/action release is consumed. MFC first asks SHRG_RETURNCMD and then
+reissues the same SHRGINFO as SHRG_NOTIFYPARENT. The second call must notify
+immediately, without waiting through another recognition timeout or cancelling
+because the initial release is queued. Clear recognition for a new stroke,
+on consumed release, and when the target control is destroyed.
+
+GetCursorPos returns the consumed stylus screen position. MSG.pt and per-thread
+GetMessagePos preserve screen coordinates independently of client-relative
+mouse LPARAM, including negative captured coordinates. Keyboard messages use
+the current stylus point; querying another thread must not reuse its last MSG.

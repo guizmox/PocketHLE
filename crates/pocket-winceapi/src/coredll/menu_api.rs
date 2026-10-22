@@ -164,7 +164,9 @@ pub(super) fn get_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     };
     let f = |o| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
     let size = f(0);
-    if !matches!(size, 44 | 48) {
+    // CE MFC also uses this 44-byte layout with a zero-initialized cbSize.
+    // Unknown nonzero structure sizes remain invalid.
+    if !matches!(size, 0 | 44 | 48) {
         return ret(0);
     }
     let (mask, text, cap) = (f(4), f(36), f(40));

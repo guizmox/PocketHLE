@@ -18,8 +18,8 @@ android {
         applicationId = "com.pockethle.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.3.4"
+        versionCode = 9
+        versionName = "0.3.5"
         buildConfigField("String", "UPDATE_VERSION", "\"$pocketReleaseVersion\"")
 
         ndk {

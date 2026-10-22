@@ -4,6 +4,19 @@ use crate::{
     text, InputEvent, MenuItem,
 };
 use std::collections::HashMap;
+pub const TRACKING_HANDLE: u32 = 0xfffffff0;
+#[derive(Debug)]
+pub struct TrackingMenu {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub owner: u32,
+    pub flags: u32,
+    pub point: (i32, i32),
+    pub result: Option<u32>,
+    pub callback: bool,
+}
+
 pub const HEIGHT: i32 = 26;
 #[derive(Debug, Clone)]
 pub struct Bar {
@@ -21,6 +34,7 @@ struct Popup {
 #[derive(Debug, Default)]
 pub struct ShellMenus {
     pub bars: HashMap<u32, Bar>,
+    pub tracking: Option<TrackingMenu>,
     active: u32,
     column: usize,
     path: Vec<Popup>,
@@ -53,8 +67,29 @@ fn enabled(item: &MenuItem, menu: u32, states: &HashMap<u32, HashMap<u32, u32>>)
 }
 impl ShellMenus {
     pub fn close(&mut self) {
+        if let Some(t) = self.tracking.as_mut() { t.result.get_or_insert(0); }
         self.path.clear();
         self.active = 0;
+    }
+    pub fn begin_tracking(&mut self, tracking: TrackingMenu, menu: u32) {
+        self.close();
+        self.bars.insert(TRACKING_HANDLE, Bar { owner: tracking.owner, menu: 0, sip: false, background: 0xffff });
+        self.tracking = Some(tracking);
+        self.active = TRACKING_HANDLE;
+        self.captured = false;
+        self.path.push(Popup { menu, selected: 0, first: 0 });
+    }
+    fn popup_rect(&self, width: i32, height: i32, count: usize) -> (i32, i32, i32, usize) {
+        let rows = ((height - if self.tracking.is_some() { 0 } else { HEIGHT }) / 20).max(1) as usize;
+        let shown = count.min(rows);
+        if let Some(t) = &self.tracking {
+            let w = width.min(220);
+            let mut x = t.point.0;
+            let mut y = t.point.1;
+            if t.flags & 8 != 0 { x -= w; } else if t.flags & 4 != 0 { x -= w / 2; }
+            if t.flags & 0x20 != 0 { y -= shown as i32 * 20; } else if t.flags & 0x10 != 0 { y -= shown as i32 * 10; }
+            (x.clamp(0, (width - w).max(0)), y.clamp(0, (height - shown as i32 * 20).max(0)), w, shown)
+        } else { (0, height - HEIGHT - shown as i32 * 20, width, shown) }
     }
     fn titles(
         &self,
@@ -168,7 +203,7 @@ impl ShellMenus {
         match ev {
             InputEvent::PointerDown { x, y } => {
                 let (x, y) = (x as i32, y as i32);
-                if y >= height - HEIGHT {
+                if self.tracking.is_none() && y >= height - HEIGHT {
                     self.captured = true;
                     let bar = &self.bars[&handle];
                     if bar.sip && x >= width - 26 {
@@ -185,12 +220,12 @@ impl ShellMenus {
                             .unwrap_or(Action::Consumed),
                     );
                 }
-                if let Some(p) = self.path.last_mut() {
+                if let Some(p) = self.path.last() {
                     self.captured = true;
-                    let count = menus.get(&p.menu).map_or(0, Vec::len);
-                    let shown = count.min(rows);
-                    let top = height - HEIGHT - shown as i32 * 20;
-                    if y >= top && y < height - HEIGHT {
+                    let count = menus.get(&p.menu).map_or(0, Vec::len).saturating_sub(p.first);
+                    let (left, top, popup_width, shown) = self.popup_rect(width, height, count);
+                    if x >= left && x < left + popup_width && y >= top && y < top + shown as i32 * 20 {
+                        let p = self.path.last_mut().unwrap();
                         p.selected = p.first + ((y - top) / 20) as usize;
                         return Some(Action::Consumed);
                     }
@@ -198,10 +233,16 @@ impl ShellMenus {
                     return Some(Action::Consumed);
                 }
             }
-            InputEvent::PointerUp { y, .. } if self.captured => {
+            InputEvent::PointerUp { x, y } if self.captured => {
                 self.captured = false;
-                if (y as i32) < height - HEIGHT && !self.path.is_empty() {
-                    return Some(self.choose(menus, states));
+                if (self.tracking.is_some() || (y as i32) < height - HEIGHT) && !self.path.is_empty() {
+                    let p = self.path.last().unwrap();
+                    let count = menus.get(&p.menu).map_or(0, Vec::len).saturating_sub(p.first);
+                    let (left, top, popup_width, shown) = self.popup_rect(width, height, count);
+                    if i32::from(x) >= left && i32::from(x) < left + popup_width && i32::from(y) >= top && i32::from(y) < top + shown as i32 * 20 {
+                        return Some(self.choose(menus, states));
+                    }
+                    self.close();
                 }
                 return Some(Action::Consumed);
             }
@@ -215,7 +256,8 @@ impl ShellMenus {
                     0x25 if self.path.len() > 1 => {
                         self.path.pop();
                     }
-                    0x25 | 0x27 => {
+                    0x27 if self.tracking.is_some() => return Some(self.choose(menus, states)),
+                    0x25 | 0x27 if self.tracking.is_none() => {
                         let count = menus.get(&self.bars[&handle].menu).map_or(0, Vec::len);
                         if count > 0 {
                             return Some(self.activate(
@@ -261,9 +303,10 @@ impl ShellMenus {
         let (w, h) = surface.dimensions();
         let (w, h) = (w as i32, h as i32);
         let y = h - HEIGHT;
+        let font = text::selected(gdi, STOCK_SYSTEM_FONT);
+        if handle != TRACKING_HANDLE {
         surface.fill_rect(0, y, w, HEIGHT, bar.background);
         surface.fill_rect(0, y, w, 1, 0x8410);
-        let font = text::selected(gdi, STOCK_SYSTEM_FONT);
         if let Some(items) = menus.get(&bar.menu) {
             for (index, (item, (x, width))) in
                 items.iter().zip(self.titles(bar, menus, w)).enumerate()
@@ -290,6 +333,7 @@ impl ShellMenus {
                 }
             }
         }
+        }
         if self.active != handle {
             return;
         }
@@ -297,20 +341,18 @@ impl ShellMenus {
             let Some(items) = menus.get(&p.menu) else {
                 return;
             };
-            let rows = ((h - HEIGHT) / 20).max(1) as usize;
-            let shown = items.len().saturating_sub(p.first).min(rows);
-            let top = y - shown as i32 * 20;
-            surface.fill_rect(0, top, w, shown as i32 * 20, 0xffff);
-            surface.fill_rect(0, top, w, 1, 0);
+            let (left, top, w, shown) = self.popup_rect(w, h, items.len().saturating_sub(p.first));
+            surface.fill_rect(left, top, w, shown as i32 * 20, 0xffff);
+            surface.fill_rect(left, top, w, 1, 0);
             for (row, item) in items.iter().enumerate().skip(p.first).take(shown) {
                 let yy = top + (row - p.first) as i32 * 20;
                 if item.kind & 0x800 != 0 {
-                    surface.fill_rect(4, yy + 10, w - 8, 1, 0x8410);
+                    surface.fill_rect(left + 4, yy + 10, w - 8, 1, 0x8410);
                     continue;
                 }
                 let selected = row == p.selected;
                 if selected {
-                    surface.fill_rect(1, yy + 1, w - 2, 19, 0x0010);
+                    surface.fill_rect(left + 1, yy + 1, w - 2, 19, 0x0010);
                 }
                 let color = if !enabled(item, p.menu, states) {
                     0x8410
@@ -321,10 +363,10 @@ impl ShellMenus {
                 };
                 text::layout(font.as_ref(), &label(item)).draw(
                     surface,
-                    16,
+                    left + 16,
                     yy + 4,
                     color,
-                    [1, yy, w - 12, yy + 20],
+                    [left + 1, yy, left + w - 12, yy + 20],
                 );
                 if states
                     .get(&p.menu)
@@ -334,15 +376,15 @@ impl ShellMenus {
                     & 8
                     != 0
                 {
-                    surface.fill_rect(5, yy + 8, 5, 5, color);
+                    surface.fill_rect(left + 5, yy + 8, 5, 5, color);
                 }
                 if item.submenu != 0 {
                     text::layout(font.as_ref(), &[62]).draw(
                         surface,
-                        w - 10,
+                        left + w - 10,
                         yy + 4,
                         color,
-                        [0, yy, w, yy + 20],
+                        [left, yy, left + w, yy + 20],
                     );
                 }
             }
@@ -441,4 +483,16 @@ mod tests {
         assert_eq!(pixel(120, 293), 0x1234);
         assert_eq!(pixel(120, 300), 0xc618);
     }
+    #[test]
+    fn context_menu_ignores_initial_hold_release_and_accepts_next_tap() {
+        let (mut shell,menus,states)=fixture();
+        shell.begin_tracking(TrackingMenu {thread:0,thunk:0,
+            frame:crate::GuestCallFrame {args:[0;4],sp:0,lr:0},owner:7,flags:0x100,
+            point:(20,17),result:None,callback:false},12);
+        assert_eq!(shell.input(TRACKING_HANDLE,InputEvent::PointerUp{x:134,y:14},240,320,&menus,&states),None);
+        assert!(shell.tracking.as_ref().unwrap().result.is_none());
+        shell.input(TRACKING_HANDLE,InputEvent::PointerDown{x:40,y:25},240,320,&menus,&states);
+        assert_eq!(shell.input(TRACKING_HANDLE,InputEvent::PointerUp{x:40,y:25},240,320,&menus,&states),Some(Action::Command(7,82)));
+    }
+
 }

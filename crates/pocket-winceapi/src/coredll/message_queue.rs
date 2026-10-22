@@ -28,7 +28,7 @@ pub(super) fn peek(
     let remove = mode & 1 != 0;
     let found = find(ctx, window, low, high, remove);
     if let Some(m) = found {
-        write_synthetic_msg_for_hwnd(ctx.cpu, out, m.0, m.1, m.2, m.3)?;
+        write_retrieved_message(ctx, out, m.0, m.1, m.2, m.3)?;
         if remove {
             ctx.kernel.synthetic_message_count += 1;
         }
