@@ -230,7 +230,7 @@ fn layer(
         }
         let n = u16_at(tree, dir + 12).ok_or("Truncated resource directory")? as usize
             + u16_at(tree, dir + 14).ok_or("Truncated resource directory")? as usize;
-        if visited.len() > 4096 || n > 4096 {
+        if visited.len() > 4096 || n > 4096 || pending.len().saturating_add(n) > 4096 {
             return Err("Resource directory limit exceeded".into());
         }
         for i in 0..n {

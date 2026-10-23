@@ -188,8 +188,11 @@ fn prepared_import_json(token: u64, pending: &pocket_library::PreparedImport) ->
 }
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportCabinet<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>, library_root: JString<'local>,
-    token: jlong, index: jni::sys::jint,
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+    index: jni::sys::jint,
 ) -> jstring {
     let result = (|| -> anyhow::Result<String> {
         let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
@@ -197,11 +200,16 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportC
         let mut pending = take_prepared_import(&root, token as u64)?;
         pending.choose_cabinet(index as usize)?;
         let json = prepared_import_json(token as u64, &pending);
-        PREPARED_IMPORTS.lock().unwrap_or_else(|e| e.into_inner())
+        PREPARED_IMPORTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(token as u64, (root, pending));
         Ok(json)
     })();
-    new_jstring(&env, result.unwrap_or_else(|e| error_json(&format!("choosePreparedImportCabinet: {e:#}"))))
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("choosePreparedImportCabinet: {e:#}"))),
+    )
 }
 
 #[no_mangle]

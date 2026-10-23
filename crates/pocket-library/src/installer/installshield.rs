@@ -141,3 +141,65 @@ pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Resu
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn put32(b: &mut [u8], p: usize, n: u32) {
+        b[p..p + 4].copy_from_slice(&n.to_le_bytes());
+    }
+    fn fixture(compressed: bool) -> Vec<(String, Vec<u8>)> {
+        use std::io::Write;
+        let payload = b"MSCF synthetic cabinet bytes";
+        let mut header = vec![0; 180];
+        header[..4].copy_from_slice(b"ISc(");
+        put32(&mut header, 4, 0x0100600c);
+        put32(&mut header, 12, 32);
+        put32(&mut header, 44, 48);
+        put32(&mut header, 72, 1);
+        let data = if compressed {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(payload).unwrap();
+            let bytes = encoder.finish().unwrap();
+            let mut block = (bytes.len() as u16).to_le_bytes().to_vec();
+            block.extend(bytes);
+            block
+        } else {
+            payload.to_vec()
+        };
+        header[80..82].copy_from_slice(&(if compressed { 4u16 } else { 0 }).to_le_bytes());
+        header[82..90].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        header[90..98].copy_from_slice(&(data.len() as u64).to_le_bytes());
+        header[98..106].copy_from_slice(&128u64.to_le_bytes());
+        header[106..122].copy_from_slice(&md5::compute(payload).0);
+        put32(&mut header, 138, 87);
+        header[165..167].copy_from_slice(&2u16.to_le_bytes());
+        header[167..173].copy_from_slice(b"x.cab\0");
+        let mut volume = vec![0; 128];
+        volume[..4].copy_from_slice(b"ISc(");
+        put32(&mut volume, 4, 0x0100600c);
+        volume.extend(data);
+        vec![("data1.hdr".into(), header), ("data2.cab".into(), volume)]
+    }
+    #[test]
+    fn stored_and_deflated_payloads_are_verified() {
+        for compressed in [false, true] {
+            let result = extract(&fixture(compressed), &mut 65536).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].name, "x.cab");
+            assert_eq!(result[0].bytes, b"MSCF synthetic cabinet bytes");
+        }
+    }
+    #[test]
+    fn missing_volume_tampering_and_truncation_are_rejected() {
+        let mut entries = fixture(false);
+        assert!(extract(&entries[..1], &mut 65536)
+            .unwrap_err()
+            .contains("Missing"));
+        entries[1].1[128] ^= 1;
+        assert!(extract(&entries, &mut 65536).unwrap_err().contains("MD5"));
+        entries[1].1.truncate(129);
+        assert!(extract(&entries, &mut 65536).is_err());
+    }
+}
