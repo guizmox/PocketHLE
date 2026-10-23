@@ -3700,3 +3700,18 @@ frame, HWND, nested stack and default-dialog frames together. Another thread
 must never consume the suspended caller's continuation. Other callback guards
 remain in place. Validate with device-clock capture, not only silent/headless
 virtual completion. Initial fix delivered before validation as requested.
+
+Snails validation checkpoint: native original fmodce.dll, Missions/story/mission/
+intro taps at 5/8/11/15 seconds. AudioTap drained in a separate host thread every
+10ms at guest format. Baseline captured exact repeated 3072-sample fragments for
+about six seconds. Dialog ownership fix plus live ring refresh at bounded
+scheduler polls markedly reduced repetition; a shorter repeat remains around
+the transition in the unoptimized headless run. Do not claim complete removal.
+After changes: real gameplay reached, 1152 frames in 34s, no crash. Full winceapi
+unit suite: 513 passed, 0 failed, 4 ignored. Includes new interleaved main/worker
+nested-dialog continuation test. Kernel worker normal-return paths also restore
+the main dialog state. Diagnostic probe code is not a production deliverable.
+Use latest cumulative snapshot; older archives overwrite common source files.
+Next: compare remaining brief repeat on optimized/device run and determine if
+native FMOD is decoding longer than its ring or waiting on a guest timer. Do not
+silence playback or invent PCM to conceal starvation.

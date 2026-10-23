@@ -441,7 +441,12 @@ fn open_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.hss.speakers.insert(speaker, (sounds, music));
     for index in 0..sounds + music {
         let group = 0x4853_0000u32.wrapping_add(ctx.kernel.hss.channels.len() as u32);
-        let channel = ctx.kernel.hss.channels.entry((speaker, index)).or_insert_with(|| pocket_kernel::HssChannel::new(group));
+        let channel = ctx
+            .kernel
+            .hss
+            .channels
+            .entry((speaker, index))
+            .or_insert_with(|| pocket_kernel::HssChannel::new(group));
         channel.stopped = true;
         channel.music = index >= sounds;
         ctx.kernel.audio.stop_voice_group(channel.group);
@@ -781,6 +786,142 @@ mod tests {
 
     /// Neither decoder should claim a file it cannot actually play —
     /// `load` reports failure to the guest on this path.
+    #[test]
+    fn memory_wav_and_virtual_channel_have_real_state() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::{Cpu, Prot};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let exports = CHANNEL_METHODS
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), 0x7000_1000 + i as u32 * 32))
+            .collect();
+        kernel
+            .dynamic_exports
+            .insert(pocket_kernel::HSS_MODULE_HANDLE, exports);
+        cpu.write_mem(0x1200, &tiny_wav()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?open@hssSpeaker@@QAAHII_NII@Z",
+                &[0x2200, 22050, 16, 0, 2, 1]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?load@hssSound@@QAAHPAX_N@Z",
+                &[0x2300, 0x1200, 1]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(!kernel.hss.clips[&0x2300].samples.is_empty());
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?loop@hssSound@@QAAX_N@Z",
+            &[0x2300, 1],
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?playSound@hssSpeaker@@QAAHPAVhssSound@@I@Z",
+                &[0x2200, 0x2300, 0x10000000]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let DispatchOutcome::ReturnedR0(ptr) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?channel@hssSpeaker@@QAAPAVhssChannel@@H@Z",
+            &[0x2200, 0],
+        ) else {
+            panic!("missing channel")
+        };
+        assert_ne!(ptr, 0);
+        let table = u32::from_le_bytes(cpu.read_mem(ptr, 4).unwrap().try_into().unwrap());
+        assert_eq!(
+            u32::from_le_bytes(cpu.read_mem(table, 4).unwrap().try_into().unwrap()),
+            0x70001000
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?channel@hssSpeaker@@QAAPAVhssChannel@@H@Z",
+                &[0x2200, 0]
+            ),
+            DispatchOutcome::ReturnedR0(ptr)
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            CHANNEL_METHODS[0],
+            &[ptr, 37],
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?volume@hssChannel@@QAAIXZ",
+                &[ptr]
+            ),
+            DispatchOutcome::ReturnedR0(37)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?playing@hssChannel@@QAA_NXZ",
+                &[ptr]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?stop@hssChannel@@QAAXXZ",
+            &[ptr],
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                "?playing@hssChannel@@QAA_NXZ",
+                &[ptr]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
     #[test]
     fn an_unrecognised_file_decodes_to_nothing() {
         assert!(decode_clip(&[0u8; 64]).is_none());
