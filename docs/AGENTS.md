@@ -3629,3 +3629,11 @@ are 32-bit. Truncate towards zero; remainder has numerator sign. Reject undefine
 zero/overflow operations without host panics. This differs from __rt_sdiv's
 divisor/numerator register convention and register pair return. Never change
 __rt_sdiv or patch GhostWorld callers to compensate for a missing CRT aggregate.
+
+## Registry parent keys (2026-10-23)
+Creating a deep registry key or seeding a CAB value must materialise every
+ancestor in the same quota-checked transaction. Descendant keys cannot exist
+without their parents. Keep display spelling and case-insensitive lookup.
+Springer's existing CAB LevelPacks/DefaultPack exposed this generic bug: it
+opens LevelPacks before enumeration and correctly exits if that parent is absent.
+Do not seed invented game values or special-case that path.

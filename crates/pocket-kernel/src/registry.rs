@@ -579,13 +579,16 @@ impl Registry {
     }
     pub fn create_key(&mut self, path: &str) -> bool {
         let canonical = canonical_key(path);
-        let lower = canonical.to_ascii_lowercase();
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        if store.keys.contains_key(&lower) {
-            return true;
-        }
+        let ancestors: Vec<_> = canonical
+            .match_indices('\\')
+            .map(|(end, _)| canonical[..end].to_string())
+            .chain(std::iter::once(canonical.clone()))
+            .collect();
         let mut keys = store.keys.clone();
-        keys.insert(lower.clone(), HashMap::new());
+        for key in &ancestors {
+            keys.entry(key.to_ascii_lowercase()).or_default();
+        }
         if store
             .charge
             .as_mut()
@@ -593,7 +596,9 @@ impl Registry {
         {
             return false;
         }
-        store.display.entry(lower).or_insert(canonical);
+        for key in ancestors {
+            store.display.entry(key.to_ascii_lowercase()).or_insert(key);
+        }
         store.keys = keys;
         true
     }
@@ -601,7 +606,15 @@ impl Registry {
         let canonical = canonical_key(path);
         let lower = canonical.to_ascii_lowercase();
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let ancestors: Vec<_> = canonical
+            .match_indices('\\')
+            .map(|(end, _)| canonical[..end].to_string())
+            .chain(std::iter::once(canonical.clone()))
+            .collect();
         let mut keys = store.keys.clone();
+        for key in &ancestors {
+            keys.entry(key.to_ascii_lowercase()).or_default();
+        }
         keys.entry(lower.clone())
             .or_default()
             .insert(name.to_ascii_lowercase(), value);
@@ -618,7 +631,9 @@ impl Registry {
             .or_default()
             .entry(name.to_ascii_lowercase())
             .or_insert_with(|| name.to_string());
-        store.display.entry(lower).or_insert(canonical);
+        for key in ancestors {
+            store.display.entry(key.to_ascii_lowercase()).or_insert(key);
+        }
         store.keys = keys;
         true
     }
@@ -1054,6 +1069,30 @@ mod tests {
                 r"\My Documents\My Saved Games\Bejeweled".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn nested_creation_and_seeded_values_materialise_all_parents() {
+        for seed_value in [false, true] {
+            let mut reg = Registry::new();
+            let leaf = r"HKLM\Software\Vendor\Product\Packs\Default";
+            if seed_value {
+                assert!(reg.set_value(leaf, "First", RegistryValue::Dword(2)));
+            } else {
+                assert!(reg.create_key(leaf));
+            }
+            for parent in [
+                r"HKLM\Software\Vendor",
+                r"HKLM\Software\Vendor\Product",
+                r"HKLM\Software\Vendor\Product\Packs",
+            ] {
+                assert!(reg.open(parent).is_some(), "missing parent {parent}");
+            }
+            assert_eq!(
+                reg.subkeys(r"HKLM\Software\Vendor\Product\Packs"),
+                vec!["Default"]
+            );
+        }
     }
 
     #[test]

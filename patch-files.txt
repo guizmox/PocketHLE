@@ -10,5 +10,6 @@ crates\pocket-winceapi\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\crt_integer.rs
 crates\pocket-library\examples\validate-installers.rs
+crates\pocket-kernel\src\registry.rs
 docs\AGENTS.md
 docs\third-party\unshield-LICENSE.txt
