@@ -3928,4 +3928,25 @@ nearby runtime DLL helper pools now reserve512B; signed offset+0x100, unsigned
 __dtoi64/__dtou64 use existing CPU-internal register-only arithmetic loop; no
 kernel/API scheduling round-trip. Preserve current handlers' truncation,
 saturation/NaN/unsigned-nonfinite behavior. Generic, no game path. Initial
-source saved before tests; native edge/random/ARM/Thumb tests still pending.
+source saved before tests. Native edge/random/ARM/Thumb tests pass (2 tests),
+CPU 19, kernel 266, API 520 (4 ignored), Android JNI host cargo check passes.
+Two 100-second Quake3 q3dm1 bot gameplay runs complete without crash. No
+isolated FPS gain claimed: different player death times invalidate comparison.
+Controlled 100000 conversions: __i64tod 132ms->9ms; __dtoi64 144ms->28ms.
+These are helper microbenchmarks, not expected whole-game FPS gains.
+
+
+## Bounded native memset (2026-10-23)
+Generic coredll memset shares the existing import/GetProcAddress hybrid loader:
+0..16 bytes branch to the nearby ARM helper at copy-helper+0x90. Zero length
+returns without touching destination, byte stores handle unaligned addresses,
+truncate value to unsigned char and preserve returned R0 destination. No extra
+writes or reads. Above16 bytes branch to the existing hooked tail at slot+28,
+with original R0/R1/R2 intact; bulk buffers keep host filling. Out-of-branch-range
+slots use a one-byte native fallback, other lengths keep dispatch. Helpers fit
+existing512B reservation; no new mappings or per-call allocations. No game checks.
+Native Unicorn tests cover all lengths0..16, alignments, values, page boundaries,
+ARM/Thumb, callee-saved registers, zero length with NULL, memory protection,
+and unchanged arguments/memory on large-length fallback. Six native tests pass
+including previous copies and numeric conversions. No whole-game FPS claim;
+user will confirm hardware performance.

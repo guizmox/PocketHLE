@@ -125,3 +125,67 @@ fn native_copy_honours_unmapped_and_read_only_memory() {
     args(&mut cpu, 0x3000, 0x2000, 4, false);
     assert!(cpu.run_until_hook(SLOT, 100).is_err());
 }
+
+#[test]
+fn fills_preserve_guards_truncate_values_and_return_to_arm_thumb() {
+    for slot in [SLOT, 0x30000000] {
+        let mut cpu = setup(slot, "memset");
+        for len in 0..=16 {
+            for dst in [0x2200, 0x2201, 0x2202, 0x2203, 0x2fff, 0x4000 - len] {
+                for value in [0, 1, 255, 256, 0x12345678, u32::MAX] {
+                    for thumb in [false, true] {
+                        let original = vec![0xa5; 0x2000];
+                        cpu.write_mem(0x2000, &original).unwrap();
+                        let mut expected = original;
+                        expected[(dst - 0x2000) as usize..(dst - 0x2000 + len) as usize]
+                            .fill(value as u8);
+                        args(&mut cpu, dst, value, len, thumb);
+                        assert_eq!(
+                            cpu.run_until_hook(slot, 200).unwrap(),
+                            StopReason::Hook(0x1100)
+                        );
+                        assert_eq!(cpu.read_mem(0x2000, 0x2000).unwrap(), expected);
+                        for (reg, wanted) in [
+                            (ArmReg::R0, dst),
+                            (ArmReg::R4, 0x12345678),
+                            (ArmReg::R11, 0x87654321),
+                            (ArmReg::Sp, 0x2800),
+                        ] {
+                            assert_eq!(cpu.read_reg(reg).unwrap(), wanted);
+                        }
+                        assert_eq!((cpu.read_reg(ArmReg::Cpsr).unwrap() & 0x20) != 0, thumb);
+                    }
+                }
+            }
+        }
+        for len in [17, 32, 4096, u32::MAX] {
+            cpu.write_mem(0x2000, &vec![0xa5; 0x2000]).unwrap();
+            args(&mut cpu, 0x2300, 0x12345678, len, false);
+            assert_eq!(
+                cpu.run_until_hook(slot, 100).unwrap(),
+                StopReason::Hook(slot + 28)
+            );
+            for (reg, wanted) in [
+                (ArmReg::R0, 0x2300),
+                (ArmReg::R1, 0x12345678),
+                (ArmReg::R2, len),
+            ] {
+                assert_eq!(cpu.read_reg(reg).unwrap(), wanted);
+            }
+            assert_eq!(cpu.read_mem(0x2000, 0x2000).unwrap(), vec![0xa5; 0x2000]);
+        }
+        args(&mut cpu, 0, 123, 0, false);
+        assert_eq!(
+            cpu.run_until_hook(slot, 100).unwrap(),
+            StopReason::Hook(0x1100)
+        );
+        for dst in [0, 0x4000, 0x3fff] {
+            args(&mut cpu, dst, 1, 4, false);
+            assert!(cpu.run_until_hook(slot, 100).is_err());
+        }
+    }
+    let mut cpu = setup(SLOT, "memset");
+    cpu.protect_region(0x3000, 0x1000, Prot::READ).unwrap();
+    args(&mut cpu, 0x3000, 1, 4, false);
+    assert!(cpu.run_until_hook(SLOT, 100).is_err());
+}

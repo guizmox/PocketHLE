@@ -169,6 +169,24 @@ pub fn install_small_copy_helper_at(
     ];
     let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     cpu.write_mem(address, &bytes)?;
+    // Bounded memset: byte stores accept every alignment, truncate the fill
+    // value to unsigned char, and never access memory for a zero length.
+    let fill: [u32; 7] = [
+        0xe3520000, // cmp r2,#0
+        0x012fff1e, // bxeq lr
+        0xe1a0c000, // mov ip,r0 (preserve the returned destination)
+        0xe4cc1001, // strb r1,[ip],#1
+        0xe2522001, // subs r2,r2,#1
+        0x1afffffc, // bne store
+        BX_LR,
+    ];
+    cpu.write_mem(
+        address + 0x90,
+        &fill
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )?;
     install_int64_double(cpu, address + 0x100, true)?;
     install_int64_double(cpu, address + 0x180, false)
 }
@@ -228,6 +246,22 @@ pub fn native_thunk_with_helper(
     if hybrid_fallback_offset(dll, name).is_none() {
         return Some(original);
     }
+    if name == "memset" {
+        let delta = i64::from(helper + 0x90) - (i64::from(address) + 8 + 8);
+        if delta % 4 != 0 || !(-(1i64 << 25)..(1i64 << 25)).contains(&delta) {
+            return Some(original);
+        }
+        return Some([
+            0xe3520010, // cmp r2,#16
+            0x8a000004, // bhi slot+28, original arguments untouched
+            0xea000000 | (((delta >> 2) as u32) & 0xffffff),
+            BX_LR,
+            BX_LR,
+            BX_LR,
+            BX_LR,
+            BX_LR,
+        ]);
+    }
     let delta = i64::from(helper) - (i64::from(address) + 24 + 8);
     if delta % 4 != 0 || !(-(1i64 << 25)..(1i64 << 25)).contains(&delta) {
         return Some(original);
@@ -247,7 +281,7 @@ pub fn native_thunk_with_helper(
 /// Native/hooked hybrid tail; the loader must hook only this address, never
 /// the entire native slot. R0 stays the destination on both paths.
 pub fn hybrid_fallback_offset(dll: &str, name: &str) -> Option<u32> {
-    if dll.eq_ignore_ascii_case("coredll.dll") && matches!(name, "memcpy" | "memmove") {
+    if dll.eq_ignore_ascii_case("coredll.dll") && matches!(name, "memcpy" | "memmove" | "memset") {
         Some(28)
     } else {
         None
@@ -398,6 +432,12 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
     }
     Some(match name {
         "memcpy" | "memmove" => BYTE_COPY,
+        "memset" => [
+            0xe3520001, // cmp r2,#1
+            0x1a000004, // bne slot+28 (host fallback)
+            0xe5c01000, // strb r1,[r0]
+            BX_LR, BX_LR, BX_LR, BX_LR, BX_LR,
+        ],
         // ---- 32-bit hardware integer divide -----------------------------
         // sdiv ip, r1, r0 / mls r1, ip, r0, r1 / mov r0, ip / bx lr
         "__rt_sdiv" => pad(&[0xE71C_F011, 0xE061_109C, 0xE1A0_000C, BX_LR]),
@@ -441,7 +481,7 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
         // could call into the host's vectorised libc.
         //
         // Bulk memcpy/memmove sizes take the hooked hybrid tail above;
-        // memset remains entirely host-dispatched. Large buffers retain
+        // memset uses the same bounded native/host split. Large buffers retain
         // their vectorised host implementation rather than an ARM byte loop.
         "strlen" => STRLEN,
         "wcslen" | "lstrlenW" => WCSLEN,
