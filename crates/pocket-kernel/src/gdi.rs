@@ -376,6 +376,7 @@ impl GdiState {
     pub fn new() -> Self {
         let mut s = Self {
             image_decode_frames: Vec::new(),
+            image_renderers: HashMap::new(),
             shell_menus: Default::default(),
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,

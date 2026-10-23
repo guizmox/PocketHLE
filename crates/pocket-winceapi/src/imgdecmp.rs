@@ -76,7 +76,7 @@ fn release_renderer(ctx: &mut CallCtx<'_>, pointer: u32) -> u32 {
                 .kernel
                 .gdi
                 .bitmap(state.bitmap)
-                .map(|b| b.dib_bits_va)
+                .and_then(|b| b.dib_bits_va)
                 .unwrap_or(0);
             ctx.kernel.gdi.delete(state.bitmap);
             if bits != 0 {
@@ -90,6 +90,7 @@ fn release_renderer(ctx: &mut CallCtx<'_>, pointer: u32) -> u32 {
 fn render_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pointer = ctx.arg_u32(0)?;
     let a = ctx.arg_u32(1)?;
+    let b = ctx.arg_u32(2)?;
     let name = ctx
         .thunk
         .friendly_name
@@ -110,7 +111,7 @@ fn render_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         state.refs = state.refs.saturating_add(1);
         result = state.refs;
     } else if name.ends_with("QueryInterface") {
-        let output = ctx.arg_u32(2)?;
+        let output = b;
         let iid = ctx.cpu.read_mem(a, 16)?;
         let unknown = [0, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
         let render = [
@@ -127,7 +128,7 @@ fn render_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }
     } else if name.ends_with("GetBitmap") {
         ctx.cpu.write_mem(a, &state.bitmap.to_le_bytes())?;
-        if ctx.arg_u32(2)? != 0 {
+        if b != 0 {
             state.owns_bitmap = false;
         }
     } else if name.ends_with("GetOrigWidth") {
@@ -135,18 +136,19 @@ fn render_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     } else if name.ends_with("GetOrigHeight") {
         ctx.cpu.write_mem(a, &state.height.to_le_bytes())?;
     } else if name.ends_with("GetBits") {
+        let bitmap = state.bitmap;
         let bits = ctx
             .kernel
             .gdi
-            .bitmap(state.bitmap)
-            .map(|b| b.dib_bits_va)
+            .bitmap(bitmap)
+            .and_then(|b| b.dib_bits_va)
             .unwrap_or(0);
         ctx.cpu.write_mem(a, &bits.to_le_bytes())?;
     } else if name.ends_with("ImageFail") {
         ctx.cpu.write_mem(a, &0u32.to_le_bytes())?;
     } else if name.ends_with("Draw") {
         let bitmap = state.bitmap;
-        let rectangle = ctx.arg_u32(2)?;
+        let rectangle = b;
         let Some(source) = ctx.kernel.gdi.bitmap(bitmap) else {
             return Ok(DispatchOutcome::ReturnedR0(INVALID));
         };
@@ -486,6 +488,40 @@ mod tests {
             .unwrap();
         data
     }
+    #[test]
+    fn completed_progress_receives_real_renderer_and_preserves_bitmap_ownership() {
+        use pocket_cpu::regs::ArmReg;
+        for requested in [false, true] {
+            let (mut cpu, mut k, mut d) = setup();
+            cpu.map_region(0x50000000,0x10000,Prot::READ|Prot::WRITE).unwrap();
+            k.dynamic_exports.insert(0x10000000, RENDER_METHODS.iter().enumerate()
+                .map(|(i,n)|(n.to_string(),0x70001000+i as u32*32)).collect());
+            let bytes=bitmap();
+            let header=[60u32,0x1800,bytes.len() as u32,bytes.len() as u32,0x2000,if requested {0x2004}else{0},16,77,0,100,1000,1000,0,0x123400,u32::MAX];
+            cpu.write_mem(0x1000,&header.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>()).unwrap();
+            cpu.write_mem(0x1800,&bytes).unwrap();
+            assert_eq!(call(&mut cpu,&mut k,&mut d,"imgdecmp.dll","ord:1",&[0x1000]),DispatchOutcome::JumpTo(0x123400));
+            let renderer=cpu.read_reg(ArmReg::R0).unwrap();
+            assert_ne!(renderer,0);
+            assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(),1);
+            assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(),77);
+            let bitmap_handle=cpu.read_u32_le(0x2000).unwrap();
+            assert!(k.gdi.bitmap(bitmap_handle).is_some());
+            assert_eq!(call(&mut cpu,&mut k,&mut d,"imgdecmp.dll","ord:1",&[0x1000]),DispatchOutcome::ReturnedR0(0));
+            assert!(k.gdi.bitmap(bitmap_handle).is_some());
+            assert_eq!(k.gdi.image_renderers.contains_key(&renderer),requested);
+            if requested {
+                assert_eq!(cpu.read_u32_le(0x2004).unwrap(),renderer);
+                call(&mut cpu,&mut k,&mut d,"coredll.dll",RENDER_METHODS[5],&[renderer,0x2100]);
+                assert_eq!(cpu.read_u32_le(0x2100).unwrap(),2);
+                call(&mut cpu,&mut k,&mut d,"coredll.dll",RENDER_METHODS[7],&[renderer,0x2100]);
+                assert_ne!(cpu.read_u32_le(0x2100).unwrap(),0);
+                assert_eq!(call(&mut cpu,&mut k,&mut d,"coredll.dll",RENDER_METHODS[2],&[renderer]),DispatchOutcome::ReturnedR0(0));
+                assert!(k.gdi.bitmap(bitmap_handle).is_some());
+            }
+        }
+    }
+
     #[test]
     fn decoded_24_bit_dib_exposes_bgr_bottom_up_rows_through_get_object() {
         let (mut cpu, mut k, mut d) = setup();
