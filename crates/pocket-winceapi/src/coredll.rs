@@ -22367,10 +22367,12 @@ fn wave_out_get_dev_caps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
             }
         }
         if buf.len() >= 76 {
-            buf[72..76].copy_from_slice(&1u32.to_le_bytes());
+            // PCM 8/16-bit, mono/stereo at 11.025, 22.05 and 44.1 kHz.
+            // All twelve standard formats are handled by the wave mixer.
+            buf[72..76].copy_from_slice(&0x0fffu32.to_le_bytes());
         }
         if buf.len() >= 78 {
-            buf[76..78].copy_from_slice(&1u16.to_le_bytes());
+            buf[76..78].copy_from_slice(&2u16.to_le_bytes());
         }
         if buf.len() >= 84 {
             buf[80..84].copy_from_slice(&12u32.to_le_bytes()); // WAVECAPS_VOLUME | WAVECAPS_LRVOLUME
@@ -25486,6 +25488,10 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(cpu.read_mem(0x2150, 4).unwrap(), 12u32.to_le_bytes());
+        // WAVE_FORMAT_2S16 must be advertised for applications that check
+        // stereo 22.05 kHz support before starting their renderer.
+        assert_eq!(cpu.read_mem(0x2148, 4).unwrap(), 0x0fffu32.to_le_bytes());
+        assert_eq!(cpu.read_mem(0x214c, 2).unwrap(), 2u16.to_le_bytes());
     }
 
     #[test]

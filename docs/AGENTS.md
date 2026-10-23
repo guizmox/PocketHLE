@@ -3848,3 +3848,17 @@ parent exits normally, child shows 'Welcome for registration' and Start button,
 remains active for 8 seconds. No game activation attempted. Diagnostic runner
 changes are not production files. Shell document associations and special nShow
 visibility variants remain explicitly outside this implementation.
+
+## Wave output capabilities / Spirit demo (2026-10-23)
+waveOutGetDevCaps wrongly advertised dwFormats=1 and wChannels=1, although the
+mixer accepts PCM8/16 mono/stereo at 11025/22050/44100 Hz. Advertise the twelve
+standard flags (0x0fff), stereo capacity=2, preserving size-limited CE layout.
+Spirit opens waveOut successfully, gets its device ID, then checks dwFormats
+bit 0x80 (WAVE_FORMAT_2S16) and exits(0) if absent, before graphics initialization.
+No game patch, fake audio or changed sample decoding. Source saved before tests.
+Spirit validation: native 45s run passes loading (~13s on this host), renders
+animated 'scene spirit resurrection force 2003', sustained ~59 framebuffer
+changes/s, two waveform buffers requeued. Simulated real-time 22050Hz stereo16
+sink captures nonzero music (peak 12565). No physical audio-device validation.
+520 winceapi tests passed, 4 ignored. This is capability metadata correction,
+not a change to samples, callbacks, GAPI or rendering. Loading is not immediate.
