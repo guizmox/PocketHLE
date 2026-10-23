@@ -28,6 +28,7 @@ rars = "0.4.9"
 newtua-nsis = "0.1.1"
 flate2.workspace = true
 md5 = "0.7"
+cab.workspace = true
 
 pocket-cab = { path = "../pocket-cab" }
 pocket-pe = { path = "../pocket-pe" }

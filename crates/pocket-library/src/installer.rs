@@ -88,6 +88,25 @@ fn layer(
         if size < 36 || size > b.len() || u32_at(b, 16).is_none_or(|p| p >= size) {
             return Err("Invalid cabinet bounds".into());
         }
+        // Some desktop launchers wrap the CE cabinet in another Microsoft
+        // cabinet containing Setup.exe/Setup.ini. Decode the container rather
+        // than mistaking its desktop files for the installed PocketPC game.
+        let mut archive = cab::Cabinet::new(Cursor::new(&b[..size])).map_err(|e| e.to_string())?;
+        let names: Vec<_> = archive.folder_entries().flat_map(|f| f.file_entries())
+            .map(|f| f.name().to_owned()).collect();
+        if names.len() > 4096 { return Err("Too many cabinet entries".into()); }
+        let is_ce = names.iter().any(|n| n.eq_ignore_ascii_case("_setup.xml") || n.to_ascii_lowercase().ends_with(".000"));
+        if !is_ce {
+            let previous = out.len();
+            for child in names.iter().filter(|n| n.to_ascii_lowercase().ends_with(".cab")) {
+                let mut data = Vec::new();
+                archive.read_file(child).map_err(|e| e.to_string())?
+                    .take(*budget as u64 + 1).read_to_end(&mut data).map_err(|e| e.to_string())?;
+                charge(data.len(), budget)?;
+                layer(&data, child, depth + 1, budget, out)?;
+            }
+            if out.len() > previous { return Ok(true); }
+        }
         if !out.iter().any(|c| c.bytes == b[..size]) {
             if out.len() >= 32 {
                 return Err("Too many embedded cabinets".into());

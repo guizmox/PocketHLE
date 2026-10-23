@@ -3637,3 +3637,9 @@ without their parents. Keep display spelling and case-insensitive lookup.
 Springer's existing CAB LevelPacks/DefaultPack exposed this generic bug: it
 opens LevelPacks before enumeration and correctly exits if that parent is absent.
 Do not seed invented game values or special-case that path.
+
+## Nested Microsoft cabinet wrappers (2026-10-23)
+Desktop setup packages may embed a Microsoft cabinet whose files are desktop
+Setup.exe/Setup.ini and one or more actual CE cabinets. Recursively decode
+nested CAB members with the same depth/byte limits; keep architecture selection
+for multiple CE payloads. SetupKursk_ARM supplied this container profile.
