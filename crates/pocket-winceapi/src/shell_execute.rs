@@ -22,7 +22,7 @@ fn failed(ctx: &mut CallCtx<'_>, ptr: u32, error: u32) -> Result<DispatchOutcome
 
 pub(super) fn execute(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let ptr = ctx.arg_u32(0)?;
-    let Ok(info) = ctx.cpu.read_mem(ptr, SIZE) else {
+    let Ok(info) = ctx.cpu.read_mem(ptr, SIZE as u32) else {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
@@ -37,6 +37,7 @@ pub(super) fn execute(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
+    // CE has no process current directory; lpDirectory has no effect.
     let mask = word(4);
     let key = (
         ctx.kernel.current_thread,
@@ -84,7 +85,7 @@ pub(super) fn execute(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     ctx.cpu.write_mem(ptr + 56, &0u32.to_le_bytes())?;
-    if mask & !(NOCLOSEPROCESS | NO_UI) != 0 || word(24) != 0 {
+    if mask & !(NOCLOSEPROCESS | NO_UI) != 0 {
         return failed(ctx, ptr, ERROR_NOT_SUPPORTED);
     }
     let mut string = |off| -> Result<String, KernelError> {
@@ -127,5 +128,109 @@ pub(super) fn execute(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         failed(ctx, ptr, error)
     } else {
         Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pocket_cpu::{stub::StubCpu, Cpu};
+
+    #[test]
+    fn shell_launch_acknowledgement_preserves_requested_handle_and_closes_temporary_handles() {
+        for keep in [false, true] {
+            let mut cpu = StubCpu::new();
+            cpu.map_region(0x1000, 0x5000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+            cpu.write_reg(ArmReg::Sp, 0x5000).unwrap();
+            cpu.write_mem(0x2000, &60u32.to_le_bytes()).unwrap();
+            cpu.write_mem(
+                0x2004,
+                &(if keep { NOCLOSEPROCESS } else { 0 }).to_le_bytes(),
+            )
+            .unwrap();
+            let mut kernel = super::super::tests::fresh_kernel();
+            let thunk = super::super::tests::dummy_thunk();
+            let (handle, table) = kernel.object_handles.new_child().unwrap();
+            table.hold_start();
+            kernel
+                .process_launch_results
+                .insert((0, thunk.thunk_va, 0x5000), Ok(handle));
+            assert_eq!(
+                execute(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(cpu.read_mem(0x2020, 4).unwrap(), handle.to_le_bytes());
+            assert_eq!(
+                cpu.read_mem(0x2038, 4).unwrap(),
+                (if keep { handle } else { 0 }).to_le_bytes()
+            );
+            let child = &kernel.child_processes[&handle];
+            assert!(child.thread_handle_closed);
+            assert_eq!(child.process_handle_closed, !keep);
+            assert_eq!(table.exit_code(table.process_id(), None), None);
+        }
+    }
+
+    #[test]
+    fn ce_directory_is_ignored_and_missing_executable_reports_file_not_found() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x5000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x5000).unwrap();
+        cpu.write_mem(0x2000, &60u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x2010, &0x3000u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x2018, &0xffffffffu32.to_le_bytes()).unwrap();
+        write_wide_str(&mut cpu, 0x3000, 100, "\\Missing\\tool.exe").unwrap();
+        let mut kernel = super::super::tests::fresh_kernel();
+        kernel.process_launch_enabled = true;
+        let thunk = super::super::tests::dummy_thunk();
+        assert_eq!(
+            execute(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.thread_last_errors.get(&0), Some(&2));
+        assert!(kernel.pending_process_launch.is_none());
+    }
+
+    #[test]
+    fn failed_shell_launch_reports_error_and_never_returns_a_fake_process() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x5000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x5000).unwrap();
+        cpu.write_mem(0x2000, &60u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x2038, &0xdeadbeefu32.to_le_bytes()).unwrap();
+        let mut kernel = super::super::tests::fresh_kernel();
+        let thunk = super::super::tests::dummy_thunk();
+        kernel
+            .process_launch_results
+            .insert((0, thunk.thunk_va, 0x5000), Err(2));
+        assert_eq!(
+            execute(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_mem(0x2020, 4).unwrap(), 2u32.to_le_bytes());
+        assert_eq!(cpu.read_mem(0x2038, 4).unwrap(), 0u32.to_le_bytes());
+        assert_eq!(kernel.thread_last_errors.get(&0), Some(&2));
+        assert!(kernel.pending_process_launch.is_none());
     }
 }

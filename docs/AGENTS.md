@@ -3831,10 +3831,20 @@ New shell_execute child module implements 60-byte Unicode CE SHELLEXECUTEINFO,
 NULL/open verbs for .exe through the same queue_child_launch as CreateProcessW.
 Real asynchronous loader acknowledgement before success; hInstApp/error,
 GetLastError, SEE_MASK_NOCLOSEPROCESS, temporary thread/process handle lifetime.
-NO_UI accepted, unsupported masks/directory/document associations return errors,
+NO_UI accepted, unsupported masks/document associations return errors; the
+unsupported CE current-directory field is ignored,
 never success stubs or host process execution. Ignored optional CE fields remain
 ignored. Standard launch visibility is used; nShow variants are not implemented.
 MSRW Kart unregistered startup asks to execute bundled regprog.exe after OK.
 No registration bypass or invented license values. Initial source delivery before
 validation as requested. Desktop/Android runners already service child requests;
 headless diagnostic requires explicitly enabling and servicing launches.
+Final validation: 520 winceapi tests passed, 4 ignored (direct test binary with
+workspace TMPDIR). Three new shell tests cover requested/temporary handles,
+loader failure and ignored CE lpDirectory with real missing-file resolution.
+Actual MSRW Kart click OK queues its bundled regprog.exe with empty arguments;
+headless child runner loads it with shared handle/VFS context, acknowledges load,
+parent exits normally, child shows 'Welcome for registration' and Start button,
+remains active for 8 seconds. No game activation attempted. Diagnostic runner
+changes are not production files. Shell document associations and special nShow
+visibility variants remain explicitly outside this implementation.

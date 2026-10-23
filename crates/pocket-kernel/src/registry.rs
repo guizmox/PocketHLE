@@ -786,6 +786,56 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn persisted_orphan_keys_restore_parent_enumeration_without_changing_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let child = r"hklm\software\example\packs\default";
+        let snapshot = RegistrySnapshot {
+            version: 1,
+            keys: HashMap::from([(
+                child.into(),
+                HashMap::from([
+                    ("title".into(), RegistryValue::Sz("Saved title".into())),
+                    ("progress".into(), RegistryValue::Dword(42)),
+                ]),
+            )]),
+            display: HashMap::from([(child.into(), r"HKLM\Software\Example\Packs\Default".into())]),
+            value_display: HashMap::from([(
+                child.into(),
+                HashMap::from([
+                    ("title".into(), "Title".into()),
+                    ("progress".into(), "Progress".into()),
+                ]),
+            )]),
+        };
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let mut registry = Registry::new();
+        registry.configure_persistence(&path).unwrap();
+        assert!(registry.open(r"HKLM\Software\Example\Packs").is_some());
+        assert_eq!(registry.subkeys(r"HKLM\Software\Example"), vec!["Packs"]);
+        assert_eq!(
+            registry.subkeys(r"HKLM\Software\Example\Packs"),
+            vec!["Default"]
+        );
+        assert_eq!(
+            registry.value(child, "Progress"),
+            Some(RegistryValue::Dword(42))
+        );
+        assert_eq!(
+            registry.value(child, "TITLE"),
+            Some(RegistryValue::Sz("Saved title".into()))
+        );
+        registry.flush().unwrap();
+        let mut again = Registry::new();
+        again.configure_persistence(&path).unwrap();
+        assert_eq!(
+            again.subkeys(r"HKLM\Software\Example\Packs"),
+            vec!["Default"]
+        );
+        assert_eq!(again.values(child), registry.values(child));
+    }
+
+    #[test]
     fn enumerated_value_spelling_survives_case_insensitive_updates_and_persistence() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
