@@ -1473,7 +1473,8 @@ impl ScheduledInputHook {
             pocket_core::kernel::InputEvent::PointerMove { .. }
             | pocket_core::kernel::InputEvent::StylusAim { .. }
             | pocket_core::kernel::InputEvent::Text { .. }
-            | pocket_core::kernel::InputEvent::KeyboardRotation { .. } => {}
+            | pocket_core::kernel::InputEvent::KeyboardRotation { .. }
+            | pocket_core::kernel::InputEvent::MouseMessage { .. } => {}
         }
     }
 }

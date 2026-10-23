@@ -3950,3 +3950,18 @@ ARM/Thumb, callee-saved registers, zero length with NULL, memory protection,
 and unchanged arguments/memory on large-length fallback. Six native tests pass
 including previous copies and numeric conversions. No whole-game FPS claim;
 user will confirm hardware performance.
+
+## CI and release 0.3.6 (2026-10-23)
+The CLI ScheduledInputHook must explicitly handle InputEvent::MouseMessage in
+its exhaustive update_held match. These injected right/middle/wheel messages
+do not represent the scheduler's tracked keys or left-stylus presses; retain
+held state and continue delivering them through the ordered input queue.
+The supplied CI failed both CLI builds on that missing enum variant, and
+rustfmt on gdi, installer validation, datetime, imgdecmp and module order.
+Format the affected files; do not remove the enum variant or weaken CI checks.
+Workspace Rust version and Android versionName are 0.3.6, Android versionCode10.
+The delivered Cargo.lock changes only the eleven local workspace versions;
+third-party dependency entries/checksums remain those of the supplied source.
+Validation: rustfmt source check and 19 CLI tests both without default features
+and with unicorn pass. Full audio/display build is not validated locally due to
+missing ALSA. Retry native build with one job succeeded after assembler error.

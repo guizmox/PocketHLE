@@ -6,9 +6,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pending = library.prepare_import(&source)?;
         if pending.cabinet_choices().is_empty() {
             let entries = library.apply_prepared_import(pending, false)?;
-            println!("OK {source}: {:?}", entries.iter().map(|e| &e.display_name).collect::<Vec<_>>());
+            println!(
+                "OK {source}: {:?}",
+                entries.iter().map(|e| &e.display_name).collect::<Vec<_>>()
+            );
         } else {
-            println!("CHOICE {source}: {:?}", pending.cabinet_choices().iter().map(|c| (&c.name, &c.architecture)).collect::<Vec<_>>());
+            println!(
+                "CHOICE {source}: {:?}",
+                pending
+                    .cabinet_choices()
+                    .iter()
+                    .map(|c| (&c.name, &c.architecture))
+                    .collect::<Vec<_>>()
+            );
             assert!(library.games().is_empty());
             let indexes: Vec<_> = pending.cabinet_choices().iter().map(|c| c.index).collect();
             drop(pending);
@@ -17,7 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pending.choose_cabinet(index)?;
                 assert!(pending.cabinet_choices().is_empty());
                 let entries = library.apply_prepared_import(pending, true)?;
-                println!("  SELECT {index}: {:?}", entries.iter().map(|e| &e.display_name).collect::<Vec<_>>());
+                println!(
+                    "  SELECT {index}: {:?}",
+                    entries.iter().map(|e| &e.display_name).collect::<Vec<_>>()
+                );
             }
         }
     }

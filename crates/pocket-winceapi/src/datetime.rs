@@ -23,7 +23,11 @@ pub(crate) fn now() -> [u16; 8] {
     ]
 }
 pub(crate) fn register(d: &mut WinCeDispatcher) {
-    d.register_handler("coredll.dll", "FileTimeToLocalFileTime", file_time_to_local_file_time);
+    d.register_handler(
+        "coredll.dll",
+        "FileTimeToLocalFileTime",
+        file_time_to_local_file_time,
+    );
     d.register_handler(
         "coredll.dll",
         "GetTimeZoneInformation",
@@ -408,9 +412,17 @@ mod tests {
         for ticks in [0u64, 1, 0x01db_eeab_1234_5679, 0x7fff_ffff_ffff_ffff] {
             cpu.write_mem(0x1200, &ticks.to_le_bytes()).unwrap();
             cpu.write_mem(0x1300, &[0xaa; 12]).unwrap();
-            assert_eq!(call(&mut cpu, &mut k, &mut d, "coredll.dll",
-                "FileTimeToLocalFileTime", &[0x1200, 0x1300, 0x41ff, 0xb9000000]),
-                DispatchOutcome::ReturnedR0(1));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "FileTimeToLocalFileTime",
+                    &[0x1200, 0x1300, 0x41ff, 0xb9000000]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
             assert_eq!(cpu.read_mem(0x1300, 8).unwrap(), ticks.to_le_bytes());
             assert_eq!(cpu.read_mem(0x1308, 4).unwrap(), [0xaa; 4]);
             assert_eq!(cpu.read_mem(0x1200, 8).unwrap(), ticks.to_le_bytes());
@@ -421,16 +433,30 @@ mod tests {
     fn file_time_to_local_rejects_bad_buffers_without_changing_output() {
         let (mut cpu, mut k, mut d) = setup();
         for (input, output, error) in [
-            (0, 0x1300, 87), (0x1200, 0, 87), (0x1300, 0x1300, 87),
-            (0x9000, 0x1300, 998), (0x1200, 0x9000, 998),
+            (0, 0x1300, 87),
+            (0x1200, 0, 87),
+            (0x1300, 0x1300, 87),
+            (0x9000, 0x1300, 998),
+            (0x1200, 0x9000, 998),
             (0x1200, 0x4ffc, 998),
         ] {
             cpu.write_mem(0x1300, &[0xaa; 8]).unwrap();
             cpu.write_mem(0x4ffc, &[0xbb; 4]).unwrap();
-            assert_eq!(call(&mut cpu, &mut k, &mut d, "coredll.dll",
-                "FileTimeToLocalFileTime", &[input, output]), DispatchOutcome::ReturnedR0(0));
-            assert_eq!(call(&mut cpu, &mut k, &mut d, "coredll.dll",
-                "GetLastError", &[]), DispatchOutcome::ReturnedR0(error));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "FileTimeToLocalFileTime",
+                    &[input, output]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", "GetLastError", &[]),
+                DispatchOutcome::ReturnedR0(error)
+            );
             assert_eq!(cpu.read_mem(0x1300, 8).unwrap(), [0xaa; 8]);
             assert_eq!(cpu.read_mem(0x4ffc, 4).unwrap(), [0xbb; 4]);
         }

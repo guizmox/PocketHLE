@@ -344,8 +344,11 @@ pub struct ImageDecodeFrame {
 
 #[derive(Debug)]
 pub struct ImageRenderer {
-    pub bitmap: u32, pub refs: u32, pub owns_bitmap: bool,
-    pub width: u32, pub height: u32,
+    pub bitmap: u32,
+    pub refs: u32,
+    pub owns_bitmap: bool,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Default)]
@@ -625,7 +628,9 @@ impl GdiState {
     pub fn save_dc(&mut self, handle: u32) -> Option<u32> {
         let snapshot = self.dc(handle)?.clone();
         let stack = self.saved_dcs.entry(handle).or_default();
-        if stack.len() >= 4096 { return None; }
+        if stack.len() >= 4096 {
+            return None;
+        }
         stack.push(snapshot);
         Some(stack.len() as u32)
     }
@@ -633,10 +638,20 @@ impl GdiState {
     /// Positive levels are absolute; negative levels count from the newest.
     /// Restoring consumes the selected snapshot and all snapshots after it.
     pub fn restore_dc(&mut self, handle: u32, level: i32) -> bool {
-        if level == 0 || self.dc(handle).is_none() { return false; }
-        let Some(stack) = self.saved_dcs.get_mut(&handle) else { return false; };
-        let index = if level < 0 { stack.len() as i64 + i64::from(level) } else { i64::from(level)-1 };
-        if index < 0 || index as usize >= stack.len() { return false; }
+        if level == 0 || self.dc(handle).is_none() {
+            return false;
+        }
+        let Some(stack) = self.saved_dcs.get_mut(&handle) else {
+            return false;
+        };
+        let index = if level < 0 {
+            stack.len() as i64 + i64::from(level)
+        } else {
+            i64::from(level) - 1
+        };
+        if index < 0 || index as usize >= stack.len() {
+            return false;
+        }
         let snapshot = stack[index as usize].clone();
         stack.truncate(index as usize);
         *self.dc_mut(handle).unwrap() = snapshot;
