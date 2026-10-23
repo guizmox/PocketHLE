@@ -1,2 +1,4 @@
-crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\hss.rs
+crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\audio.rs
 docs\AGENTS.md

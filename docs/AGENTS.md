@@ -3650,3 +3650,13 @@ string passed to CE WinMain), defaulting to empty when no arguments were supplie
 The CE CRT obtains argv[0] separately from GetModuleFileNameW. Returning the
 module path as extra arguments broke Stratagus with "too many files", especially
 under Program Files. Preserve explicit argument text and its stable cached pointer.
+
+## HSS memory clips and channel ABI (2026-10-23)
+The PAX_N load overload receives WAV/MOD bytes, not UTF-16 paths. Bound reads
+by the format's declared length (including MOD patterns/sample headers), copy
+before the guest releases memory, and do not cache by reusable guest addresses.
+HSS speaker channel lookup must return a stable object with a real method table
+(volume, pan, position getter/setter, length), backed by the actual mixer voice
+group. Keep per-channel frequency, volume, playback/pause/loop/position state.
+Never return zero-filled pseudo objects: Street Duel calls the virtual volume
+setter immediately. Memory audio loading and channel ABI are generic HSS fixes.

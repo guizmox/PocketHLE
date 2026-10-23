@@ -85,14 +85,79 @@ pub fn register(d: &mut WinCeDispatcher) {
     // Remaining surface with no state behind it.
     let success_stubs = [
         "?bufferLength@hssSpeaker@@QAAHH@Z",
-        "?channel@hssSpeaker@@QAAPAVhssChannel@@H@Z",
-        "?frequency@hssChannel@@QAAXI@Z",
-        "?playing@hssChannel@@QAA_NXZ",
-        "?stop@hssChannel@@QAAXXZ",
     ];
     for f in success_stubs {
         d.register_handler(dll, f, ok);
     }
+    d.register_handler(dll, "?channel@hssSpeaker@@QAAPAVhssChannel@@H@Z", channel);
+    for name in CHANNEL_METHODS {
+        d.register_handler(dll, name, channel_method);
+    }
+}
+
+const CHANNEL_METHODS: [&str; 16] = [
+    "?volume@hssChannel@@UAAXI@Z", "?pan@hssChannel@@UAAXI@Z",
+    "?position@hssChannel@@UAAIXZ", "?position@hssChannel@@UAAXI@Z", "?length@hssChannel@@UAAIXZ",
+    "?volume@hssChannel@@QAAIXZ", "?pan@hssChannel@@QAAIXZ",
+    "?frequency@hssChannel@@QAAXI@Z", "?frequency@hssChannel@@QAAIXZ",
+    "?playing@hssChannel@@QAA_NXZ", "?stop@hssChannel@@QAAXXZ",
+    "?pause@hssChannel@@QAAXXZ", "?resume@hssChannel@@QAAXXZ", "?paused@hssChannel@@QAA_NXZ",
+    "?loop@hssChannel@@QAAX_N@Z", "?loop@hssChannel@@QAA_NXZ",
+];
+
+fn channel(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let speaker = ctx.arg_u32(0)?;
+    let index = ctx.arg_u32(1)?;
+    let Some(state) = ctx.kernel.hss.channels.get_mut(&(speaker, index)) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if state.pointer != 0 { return Ok(DispatchOutcome::ReturnedR0(state.pointer)); }
+    let pointer = ctx.kernel.heap.alloc(24).ok_or_else(|| KernelError::Loader("HSS channel allocation failed".into()))?;
+    let table = pointer + 4;
+    ctx.cpu.write_mem(pointer, &table.to_le_bytes())?;
+    for (i, name) in CHANNEL_METHODS[..5].iter().enumerate() {
+        let address = ctx.kernel.dynamic_exports.get(&pocket_kernel::HSS_MODULE_HANDLE)
+            .and_then(|exports| exports.get(*name)).copied()
+            .ok_or_else(|| KernelError::Loader(format!("HSS missing method {name}")))?;
+        ctx.cpu.write_mem(table + i as u32 * 4, &address.to_le_bytes())?;
+    }
+    ctx.kernel.hss.channels.get_mut(&(speaker, index)).unwrap().pointer = pointer;
+    Ok(DispatchOutcome::ReturnedR0(pointer))
+}
+
+fn channel_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    let arg = ctx.arg_u32(1)?;
+    let name = ctx.thunk.friendly_name.as_deref().or_else(|| match &ctx.thunk.binding {
+        pocket_pe::ImportBinding::Name(n) => Some(n.as_str()), _ => None
+    }).unwrap_or_default();
+    let Some(state) = ctx.kernel.hss.channels.values_mut().find(|c| c.pointer == pointer && pointer != 0) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let mut result = 0;
+    if name.contains("?volume@") {
+        if name.contains("I@Z") { state.volume = arg.min(64); } else { result = state.volume; }
+    } else if name.contains("?pan@") {
+        if name.contains("I@Z") { state.pan = arg.min(255); } else { result = state.pan; }
+    } else if name.contains("?frequency@") {
+        if name.contains("I@Z") { state.offset = state.position();state.started=std::time::Instant::now();state.rate=arg.max(1); }
+        else { result = state.rate; }
+    } else if name.contains("?position@") {
+        if name.contains("I@Z") { state.offset=u64::from(arg).min(state.frames);state.started=std::time::Instant::now(); }
+        else { result=state.position() as u32; }
+    } else if name.contains("?length@") { result=state.frames as u32; }
+    else if name.contains("?playing@") { result=u32::from(state.active()); }
+    else if name.contains("?paused@") { result=u32::from(state.paused); }
+    else if name.contains("?loop@") {
+        if name.contains("_N@Z") { state.looped=arg!=0; } else { result=u32::from(state.looped); }
+    } else if name.contains("?pause@") {
+        state.offset=state.position();state.paused=true;
+    } else if name.contains("?resume@") { state.started=std::time::Instant::now();state.paused=false; }
+    else if name.contains("?stop@") { state.stopped=true;ctx.kernel.audio.stop_voice_group(state.group); }
+    ctx.kernel.audio.configure_voice_group(state.group, state.volume as f32/64.0, state.rate, state.pan as f32/255.0,
+        if name.contains("?position@") && name.contains("I@Z") { Some(state.offset) } else { None }, state.looped);
+    ctx.kernel.audio.pause_voice_group(state.group, state.paused);
+    Ok(DispatchOutcome::ReturnedR0(result))
 }
 
 /// HSS volumes run 0..=64, like the tracker scale they came from.
@@ -117,28 +182,24 @@ fn load_clip(ctx: &mut CallCtx<'_>, kind: &str) -> Result<DispatchOutcome, Kerne
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
 
-    let path = crate::coredll::read_guest_wstr_lossy(ctx, arg, 260)?;
-
-    // A game re-loads the same file into a fresh object whenever it
-    // changes level, and decoding a module is expensive, so the decode
-    // is cached by path and only the cheap per-object state is fresh.
-    let cached = ctx.kernel.hss.decoded.get(&path).cloned();
+    let memory = matches!(&ctx.thunk.binding, pocket_pe::ImportBinding::Name(name) if name.contains("PAX_N"));
+    let path = if memory { format!("memory:{arg:08x}") } else {
+        crate::coredll::read_guest_wstr_lossy(ctx, arg, 260)?
+    };
+    // Guest memory may be freed/reused after load; never cache by its address.
+    let cached = if memory { None } else { ctx.kernel.hss.decoded.get(&path).cloned() };
     let (format, samples) = match cached {
         Some(hit) => hit,
         None => {
-            let Some(bytes) = crate::coredll::read_guest_file_for(ctx, &path) else {
-                log::debug!("{kind}::load({path:?}) -> file not found");
-                return Ok(DispatchOutcome::ReturnedR0(0));
+            let bytes = if memory { read_memory_clip(ctx, arg)? } else {
+                crate::coredll::read_guest_file_for(ctx, &path)
             };
+            let Some(bytes) = bytes else { return Ok(DispatchOutcome::ReturnedR0(0)); };
             let Some((format, samples)) = decode_clip(&bytes) else {
-                log::debug!(
-                    "{kind}::load({path:?}) -> unrecognised format ({} bytes)",
-                    bytes.len()
-                );
                 return Ok(DispatchOutcome::ReturnedR0(0));
             };
             let entry = (format, Arc::new(samples));
-            ctx.kernel.hss.decoded.insert(path.clone(), entry.clone());
+            if !memory { ctx.kernel.hss.decoded.insert(path.clone(), entry.clone()); }
             entry
         }
     };
@@ -160,6 +221,26 @@ fn load_clip(ctx: &mut CallCtx<'_>, kind: &str) -> Result<DispatchOutcome, Kerne
         },
     );
     Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+/// Memory overloads contain the same self-describing WAV/MOD bytes as files.
+fn read_memory_clip(ctx: &mut CallCtx<'_>, address: u32) -> Result<Option<Vec<u8>>, KernelError> {
+    let Ok(prefix) = ctx.cpu.read_mem(address, 12) else { return Ok(None); };
+    let size = if &prefix[..4] == b"RIFF" && &prefix[8..12] == b"WAVE" {
+        u32::from_le_bytes(prefix[4..8].try_into().unwrap()).checked_add(8)
+    } else {
+        let Ok(header) = ctx.cpu.read_mem(address, 1084) else { return Ok(None); };
+        let channels = match &header[1080..1084] { b"M.K." | b"M!K!" | b"4CHN" | b"FLT4" => 4,
+            b"6CHN" => 6, b"8CHN" | b"FLT8" => 8, _ => return Ok(None) };
+        let song = header[950] as usize;
+        if !(1..=128).contains(&song) { return Ok(None); }
+        let patterns = header[952..952+song].iter().copied().max().unwrap_or(0) as u32 + 1;
+        let samples: u32 = (0..31).map(|i| u16::from_be_bytes([header[42+i*30],header[43+i*30]]) as u32 * 2).sum();
+        Some(1084 + patterns * 64 * channels * 4 + samples)
+    };
+    let Some(size) = size.filter(|n| *n <= 32 * 1024 * 1024) else { return Ok(None); };
+    if ctx.cpu.check_guest_access(address, size, pocket_cpu::Prot::READ).is_err() { return Ok(None); }
+    Ok(ctx.cpu.read_mem(address, size).ok())
 }
 
 /// Decode whatever HSS was handed. A `.tkm` is a renamed Protracker
@@ -245,6 +326,10 @@ fn open_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         channels: if stereo { 2 } else { 1 },
         bits_per_sample: if bits == 8 { 8 } else { 16 },
     };
+    let speaker = ctx.arg_u32(0)?;
+    let sounds = ctx.arg_u32(4)?.min(256);
+    let music = ctx.arg_u32(5)?.min(256);
+    ctx.kernel.hss.speakers.insert(speaker, (sounds, music));
     ctx.kernel.hss.format = format;
     ctx.kernel.hss.opened = true;
     ctx.kernel.audio.set_guest_format(format);
@@ -268,12 +353,25 @@ fn play_sound(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// HSS plays one music at a time: starting a new one replaces the
 /// current track rather than layering over it.
 fn play_music(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    for channel in ctx.kernel.hss.channels.values_mut().filter(|c| c.music) {
+        channel.stopped = true;
+        ctx.kernel.audio.stop_voice_group(channel.group);
+    }
     ctx.kernel.audio.stop_voice_group(HSS_MUSIC_GROUP);
     play(ctx, HSS_MUSIC_GROUP)
 }
 
 fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelError> {
     let clip_this = ctx.arg_u32(1)?;
+    let speaker = ctx.arg_u32(0)?;
+    let requested = ctx.arg_u32(2)?;
+    let (sounds, musics) = ctx.kernel.hss.speakers.get(&speaker).copied().unwrap_or((16, 1));
+    let (start, count) = if group == HSS_MUSIC_GROUP { (sounds, musics) } else { (0, sounds) };
+    let selected = if requested < count { Some(start + requested) } else {
+        (start..start+count).find(|index| ctx.kernel.hss.channels.get(&(speaker, *index))
+            .is_none_or(|channel| !channel.active()))
+    };
+    let Some(index) = selected else { return Ok(DispatchOutcome::ReturnedR0((-1000i32) as u32)); };
     let Some(clip) = ctx.kernel.hss.clips.get(&clip_this) else {
         // A `play` for something that never loaded. Report failure so a
         // guest that checks gets an honest answer.
@@ -296,25 +394,35 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
     let looped = clip.looped;
     let path = clip.path.clone();
 
-    ctx.kernel.audio.play_voice_with(
-        &samples,
-        format,
-        VoiceParams {
-            looped,
-            group,
-            volume,
-        },
-    );
+    let voice_group = 0x4853_0000u32.wrapping_add(ctx.kernel.hss.channels.len() as u32);
+    let channel = ctx.kernel.hss.channels.entry((speaker, index)).or_insert_with(|| pocket_kernel::HssChannel::new(voice_group));
+    ctx.kernel.audio.stop_voice_group(channel.group);
+    channel.format = format;
+    channel.rate = format.sample_rate;
+    channel.frames = samples.len() as u64 / u64::from(format.channels.max(1));
+    channel.started = std::time::Instant::now();
+    channel.offset = 0;
+    channel.stopped = false;
+    channel.paused = false;
+    channel.looped = looped;
+    channel.volume = (volume * 64.0) as u32;
+    channel.music = group == HSS_MUSIC_GROUP;
+    let channel_group = channel.group;
+    ctx.kernel.audio.play_voice_with(&samples, format, VoiceParams { looped, group: channel_group, volume });
     ctx.kernel.audio.start();
     log::debug!(
         "hss: play {path:?} ({} samples, loop={looped}, gain={volume:.2})",
         samples.len()
     );
-    Ok(DispatchOutcome::ReturnedR0(1))
+    Ok(DispatchOutcome::ReturnedR0(index))
 }
 
 /// `void hssSpeaker::stopSounds()`.
 fn stop_sounds(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    for channel in ctx.kernel.hss.channels.values_mut().filter(|c| !c.music) {
+        channel.stopped = true;
+        ctx.kernel.audio.stop_voice_group(channel.group);
+    }
     ctx.kernel.audio.stop_voice_group(HSS_SOUND_GROUP);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -370,19 +478,7 @@ fn ok(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             pocket_pe::ImportBinding::Ordinal(_) => None,
         })
         .unwrap_or_default();
-    let result = if name.contains("channel@hssSpeaker") {
-        let channel = ctx.kernel.heap.alloc(0x100).unwrap_or(0);
-        if channel != 0 {
-            let _ = ctx.cpu.write_mem(channel, &[0; 0x100]);
-        }
-        channel
-    } else if name.contains("playing@hssChannel") || name.contains("frequency@hssChannel") {
-        0
-    } else if name.contains("bufferLength@hssSpeaker") {
-        4096
-    } else {
-        1
-    };
+    let result = if name.contains("bufferLength@hssSpeaker") { 4096 } else { 1 };
     Ok(DispatchOutcome::ReturnedR0(result))
 }
 

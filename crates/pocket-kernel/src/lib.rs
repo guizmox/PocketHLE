@@ -507,9 +507,29 @@ pub struct HssClip {
     pub path: String,
 }
 
+/// One stable HSS playback channel, owned by its speaker and channel index.
+#[derive(Debug)]
+pub struct HssChannel {
+    pub pointer: u32, pub group: u32, pub volume: u32, pub pan: u32,
+    pub format: GuestFormat, pub rate: u32, pub frames: u64,
+    pub started: std::time::Instant, pub offset: u64,
+    pub stopped: bool, pub paused: bool, pub looped: bool, pub music: bool,
+}
+impl HssChannel {
+    pub fn new(group: u32) -> Self { Self { pointer:0,group,volume:64,pan:128,format:GuestFormat::default(),rate:22050,frames:0,
+        started:std::time::Instant::now(),offset:0,stopped:true,paused:false,looped:false,music:false } }
+    pub fn position(&self) -> u64 {
+        let position=self.offset.saturating_add(if self.paused || self.stopped {0} else {(self.started.elapsed().as_secs_f64()*self.rate as f64) as u64});
+        if self.looped && self.frames!=0 { position % self.frames } else {position.min(self.frames)}
+    }
+    pub fn active(&self) -> bool { !self.stopped && self.frames>0 && (self.looped || self.paused || self.position()<self.frames) }
+}
+
 /// Everything we track for `hss.dll`.
 #[derive(Debug)]
 pub struct HssState {
+    pub channels: HashMap<(u32, u32), HssChannel>,
+    pub speakers: HashMap<u32, (u32, u32)>,
     /// Loaded clips, keyed by the `this` pointer of the `hssSound` /
     /// `hssMusic` object that owns them.
     pub clips: HashMap<u32, HssClip>,
@@ -534,6 +554,8 @@ pub struct HssState {
 impl Default for HssState {
     fn default() -> Self {
         Self {
+            channels: HashMap::new(),
+            speakers: HashMap::new(),
             clips: HashMap::new(),
             decoded: HashMap::new(),
             format: GuestFormat::default(),

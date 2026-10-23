@@ -50,6 +50,7 @@ struct AudioVoice {
     samples: Vec<i16>,
     format: GuestFormat,
     position_q16: u64,
+    pan: f32,
     looped: bool,
     volume: f32,
     group: u32,
@@ -435,6 +436,7 @@ impl Shared {
             samples,
             format,
             position_q16: 0,
+            pan: 0.5,
             looped: params.looped,
             volume: params.volume,
             group: params.group,
@@ -502,9 +504,9 @@ impl Shared {
                         let source_frame = (voice.position_q16 >> 16) as usize;
                         let sample_index = source_frame * voice_channels;
                         let left_sample =
-                            voice.samples[sample_index] as f32 / 32768.0 * voice.volume;
+                            voice.samples[sample_index] as f32 / 32768.0 * voice.volume * ((1.0-voice.pan)*2.0).min(1.0);
                         let right_sample = if voice_channels > 1 {
-                            voice.samples[sample_index + 1] as f32 / 32768.0 * voice.volume
+                            voice.samples[sample_index + 1] as f32 / 32768.0 * voice.volume * (voice.pan*2.0).min(1.0)
                         } else {
                             left_sample
                         };
@@ -1033,6 +1035,19 @@ impl AudioEngine {
         }
         #[cfg(not(feature = "audio-cpal"))]
         let _ = (group, paused);
+    }
+
+    /// Update one HSS channel without restarting its playback or other voices.
+    pub fn configure_voice_group(&self, group: u32, volume: f32, rate: u32, pan: f32, position: Option<u64>, looped: bool) {
+        #[cfg(feature="audio-cpal")]
+        if let Ok(mut shared)=self.shared.lock() {
+            for voice in shared.voices.iter_mut().filter(|voice| voice.group==group) {
+                voice.volume=volume;voice.format.sample_rate=rate.max(1);voice.pan=pan.clamp(0.0,1.0);voice.looped=looped;
+                if let Some(frame)=position { voice.position_q16=frame.saturating_mul(65536); }
+            }
+        }
+        #[cfg(not(feature="audio-cpal"))]
+        let _=(group,volume,rate,pan,position,looped);
     }
 
     /// Convenience for unsigned 8-bit PCM (the format `PlaySound` and
