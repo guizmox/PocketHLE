@@ -113,6 +113,91 @@ const BYTE_COPY: [u32; 8] = [
     BX_LR, // hooked fallback, preserving all original arguments
 ];
 
+/// Shared bounded-copy helper in the synthetic tick page or a DLL thunk pool.
+/// Aligned 4/16-byte copies load all source words before storing. Other small
+/// copies choose the direction needed for memmove, without touching neighbours.
+pub const SMALL_COPY_HELPER_BYTES: u32 = 256;
+pub const SMALL_COPY_HELPER: u32 = TICK_PAGE_VA + 0x100;
+pub fn install_small_copy_helper(
+    cpu: &mut dyn pocket_cpu::Cpu,
+) -> Result<(), pocket_cpu::CpuError> {
+    install_small_copy_helper_at(cpu, SMALL_COPY_HELPER)
+}
+pub fn install_small_copy_helper_at(
+    cpu: &mut dyn pocket_cpu::Cpu,
+    address: u32,
+) -> Result<(), pocket_cpu::CpuError> {
+    let words: [u32; 34] = [
+        0xe3520004, // cmp r2,#4
+        0x1a000005, // b sixteen
+        0xe180c001, // orr ip,r0,r1
+        0xe31c0003, // tst ip,#3
+        0x1a00000a, // b generic
+        0xe5913000, // ldr r3,[r1]
+        0xe5803000, // str r3,[r0]
+        0xe12fff1e, // bx lr
+        0xe3520010, // cmp r2,#16
+        0x1a000005, // b generic
+        0xe180c001, // orr ip,r0,r1
+        0xe31c0003, // tst ip,#3
+        0x1a000002, // b generic
+        0xe891100e, // ldmia r1,{r1,r2,r3,ip}
+        0xe880100e, // stmia r0,{r1,r2,r3,ip}
+        0xe12fff1e, // bx lr
+        0xe3520000, // cmp r2,#0
+        0x012fff1e, // bxeq lr
+        0xe1500001, // cmp r0,r1
+        0x012fff1e, // bxeq lr
+        0x3a000006, // b forward
+        0xe0811002, // add r1,r1,r2
+        0xe080c002, // add ip,r0,r2
+        0xe5713001, // ldrb r3,[r1,#-1]!
+        0xe56c3001, // strb r3,[ip,#-1]!
+        0xe2522001, // subs r2,r2,#1
+        0x1afffffb, // b backward
+        0xe12fff1e, // bx lr
+        0xe1a0c000, // mov ip,r0
+        0xe4d13001, // ldrb r3,[r1],#1
+        0xe4cc3001, // strb r3,[ip],#1
+        0xe2522001, // subs r2,r2,#1
+        0x1afffffb, // b forward_loop
+        0xe12fff1e, // bx lr
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.write_mem(address, &bytes)
+}
+
+/// Address-aware small-copy thunk, shared by static imports, runtime DLLs and
+/// GetProcAddress. Keep the hooked tail at +28 with original arguments intact.
+pub fn native_thunk_at(dll: &str, name: &str, address: u32) -> Option<[u32; 8]> {
+    native_thunk_with_helper(dll, name, address, SMALL_COPY_HELPER)
+}
+pub fn native_thunk_with_helper(
+    dll: &str,
+    name: &str,
+    address: u32,
+    helper: u32,
+) -> Option<[u32; 8]> {
+    let original = native_thunk_for(dll, name)?;
+    if hybrid_fallback_offset(dll, name).is_none() {
+        return Some(original);
+    }
+    let delta = i64::from(helper) - (i64::from(address) + 24 + 8);
+    if delta % 4 != 0 || !(-(1i64 << 25)..(1i64 << 25)).contains(&delta) {
+        return Some(original);
+    }
+    Some([
+        0xe352_0001, // cmp r2,#1
+        0x05d1_3000, // ldrbeq r3,[r1]
+        0x05c0_3000, // strbeq r3,[r0]
+        0x012f_ff1e, // bxeq lr
+        0xe352_0010, // cmp r2,#16
+        0x8a00_0000, // bhi slot+28
+        0xea00_0000 | (((delta >> 2) as u32) & 0x00ff_ffff),
+        BX_LR, // host fallback hook
+    ])
+}
+
 /// Native/hooked hybrid tail; the loader must hook only this address, never
 /// the entire native slot. R0 stays the destination on both paths.
 pub fn hybrid_fallback_offset(dll: &str, name: &str) -> Option<u32> {

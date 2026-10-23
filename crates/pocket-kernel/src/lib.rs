@@ -3452,13 +3452,17 @@ impl Process {
         // `LDR` from this page, so it must be mapped before any
         // guest code runs. Mapping it `READ | WRITE` rather than
         // `READ` only, because Unicorn's `mem_write` on a strictly
-        // read-only mapping fails on some host kernels.
+        // read-only mapping fails on some host kernels. A separate portion
+        // of this page also holds the bounded native copy helper.
         cpu.map_region(
             native_thunks::TICK_PAGE_VA,
             0x1000,
-            Prot::READ | Prot::WRITE,
+            Prot::READ | Prot::WRITE | Prot::EXEC,
         )?;
         cpu.write_mem(native_thunks::TICK_PAGE_VA, &[0u8; 16])?;
+        if cpu.arch() == Arch::Arm {
+            native_thunks::install_small_copy_helper(cpu)?;
+        }
         let mut thunks = Vec::with_capacity(image.imports.len());
         let mut thunk_by_va = HashMap::with_capacity(image.imports.len());
         // Thunk slots that trap into the dispatcher, in ascending
@@ -3487,7 +3491,7 @@ impl Process {
                 if image.machine == machine::MIPS_R3000 || image.machine == machine::MIPS_R4000 {
                     None
                 } else {
-                    native_name.and_then(|n| native_thunks::native_thunk_for(&imp.dll, n))
+                    native_name.and_then(|n| native_thunks::native_thunk_at(&imp.dll, n, thunk_va))
                 };
             let fallback_offset = if native.is_some() {
                 native_name.and_then(|name| native_thunks::hybrid_fallback_offset(&imp.dll, name))
@@ -3590,7 +3594,8 @@ impl Process {
                 // existing dispatch behaviour.
                 let hybrid = if cpu.arch() == Arch::Arm {
                     native_thunks::hybrid_fallback_offset(&dll, &name).and_then(|offset| {
-                        native_thunks::native_thunk_for(&dll, &name).map(|words| (offset, words))
+                        native_thunks::native_thunk_at(&dll, &name, thunk_va)
+                            .map(|words| (offset, words))
                     })
                 } else {
                     None

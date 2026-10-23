@@ -1,6 +1,9 @@
+crates\pocket-kernel\Cargo.toml
+crates\pocket-kernel\src\native_thunks.rs
+crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\registry.rs
+crates\pocket-kernel\tests\small_copy.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\shell_execute.rs
 crates\pocket-winceapi\src\gx.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-kernel\src\registry.rs
 docs\AGENTS.md

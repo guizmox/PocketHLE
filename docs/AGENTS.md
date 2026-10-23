@@ -3862,3 +3862,58 @@ changes/s, two waveform buffers requeued. Simulated real-time 22050Hz stereo16
 sink captures nonzero music (peak 12565). No physical audio-device validation.
 520 winceapi tests passed, 4 ignored. This is capability metadata correction,
 not a change to samples, callbacks, GAPI or rendering. Loading is not immediate.
+
+## Quake3 performance investigation (2026-10-23, no shipped runtime change)
+Original supplied Q3CE reaches menu. Opt-in temporary dispatcher/CPU timers:
+Baseline sequential GPU-requested (llvmpipe host) 30s: 1,900,190 dispatches,
+22.983s in CPU run calls (includes stop/start), 4.099s in API handlers.
+Steady menu eglSwapBuffers 10-20s:60; 20-30s:60 =>6fps. Huge memcpy count,
+most hot rows len4 from UIARM at 0x30005e58..0x30006034 and elsewhere.
+Existing native_thunks BYTE_COPY only handles length1, all other lengths trap.
+Isolated diagnostic replaces that one-byte path by 4-byte LDR/STR (NOT a complete
+production optimization). Same original game/config, same profiled host backend:
+10-20s:346 swaps=34.6fps;20-30s:385=38.5fps; menu visually intact. No in-game
+measurement, no physical GPU/Android/SteamDeck comparison. Do not generalize fps.
+Strong evidence of tiny memcpy trap overhead; implement bounded small-copy path
+preserving length1, overlap/memmove, unaligned/page/protection/Thumb behavior,
+framebuffer notification and bulk host fallback before delivery. Further costly
+cases: len16 packing at Q3CE0x7478c; ~529 glDrawElements per menu frame.
+The experiment and all instrumentation were REMOVED from production sources.
+Reproduction snapshots/logs archived separately; do not apply them as a patch.
+
+## Production small-copy path (2026-10-23)
+Implement 1-byte and 4-byte memcpy/memmove paths without changing THUNK_STRIDE.
+Address-aware native_thunk_at branches to a shared helper at tick page+0x100.
+Tick page executable; tick data at offset0 unchanged. Out-of-range branch falls
+back to original one-byte native thunk. Four-byte aligned load/store, unaligned
+byte gather before stores, overlap-safe; no reads beyond four bytes. Callee-saved
+registers/stack untouched, BX returns to ARM/Thumb. Other lengths still trap+28.
+Use address-aware emitter in root imports, dynamic exports and runtime DLLs.
+Generic change, no Quake/title-specific branch. Tests optional unicorn-tests
+feature in pocket-kernel, actual native execution rather than encoding snapshots.
+Integration correction: runtime DLL thunks live around 0x30000000, outside ARM
+B reach of the root helper. Reserve 80 bytes after each executable DLL import
+pool and emit the helper there; pool mapping/unload/rollback owns its lifetime.
+New execution tests include slot0x30000000 with nearby helper. Original v1
+fell back safely but missed DLL speedups. v2 passes 520 API and native tests.
+In-game profile identified heavy 16-byte copies as well as UI 4-byte copies.
+Extend bounded native path to 0..16 bytes: aligned4/16 use word transfers,
+remaining lengths/unaligned addresses use overlap-safe directional byte loop.
+1-byte shortcut retained, >16 bytes keep original arguments and +28 host hook.
+Helper 136B, reserve256B per executable DLL pool. Native tests cover every
+length0..16, all source alignments, overlap both directions, pages, ARM/Thumb,
+static/dynamic/far DLL thunk addresses. Three native tests pass (expanded matrix).
+Final in-game comparison: actual single-player q3dm1 reached via menu, same
+scheduled inputs, original supplied game/configuration; sequential125s runs.
+Count only successful eglSwapBuffers returns (exclude scheduler retries).
+Common60-80s window, same scene, still-alive player: baseline159 swaps/20.004s
+=7.9484fps; optimized206/20.001s=10.2995fps (+29.58%). Later deaths/movement
+change view; do not use later faster windows to claim comparable gains.
+Live bots, not deterministic timedemo; host GPU is llvmpipe, dev optimized,
+240x320. Not physical PC/Android/SteamDeck performance. Both runs exit normally
+at requested125s. Profile probes and baseline-disable option removed from all
+production code. Menu gain must not be presented as in-game gain.
+Final native tests cover lengths0..16; 520 API tests pass,4 ignored.
+Final checks: 266 kernel tests, expanded native small-copy matrix, and Android
+JNI host Rust check --no-default-features pass; not an APK/device test. Non-ARM
+runtime DLL imports retain the original emitter when no local ARM helper exists.

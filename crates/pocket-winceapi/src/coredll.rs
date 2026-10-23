@@ -4876,9 +4876,15 @@ fn map_resource_module_inner(
         return Ok(None);
     }
     let thunk_base = base + pocket_cpu::round_up_to_page(image.size_of_image);
-    let thunk_size = pocket_cpu::round_up_to_page(
-        (image.imports.len() as u32).saturating_mul(pocket_kernel::THUNK_STRIDE),
-    );
+    let import_bytes = (image.imports.len() as u32).saturating_mul(pocket_kernel::THUNK_STRIDE);
+    let copy_helper_size =
+        if executable && ctx.cpu.arch() == pocket_cpu::Arch::Arm && import_bytes != 0 {
+            pocket_kernel::native_thunks::SMALL_COPY_HELPER_BYTES
+        } else {
+            0
+        };
+    let copy_helper = thunk_base + import_bytes;
+    let thunk_size = pocket_cpu::round_up_to_page(import_bytes.saturating_add(copy_helper_size));
     if image.size_of_image > MODULE_REGION_STRIDE
         || thunk_base
             .checked_add(thunk_size)
@@ -4968,6 +4974,12 @@ fn map_resource_module_inner(
                 ctx.cpu
                     .map_region(thunk_base, thunk_size, Prot::READ | Prot::EXEC)?;
                 mapped.push((thunk_base, thunk_size));
+                if copy_helper_size != 0 {
+                    pocket_kernel::native_thunks::install_small_copy_helper_at(
+                        ctx.cpu,
+                        copy_helper,
+                    )?;
+                }
             }
             for (index, import) in image
                 .imports
@@ -4990,7 +5002,18 @@ fn map_resource_module_inner(
                     friendly_name,
                 };
                 let native = thunk.friendly_name.as_deref().and_then(|name| {
-                    pocket_kernel::native_thunks::native_thunk_for(&import.dll, name)
+                    if copy_helper_size == 0 {
+                        // Preserve the existing non-ARM import path; there is
+                        // no local ARM copy helper in that module's pool.
+                        pocket_kernel::native_thunks::native_thunk_for(&import.dll, name)
+                    } else {
+                        pocket_kernel::native_thunks::native_thunk_with_helper(
+                            &import.dll,
+                            name,
+                            address,
+                            copy_helper,
+                        )
+                    }
                 });
                 let inline_arithmetic = match thunk.friendly_name.as_deref() {
                     Some(name) if native.is_none() => {
