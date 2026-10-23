@@ -9,7 +9,7 @@ fn setup(slot: u32, name: &str) -> UnicornCpu {
     cpu.map_region(TICK_PAGE_VA, 0x1000, Prot::READ | Prot::WRITE | Prot::EXEC)
         .unwrap();
     let helper = if slot < 0x50000000 {
-        slot + 0xf00
+        slot + 0xc00
     } else {
         SMALL_COPY_HELPER
     };

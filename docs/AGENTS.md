@@ -3917,3 +3917,15 @@ Final native tests cover lengths0..16; 520 API tests pass,4 ignored.
 Final checks: 266 kernel tests, expanded native small-copy matrix, and Android
 JNI host Rust check --no-default-features pass; not an APK/device test. Non-ARM
 runtime DLL imports retain the original emitter when no local ARM helper exists.
+
+## Numeric conversion acceleration (2026-10-23)
+New native __i64tod/__u64tod helper: convert exact low32 and signed/unsigned high32
+to doubles; high*2^32 is exact, sum rounds once to nearest. Temporarily set RN,
+disable guest FP exception enables, restore complete FPSCR afterwards. Only
+caller-saved integer/VFP temporaries touched. Root shared tick-page helper and
+nearby runtime DLL helper pools now reserve512B; signed offset+0x100, unsigned
++0x180. Static imports and GetProcAddress use same native branch emitter.
+__dtoi64/__dtou64 use existing CPU-internal register-only arithmetic loop; no
+kernel/API scheduling round-trip. Preserve current handlers' truncation,
+saturation/NaN/unsigned-nonfinite behavior. Generic, no game path. Initial
+source saved before tests; native edge/random/ARM/Thumb tests still pending.

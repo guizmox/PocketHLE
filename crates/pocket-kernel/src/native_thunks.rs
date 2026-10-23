@@ -67,6 +67,10 @@ pub fn install_inline_arithmetic64(
         return Ok(false);
     }
     let operation = match name {
+        "__i64tod" => Arithmetic64::SignedToDouble,
+        "__u64tod" => Arithmetic64::UnsignedToDouble,
+        "__dtoi64" => Arithmetic64::DoubleToSigned,
+        "__dtou64" => Arithmetic64::DoubleToUnsigned,
         "__rt_sdiv64by64" => Arithmetic64::SignedDivide,
         "__rt_udiv64by64" => Arithmetic64::UnsignedDivide,
         "__rt_srem64by64" => Arithmetic64::SignedRemainder,
@@ -116,7 +120,7 @@ const BYTE_COPY: [u32; 8] = [
 /// Shared bounded-copy helper in the synthetic tick page or a DLL thunk pool.
 /// Aligned 4/16-byte copies load all source words before storing. Other small
 /// copies choose the direction needed for memmove, without touching neighbours.
-pub const SMALL_COPY_HELPER_BYTES: u32 = 256;
+pub const SMALL_COPY_HELPER_BYTES: u32 = 512;
 pub const SMALL_COPY_HELPER: u32 = TICK_PAGE_VA + 0x100;
 pub fn install_small_copy_helper(
     cpu: &mut dyn pocket_cpu::Cpu,
@@ -164,6 +168,40 @@ pub fn install_small_copy_helper_at(
         0xe12fff1e, // bx lr
     ];
     let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.write_mem(address, &bytes)?;
+    install_int64_double(cpu, address + 0x100, true)?;
+    install_int64_double(cpu, address + 0x180, false)
+}
+
+// high32*2^32 and low32 are exactly representable doubles. Only their sum
+// rounds, so the result matches an integer->double cast even beyond 2^53.
+// Use RN temporarily and restore the full FPSCR (rounding, exception flags).
+fn install_int64_double(
+    cpu: &mut dyn pocket_cpu::Cpu,
+    address: u32,
+    signed: bool,
+) -> Result<(), pocket_cpu::CpuError> {
+    let words: [u32; 18] = [
+        0xeef1ca10,                                   // vmrs ip,fpscr
+        0xe3cc38c0,                                   // bic r3,ip,#0xc00000
+        0xe3c33c9f,                                   // bic r3,r3,#0x9f00
+        0xeee13a10,                                   // vmsr fpscr,r3
+        0xee000a10,                                   // vmov s0,r0
+        0xeeb80b40,                                   // vcvt.f64.u32 d0,s0
+        0xee011a10,                                   // vmov s2,r1
+        if signed { 0xeeb81bc1 } else { 0xeeb81b41 }, // vcvt d1,s2
+        0xed9f2b06,                                   // vldr d2,[pc,#24]
+        0xee211b02,                                   // vmul.f64 d1,d1,d2
+        0xee300b01,                                   // vadd.f64 d0,d0,d1
+        0xec510b10,                                   // vmov r0,r1,d0
+        0xeee1ca10,                                   // vmsr fpscr,ip
+        BX_LR,
+        BX_LR,
+        BX_LR,
+        0,
+        0x41f00000, // double 2^32
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     cpu.write_mem(address, &bytes)
 }
 
@@ -178,6 +216,14 @@ pub fn native_thunk_with_helper(
     address: u32,
     helper: u32,
 ) -> Option<[u32; 8]> {
+    if dll.eq_ignore_ascii_case("coredll.dll") && matches!(name, "__i64tod" | "__u64tod") {
+        let target = helper + if name == "__i64tod" { 0x100 } else { 0x180 };
+        let delta = i64::from(target) - (i64::from(address) + 8);
+        if delta % 4 != 0 || !(-(1i64 << 25)..(1i64 << 25)).contains(&delta) {
+            return None;
+        }
+        return Some(pad(&[0xea000000 | (((delta >> 2) as u32) & 0xffffff)]));
+    }
     let original = native_thunk_for(dll, name)?;
     if hybrid_fallback_offset(dll, name).is_none() {
         return Some(original);

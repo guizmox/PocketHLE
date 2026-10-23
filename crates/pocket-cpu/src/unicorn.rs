@@ -965,8 +965,12 @@ impl Cpu for UnicornCpu {
             // stay inside this CPU slice, retaining one fixed wall-clock deadline.
             let n = u64::from(self.read_reg(ArmReg::R0)?)
                 | (u64::from(self.read_reg(ArmReg::R1)?) << 32);
-            let d = u64::from(self.read_reg(ArmReg::R2)?)
-                | (u64::from(self.read_reg(ArmReg::R3)?) << 32);
+            let d = if operation.unary() {
+                0
+            } else {
+                u64::from(self.read_reg(ArmReg::R2)?)
+                    | (u64::from(self.read_reg(ArmReg::R3)?) << 32)
+            };
             let value = operation.evaluate(n, d);
             self.write_return_pair(value as u32, (value >> 32) as u32)?;
             // The padded next word is bx lr. Execute it natively so Thumb returns
@@ -1057,6 +1061,7 @@ mod tests {
                         }
                         Arithmetic64::UnsignedDivide => (u128::from(n) / u128::from(d)) as u64,
                         Arithmetic64::UnsignedRemainder => (u128::from(n) % u128::from(d)) as u64,
+                        _ => unreachable!(),
                     }
                 };
                 assert_eq!(actual, expected, "{operation:?} {n:#x} {d:#x}");

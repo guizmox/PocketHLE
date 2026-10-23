@@ -3592,21 +3592,25 @@ impl Process {
                 // GetProcAddress must expose the same small-copy fast path
                 // as a static import; unrelated dynamic exports keep their
                 // existing dispatch behaviour.
-                let hybrid = if cpu.arch() == Arch::Arm {
-                    native_thunks::hybrid_fallback_offset(&dll, &name).and_then(|offset| {
-                        native_thunks::native_thunk_at(&dll, &name, thunk_va)
-                            .map(|words| (offset, words))
-                    })
+                let hybrid = if cpu.arch() == Arch::Arm
+                    && (native_thunks::hybrid_fallback_offset(&dll, &name).is_some()
+                        || (dll.eq_ignore_ascii_case("coredll.dll")
+                            && matches!(name.as_str(), "__i64tod" | "__u64tod")))
+                {
+                    native_thunks::native_thunk_at(&dll, &name, thunk_va)
+                        .map(|words| (native_thunks::hybrid_fallback_offset(&dll, &name), words))
                 } else {
                     None
                 };
-                if native_thunks::install_inline_arithmetic64(cpu, thunk_va, &dll, &name)? {
-                    // Match static imports without a kernel-dispatch hook.
-                } else if let Some((offset, words)) = hybrid {
+                if let Some((offset, words)) = hybrid {
                     cpu.write_mem(thunk_va, &native_thunks::thunk_bytes(&words))?;
-                    let fallback = thunk_va + offset;
-                    cpu.add_code_hook(fallback)?;
-                    thunk_by_va.insert(fallback, thunks.len());
+                    if let Some(offset) = offset {
+                        let fallback = thunk_va + offset;
+                        cpu.add_code_hook(fallback)?;
+                        thunk_by_va.insert(fallback, thunks.len());
+                    }
+                } else if native_thunks::install_inline_arithmetic64(cpu, thunk_va, &dll, &name)? {
+                    // Register-only conversion/arithmetic, no kernel dispatch.
                 } else {
                     let mut buf = [0u8; THUNK_STRIDE as usize];
                     let stub = return_stub_bytes(cpu.arch());
