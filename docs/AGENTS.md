@@ -3660,3 +3660,12 @@ HSS speaker channel lookup must return a stable object with a real method table
 group. Keep per-channel frequency, volume, playback/pause/loop/position state.
 Never return zero-filled pseudo objects: Street Duel calls the virtual volume
 setter immediately. Memory audio loading and channel ABI are generic HSS fixes.
+
+## IMGDECMP completion and IImageRender (2026-10-23)
+Decode bitmap data before calling pfnImageProgress with bComplete=TRUE and the
+original lParam. Supply a real reference-counted IImageRender with Draw, GetBitmap,
+GetOrigWidth/Height, GetBits, ImageFail and IUnknown; no dummy COM pointer. Keep
+callback continuations separate from data callbacks, restore the original ABI
+frame, and release only the internal reference on callback return. Transfer
+HBITMAP ownership when requested, preserve caller-owned bitmaps on renderer release.
+Kursk supplies a progress callback even though it requests HBITMAP output.

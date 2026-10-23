@@ -8,6 +8,177 @@ const NOT_IMPLEMENTED: u32 = 0x80004001;
 const OUT_OF_MEMORY: u32 = 0x8007000e;
 const MAX_COMPRESSED: usize = 128 * 1024 * 1024;
 
+const RENDER_METHODS: [&str; 9] = [
+    "_HLE_ImageRender_QueryInterface",
+    "_HLE_ImageRender_AddRef",
+    "_HLE_ImageRender_Release",
+    "_HLE_ImageRender_Draw",
+    "_HLE_ImageRender_GetBitmap",
+    "_HLE_ImageRender_GetOrigWidth",
+    "_HLE_ImageRender_GetOrigHeight",
+    "_HLE_ImageRender_GetBits",
+    "_HLE_ImageRender_ImageFail",
+];
+pub(crate) fn register(dispatcher: &mut crate::WinCeDispatcher) {
+    for name in RENDER_METHODS {
+        dispatcher.register_handler("coredll.dll", name, render_method);
+    }
+}
+fn make_renderer(
+    ctx: &mut CallCtx<'_>,
+    bitmap: u32,
+    bitmap_transferred: bool,
+    _requested: bool,
+    bytes: &[u8],
+) -> Result<u32, KernelError> {
+    let Some(pointer) = ctx.kernel.heap.alloc(40) else {
+        return Ok(0);
+    };
+    ctx.cpu.write_mem(pointer, &(pointer + 4).to_le_bytes())?;
+    for (i, name) in RENDER_METHODS.iter().enumerate() {
+        let address = ctx
+            .kernel
+            .dynamic_exports
+            .get(&0x1000_0000)
+            .and_then(|m| m.get(*name))
+            .copied()
+            .ok_or_else(|| KernelError::Loader(format!("Missing image renderer method {name}")))?;
+        ctx.cpu
+            .write_mem(pointer + 4 + i as u32 * 4, &address.to_le_bytes())?;
+    }
+    let dimensions = image::io::Reader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .unwrap_or((0, 0));
+    ctx.kernel.gdi.image_renderers.insert(
+        pointer,
+        pocket_kernel::gdi::ImageRenderer {
+            bitmap,
+            refs: 1,
+            owns_bitmap: !bitmap_transferred,
+            width: dimensions.0,
+            height: dimensions.1,
+        },
+    );
+    Ok(pointer)
+}
+fn release_renderer(ctx: &mut CallCtx<'_>, pointer: u32) -> u32 {
+    let Some(state) = ctx.kernel.gdi.image_renderers.get_mut(&pointer) else {
+        return 0;
+    };
+    state.refs = state.refs.saturating_sub(1);
+    let refs = state.refs;
+    if refs == 0 {
+        let state = ctx.kernel.gdi.image_renderers.remove(&pointer).unwrap();
+        if state.owns_bitmap {
+            let bits = ctx
+                .kernel
+                .gdi
+                .bitmap(state.bitmap)
+                .map(|b| b.dib_bits_va)
+                .unwrap_or(0);
+            ctx.kernel.gdi.delete(state.bitmap);
+            if bits != 0 {
+                ctx.kernel.heap.free(bits);
+            }
+        }
+        ctx.kernel.heap.free(pointer);
+    }
+    refs
+}
+fn render_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    let a = ctx.arg_u32(1)?;
+    let name = ctx
+        .thunk
+        .friendly_name
+        .as_deref()
+        .or_else(|| match &ctx.thunk.binding {
+            pocket_pe::ImportBinding::Name(n) => Some(n.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if name.ends_with("Release") {
+        return Ok(DispatchOutcome::ReturnedR0(release_renderer(ctx, pointer)));
+    }
+    let Some(state) = ctx.kernel.gdi.image_renderers.get_mut(&pointer) else {
+        return Ok(DispatchOutcome::ReturnedR0(INVALID));
+    };
+    let mut result = 0;
+    if name.ends_with("AddRef") {
+        state.refs = state.refs.saturating_add(1);
+        result = state.refs;
+    } else if name.ends_with("QueryInterface") {
+        let output = ctx.arg_u32(2)?;
+        let iid = ctx.cpu.read_mem(a, 16)?;
+        let unknown = [0, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46];
+        let render = [
+            0x90, 0x20, 0x03, 0x59, 0x4b, 0x15, 0xd1, 0x11, 0xa9, 0xbf, 0, 0x60, 0x97, 0xde, 0x29,
+            0x9b,
+        ];
+        let supported = iid == unknown || iid == render;
+        ctx.cpu
+            .write_mem(output, &if supported { pointer } else { 0 }.to_le_bytes())?;
+        if supported {
+            state.refs += 1;
+        } else {
+            result = 0x80004002;
+        }
+    } else if name.ends_with("GetBitmap") {
+        ctx.cpu.write_mem(a, &state.bitmap.to_le_bytes())?;
+        if ctx.arg_u32(2)? != 0 {
+            state.owns_bitmap = false;
+        }
+    } else if name.ends_with("GetOrigWidth") {
+        ctx.cpu.write_mem(a, &state.width.to_le_bytes())?;
+    } else if name.ends_with("GetOrigHeight") {
+        ctx.cpu.write_mem(a, &state.height.to_le_bytes())?;
+    } else if name.ends_with("GetBits") {
+        let bits = ctx
+            .kernel
+            .gdi
+            .bitmap(state.bitmap)
+            .map(|b| b.dib_bits_va)
+            .unwrap_or(0);
+        ctx.cpu.write_mem(a, &bits.to_le_bytes())?;
+    } else if name.ends_with("ImageFail") {
+        ctx.cpu.write_mem(a, &0u32.to_le_bytes())?;
+    } else if name.ends_with("Draw") {
+        let bitmap = state.bitmap;
+        let rectangle = ctx.arg_u32(2)?;
+        let Some(source) = ctx.kernel.gdi.bitmap(bitmap) else {
+            return Ok(DispatchOutcome::ReturnedR0(INVALID));
+        };
+        let (w, h) = (source.width, source.height);
+        let rect = if rectangle == 0 {
+            [0, 0, w as i32, h as i32]
+        } else {
+            let raw = ctx.cpu.read_mem(rectangle, 16)?;
+            std::array::from_fn(|i| i32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap()))
+        };
+        let dc = ctx.kernel.gdi.create_memory_dc();
+        ctx.kernel.gdi.select_into(dc, bitmap);
+        let drawn = crate::coredll::stretch_blt_inner(
+            ctx,
+            a,
+            rect[0],
+            rect[1],
+            rect[2] - rect[0],
+            rect[3] - rect[1],
+            dc,
+            0,
+            0,
+            w as i32,
+            h as i32,
+            0x00cc0020,
+        );
+        ctx.kernel.gdi.delete(dc);
+        drawn?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(result))
+}
+
 pub(crate) fn decompress(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let thread = ctx.kernel.current_thread;
     let thunk = ctx.thunk.thunk_va;
@@ -21,6 +192,11 @@ pub(crate) fn decompress(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         .is_some_and(|f| f.thread == thread && f.thunk == thunk && f.frame.sp == sp)
     {
         state = ctx.kernel.gdi.image_decode_frames.pop().unwrap();
+        if let Some((result, renderer)) = state.completion {
+            restore(ctx, &state.frame)?;
+            release_renderer(ctx, renderer);
+            return Ok(DispatchOutcome::ReturnedR0(result));
+        }
         let count = ctx.cpu.read_reg(ArmReg::R0)?;
         restore(ctx, &state.frame)?;
         if count > state.info[2] {
@@ -53,13 +229,18 @@ pub(crate) fn decompress(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         // Do not manufacture an IImageRender COM object or fake progress.
         // Stream-backed IStream and progressive-render interfaces need their
         // own implementations; bitmap and GETDATAFUNC paths below are real.
-        if info[5] != 0 || info[13] != 0 || (size == 64 && ctx.cpu.read_u32_le(ptr + 60)? != 0) {
+        if size == 64 && ctx.cpu.read_u32_le(ptr + 60)? != 0 {
             return Ok(DispatchOutcome::ReturnedR0(NOT_IMPLEMENTED));
         }
-        if info[4] == 0 {
+        if info[4] == 0 && info[5] == 0 {
             return Ok(DispatchOutcome::ReturnedR0(INVALID));
         }
-        ctx.cpu.write_mem(info[4], &0u32.to_le_bytes())?;
+        if info[4] != 0 {
+            ctx.cpu.write_mem(info[4], &0u32.to_le_bytes())?;
+        }
+        if info[5] != 0 {
+            ctx.cpu.write_mem(info[5], &0u32.to_le_bytes())?;
+        }
         if info[3] as usize > MAX_COMPRESSED {
             return Ok(DispatchOutcome::ReturnedR0(OUT_OF_MEMORY));
         }
@@ -83,12 +264,62 @@ pub(crate) fn decompress(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
             },
             info,
             bytes,
+            completion: None,
         };
         if info[12] != 0 {
             return request_data(ctx, state);
         }
     }
-    decode_bitmap(ctx, &state.info, &state.bytes)
+    let mut info = state.info;
+    let temporary = if info[4] == 0 {
+        let Some(ptr) = ctx.kernel.heap.alloc(4) else {
+            return Ok(DispatchOutcome::ReturnedR0(OUT_OF_MEMORY));
+        };
+        info[4] = ptr;
+        Some(ptr)
+    } else {
+        None
+    };
+    let decoded = decode_bitmap(ctx, &info, &state.bytes)?;
+    let handle = ctx.cpu.read_u32_le(info[4])?;
+    if let Some(ptr) = temporary {
+        ctx.kernel.heap.free(ptr);
+    }
+    if !matches!(decoded, DispatchOutcome::ReturnedR0(0)) || (info[5] == 0 && info[13] == 0) {
+        return Ok(decoded);
+    }
+    let renderer = make_renderer(
+        ctx,
+        handle,
+        info[4] == state.info[4],
+        info[5] != 0,
+        &state.bytes,
+    )?;
+    if renderer == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(OUT_OF_MEMORY));
+    }
+    if info[5] != 0 {
+        ctx.cpu.write_mem(info[5], &renderer.to_le_bytes())?;
+    }
+    if info[13] != 0 {
+        if info[5] != 0 {
+            ctx.kernel
+                .gdi
+                .image_renderers
+                .get_mut(&renderer)
+                .unwrap()
+                .refs += 1;
+        }
+        state.completion = Some((0, renderer));
+        state.bytes.clear();
+        ctx.cpu.write_reg(ArmReg::R0, renderer)?;
+        ctx.cpu.write_reg(ArmReg::R1, 1)?; // real image is fully decoded
+        ctx.cpu.write_reg(ArmReg::R2, info[7])?;
+        ctx.cpu.write_reg(ArmReg::Lr, state.thunk)?;
+        ctx.kernel.gdi.image_decode_frames.push(state);
+        return Ok(DispatchOutcome::JumpTo(info[13]));
+    }
+    Ok(decoded)
 }
 fn restore(ctx: &mut CallCtx<'_>, frame: &GuestCallFrame) -> Result<(), KernelError> {
     for (r, v) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]

@@ -339,11 +339,19 @@ pub struct ImageDecodeFrame {
     pub frame: crate::GuestCallFrame,
     pub info: [u32; 15],
     pub bytes: Vec<u8>,
+    pub completion: Option<(u32, u32)>,
+}
+
+#[derive(Debug)]
+pub struct ImageRenderer {
+    pub bitmap: u32, pub refs: u32, pub owns_bitmap: bool,
+    pub width: u32, pub height: u32,
 }
 
 #[derive(Debug, Default)]
 pub struct GdiState {
     pub image_decode_frames: Vec<ImageDecodeFrame>,
+    pub image_renderers: HashMap<u32, ImageRenderer>,
     pub shell_menus: crate::shell_menu::ShellMenus,
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,

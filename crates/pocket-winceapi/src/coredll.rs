@@ -142,6 +142,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetProcAddress", get_proc_address_a);
     d.register_handler(dll, "GetProcAddressA", get_proc_address_a);
     d.register_handler(dll, "LoadLibraryW", load_library_w);
+    crate::imgdecmp::register(d);
     d.register_handler(dll, "DecompressImageIndirect", crate::imgdecmp::decompress);
     d.register_handler(
         "imgdecmp.dll",
@@ -15587,7 +15588,7 @@ fn bit_blt_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stretch_blt_inner(
+pub(crate) fn stretch_blt_inner(
     ctx: &mut CallCtx<'_>,
     hdc_dst: u32,
     dx: i32,
