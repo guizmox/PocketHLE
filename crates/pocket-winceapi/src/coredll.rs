@@ -5218,11 +5218,10 @@ fn get_command_line_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if let Some(cached) = ctx.kernel.command_line_cache {
         return Ok(DispatchOutcome::ReturnedR0(cached));
     }
-    let path = ctx
-        .kernel
-        .command_line
-        .clone()
-        .unwrap_or_else(|| ctx.kernel.module_path.clone());
+    // CE startup arguments are also passed to WinMain in r2. A shell launch
+    // without arguments has an empty command line, not another copy of the
+    // module filename (the CRT obtains argv[0] through GetModuleFileNameW).
+    let path = ctx.kernel.command_line.clone().unwrap_or_default();
     let bytes_needed = (path.encode_utf16().count() as u32 + 1) * 2;
     let va = match ctx.kernel.heap.alloc(bytes_needed) {
         Some(p) => p,
@@ -36630,5 +36629,25 @@ mod broadcast_delivery_tests {
         kernel.wnd_proc = 0;
         assert!(enqueue_window_message(&mut kernel, 0xffff, 0xc123, 7, 9));
         assert!(kernel.posted_messages.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod startup_command_line_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::{Cpu, Prot};
+    use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn shell_launch_has_no_implicit_executable_argument() {
+        for command in [None, Some("-d \"\\Data Files\\Game\"".to_string())] {
+            let (mut cpu, mut kernel, mut dispatcher) = setup();
+            cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
+            kernel.module_path = "\\Program Files\\Game\\game.exe".into();
+            kernel.command_line = command.clone();
+            let DispatchOutcome::ReturnedR0(ptr) = call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "GetCommandLineW", &[]) else { panic!("unexpected result") };
+            let expected: Vec<_> = command.unwrap_or_default().encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
+            assert_eq!(cpu.read_mem(ptr, expected.len() as u32).unwrap(), expected);
+            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "GetCommandLineW", &[]), DispatchOutcome::ReturnedR0(ptr));
+        }
     }
 }

@@ -3643,3 +3643,10 @@ Desktop setup packages may embed a Microsoft cabinet whose files are desktop
 Setup.exe/Setup.ini and one or more actual CE cabinets. Recursively decode
 nested CAB members with the same depth/byte limits; keep architecture selection
 for multiple CE payloads. SetupKursk_ARM supplied this container profile.
+
+## CE startup command line (2026-10-23)
+GetCommandLineW must expose the explicit startup argument string (the same
+string passed to CE WinMain), defaulting to empty when no arguments were supplied.
+The CE CRT obtains argv[0] separately from GetModuleFileNameW. Returning the
+module path as extra arguments broke Stratagus with "too many files", especially
+under Program Files. Preserve explicit argument text and its stable cached pointer.
