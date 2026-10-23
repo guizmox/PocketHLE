@@ -352,6 +352,7 @@ pub struct ImageRenderer {
 pub struct GdiState {
     pub image_decode_frames: Vec<ImageDecodeFrame>,
     pub image_renderers: HashMap<u32, ImageRenderer>,
+    saved_dcs: HashMap<u32, Vec<Dc>>,
     pub shell_menus: crate::shell_menu::ShellMenus,
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,
@@ -377,6 +378,7 @@ impl GdiState {
         let mut s = Self {
             image_decode_frames: Vec::new(),
             image_renderers: HashMap::new(),
+            saved_dcs: HashMap::new(),
             shell_menus: Default::default(),
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,
@@ -607,6 +609,7 @@ impl GdiState {
         {
             return false;
         }
+        self.saved_dcs.remove(&handle);
         self.regions.remove(&handle).is_some() || self.objects.remove(&handle).is_some()
     }
 
@@ -616,6 +619,28 @@ impl GdiState {
 
     pub fn get_mut(&mut self, handle: u32) -> Option<&mut GdiObject> {
         self.objects.get_mut(&handle)
+    }
+
+    /// SaveDC levels belong to one DC and capture its complete modeled state.
+    pub fn save_dc(&mut self, handle: u32) -> Option<u32> {
+        let snapshot = self.dc(handle)?.clone();
+        let stack = self.saved_dcs.entry(handle).or_default();
+        if stack.len() >= 4096 { return None; }
+        stack.push(snapshot);
+        Some(stack.len() as u32)
+    }
+
+    /// Positive levels are absolute; negative levels count from the newest.
+    /// Restoring consumes the selected snapshot and all snapshots after it.
+    pub fn restore_dc(&mut self, handle: u32, level: i32) -> bool {
+        if level == 0 || self.dc(handle).is_none() { return false; }
+        let Some(stack) = self.saved_dcs.get_mut(&handle) else { return false; };
+        let index = if level < 0 { stack.len() as i64 + i64::from(level) } else { i64::from(level)-1 };
+        if index < 0 || index as usize >= stack.len() { return false; }
+        let snapshot = stack[index as usize].clone();
+        stack.truncate(index as usize);
+        *self.dc_mut(handle).unwrap() = snapshot;
+        true
     }
 
     pub fn dc(&self, handle: u32) -> Option<&Dc> {

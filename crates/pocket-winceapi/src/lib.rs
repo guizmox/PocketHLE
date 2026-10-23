@@ -30,6 +30,7 @@ mod copilot;
 pub mod coredll;
 mod crt_ansi;
 mod crt_integer;
+mod dc_state;
 mod datetime;
 pub mod ddraw;
 mod dialog_keys;

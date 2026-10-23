@@ -3669,3 +3669,24 @@ callback continuations separate from data callbacks, restore the original ABI
 frame, and release only the internal reference on callback return. Transfer
 HBITMAP ownership when requested, preserve caller-owned bitmaps on renderer release.
 Kursk supplies a progress callback even though it requests HBITMAP output.
+
+## Active compatibility validation checkpoint (2026-10-23)
+Springer: registry parent creation fix delivered separately; native 8s run stayed
+alive and rendered 987 frames. Kursk: nested CAB extraction fix delivered; real
+menu visible after IMGDECMP callback/IImageRender implementation; corrected
+image-decoder-v3 compiles and four IMGDECMP unit tests pass. Street Duel: HSS
+memory WAV/MOD decode and stable real channel vtables delivered; music capture
+3,217,536 frames, peak 18,938; four HSS tests pass. Further menu interaction under
+validation. Stratagus: empty default CE command line fix delivered; no more
+"too many files". Subsequent 240x320 probe hit framebuffer overrun at 0x78026000;
+user explicitly requested STOP TESTING STRATAGUS and will test it themselves.
+Do not rerun Stratagus. Snails: added as fifth requested fix, reproduce Missions
+loading and repeated audio with supplied original CAB; work still pending.
+Standalone corrected archives are in deliverables and saved persistently.
+
+## SaveDC and RestoreDC (2026-10-23)
+Save full modeled DC state, including selected objects and clip rectangles, on
+a per-DC stack. Positive restore levels are absolute; negatives are relative.
+Consume the restored level and all levels above it. Invalid handles/levels fail
+without changing live state. Deleting a DC discards its saved levels. No pixel
+copy or game-specific handling is involved.

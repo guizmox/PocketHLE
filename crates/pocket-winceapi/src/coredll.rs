@@ -142,6 +142,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetProcAddress", get_proc_address_a);
     d.register_handler(dll, "GetProcAddressA", get_proc_address_a);
     d.register_handler(dll, "LoadLibraryW", load_library_w);
+    crate::dc_state::register(d);
     crate::imgdecmp::register(d);
     d.register_handler(dll, "DecompressImageIndirect", crate::imgdecmp::decompress);
     d.register_handler(

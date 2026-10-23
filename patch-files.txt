@@ -1,4 +1,5 @@
-crates\pocket-winceapi\src\imgdecmp.rs
+crates\pocket-winceapi\src\dc_state.rs
+crates\pocket-winceapi\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-kernel\src\gdi.rs
 docs\AGENTS.md
