@@ -2455,8 +2455,6 @@ pub(crate) fn wake_due_worker(
     ctx.kernel.worker_preempt_after_ms = now.saturating_add(timer_poll_interval(ctx.kernel));
     if ctx.kernel.wave_out.function_frame.is_some()
         || ctx.kernel.create_frame.is_some()
-        || ctx.kernel.dialog_frame.is_some()
-        || !ctx.kernel.dialog_default_frames.is_empty()
         || !ctx.kernel.vector_iter_stack.is_empty()
         || !ctx.kernel.qsort_frames.is_empty()
         || !ctx.kernel.module_attach_frames.is_empty()
@@ -23419,6 +23417,23 @@ fn switch_guest_fp(ctx: &mut CallCtx<'_>, next: usize) -> Result<(), KernelError
         .insert(ctx.kernel.current_thread, value);
     let next_value = ctx.kernel.guest_fpscr.get(&next).copied().unwrap_or(0);
     ctx.cpu.write_fpscr(next_value)?;
+    if next != ctx.kernel.current_thread {
+        // A WM_INITDIALOG or DefDlgProc callback may load resources for seconds.
+        // Park its continuation with its owner so audio workers can run, and
+        // another thread cannot consume its return frame or nested dialog stack.
+        let current = pocket_kernel::DialogCallbackState {
+            frame: ctx.kernel.dialog_frame.take(),
+            hwnd: std::mem::take(&mut ctx.kernel.dialog_frame_hwnd),
+            stack: std::mem::take(&mut ctx.kernel.dialog_frame_stack),
+            defaults: std::mem::take(&mut ctx.kernel.dialog_default_frames),
+        };
+        ctx.kernel.parked_dialog_callbacks.insert(ctx.kernel.current_thread, current);
+        let resumed = ctx.kernel.parked_dialog_callbacks.remove(&next).unwrap_or_default();
+        ctx.kernel.dialog_frame = resumed.frame;
+        ctx.kernel.dialog_frame_hwnd = resumed.hwnd;
+        ctx.kernel.dialog_frame_stack = resumed.stack;
+        ctx.kernel.dialog_default_frames = resumed.defaults;
+    }
     Ok(())
 }
 
@@ -28661,6 +28676,7 @@ mod tests {
             window_extra: std::collections::HashMap::new(),
             dialog_default_frames: Vec::new(),
             dialog_frame_stack: Vec::new(),
+            parked_dialog_callbacks: std::collections::HashMap::new(),
             window_destroy_frames: Vec::new(),
             control_notify_frames: Vec::new(),
             gesture_frames: Vec::new(),

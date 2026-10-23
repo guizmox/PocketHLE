@@ -433,6 +433,7 @@ pub(crate) mod tests {
             window_extra: std::collections::HashMap::new(),
             dialog_default_frames: Vec::new(),
             dialog_frame_stack: Vec::new(),
+            parked_dialog_callbacks: std::collections::HashMap::new(),
             window_destroy_frames: Vec::new(),
             control_notify_frames: Vec::new(),
             gesture_frames: Vec::new(),

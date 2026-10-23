@@ -3690,3 +3690,13 @@ a per-DC stack. Positive restore levels are absolute; negatives are relative.
 Consume the restored level and all levels above it. Invalid handles/levels fail
 without changing live state. Deleting a DC discards its saved levels. No pixel
 copy or game-specific handling is involved.
+
+## Live wave audio during dialog initialization (2026-10-23)
+Snails mission loading reproduced an identical 3072-sample loop for seconds
+with an AudioTap device clock. WM_INITDIALOG blocked worker scheduling while
+waveOut continued playing. Dialog init/default continuations now park with
+the owning guest thread at every existing scheduler context switch. Restore
+frame, HWND, nested stack and default-dialog frames together. Another thread
+must never consume the suspended caller's continuation. Other callback guards
+remain in place. Validate with device-clock capture, not only silent/headless
+virtual completion. Initial fix delivered before validation as requested.

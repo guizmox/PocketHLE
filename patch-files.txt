@@ -1,5 +1,4 @@
-crates\pocket-winceapi\src\dc_state.rs
-crates\pocket-winceapi\src\lib.rs
+crates\pocket-kernel\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
-crates\pocket-kernel\src\gdi.rs
+crates\pocket-winceapi\src\gx.rs
 docs\AGENTS.md

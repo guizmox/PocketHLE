@@ -1253,6 +1253,8 @@ pub struct KernelState {
     pub window_extra: HashMap<(u32, i32), u32>,
     pub dialog_default_frames: Vec<(usize, u32, GuestCallFrame)>,
     pub dialog_frame_stack: Vec<(GuestCallFrame, u32)>,
+    /// Dialog continuations parked with their owning guest thread.
+    pub parked_dialog_callbacks: HashMap<usize, DialogCallbackState>,
     pub window_destroy_frames: Vec<WindowDestroyFrame>,
     pub control_notify_frames: Vec<ControlNotifyFrame>,
     /// Synchronous SHRecognizeGesture notification continuations.
@@ -3797,6 +3799,7 @@ impl Process {
                 window_extra: HashMap::new(),
                 dialog_default_frames: Vec::new(),
                 dialog_frame_stack: Vec::new(),
+                parked_dialog_callbacks: HashMap::new(),
                 window_destroy_frames: Vec::new(),
                 control_notify_frames: Vec::new(),
                 gesture_frames: Vec::new(),
@@ -5479,4 +5482,13 @@ impl Drop for KernelState {
         self.vfs.close_all();
         self.internet.close_all();
     }
+}
+
+/// Synchronous dialog calls belong to the calling thread, not the process.
+#[derive(Default)]
+pub struct DialogCallbackState {
+    pub frame: Option<GuestCallFrame>,
+    pub hwnd: u32,
+    pub stack: Vec<(GuestCallFrame, u32)>,
+    pub defaults: Vec<(usize, u32, GuestCallFrame)>,
 }
