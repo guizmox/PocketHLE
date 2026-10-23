@@ -510,13 +510,13 @@ pub struct HssClip {
 /// One stable HSS playback channel, owned by its speaker and channel index.
 #[derive(Debug)]
 pub struct HssChannel {
-    pub pointer: u32, pub group: u32, pub volume: u32, pub pan: u32,
+    pub pointer: u32, pub group: u32, pub volume: u32, pub pan: u32, pub master: f32,
     pub format: GuestFormat, pub rate: u32, pub frames: u64,
     pub started: std::time::Instant, pub offset: u64,
     pub stopped: bool, pub paused: bool, pub looped: bool, pub music: bool,
 }
 impl HssChannel {
-    pub fn new(group: u32) -> Self { Self { pointer:0,group,volume:64,pan:128,format:GuestFormat::default(),rate:22050,frames:0,
+    pub fn new(group: u32) -> Self { Self { pointer:0,group,volume:64,pan:128,master:1.0,format:GuestFormat::default(),rate:22050,frames:0,
         started:std::time::Instant::now(),offset:0,stopped:true,paused:false,looped:false,music:false } }
     pub fn position(&self) -> u64 {
         let position=self.offset.saturating_add(if self.paused || self.stopped {0} else {(self.started.elapsed().as_secs_f64()*self.rate as f64) as u64});
