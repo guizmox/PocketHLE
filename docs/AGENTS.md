@@ -3820,3 +3820,21 @@ Fully parented same values launch normally. configure_persistence now restores
 missing ancestors of every merged key before RAM quota charging and publication.
 Preserve values, canonical lookup and available ancestor display spelling. No
 new game values, game check, registry deletion or reinstallation requirement.
+Springer follow-up validation: same orphan-key snapshot exits before correction
+(frames=1), then reaches Select GAME and START LEVEL and stays active through
+8s / 1003 framebuffer changes with correction. Native CPU, simulated audio sink.
+15 registry tests pass, including orphan parent enumeration, unchanged saved
+values and spelling, persistence round-trip, and existing quota transactions.
+
+## ShellExecuteEx CE executable launch (2026-10-23)
+New shell_execute child module implements 60-byte Unicode CE SHELLEXECUTEINFO,
+NULL/open verbs for .exe through the same queue_child_launch as CreateProcessW.
+Real asynchronous loader acknowledgement before success; hInstApp/error,
+GetLastError, SEE_MASK_NOCLOSEPROCESS, temporary thread/process handle lifetime.
+NO_UI accepted, unsupported masks/directory/document associations return errors,
+never success stubs or host process execution. Ignored optional CE fields remain
+ignored. Standard launch visibility is used; nShow variants are not implemented.
+MSRW Kart unregistered startup asks to execute bundled regprog.exe after OK.
+No registration bypass or invented license values. Initial source delivery before
+validation as requested. Desktop/Android runners already service child requests;
+headless diagnostic requires explicitly enabling and servicing launches.

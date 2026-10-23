@@ -21,6 +21,9 @@
 //! and they get called many thousands of times before the game ever
 //! reaches `WinMain`.
 
+#[path = "shell_execute.rs"]
+mod shell_execute;
+
 #[path = "coredll/choice_controls.rs"]
 mod choice_controls;
 #[path = "coredll/control_color.rs"]
@@ -563,6 +566,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "TranslateMessage", translate_message);
     d.register_handler(dll, "PostQuitMessage", post_quit_message);
     d.register_handler(dll, "CreateProcessW", create_process_w);
+    d.register_handler(dll, "ShellExecuteEx", shell_execute::execute);
+    d.register_handler(dll, "ShellExecuteExW", shell_execute::execute);
     d.register_handler("sdlaunch.dll", "SDCreateProcess", sd_create_process);
     d.register_handler(dll, "PostMessageW", post_message_w);
     d.register_handler(dll, "PostThreadMessageW", post_thread_message_w);
@@ -3608,6 +3613,16 @@ fn create_process_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
             }
         }
     };
+    queue_child_launch(ctx, name, command_line, flags, key)
+}
+
+fn queue_child_launch(
+    ctx: &mut CallCtx<'_>,
+    name: String,
+    command_line: String,
+    flags: u32,
+    key: (usize, u32, u32),
+) -> Result<DispatchOutcome, KernelError> {
     let Some(path) = ctx.kernel.vfs.resolve(&name).filter(|p| p.is_file()) else {
         set_thread_error(ctx, 2);
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -33410,31 +33425,38 @@ mod tests {
     }
 
     #[test]
-    fn directdraw_locked_scanlines_do_not_publish_partial_frames() {
-        let mut cpu = StubCpu::new();
-        let mut kernel = fresh_kernel();
-        let t = dummy_thunk();
-        let base = SYNTHETIC_FRAMEBUFFER_BASE;
-        cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE)
-            .unwrap();
-        let before = kernel.framebuffer.frame_counter;
-        kernel.framebuffer.directdraw.primary_locks.insert(base);
-        let mut ctx = CallCtx {
-            cpu: &mut cpu,
-            kernel: &mut kernel,
-            thunk: &t,
-        };
-        for row in 0..3 {
-            let dst = base + row * ctx.kernel.framebuffer.stride_bytes();
-            ctx.cpu.write_mem(dst, &[0xff, 0xff]).unwrap();
-            sync_direct_framebuffer_write(&mut ctx, dst, 2).unwrap();
-            assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
-            assert_eq!(ctx.kernel.direct_fb_frames, 0);
+    fn locked_scanlines_do_not_publish_partial_frames() {
+        for gapi in [false, true] {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            let t = dummy_thunk();
+            let base = SYNTHETIC_FRAMEBUFFER_BASE;
+            cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let before = kernel.framebuffer.frame_counter;
+            if gapi {
+                kernel.gx_draw_active = true;
+            } else {
+                kernel.framebuffer.directdraw.primary_locks.insert(base);
+            }
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
+            for row in 0..3 {
+                let dst = base + row * ctx.kernel.framebuffer.stride_bytes();
+                ctx.cpu.write_mem(dst, &[0xff, 0xff]).unwrap();
+                sync_direct_framebuffer_write(&mut ctx, dst, 2).unwrap();
+                assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
+                assert_eq!(ctx.kernel.direct_fb_frames, 0);
+            }
+            ctx.kernel.gx_draw_active = false;
+            ctx.kernel.framebuffer.directdraw.primary_locks.clear();
+            sync_direct_framebuffer_write(&mut ctx, base, 2).unwrap();
+            assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
+            assert_eq!(ctx.kernel.direct_fb_frames, 1);
         }
-        ctx.kernel.framebuffer.directdraw.primary_locks.clear();
-        sync_direct_framebuffer_write(&mut ctx, base, 2).unwrap();
-        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
-        assert_eq!(ctx.kernel.direct_fb_frames, 1);
     }
 
     #[test]
