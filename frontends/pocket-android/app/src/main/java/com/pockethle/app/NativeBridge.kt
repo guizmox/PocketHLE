@@ -64,6 +64,7 @@ object NativeBridge {
 
     /** Returns the freshly imported game as a JSON [GameEntry]. */
     @JvmStatic external fun prepareImport(libraryRoot: String, source: String): String
+    @JvmStatic external fun choosePreparedImportCabinet(libraryRoot: String, token: Long, index: Int): String
     @JvmStatic external fun choosePreparedImportPlatform(libraryRoot: String, token: Long, gameId: String, gizmondo: Boolean): String
     @JvmStatic external fun commitPreparedImport(libraryRoot: String, token: Long, allowUpdates: Boolean): String
     @JvmStatic external fun cancelPreparedImport(libraryRoot: String, token: Long)

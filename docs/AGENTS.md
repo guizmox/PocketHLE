@@ -3589,3 +3589,34 @@ clear it on focus loss. UI long press must not send guest ESC/brightness.
 Migrate saved factory L1 fullscreen to View in the Steam Deck config, preserving
 other custom assignments. Never let an old L1 fullscreen intercept game volume
 or APP4; L1 must not toggle fullscreen in the UI either.
+
+## FILETIME local conversion (2026-10-23)
+
+FileTimeToLocalFileTime is registered in datetime.rs. Convert against the
+existing emulated UTC/no-DST timezone, preserving all 64 bits and 100-ns
+precision; do not use the host timezone independently of GetLocalTime and
+GetTimeZoneInformation. It reads exactly two guest pointer arguments, writes
+8 bytes on success, and reports invalid/inaccessible buffers via LastError.
+No Warcraft-specific handling. Update this conversion together with clock
+and timezone APIs if configurable emulated timezones are added later.
+
+
+## Desktop installer import containers (2026-10-23)
+`pocket-library::installer` decodes host installers without executing them.
+Format detection uses PE resources, valid zlib headers, NSIS first headers and ZIP
+central directories; never game names, fixed offsets, or filenames. Guest PE
+machine types retain the existing standalone path. Shared decoded-byte, entry
+count and nesting limits apply. Temporary paths are generated, never archive paths.
+Recovered cabinets pass the normal CAB importer and CE/architecture checks.
+Ambiguous multi-CAB installers report an error rather than guessing the game.
+The existing NSIS reader remains the fallback for modern/solid variants.
+InstallShield 6–13 header/volume sets inside ZIP/SFX are decoded without host
+execution. Require the matching volume, bounded Deflate blocks, exact expanded
+size and matching MD5. Split/obfuscated/linked/old-compression variants remain
+explicit errors. Format layout follows the MIT Unshield reference (notice in
+docs/third-party). No filename, game-specific offsets or archive modification.
+Multiple CE cabinets are offered through PreparedImport.cabinet_choices on both
+Desktop and Android, including unsupported/unknown CPU labels. The user selects
+one; never silently prefer ARM or merge architecture variants. Selection happens
+in private staging and ordinary update confirmation remains after selection.
+Dropping/cancelling clears staging. Direct/CLI imports report a choice requirement.

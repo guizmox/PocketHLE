@@ -23,6 +23,7 @@ pub(crate) fn now() -> [u16; 8] {
     ]
 }
 pub(crate) fn register(d: &mut WinCeDispatcher) {
+    d.register_handler("coredll.dll", "FileTimeToLocalFileTime", file_time_to_local_file_time);
     d.register_handler(
         "coredll.dll",
         "GetTimeZoneInformation",
@@ -37,6 +38,31 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         d.register_handler("coredll.dll", name, format_api);
     }
 }
+/// Convert UTC FILETIME to the emulated local FILETIME. The emulated
+/// timezone is UTC with no DST, consistently with GetLocalTime and
+/// GetTimeZoneInformation, so the exact 100-ns timestamp is preserved.
+fn file_time_to_local_file_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let input = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    // The WinCE contract requires distinct input and output structures.
+    if input == 0 || output == 0 || input == output {
+        return fail(ctx, 87); // ERROR_INVALID_PARAMETER
+    }
+    if ctx.cpu.check_guest_access(input, 8, Prot::READ).is_err()
+        || ctx.cpu.check_guest_access(output, 8, Prot::WRITE).is_err()
+    {
+        return fail(ctx, 998); // ERROR_NOACCESS
+    }
+    let bytes = match ctx.cpu.read_mem(input, 8) {
+        Ok(bytes) => bytes,
+        Err(_) => return fail(ctx, 998),
+    };
+    if ctx.cpu.write_mem(output, &bytes).is_err() {
+        return fail(ctx, 998);
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 /// The virtual local clock is UTC (same policy as GetLocalTime).
 /// TIME_ZONE_INFORMATION is 172 bytes, with no daylight transitions.
 fn time_zone_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -375,6 +401,41 @@ mod tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+    #[test]
+    fn file_time_to_local_preserves_full_precision_in_virtual_utc() {
+        let (mut cpu, mut k, mut d) = setup();
+        // Include the epoch, a nonzero high DWORD and sub-millisecond ticks.
+        for ticks in [0u64, 1, 0x01db_eeab_1234_5679, 0x7fff_ffff_ffff_ffff] {
+            cpu.write_mem(0x1200, &ticks.to_le_bytes()).unwrap();
+            cpu.write_mem(0x1300, &[0xaa; 12]).unwrap();
+            assert_eq!(call(&mut cpu, &mut k, &mut d, "coredll.dll",
+                "FileTimeToLocalFileTime", &[0x1200, 0x1300, 0x41ff, 0xb9000000]),
+                DispatchOutcome::ReturnedR0(1));
+            assert_eq!(cpu.read_mem(0x1300, 8).unwrap(), ticks.to_le_bytes());
+            assert_eq!(cpu.read_mem(0x1308, 4).unwrap(), [0xaa; 4]);
+            assert_eq!(cpu.read_mem(0x1200, 8).unwrap(), ticks.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn file_time_to_local_rejects_bad_buffers_without_changing_output() {
+        let (mut cpu, mut k, mut d) = setup();
+        for (input, output, error) in [
+            (0, 0x1300, 87), (0x1200, 0, 87), (0x1300, 0x1300, 87),
+            (0x9000, 0x1300, 998), (0x1200, 0x9000, 998),
+            (0x1200, 0x4ffc, 998),
+        ] {
+            cpu.write_mem(0x1300, &[0xaa; 8]).unwrap();
+            cpu.write_mem(0x4ffc, &[0xbb; 4]).unwrap();
+            assert_eq!(call(&mut cpu, &mut k, &mut d, "coredll.dll",
+                "FileTimeToLocalFileTime", &[input, output]), DispatchOutcome::ReturnedR0(0));
+            assert_eq!(call(&mut cpu, &mut k, &mut d, "coredll.dll",
+                "GetLastError", &[]), DispatchOutcome::ReturnedR0(error));
+            assert_eq!(cpu.read_mem(0x1300, 8).unwrap(), [0xaa; 8]);
+            assert_eq!(cpu.read_mem(0x4ffc, 4).unwrap(), [0xbb; 4]);
+        }
+    }
+
     #[test]
     fn timezone_matches_virtual_utc_clock_and_initializes_the_entire_structure() {
         let (mut cpu, mut k, mut d) = setup();

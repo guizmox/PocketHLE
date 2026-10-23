@@ -1564,6 +1564,37 @@ impl PocketLauncher {
         let Some(pending) = self.pending_import.as_ref() else {
             return;
         };
+        if !pending.cabinet_choices().is_empty() {
+            let choices = pending.cabinet_choices().to_vec();
+            let mut selected = None;
+            let mut cancel = false;
+            egui::Window::new("Choose installer cabinet")
+                .collapsible(false).resizable(false).show(ctx, |ui| {
+                    ui.label("This installer contains several CABs. Which one should be imported?");
+                    for choice in &choices {
+                        if ui.button(format!("{} — {}", choice.name, choice.architecture)).clicked() {
+                            selected = Some(choice.index);
+                        }
+                    }
+                    cancel = ui.button("Cancel import").clicked();
+                });
+            if cancel {
+                self.pending_import = None;
+                self.library_busy = false;
+                self.status = "Import cancelled.".into();
+            } else if let Some(index) = selected {
+                let mut pending = self.pending_import.take().unwrap();
+                let tx = self.events_tx.clone();
+                self.status = "Preparing selected cabinet...".into();
+                std::thread::spawn(move || {
+                    match pending.choose_cabinet(index) {
+                        Ok(()) => { let _ = tx.send(UiEvent::ImportPrepared(pending)); }
+                        Err(error) => { let _ = tx.send(UiEvent::ImportFinished(Err(error.to_string()))); }
+                    }
+                });
+            }
+            return;
+        }
         if let Some((id, name)) = pending.platform_choices().first().cloned() {
             let mut choice = None;
             let mut cancel = false;
@@ -3795,7 +3826,7 @@ impl PocketLauncher {
                 lib.config_mut().last_import_dir = Some(parent);
                 lib.save().map_err(|e| e.to_string())?;
                 let pending = lib.prepare_import(&path).map_err(|e| e.to_string())?;
-                if !pending.updates().is_empty() || !pending.platform_choices().is_empty() {
+                if !pending.updates().is_empty() || !pending.platform_choices().is_empty() || !pending.cabinet_choices().is_empty() {
                     tx.send(UiEvent::ImportPrepared(pending))
                         .map_err(|e| e.to_string())?;
                     return Ok(Vec::new());

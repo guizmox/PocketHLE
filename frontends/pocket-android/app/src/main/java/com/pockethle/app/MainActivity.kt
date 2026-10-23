@@ -296,6 +296,43 @@ class MainActivity : AppCompatActivity() {
     private fun showPreparedImport(raw: String) {
         val obj = JSONObject(raw)
         val token = obj.getString("token").toLong()
+        val cabinets = obj.optJSONArray("cabinet_choices")
+        if (cabinets != null && cabinets.length() > 0) {
+            setLibraryBusy("Waiting for cabinet selection…")
+            busyDialog?.dismiss()
+            busyDialog = null
+            val labels = (0 until cabinets.length()).map {
+                val c = cabinets.getJSONObject(it)
+                "${c.getString("name")} — ${c.getString("architecture") }"
+            }.toTypedArray()
+            AlertDialog.Builder(this).setTitle("Choose installer cabinet")
+                .setCancelable(false)
+                .setItems(labels) { _, which ->
+                    setLibraryBusy("Preparing selected cabinet…")
+                    lifecycleScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val next = NativeBridge.choosePreparedImportCabinet(rootDir, token, cabinets.getJSONObject(which).getInt("index"))
+                                val response = JSONObject(next)
+                                if (!response.optBoolean("ok", false)) error(response.optString("error"))
+                                next
+                            }
+                        }
+                        setLibraryBusy(null)
+                        result.onSuccess { showPreparedImport(it) }.onFailure { error ->
+                            NativeBridge.cancelPreparedImport(rootDir, token)
+                            pendingImportToken = null
+                            Snackbar.make(recycler, error.message ?: "Import failed", Snackbar.LENGTH_LONG).show()
+                        }
+                    }
+                }
+                .setNegativeButton("Cancel import") { _, _ ->
+                    NativeBridge.cancelPreparedImport(rootDir, token)
+                    pendingImportToken = null
+                    setLibraryBusy(null)
+                }.show()
+            return
+        }
         val choices = obj.optJSONArray("platform_choices")
         if (choices != null && choices.length() > 0) {
             val game = choices.getJSONObject(0)

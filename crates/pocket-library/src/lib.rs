@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod analysis;
+mod installer;
 pub use analysis::{analyze_game, detect_gizmondo_title_id, game_gizmondo_title_id, GameAnalysis};
 
 pub mod gizmondo_titles;
@@ -1173,9 +1174,44 @@ pub struct PreparedImport {
     zip_source: bool,
     entries: Vec<GameEntry>,
     updates: Vec<GameEntry>,
+    cabinet_choices: Vec<InstallerCabinetChoice>,
+}
+
+/// A cabinet offered by an installer; selecting one does not select others.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallerCabinetChoice {
+    pub index: usize,
+    pub name: String,
+    pub architecture: String,
+    #[serde(skip)]
+    path: PathBuf,
 }
 
 impl PreparedImport {
+    pub fn cabinet_choices(&self) -> &[InstallerCabinetChoice] {
+        &self.cabinet_choices
+    }
+
+    pub fn choose_cabinet(&mut self, index: usize) -> Result<(), LibraryError> {
+        let choice = self.cabinet_choices.iter().find(|c| c.index == index)
+            .ok_or_else(|| LibraryError::InvalidId("Unknown installer cabinet selection".into()))?;
+        let target = Library::open(&self.target_root)?;
+        let mut provisional = Library::open(self.staging.path())?;
+        provisional.config = target.config.clone();
+        provisional.import_cab(&choice.path)?;
+        let entries = provisional.games().to_vec();
+        let mut updates = Vec::new();
+        for entry in &entries {
+            if let Some(previous) = target.previous_import(&entry.id, &entry.source_cab)? {
+                updates.push(previous);
+            }
+        }
+        self.entries = entries;
+        self.updates = updates;
+        self.cabinet_choices.clear();
+        Ok(())
+    }
+
     /// Ask only for unresolved ZIP games, not CABs or already classified updates.
     pub fn platform_choices(&self) -> Vec<(String, String)> {
         if !self.zip_source {
@@ -1275,7 +1311,21 @@ impl Library {
             .unwrap_or("")
             .to_ascii_lowercase();
         let zip_source = count == 4 && signature[..2] == *b"PK" || ext == "zip";
-        let _imported = if zip_source {
+        let installer_cabinets = if signature[..2] == *b"MZ"
+            && !sniff_pe(path).ok().flatten().is_some_and(|pe| pe.is_supported_guest()) {
+            stage_installer_cabinets(path, staging.path())?
+        } else { None };
+        if let Some(choices) = installer_cabinets.as_ref().filter(|c| c.len() > 1) {
+            return Ok(PreparedImport {
+                target_root: self.root.clone(), zip_source: false,
+                entries: Vec::new(), updates: Vec::new(),
+                cabinet_choices: choices.clone(), staging,
+            });
+        }
+        let _imported = if let Some(choices) = installer_cabinets {
+            let choice = choices.first().ok_or_else(|| LibraryError::NoPocketPcCab(path.display().to_string()))?;
+            vec![provisional.import_cab(&choice.path)?.clone()]
+        } else if zip_source {
             provisional.import_zip_entries(path)?
         } else {
             let entry = if signature == *b"MSCF" || ext == "cab" {
@@ -1306,6 +1356,7 @@ impl Library {
             zip_source,
             entries,
             updates,
+            cabinet_choices: Vec::new(),
         })
     }
 
@@ -1316,6 +1367,9 @@ impl Library {
         pending: PreparedImport,
         allow_updates: bool,
     ) -> Result<Vec<GameEntry>, LibraryError> {
+        if !pending.cabinet_choices.is_empty() {
+            return Err(LibraryError::NoPocketPcCab("Choose an installer cabinet before importing".into()));
+        }
         if pending.target_root != self.root {
             return Err(LibraryError::InvalidId(
                 "import belongs to another library".into(),
@@ -1748,8 +1802,18 @@ impl Library {
     /// but it has no entry point to start.
     pub fn import_exe(&mut self, exe_path: impl AsRef<Path>) -> Result<&GameEntry, LibraryError> {
         let exe_path = exe_path.as_ref();
-        if is_nsis_installer(exe_path) {
-            return self.import_nsis_installer(exe_path);
+        if !sniff_pe(exe_path).ok().flatten().is_some_and(|pe| pe.is_supported_guest()) {
+            let staging = tempfile::Builder::new().prefix(".installer-import-").tempdir_in(&self.root)?;
+            if let Some(choices) = stage_installer_cabinets(exe_path, staging.path())? {
+                if choices.len() != 1 {
+                    return Err(LibraryError::NoPocketPcCab(format!(
+                        "Choose a cabinet using the import dialog: {}",
+                        choices.iter().map(|c| format!("{} ({})", c.name, c.architecture)).collect::<Vec<_>>().join(", ")
+                    )));
+                }
+                return self.import_cab(&choices[0].path);
+            }
+            if is_nsis_installer(exe_path) { return self.import_nsis_installer(exe_path); }
         }
         let source_name = exe_path
             .file_name()
@@ -3107,6 +3171,43 @@ const IMAGE_FILE_MACHINE_THUMB: u16 = 0x01c2;
 const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
 const IMAGE_FILE_MACHINE_MIPS_R3000: u16 = 0x0162;
 const IMAGE_FILE_MACHINE_MIPS_R4000: u16 = 0x0166;
+
+fn stage_installer_cabinets(source: &Path, staging: &Path) -> Result<Option<Vec<InstallerCabinetChoice>>, LibraryError> {
+    if fs::metadata(source)?.len() > 256 * 1024 * 1024 {
+        return Err(LibraryError::NoPocketPcCab("Installer exceeds input size limit".into()));
+    }
+    let bytes = fs::read(source)?;
+    let cabinets = match installer::extract(&bytes) {
+        Ok(cabinets) => cabinets,
+        Err(_) if is_nsis_installer(source) => None,
+        Err(error) => return Err(LibraryError::NoPocketPcCab(error)),
+    };
+    let Some(cabinets) = cabinets else { return Ok(None); };
+    let source_id = sanitize_id(source.file_stem().map(|s| s.to_string_lossy()).as_deref());
+    if source_id.is_empty() { return Err(LibraryError::InvalidId(source.display().to_string())); }
+    let mut choices = Vec::new();
+    for (index, cabinet) in cabinets.iter().enumerate() {
+        let path = staging.join(format!("{source_id}-cabinet-{index}.cab"));
+        fs::write(&path, &cabinet.bytes)?;
+        let probe = staging.join(format!("probe-{index}"));
+        let (files, header) = pocket_cab::extract_for_install(&path, &probe)?;
+        let is_ce = header.as_ref().is_some_and(|h| h.structured)
+            || files.iter().any(|f| f.short_name.eq_ignore_ascii_case("_setup.xml"));
+        if is_ce {
+            let arch = header.as_ref().and_then(|h| h.arch);
+            let architecture = match arch {
+                Some(2577 | 1824) => "ARM".into(),
+                Some(4000) => "MIPS".into(),
+                Some(10003) => "SH3".into(),
+                Some(0) | None => "Unspecified CPU".into(),
+                Some(value) => format!("CPU {value}"),
+            };
+            choices.push(InstallerCabinetChoice { index, name: cabinet.name.clone(), architecture, path });
+        }
+        fs::remove_dir_all(probe)?;
+    }
+    Ok(Some(choices))
+}
 
 fn is_nsis_installer(path: &Path) -> bool {
     let Ok(data) = fs::read(path) else {
