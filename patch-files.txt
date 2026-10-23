@@ -1,4 +1,2 @@
-crates\pocket-kernel\src\lib.rs
-crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\gx.rs
+crates\pocket-kernel\src\registry.rs
 docs\AGENTS.md

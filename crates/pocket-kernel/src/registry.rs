@@ -290,6 +290,32 @@ impl Registry {
                 }
                 keys.insert(key, values);
             }
+            // Older snapshots can contain a child without its parent. CAB
+            // seeding skips values already persisted, so reinstalling cannot
+            // repair that topology. Restore the registry invariant on load,
+            // before charging/publishing the merged transaction.
+            let mut parent_display = HashMap::new();
+            for key in keys.keys().cloned().collect::<Vec<_>>() {
+                let spelling = snapshot
+                    .display
+                    .get(&key)
+                    .or_else(|| store.display.get(&key))
+                    .unwrap_or(&key);
+                for (end, _) in key.match_indices('\\') {
+                    let parent = key[..end].to_string();
+                    keys.entry(parent.clone()).or_default();
+                    // Saved display spelling need not have the same UTF-8
+                    // byte length as its canonical lowercase key.
+                    let depth = parent.split('\\').count();
+                    parent_display.entry(parent).or_insert_with(|| {
+                        spelling
+                            .split('\\')
+                            .take(depth)
+                            .collect::<Vec<_>>()
+                            .join("\\")
+                    });
+                }
+            }
             if store
                 .charge
                 .as_mut()
@@ -298,6 +324,9 @@ impl Registry {
                 return Err(Error::other("insufficient device RAM for registry"));
             }
             store.keys = keys;
+            for (key, spelling) in parent_display {
+                store.display.entry(key).or_insert(spelling);
+            }
             store.display.extend(snapshot.display);
             store.value_display.extend(snapshot.value_display);
         }

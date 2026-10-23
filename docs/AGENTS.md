@@ -3805,3 +3805,18 @@ Skip raw polling and bulk-write presentation during it; close clears ownership.
 Keep polling/direct memcpy fallback unchanged outside GAPI drawing. No game branch.
 Initial native capture reaches main menu; visible whole-screen flicker has not
 been reproduced conclusively on this host. Validate before calling it resolved.
+Validation: 517 winceapi tests passed, 4 ignored; kernel regression verifies
+unfinished guest pixels stay unpublished while raw polling resumes afterwards.
+Bulk-copy regression covers both DirectDraw and GAPI locks. Native 10s run
+reaches the menu and animates normally; no crash. Physical-device flicker
+resolution still requires user confirmation.
+
+## Persisted orphan registry keys / Springer follow-up (2026-10-23)
+Prior create_key/set_value parent fix did not repair already saved snapshots.
+Frontend skips CAB values already persisted, so even reimport left LevelPacks
+absent while LevelPacks/DefaultPack existed; Springer exited without missing APIs.
+Reproduced with actual freshly imported game + old-format orphan snapshot.
+Fully parented same values launch normally. configure_persistence now restores
+missing ancestors of every merged key before RAM quota charging and publication.
+Preserve values, canonical lookup and available ancestor display spelling. No
+new game values, game check, registry deletion or reinstallation requirement.
