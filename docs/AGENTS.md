@@ -3620,3 +3620,12 @@ Desktop and Android, including unsupported/unknown CPU labels. The user selects
 one; never silently prefer ARM or merge architecture variants. Selection happens
 in private staging and ordinary update confirmation remains after selection.
 Dropping/cancelling clears staging. Direct/CLI imports report a choice requirement.
+
+## WinCE CRT div/ldiv aggregate return (2026-10-23)
+ARM WinCE div and ldiv return an 8-byte {signed quotient, signed remainder}
+structure through caller-owned storage in r0; numerator is r1, denominator r2.
+Write exactly eight bytes and return the storage pointer in r0. Both int/long
+are 32-bit. Truncate towards zero; remainder has numerator sign. Reject undefined
+zero/overflow operations without host panics. This differs from __rt_sdiv's
+divisor/numerator register convention and register pair return. Never change
+__rt_sdiv or patch GhostWorld callers to compensate for a missing CRT aggregate.

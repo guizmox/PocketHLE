@@ -14,7 +14,9 @@ pub(crate) struct Cabinet {
 }
 
 fn u16_at(b: &[u8], p: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(p..p.checked_add(2)?)?.try_into().ok()?))
+    Some(u16::from_le_bytes(
+        b.get(p..p.checked_add(2)?)?.try_into().ok()?,
+    ))
 }
 fn u32_at(b: &[u8], p: usize) -> Option<usize> {
     Some(u32::from_le_bytes(b.get(p..p.checked_add(4)?)?.try_into().ok()?) as usize)
@@ -26,22 +28,32 @@ fn inflate(input: &[u8], zlib: bool, budget: &mut usize) -> Result<Vec<u8>> {
         Box::new(flate2::read::DeflateDecoder::new(input))
     };
     let mut out = Vec::new();
-    reader.take(*budget as u64 + 1).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    reader
+        .take(*budget as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
     charge(out.len(), budget)?;
     Ok(out)
 }
 fn charge(size: usize, budget: &mut usize) -> Result<()> {
-    *budget = budget.checked_sub(size).ok_or("Installer exceeds decoded size limit")?;
+    *budget = budget
+        .checked_sub(size)
+        .ok_or("Installer exceeds decoded size limit")?;
     Ok(())
 }
 
 /// None means an ordinary guest executable, not a recognized installer.
 pub(crate) fn extract(bytes: &[u8]) -> Result<Option<Vec<Cabinet>>> {
-    if bytes.len() > LIMIT { return Err("Installer exceeds input size limit".into()); }
+    if bytes.len() > LIMIT {
+        return Err("Installer exceeds input size limit".into());
+    }
     // Guest PE binaries must retain the standalone executable import path.
     if bytes.starts_with(b"MZ") {
         if let Some(pe) = u32_at(bytes, 60).filter(|p| *p <= bytes.len().saturating_sub(24)) {
-            if matches!(u16_at(bytes, pe + 4), Some(0x01c0 | 0x01c2 | 0x01c4 | 0x0162 | 0x0166)) {
+            if matches!(
+                u16_at(bytes, pe + 4),
+                Some(0x01c0 | 0x01c2 | 0x01c4 | 0x0162 | 0x0166)
+            ) {
                 return Ok(None);
             }
         }
@@ -49,13 +61,25 @@ pub(crate) fn extract(bytes: &[u8]) -> Result<Option<Vec<Cabinet>>> {
     let mut out = Vec::new();
     let mut budget = LIMIT;
     let recognized = layer(bytes, "payload", 0, &mut budget, &mut out)?;
-    if !recognized { return Ok(None); }
-    if out.is_empty() { return Err("Recognized installer contains no supported PocketPC cabinet".into()); }
+    if !recognized {
+        return Ok(None);
+    }
+    if out.is_empty() {
+        return Err("Recognized installer contains no supported PocketPC cabinet".into());
+    }
     Ok(Some(out))
 }
 
-fn layer(b: &[u8], name: &str, depth: usize, budget: &mut usize, out: &mut Vec<Cabinet>) -> Result<bool> {
-    if depth > DEPTH { return Err("Installer nesting limit exceeded".into()); }
+fn layer(
+    b: &[u8],
+    name: &str,
+    depth: usize,
+    budget: &mut usize,
+    out: &mut Vec<Cabinet>,
+) -> Result<bool> {
+    if depth > DEPTH {
+        return Err("Installer nesting limit exceeded".into());
+    }
     if b.starts_with(b"ISc(") {
         return Err("InstallShield CAB detected: this archive format is not supported yet".into());
     }
@@ -65,24 +89,38 @@ fn layer(b: &[u8], name: &str, depth: usize, budget: &mut usize, out: &mut Vec<C
             return Err("Invalid cabinet bounds".into());
         }
         if !out.iter().any(|c| c.bytes == b[..size]) {
-            if out.len() >= 32 { return Err("Too many embedded cabinets".into()); }
+            if out.len() >= 32 {
+                return Err("Too many embedded cabinets".into());
+            }
             charge(size, budget)?;
-            out.push(Cabinet { name: name.to_owned(), bytes: b[..size].to_vec() });
+            out.push(Cabinet {
+                name: name.to_owned(),
+                bytes: b[..size].to_vec(),
+            });
         }
         return Ok(true);
     }
     // ZIP supports self-extracting executables; its central directory supplies
     // offsets and sizes. Never extract archive paths onto the host filesystem.
     if let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(b)) {
-        if zip.len() > 4096 { return Err("Too many installer archive entries".into()); }
+        if zip.len() > 4096 {
+            return Err("Too many installer archive entries".into());
+        }
         let mut entries = Vec::new();
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-            if entry.is_dir() { continue; }
-            if entry.size() > *budget as u64 { return Err("Installer archive exceeds size limit".into()); }
+            if entry.is_dir() {
+                continue;
+            }
+            if entry.size() > *budget as u64 {
+                return Err("Installer archive exceeds size limit".into());
+            }
             let child_name = entry.name().to_owned();
             let mut data = Vec::new();
-            (&mut entry).take(*budget as u64 + 1).read_to_end(&mut data).map_err(|e| e.to_string())?;
+            (&mut entry)
+                .take(*budget as u64 + 1)
+                .read_to_end(&mut data)
+                .map_err(|e| e.to_string())?;
             charge(data.len(), budget)?;
             entries.push((child_name, data));
         }
@@ -102,18 +140,28 @@ fn layer(b: &[u8], name: &str, depth: usize, budget: &mut usize, out: &mut Vec<C
     // distinguishes it from instruction constants in the executable stub.
     let sig = b"\xef\xbe\xad\xdeNullsoftInst";
     if let Some(p) = b.windows(sig.len()).position(|w| w == sig) {
-        if p < 4 { return Err("Invalid NSIS header".into()); }
+        if p < 4 {
+            return Err("Invalid NSIS header".into());
+        }
         let base = p - 4;
         let length = u32_at(b, base + 24).ok_or("Truncated NSIS header")?;
-        let end = base.checked_add(length).filter(|e| *e <= b.len()).ok_or("Invalid NSIS length")?;
+        let end = base
+            .checked_add(length)
+            .filter(|e| *e <= b.len())
+            .ok_or("Invalid NSIS length")?;
         let mut pos = base + 28;
         while pos < end {
             // Optional trailing installer CRC is not an archive block.
-            if end - pos == 4 { break; }
+            if end - pos == 4 {
+                break;
+            }
             let raw = u32_at(b, pos).ok_or("Truncated NSIS block")?;
             let count = raw & 0x7fff_ffff;
             let start = pos + 4;
-            let next = start.checked_add(count).filter(|n| *n <= end).ok_or("Invalid NSIS block length")?;
+            let next = start
+                .checked_add(count)
+                .filter(|n| *n <= end)
+                .ok_or("Invalid NSIS block length")?;
             let data = &b[start..next];
             if raw & 0x8000_0000 != 0 {
                 let decoded = inflate(data, false, budget)?;
@@ -125,11 +173,19 @@ fn layer(b: &[u8], name: &str, depth: usize, budget: &mut usize, out: &mut Vec<C
         }
         return Ok(true);
     }
-    if !b.starts_with(b"MZ") { return Ok(false); }
-    let pe = u32_at(b, 60).filter(|p| *p <= b.len().saturating_sub(24)).ok_or("Truncated PE header")?;
-    if b.get(pe..pe + 4) != Some(b"PE\0\0") { return Ok(false); }
+    if !b.starts_with(b"MZ") {
+        return Ok(false);
+    }
+    let pe = u32_at(b, 60)
+        .filter(|p| *p <= b.len().saturating_sub(24))
+        .ok_or("Truncated PE header")?;
+    if b.get(pe..pe + 4) != Some(b"PE\0\0") {
+        return Ok(false);
+    }
     let count = u16_at(b, pe + 6).ok_or("Truncated PE header")? as usize;
-    if count > 96 { return Err("Too many PE sections".into()); }
+    if count > 96 {
+        return Err("Too many PE sections".into());
+    }
     let optional = u16_at(b, pe + 20).ok_or("Truncated PE header")? as usize;
     let sections = pe + 24 + optional;
     let raw = |rva: usize| -> Option<usize> {
@@ -153,31 +209,50 @@ fn layer(b: &[u8], name: &str, depth: usize, budget: &mut usize, out: &mut Vec<C
             }
         }
     }
-    if u16_at(b, pe + 24) != Some(0x10b) || optional < 120 { return Ok(recognized); }
+    if u16_at(b, pe + 24) != Some(0x10b) || optional < 120 {
+        return Ok(recognized);
+    }
     let rva = u32_at(b, pe + 24 + 112).unwrap_or(0);
     let size = u32_at(b, pe + 24 + 116).unwrap_or(0);
-    let Some(base) = raw(rva) else { return Ok(recognized); };
-    let end = base.checked_add(size).filter(|e| *e <= b.len()).ok_or("Invalid resource bounds")?;
+    let Some(base) = raw(rva) else {
+        return Ok(recognized);
+    };
+    let end = base
+        .checked_add(size)
+        .filter(|e| *e <= b.len())
+        .ok_or("Invalid resource bounds")?;
     let tree = &b[base..end];
     let mut pending = vec![(0usize, 0usize)];
     let mut visited = std::collections::HashSet::new();
     while let Some((dir, level)) = pending.pop() {
-        if level > 3 || !visited.insert(dir) { return Err("Invalid resource directory cycle/depth".into()); }
+        if level > 3 || !visited.insert(dir) {
+            return Err("Invalid resource directory cycle/depth".into());
+        }
         let n = u16_at(tree, dir + 12).ok_or("Truncated resource directory")? as usize
             + u16_at(tree, dir + 14).ok_or("Truncated resource directory")? as usize;
-        if visited.len() > 4096 || n > 4096 { return Err("Resource directory limit exceeded".into()); }
+        if visited.len() > 4096 || n > 4096 {
+            return Err("Resource directory limit exceeded".into());
+        }
         for i in 0..n {
             let value = u32_at(tree, dir + 16 + i * 8 + 4).ok_or("Truncated resource entry")?;
             let offset = value & 0x7fff_ffff;
-            if value & 0x8000_0000 != 0 { pending.push((offset, level + 1)); continue; }
+            if value & 0x8000_0000 != 0 {
+                pending.push((offset, level + 1));
+                continue;
+            }
             let rva = u32_at(tree, offset).ok_or("Truncated resource data")?;
             let len = u32_at(tree, offset + 4).ok_or("Truncated resource size")?;
             let start = raw(rva).ok_or("Invalid resource address")?;
-            let data = b.get(start..start.checked_add(len).ok_or("Resource overflow")?).ok_or("Truncated resource payload")?;
+            let data = b
+                .get(start..start.checked_add(len).ok_or("Resource overflow")?)
+                .ok_or("Truncated resource payload")?;
             // zlib CMF/FLG, DEFLATE, legal window, no preset dictionary.
-            if data.len() >= 2 && data[0] & 15 == 8 && data[0] >> 4 <= 7
+            if data.len() >= 2
+                && data[0] & 15 == 8
+                && data[0] >> 4 <= 7
                 && (u16::from(data[0]) * 256 + u16::from(data[1])) % 31 == 0
-                && data[1] & 32 == 0 {
+                && data[1] & 32 == 0
+            {
                 let decoded = inflate(data, true, budget)?;
                 recognized |= layer(&decoded, name, depth + 1, budget, out)?;
             } else if data.starts_with(b"MSCF") || data.starts_with(b"MZ") {

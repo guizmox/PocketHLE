@@ -6,5 +6,8 @@ frontends\pocket-desktop\src\app.rs
 frontends\pocket-android-jni\src\lib.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\NativeBridge.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\MainActivity.kt
+crates\pocket-winceapi\src\lib.rs
+crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\crt_integer.rs
 docs\AGENTS.md
 docs\third-party\unshield-LICENSE.txt

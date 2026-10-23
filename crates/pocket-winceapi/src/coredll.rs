@@ -1164,6 +1164,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "floor", m_floor);
     d.register_handler(dll, "floorf", m_floorf);
     d.register_handler(dll, "ceil", m_ceil);
+    crate::crt_integer::register(d);
     d.register_handler(dll, "abs", m_abs_i32);
     d.register_handler(dll, "fabs", m_fabs);
     d.register_handler(dll, "atan2", m_atan2);
