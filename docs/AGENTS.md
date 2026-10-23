@@ -3795,3 +3795,13 @@ During map window 21-39s, largest scheduler sampling gap fell from 988.9ms to
 2.30s of underrun from queued samples and scheduling gaps). Simulated native
 sink, not a physical Windows/Android audio-device validation. Both buffers
 continued requeueing with original callback delivery. Final change is GDI only.
+
+## GAPI unfinished draw presentation (2026-10-23)
+Tots'N'Togs imports GXBeginDraw/GXEndDraw and renders its menu in guest memory.
+Raw framebuffer polling and memcpy/memset presentation did not respect that
+interval, potentially publishing partially rendered frames. Track gx_draw_active
+from successful BeginDraw until completed EndDraw (including display waits).
+Skip raw polling and bulk-write presentation during it; close clears ownership.
+Keep polling/direct memcpy fallback unchanged outside GAPI drawing. No game branch.
+Initial native capture reaches main menu; visible whole-screen flicker has not
+been reproduced conclusively on this host. Validate before calling it resolved.

@@ -5624,7 +5624,7 @@ fn sync_direct_framebuffer_write(
     dst: u32,
     len: usize,
 ) -> Result<(), KernelError> {
-    if !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty() {
+    if ctx.kernel.gx_draw_active || !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty() {
         return Ok(());
     }
     let base = SYNTHETIC_FRAMEBUFFER_BASE;
@@ -28768,6 +28768,7 @@ mod tests {
             dib_sync_scratch: Vec::new(),
             dib_decode_scratch: Vec::new(),
             gx_last_pushed_counter: 0,
+            gx_draw_active: false,
             gx_guest_signature: None,
             gles_strings: std::collections::HashMap::new(),
             synthetic_message_count: 0,

@@ -1183,6 +1183,9 @@ pub struct KernelState {
     /// host fb in the meantime, and we can skip the
     /// host-fb -> guest-fb copy that primes the back-buffer.
     pub gx_last_pushed_counter: u64,
+    /// GXBeginDraw owns guest pixels until GXEndDraw publishes the frame.
+    /// Raw framebuffer polling must not expose an unfinished GAPI draw.
+    pub gx_draw_active: bool,
     /// Signature of sampled guest framebuffer rows from the last sync.
     pub gx_guest_signature: Option<u64>,
     /// Guest addresses of the strings `glGetString` / `eglQueryString`
@@ -3826,6 +3829,7 @@ impl Process {
                 dib_sync_scratch: Vec::new(),
                 dib_decode_scratch: Vec::new(),
                 gx_last_pushed_counter: 0,
+                gx_draw_active: false,
                 gx_guest_signature: None,
                 gles_strings: HashMap::new(),
                 synthetic_message_count: 0,
@@ -3999,6 +4003,7 @@ impl<F: FnMut(&mut KernelState) -> FrameAction> FrameHook for F {
 
 fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
     if !state.fb_mapped
+        || state.gx_draw_active
         || !state.framebuffer.directdraw.primary_locks.is_empty()
         || state.framebuffer.frame_counter != state.gx_last_pushed_counter
     {
@@ -4767,6 +4772,40 @@ mod tests {
         assert_eq!(k.gx_last_pushed_counter, last_guest);
         sync_guest_framebuffer(&mut cpu, k);
         assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+    }
+
+    #[test]
+    fn gapi_draw_does_not_publish_partial_guest_pixels() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let k = &mut process.state;
+        cpu.map_region(
+            SYNTHETIC_FRAMEBUFFER_BASE,
+            (k.framebuffer.byte_size() + 0xfff) & !0xfff,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+        k.fb_mapped = true;
+        k.guest_fb_pitch = k.framebuffer.stride_bytes();
+        k.gx_last_pushed_counter = k.framebuffer.frame_counter;
+        let before = k.framebuffer.pixels.clone();
+        let counter = k.framebuffer.frame_counter;
+        k.gx_draw_active = true;
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes())
+            .unwrap();
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(k.framebuffer.pixels, before);
+        assert_eq!(k.framebuffer.frame_counter, counter);
+        // Direct framebuffer users outside a GX draw retain polling support.
+        k.gx_draw_active = false;
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(&k.framebuffer.pixels[..2], &0xf800u16.to_le_bytes());
     }
 
     /// `SB_SETPARTS` hands us right-hand edges, with a trailing -1

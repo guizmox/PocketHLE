@@ -146,6 +146,7 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 fn gx_close_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.gx_draw_active = false;
     ctx.kernel.controls.direct_surface_hwnd = 0;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -180,6 +181,7 @@ fn gx_begin_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
+    ctx.kernel.gx_draw_active = true;
     log::trace!("GXBeginDraw() -> 0x{:08x}", SYNTHETIC_FB_BASE);
     Ok(DispatchOutcome::ReturnedR0(SYNTHETIC_FB_BASE))
 }
@@ -229,6 +231,7 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel.gx_guest_signature = Some(signature);
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
+    ctx.kernel.gx_draw_active = false;
     ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -395,6 +398,7 @@ pub(crate) mod tests {
             dib_sync_scratch: Vec::new(),
             dib_decode_scratch: Vec::new(),
             gx_last_pushed_counter: 0,
+            gx_draw_active: false,
             gx_guest_signature: None,
             gles_strings: std::collections::HashMap::new(),
             synthetic_message_count: 0,
@@ -568,6 +572,7 @@ pub(crate) mod tests {
                 DispatchOutcome::ReturnedR0(SYNTHETIC_FB_BASE)
             );
         }
+        assert!(kernel.gx_draw_active);
         // Guest writes a magenta pixel at (0,0): RGB565 0xF81F (LE: 1F F8).
         cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
         // Set sp to a sane value so arg_u32 doesn't trip.
@@ -582,6 +587,7 @@ pub(crate) mod tests {
             pre_counter = c.kernel.framebuffer.frame_counter;
             assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
         }
+        assert!(!kernel.gx_draw_active);
         // The host framebuffer must have observed those pixels and
         // bumped its dirty counter.
         assert_eq!(kernel.framebuffer.pixels[0], 0x1f);
