@@ -16245,6 +16245,16 @@ fn sync_dib_from_guest(ctx: &mut CallCtx<'_>, hdc: u32) -> Result<(), KernelErro
 }
 
 fn encode_pixels_to_dib(bm: &pocket_kernel::gdi::Bitmap, buf: &mut [u8]) {
+    // A palette DIB usually reuses a small set of RGB565 colours. Resolve
+    // each distinct colour once per conversion instead of scanning the full
+    // palette for every pixel. Keep the first index on exact-colour ties.
+    // The cache is local: palette changes between GDI operations remain visible.
+    let mut palette_cache = std::collections::HashMap::<u16, u8>::new();
+    if bm.bpp == 8 {
+        for (i, &colour) in bm.dib_palette.iter().enumerate() {
+            palette_cache.entry(colour).or_insert(i as u8);
+        }
+    }
     let stride = bm.dib_row_stride as usize;
     for src_y in 0..bm.height {
         let dst_y = if bm.dib_bottom_up {
@@ -16313,20 +16323,26 @@ fn encode_pixels_to_dib(bm: &pocket_kernel::gdi::Bitmap, buf: &mut [u8]) {
                         continue;
                     }
                     let px = u16::from_le_bytes([bm.pixels[off], bm.pixels[off + 1]]);
-                    let (r, g, b) = rgb565_to_888(px);
-                    let mut best_i = 0u8;
-                    let mut best_d = u32::MAX;
-                    for (i, &p) in bm.dib_palette.iter().enumerate() {
-                        let (pr, pg, pb) = rgb565_to_888(p);
-                        let dr = pr.abs_diff(r) as u32;
-                        let dg = pg.abs_diff(g) as u32;
-                        let db = pb.abs_diff(b) as u32;
-                        let d = dr * dr + dg * dg + db * db;
-                        if d < best_d {
-                            best_d = d;
-                            best_i = i as u8;
+                    let best_i = if let Some(&index) = palette_cache.get(&px) {
+                        index
+                    } else {
+                        let (r, g, b) = rgb565_to_888(px);
+                        let mut best_i = 0u8;
+                        let mut best_d = u32::MAX;
+                        for (i, &p) in bm.dib_palette.iter().enumerate() {
+                            let (pr, pg, pb) = rgb565_to_888(p);
+                            let dr = pr.abs_diff(r) as u32;
+                            let dg = pg.abs_diff(g) as u32;
+                            let db = pb.abs_diff(b) as u32;
+                            let d = dr * dr + dg * dg + db * db;
+                            if d < best_d {
+                                best_d = d;
+                                best_i = i as u8;
+                            }
                         }
-                    }
+                        palette_cache.insert(px, best_i);
+                        best_i
+                    };
                     let off2 = dst_row + x as usize;
                     if off2 < buf.len() {
                         buf[off2] = best_i;
@@ -33657,6 +33673,71 @@ mod tests {
             DispatchOutcome::ReturnedR0(5)
         );
         assert_eq!(ctx.cpu.read_mem(0x40000, 4).unwrap(), 99u32.to_le_bytes());
+    }
+
+    #[test]
+    fn indexed_dib_cache_is_bit_exact_for_all_rgb565_colours_and_palette_changes() {
+        let mut bitmap = pocket_kernel::gdi::Bitmap::new(256, 256);
+        bitmap.bpp = 8;
+        bitmap.dib_row_stride = 260;
+        bitmap.dib_bottom_up = true;
+        bitmap.dib_palette = (0..256).map(|i| ((i * 257) ^ 0x3947) as u16).collect();
+        bitmap.dib_palette[0] = 0;
+        bitmap.dib_palette[2] = 0;
+        bitmap.pixels = (0..65536u32)
+            .flat_map(|p| (p as u16).to_le_bytes())
+            .collect();
+        let reference = |bitmap: &pocket_kernel::gdi::Bitmap| {
+            let mut output = vec![0xa5; bitmap.dib_row_stride as usize * bitmap.height as usize];
+            for y in 0..bitmap.height {
+                for x in 0..bitmap.width {
+                    let off = ((y * bitmap.width + x) * 2) as usize;
+                    let (r, g, b) = rgb565_to_888(u16::from_le_bytes([
+                        bitmap.pixels[off],
+                        bitmap.pixels[off + 1],
+                    ]));
+                    let index = bitmap
+                        .dib_palette
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, p)| {
+                            let (pr, pg, pb) = rgb565_to_888(**p);
+                            let dr = pr.abs_diff(r) as u32;
+                            let dg = pg.abs_diff(g) as u32;
+                            let db = pb.abs_diff(b) as u32;
+                            dr * dr + dg * dg + db * db
+                        })
+                        .unwrap()
+                        .0 as u8;
+                    let row = if bitmap.dib_bottom_up {
+                        bitmap.height - 1 - y
+                    } else {
+                        y
+                    };
+                    output[(row * bitmap.dib_row_stride + x) as usize] = index;
+                }
+            }
+            output
+        };
+        let expected = reference(&bitmap);
+        let mut actual = vec![0xa5; expected.len()];
+        encode_pixels_to_dib(&bitmap, &mut actual);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual[255 * 260],
+            0,
+            "duplicate exact colours use the first index"
+        );
+        bitmap.width = 16;
+        bitmap.height = 1;
+        bitmap.dib_row_stride = 20;
+        bitmap.dib_bottom_up = false;
+        bitmap.pixels.truncate(32);
+        bitmap.dib_palette.reverse();
+        let expected = reference(&bitmap);
+        let mut actual = vec![0xa5; expected.len()];
+        encode_pixels_to_dib(&bitmap, &mut actual);
+        assert_eq!(actual, expected);
     }
 
     #[test]

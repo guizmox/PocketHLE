@@ -3777,3 +3777,21 @@ events in the managed left-stylus-only mini-game path. This is a type check,
 not an Android APK/device run. Native probe and import helper are diagnostics;
 do not ship diagnostic root Cargo/workspace changes or their game data.
 Latest grouped delivery supersedes initial installer/API interim archives.
+
+## Indexed DIB writeback and scrolling audio (2026-10-23)
+Native timing isolated the dominant map-scroll stall to ExtTextOutW(ETO_OPAQUE,
+len=0) on a 720x960 8-bit DIB: drawing ~12us, guest readback ~1.5ms, palette
+writeback ~0.8s. encode_pixels_to_dib scanned all 256 colours for each pixel.
+Use a local RGB565->palette-index cache, preserving nearest-colour distances,
+first-index ties and palette changes. Exhaustive 65536-colour regression test.
+The experimental asynchronous wave callback change was WITHDRAWN after a native
+run crashed. Restore original CPU, kernel and callback scheduling. Do not apply
+interim audio-driver v1/v2 or audio-GDI v3 over this final source. Keep only the
+GDI optimization; no title-specific path or changed guest audio semantics.
+Final native 40-second replay reached the map, scrolled right 24-30s and left
+32-38s, exited normally. Host audio sink drained at real-time 22050Hz mono.
+During map window 21-39s, largest scheduler sampling gap fell from 988.9ms to
+30.4ms; no queue starvation observed after optimization (baseline estimated
+2.30s of underrun from queued samples and scheduling gaps). Simulated native
+sink, not a physical Windows/Android audio-device validation. Both buffers
+continued requeueing with original callback delivery. Final change is GDI only.

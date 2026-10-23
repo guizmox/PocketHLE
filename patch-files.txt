@@ -1,10 +1,5 @@
-crates\pocket-kernel\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\sdl.rs
-crates\pocket-library\src\lib.rs
-crates\pocket-library\src\installer.rs
-crates\pocket-library\src\installer\wise.rs
-crates\pocket-library\src\installer\pocketsetup.rs
-crates\pocket-library\src\installer\sharedparts.rs
-frontends\pocket-android-jni\src\managed_game.rs
+crates\pocket-cpu\src\lib.rs
+crates\pocket-cpu\src\unicorn.rs
+crates\pocket-kernel\src\lib.rs
 docs\AGENTS.md
