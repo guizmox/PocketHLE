@@ -2453,6 +2453,9 @@ pub(crate) fn wake_due_worker(
         return Ok(None);
     }
     ctx.kernel.worker_preempt_after_ms = now.saturating_add(timer_poll_interval(ctx.kernel));
+    // A live WAVEHDR is guest-writable DMA memory. Publish mixer writes at
+    // bounded scheduling points even when no waveOut API is called afterwards.
+    refresh_wave_loops(ctx)?;
     if ctx.kernel.wave_out.function_frame.is_some()
         || ctx.kernel.create_frame.is_some()
         || !ctx.kernel.vector_iter_stack.is_empty()
@@ -23417,23 +23420,7 @@ fn switch_guest_fp(ctx: &mut CallCtx<'_>, next: usize) -> Result<(), KernelError
         .insert(ctx.kernel.current_thread, value);
     let next_value = ctx.kernel.guest_fpscr.get(&next).copied().unwrap_or(0);
     ctx.cpu.write_fpscr(next_value)?;
-    if next != ctx.kernel.current_thread {
-        // A WM_INITDIALOG or DefDlgProc callback may load resources for seconds.
-        // Park its continuation with its owner so audio workers can run, and
-        // another thread cannot consume its return frame or nested dialog stack.
-        let current = pocket_kernel::DialogCallbackState {
-            frame: ctx.kernel.dialog_frame.take(),
-            hwnd: std::mem::take(&mut ctx.kernel.dialog_frame_hwnd),
-            stack: std::mem::take(&mut ctx.kernel.dialog_frame_stack),
-            defaults: std::mem::take(&mut ctx.kernel.dialog_default_frames),
-        };
-        ctx.kernel.parked_dialog_callbacks.insert(ctx.kernel.current_thread, current);
-        let resumed = ctx.kernel.parked_dialog_callbacks.remove(&next).unwrap_or_default();
-        ctx.kernel.dialog_frame = resumed.frame;
-        ctx.kernel.dialog_frame_hwnd = resumed.hwnd;
-        ctx.kernel.dialog_frame_stack = resumed.stack;
-        ctx.kernel.dialog_default_frames = resumed.defaults;
-    }
+    ctx.kernel.switch_dialog_callbacks(next);
     Ok(())
 }
 
@@ -33397,6 +33384,54 @@ mod tests {
     }
 
     #[test]
+    fn dialog_callbacks_follow_their_thread_across_audio_preemption() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let outer = GuestCallFrame {
+            args: [1, 2, 3, 4],
+            lr: 0x11000,
+            sp: 0x20000,
+        };
+        let nested = GuestCallFrame {
+            args: [5, 6, 7, 8],
+            lr: 0x12000,
+            sp: 0x1ff00,
+        };
+        kernel.dialog_frame = Some(nested);
+        kernel.dialog_frame_hwnd = 42;
+        kernel.dialog_frame_stack.push((outer, 41));
+        kernel
+            .dialog_default_frames
+            .push((0, thunk.thunk_va, outer));
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        switch_guest_fp(&mut ctx, 1).unwrap();
+        ctx.kernel.current_thread = 1;
+        assert!(ctx.kernel.dialog_frame.is_none());
+        assert!(ctx.kernel.dialog_frame_stack.is_empty());
+        assert!(ctx.kernel.dialog_default_frames.is_empty());
+        ctx.kernel.dialog_frame = Some(outer);
+        ctx.kernel.dialog_frame_hwnd = 99;
+        switch_guest_fp(&mut ctx, 0).unwrap();
+        ctx.kernel.current_thread = 0;
+        assert_eq!(ctx.kernel.dialog_frame.unwrap().sp, nested.sp);
+        assert_eq!(ctx.kernel.dialog_frame_hwnd, 42);
+        assert_eq!(ctx.kernel.dialog_frame_stack[0].1, 41);
+        assert_eq!(ctx.kernel.dialog_default_frames[0].0, 0);
+        // Completing the main callback cannot consume the worker's frame.
+        ctx.kernel.dialog_frame = None;
+        switch_guest_fp(&mut ctx, 1).unwrap();
+        ctx.kernel.current_thread = 1;
+        assert_eq!(ctx.kernel.dialog_frame.unwrap().sp, outer.sp);
+        assert_eq!(ctx.kernel.dialog_frame_hwnd, 99);
+        assert!(ctx.kernel.dialog_default_frames.is_empty());
+    }
+
+    #[test]
     fn control_fp_rounding_masks_and_thread_isolation() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -36659,13 +36694,38 @@ mod startup_command_line_tests {
     fn shell_launch_has_no_implicit_executable_argument() {
         for command in [None, Some("-d \"\\Data Files\\Game\"".to_string())] {
             let (mut cpu, mut kernel, mut dispatcher) = setup();
-            cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
+            cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+                .unwrap();
             kernel.module_path = "\\Program Files\\Game\\game.exe".into();
             kernel.command_line = command.clone();
-            let DispatchOutcome::ReturnedR0(ptr) = call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "GetCommandLineW", &[]) else { panic!("unexpected result") };
-            let expected: Vec<_> = command.unwrap_or_default().encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
+            let DispatchOutcome::ReturnedR0(ptr) = call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "GetCommandLineW",
+                &[],
+            ) else {
+                panic!("unexpected result")
+            };
+            let expected: Vec<_> = command
+                .unwrap_or_default()
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
             assert_eq!(cpu.read_mem(ptr, expected.len() as u32).unwrap(), expected);
-            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "GetCommandLineW", &[]), DispatchOutcome::ReturnedR0(ptr));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "GetCommandLineW",
+                    &[]
+                ),
+                DispatchOutcome::ReturnedR0(ptr)
+            );
         }
     }
 }

@@ -510,19 +510,57 @@ pub struct HssClip {
 /// One stable HSS playback channel, owned by its speaker and channel index.
 #[derive(Debug)]
 pub struct HssChannel {
-    pub pointer: u32, pub group: u32, pub volume: u32, pub pan: u32, pub master: f32,
-    pub format: GuestFormat, pub rate: u32, pub frames: u64,
-    pub started: std::time::Instant, pub offset: u64,
-    pub stopped: bool, pub paused: bool, pub looped: bool, pub music: bool,
+    pub pointer: u32,
+    pub group: u32,
+    pub volume: u32,
+    pub pan: u32,
+    pub master: f32,
+    pub format: GuestFormat,
+    pub rate: u32,
+    pub frames: u64,
+    pub started: std::time::Instant,
+    pub offset: u64,
+    pub stopped: bool,
+    pub paused: bool,
+    pub looped: bool,
+    pub music: bool,
 }
 impl HssChannel {
-    pub fn new(group: u32) -> Self { Self { pointer:0,group,volume:64,pan:128,master:1.0,format:GuestFormat::default(),rate:22050,frames:0,
-        started:std::time::Instant::now(),offset:0,stopped:true,paused:false,looped:false,music:false } }
-    pub fn position(&self) -> u64 {
-        let position=self.offset.saturating_add(if self.paused || self.stopped {0} else {(self.started.elapsed().as_secs_f64()*self.rate as f64) as u64});
-        if self.looped && self.frames!=0 { position % self.frames } else {position.min(self.frames)}
+    pub fn new(group: u32) -> Self {
+        Self {
+            pointer: 0,
+            group,
+            volume: 64,
+            pan: 128,
+            master: 1.0,
+            format: GuestFormat::default(),
+            rate: 22050,
+            frames: 0,
+            started: std::time::Instant::now(),
+            offset: 0,
+            stopped: true,
+            paused: false,
+            looped: false,
+            music: false,
+        }
     }
-    pub fn active(&self) -> bool { !self.stopped && self.frames>0 && (self.looped || self.paused || self.position()<self.frames) }
+    pub fn position(&self) -> u64 {
+        let position = self.offset.saturating_add(if self.paused || self.stopped {
+            0
+        } else {
+            (self.started.elapsed().as_secs_f64() * self.rate as f64) as u64
+        });
+        if self.looped && self.frames != 0 {
+            position % self.frames
+        } else {
+            position.min(self.frames)
+        }
+    }
+    pub fn active(&self) -> bool {
+        !self.stopped
+            && self.frames > 0
+            && (self.looped || self.paused || self.position() < self.frames)
+    }
 }
 
 /// Everything we track for `hss.dll`.
@@ -1499,6 +1537,30 @@ pub struct MainThreadState {
 }
 
 impl KernelState {
+    pub fn switch_dialog_callbacks(&mut self, next: usize) {
+        if next != self.current_thread {
+            // A WM_INITDIALOG or DefDlgProc callback may load resources for seconds.
+            // Park its continuation with its owner so audio workers can run, and
+            // another thread cannot consume its return frame or nested dialog stack.
+            let current = DialogCallbackState {
+                frame: self.dialog_frame.take(),
+                hwnd: std::mem::take(&mut self.dialog_frame_hwnd),
+                stack: std::mem::take(&mut self.dialog_frame_stack),
+                defaults: std::mem::take(&mut self.dialog_default_frames),
+            };
+            self.parked_dialog_callbacks
+                .insert(self.current_thread, current);
+            let resumed = self
+                .parked_dialog_callbacks
+                .remove(&next)
+                .unwrap_or_default();
+            self.dialog_frame = resumed.frame;
+            self.dialog_frame_hwnd = resumed.hwnd;
+            self.dialog_frame_stack = resumed.stack;
+            self.dialog_default_frames = resumed.defaults;
+        }
+    }
+
     /// A modal loop may dispatch again inside its caller's WndProc. Only
     /// the matching stack level is a return; a deeper call is a new frame.
     pub fn take_message_return(&mut self, owner: usize, sp: u32) -> Option<GuestCallFrame> {
@@ -4337,6 +4399,7 @@ pub fn run_main_loop_with_hook(
                         {
                             let fpscr = cpu.read_fpscr()?;
                             process.state.guest_fpscr.insert(thread_index + 1, fpscr);
+                            process.state.switch_dialog_callbacks(0);
                             process.state.current_thread = 0;
                             cpu.write_fpscr(
                                 process.state.guest_fpscr.get(&0).copied().unwrap_or(0),
@@ -4381,6 +4444,7 @@ pub fn run_main_loop_with_hook(
                             cpu.write_fpscr(
                                 process.state.guest_fpscr.get(&0).copied().unwrap_or(0),
                             )?;
+                            process.state.switch_dialog_callbacks(0);
                             process.state.current_thread = 0;
                             pc = thread.resume_pc;
                         } else {
@@ -4418,6 +4482,7 @@ pub fn run_main_loop_with_hook(
                             cpu.write_fpscr(
                                 process.state.guest_fpscr.get(&0).copied().unwrap_or(0),
                             )?;
+                            process.state.switch_dialog_callbacks(0);
                             process.state.current_thread = 0;
                             pc = thread.resume_pc;
                         }
