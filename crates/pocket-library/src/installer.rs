@@ -2,6 +2,9 @@
 //! for format detection. Every decoded layer shares an allocation budget.
 use std::io::{Cursor, Read};
 mod installshield;
+mod pocketsetup;
+mod sharedparts;
+mod wise;
 
 const LIMIT: usize = 256 * 1024 * 1024;
 const DEPTH: usize = 6;
@@ -92,20 +95,53 @@ fn layer(
         // cabinet containing Setup.exe/Setup.ini. Decode the container rather
         // than mistaking its desktop files for the installed PocketPC game.
         let mut archive = cab::Cabinet::new(Cursor::new(&b[..size])).map_err(|e| e.to_string())?;
-        let names: Vec<_> = archive.folder_entries().flat_map(|f| f.file_entries())
-            .map(|f| f.name().to_owned()).collect();
-        if names.len() > 4096 { return Err("Too many cabinet entries".into()); }
-        let is_ce = names.iter().any(|n| n.eq_ignore_ascii_case("_setup.xml") || n.to_ascii_lowercase().ends_with(".000"));
+        let names: Vec<_> = archive
+            .folder_entries()
+            .flat_map(|f| f.file_entries())
+            .map(|f| f.name().to_owned())
+            .collect();
+        if names.len() > 4096 {
+            return Err("Too many cabinet entries".into());
+        }
+        let is_ce = names.iter().any(|n| {
+            n.eq_ignore_ascii_case("_setup.xml") || n.to_ascii_lowercase().ends_with(".000")
+        });
         if !is_ce {
             let previous = out.len();
-            for child in names.iter().filter(|n| n.to_ascii_lowercase().ends_with(".cab")) {
+            let mut entries = Vec::new();
+            for child in names.iter().filter(|n| {
+                let name = n.replace('\\', "/").to_ascii_lowercase();
+                name.ends_with(".cab")
+                    || name
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|n| n == "files.dat" || n == "parts.dat")
+            }) {
                 let mut data = Vec::new();
-                archive.read_file(child).map_err(|e| e.to_string())?
-                    .take(*budget as u64 + 1).read_to_end(&mut data).map_err(|e| e.to_string())?;
+                archive
+                    .read_file(child)
+                    .map_err(|e| e.to_string())?
+                    .take(*budget as u64 + 1)
+                    .read_to_end(&mut data)
+                    .map_err(|e| e.to_string())?;
                 charge(data.len(), budget)?;
-                layer(&data, child, depth + 1, budget, out)?;
+                entries.push((child.clone(), data));
             }
-            if out.len() > previous { return Ok(true); }
+            if let Some(rebuilt) = sharedparts::extract(&entries, budget)? {
+                for cabinet in rebuilt {
+                    layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
+                }
+            } else {
+                for (child, data) in entries
+                    .iter()
+                    .filter(|(n, _)| n.to_ascii_lowercase().ends_with(".cab"))
+                {
+                    layer(data, child, depth + 1, budget, out)?;
+                }
+            }
+            if out.len() > previous {
+                return Ok(true);
+            }
         }
         if !out.iter().any(|c| c.bytes == b[..size]) {
             if out.len() >= 32 {
@@ -218,11 +254,37 @@ fn layer(
         }
         None
     };
+    let mut overlay = 0usize;
+    for i in 0..count {
+        let p = sections + 40 * i;
+        let offset = u32_at(b, p + 20).ok_or("Truncated section")?;
+        let length = u32_at(b, p + 16).ok_or("Truncated section")?;
+        overlay = overlay.max(offset.checked_add(length).ok_or("Section overflow")?);
+    }
+    if let Some(cabinets) = pocketsetup::extract(b, budget)? {
+        for cabinet in cabinets {
+            layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
+        }
+        return Ok(true);
+    }
+    if let Some(cabinets) = wise::extract(b, overlay, budget)? {
+        for cabinet in cabinets {
+            layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
+        }
+        return Ok(true);
+    }
     let mut recognized = false;
     // Direct cabinets inside a PE overlay (including an inflated launcher).
     for (pos, _) in b.windows(4).enumerate().filter(|(_, w)| *w == b"MSCF") {
         if let Some(size) = u32_at(b, pos + 8) {
-            if size >= 36 && pos.checked_add(size).is_some_and(|e| e <= b.len()) {
+            if size >= 36
+                && pos.checked_add(size).is_some_and(|e| e <= b.len())
+                && b.get(pos + 24..pos + 26) == Some(&[3, 1][..])
+                && u32_at(b, pos + 4) == Some(0)
+                && u32_at(b, pos + 12) == Some(0)
+                && u32_at(b, pos + 20) == Some(0)
+                && u32_at(b, pos + 16).is_some_and(|p| p >= 36 && p < size)
+            {
                 layer(&b[pos..pos + size], name, depth + 1, budget, out)?;
                 recognized = true;
             }
@@ -285,6 +347,25 @@ fn layer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inspect_supplied_installers() {
+        let Some(paths) = std::env::var_os("POCKET_INSTALLER_SAMPLES") else {
+            return;
+        };
+        for path in std::env::split_paths(&paths) {
+            let b = std::fs::read(&path).unwrap();
+            let result = extract(&b);
+            eprintln!(
+                "SAMPLE {}: {:?}",
+                path.display(),
+                result.as_ref().map(|v| v.as_ref().map(|v| v
+                    .iter()
+                    .map(|c| (&c.name, c.bytes.len()))
+                    .collect::<Vec<_>>()))
+            );
+            assert!(result.unwrap().is_some());
+        }
+    }
     #[test]
     fn arbitrary_data_is_not_an_installer() {
         assert!(extract(b"not an installer").unwrap().is_none());

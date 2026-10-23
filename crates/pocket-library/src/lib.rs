@@ -1314,11 +1314,12 @@ impl Library {
             .unwrap_or("")
             .to_ascii_lowercase();
         let zip_source = count == 4 && signature[..2] == *b"PK" || ext == "zip";
-        let installer_cabinets = if signature[..2] == *b"MZ"
+        let installer_cabinets = if (signature[..2] == *b"MZ"
             && !sniff_pe(path)
                 .ok()
                 .flatten()
-                .is_some_and(|pe| pe.is_supported_guest())
+                .is_some_and(|pe| pe.is_supported_guest()))
+            || (zip_source && is_desktop_cab_bundle(path)?)
         {
             stage_installer_cabinets(path, staging.path())?
         } else {
@@ -3199,6 +3200,50 @@ const IMAGE_FILE_MACHINE_THUMB: u16 = 0x01c2;
 const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
 const IMAGE_FILE_MACHINE_MIPS_R3000: u16 = 0x0162;
 const IMAGE_FILE_MACHINE_MIPS_R4000: u16 = 0x0166;
+
+// A desktop distribution containing CABs plus desktop setup metadata must
+// expose all architectures. Portable game ZIPs retain the ordinary ZIP route.
+fn is_desktop_cab_bundle(path: &Path) -> Result<bool, LibraryError> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(fs::File::open(path)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if archive.len() > 4096 {
+        return Ok(false);
+    }
+    let mut cabinets = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_ascii_lowercase();
+        if name.ends_with(".cab") {
+            cabinets += 1;
+            continue;
+        }
+        if name.ends_with(".ini") || name.ends_with(".txt") {
+            continue;
+        }
+        if name.ends_with(".exe") {
+            let mut header = Vec::new();
+            (&mut entry).take(65536).read_to_end(&mut header)?;
+            if header.starts_with(b"MZ") && header.len() >= 64 {
+                let pe = u32::from_le_bytes(header[60..64].try_into().unwrap()) as usize;
+                if let Some(coff) = header.get(pe..pe.saturating_add(24)) {
+                    if coff.starts_with(b"PE\0\0")
+                        && u16::from_le_bytes([coff[4], coff[5]]) == 0x14c
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
+        return Ok(false);
+    }
+    Ok(cabinets > 0)
+}
 
 fn stage_installer_cabinets(
     source: &Path,

@@ -640,6 +640,41 @@ fn pump_input(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
                 }
                 put(&mut event, 12, modifiers);
             }
+            InputEvent::MouseMessage {
+                message,
+                x,
+                y,
+                data,
+            } => {
+                event[4..6].copy_from_slice(&x.to_le_bytes());
+                event[6..8].copy_from_slice(&y.to_le_bytes());
+                ctx.kernel.sdl.mouse.0 = x;
+                ctx.kernel.sdl.mouse.1 = y;
+                let (vk, button, down) = match message {
+                    0x204 => (2, 3, true),
+                    0x205 => (2, 3, false),
+                    0x207 => (4, 2, true),
+                    0x208 => (4, 2, false),
+                    0x20a => {
+                        if data == 0 {
+                            continue;
+                        }
+                        event[2] = if data > 0 { 4 } else { 5 };
+                        event[0] = 5;
+                        event[3] = 1;
+                        ctx.kernel.sdl.events.push_back(event);
+                        event[0] = 6;
+                        event[3] = 0;
+                        ctx.kernel.sdl.events.push_back(event);
+                        continue;
+                    }
+                    _ => continue,
+                };
+                ctx.kernel.pressed_keys[vk] = down;
+                event[0] = if down { 5 } else { 6 };
+                event[2] = button;
+                event[3] = u8::from(down);
+            }
             InputEvent::PointerDown { x, y } | InputEvent::PointerUp { x, y } => {
                 let down = matches!(input, InputEvent::PointerDown { .. });
                 event[0] = if down { 5 } else { 6 };
@@ -651,7 +686,9 @@ fn pump_input(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
             }
             InputEvent::PointerMove { x, y } => {
                 event[0] = 4;
-                event[2] = u8::from(ctx.kernel.sdl.mouse.2);
+                event[2] = u8::from(ctx.kernel.sdl.mouse.2)
+                    | (u8::from(ctx.kernel.pressed_keys[4]) << 1)
+                    | (u8::from(ctx.kernel.pressed_keys[2]) << 2);
                 event[4..6].copy_from_slice(&x.to_le_bytes());
                 event[6..8].copy_from_slice(&y.to_le_bytes());
                 event[8..10].copy_from_slice(
@@ -800,6 +837,45 @@ mod tests {
         call(&mut cpu, &mut kernel, quit, &[]);
         assert!(kernel.sdl.surfaces.is_empty());
         assert_eq!(kernel.sdl.screen, 0);
+    }
+    #[test]
+    fn injected_auxiliary_mouse_keeps_drag_and_wheel_order() {
+        let (mut cpu, mut kernel) = setup();
+        kernel.pending_input.extend([
+            InputEvent::MouseMessage {
+                message: 0x204,
+                x: 10,
+                y: 20,
+                data: 0,
+            },
+            InputEvent::PointerMove { x: 12, y: 24 },
+            InputEvent::MouseMessage {
+                message: 0x205,
+                x: 12,
+                y: 24,
+                data: 0,
+            },
+            InputEvent::MouseMessage {
+                message: 0x20a,
+                x: 12,
+                y: 24,
+                data: -120,
+            },
+        ]);
+        call(&mut cpu, &mut kernel, pump, &[]);
+        let events: Vec<_> = kernel
+            .sdl
+            .events
+            .iter()
+            .map(|e| (e[0], e[2], e[3]))
+            .collect();
+        assert_eq!(
+            events,
+            vec![(5, 3, 1), (4, 4, 0), (6, 3, 0), (5, 5, 1), (6, 5, 0)]
+        );
+        assert!(!kernel.pressed_keys[2]);
+        assert_eq!(kernel.sdl.mouse.0, 12);
+        assert_eq!(kernel.sdl.mouse.1, 24);
     }
     #[test]
     fn queued_input_peek_order_and_live_key_state() {

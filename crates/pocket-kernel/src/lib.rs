@@ -377,6 +377,13 @@ pub enum InputEvent {
         x: u16,
         y: u16,
     },
+    /// Injected CE right/middle/wheel input shares the ordered input queue.
+    MouseMessage {
+        message: u32,
+        x: u16,
+        y: u16,
+        data: i16,
+    },
     /// Hardware / D-pad / virtual-keyboard key press. `vk` is a
     /// standard Win32 virtual-key code (e.g. `VK_LEFT = 0x25`).
     KeyDown {

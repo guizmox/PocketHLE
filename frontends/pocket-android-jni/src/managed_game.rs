@@ -191,7 +191,8 @@ impl ManagedGame {
                 0x0d | 0x20 => self.fire(),
                 _ => {}
             },
-            InputEvent::StylusAim { .. }
+            InputEvent::MouseMessage { .. }
+            | InputEvent::StylusAim { .. }
             | InputEvent::KeyUp { .. }
             | InputEvent::Text { .. }
             | InputEvent::KeyboardRotation { .. } => {}

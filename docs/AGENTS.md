@@ -3715,3 +3715,65 @@ Use latest cumulative snapshot; older archives overwrite common source files.
 Next: compare remaining brief repeat on optimized/device run and determine if
 native FMOD is decoding longer than its ring or waiting on a guest timer. Do not
 silence playback or invent PCM to conceal starvation.
+
+## Installer profiles checkpoint (2026-10-23, new attachments)
+Current source restored from crates(9).zip. New generic profiles: Wise sequential
+raw DEFLATE streams with per-stream CRC and executable/script/bitmap sizes;
+PocketSetup PS2 16KiB chunks with signed compressed/raw lengths. Nested CAB
+selection remains shared; Anthelion2 contains QVGA and VGA ARM CABs. Ignore
+instruction constants resembling MSCF by validating structural header before
+parsing a PE-embedded candidate. ChristmasRush Wise stream extraction confirmed
+through exact EOF/CRC in an independent inspection; Tots'n'Togs reconstructed
+CAB exactly 2221508 bytes from 136 blocks including raw blocks. Rust validation
+pending at first delivery. Diesel ZIP includes ARM/MIPS/SH3 cabinets; do not
+silently select one architecture. Runtime investigation and new APIs pending.
+
+## Requested CE mouse injection and wave ID (2026-10-23)
+mouse_event queues real movement/left click events through the existing stylus
+path, normalizes absolute 0..65535 to current guest display, clamps signed
+relative movement, and emits right/middle/wheel messages with button modifiers.
+CE dwExtraInfo is documented unsupported. Pointer acceleration is neutral in
+the modeled device. waveOutGetID validates a live HWAVEOUT and writable UINT,
+returns the concrete single output ID zero (including WAVE_MAPPER opens), and
+rejects invalid/closed handles without writing. Initial delivery before tests.
+Anthelion2's outer CAB contains all-zero placeholder CAB files and files.dat /
+parts.dat. Implemented shared 512-byte block reconstruction after reading the
+packager's x86 decoder: files.dat = u8 count + count*64 NUL-terminated names;
+parts.dat = 512 data bytes, u8 reference count, then u32 references where low
+byte is target index and high 24 bits are byte offset. Reconstruct memory only,
+validate indices/bounds and parse resulting real CABs. Two actual import choices
+now verified: Anthelion 2 Beta and Anthelion 2 VGA Beta. Christmas Rush and
+Tots'n'Togs actual imports verified. Desktop CAB-only ZIP distributions now enter
+the same architecture choice route; portable ZIPs with guest executables/assets
+retain the ordinary importer. Initial new ZIP choice delivery before validation.
+Validation: library suite 117 passed; actual Anthelion2 QVGA and VGA choices
+both import; Christmas Rush and Tots'n'Togs import. Diesel desktop ZIP exposes
+SH3, MIPS, ARM choices; ARM imported to diesel-library, install_dir from CAB is
+\\Program Files\\Games\\Diesel FPS Technology DEMO\\. mouse_event targeted test
+and waveOutGetID targeted test pass. Native CPU build preparing runtime probe;
+first 9-job GCC run failed on large MIPS64 objects; rebuilding with two jobs.
+Do not change production compilation settings to hide host test environment.
+Mouse injection follow-up: right/middle/wheel now share pending_input with
+left/movement, rather than a separate posted-message queue. This preserves
+ordering across calls and samples button/modifier state when each event is
+consumed. A MouseMessage input variant carries auxiliary events; native WinCE
+routes it through existing pointer targeting and SDL maps it to real SDL1.2
+button/wheel events. No frontend remapping/profile changes. New delivery
+before rerunning regressions. Earlier API v1 is superseded.
+
+## Final validation / Diesel cause (2026-10-23)
+Diesel legacy ZIP import experimentally selected fpsdemo.SH3.CAB (first archive
+member), executable PE machine 0x01A2, despite ARM and MIPS variants. New desktop
+CAB bundle preparation exposes all choices; selecting ARM produces machine
+0x01C0 and DieselFPS.exe. Native ARM probe with CAB's real install prefix ran
+18 seconds and reached the 3D scene (no crash, no process exit). No game-specific
+runtime or graphics adjustment. Existing SH3 library entries are not rewritten;
+user must reimport the ZIP and choose ARM.
+Validation after ordered mouse input change: winceapi 515 passed, 4 ignored;
+additional SDL auxiliary mouse/drag/wheel order test passed. Library 117 passed,
+actual three installers imported including both Anthelion variants. Android JNI
+host Rust check --no-default-features passes after handling auxiliary pointer
+events in the managed left-stylus-only mini-game path. This is a type check,
+not an Android APK/device run. Native probe and import helper are diagnostics;
+do not ship diagnostic root Cargo/workspace changes or their game data.
+Latest grouped delivery supersedes initial installer/API interim archives.

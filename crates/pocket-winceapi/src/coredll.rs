@@ -615,6 +615,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "waveOutGetDevCaps", wave_out_get_dev_caps);
     d.register_handler(dll, "waveOutGetDevCapsW", wave_out_get_dev_caps);
     d.register_handler(dll, "waveOutGetPosition", wave_out_get_position);
+    d.register_handler(dll, "waveOutGetID", wave_out_get_id);
     d.register_constant(dll, "waveOutMessage", 0, zero_returning);
     d.register_handler(dll, "setjmp", setjmp);
     d.register_handler(dll, "SendMessageW", send_message_w);
@@ -627,6 +628,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ChildWindowFromPoint", window_from_point);
     d.register_handler(dll, "GetWindowRect", get_window_rect);
     d.register_handler(dll, "GetCursorPos", get_cursor_pos);
+    d.register_handler(dll, "mouse_event", mouse_event);
     d.register_handler(dll, "SetCursor", set_cursor);
     d.register_handler(dll, "GetClassInfoW", get_class_info_w);
     d.register_handler(
@@ -12099,6 +12101,16 @@ const BN_CLICKED: u32 = 0;
 fn input_to_message(ev: pocket_kernel::InputEvent) -> Option<(u32, u32, u32)> {
     match ev {
         InputEvent::Text { character } => Some((0x102, character as u32, 1)),
+        InputEvent::MouseMessage {
+            message,
+            x,
+            y,
+            data,
+        } => Some((
+            message,
+            (data as u16 as u32) << 16,
+            (u32::from(y) << 16) | u32::from(x),
+        )),
         InputEvent::KeyboardRotation { .. } | InputEvent::StylusAim { .. } => None,
         pocket_kernel::InputEvent::PointerDown { x, y } => {
             let lparam = ((y as u32) << 16) | (x as u32);
@@ -12866,11 +12878,20 @@ pub(crate) fn monotonic_ms() -> u64 {
 fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
     if let InputEvent::PointerDown { x, y }
     | InputEvent::PointerMove { x, y }
-    | InputEvent::PointerUp { x, y } = ev
+    | InputEvent::PointerUp { x, y }
+    | InputEvent::MouseMessage { x, y, .. } = ev
     {
         ctx.kernel.controls.cursor_position = (i32::from(x), i32::from(y));
     }
     match ev {
+        InputEvent::MouseMessage { message, .. } => match message {
+            0x204 => ctx.kernel.pressed_keys[2] = true,
+            0x205 => ctx.kernel.pressed_keys[2] = false,
+            0x207 => ctx.kernel.pressed_keys[4] = true,
+            0x208 => ctx.kernel.pressed_keys[4] = false,
+            _ => {}
+        },
+
         pocket_kernel::InputEvent::KeyDown { vk } => {
             if vk == 0x0d && !ctx.kernel.pressed_keys[0x0d] {
                 ctx.kernel
@@ -13222,7 +13243,8 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
     let (x, y) = match event {
         InputEvent::PointerDown { x, y }
         | InputEvent::PointerUp { x, y }
-        | InputEvent::PointerMove { x, y } => (i32::from(x), i32::from(y)),
+        | InputEvent::PointerMove { x, y }
+        | InputEvent::MouseMessage { x, y, .. } => (i32::from(x), i32::from(y)),
         InputEvent::Text { .. }
             if kernel.shell_keyboard.sip && kernel.shell_keyboard.target != 0 =>
         {
@@ -13230,11 +13252,20 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
         }
         _ => return Some((input_window(kernel), message, wp, lp)),
     };
-    let wp = if message == WM_MOUSEMOVE && !kernel.pressed_keys[1] {
-        wp & !MK_LBUTTON
-    } else {
-        wp
+    let left = match message {
+        WM_LBUTTONDOWN => true,
+        WM_LBUTTONUP => false,
+        _ => kernel.pressed_keys[1],
     };
+    let buttons = u32::from(left)
+        | (u32::from(kernel.pressed_keys[2]) << 1)
+        | (u32::from(kernel.pressed_keys[4]) << 4)
+        | (u32::from(kernel.pressed_keys[0x10]) << 2)
+        | (u32::from(kernel.pressed_keys[0x11]) << 3);
+    let wp = (wp & 0xffff0000) | buttons;
+    if message == 0x20a {
+        return Some((input_window(kernel), message, wp, lp));
+    }
     if let Some(hwnd) = kernel
         .controls
         .pointer_capture
@@ -21352,6 +21383,102 @@ fn resolve_dynamic_export(ctx: &CallCtx<'_>, module: u32, name: &str) -> u32 {
                 0
             }
         })
+}
+
+/// Windows CE mouse injection; dwExtraInfo is unsupported by CE itself.
+fn mouse_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let flags = ctx.arg_u32(0)?;
+    let dx = ctx.arg_u32(1)?;
+    let dy = ctx.arg_u32(2)?;
+    let data = ctx.arg_u32(3)?;
+    let _extra = ctx.arg_u32(4)?;
+    let (old_x, old_y) = ctx.kernel.controls.cursor_position;
+    let max_x = ctx
+        .kernel
+        .framebuffer
+        .width
+        .saturating_sub(1)
+        .min(u16::MAX as u32) as i64;
+    let max_y = ctx
+        .kernel
+        .framebuffer
+        .height
+        .saturating_sub(1)
+        .min(u16::MAX as u32) as i64;
+    let (x, y) = if flags & 1 == 0 {
+        (i64::from(old_x), i64::from(old_y))
+    } else if flags & 0x8000 != 0 {
+        (
+            (i64::from(dx.min(65535)) * max_x + 32767) / 65535,
+            (i64::from(dy.min(65535)) * max_y + 32767) / 65535,
+        )
+    } else {
+        // The emulated pointer has neutral speed/acceleration (1:1).
+        (
+            i64::from(old_x) + i64::from(dx as i32),
+            i64::from(old_y) + i64::from(dy as i32),
+        )
+    };
+    let x = x.clamp(0, max_x) as u16;
+    let y = y.clamp(0, max_y) as u16;
+    if flags & 1 != 0 {
+        ctx.kernel.controls.cursor_position = (i32::from(x), i32::from(y));
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::PointerMove { x, y });
+    }
+    // Use the regular stylus route, including capture, native controls and
+    // built-in controls. No foreground-window-only shortcut for left clicks.
+    if flags & 2 != 0 {
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::PointerDown { x, y });
+    }
+    if flags & 4 != 0 {
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::PointerUp { x, y });
+    }
+    for (flag, message) in [(8, 0x204), (16, 0x205), (32, 0x207), (64, 0x208)] {
+        if flags & flag != 0 {
+            ctx.kernel
+                .pending_input
+                .push_back(InputEvent::MouseMessage {
+                    message,
+                    x,
+                    y,
+                    data: 0,
+                });
+        }
+    }
+    if flags & 0x800 != 0 {
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::MouseMessage {
+                message: 0x20a,
+                x,
+                y,
+                data: data as i16,
+            });
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn wave_out_get_id(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    if !ctx.kernel.wave_out.devices.contains_key(&handle) {
+        return Ok(DispatchOutcome::ReturnedR0(5)); // MMSYSERR_INVALHANDLE
+    }
+    if output == 0 || ctx.cpu.check_guest_access(output, 4, Prot::WRITE).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(11)); // MMSYSERR_INVALPARAM
+    }
+    // waveOutGetNumDevs advertises a single concrete output, ID 0. An open
+    // through WAVE_MAPPER resolves to that same concrete output.
+    if ctx.cpu.write_mem(output, &0u32.to_le_bytes()).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(11));
+    }
+    Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
 
 fn get_cursor_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -33429,6 +33556,107 @@ mod tests {
         assert_eq!(ctx.kernel.dialog_frame.unwrap().sp, outer.sp);
         assert_eq!(ctx.kernel.dialog_frame_hwnd, 99);
         assert!(ctx.kernel.dialog_default_frames.is_empty());
+    }
+
+    #[test]
+    fn injected_mouse_respects_absolute_relative_motion_and_button_edges() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(0x40000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x40000).unwrap();
+        cpu.write_mem(0x40000, &0u32.to_le_bytes()).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, 0x8003).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 65535).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 65535).unwrap();
+        mouse_event(&mut ctx).unwrap();
+        let x = (ctx.kernel.framebuffer.width - 1) as u16;
+        let y = (ctx.kernel.framebuffer.height - 1) as u16;
+        assert_eq!(
+            ctx.kernel.pending_input.pop_front(),
+            Some(InputEvent::PointerMove { x, y })
+        );
+        assert_eq!(
+            ctx.kernel.pending_input.pop_front(),
+            Some(InputEvent::PointerDown { x, y })
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, (-10i32) as u32).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, (-20i32) as u32).unwrap();
+        mouse_event(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.kernel.controls.cursor_position,
+            (i32::from(x) - 10, i32::from(y) - 20)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 4).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
+        mouse_event(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.kernel.pending_input.back(),
+            Some(&InputEvent::PointerUp {
+                x: x - 10,
+                y: y - 20
+            })
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 8 | 32 | 0x800).unwrap();
+        ctx.cpu.write_reg(ArmReg::R3, 120).unwrap();
+        mouse_event(&mut ctx).unwrap();
+        while let Some(event) = ctx.kernel.pending_input.pop_front() {
+            update_key_state(&mut ctx, event);
+            if let InputEvent::MouseMessage { message: 0x20a, .. } = event {
+                let (_, message, wp, _) = addressed_input(ctx.kernel, event).unwrap();
+                assert_eq!(message, 0x20a);
+                assert_eq!(wp >> 16, 120);
+                assert_eq!(wp & 0x12, 0x12);
+            }
+        }
+        assert!(ctx.kernel.pressed_keys[2] && ctx.kernel.pressed_keys[4]);
+    }
+    #[test]
+    fn wave_id_validates_handle_and_output_without_touching_failures() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(0x40000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x40000, &99u32.to_le_bytes()).unwrap();
+        kernel.wave_out.devices.insert(
+            0xdead4100,
+            pocket_kernel::WaveOutDevice {
+                callback_kind: pocket_kernel::WaveCallbackKind::None,
+                callback_target: 0,
+                instance: 0,
+                owner_thread: 0,
+                format: Default::default(),
+                paused: false,
+            },
+        );
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, 0xdead4100).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x40000).unwrap();
+        assert_eq!(
+            wave_out_get_id(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_mem(0x40000, 4).unwrap(), 0u32.to_le_bytes());
+        ctx.cpu.write_mem(0x40000, &99u32.to_le_bytes()).unwrap();
+        ctx.kernel.wave_out.devices.clear();
+        assert_eq!(
+            wave_out_get_id(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(5)
+        );
+        assert_eq!(ctx.cpu.read_mem(0x40000, 4).unwrap(), 99u32.to_le_bytes());
     }
 
     #[test]
