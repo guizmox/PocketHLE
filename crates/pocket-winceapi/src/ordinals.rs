@@ -91,7 +91,9 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
 /// Number of ordinal entries for `dll` — used by tests.
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
-    if key == "mfcce300.dll" { return 10; }
+    if key == "mfcce300.dll" {
+        return 10;
+    }
     if pocket_gles::ordinals::is_gles_dll(&key) {
         return pocket_gles::ordinals::entry_count(&key);
     }

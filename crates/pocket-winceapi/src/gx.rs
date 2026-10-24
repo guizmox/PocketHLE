@@ -403,6 +403,7 @@ pub(crate) mod tests {
             gles_strings: std::collections::HashMap::new(),
             synthetic_message_count: 0,
             synthetic_message_budget: 240,
+            synthetic_peek_paint_yield: Default::default(),
             wnd_proc: 0,
             window_class_procs: std::collections::HashMap::new(),
             window_background: None,

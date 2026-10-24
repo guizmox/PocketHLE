@@ -38,6 +38,7 @@ mod list_paint;
 pub(crate) mod menu_api;
 #[path = "coredll/palette.rs"]
 mod palette;
+mod progress;
 #[cfg(test)]
 mod recovery_tests;
 #[path = "coredll/registry_enumeration.rs"]
@@ -45,7 +46,6 @@ mod registry_enumeration;
 mod tab_control;
 mod toolbar;
 mod trackbar;
-mod progress;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
 use pocket_kernel::controls::{ControlAction, ControlClass, Controls};
@@ -7740,7 +7740,10 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let mut input = Vec::new();
     let pushed = ctx.kernel.crt_pushback.remove(&handle);
     let mut offsets = vec![0usize];
-    if let Some(byte) = pushed {input.push(byte); offsets.push(0);}
+    if let Some(byte) = pushed {
+        input.push(byte);
+        offsets.push(0);
+    }
     let mut i = 0;
     while i < raw.len() {
         if text_mode && raw[i] == b'\r' && raw.get(i + 1) == Some(&b'\n') {
@@ -7765,7 +7768,9 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         SeekKind::Begin,
     );
     if result.as_ref().map_or(true, |(_, consumed)| *consumed == 0) {
-        if let Some(byte) = pushed {ctx.kernel.crt_pushback.insert(handle,byte);}
+        if let Some(byte) = pushed {
+            ctx.kernel.crt_pushback.insert(handle, byte);
+        }
     }
     let (assigned, _) = result?;
     Ok(DispatchOutcome::ReturnedR0(assigned as u32))
@@ -9075,10 +9080,15 @@ fn crt_fflush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// non-LF lookahead so a later stdio call sees precisely the next byte.
 fn read_stdio_bytes(ctx: &mut CallCtx<'_>, h: u32, output: &mut [u8]) -> usize {
     use pocket_kernel::vfs::SeekKind;
-    if output.is_empty() { return 0; }
+    if output.is_empty() {
+        return 0;
+    }
     let mut written = if let Some(byte) = ctx.kernel.crt_pushback.remove(&h) {
-        output[0] = byte; 1
-    } else { 0 };
+        output[0] = byte;
+        1
+    } else {
+        0
+    };
     if !ctx.kernel.vfs.is_text_mode(h) {
         return written + ctx.kernel.vfs.read(h, &mut output[written..]).unwrap_or(0);
     }
@@ -9176,7 +9186,9 @@ fn crt_fseek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     };
     let adjustment = i64::from(whence == 1 && ctx.kernel.crt_pushback.contains_key(&h));
     let r = ctx.kernel.vfs.seek(h, off - adjustment, kind);
-    if r.is_some() { ctx.kernel.crt_pushback.remove(&h); }
+    if r.is_some() {
+        ctx.kernel.crt_pushback.remove(&h);
+    }
     log::trace!("fseek(0x{h:08x}, {off}, {whence}) -> {r:?}");
     Ok(DispatchOutcome::ReturnedR0(if r.is_some() {
         0
@@ -9234,7 +9246,10 @@ fn crt_fsetpos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.cpu.read_mem_into(src, &mut buf)?;
     let pos = u32::from_le_bytes(buf);
     match ctx.kernel.vfs.seek(h, pos as i64, SeekKind::Begin) {
-        Some(_) => {ctx.kernel.crt_pushback.remove(&h); Ok(DispatchOutcome::ReturnedR0(0))},
+        Some(_) => {
+            ctx.kernel.crt_pushback.remove(&h);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
         None => Ok(DispatchOutcome::ReturnedR0(u32::MAX)),
     }
 }
@@ -9244,13 +9259,21 @@ fn crt_feof(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let size = ctx.kernel.vfs.size(h).unwrap_or(0);
     let pos = ctx.kernel.vfs.seek(h, 0, SeekKind::Current).unwrap_or(0);
-    Ok(DispatchOutcome::ReturnedR0(if pos >= size && !ctx.kernel.crt_pushback.contains_key(&h) { 1 } else { 0 }))
+    Ok(DispatchOutcome::ReturnedR0(
+        if pos >= size && !ctx.kernel.crt_pushback.contains_key(&h) {
+            1
+        } else {
+            0
+        },
+    ))
 }
 
 fn crt_rewind(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
-    if ctx.kernel.vfs.seek(h, 0, SeekKind::Begin).is_some() {ctx.kernel.crt_pushback.remove(&h); }
+    if ctx.kernel.vfs.seek(h, 0, SeekKind::Begin).is_some() {
+        ctx.kernel.crt_pushback.remove(&h);
+    }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -9258,8 +9281,10 @@ fn crt_rewind(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// EOF and a second outstanding pushback fail without altering stream state.
 fn crt_ungetc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (character, handle) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
-    if character == u32::MAX || !ctx.kernel.vfs.is_open(handle)
-        || ctx.kernel.crt_pushback.contains_key(&handle) {
+    if character == u32::MAX
+        || !ctx.kernel.vfs.is_open(handle)
+        || ctx.kernel.crt_pushback.contains_key(&handle)
+    {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     ctx.kernel.crt_pushback.insert(handle, character as u8);
@@ -9294,7 +9319,9 @@ fn read_stdio_line(ctx: &mut CallCtx<'_>, h: u32, max: usize, text_mode: bool) -
     let mut out = Vec::with_capacity(max);
     if let Some(byte) = ctx.kernel.crt_pushback.remove(&h) {
         out.push(byte);
-        if byte == b'\n' || out.len()+1 >= max {return out;}
+        if byte == b'\n' || out.len() + 1 >= max {
+            return out;
+        }
     }
     let mut byte = [0u8; 1];
     while out.len() + 1 < max {
@@ -11655,7 +11682,10 @@ fn control_message(
                 7 => 0x100,             // BS_GROUPBOX: static decoration
                 _ => 0x2000,            // check boxes and other button types
             },
-            ControlClass::Static | ControlClass::Toolbar | ControlClass::ScrollBar | ControlClass::Progress => 0x100,
+            ControlClass::Static
+            | ControlClass::Toolbar
+            | ControlClass::ScrollBar
+            | ControlClass::Progress => 0x100,
             ControlClass::ComboBox => {
                 0x81 | if wparam == 0x0d || (wparam == 0x1b && c.choice_open) {
                     4
@@ -13223,10 +13253,14 @@ fn advance_deadline(previous: u64, interval: u64, now: u64) -> u64 {
 /// speed and never draws a single pixel (Asphalt 2 3D behaved exactly
 /// this way — 240 dispatched messages, `frame_counter=0`).
 fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
-    let now = monotonic_ms();
     if let Some(timer) = timer_message_if_due(ctx, true) {
         return Some(timer);
     }
+    legacy_paint_if_due(ctx)
+}
+
+fn legacy_paint_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    let now = monotonic_ms();
     if now >= ctx.kernel.synthetic_paint_next_ms {
         ctx.kernel.synthetic_paint_next_ms = advance_deadline(
             ctx.kernel.synthetic_paint_next_ms,
@@ -13609,7 +13643,7 @@ fn take_posted_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     ctx.kernel.posted_messages.remove(i)
 }
 
-fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+fn next_queued_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     while let Some(ev) = take_pending_input(ctx) {
         update_key_state(ctx, ev);
         if let Some(handled) = controls_take_input(ctx, ev) {
@@ -13631,7 +13665,32 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     if let Some((msg, wp, lp)) = key_repeat_if_due(ctx) {
         return Some((input_window(ctx.kernel), msg, wp, lp));
     }
-    synthetic_message_if_due(ctx)
+    None
+}
+
+fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    next_queued_message_if_due(ctx).or_else(|| synthetic_message_if_due(ctx))
+}
+
+/// A fabricated paint must not manufacture a permanently nonempty queue.
+/// A paced WM_PAINT can take longer than the next legacy-paint interval;
+/// without an idle opportunity PeekMessage then starves the application's
+/// own update/render branch. Real input, posted traffic and timers still win.
+/// A PM_NOREMOVE preview stays in pending_message until actually removed,
+/// so repeated previews cannot consume this idle opportunity prematurely.
+fn next_peek_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    if let Some(message) =
+        next_queued_message_if_due(ctx).or_else(|| timer_message_if_due(ctx, true))
+    {
+        return Some(message);
+    }
+    let thread = ctx.kernel.current_thread;
+    if ctx.kernel.synthetic_peek_paint_yield.remove(&thread) {
+        return None;
+    }
+    let paint = legacy_paint_if_due(ctx)?;
+    ctx.kernel.synthetic_peek_paint_yield.insert(thread);
+    Some(paint)
 }
 
 /// How many more times a guest may ask for a message after it has been
@@ -13884,7 +13943,7 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         // loop is idle, so let a parked worker (typically the mixer
         // thread) run, and conversely park a worker that has drained
         // its own queue.
-        None => match next_message_if_due(ctx) {
+        None => match next_peek_message_if_due(ctx) {
             Some(addressed) => addressed,
             None => {
                 if remove_mode & 2 != 0 {
@@ -26475,42 +26534,83 @@ mod tests {
 
     #[test]
     fn stdio_ungetc_preserves_files_and_works_with_reads_scans_and_positioning() {
-        use crate::bluetooth::tests::{call,setup};
-        use pocket_kernel::vfs::{Access,SeekKind};
-        let dir=tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("push.dat"),b"ab\n12 34").unwrap();
-        let (mut cpu,mut k,mut d)=setup();k.vfs.mount("\\Data\\",dir.path());
-        let h=k.vfs.open("\\Data\\push.dat",Access::Read,false).unwrap();
-        let invoke=|cpu:&mut pocket_cpu::stub::StubCpu,k:&mut KernelState,d:&mut WinCeDispatcher,name,args:&[u32]|call(cpu,k,d,"coredll.dll",name,args);
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(b'a' as u32));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'X' as u32,h]),DispatchOutcome::ReturnedR0(b'X' as u32));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Y' as u32,h]),DispatchOutcome::ReturnedR0(u32::MAX));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ftell",&[h]),DispatchOutcome::ReturnedR0(0));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fread",&[0x2000,1,2,h]),DispatchOutcome::ReturnedR0(2));
-        assert_eq!(cpu.read_mem(0x2000,2).unwrap(),b"Xb");
-        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,3,0]);
-        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'9' as u32,h]);
-        cpu.write_mem(0x1800,b"%d\0").unwrap();
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fscanf",&[h,0x1800,0x2000]),DispatchOutcome::ReturnedR0(1));
-        assert_eq!(cpu.read_mem(0x2000,4).unwrap(),912i32.to_le_bytes());
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(b' ' as u32));
-        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,0,2]);
-        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Z' as u32,h]);
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"feof",&[h]),DispatchOutcome::ReturnedR0(0));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ungetc",&[u32::MAX,h]),DispatchOutcome::ReturnedR0(u32::MAX));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(b'Z' as u32));
-        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(u32::MAX));
-        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,0,0]);
-        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'X' as u32,h]);
-        invoke(&mut cpu,&mut k,&mut d,"fgets",&[0x2000,8,h]);
-        assert_eq!(cpu.read_mem(0x2000,5).unwrap(),b"Xab\n\0");
-        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Z' as u32,h]);
-        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,0,1]);
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_kernel::vfs::{Access, SeekKind};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("push.dat"), b"ab\n12 34").unwrap();
+        let (mut cpu, mut k, mut d) = setup();
+        k.vfs.mount("\\Data\\", dir.path());
+        let h = k.vfs.open("\\Data\\push.dat", Access::Read, false).unwrap();
+        let invoke = |cpu: &mut pocket_cpu::stub::StubCpu,
+                      k: &mut KernelState,
+                      d: &mut WinCeDispatcher,
+                      name,
+                      args: &[u32]| call(cpu, k, d, "coredll.dll", name, args);
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b'a' as u32)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'X' as u32, h]),
+            DispatchOutcome::ReturnedR0(b'X' as u32)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'Y' as u32, h]),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "ftell", &[h]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "fread", &[0x2000, 1, 2, h]),
+            DispatchOutcome::ReturnedR0(2)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 2).unwrap(), b"Xb");
+        invoke(&mut cpu, &mut k, &mut d, "fseek", &[h, 3, 0]);
+        invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'9' as u32, h]);
+        cpu.write_mem(0x1800, b"%d\0").unwrap();
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "fscanf", &[h, 0x1800, 0x2000]),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 4).unwrap(), 912i32.to_le_bytes());
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b' ' as u32)
+        );
+        invoke(&mut cpu, &mut k, &mut d, "fseek", &[h, 0, 2]);
+        invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'Z' as u32, h]);
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "feof", &[h]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "ungetc", &[u32::MAX, h]),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b'Z' as u32)
+        );
+        assert_eq!(
+            invoke(&mut cpu, &mut k, &mut d, "fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        invoke(&mut cpu, &mut k, &mut d, "fseek", &[h, 0, 0]);
+        invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'X' as u32, h]);
+        invoke(&mut cpu, &mut k, &mut d, "fgets", &[0x2000, 8, h]);
+        assert_eq!(cpu.read_mem(0x2000, 5).unwrap(), b"Xab\n\0");
+        invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'Z' as u32, h]);
+        invoke(&mut cpu, &mut k, &mut d, "fseek", &[h, 0, 1]);
         assert!(!k.crt_pushback.contains_key(&h));
-        k.vfs.seek(h,0,SeekKind::Begin);let mut bytes=[0;8];k.vfs.read(h,&mut bytes);
-        assert_eq!(&bytes,b"ab\n12 34");
-        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Z' as u32,h]);
-        invoke(&mut cpu,&mut k,&mut d,"fclose",&[h]);assert!(!k.crt_pushback.contains_key(&h));
+        k.vfs.seek(h, 0, SeekKind::Begin);
+        let mut bytes = [0; 8];
+        k.vfs.read(h, &mut bytes);
+        assert_eq!(&bytes, b"ab\n12 34");
+        invoke(&mut cpu, &mut k, &mut d, "ungetc", &[b'Z' as u32, h]);
+        invoke(&mut cpu, &mut k, &mut d, "fclose", &[h]);
+        assert!(!k.crt_pushback.contains_key(&h));
     }
 
     #[test]
@@ -28889,6 +28989,7 @@ mod tests {
             gles_strings: std::collections::HashMap::new(),
             synthetic_message_count: 0,
             synthetic_message_budget: 240,
+            synthetic_peek_paint_yield: Default::default(),
             wnd_proc: 0,
             window_class_procs: std::collections::HashMap::new(),
             window_background: None,
@@ -30207,14 +30308,7 @@ mod tests {
             assert_ne!(p, 0);
             cpu.write_mem(p + size - 1, &[0xa5]).unwrap();
             assert_eq!(cpu.read_mem(p + size - 1, 1).unwrap(), [0xa5]);
-            call(
-                &mut cpu,
-                &mut k,
-                &mut d,
-                "mfcce300.dll",
-                "ord:317",
-                &[p],
-            );
+            call(&mut cpu, &mut k, &mut d, "mfcce300.dll", "ord:317", &[p]);
             assert_eq!(k.heap.free_bytes(), before);
         }
         assert_eq!(
@@ -34930,6 +35024,99 @@ mod tests {
     /// like any other message and drops it, so it kept polling: Ball
     /// Busters froze on the publisher logo and spent the rest of its
     /// slice budget in the pump without rendering another frame.
+    #[test]
+    fn peek_legacy_paints_allow_idle_without_delaying_input_posts_or_real_timers() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut k, mut d) = setup();
+        k.synthetic_message_budget = 0;
+        k.pending_startup.clear();
+        k.pending_create = None;
+        k.pending_message = None;
+        k.posted_messages.clear();
+        k.timers.clear();
+        let poll = |cpu: &mut StubCpu, k: &mut KernelState, d: &mut WinCeDispatcher, mode: u32| {
+            // Simulate a paint handler slower than the next legacy deadline.
+            k.synthetic_paint_next_ms = 0;
+            call(
+                cpu,
+                k,
+                d,
+                "coredll.dll",
+                "PeekMessageW",
+                &[0x2000, 0, 0, 0, mode | 2],
+            )
+        };
+        let message = |cpu: &mut StubCpu| {
+            u32::from_le_bytes(cpu.read_mem(0x2004, 4).unwrap().try_into().unwrap())
+        };
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(message(&mut cpu), WM_PAINT);
+        k.pending_input.push_back(InputEvent::KeyDown { vk: 0x25 });
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(message(&mut cpu), WM_KEYDOWN);
+        k.posted_messages.push_back((FAKE_HWND, 0x8001, 42, 0));
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(message(&mut cpu), 0x8001);
+        k.timers.insert((0, FAKE_HWND, 7), (100, 0, 0));
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(message(&mut cpu), WM_TIMER);
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(message(&mut cpu), WM_PAINT);
+        // Repeated PM_NOREMOVE previews remain identical until PM_REMOVE.
+        k.synthetic_peek_paint_yield.clear();
+        k.pending_message = None;
+        k.timers.clear();
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 0),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        let preview = cpu.read_mem(0x2000, 16).unwrap();
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 0),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 16).unwrap(), preview);
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 16).unwrap(), preview);
+        assert_eq!(
+            poll(&mut cpu, &mut k, &mut d, 1),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        // A blocking GetMessage path still generates its due paint normally.
+        k.synthetic_peek_paint_yield.insert(0);
+        k.synthetic_paint_next_ms = 0;
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut k,
+            thunk: &thunk,
+        };
+        assert_eq!(next_message_if_due(&mut ctx).unwrap().1, WM_PAINT);
+        assert!(ctx.kernel.synthetic_peek_paint_yield.contains(&0));
+    }
+
     #[test]
     fn a_pump_that_ignores_wm_quit_is_halted_instead_of_spun() {
         const MSG: u32 = 0x1000;

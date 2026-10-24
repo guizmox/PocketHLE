@@ -1202,6 +1202,8 @@ pub struct KernelState {
     /// Maximum synthetic frame messages to inject. `0` means
     /// unlimited.
     pub synthetic_message_budget: u64,
+    /// After a fabricated PeekMessage paint, let an empty real queue reach idle.
+    pub synthetic_peek_paint_yield: std::collections::HashSet<usize>,
     /// Address of the guest's last-registered window procedure. Set
     /// by `RegisterClassW`, used by `DispatchMessageW` to trampoline
     /// into guest-side WM_PAINT / WM_KEYDOWN handlers.
@@ -3849,6 +3851,7 @@ impl Process {
                 gles_strings: HashMap::new(),
                 synthetic_message_count: 0,
                 synthetic_message_budget: 240,
+                synthetic_peek_paint_yield: Default::default(),
                 wnd_proc: 0,
                 window_class_procs: HashMap::new(),
                 window_background: None,
@@ -4794,8 +4797,12 @@ mod tests {
     fn shell_bar_without_child_controls_is_composited_and_respects_visibility() {
         let mut cpu = StubCpu::new();
         let mut process = Process::map_into(
-            image_based_at(0x10000, 0x1000), &mut cpu, &|_, _| None, &NullDispatcher,
-        ).unwrap();
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
         let k = &mut process.state;
         let (owner, bar) = (0xdead0001, 0xdead0b01);
         k.active_window = owner;
@@ -4803,21 +4810,33 @@ mod tests {
         k.window_styles.insert(bar, (0x90000000, 0));
         k.window_visibility.insert(owner, true);
         k.window_visibility.insert(bar, true);
-        k.gdi.shell_menus.bars.insert(bar, shell_menu::Bar {
-            owner, menu: 0, sip: true, background: 0xf800,
-        });
+        k.gdi.shell_menus.bars.insert(
+            bar,
+            shell_menu::Bar {
+                owner,
+                menu: 0,
+                sip: true,
+                background: 0xf800,
+            },
+        );
         assert!(k.controls.is_empty());
         k.framebuffer.fill(0x07e0);
         let counter = k.framebuffer.frame_counter;
         k.composite_controls();
         let offset = ((k.framebuffer.height - 3) * k.framebuffer.width * 2) as usize;
-        assert_eq!(&k.framebuffer.pixels[offset..offset+2], &0xf800u16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.pixels[offset..offset + 2],
+            &0xf800u16.to_le_bytes()
+        );
         assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
         assert_eq!(k.framebuffer.frame_counter, counter);
         k.window_visibility.insert(bar, false);
         k.framebuffer.fill(0x001f);
         k.composite_controls();
-        assert_eq!(&k.framebuffer.pixels[offset..offset+2], &0x001fu16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.pixels[offset..offset + 2],
+            &0x001fu16.to_le_bytes()
+        );
     }
 
     #[test]

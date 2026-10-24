@@ -45,8 +45,8 @@ mod imgdecmp;
 mod legacy_services;
 #[cfg(feature = "video-static")]
 mod media_static;
-mod number_format;
 mod mfc;
+mod number_format;
 pub mod ole32;
 pub mod ordinals;
 mod scroll;
