@@ -58,3 +58,4 @@ opt-level = 1
 
 [patch.crates-io]
 unicorn-engine-sys = { path = "vendor/unicorn-engine-sys" }
+newtua-nsis = { path = "vendor/newtua-nsis" }

@@ -22268,7 +22268,6 @@ fn set_clipboard_data(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 const FAKE_HWAVEOUT: u32 = 0xDEAD_4001;
 const FIRST_HWAVEOUT: u32 = 0xDEAD_4100;
 const MMSYSERR_NOERROR: u32 = 0;
-const MMSYSERR_ALLOCATED: u32 = 4;
 
 /// `WAVEHDR.dwFlags` bits we care about.
 const WHDR_DONE: u32 = 0x1;
@@ -22524,18 +22523,9 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR));
     }
 
-    // Windows CE waveOutOpen is not an unbounded handle allocator: the
-    // wave manager / driver may reject a real open once its mixer stream
-    // resources are exhausted.  Keep format-query calls side-effect free,
-    // and bound only simultaneously live playback streams.
-    //
-    // 32 is the emulated software mixer's stream capacity.  It is deliberately
-    // independent of any application's handle table; closed streams free a slot.
-    const MAX_WAVE_OUT_STREAMS: usize = 32;
-    if ctx.kernel.wave_out.devices.len() >= MAX_WAVE_OUT_STREAMS {
-        return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_ALLOCATED));
-    }
-
+    // The mixer owns a dynamically sized map of WaveStream values. Opening a
+    // handle does not consume a hardware voice or start a separate host device.
+    // Do not impose a fictitious 32-stream hardware limit on these software streams.
     let kind = match flags & 0x0007_0000 {
         0x0001_0000 => WaveCallbackKind::Window,
         0x0002_0000 => WaveCallbackKind::Thread,
@@ -37088,5 +37078,75 @@ mod startup_command_line_tests {
                 DispatchOutcome::ReturnedR0(ptr)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod wave_open_capacity_tests {
+    use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
+    use super::*;
+    use pocket_cpu::Cpu;
+    #[test]
+    fn software_streams_open_beyond_32_query_is_side_effect_free_and_close_isolated() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut handles = Vec::new();
+        // NULL format uses the currently configured default PCM, as before.
+        for _ in 0..128 {
+            for (reg, val) in [
+                (ArmReg::R0, 0x1100),
+                (ArmReg::R1, 0),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, 0),
+                (ArmReg::Sp, 0x1800),
+            ] {
+                cpu.write_reg(reg, val).unwrap();
+            }
+            cpu.write_mem(0x1800, &[0; 8]).unwrap();
+            assert_eq!(
+                wave_out_open(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            handles.push(cpu.read_u32_le(0x1100).unwrap());
+        }
+        assert_eq!(
+            handles
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            128
+        );
+        assert_eq!(kernel.wave_out.devices.len(), 128);
+        cpu.write_mem(0x1804, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            wave_out_open(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.wave_out.devices.len(), 128);
+        cpu.write_reg(ArmReg::R0, handles[0]).unwrap();
+        assert_eq!(
+            wave_out_close(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.wave_out.devices.len(), 127);
+        assert!(!kernel.wave_out.devices.contains_key(&handles[0]));
+        assert!(kernel.wave_out.devices.contains_key(&handles[127]));
     }
 }

@@ -105,9 +105,9 @@ fn sanitize_name(name: &str) -> String {
         .to_string()
 }
 
-/// Installation-only recovery for a single inconsistent CFDATA checksum in
+/// Installation-only recovery for bounded inconsistent CFDATA checksums in
 /// an uncompressed, non-spanned CAB. The original CAB/payload are never changed.
-/// Structural errors, compression errors, truncated data and multiple checksum
+/// Structural errors, compression errors, truncated data and excessive checksum
 /// mismatches remain fatal. Strict extract_all/extract_with_header stay strict.
 pub fn extract_for_install<P: AsRef<Path>, Q: AsRef<Path>>(
     cab_path: P,
@@ -129,7 +129,7 @@ pub fn extract_for_install<P: AsRef<Path>, Q: AsRef<Path>>(
             };
             let files = extract_reader(io::Cursor::new(recovered), out_dir)?;
             let header = header_from_files(&files)?;
-            log::warn!("CAB import recovered one inconsistent uncompressed-block checksum; source and payload bytes are unchanged: {}",cab_path.display());
+            log::warn!("CAB import recovered inconsistent uncompressed-block checksum metadata; source and payload bytes are unchanged: {}",cab_path.display());
             Ok((files, header))
         }
     }

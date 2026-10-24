@@ -2432,8 +2432,6 @@ checksum = "5eebcfcabefda6b7a894eddba5b8321eb1259156e9b616a9c92c32d829295b5e"
 [[package]]
 name = "newtua-nsis"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e8ed258cbbc805e54d86e16f46fba7763c4e1cd402cc0a1126f56b927ef5e94"
 dependencies = [
  "lzma-rs",
  "newtua-common",

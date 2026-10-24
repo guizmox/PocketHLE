@@ -1,0 +1,6 @@
+PocketHLE local extension of newtua-nsis 0.1.1 (LGPL-3.0-or-later).
+Original copyright/license notices are retained in src/*.rs and Cargo.toml.
+Changes: expose decode_legacy_bzip2, add an output limit to bzip2 decoding.
+Original high-level archive reader behaviour remains unchanged.
+Source: https://crates.io/crates/newtua-nsis/0.1.1
+All modified source is supplied here for rebuilding and relinking.

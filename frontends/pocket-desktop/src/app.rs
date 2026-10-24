@@ -2358,6 +2358,15 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 if !is_gizmondo {
+                    ui.label("Owner name (PocketPC)");
+                    ui.add(egui::TextEdit::singleline(&mut draft.pocketpc_owner_name).hint_text("Device default"));
+                    ui.end_row();
+                    ui.label("Device name (Preset ID — ASCII)");
+                    ui.add(egui::TextEdit::singleline(&mut draft.pocketpc_device_name).hint_text("Device default"));
+                    ui.end_row();
+                    ui.label("PocketPC ID (Platform ID — hexadecimal)");
+                    ui.add(egui::TextEdit::singleline(&mut draft.pocketpc_device_id).hint_text("Device default"));
+                    ui.end_row();
                     ui.label("Screen");
                     egui::ComboBox::from_id_source("game_screen")
                         .selected_text(draft.screen.label())

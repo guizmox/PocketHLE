@@ -51,6 +51,28 @@ class GameSettingsActivity : AppCompatActivity() {
             setPreferencesFromResource(R.xml.preferences_game, rootKey)
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
+            if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
+                fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
+                    preferenceScreen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
+                        key = keyName; title = label; isPersistent = false; text = initial
+                        summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
+                        dialogMessage = "Empty = device default. Applies at the next launch." + if (keyName.endsWith("device_id")) " Enter hexadecimal byte pairs." else ""
+                        setOnPreferenceChangeListener { _, value ->
+                            val input = value.toString()
+                            val valid = !input.contains('\u0000') && when (keyName) {
+                                "pocketpc_owner_name" -> input.length <= 255
+                                "pocketpc_device_name" -> input.length <= 4096 && input.all { it.code <= 127 }
+                                else -> input.length <= 8192 && input.length % 2 == 0 && input.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+                            }
+                            if (!valid) {android.widget.Toast.makeText(requireContext(), "Invalid identity value", android.widget.Toast.LENGTH_LONG).show();false}
+                            else {update(input);writeGameSettings();true}
+                        }
+                    })
+                }
+                identityField("pocketpc_owner_name", "Owner name (PocketPC)", current.pocketpcOwnerName) {current=current.copy(pocketpcOwnerName=it)}
+                identityField("pocketpc_device_name", "Device name (Preset ID — ASCII)", current.pocketpcDeviceName) {current=current.copy(pocketpcDeviceName=it)}
+                identityField("pocketpc_device_id", "PocketPC ID (Platform ID — hexadecimal)", current.pocketpcDeviceId) {current=current.copy(pocketpcDeviceId=it)}
+            }
             findPreference<ListPreference>("screen")?.apply {
                 value = current.screen
                 setOnPreferenceChangeListener { _, newValue ->

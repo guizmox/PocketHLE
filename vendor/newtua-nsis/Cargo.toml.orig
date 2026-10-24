@@ -1,0 +1,21 @@
+[package]
+name = "newtua-nsis"
+version = "0.1.1"
+description = "Decoder for NSIS (Nullsoft installer) archives."
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+# Codec exception (see CLAUDE.md): raw LZMA1 is explicitly out of scope to
+# re-implement, so we lean on the mature pure-Rust `lzma-rs` crate. NSIS's
+# modified deflate is decoded by `newtua-common::deflate::inflate_nsis`.
+[dependencies]
+newtua-common.workspace = true
+lzma-rs = "0.3"
+
+[dev-dependencies]
+newtua-testutil.workspace = true

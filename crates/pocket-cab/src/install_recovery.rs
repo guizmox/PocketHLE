@@ -1,5 +1,5 @@
 //! Narrow installation compatibility, never a global checksum bypass.
-//! A few old uncompressed Pocket PC packages (Snails) have one stale CFDATA
+//! A few old uncompressed Pocket PC packages (Snails) have stale CFDATA
 //! checksum. Recompute that metadata in an owned copy, retaining every payload
 //! byte. Structural/decompression validation still happens in the CAB reader.
 fn word(bytes: &[u8], at: usize) -> Option<u16> {
@@ -31,7 +31,7 @@ pub(super) fn recover(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let table_end = 36usize.checked_add(folders.checked_mul(8)?)?;
     let mut previous_end = table_end;
-    let mut correction = None;
+    let mut corrections = Vec::new();
     for folder in 0..folders {
         let table = 36 + folder * 8;
         let mut at = dword(bytes, table)? as usize;
@@ -49,18 +49,22 @@ pub(super) fn recover(bytes: &[u8]) -> Option<Vec<u8>> {
             let end = at.checked_add(8)?.checked_add(size)?;
             let actual = block_checksum(bytes.get(at + 4..end)?);
             if stored != 0 && stored != actual {
-                if correction.is_some() {
+                if corrections.len() >= 64 {
                     return None;
                 }
-                correction = Some((at, actual));
+                corrections.push((at, actual));
             }
             at = end;
         }
         previous_end = at;
     }
-    let (at, actual) = correction?;
+    if corrections.is_empty() {
+        return None;
+    }
     let mut owned = bytes.to_vec();
-    owned[at..at + 4].copy_from_slice(&actual.to_le_bytes());
+    for (at, actual) in corrections {
+        owned[at..at + 4].copy_from_slice(&actual.to_le_bytes());
+    }
     Some(owned)
 }
 
@@ -105,13 +109,13 @@ mod tests {
         assert!(recover(&original).is_none());
     }
     #[test]
-    fn multiple_mismatches_truncation_compression_and_spanning_stay_errors() {
+    fn multiple_stale_checksums_preserve_payload_and_structural_errors_stay_errors() {
         let mut bytes = fixture();
         let at = dword(&bytes, 36).unwrap() as usize;
         let second = at + 8 + usize::from(word(&bytes, at + 4).unwrap());
         bytes[at] ^= 1;
         bytes[second] ^= 1;
-        assert!(recover(&bytes).is_none());
+        assert_eq!(recover(&bytes).unwrap(), fixture());
         bytes[second] ^= 1;
         bytes.pop();
         assert!(recover(&bytes).is_none());
@@ -122,5 +126,30 @@ mod tests {
         bytes[42] = 0;
         bytes[30] = 1;
         assert!(recover(&bytes).is_none());
+    }
+    #[test]
+    fn recovery_is_bounded_to_64_metadata_words() {
+        let mut builder = cab::CabinetBuilder::new();
+        builder
+            .add_folder(cab::CompressionType::None)
+            .add_file("data.bin");
+        let mut writer = builder.build(io::Cursor::new(Vec::new())).unwrap();
+        writer
+            .next_file()
+            .unwrap()
+            .unwrap()
+            .write_all(&vec![0x51; 65 * 32768])
+            .unwrap();
+        let original = writer.finish().unwrap().into_inner();
+        let mut stale = original.clone();
+        let mut at = dword(&stale, 36).unwrap() as usize;
+        for i in 0..65 {
+            stale[at] ^= 1;
+            if i == 63 {
+                assert_eq!(recover(&stale).unwrap(), original);
+            }
+            at += 8 + usize::from(word(&stale, at + 4).unwrap());
+        }
+        assert!(recover(&stale).is_none());
     }
 }

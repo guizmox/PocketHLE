@@ -2,9 +2,11 @@
 //! for format detection. Every decoded layer shares an allocation budget.
 use std::io::{Cursor, Read};
 mod installshield;
+mod nsis_bzip;
 mod pocketsetup;
 mod rar;
 mod sharedparts;
+mod vise;
 mod wise;
 
 const LIMIT: usize = 256 * 1024 * 1024;
@@ -200,6 +202,12 @@ fn layer(
             .checked_add(length)
             .filter(|e| *e <= b.len())
             .ok_or("Invalid NSIS length")?;
+        if let Some(cabinets) = nsis_bzip::extract(b, base, end, budget)? {
+            for cabinet in cabinets {
+                layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
+            }
+            return Ok(true);
+        }
         let mut pos = base + 28;
         while pos < end {
             // Optional trailing installer CRC is not an archive block.
@@ -258,6 +266,12 @@ fn layer(
         overlay = overlay.max(offset.checked_add(length).ok_or("Section overflow")?);
     }
     if let Some(cabinets) = pocketsetup::extract(b, budget)? {
+        for cabinet in cabinets {
+            layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
+        }
+        return Ok(true);
+    }
+    if let Some(cabinets) = vise::extract(b, overlay, budget)? {
         for cabinet in cabinets {
             layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
         }

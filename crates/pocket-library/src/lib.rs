@@ -49,6 +49,8 @@ pub use keybindings::{GuestButton, KeyBinding, KeyBindings};
 /// Errors returned by [`Library`] operations.
 #[derive(Debug, Error)]
 pub enum LibraryError {
+    #[error("Invalid game settings: {0}")]
+    InvalidSettings(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serde error: {0}")]
@@ -548,6 +550,13 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
+    /// Empty strings inherit the emulated PocketPC device identity. Ignored on Gizmondo.
+    #[serde(default)]
+    pub pocketpc_owner_name: String,
+    #[serde(default)]
+    pub pocketpc_device_name: String,
+    #[serde(default)]
+    pub pocketpc_device_id: String,
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
@@ -630,9 +639,35 @@ impl DpadDeadzone {
     }
 }
 
+impl GameSettings {
+    pub fn validate_pocketpc_identity(&self) -> Result<(), String> {
+        if self.pocketpc_owner_name.contains('\0')
+            || self.pocketpc_owner_name.encode_utf16().count() > 255
+        {
+            return Err("Owner name must contain at most 255 UTF-16 characters and no NUL".into());
+        }
+        if self.pocketpc_device_name.contains('\0')
+            || !self.pocketpc_device_name.is_ascii()
+            || self.pocketpc_device_name.len() > 4096
+        {
+            return Err(
+                "PocketPC device name must use ASCII without NUL (maximum 4096 bytes)".into(),
+            );
+        }
+        let id = &self.pocketpc_device_id;
+        if id.len() > 8192 || id.len() % 2 != 0 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("PocketPC ID must use hexadecimal byte pairs (maximum 4096 bytes)".into());
+        }
+        Ok(())
+    }
+}
+
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
+            pocketpc_owner_name: String::new(),
+            pocketpc_device_name: String::new(),
+            pocketpc_device_id: String::new(),
             gpu_renderer: None,
             anisotropic_filtering: None,
             cpu_backend: CpuBackendPref::default(),
@@ -2745,6 +2780,9 @@ impl Library {
         id: &str,
         settings: GameSettings,
     ) -> Result<(), LibraryError> {
+        settings
+            .validate_pocketpc_identity()
+            .map_err(LibraryError::InvalidSettings)?;
         let game = self
             .get_mut(id)
             .ok_or_else(|| LibraryError::NotFound(id.to_string()))?;
@@ -6005,5 +6043,54 @@ mod device_identity_config_tests {
             c.device_identity_hex(true),
             (c.gizmondo_preset_id.as_str(), "AABBCCDD")
         );
+    }
+}
+
+#[cfg(test)]
+mod pocketpc_game_identity_tests {
+    use super::*;
+    #[test]
+    fn old_settings_inherit_and_custom_values_roundtrip() {
+        let old: GameSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            old.pocketpc_owner_name.is_empty()
+                && old.pocketpc_device_name.is_empty()
+                && old.pocketpc_device_id.is_empty()
+        );
+        let custom = GameSettings {
+            pocketpc_owner_name: "Élodie".into(),
+            pocketpc_device_name: "MyPDA".into(),
+            pocketpc_device_id: "0011aAFF".into(),
+            ..Default::default()
+        };
+        custom.validate_pocketpc_identity().unwrap();
+        let again: GameSettings =
+            serde_json::from_value(serde_json::to_value(&custom).unwrap()).unwrap();
+        assert_eq!(again.pocketpc_owner_name, custom.pocketpc_owner_name);
+        assert_eq!(again.pocketpc_device_name, custom.pocketpc_device_name);
+        assert_eq!(again.pocketpc_device_id, custom.pocketpc_device_id);
+    }
+    #[test]
+    fn malformed_identity_values_are_rejected() {
+        for id in ["xyz", "1", "00-ff"] {
+            assert!(GameSettings {
+                pocketpc_device_id: id.into(),
+                ..Default::default()
+            }
+            .validate_pocketpc_identity()
+            .is_err());
+        }
+        assert!(GameSettings {
+            pocketpc_device_name: "é".into(),
+            ..Default::default()
+        }
+        .validate_pocketpc_identity()
+        .is_err());
+        assert!(GameSettings {
+            pocketpc_owner_name: "a\0b".into(),
+            ..Default::default()
+        }
+        .validate_pocketpc_identity()
+        .is_err());
     }
 }

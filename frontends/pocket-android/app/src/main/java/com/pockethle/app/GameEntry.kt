@@ -67,6 +67,9 @@ data class GameSettings(
     val gpuRenderer: Boolean? = null,
     val anisotropicFiltering: Int? = null,
     val dpadDeadzone: String = "large",
+    val pocketpcOwnerName: String = "",
+    val pocketpcDeviceName: String = "",
+    val pocketpcDeviceId: String = "",
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
@@ -79,6 +82,9 @@ data class GameSettings(
         put("halt_on_unimplemented", haltOnUnimplemented)
         put("screen", screen)
         put("rotation", rotation)
+        put("pocketpc_owner_name", pocketpcOwnerName)
+        put("pocketpc_device_name", pocketpcDeviceName)
+        put("pocketpc_device_id", pocketpcDeviceId)
     }
 
     companion object {
@@ -101,6 +107,9 @@ data class GameSettings(
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
+            pocketpcOwnerName = obj.optString("pocketpc_owner_name", ""),
+            pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),
+            pocketpcDeviceId = obj.optString("pocketpc_device_id", ""),
             originalJson = obj.toString(),
         )
     }

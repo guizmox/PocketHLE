@@ -332,6 +332,59 @@ impl Emulator {
             p.state.registry.set_value(key, name, value);
         }
     }
+    /// Apply one game's PocketPC identity without changing the persisted device.
+    pub fn set_pocketpc_identity(
+        &mut self,
+        owner: &str,
+        name: &str,
+        platform_hex: &str,
+    ) -> Result<()> {
+        use pocket_kernel::{
+            device_identity::{DeviceIdentity, REGISTRY_KEY, REGISTRY_VALUE},
+            registry::RegistryValue,
+        };
+        anyhow::ensure!(
+            !owner.contains('\0') && owner.encode_utf16().count() <= 255,
+            "Owner name must contain at most 255 characters and no NUL"
+        );
+        anyhow::ensure!(
+            !name.contains('\0') && name.is_ascii() && name.len() <= 4096,
+            "PocketPC device name must use ASCII characters without NUL (maximum 4096 bytes)"
+        );
+        let process = self.process.as_mut().context("no PE loaded")?;
+        let mut id = DeviceIdentity::load_or_create(&mut process.state.registry)
+            .map_err(anyhow::Error::msg)?;
+        if !name.is_empty() {
+            id.preset = name.as_bytes().to_vec();
+        }
+        if !platform_hex.is_empty() {
+            id = DeviceIdentity::from_hex(&DeviceIdentity::hex(&id.preset), platform_hex)
+                .map_err(anyhow::Error::msg)?;
+        }
+        let encoded = id.encode().map_err(anyhow::Error::msg)?;
+        if !owner.is_empty() {
+            process.state.registry.set_volatile_value(
+                r"HKCU\ControlPanel\Owner",
+                "Owner",
+                RegistryValue::Sz(owner.into()),
+            );
+        }
+        if !name.is_empty() {
+            process.state.registry.set_volatile_value(
+                r"HKLM\Ident",
+                "Name",
+                RegistryValue::Sz(name.into()),
+            );
+        }
+        if !name.is_empty() || !platform_hex.is_empty() {
+            process.state.registry.set_volatile_value(
+                REGISTRY_KEY,
+                REGISTRY_VALUE,
+                RegistryValue::Binary(encoded),
+            );
+        }
+        Ok(())
+    }
     /// Set the directory relative guest paths resolve against.
     ///
     /// Windows CE has no per-process working directory, but games ship

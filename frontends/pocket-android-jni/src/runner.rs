@@ -529,6 +529,16 @@ fn run_process(
             }
         }
     }
+    if !is_gizmondo {
+        if let Err(error) = emu.set_pocketpc_identity(
+            &entry.settings.pocketpc_owner_name,
+            &entry.settings.pocketpc_device_name,
+            &entry.settings.pocketpc_device_id,
+        ) {
+            summary_lines.push(format!("Invalid PocketPC identity: {error}"));
+            return (summary_lines.join("\n"), 87);
+        }
+    }
     for value in &entry.registry {
         let registry_value = if let Some(text) = value.string.as_deref() {
             pocket_core::kernel::registry::RegistryValue::Sz(text.to_string())

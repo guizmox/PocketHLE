@@ -84,6 +84,7 @@ pub struct Registry {
     /// Handles belong to a process; the values belong to the device.
     handles: HashMap<u32, String>,
     next_handle: u32,
+    volatile_values: Arc<Mutex<HashMap<(String, String), Option<RegistryValue>>>>,
 }
 
 /// Map a predefined `HKEY_*` constant to its canonical prefix.
@@ -133,6 +134,12 @@ impl Registry {
             })),
             handles: HashMap::new(),
             next_handle: HANDLE_BASE,
+            volatile_values: Arc::new(Mutex::new(
+                self.volatile_values
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            )),
         }
     }
 
@@ -395,6 +402,7 @@ impl Registry {
             store: Arc::new(Mutex::new(RegistryStore::default())),
             handles: HashMap::new(),
             next_handle: HANDLE_BASE,
+            volatile_values: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -526,11 +534,22 @@ impl Registry {
     }
 
     pub fn contains_key(&self, path: &str) -> bool {
-        self.store
+        let key = canonical_key(path).to_ascii_lowercase();
+        if self
+            .store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .keys
-            .contains_key(&canonical_key(path).to_ascii_lowercase())
+            .contains_key(&key)
+        {
+            return true;
+        }
+        let prefix = format!("{key}\\");
+        self.volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .any(|(path, _)| path == &key || path.starts_with(&prefix))
     }
 
     fn stored_pages(keys: &HashMap<String, HashMap<String, RegistryValue>>) -> u32 {
@@ -607,6 +626,9 @@ impl Registry {
         true
     }
     pub fn create_key(&mut self, path: &str) -> bool {
+        if self.contains_key(path) {
+            return true;
+        }
         let canonical = canonical_key(path);
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let ancestors: Vec<_> = canonical
@@ -631,7 +653,34 @@ impl Registry {
         store.keys = keys;
         true
     }
+    /// Process/game view only. Flush serializes the device store, never these values.
+    pub fn set_volatile_value(&mut self, path: &str, name: &str, value: RegistryValue) {
+        self.volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                (
+                    canonical_key(path).to_ascii_lowercase(),
+                    name.to_ascii_lowercase(),
+                ),
+                Some(value),
+            );
+    }
     pub fn set_value(&mut self, path: &str, name: &str, value: RegistryValue) -> bool {
+        let view_key = (
+            canonical_key(path).to_ascii_lowercase(),
+            name.to_ascii_lowercase(),
+        );
+        {
+            let mut overlay = self
+                .volatile_values
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = overlay.get_mut(&view_key) {
+                *existing = Some(value);
+                return true;
+            }
+        }
         let canonical = canonical_key(path);
         let lower = canonical.to_ascii_lowercase();
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -667,6 +716,17 @@ impl Registry {
         true
     }
     pub fn value(&self, path: &str, name: &str) -> Option<RegistryValue> {
+        if let Some(value) = self
+            .volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(
+                canonical_key(path).to_ascii_lowercase(),
+                name.to_ascii_lowercase(),
+            ))
+        {
+            return value.clone();
+        }
         self.store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -679,23 +739,43 @@ impl Registry {
     /// Old snapshots with normalized names use that existing spelling.
     pub fn values(&self, path: &str) -> Vec<(String, RegistryValue)> {
         let key = canonical_key(path).to_ascii_lowercase();
-        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(values) = store.keys.get(&key) else {
-            return Vec::new();
-        };
-        let mut names: Vec<_> = values.keys().collect();
-        names.sort();
-        names
-            .into_iter()
-            .map(|name| {
-                let display = store
-                    .value_display
-                    .get(&key)
-                    .and_then(|n| n.get(name))
-                    .unwrap_or(name);
-                (display.clone(), values[name].clone())
-            })
-            .collect()
+        let mut result = std::collections::BTreeMap::new();
+        {
+            let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(values) = store.keys.get(&key) {
+                for (name, value) in values {
+                    let display = store
+                        .value_display
+                        .get(&key)
+                        .and_then(|n| n.get(name))
+                        .unwrap_or(name)
+                        .clone();
+                    result.insert(name.clone(), (display, value.clone()));
+                }
+            }
+        }
+        for ((path, name), value) in self
+            .volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
+            if path == &key {
+                match value {
+                    Some(value) => {
+                        let display = result
+                            .get(name)
+                            .map(|p: &(String, RegistryValue)| p.0.clone())
+                            .unwrap_or_else(|| name.clone());
+                        result.insert(name.clone(), (display, value.clone()));
+                    }
+                    None => {
+                        result.remove(name);
+                    }
+                }
+            }
+        }
+        result.into_values().collect()
     }
     /// Immediate children, sorted case-insensitively with their display names.
     pub fn subkeys(&self, path: &str) -> Vec<String> {
@@ -717,10 +797,33 @@ impl Registry {
                 }
             }
         }
+        for (key, _) in self
+            .volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+        {
+            if let Some(rest) = key.strip_prefix(&prefix) {
+                if let Some(child) = rest.split('\\').next().filter(|s| !s.is_empty()) {
+                    children.entry(child.into()).or_insert_with(|| child.into());
+                }
+            }
+        }
         children.into_values().collect()
     }
 
     pub fn delete_value(&mut self, path: &str, name: &str) -> bool {
+        if let Some(value) = self
+            .volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&(
+                canonical_key(path).to_ascii_lowercase(),
+                name.to_ascii_lowercase(),
+            ))
+        {
+            return value.take().is_some();
+        }
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let removed = store
             .keys
@@ -746,15 +849,8 @@ impl Registry {
     /// key was never created, so `RegOpenKeyEx` can report
     /// `ERROR_FILE_NOT_FOUND` the way a real device does.
     pub fn open(&mut self, path: &str) -> Option<u32> {
-        let canonical = canonical_key(path);
-        let lower = canonical.to_ascii_lowercase();
-        if !self
-            .store
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys
-            .contains_key(&lower)
-        {
+        let lower = canonical_key(path).to_ascii_lowercase();
+        if !self.contains_key(path) {
             return None;
         }
         let handle = self.next_handle;
@@ -1198,5 +1294,40 @@ mod tests {
         let sz = RegistryValue::Sz("AB".to_string());
         assert_eq!(sz.type_code(), 1);
         assert_eq!(sz.to_bytes(), vec![b'A', 0, b'B', 0, 0, 0]);
+    }
+    #[test]
+    fn game_overrides_read_and_enumerate_without_persisting_or_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let key = r"HKCU\ControlPanel\Owner";
+        let mut game = Registry::with_device_defaults();
+        game.configure_persistence(&path).unwrap();
+        let baseline = game.value(key, "Owner").unwrap();
+        game.set_volatile_value(key, "Owner", RegistryValue::Sz("Game A".into()));
+        assert_eq!(
+            game.value(key, "OWNER"),
+            Some(RegistryValue::Sz("Game A".into()))
+        );
+        assert!(game
+            .values(key)
+            .iter()
+            .any(|(_, v)| v == &RegistryValue::Sz("Game A".into())));
+        let mut child = Registry::new();
+        child.store = game.store.clone();
+        child.volatile_values = game.volatile_values.clone();
+        assert!(game.set_value(
+            key,
+            "Owner",
+            RegistryValue::Sz("Temporary guest edit".into())
+        ));
+        assert_eq!(child.value(key, "Owner"), game.value(key, "Owner"));
+        let isolated = game.isolated_copy();
+        assert!(game.delete_value(key, "Owner"));
+        assert!(game.value(key, "Owner").is_none());
+        assert!(isolated.value(key, "Owner").is_some());
+        game.flush().unwrap();
+        let mut next = Registry::with_device_defaults();
+        next.configure_persistence(&path).unwrap();
+        assert_eq!(next.value(key, "Owner"), Some(baseline));
     }
 }

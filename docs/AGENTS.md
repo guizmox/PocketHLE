@@ -3990,3 +3990,41 @@ checks. Original supplied Spawn.exe yields Spawn.PPC_2577.CAB (10382599 bytes),
 MD5 ddb62747d246f1d002c280de2b193968; normal Library::prepare_import/apply import
 in a new temporary library creates the Spawn entry. rustfmt1.90 check passes.
 No game launch or Android/Windows cross-compilation claimed; tested import only.
+
+## CAB recovery, VISE, NSIS and per-game identity (2026-10-24)
+Generic import fixes: uncompressed CAB recovery now accepts up to64 inconsistent
+CFDATA checksum words (supersedes the previous single-checksum restriction).
+Change only checksum metadata in the in-memory recovery copy; strict extraction
+remains strict. Reject compression, reserves, spanning, invalid bounds or more
+than64 mismatches. Tomb Raider's supplied CAB has two such stale words.
+VISE ESIV containers have checked PE overlay/footer boundaries; decode their
+word-swapped Deflate with 16-bit stored-block alignment and odd-byte padding.
+Probe only within recognized containers; bound scans, outputs and CAB counts.
+Legacy solid NSIS bzip2 uses checked length-prefixed blocks after its script
+header. FH_FLAGS_UNINSTALL=1 does not imply another CRC; NO_CRC=4. Verify the
+installer CRC from byte512. Reuse newtua-nsis0.1.1 via a local path patch adding
+only a bounded public decoder; preserve its existing high-level reader behavior.
+Radium yields ARM and MIPS CABs; route both through existing user selection.
+Never use a game name, fixed payload address or execute host installer code.
+
+Remove the artificial32 waveOut stream cap: kernel AudioMixer already owns
+software streams dynamically, independent of host physical voice count. POPHD
+mistook the33rd refused waveOutOpen for MEMORY FULL. Confirmed35 successful
+opens after the change and progression to language/sound prompts, not gameplay.
+
+PocketPC per-game settings: pocketpc_owner_name, pocketpc_device_name (ASCII
+PresetID), pocketpc_device_id (hex PlatformID). Empty fields inherit device
+configuration. Desktop and Android expose fields only for PocketPC and apply
+them only at non-Gizmondo launches. Registry volatile overrides are shared with
+child views and copied independently by isolated_copy. Reads, open/enumeration,
+writes/deletion see overrides; flush serializes only the persistent device store.
+Virtual keys must not be inserted into device defaults or persisted. Owner is
+exposed through the existing ControlPanel/Owner value convention; DEVICE_ID is
+encoded by existing DeviceIdentity and consumed by the HAL handler. Do not
+confuse raw PlatformID bytes with a game's derived registration code.
+
+Final validation: CAB17, kernel267, library128, WinCE API521 tests pass (4 ignored).
+Vendored NSIS decoder44 tests pass. Core identity integration test and Android
+JNI host check are logged separately. Full Windows build/APK/UI and complete
+POPHD gameplay are not claimed validated here. Keep Cargo.toml/Cargo.lock and
+vendor/newtua-nsis together when applying this cumulative patch.

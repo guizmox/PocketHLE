@@ -346,6 +346,22 @@ impl Runner {
                 }
             }
         }
+        if !is_gizmondo {
+            if let Err(e) = emu.set_pocketpc_identity(
+                &game.settings.pocketpc_owner_name,
+                &game.settings.pocketpc_device_name,
+                &game.settings.pocketpc_device_id,
+            ) {
+                summary_lines.push(format!("Invalid PocketPC identity: {e}"));
+                return (
+                    RunOutcome {
+                        summary: summary_lines.join("\n"),
+                        framebuffer: None,
+                    },
+                    87,
+                );
+            }
+        }
         let (screen_w, screen_h) = if is_gizmondo {
             (320, 240)
         } else {
