@@ -3,6 +3,7 @@
 use std::io::{Cursor, Read};
 mod installshield;
 mod pocketsetup;
+mod rar;
 mod sharedparts;
 mod wise;
 
@@ -179,16 +180,11 @@ fn layer(
             charge(data.len(), budget)?;
             entries.push((child_name, data));
         }
-        if entries.iter().any(|(_, b)| b.starts_with(b"ISc(")) {
-            for cabinet in installshield::extract(&entries, budget)? {
-                layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
-            }
-        }
-        for (child_name, data) in entries {
-            if !data.starts_with(b"ISc(") {
-                layer(&data, &child_name, depth + 1, budget, out)?;
-            }
-        }
+        archive_layers(entries, depth, budget, out)?;
+        return Ok(true);
+    }
+    if let Some(entries) = rar::extract(b, budget)? {
+        archive_layers(entries, depth, budget, out)?;
         return Ok(true);
     }
     // Legacy NSIS non-solid Deflate. The complete first-header signature
@@ -342,6 +338,25 @@ fn layer(
         }
     }
     Ok(recognized)
+}
+
+fn archive_layers(
+    entries: Vec<(String, Vec<u8>)>,
+    depth: usize,
+    budget: &mut usize,
+    out: &mut Vec<Cabinet>,
+) -> Result<()> {
+    if entries.iter().any(|(_, b)| b.starts_with(b"ISc(")) {
+        for cabinet in installshield::extract(&entries, budget)? {
+            layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
+        }
+    }
+    for (child_name, data) in entries {
+        if !data.starts_with(b"ISc(") {
+            layer(&data, &child_name, depth + 1, budget, out)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

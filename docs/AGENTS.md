@@ -3965,3 +3965,28 @@ third-party dependency entries/checksums remain those of the supplied source.
 Validation: rustfmt source check and 19 CLI tests both without default features
 and with unicorn pass. Full audio/display build is not validated locally due to
 missing ALSA. Retry native build with one job succeeded after assembler error.
+
+## RAR SFX and InstallShield 5 installers (2026-10-24)
+Spawn.exe is a RAR 3 SFX containing InstallShield 5 header/volume sets, whose
+payload is a standard PocketPC CAB. Detect archive signatures, never filenames.
+The installer pipeline now reuses the existing rars dependency to decode RAR/SFX
+in memory and feeds the same nested-container logic as ZIP. Do not execute the
+Windows stub or its script, and do not require external unrar/7zip/UPX tools.
+Preflight every RAR member (including unwanted solid-archive dependencies):
+shared expanded-byte budget, <=4096 entries, reject encrypted/split entries;
+bound writer output to declared member size and preserve decoder CRC checks.
+Archive paths are metadata only; no archive-named host files are written here.
+InstallShield 5 uses indexed 58-byte descriptors after the directory index table,
+32-bit sizes/offsets, associated same-stem header/volume, and MD5 at descriptor
++42. Versions6..13 retain their existing87-byte descriptor path. Verify volume
+version, entry bounds, supported flags, split-volume boundaries, decompressed
+size and MD5. Bounded Deflate blocks use the existing decoder; old compression,
+split, obfuscated and linked variants remain explicit errors. Format reference:
+MIT Unshield; retain the existing docs/third-party notice. Multiple recovered CE
+cabinets continue through PreparedImport.cabinet_choices; never choose by game.
+Validation: Rust1.90, locked original dependencies, all121 pocket-library tests
+pass, including v5 stored/Deflate, index/split/MD5 negatives and RAR SFX/CRC/size
+checks. Original supplied Spawn.exe yields Spawn.PPC_2577.CAB (10382599 bytes),
+MD5 ddb62747d246f1d002c280de2b193968; normal Library::prepare_import/apply import
+in a new temporary library creates the Spawn entry. rustfmt1.90 check passes.
+No game launch or Android/Windows cross-compilation claimed; tested import only.

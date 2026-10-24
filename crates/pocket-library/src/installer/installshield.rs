@@ -31,17 +31,30 @@ pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Resu
         } else {
             (version & 0xffff) / 100
         };
-        if !(6..=13).contains(&major) {
+        if !(5..=13).contains(&major) {
             return Err(format!("Unsupported InstallShield cabinet version {major}"));
         }
         let base = number(header, 12)?;
+        let descriptor_end = base
+            .checked_add(48)
+            .ok_or("InstallShield cabinet descriptor overflow")?;
+        header
+            .get(base..descriptor_end)
+            .ok_or("Truncated InstallShield cabinet descriptor")?;
         let table = base
             .checked_add(number(header, base + 12)?)
             .ok_or("InstallShield table overflow")?;
         let count = number(header, base + 40)?;
-        let descriptors = table
-            .checked_add(number(header, base + 44)?)
-            .ok_or("InstallShield descriptor overflow")?;
+        let descriptors = if major == 5 {
+            let directories = number(header, base + 28)?;
+            if directories > 4096 {
+                return Err("Too many InstallShield directories".into());
+            }
+            table.checked_add(directories * 4)
+        } else {
+            table.checked_add(number(header, base + 44)?)
+        }
+        .ok_or("InstallShield descriptor overflow")?;
         if count > 4096 {
             return Err("Too many InstallShield entries".into());
         }
@@ -51,15 +64,37 @@ pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Resu
             .0;
         let prefix = prefix.trim_end_matches(|c: char| c.is_ascii_digit());
         for i in 0..count {
-            let p = descriptors
-                .checked_add(i * 87)
-                .ok_or("InstallShield descriptor overflow")?;
-            let descriptor = header
-                .get(p..p + 87)
-                .ok_or("Truncated InstallShield descriptor")?;
-            let flags = u16_at(descriptor, 0).unwrap();
-            let name_offset = number(descriptor, 58)?;
-            let data_offset = wide(descriptor, 18)?;
+            let (descriptor, flags, name_offset) = if major == 5 {
+                let index = descriptors
+                    .checked_add(i * 4)
+                    .ok_or("InstallShield index overflow")?;
+                let p = table
+                    .checked_add(number(header, index)?)
+                    .ok_or("InstallShield descriptor overflow")?;
+                let d = header
+                    .get(
+                        p..p.checked_add(58)
+                            .ok_or("InstallShield descriptor overflow")?,
+                    )
+                    .ok_or("Truncated InstallShield 5 descriptor")?;
+                (d, u16_at(d, 8).unwrap(), number(d, 0)?)
+            } else {
+                let p = descriptors
+                    .checked_add(i * 87)
+                    .ok_or("InstallShield descriptor overflow")?;
+                let d = header
+                    .get(
+                        p..p.checked_add(87)
+                            .ok_or("InstallShield descriptor overflow")?,
+                    )
+                    .ok_or("Truncated InstallShield descriptor")?;
+                (d, u16_at(d, 0).unwrap(), number(d, 58)?)
+            };
+            let data_offset = if major == 5 {
+                number(descriptor, 38)?
+            } else {
+                wide(descriptor, 18)?
+            };
             if flags & 8 != 0 || name_offset == 0 || data_offset == 0 {
                 continue;
             }
@@ -79,22 +114,45 @@ pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Resu
             }
             // Split/obfuscated/linked payloads need different decoding. Never
             // silently concatenate volumes or substitute a neighbouring file.
-            if flags & !4 != 0 || descriptor[84] != 0 {
+            if flags & !4 != 0 || (major != 5 && descriptor[84] != 0) {
                 return Err("Unsupported split, obfuscated or linked InstallShield cabinet".into());
             }
-            let expanded = wide(descriptor, 2)?;
-            let compressed = wide(descriptor, 10)?;
+            let expanded = if major == 5 {
+                number(descriptor, 10)?
+            } else {
+                wide(descriptor, 2)?
+            };
+            let compressed = if major == 5 {
+                number(descriptor, 14)?
+            } else {
+                wide(descriptor, 10)?
+            };
             if expanded > *budget {
                 return Err("InstallShield payload exceeds size limit".into());
             }
-            let volume = u16_at(descriptor, 85).unwrap();
-            let volume_name = format!("{prefix}{volume}.cab");
+            let volume_name = if major == 5 {
+                format!("{}.cab", header_name.rsplit_once('.').unwrap().0)
+            } else {
+                let volume = u16_at(descriptor, 85).unwrap();
+                format!("{prefix}{volume}.cab")
+            };
             let (_, data) = entries
                 .iter()
                 .find(|(n, b)| n.eq_ignore_ascii_case(&volume_name) && b.starts_with(b"ISc("))
                 .ok_or_else(|| format!("Missing InstallShield volume {volume_name}"))?;
             if number(data, 4)? != version {
                 return Err("InstallShield volume version mismatch".into());
+            }
+            if major == 5 {
+                let first = number(data, 28)?;
+                let last = number(data, 32)?;
+                if i < first
+                    || i > last
+                    || (i + 1 < count && i == last && number(data, 56)? != compressed)
+                    || (i > 0 && i == first && number(data, 44)? != compressed)
+                {
+                    return Err("Unsupported split InstallShield 5 cabinet".into());
+                }
             }
             let size = if flags & 4 != 0 { compressed } else { expanded };
             let end = data_offset
@@ -130,7 +188,12 @@ pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Resu
                 }
                 result
             };
-            if decoded.len() != expanded || md5::compute(&decoded).0 != descriptor[26..42] {
+            let expected_md5 = if major == 5 {
+                &descriptor[42..58]
+            } else {
+                &descriptor[26..42]
+            };
+            if decoded.len() != expanded || md5::compute(&decoded).0 != expected_md5 {
                 return Err("InstallShield payload size or MD5 mismatch".into());
             }
             out.push(Cabinet {
@@ -201,5 +264,55 @@ mod tests {
         assert!(extract(&entries, &mut 65536).unwrap_err().contains("MD5"));
         entries[1].1.truncate(129);
         assert!(extract(&entries, &mut 65536).is_err());
+    }
+    fn fixture5(compressed: bool) -> Vec<(String, Vec<u8>)> {
+        let original = fixture(compressed);
+        let d = &original[0].1[80..167];
+        let mut header = vec![0; 152];
+        header[..4].copy_from_slice(b"ISc(");
+        put32(&mut header, 4, 0x01005201);
+        put32(&mut header, 12, 32);
+        put32(&mut header, 44, 48);
+        put32(&mut header, 60, 1); // one directory
+        put32(&mut header, 72, 1); // one file
+        put32(&mut header, 84, 8); // file descriptor relative to table
+        put32(&mut header, 88, 66); // name relative to table
+        header[96..98].copy_from_slice(&d[0..2]);
+        header[98..102].copy_from_slice(&d[2..6]);
+        header[102..106].copy_from_slice(&d[10..14]);
+        header[126..130].copy_from_slice(&d[18..22]);
+        header[130..146].copy_from_slice(&d[26..42]);
+        header[146..152].copy_from_slice(b"x.cab\0");
+        let mut volume = original[1].1.clone();
+        put32(&mut volume, 4, 0x01005201);
+        vec![("data1.hdr".into(), header), ("data1.cab".into(), volume)]
+    }
+    #[test]
+    fn version5_indexed_descriptors_stored_and_deflated() {
+        for compressed in [false, true] {
+            let result = extract(&fixture5(compressed), &mut 65536).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].name, "x.cab");
+            assert_eq!(result[0].bytes, b"MSCF synthetic cabinet bytes");
+        }
+    }
+    #[test]
+    fn version5_integrity_bad_indexes_and_split_volumes() {
+        let original = fixture5(false);
+        let mut bad = original.clone();
+        bad[1].1[128] ^= 1;
+        assert!(extract(&bad, &mut 65536).unwrap_err().contains("MD5"));
+        assert!(extract(&original[..1], &mut 65536)
+            .unwrap_err()
+            .contains("Missing"));
+        let mut bad = original.clone();
+        put32(&mut bad[0].1, 84, u32::MAX);
+        assert!(extract(&bad, &mut 65536).is_err());
+        let mut bad = original.clone();
+        put32(&mut bad[1].1, 28, 1);
+        assert!(extract(&bad, &mut 65536).unwrap_err().contains("split"));
+        let mut bad = original;
+        put32(&mut bad[0].1, 12, u32::MAX);
+        assert!(extract(&bad, &mut 65536).is_err());
     }
 }
