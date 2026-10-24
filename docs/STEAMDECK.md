@@ -16,22 +16,46 @@ les boutons Xbox. Les boutons arrière ne sont pas nécessaires.
 
 ## Commandes en jeu
 
+Les boutons Menu (☰, à droite) et View (à gauche) servent à l’émulateur :
+
 | Bouton Deck | Fonction |
 |---|---|
-| Croix / stick gauche | Directions Gizmondo |
-| A / B / X / Y | Play / Forward / Rewind / Stop |
-| L1 | Plein écran |
-| R1 | Home Gizmondo |
-| L2 / R2 | Gizmondo L / R |
-| Select / View — appui court | Filtre d’upscaling suivant, en boucle |
-| Select / View — maintien de 650 ms | Arrêter le jeu et revenir au catalogue |
-| Start / Menu — appui court | Volume Gizmondo (Piano 2) |
-| Start / Menu — maintien de 650 ms | Luminosité Gizmondo (Piano 3) |
+| Menu — appui court | Filtre d’upscaling suivant |
+| Menu — maintien de 650 ms | Arrêter le jeu et revenir au catalogue |
+| View — appui court | Basculer le plein écran |
+| View — maintien de 650 ms | Luminosité Gizmondo ; aucune touche sur PocketPC |
 
-Le nom du filtre apparaît brièvement dans le jeu. Le dernier filtre choisi
-est enregistré dans les réglages Deck. Start envoie les touches **Volume** ou **Luminosité de la Gizmondo** selon
-la durée de l’appui ; il ne règle pas le volume ou la luminosité système de
-SteamOS. L’appui long déclenche seulement Luminosité, sans ouvrir Volume avant.
+### PocketPC / WinCE
+
+| Bouton Deck | Fonction |
+|---|---|
+| Croix / stick gauche | Directions |
+| R2 | Action / Entrée |
+| L2 | P1 (VK_APP1) |
+| R3 — clic du stick droit | P2 (VK_APP2) |
+| R1 | P3 (VK_APP3) |
+| L3 — clic du stick gauche | P4 (VK_APP4) |
+| L1 | Échap |
+| A / B / X / Y | A / B / C / Tab (Ctrl / Espace / Maj / Tab) |
+
+Les quatre boutons P1–P4 sont ceux annoncés par GAPI. Un jeu peut limiter son
+écran de configuration à ces boutons et aux directions ; cela ne signifie pas
+qu’il accepte aussi toutes les touches du clavier. Action / Entrée est distinct
+de P1. Le clic d’un stick est indépendant de ses déplacements.
+
+### Gizmondo
+
+| Bouton Deck | Fonction |
+|---|---|
+| Croix / stick gauche | Directions |
+| A / Y / B / X | Action / A / B / C |
+| L1 | Volume Gizmondo (Piano 2) |
+| R1 | Home Gizmondo (Piano 1) |
+| L2 / R2 | Gizmondo L / R |
+
+Les assignations Gizmondo personnalisées restent conservées, à l’exception de
+L1 réservé au volume. Les commandes Gizmondo règlent la machine émulée, pas le
+volume ou la luminosité de SteamOS.
 
 ## Catalogue
 

@@ -4053,3 +4053,19 @@ Move ESC off View long press for PocketPC; View short still toggles fullscreen.
 Preserve Gizmondo's mappings including View long secondary key. RightThumb and
 LeftThumb are the backend names for actual stick clicks, not stick directions.
 Checkpoint saved before tests; final validation logs accompany the delivery.
+
+Reference checking also found fractional sample phase was discarded on every
+tracker loop, slightly detuning short samples. Preserve fixed-point phase and
+overshoot modulo loop length; do not alter loop bounds or tracker effects.
+The absolute tone test now requires the PAL target within1.5Hz at three output
+rates. Real menu MOD is independently compared with libopenmpt (no dependency
+added to PocketHLE). Actual before/after input runs use the same keys and taps.
+
+Verified after delivery: Street Duel's Change screen accepts P4 for acceleration,
+P1 for brake, P2 for handbrake and P3 for pause using identical before/after tap
+and key sequences (before rejected all four). Kernel269/library128 Steam Deck/
+WinCE API521 tests pass, with4 API tests ignored. HSS regression tests rerun after
+phase preservation. Host Android JNI check and rustfmt pass. Absolute reference
+tone changes512.760Hz ->258.984Hz (PAL target258.973Hz). Menu MOD spectrum against
+libopenmpt improves0.7847 ->0.9569 without transposition; not bit-exact replay.
+Full Windows GUI, APK and physical Deck controller not run in this environment.

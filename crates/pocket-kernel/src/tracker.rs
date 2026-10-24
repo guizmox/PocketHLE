@@ -508,8 +508,11 @@ fn mix(
             let pos = (ch.pos >> 16) as usize;
             if pos >= sample.data.len() {
                 if sample.loop_len > 0 {
-                    let rel = (pos - sample.loop_start) % sample.loop_len;
-                    ch.pos = ((sample.loop_start + rel) as u64) << 16;
+                    // Preserve the fractional phase and any overshoot. Dropping
+                    // the fraction at every loop retunes short periodic samples.
+                    let start = (sample.loop_start as u64) << 16;
+                    let length = (sample.loop_len as u64) << 16;
+                    ch.pos = start + (ch.pos - start) % length;
                 } else {
                     ch.active = false;
                 }
@@ -640,7 +643,7 @@ mod tests {
                 .count();
             let hz = crossings as f64 * rate as f64 / (end - start) as f64;
             assert!(
-                (hz - 258.97).abs() < 3.0,
+                (hz - 258.97).abs() < 1.5,
                 "{rate} Hz output: tone was {hz} Hz"
             );
         }

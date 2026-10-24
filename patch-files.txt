@@ -18,6 +18,7 @@ crates\pocket-library\tests\data\nsis1-bzip-synthetic.exe
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\gx.rs
 docs\AGENTS.md
+docs\STEAMDECK.md
 frontends\pocket-android-jni\src\runner.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
