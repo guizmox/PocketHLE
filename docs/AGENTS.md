@@ -4028,3 +4028,19 @@ Vendored NSIS decoder44 tests pass. Core identity integration test and Android
 JNI host check are logged separately. Full Windows build/APK/UI and complete
 POPHD gameplay are not claimed validated here. Keep Cargo.toml/Cargo.lock and
 vendor/newtua-nsis together when applying this cumulative patch.
+
+## HSS MOD pitch and PocketPC GAPI button codes (2026-10-24)
+Street Duel reproduces two generic discrepancies. Protracker sample playback
+used the full7.09MHz PAL system clock instead of Paula's half-clock3.5468946MHz.
+This raises pitch one octave while preserving row timing. Fix only sample clock;
+do not halve the whole mixer rate or change HSS output rate/tempo. Add an
+absolute rendered PCM tone measurement at22.05/44.1/48kHz with duration checks.
+PocketPC GAPI previously advertised D2/D3/D4 while frontend hardware keys P2/P3/P4
+send C2/C3/C4. A client that whitelists GXGetDefaultKeys rejects those real
+messages; asynchronous key aliases cannot fix a message-driven whitelist.
+For action=Return (PocketPC), advertise Return/C2/C3/C4 in portrait and landscape.
+Preserve legacy/Gizmondo's D1/D2/D3/D4 exactly and keep host mappings unchanged.
+Street Duel's Change menu only accepts its GAPI keys. Ctrl/Space/Shift/Tab from
+the user's Deck A/B/X/Y bindings are keyboard keys, not advertised hardware
+buttons; do not invent a game-specific whitelist patch or silently remap Tab.
+Checkpoint saved before tests; final results recorded in the delivery logs.

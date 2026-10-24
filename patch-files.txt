@@ -4,7 +4,9 @@ crates\pocket-cab\src\install_recovery.rs
 crates\pocket-cab\src\lib.rs
 crates\pocket-core\src\lib.rs
 crates\pocket-core\tests\pocketpc_identity.rs
+crates\pocket-kernel\src\gapi.rs
 crates\pocket-kernel\src\registry.rs
+crates\pocket-kernel\src\tracker.rs
 crates\pocket-library\src\installer.rs
 crates\pocket-library\src\installer\installshield.rs
 crates\pocket-library\src\installer\nsis_bzip.rs

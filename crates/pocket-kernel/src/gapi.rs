@@ -55,6 +55,13 @@ pub fn default_key_list() -> [u8; KEY_LIST_BYTES] {
 pub fn key_list_with_action(action: u16) -> [u8; KEY_LIST_BYTES] {
     let mut keys = DEFAULT_KEYS;
     keys[4] = action;
+    // Pocket PC host inputs use VK_APP2..4 (C2..C4). Advertise these same
+    // hardware codes to GAPI clients, including clients that whitelist the
+    // returned keys instead of polling aliases in GetAsyncKeyState.
+    // The legacy/Gizmondo table deliberately keeps its D2..D4 codes.
+    if action == VK_RETURN {
+        keys[5..].copy_from_slice(&[0xC2, 0xC3, 0xC4]);
+    }
     let mut buf = [0u8; KEY_LIST_BYTES];
     for (i, vk) in keys.iter().enumerate() {
         buf[i * 12..i * 12 + 2].copy_from_slice(&vk.to_le_bytes());
@@ -99,6 +106,21 @@ pub fn remap_host_key_with_action(vk: u16, queried: bool, action: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pocket_pc_advertises_the_hardware_keys_delivered_by_host_bindings() {
+        for options in [2, 3] {
+            let table = key_list_for_options(VK_RETURN, options);
+            let buttons: Vec<_> = (4..8)
+                .map(|i| u16::from_le_bytes([table[i * 12], table[i * 12 + 1]]))
+                .collect();
+            assert_eq!(buttons, [0x0D, 0xC2, 0xC3, 0xC4]);
+            for (i, &vk) in DEFAULT_KEYS.iter().enumerate() {
+                let legacy = key_list_for_options(VK_A, options);
+                assert_eq!(u16::from_le_bytes([legacy[i * 12], legacy[i * 12 + 1]]), vk);
+            }
+        }
+    }
 
     #[test]
     fn landscape_table_rotates_directions_only_on_pocket_pc() {

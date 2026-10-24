@@ -13,10 +13,9 @@
 //! effect is ignored rather than guessed at: a wrong effect is more
 //! audible than a missing one.
 
-/// Amiga PAL clock. A period of `p` plays at `PAL_CLOCK / p` Hz — this
-/// one constant is what makes a module play at the pitch its author
-/// heard.
-const PAL_CLOCK: f64 = 7_093_789.2;
+/// Paula's PAL sample clock is half the 7.09 MHz system clock. Protracker
+/// periods divide this clock; row/tick timing is independent of sample pitch.
+const PAL_CLOCK: f64 = 3_546_894.6;
 
 /// Rows per pattern, fixed by the format.
 const ROWS: usize = 64;
@@ -619,6 +618,32 @@ mod tests {
         assert!(!pcm.is_empty(), "render produced nothing");
         assert_eq!(pcm.len() % 2, 0, "output must be interleaved stereo");
         assert!(pcm.iter().any(|&s| s != 0), "render produced only silence");
+    }
+
+    /// A 32-byte loop at period 428 has a 258.97 Hz fundamental on PAL.
+    /// Check actual rendered PCM at multiple output rates, independently of
+    /// the period-to-step implementation, and keep the row duration unchanged.
+    #[test]
+    fn rendered_pal_pitch_and_tempo_match_a_reference_tone() {
+        let mut bytes = tiny_module();
+        bytes[48..50].copy_from_slice(&16u16.to_be_bytes()); // loop 32 bytes
+        let m = Module::parse(&bytes).unwrap();
+        for rate in [22_050, 44_100, 48_000] {
+            let pcm = m.render(rate, 2);
+            assert_eq!(pcm.len(), rate as usize * 2 * 2);
+            let frames: Vec<_> = pcm.chunks_exact(2).map(|s| s[0]).collect();
+            let start = rate as usize / 10;
+            let end = rate as usize;
+            let crossings = frames[start..end]
+                .windows(2)
+                .filter(|s| s[0] <= 0 && s[1] > 0)
+                .count();
+            let hz = crossings as f64 * rate as f64 / (end - start) as f64;
+            assert!(
+                (hz - 258.97).abs() < 3.0,
+                "{rate} Hz output: tone was {hz} Hz"
+            );
+        }
     }
 
     /// A module whose order table jumps backwards plays forever on a
