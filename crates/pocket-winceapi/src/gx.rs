@@ -292,9 +292,9 @@ fn gx_get_default_keys(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     let buf = pocket_kernel::gapi::key_list_for_options(ctx.kernel.gapi_action_key, options);
     debug_assert_eq!(buf.len(), 0x60);
     ctx.cpu.write_mem(sret, &buf)?;
-    // Record the query so legacy/Gizmondo confirm follows vkA. The Pocket
-    // PC profile advertises and preserves the physical select key, Return;
-    // reading GAPI directions does not imply every binding uses the table.
+    // Legacy/Gizmondo confirm follows vkA after this query. PocketPC GAPI
+    // advertises its four application buttons C1..C4; the central physical
+    // select key remains Return, distinct from those hardware buttons.
     ctx.kernel.gapi_keys_queried = true;
     Ok(DispatchOutcome::ReturnedR0(sret))
 }

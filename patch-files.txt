@@ -12,9 +12,11 @@ crates\pocket-library\src\installer\installshield.rs
 crates\pocket-library\src\installer\nsis_bzip.rs
 crates\pocket-library\src\installer\rar.rs
 crates\pocket-library\src\installer\vise.rs
+crates\pocket-library\src\keybindings.rs
 crates\pocket-library\src\lib.rs
 crates\pocket-library\tests\data\nsis1-bzip-synthetic.exe
 crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\gx.rs
 docs\AGENTS.md
 frontends\pocket-android-jni\src\runner.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt

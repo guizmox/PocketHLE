@@ -498,9 +498,11 @@ pub fn steam_deck_guest_button(control: &str, gizmondo: bool) -> Option<GuestBut
     }
     match control {
         "RightTrigger2" => Some(Action),
-        "LeftTrigger2" => Some(PocketPcApp2),
+        "LeftTrigger2" => Some(PocketPcApp1),
+        "RightThumb" => Some(PocketPcApp2),
+        "LeftThumb" => Some(PocketPcApp4),
         "RightTrigger" => Some(PocketPcApp3),
-        "LeftTrigger" => Some(PocketPcApp4),
+        "LeftTrigger" => Some(Soft2),
         "South" => Some(ButtonA),
         "East" => Some(ButtonB),
         "West" => Some(ButtonC),
@@ -566,9 +568,11 @@ mod controller_tests {
         use GuestButton::*;
         for (control, button) in [
             ("RightTrigger2", Action),
-            ("LeftTrigger2", PocketPcApp2),
+            ("LeftTrigger2", PocketPcApp1),
+            ("RightThumb", PocketPcApp2),
+            ("LeftThumb", PocketPcApp4),
             ("RightTrigger", PocketPcApp3),
-            ("LeftTrigger", PocketPcApp4),
+            ("LeftTrigger", Soft2),
             ("South", ButtonA),
             ("East", ButtonB),
             ("West", ButtonC),

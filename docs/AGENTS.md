@@ -4030,17 +4030,26 @@ POPHD gameplay are not claimed validated here. Keep Cargo.toml/Cargo.lock and
 vendor/newtua-nsis together when applying this cumulative patch.
 
 ## HSS MOD pitch and PocketPC GAPI button codes (2026-10-24)
-Street Duel reproduces two generic discrepancies. Protracker sample playback
-used the full7.09MHz PAL system clock instead of Paula's half-clock3.5468946MHz.
-This raises pitch one octave while preserving row timing. Fix only sample clock;
-do not halve the whole mixer rate or change HSS output rate/tempo. Add an
-absolute rendered PCM tone measurement at22.05/44.1/48kHz with duration checks.
-PocketPC GAPI previously advertised D2/D3/D4 while frontend hardware keys P2/P3/P4
-send C2/C3/C4. A client that whitelists GXGetDefaultKeys rejects those real
-messages; asynchronous key aliases cannot fix a message-driven whitelist.
-For action=Return (PocketPC), advertise Return/C2/C3/C4 in portrait and landscape.
-Preserve legacy/Gizmondo's D1/D2/D3/D4 exactly and keep host mappings unchanged.
-Street Duel's Change menu only accepts its GAPI keys. Ctrl/Space/Shift/Tab from
-the user's Deck A/B/X/Y bindings are keyboard keys, not advertised hardware
-buttons; do not invent a game-specific whitelist patch or silently remap Tab.
-Checkpoint saved before tests; final results recorded in the delivery logs.
+Protracker sample playback used the full7.09MHz PAL system clock instead of
+Paula's half-clock3.5468946MHz, raising pitch one octave without changing row
+timing. Fix only the sample clock; preserve mixer output rate and module tempo.
+Measure absolute rendered PCM tone at22.05/44.1/48kHz and unchanged duration.
+
+The four PocketPC GAPI buttons must be VK_APP1..4 (C1..C4), matching frontend
+hardware inputs. The previous table incorrectly replaced P1 with Return and
+advertised D2/D3/D4 for the other buttons. Whitelisting clients such as Street
+Duel then accepted Return and directions but rejected every PocketPC APP key.
+For the PocketPC profile (physical action key=Return), report C1/C2/C3/C4 in
+both portrait and landscape. Keep Return independent and do not remap it merely
+because an application queries GAPI directions. Gizmondo/legacy's D1..D4 table,
+input behavior and button layout remain unchanged.
+GAPI supplies four button entries: Street Duel's Change menu accepts those four
+and the arrows. Keyboard Ctrl/Space/Shift/Tab/Escape and the separate Return
+are not necessarily bindable in that game; do not patch its whitelist.
+
+User-confirmed Deck PocketPC mapping: R2=Action, L2=P1, right stick click R3=P2,
+R1=P3, left stick click L3=P4, L1=ESC. Face buttons A/B/X/Y keep Ctrl/Space/Shift/Tab.
+Move ESC off View long press for PocketPC; View short still toggles fullscreen.
+Preserve Gizmondo's mappings including View long secondary key. RightThumb and
+LeftThumb are the backend names for actual stick clicks, not stick directions.
+Checkpoint saved before tests; final validation logs accompany the delivery.

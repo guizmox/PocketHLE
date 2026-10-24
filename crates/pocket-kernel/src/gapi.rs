@@ -51,16 +51,19 @@ pub fn default_key_list() -> [u8; KEY_LIST_BYTES] {
     key_list_with_action(VK_A)
 }
 
-/// Device-selected action key; the Gizmondo/legacy profile keeps VK_A.
+/// Serialize the device's four gaming buttons. The PocketPC profile is
+/// selected by its separate physical action key, VK_RETURN; its four application
+/// buttons use C1..C4. Gizmondo/legacy retains the D1..D4 gaming keys.
 pub fn key_list_with_action(action: u16) -> [u8; KEY_LIST_BYTES] {
     let mut keys = DEFAULT_KEYS;
     keys[4] = action;
-    // Pocket PC host inputs use VK_APP2..4 (C2..C4). Advertise these same
-    // hardware codes to GAPI clients, including clients that whitelist the
-    // returned keys instead of polling aliases in GetAsyncKeyState.
-    // The legacy/Gizmondo table deliberately keeps its D2..D4 codes.
+    // The PocketPC device has four application buttons, VK_APP1..4. GAPI
+    // must report the same physical keys that frontends deliver. The central
+    // Return/action key is separate; replacing APP1 with Return made APP1
+    // disappear from clients that whitelist the returned hardware keys.
+    // Preserve the legacy/Gizmondo table for its separate device profile.
     if action == VK_RETURN {
-        keys[5..].copy_from_slice(&[0xC2, 0xC3, 0xC4]);
+        keys[4..].copy_from_slice(&[0xC1, 0xC2, 0xC3, 0xC4]);
     }
     let mut buf = [0u8; KEY_LIST_BYTES];
     for (i, vk) in keys.iter().enumerate() {
@@ -114,7 +117,7 @@ mod tests {
             let buttons: Vec<_> = (4..8)
                 .map(|i| u16::from_le_bytes([table[i * 12], table[i * 12 + 1]]))
                 .collect();
-            assert_eq!(buttons, [0x0D, 0xC2, 0xC3, 0xC4]);
+            assert_eq!(buttons, [0xC1, 0xC2, 0xC3, 0xC4]);
             for (i, &vk) in DEFAULT_KEYS.iter().enumerate() {
                 let legacy = key_list_for_options(VK_A, options);
                 assert_eq!(u16::from_le_bytes([legacy[i * 12], legacy[i * 12 + 1]]), vk);
@@ -163,8 +166,11 @@ mod tests {
         let legacy = default_key_list();
         let ppc = key_list_with_action(VK_RETURN);
         assert_eq!(&ppc[..48], &legacy[..48]);
-        assert_eq!(&ppc[50..], &legacy[50..]);
-        assert_eq!(u16::from_le_bytes([ppc[48], ppc[49]]), VK_RETURN);
+        for (i, vk) in [0xC1u16, 0xC2, 0xC3, 0xC4].iter().enumerate() {
+            let offset = (i + 4) * 12;
+            assert_eq!(u16::from_le_bytes([ppc[offset], ppc[offset + 1]]), *vk);
+            assert_eq!(&ppc[offset + 2..offset + 12], &[0; 10]);
+        }
         for vk in [
             VK_RETURN, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_A, VK_B, VK_C, VK_START, 0x11, 0x20,
             0x10, 0x09, 0x1b, 0x70, 0x7a,

@@ -3610,16 +3610,9 @@ impl PocketLauncher {
                 self.set_fullscreen(ctx, !fullscreen);
             }
             Some(crate::deck_navigation::ViewAction::SecondaryKey)
-                if self.screen == Screen::Run =>
+                if self.screen == Screen::Run && self.running_is_gizmondo =>
             {
-                self.pulse_deck_piano(
-                    device,
-                    if self.running_is_gizmondo {
-                        GuestButton::GizPiano3
-                    } else {
-                        GuestButton::Soft2
-                    },
-                );
+                self.pulse_deck_piano(device, GuestButton::GizPiano3);
             }
             _ => {}
         }
