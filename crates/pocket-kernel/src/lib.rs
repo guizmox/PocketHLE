@@ -1505,6 +1505,8 @@ pub struct KernelState {
     /// loads every map asset through these imports.
     pub gz_files: crate::gz::GzFiles,
     pub zlib_streams: crate::zlib::ZlibStreams,
+    /// One-byte CRT pushback, separate from raw Win32 file I/O.
+    pub crt_pushback: HashMap<u32, u8>,
     pub sdl: crate::sdl::SdlState,
     /// Messages posted with `PostMessageW` (and the `MM_WOM_DONE`
     /// notifications we synthesise for `waveOut`), waiting to be
@@ -2050,7 +2052,11 @@ impl KernelState {
 
     fn composite_window_layers(&mut self, present_windows: bool) {
         self.refresh_control_visibility();
-        if !present_windows && self.controls.is_empty() && self.modal.is_none() {
+        if !present_windows
+            && self.controls.is_empty()
+            && self.modal.is_none()
+            && self.active_shell_bar().is_none()
+        {
             return;
         }
         // Measure before notification stamps/item rectangles, not only before
@@ -3936,6 +3942,7 @@ impl Process {
                 hss: Default::default(),
                 gz_files: Default::default(),
                 zlib_streams: Default::default(),
+                crt_pushback: HashMap::new(),
                 sdl: Default::default(),
                 posted_messages: Default::default(),
                 msg_queues: HashMap::new(),
@@ -4781,6 +4788,36 @@ mod tests {
         assert_eq!(k.gx_last_pushed_counter, last_guest);
         sync_guest_framebuffer(&mut cpu, k);
         assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+    }
+
+    #[test]
+    fn shell_bar_without_child_controls_is_composited_and_respects_visibility() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000), &mut cpu, &|_, _| None, &NullDispatcher,
+        ).unwrap();
+        let k = &mut process.state;
+        let (owner, bar) = (0xdead0001, 0xdead0b01);
+        k.active_window = owner;
+        k.window_styles.insert(owner, (0x10000000, 0));
+        k.window_styles.insert(bar, (0x90000000, 0));
+        k.window_visibility.insert(owner, true);
+        k.window_visibility.insert(bar, true);
+        k.gdi.shell_menus.bars.insert(bar, shell_menu::Bar {
+            owner, menu: 0, sip: true, background: 0xf800,
+        });
+        assert!(k.controls.is_empty());
+        k.framebuffer.fill(0x07e0);
+        let counter = k.framebuffer.frame_counter;
+        k.composite_controls();
+        let offset = ((k.framebuffer.height - 3) * k.framebuffer.width * 2) as usize;
+        assert_eq!(&k.framebuffer.pixels[offset..offset+2], &0xf800u16.to_le_bytes());
+        assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+        assert_eq!(k.framebuffer.frame_counter, counter);
+        k.window_visibility.insert(bar, false);
+        k.framebuffer.fill(0x001f);
+        k.composite_controls();
+        assert_eq!(&k.framebuffer.pixels[offset..offset+2], &0x001fu16.to_le_bytes());
     }
 
     #[test]

@@ -45,6 +45,7 @@ mod registry_enumeration;
 mod tab_control;
 mod toolbar;
 mod trackbar;
+mod progress;
 use pocket_cpu::regs::ArmReg;
 use pocket_cpu::Prot;
 use pocket_kernel::controls::{ControlAction, ControlClass, Controls};
@@ -395,6 +396,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     // reaches `main`; MSVC-built images never do.
     d.register_handler(dll, "_fpreset", crt_fpreset);
     d.register_handler(dll, "fgetc", crt_fgetc);
+    d.register_handler(dll, "ungetc", crt_ungetc);
     d.register_handler(dll, "fputc", crt_fputc);
     d.register_handler(dll, "fgets", crt_fgets);
     d.register_handler(dll, "fputs", crt_fputs);
@@ -480,6 +482,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     // MFC for CE3 exports the same global allocation ABI by ordinal315.
     d.register_handler("mfcce300.dll", "??2@YAPAXI@Z", operator_new);
     d.register_handler("mfcce300.dll", "ord:315", operator_new);
+    d.register_handler("mfcce300.dll", "??3@YAXPAX@Z", free);
+    d.register_handler("mfcce300.dll", "ord:317", free);
     d.register_handler(dll, "??3@YAXPAX@Z", free);
     d.register_handler(dll, "??_U@YAPAXI@Z", operator_new);
     d.register_handler(dll, "??_V@YAXPAX@Z", free);
@@ -2896,6 +2900,7 @@ fn close_owned_handle(kernel: &mut KernelState, handle: u32) -> bool {
     let Some((_, last)) = kernel.object_handles.close(handle) else {
         return false;
     };
+    kernel.crt_pushback.remove(&handle);
     match object {
         HandleObject::Thread(index) => {
             if let Some(thread) = index.checked_sub(1).and_then(|i| kernel.threads.get_mut(i)) {
@@ -7733,7 +7738,9 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         }
     }
     let mut input = Vec::new();
+    let pushed = ctx.kernel.crt_pushback.remove(&handle);
     let mut offsets = vec![0usize];
+    if let Some(byte) = pushed {input.push(byte); offsets.push(0);}
     let mut i = 0;
     while i < raw.len() {
         if text_mode && raw[i] == b'\r' && raw.get(i + 1) == Some(&b'\n') {
@@ -7757,6 +7764,9 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         start.saturating_add(used as u64) as i64,
         SeekKind::Begin,
     );
+    if result.as_ref().map_or(true, |(_, consumed)| *consumed == 0) {
+        if let Some(byte) = pushed {ctx.kernel.crt_pushback.insert(handle,byte);}
+    }
     let (assigned, _) = result?;
     Ok(DispatchOutcome::ReturnedR0(assigned as u32))
 }
@@ -9065,10 +9075,13 @@ fn crt_fflush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// non-LF lookahead so a later stdio call sees precisely the next byte.
 fn read_stdio_bytes(ctx: &mut CallCtx<'_>, h: u32, output: &mut [u8]) -> usize {
     use pocket_kernel::vfs::SeekKind;
+    if output.is_empty() { return 0; }
+    let mut written = if let Some(byte) = ctx.kernel.crt_pushback.remove(&h) {
+        output[0] = byte; 1
+    } else { 0 };
     if !ctx.kernel.vfs.is_text_mode(h) {
-        return ctx.kernel.vfs.read(h, output).unwrap_or(0);
+        return written + ctx.kernel.vfs.read(h, &mut output[written..]).unwrap_or(0);
     }
-    let mut written = 0;
     let mut raw = [0u8; 4096];
     while written < output.len() {
         let capacity = raw.len().min(output.len() - written);
@@ -9161,7 +9174,9 @@ fn crt_fseek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         // become a successful SEEK_SET that changes its current position.
         _ => return Ok(DispatchOutcome::ReturnedR0(u32::MAX)),
     };
-    let r = ctx.kernel.vfs.seek(h, off, kind);
+    let adjustment = i64::from(whence == 1 && ctx.kernel.crt_pushback.contains_key(&h));
+    let r = ctx.kernel.vfs.seek(h, off - adjustment, kind);
+    if r.is_some() { ctx.kernel.crt_pushback.remove(&h); }
     log::trace!("fseek(0x{h:08x}, {off}, {whence}) -> {r:?}");
     Ok(DispatchOutcome::ReturnedR0(if r.is_some() {
         0
@@ -9174,6 +9189,7 @@ fn crt_ftell(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
     let pos = ctx.kernel.vfs.seek(h, 0, SeekKind::Current).unwrap_or(0);
+    let pos = pos.saturating_sub(u64::from(ctx.kernel.crt_pushback.contains_key(&h)));
     Ok(DispatchOutcome::ReturnedR0(pos as u32))
 }
 
@@ -9197,6 +9213,7 @@ fn crt_fgetpos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let Some(pos) = ctx.kernel.vfs.seek(h, 0, SeekKind::Current) else {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
+    let pos = pos.saturating_sub(u64::from(ctx.kernel.crt_pushback.contains_key(&h)));
     if out != 0 {
         ctx.cpu.write_mem(out, &pos.to_le_bytes())?;
     }
@@ -9217,7 +9234,7 @@ fn crt_fsetpos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.cpu.read_mem_into(src, &mut buf)?;
     let pos = u32::from_le_bytes(buf);
     match ctx.kernel.vfs.seek(h, pos as i64, SeekKind::Begin) {
-        Some(_) => Ok(DispatchOutcome::ReturnedR0(0)),
+        Some(_) => {ctx.kernel.crt_pushback.remove(&h); Ok(DispatchOutcome::ReturnedR0(0))},
         None => Ok(DispatchOutcome::ReturnedR0(u32::MAX)),
     }
 }
@@ -9227,14 +9244,26 @@ fn crt_feof(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let size = ctx.kernel.vfs.size(h).unwrap_or(0);
     let pos = ctx.kernel.vfs.seek(h, 0, SeekKind::Current).unwrap_or(0);
-    Ok(DispatchOutcome::ReturnedR0(if pos >= size { 1 } else { 0 }))
+    Ok(DispatchOutcome::ReturnedR0(if pos >= size && !ctx.kernel.crt_pushback.contains_key(&h) { 1 } else { 0 }))
 }
 
 fn crt_rewind(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
-    let _ = ctx.kernel.vfs.seek(h, 0, SeekKind::Begin);
+    if ctx.kernel.vfs.seek(h, 0, SeekKind::Begin).is_some() {ctx.kernel.crt_pushback.remove(&h); }
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+/// One byte of FILE pushback, independent of the underlying file contents.
+/// EOF and a second outstanding pushback fail without altering stream state.
+fn crt_ungetc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (character, handle) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
+    if character == u32::MAX || !ctx.kernel.vfs.is_open(handle)
+        || ctx.kernel.crt_pushback.contains_key(&handle) {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    ctx.kernel.crt_pushback.insert(handle, character as u8);
+    Ok(DispatchOutcome::ReturnedR0(character & 0xff))
 }
 
 fn crt_fgetc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -9263,6 +9292,10 @@ fn crt_fputc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn read_stdio_line(ctx: &mut CallCtx<'_>, h: u32, max: usize, text_mode: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(max);
+    if let Some(byte) = ctx.kernel.crt_pushback.remove(&h) {
+        out.push(byte);
+        if byte == b'\n' || out.len()+1 >= max {return out;}
+    }
     let mut byte = [0u8; 1];
     while out.len() + 1 < max {
         let read = ctx.kernel.vfs.read(h, &mut byte).unwrap_or(0);
@@ -11549,6 +11582,9 @@ fn control_message(
     if let Some(v) = crate::scroll::control_message(ctx, hwnd, message, wparam, lparam)? {
         return Ok(v);
     }
+    if let Some(result) = progress::message(ctx, hwnd, message, wparam, lparam)? {
+        return Ok(result);
+    }
     if let Some(result) = trackbar::message(ctx, hwnd, message, wparam, lparam) {
         return Ok(result);
     }
@@ -11619,7 +11655,7 @@ fn control_message(
                 7 => 0x100,             // BS_GROUPBOX: static decoration
                 _ => 0x2000,            // check boxes and other button types
             },
-            ControlClass::Static | ControlClass::Toolbar | ControlClass::ScrollBar => 0x100,
+            ControlClass::Static | ControlClass::Toolbar | ControlClass::ScrollBar | ControlClass::Progress => 0x100,
             ControlClass::ComboBox => {
                 0x81 | if wparam == 0x0d || (wparam == 0x1b && c.choice_open) {
                     4
@@ -17845,6 +17881,7 @@ fn get_class_name_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
                     ControlClass::Static => "STATIC",
                     ControlClass::ListView => "SysListView32",
                     ControlClass::TrackBar => "msctls_trackbar32",
+                    ControlClass::Progress => "msctls_progress32",
                     ControlClass::ListBox => "LISTBOX",
                     ControlClass::ComboBox => "COMBOBOX",
                     ControlClass::Toolbar => "ToolbarWindow32",
@@ -26437,6 +26474,46 @@ mod tests {
     }
 
     #[test]
+    fn stdio_ungetc_preserves_files_and_works_with_reads_scans_and_positioning() {
+        use crate::bluetooth::tests::{call,setup};
+        use pocket_kernel::vfs::{Access,SeekKind};
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("push.dat"),b"ab\n12 34").unwrap();
+        let (mut cpu,mut k,mut d)=setup();k.vfs.mount("\\Data\\",dir.path());
+        let h=k.vfs.open("\\Data\\push.dat",Access::Read,false).unwrap();
+        let invoke=|cpu:&mut pocket_cpu::stub::StubCpu,k:&mut KernelState,d:&mut WinCeDispatcher,name,args:&[u32]|call(cpu,k,d,"coredll.dll",name,args);
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(b'a' as u32));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'X' as u32,h]),DispatchOutcome::ReturnedR0(b'X' as u32));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Y' as u32,h]),DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ftell",&[h]),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fread",&[0x2000,1,2,h]),DispatchOutcome::ReturnedR0(2));
+        assert_eq!(cpu.read_mem(0x2000,2).unwrap(),b"Xb");
+        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,3,0]);
+        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'9' as u32,h]);
+        cpu.write_mem(0x1800,b"%d\0").unwrap();
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fscanf",&[h,0x1800,0x2000]),DispatchOutcome::ReturnedR0(1));
+        assert_eq!(cpu.read_mem(0x2000,4).unwrap(),912i32.to_le_bytes());
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(b' ' as u32));
+        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,0,2]);
+        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Z' as u32,h]);
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"feof",&[h]),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"ungetc",&[u32::MAX,h]),DispatchOutcome::ReturnedR0(u32::MAX));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(b'Z' as u32));
+        assert_eq!(invoke(&mut cpu,&mut k,&mut d,"fgetc",&[h]),DispatchOutcome::ReturnedR0(u32::MAX));
+        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,0,0]);
+        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'X' as u32,h]);
+        invoke(&mut cpu,&mut k,&mut d,"fgets",&[0x2000,8,h]);
+        assert_eq!(cpu.read_mem(0x2000,5).unwrap(),b"Xab\n\0");
+        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Z' as u32,h]);
+        invoke(&mut cpu,&mut k,&mut d,"fseek",&[h,0,1]);
+        assert!(!k.crt_pushback.contains_key(&h));
+        k.vfs.seek(h,0,SeekKind::Begin);let mut bytes=[0;8];k.vfs.read(h,&mut bytes);
+        assert_eq!(&bytes,b"ab\n12 34");
+        invoke(&mut cpu,&mut k,&mut d,"ungetc",&[b'Z' as u32,h]);
+        invoke(&mut cpu,&mut k,&mut d,"fclose",&[h]);assert!(!k.crt_pushback.contains_key(&h));
+    }
+
+    #[test]
     fn stdio_fseek_rejects_invalid_origin_without_changing_position_or_data() {
         use pocket_kernel::vfs::{Access, SeekKind};
         let dir = tempfile::tempdir().unwrap();
@@ -28897,6 +28974,7 @@ mod tests {
             hss: Default::default(),
             gz_files: Default::default(),
             zlib_streams: Default::default(),
+            crt_pushback: Default::default(),
             sdl: Default::default(),
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
@@ -30133,8 +30211,8 @@ mod tests {
                 &mut cpu,
                 &mut k,
                 &mut d,
-                "coredll.dll",
-                "??3@YAXPAX@Z",
+                "mfcce300.dll",
+                "ord:317",
                 &[p],
             );
             assert_eq!(k.heap.free_bytes(), before);

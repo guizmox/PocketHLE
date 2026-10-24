@@ -46,6 +46,7 @@ mod legacy_services;
 #[cfg(feature = "video-static")]
 mod media_static;
 mod number_format;
+mod mfc;
 pub mod ole32;
 pub mod ordinals;
 mod scroll;
@@ -258,6 +259,7 @@ impl WinCeDispatcher {
             unimplemented_sink: None,
         };
         coredll::register(&mut d);
+        mfc::register(&mut d);
         bluetooth::register(&mut d);
         vibration::register(&mut d);
         wininet::register(&mut d);

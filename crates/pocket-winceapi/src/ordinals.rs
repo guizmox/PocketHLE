@@ -63,8 +63,20 @@ static ORDINAL_TABLES: Lazy<HashMap<String, HashMap<u16, String>>> = Lazy::new(|
 /// if the DLL or ordinal is unknown.
 pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
     let key = dll.to_ascii_lowercase();
-    if key == "mfcce300.dll" && ordinal == 315 {
-        return Some("??2@YAPAXI@Z".into());
+    if key == "mfcce300.dll" {
+        match ordinal {
+            47 => return Some("??0CByteArray@@QAA@XZ".into()),
+            177 => return Some("??0CString@@QAA@PBD@Z".into()),
+            321 => return Some("??4CString@@QAAABV0@ABV0@@Z".into()),
+            181 => return Some("??0CString@@QAA@XZ".into()),
+            218 => return Some("??1CByteArray@@QAA@XZ".into()),
+            297 => return Some("??1CString@@QAA@XZ".into()),
+            2304 => return Some("?SetAtGrow@CByteArray@@QAAXHE@Z".into()),
+            2413 => return Some("?SetSize@CByteArray@@QAAXHH@Z".into()),
+            315 => return Some("??2@YAPAXI@Z".into()),
+            317 => return Some("??3@YAXPAX@Z".into()),
+            _ => {}
+        }
     }
     // The OpenGL ES client libraries keep their tables in
     // `pocket-gles`, next to the implementation they describe.
@@ -79,6 +91,7 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
 /// Number of ordinal entries for `dll` — used by tests.
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
+    if key == "mfcce300.dll" { return 10; }
     if pocket_gles::ordinals::is_gles_dll(&key) {
         return pocket_gles::ordinals::entry_count(&key);
     }

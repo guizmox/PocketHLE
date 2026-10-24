@@ -31,6 +31,7 @@ pub enum ControlClass {
     ListBox,
     ComboBox,
     TrackBar,
+    Progress,
     Tab,
     Toolbar,
     ScrollBar,
@@ -52,6 +53,8 @@ impl ControlClass {
             Some(Self::ListBox)
         } else if name.eq_ignore_ascii_case("COMBOBOX") {
             Some(Self::ComboBox)
+        } else if name.eq_ignore_ascii_case("msctls_progress32") {
+            Some(Self::Progress)
         } else if name.eq_ignore_ascii_case("msctls_trackbar32") {
             Some(Self::TrackBar)
         } else if name.eq_ignore_ascii_case("ToolbarWindow32") {
@@ -324,6 +327,7 @@ pub struct ChildWindow {
     pub choice_row_height: i32,
     pub choice_popup_y: i32,
     pub choice_popup_h: i32,
+    pub progress_colors: (u32, u32),
     pub track_range: (i32, i32),
     pub track_pos: i32,
     pub track_line: i32,
@@ -1036,6 +1040,61 @@ impl ChildWindow {
             }
         }
     }
+    fn render_progress(&self, surf: &mut Surface<'_>) {
+        let color = |v, fallback| {
+            crate::framebuffer::colorref_to_rgb565(if v == 0xff000000 { fallback } else { v })
+        };
+        let (bar, background) = (
+            color(self.progress_colors.0, 0x00800000),
+            color(self.progress_colors.1, 0x00c0c0c0),
+        );
+        surf.fill_rect(self.x, self.y, self.w, self.h, 0x8410);
+        surf.fill_rect(self.x + 1, self.y + 1, self.w - 2, self.h - 2, background);
+        let vertical = self.style & 4 != 0;
+        let extent = (if vertical { self.h } else { self.w })
+            .saturating_sub(4)
+            .max(0);
+        let span = i64::from(self.track_range.1) - i64::from(self.track_range.0);
+        let fill = if span > 0 {
+            ((i64::from(self.track_pos) - i64::from(self.track_range.0)).clamp(0, span)
+                * i64::from(extent)
+                / span) as i32
+        } else {
+            0
+        };
+        if self.style & 1 != 0 {
+            if vertical {
+                surf.fill_rect(
+                    self.x + 2,
+                    self.y + self.h - 2 - fill,
+                    self.w - 4,
+                    fill,
+                    bar,
+                );
+            } else {
+                surf.fill_rect(self.x + 2, self.y + 2, fill, self.h - 4, bar);
+            }
+        } else {
+            // Segment work is bounded by the actual target surface, even for bad geometry.
+            let (sw, sh) = surf.dimensions();
+            let limit = fill.min(if vertical { sh } else { sw } as i32);
+            for start in (0..limit).step_by(8) {
+                let length = (fill - start).min(6);
+                if vertical {
+                    surf.fill_rect(
+                        self.x + 2,
+                        self.y + self.h - 2 - start - length,
+                        self.w - 4,
+                        length,
+                        bar,
+                    );
+                } else {
+                    surf.fill_rect(self.x + 2 + start, self.y + 2, length, self.h - 4, bar);
+                }
+            }
+        }
+    }
+
     fn render_track(&self, surf: &mut Surface<'_>, focused: bool) {
         let vertical = self.style & 2 != 0;
         let length = if vertical { self.h } else { self.w };
@@ -1317,6 +1376,7 @@ impl ChildWindow {
             ControlClass::Toolbar => self.render_toolbar(surf, gdi),
             ControlClass::ScrollBar => self.render_scrollbar(surf),
             ControlClass::TrackBar => self.render_track(surf, focused),
+            ControlClass::Progress => self.render_progress(surf),
             ControlClass::Button => self.render_button(surf, focused, face.as_ref()),
             ControlClass::Edit => self.render_edit(surf, focused, face.as_ref()),
             ControlClass::Static => self.render_static(surf, face.as_ref()),
@@ -1856,9 +1916,14 @@ impl Controls {
             choice_row_height: 16,
             choice_popup_y: 20,
             choice_popup_h: 98,
+            progress_colors: (0xff000000, 0xff000000),
             track_range: (0, 100),
             track_pos: 0,
-            track_line: 1,
+            track_line: if class == ControlClass::Progress {
+                10
+            } else {
+                1
+            },
             track_page: 20,
             track_tick_freq: 1,
             track_ticks: Vec::new(),
