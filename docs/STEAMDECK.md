@@ -23,25 +23,27 @@ Les boutons Menu (☰, à droite) et View (à gauche) servent à l’émulateur 
 | Menu — appui court | Filtre d’upscaling suivant |
 | Menu — maintien de 650 ms | Arrêter le jeu et revenir au catalogue |
 | View — appui court | Basculer le plein écran |
-| View — maintien de 650 ms | Luminosité Gizmondo ; aucune touche sur PocketPC |
+| View — maintien de 650 ms | Luminosité Gizmondo ; sortie du jeu sur PocketPC |
 
 ### PocketPC / WinCE
 
 | Bouton Deck | Fonction |
 |---|---|
 | Croix / stick gauche | Directions |
-| R2 | Action / Entrée |
-| L2 | P1 (VK_APP1) |
-| R3 — clic du stick droit | P2 (VK_APP2) |
-| R1 | P3 (VK_APP3) |
-| L3 — clic du stick gauche | P4 (VK_APP4) |
-| L1 | Échap |
+| L1 | P1 (VK_APP1) |
+| R1 | P2 (VK_APP2) |
+| L2 | P3 (VK_APP3) |
+| R2 | P4 (VK_APP4) |
+| L3 — clic du stick gauche | Échap |
+| R3 — clic du stick droit | Action / Entrée |
 | A / B / X / Y | A / B / C / Tab (Ctrl / Espace / Maj / Tab) |
 
 Les quatre boutons P1–P4 sont ceux annoncés par GAPI. Un jeu peut limiter son
 écran de configuration à ces boutons et aux directions ; cela ne signifie pas
 qu’il accepte aussi toutes les touches du clavier. Action / Entrée est distinct
-de P1. Le clic d’un stick est indépendant de ses déplacements.
+de P1. Le clic d’un stick est indépendant de ses déplacements. Si SDL les expose, les
+boutons Steam (Guide/Mode) et Quick Access (Misc1) permettent aussi de sortir du
+jeu PocketPC par appui long. SteamOS peut réserver ces boutons au système.
 
 ### Gizmondo
 

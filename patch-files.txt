@@ -17,6 +17,11 @@ crates\pocket-library\src\lib.rs
 crates\pocket-library\tests\data\nsis1-bzip-synthetic.exe
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\gx.rs
+crates\pocket-winceapi\src\hss.rs
+crates\pocket-winceapi\src\imgdecmp.rs
+crates\pocket-winceapi\src\lib.rs
+crates\pocket-winceapi\src\ordinals.rs
+crates\pocket-winceapi\src\wave_adpcm.rs
 docs\AGENTS.md
 docs\STEAMDECK.md
 frontends\pocket-android-jni\src\runner.rs

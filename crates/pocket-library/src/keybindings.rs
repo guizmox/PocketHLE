@@ -489,26 +489,36 @@ pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, Guest
     bindings
 }
 
-/// Platform-specific Deck bindings override only the newly assigned controls.
-/// All other Gizmondo controls keep the user's saved mapping.
+/// PocketPC-only Steam Deck overrides. The Gizmondo branch is unchanged:
+/// it keeps using its own saved gamepad bindings and the volume shortcut.
 pub fn steam_deck_guest_button(control: &str, gizmondo: bool) -> Option<GuestButton> {
     use GuestButton::*;
     if gizmondo {
         return (control == "LeftTrigger").then_some(GizPiano2);
     }
     match control {
-        "RightTrigger2" => Some(Action),
-        "LeftTrigger2" => Some(PocketPcApp1),
-        "RightThumb" => Some(PocketPcApp2),
-        "LeftThumb" => Some(PocketPcApp4),
-        "RightTrigger" => Some(PocketPcApp3),
-        "LeftTrigger" => Some(Soft2),
+        "LeftTrigger" => Some(PocketPcApp1),   // L1 = P1
+        "RightTrigger" => Some(PocketPcApp2),  // R1 = P2
+        "LeftTrigger2" => Some(PocketPcApp3),  // L2 = P3
+        "RightTrigger2" => Some(PocketPcApp4), // R2 = P4
+        "LeftThumb" => Some(Soft2),            // L3 = ESC (VK_ESCAPE)
+        "RightThumb" => Some(Action),          // R3 = Action (VK_RETURN)
         "South" => Some(ButtonA),
         "East" => Some(ButtonB),
         "West" => Some(ButtonC),
         "North" => Some(Soft1), // TAB
         _ => None,
     }
+}
+
+/// Recognize either Steam Deck FN/system button as an EXIT long-press source,
+/// but *only* in PocketPC mode. The launcher event loop must still measure the
+/// hold duration and invoke its existing EXIT action; this keybinding module
+/// does not receive key-down/key-up events or close the launcher itself.
+/// SDL Guide is normalized to Mode by our worker; also accept the raw name.
+/// Misc1 = right Quick Access (...), when SteamOS exposes it to SDL.
+pub fn steam_deck_pocketpc_fn_exit_control(control: &str, gizmondo: bool) -> bool {
+    !gizmondo && matches!(control, "Guide" | "Mode" | "Misc1")
 }
 
 /// Upgrade only the exact first factory Deck preset, preserving user mappings.
@@ -567,12 +577,12 @@ mod controller_tests {
     fn deck_pocketpc_keys_and_gizmondo_volume_are_separate() {
         use GuestButton::*;
         for (control, button) in [
-            ("RightTrigger2", Action),
-            ("LeftTrigger2", PocketPcApp1),
-            ("RightThumb", PocketPcApp2),
-            ("LeftThumb", PocketPcApp4),
-            ("RightTrigger", PocketPcApp3),
-            ("LeftTrigger", Soft2),
+            ("LeftTrigger", PocketPcApp1),
+            ("RightTrigger", PocketPcApp2),
+            ("LeftTrigger2", PocketPcApp3),
+            ("RightTrigger2", PocketPcApp4),
+            ("LeftThumb", Soft2),
+            ("RightThumb", Action),
             ("South", ButtonA),
             ("East", ButtonB),
             ("West", ButtonC),
@@ -592,7 +602,26 @@ mod controller_tests {
             assert_eq!(steam_deck_guest_button(control, false), None);
             assert_eq!(steam_deck_guest_button(control, true), None);
         }
+        assert_eq!(
+            steam_deck_guest_button("LeftThumb", false).unwrap().vk(),
+            0x1B
+        );
+        assert_eq!(
+            steam_deck_guest_button("RightThumb", false).unwrap().vk(),
+            0x0D
+        );
         assert_eq!(steam_deck_guest_button("North", false).unwrap().vk(), 0x09);
+    }
+
+    #[test]
+    fn deck_fn_long_press_exit_sources_are_pocketpc_only() {
+        assert!(steam_deck_pocketpc_fn_exit_control("Guide", false));
+        assert!(steam_deck_pocketpc_fn_exit_control("Mode", false));
+        assert!(steam_deck_pocketpc_fn_exit_control("Misc1", false));
+        assert!(!steam_deck_pocketpc_fn_exit_control("Guide", true));
+        assert!(!steam_deck_pocketpc_fn_exit_control("Mode", true));
+        assert!(!steam_deck_pocketpc_fn_exit_control("Misc1", true));
+        assert!(!steam_deck_pocketpc_fn_exit_control("Start", false));
     }
 
     #[test]

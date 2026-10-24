@@ -280,9 +280,14 @@ fn load_clip(ctx: &mut CallCtx<'_>, kind: &str) -> Result<DispatchOutcome, Kerne
                 crate::coredll::read_guest_file_for(ctx, &path)
             };
             let Some(bytes) = bytes else {
+                log::debug!("{kind}::load({path:?}): no readable WAV/MOD container");
                 return Ok(DispatchOutcome::ReturnedR0(0));
             };
             let Some((format, samples)) = decode_clip(&bytes) else {
+                log::debug!(
+                    "{kind}::load({path:?}): unsupported/corrupt audio; header={:02x?}",
+                    &bytes[..bytes.len().min(48)]
+                );
                 return Ok(DispatchOutcome::ReturnedR0(0));
             };
             let entry = (format, Arc::new(samples));
@@ -422,7 +427,7 @@ fn get_clip_volume(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(volume))
 }
 
-/// `int hssSpeaker::open(UINT rate, UINT bits, bool stereo, UINT, UINT)`.
+/// `int hssSpeaker::open(UINT rate, UINT bits, bool stereo, UINT musics, UINT sounds)`.
 ///
 /// The guest picks the mixer format here; we adopt it so the engine
 /// resamples everything to the rate the game expects to hear.
@@ -436,8 +441,9 @@ fn open_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         bits_per_sample: if bits == 8 { 8 } else { 16 },
     };
     let speaker = ctx.arg_u32(0)?;
-    let sounds = ctx.arg_u32(4)?.min(256);
-    let music = ctx.arg_u32(5)?.min(256);
+    // HSS orders its music channels first, then its sample/SFX channels.
+    let music = ctx.arg_u32(4)?.clamp(1, 3);
+    let sounds = ctx.arg_u32(5)?.clamp(8, 64);
     ctx.kernel.hss.speakers.insert(speaker, (sounds, music));
     for index in 0..sounds + music {
         let group = 0x4853_0000u32.wrapping_add(ctx.kernel.hss.channels.len() as u32);
@@ -448,7 +454,7 @@ fn open_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             .entry((speaker, index))
             .or_insert_with(|| pocket_kernel::HssChannel::new(group));
         channel.stopped = true;
-        channel.music = index >= sounds;
+        channel.music = index < music;
         ctx.kernel.audio.stop_voice_group(channel.group);
     }
     ctx.kernel.hss.format = format;
@@ -461,7 +467,7 @@ fn open_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         format.bits_per_sample,
         if stereo { "stereo" } else { "mono" }
     );
-    Ok(DispatchOutcome::ReturnedR0(1))
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 /// `int hssSpeaker::playSound(hssSound*, UINT)`.
@@ -469,16 +475,8 @@ fn play_sound(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     play(ctx, HSS_SOUND_GROUP)
 }
 
-/// `int hssSpeaker::playMusic(hssMusic*, UINT)`.
-///
-/// HSS plays one music at a time: starting a new one replaces the
-/// current track rather than layering over it.
+/// `int hssSpeaker::playMusic(hssMusic*, UINT)` uses the music channel pool.
 fn play_music(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    for channel in ctx.kernel.hss.channels.values_mut().filter(|c| c.music) {
-        channel.stopped = true;
-        ctx.kernel.audio.stop_voice_group(channel.group);
-    }
-    ctx.kernel.audio.stop_voice_group(HSS_MUSIC_GROUP);
     play(ctx, HSS_MUSIC_GROUP)
 }
 
@@ -494,13 +492,11 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
         .copied()
         .unwrap_or((16, 1));
     let (start, count) = if group == HSS_MUSIC_GROUP {
-        (sounds, musics)
+        (0, musics)
     } else {
-        (0, sounds)
+        (musics, sounds)
     };
-    let selected = if requested < count {
-        Some(start + requested)
-    } else {
+    let selected = if requested & 0x1000_0000 != 0 {
         (start..start + count).find(|index| {
             ctx.kernel
                 .hss
@@ -508,6 +504,9 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
                 .get(&(speaker, *index))
                 .is_none_or(|channel| !channel.active())
         })
+    } else {
+        let index = requested & 0xffff;
+        (index < count).then_some(start + index)
     };
     let Some(index) = selected else {
         return Ok(DispatchOutcome::ReturnedR0((-1000i32) as u32));
@@ -548,12 +547,13 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
     channel.started = std::time::Instant::now();
     channel.offset = 0;
     channel.stopped = false;
-    channel.paused = false;
+    channel.paused = requested & 0x2000_0000 != 0;
     channel.looped = looped;
     channel.volume = clip.volume;
     channel.master = master as f32 / 64.0;
     channel.music = group == HSS_MUSIC_GROUP;
     let channel_group = channel.group;
+    let paused = channel.paused;
     ctx.kernel.audio.play_voice_with(
         &samples,
         format,
@@ -563,6 +563,7 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
             volume,
         },
     );
+    ctx.kernel.audio.pause_voice_group(channel_group, paused);
     ctx.kernel.audio.start();
     log::debug!(
         "hss: play {path:?} ({} samples, loop={looped}, gain={volume:.2})",
@@ -585,6 +586,10 @@ fn stop_sounds(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// JumpyBall calls this on every level change while effects are still
 /// playing.
 fn stop_musics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    for channel in ctx.kernel.hss.channels.values_mut().filter(|c| c.music) {
+        channel.stopped = true;
+        ctx.kernel.audio.stop_voice_group(channel.group);
+    }
     ctx.kernel.audio.stop_voice_group(HSS_MUSIC_GROUP);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -784,6 +789,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn music_pool_precedes_sfx_pool_and_all_requested_effect_channels_are_available() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut k, mut d) = setup();
+        cpu.write_mem(0x1200, &tiny_wav()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "hss.dll",
+                "?open@hssSpeaker@@QAAHII_NII@Z",
+                &[0x2200, 22050, 16, 1, 1, 16]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "hss.dll",
+            "?load@hssSound@@QAAHPAX_N@Z",
+            &[0x2300, 0x1200, 1],
+        );
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "hss.dll",
+            "?loop@hssSound@@QAAX_N@Z",
+            &[0x2300, 1],
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "hss.dll",
+                "?playMusic@hssSpeaker@@QAAHPAVhssMusic@@I@Z",
+                &[0x2200, 0x2300, 0x10000000]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        for channel in 1..=16 {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "hss.dll",
+                    "?playSound@hssSpeaker@@QAAHPAVhssSound@@I@Z",
+                    &[0x2200, 0x2300, 0x10000000]
+                ),
+                DispatchOutcome::ReturnedR0(channel)
+            );
+        }
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "hss.dll",
+                "?playSound@hssSpeaker@@QAAHPAVhssSound@@I@Z",
+                &[0x2200, 0x2300, 0x10000000]
+            ),
+            DispatchOutcome::ReturnedR0((-1000i32) as u32)
+        );
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "hss.dll",
+            "?stopMusics@hssSpeaker@@QAAXXZ",
+            &[0x2200],
+        );
+        assert!(!k.hss.channels[&(0x2200, 0)].active());
+        assert!((1..=16).all(|n| k.hss.channels[&(0x2200, n)].active()));
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "hss.dll",
+            "?stopSounds@hssSpeaker@@QAAXXZ",
+            &[0x2200],
+        );
+        assert!(k.hss.channels.values().all(|c| !c.active()));
+    }
+
     /// Neither decoder should claim a file it cannot actually play —
     /// `load` reports failure to the guest on this path.
     #[test]
@@ -809,9 +903,9 @@ mod tests {
                 &mut dispatcher,
                 "hss.dll",
                 "?open@hssSpeaker@@QAAHII_NII@Z",
-                &[0x2200, 22050, 16, 0, 2, 1]
+                &[0x2200, 22050, 16, 0, 1, 2]
             ),
-            DispatchOutcome::ReturnedR0(1)
+            DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(
             call(
@@ -842,7 +936,7 @@ mod tests {
                 "?playSound@hssSpeaker@@QAAHPAVhssSound@@I@Z",
                 &[0x2200, 0x2300, 0x10000000]
             ),
-            DispatchOutcome::ReturnedR0(0)
+            DispatchOutcome::ReturnedR0(1)
         );
         let DispatchOutcome::ReturnedR0(ptr) = call(
             &mut cpu,
@@ -850,7 +944,7 @@ mod tests {
             &mut dispatcher,
             "hss.dll",
             "?channel@hssSpeaker@@QAAPAVhssChannel@@H@Z",
-            &[0x2200, 0],
+            &[0x2200, 1],
         ) else {
             panic!("missing channel")
         };
@@ -867,7 +961,7 @@ mod tests {
                 &mut dispatcher,
                 "hss.dll",
                 "?channel@hssSpeaker@@QAAPAVhssChannel@@H@Z",
-                &[0x2200, 0]
+                &[0x2200, 1]
             ),
             DispatchOutcome::ReturnedR0(ptr)
         );

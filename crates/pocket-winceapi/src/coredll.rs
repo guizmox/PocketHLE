@@ -477,6 +477,9 @@ pub fn register(d: &mut WinCeDispatcher) {
     //   ??_U@YAPAXI@Z = void* operator new[](unsigned int)
     //   ??_V@YAXPAX@Z = void  operator delete[](void*)
     d.register_handler(dll, "??2@YAPAXI@Z", operator_new);
+    // MFC for CE3 exports the same global allocation ABI by ordinal315.
+    d.register_handler("mfcce300.dll", "??2@YAPAXI@Z", operator_new);
+    d.register_handler("mfcce300.dll", "ord:315", operator_new);
     d.register_handler(dll, "??3@YAXPAX@Z", free);
     d.register_handler(dll, "??_U@YAPAXI@Z", operator_new);
     d.register_handler(dll, "??_V@YAXPAX@Z", free);
@@ -17624,7 +17627,9 @@ pub(crate) fn read_guest_wstr_lossy(
 pub(crate) fn decode_pcm_wave(
     bytes: &[u8],
 ) -> Option<(pocket_kernel::audio::GuestFormat, Vec<i16>)> {
-    let (fmt, data) = parse_pcm_wave(bytes)?;
+    let Some((fmt, data)) = parse_pcm_wave(bytes) else {
+        return crate::wave_adpcm::decode(bytes);
+    };
     let samples: Vec<i16> = match fmt.bits_per_sample {
         8 => data.iter().map(|&b| (b as i16 - 128) * 256).collect(),
         16 => data
@@ -30106,6 +30111,46 @@ mod tests {
         c.cpu.write_reg(ArmReg::R0, p).unwrap();
         let _ = free(&mut c).unwrap();
         assert_eq!(c.kernel.heap.free_bytes(), initial_free);
+    }
+
+    #[test]
+    fn mfc_new_ordinal_allocates_real_writable_memory_releasable_by_crt() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut k, mut d) = setup();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let before = k.heap.free_bytes();
+        for (api, size) in [("ord:315", 32u32), ("??2@YAPAXI@Z", 8192)] {
+            let DispatchOutcome::ReturnedR0(p) =
+                call(&mut cpu, &mut k, &mut d, "mfcce300.dll", api, &[size])
+            else {
+                panic!("allocation did not return");
+            };
+            assert_ne!(p, 0);
+            cpu.write_mem(p + size - 1, &[0xa5]).unwrap();
+            assert_eq!(cpu.read_mem(p + size - 1, 1).unwrap(), [0xa5]);
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "??3@YAXPAX@Z",
+                &[p],
+            );
+            assert_eq!(k.heap.free_bytes(), before);
+        }
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "mfcce300.dll",
+                "ord:315",
+                &[u32::MAX]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(k.heap.free_bytes(), before);
     }
 
     #[test]

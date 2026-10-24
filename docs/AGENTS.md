@@ -4069,3 +4069,54 @@ phase preservation. Host Android JNI check and rustfmt pass. Absolute reference
 tone changes512.760Hz ->258.984Hz (PAL target258.973Hz). Menu MOD spectrum against
 libopenmpt improves0.7847 ->0.9569 without transposition; not bit-exact replay.
 Full Windows GUI, APK and physical Deck controller not run in this environment.
+
+## User layout integration and callback-only IMGDECMP (2026-10-24)
+User supplied complete keybindings.rs and app.rs supersede the previous Deck
+layout. PPC only: L1=P1, R1=P2, L2=P3, R2=P4, L3=ESC, R3=Action. Preserve their
+FN/View/Menu hold-to-exit logic and all Gizmondo branches. The SDL worker names
+Guide "Mode"; accept both names in steam_deck_pocketpc_fn_exit_control, plus
+Misc1, without renaming existing saved backend controls.
+IMGDECMP: phBM and ppImageRender can both be NULL when pfnImageProgress consumes
+the image. Validate the callback as an output sink; retain the temporary DIB
+and renderer during the synchronous callback and release afterward unless the
+guest AddRefs. Tomb Raider supplies this exact60-byte form for GIF backgrounds.
+New synthetic GIF test checks callback delivery,24-bit BGR bits and cleanup.
+Checkpoint saved before game verification; SFX investigation remains pending.
+
+## HSS voice ABI, Microsoft ADPCM, MFC CE3 allocation (2026-10-24)
+The original bundled HSS DLL confirms open(rate,bits,stereo,musics,sounds):
+1..3 music channels,8..64 sample channels, music channels first in global ids.
+Success returns0. Previously swapping the counts, ordering sounds first and
+returning wrong global ids left one SFX slot and caused clients to mis-handle
+sample channels. playSound returns music_count+sample_index; playMusic returns
+music_index. Flag0x10000000 is automatic/free selection; otherwise low16 bits
+select a category-relative channel. Flag0x20000000 starts paused. StopMusics
+must stop the individual music groups, not only the unused legacy group id,
+and must not stop effects. Do not stop all music slots before selecting one.
+Tests exercise16 looping effects beside one music stream, full-pool failure,
+global channel ids and independent stop behavior. Original DLL is evidence for
+ABI only; no native DLL or game file is redistributed in the patch.
+
+Shared PlaySound/HSS decoding now accepts RIFF MS ADPCM tag2 (4bit, mono/stereo).
+Honor block predictors, per-channel deltas and histories, custom coefficients,
+nibble order, samplesPerBlock and fact length. Bound decoded output, validate
+chunk/block/coefficient sizes. Signed prediction uses arithmetic >>8; division
+by256 incorrectly rounds negative values. Mono/stereo reference signals decode
+bit-identically to libsndfile (10000/20000 samples); no runtime decoder dependency
+added. The supplied Street Duel has one previously rejected MS ADPCM SFX and
+20 sample effects in total, plus its MOD music. Captured in-game trace includes
+sample playback and subsequent engine channel frequency changes while driving.
+
+MFCCE300 ordinal315 is the size-only global C++ operator new allocation export,
+used by Spawn after reading array counts. Resolve to ??2@YAPAXI@Z for this DLL
+version only and reuse the real common CRT allocator for name and ordinal calls.
+No guessed success pointers and no game-name branch. Test writable allocation,
+CRT delete interoperability and allocation failure. Four Spawn calls now return
+writable blocks and startup reaches its Registration dialog. Supplied key was
+entered during diagnostics; activation/gameplay was not confirmed.
+
+Tomb Raider verified with its real CAB install prefix (the first diagnostic
+mount was incorrect and stopped before decoding). GIF logos, title/menu image
+and attract-mode3D are visible with the callback-only fix. Do not mistake a
+probe's missing mount for an emulator resource bug. Diagnostic probe sources and
+coordinates are not production changes. No change to the Gizmondo input table.

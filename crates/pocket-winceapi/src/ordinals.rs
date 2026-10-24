@@ -63,6 +63,9 @@ static ORDINAL_TABLES: Lazy<HashMap<String, HashMap<u16, String>>> = Lazy::new(|
 /// if the DLL or ordinal is unknown.
 pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
     let key = dll.to_ascii_lowercase();
+    if key == "mfcce300.dll" && ordinal == 315 {
+        return Some("??2@YAPAXI@Z".into());
+    }
     // The OpenGL ES client libraries keep their tables in
     // `pocket-gles`, next to the implementation they describe.
     if pocket_gles::ordinals::is_gles_dll(&key) {

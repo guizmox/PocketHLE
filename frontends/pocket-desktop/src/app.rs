@@ -132,6 +132,8 @@ pub struct PocketLauncher {
     deck_filter_notice: Option<(String, Instant)>,
     deck_menu_press: Option<(usize, Instant)>,
     deck_view_press: Option<(usize, Instant)>,
+    /// PocketPC only: additional Steam / Quick Access FN buttons, when exposed by SDL.
+    deck_fn_press: std::collections::HashMap<(usize, String), Instant>,
     deck_piano_release: Option<(usize, Instant)>,
     upscale_window_size: Option<Vec2>,
     console_fit_pending: bool,
@@ -659,6 +661,7 @@ impl PocketLauncher {
             deck_filter_notice: None,
             deck_menu_press: None,
             deck_view_press: None,
+            deck_fn_press: Default::default(),
             deck_piano_release: None,
             upscale_window_size: None,
             console_fit_pending: false,
@@ -2027,6 +2030,7 @@ impl PocketLauncher {
                 self.deck_nav_repeat = None;
                 self.deck_menu_press = None;
                 self.deck_view_press = None;
+                self.deck_fn_press.clear();
                 let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
                 for key in keys {
                     self.release_gamepad_control(&key);
@@ -2225,7 +2229,7 @@ impl PocketLauncher {
                     }
                 }
             });
-            ui.label("View tap toggles fullscreen in the UI and in game. In game: View hold = ESC (PocketPC) or brightness (Gizmondo); Menu = filter / hold exit. Gizmondo L1 = volume.");
+            ui.label("View tap toggles fullscreen in the UI and in game. PocketPC: View / Menu hold = exit, L3 = ESC, R3 = Action. Gizmondo: View hold = brightness; Menu = filter / hold exit; L1 = volume.");
             if ui.button("Apply Steam Deck preset").clicked() {
                 draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
                 draft.gamepad_fullscreen =
@@ -3261,6 +3265,7 @@ impl PocketLauncher {
         }
         self.stylus_last = (0, 0);
         self.deck_view_press = None;
+        self.deck_fn_press.clear();
         self.deck_piano_release = None;
         self.deck_menu_press = None;
         self.gamepad_held.clear();
@@ -3320,6 +3325,7 @@ impl PocketLauncher {
                     self.deck_nav_repeat = None;
                     self.deck_menu_press = None;
                     self.deck_view_press = None;
+                    self.deck_fn_press.clear();
                     self.gamepad_devices = devices;
                     self.stylus_gamepad.retain(|(id, _), _| {
                         self.gamepad_devices.iter().any(|(device, _)| device == id)
@@ -3362,7 +3368,20 @@ impl PocketLauncher {
                         {
                             if let Some((_, pressed_at)) = self.deck_view_press.take() {
                                 if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
-                                    self.handle_deck_view(ctx, device, pressed_at.elapsed(), true);
+                                    let elapsed = pressed_at.elapsed();
+                                    if self.screen == Screen::Run
+                                        && !self.running_is_gizmondo
+                                        && crate::deck_navigation::menu_action(elapsed, true)
+                                            == Some(
+                                                crate::deck_navigation::MenuAction::ReturnToLibrary,
+                                            )
+                                    {
+                                        // PocketPC: left View/FN hold exits just like right Menu/FN.
+                                        self.return_to_library(ctx);
+                                    } else {
+                                        // Short View tap and all Gizmondo gestures are unchanged.
+                                        self.handle_deck_view(ctx, device, elapsed, true);
+                                    }
                                 }
                             }
                         }
@@ -3389,6 +3408,27 @@ impl PocketLauncher {
                                         ) => self.return_to_library(ctx),
                                         None => {}
                                     }
+                                }
+                            }
+                        }
+                        if cfg!(feature = "steam-deck")
+                            && self.screen == Screen::Run
+                            && !self.running_is_gizmondo
+                            && pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
+                                &control,
+                                self.running_is_gizmondo,
+                            )
+                        {
+                            if let Some(pressed_at) = self.deck_fn_press.remove(&key) {
+                                if ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                                    && crate::deck_navigation::menu_action(
+                                        pressed_at.elapsed(),
+                                        true,
+                                    ) == Some(
+                                        crate::deck_navigation::MenuAction::ReturnToLibrary,
+                                    )
+                                {
+                                    self.return_to_library(ctx);
                                 }
                             }
                         }
@@ -3467,6 +3507,10 @@ impl PocketLauncher {
                         && (matches!(control.as_str(), "Select" | "LeftTrigger")
                             || (self.screen == Screen::Run
                                 && (control == "Start"
+                                    || pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
+                                        &control,
+                                        self.running_is_gizmondo,
+                                    )
                                     || pocket_library::keybindings::steam_deck_guest_button(
                                         &control,
                                         self.running_is_gizmondo,
@@ -3485,6 +3529,19 @@ impl PocketLauncher {
                         }
                         if self.screen == Screen::Run && control == "Start" {
                             self.deck_menu_press = Some((device, Instant::now()));
+                            continue;
+                        }
+                        // Steam (Guide) and Quick Access (...) (Misc1) can be
+                        // delivered separately from View/Menu by some SDL profiles.
+                        // Capture them only for PocketPC; Gizmondo stays untouched.
+                        if self.screen == Screen::Run
+                            && !self.running_is_gizmondo
+                            && pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
+                                &control,
+                                self.running_is_gizmondo,
+                            )
+                        {
+                            self.deck_fn_press.entry(key).or_insert_with(Instant::now);
                             continue;
                         }
                         if control == "Select" {
@@ -4183,10 +4240,30 @@ impl eframe::App for PocketLauncher {
         }
         if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
             if let Some((device, pressed_at)) = self.deck_view_press {
-                if crate::deck_navigation::view_action(pressed_at.elapsed(), false).is_some() {
+                if !self.running_is_gizmondo {
+                    // In PocketPC, View/FN long-hold has the same EXIT timing as
+                    // Menu/FN. Do not consume View at its old secondary-key threshold.
+                    if crate::deck_navigation::menu_action(pressed_at.elapsed(), false)
+                        == Some(crate::deck_navigation::MenuAction::ReturnToLibrary)
+                    {
+                        self.deck_view_press = None;
+                        self.return_to_library(ctx);
+                    }
+                } else if crate::deck_navigation::view_action(pressed_at.elapsed(), false).is_some()
+                {
+                    // Gizmondo View brightness remains unchanged.
                     self.deck_view_press = None;
                     self.handle_deck_view(ctx, device, pressed_at.elapsed(), false);
                 }
+            }
+            if !self.running_is_gizmondo
+                && self.deck_fn_press.values().any(|pressed_at| {
+                    crate::deck_navigation::menu_action(pressed_at.elapsed(), false)
+                        == Some(crate::deck_navigation::MenuAction::ReturnToLibrary)
+                })
+            {
+                self.deck_fn_press.clear();
+                self.return_to_library(ctx);
             }
             if let Some((_, pressed_at)) = self.deck_menu_press {
                 if crate::deck_navigation::menu_action(pressed_at.elapsed(), false)

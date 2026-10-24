@@ -54,6 +54,7 @@ mod serial;
 mod shell;
 mod shell_keyboard;
 mod vibration;
+mod wave_adpcm;
 mod wavein;
 mod wininet;
 mod ws2;

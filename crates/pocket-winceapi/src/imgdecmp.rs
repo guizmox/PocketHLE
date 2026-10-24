@@ -234,7 +234,10 @@ pub(crate) fn decompress(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         if size == 64 && ctx.cpu.read_u32_le(ptr + 60)? != 0 {
             return Ok(DispatchOutcome::ReturnedR0(NOT_IMPLEMENTED));
         }
-        if info[4] == 0 && info[5] == 0 {
+        // A progress callback is itself a consumer of the IImageRender result.
+        // Applications may decode/draw entirely through it without requesting
+        // either a returned HBITMAP or a persistent renderer pointer.
+        if info[4] == 0 && info[5] == 0 && info[13] == 0 {
             return Ok(DispatchOutcome::ReturnedR0(INVALID));
         }
         if info[4] != 0 {
@@ -580,6 +583,77 @@ mod tests {
                 assert!(k.gdi.bitmap(bitmap_handle).is_some());
             }
         }
+    }
+
+    #[test]
+    fn gif_can_be_consumed_only_by_progress_callback_and_releases_temporary_bitmap() {
+        let (mut cpu, mut k, mut d) = setup();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        k.dynamic_exports.insert(
+            0x10000000,
+            RENDER_METHODS
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.to_string(), 0x70001000 + i as u32 * 32))
+                .collect(),
+        );
+        let mut bytes = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut bytes)
+            .encode(&[255, 0, 0, 255], 1, 1, image::ColorType::Rgba8)
+            .unwrap();
+        let info = [
+            60u32,
+            0x1800,
+            bytes.len() as u32,
+            bytes.len() as u32,
+            0,
+            0,
+            24,
+            77,
+            0,
+            100,
+            1000,
+            1000,
+            0,
+            0x123400,
+            u32::MAX,
+        ];
+        cpu.write_mem(
+            0x1000,
+            &info
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        cpu.write_mem(0x1800, &bytes).unwrap();
+        assert_eq!(
+            call(&mut cpu, &mut k, &mut d, "imgdecmp.dll", "ord:1", &[0x1000]),
+            DispatchOutcome::JumpTo(0x123400)
+        );
+        let renderer = cpu.read_reg(ArmReg::R0).unwrap();
+        assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), 1);
+        assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(), 77);
+        let handle = k.gdi.image_renderers[&renderer].bitmap;
+        let bits = k.gdi.bitmap(handle).unwrap().dib_bits_va.unwrap();
+        assert_eq!(cpu.read_mem(bits, 3).unwrap(), [0, 0, 255]);
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            RENDER_METHODS[7],
+            &[renderer, 0x2100],
+        );
+        assert_eq!(cpu.read_u32_le(0x2100).unwrap(), bits);
+        assert_eq!(
+            call(&mut cpu, &mut k, &mut d, "imgdecmp.dll", "ord:1", &[0x1000]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(k.gdi.image_renderers.is_empty());
+        assert!(k.gdi.bitmap(handle).is_none());
+        assert!(k.gdi.image_decode_frames.is_empty());
     }
 
     #[test]
