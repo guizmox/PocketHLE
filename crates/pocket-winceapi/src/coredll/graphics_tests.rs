@@ -3365,6 +3365,8 @@ fn gizmondo_dialog_idle_does_not_repaint_but_real_invalidations_still_do() {
         thunk: &thunk,
     };
     build_dialog_from_template_for(&mut ctx, 0x2000, hwnd, false);
+    // This fixture represents an initialized, visible modeless dialog.
+    finish_modeless_dialog_show(&mut ctx, hwnd);
     ctx.kernel.window_procs.insert(hwnd, 0x2300);
     ctx.kernel.active_window = hwnd;
     assert_eq!(synthetic_paint_target(ctx.kernel), 0);

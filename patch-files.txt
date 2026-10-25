@@ -1,1 +1,2 @@
 crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\coredll\graphics_tests.rs

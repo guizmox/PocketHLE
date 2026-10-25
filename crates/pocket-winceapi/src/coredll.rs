@@ -33412,6 +33412,55 @@ mod tests {
     }
 
     #[test]
+    fn end_paint_publishes_new_native_pixels_with_a_gapi_mapping_but_not_stale_pixels() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let hwnd = 0xdead1000;
+        kernel.window_rects.insert(hwnd, (0, 0, 4, 4));
+        kernel.window_visibility.insert(hwnd, true);
+        kernel.fb_mapped = true;
+        kernel.controls.direct_surface_hwnd = hwnd;
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let dc = window_dc(&mut ctx, hwnd);
+        surface_for_dc(ctx.kernel, dc)
+            .unwrap()
+            .fill_rect(0, 0, 4, 4, 0xf800);
+        ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
+        let before = ctx.kernel.framebuffer.frame_counter;
+        end_paint(&mut ctx).unwrap();
+        assert!(ctx.kernel.framebuffer.frame_counter > before);
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[..2],
+            &0xf800u16.to_le_bytes()
+        );
+        // A later direct presentation replaces the image. An empty native
+        // paint must leave both that image and its presentation count alone.
+        ctx.kernel.framebuffer.pixels[..2].copy_from_slice(&0x07e0u16.to_le_bytes());
+        let before = ctx.kernel.framebuffer.frame_counter;
+        end_paint(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[..2],
+            &0x07e0u16.to_le_bytes()
+        );
+        // Switching back to GDI again must still work.
+        surface_for_dc(ctx.kernel, dc)
+            .unwrap()
+            .fill_rect(0, 0, 4, 4, 0x001f);
+        end_paint(&mut ctx).unwrap();
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[..2],
+            &0x001fu16.to_le_bytes()
+        );
+    }
+
+    #[test]
     fn work_area_returns_guest_dimensions_and_rejects_bad_output() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
