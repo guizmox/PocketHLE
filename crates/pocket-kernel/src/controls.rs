@@ -122,6 +122,9 @@ pub struct DialogPanel {
     /// table would be wrong. `Some` adds the Windows CE chrome: a
     /// coloured bar above the client area carrying the OK box.
     pub caption: Option<String>,
+    /// Shell-managed fullscreen captions share the PocketPC navigation strip.
+    /// None retains ordinary popup/dialog caption metrics.
+    pub caption_height: Option<i32>,
     /// Is the OK box currently held down?
     pub ok_pressed: bool,
 }
@@ -153,7 +156,7 @@ impl DialogPanel {
     /// Height the caption takes off the top of the window, or 0.
     pub fn caption_h(&self) -> i32 {
         if self.caption.is_some() {
-            Self::CAPTION_H
+            self.caption_height.unwrap_or(Self::CAPTION_H).max(0)
         } else {
             0
         }
@@ -175,8 +178,11 @@ impl DialogPanel {
     /// toggled rather than on the way out.
     pub fn ok_box(&self) -> Option<(i32, i32, i32, i32)> {
         self.caption.as_ref()?;
+        if self.caption_h() < Self::BOX_H {
+            return None;
+        }
         let inset = i32::from(self.border);
-        let pad = (Self::CAPTION_H - Self::BOX_H) / 2;
+        let pad = (self.caption_h() - Self::BOX_H) / 2;
         Some((
             self.x + self.w - inset - pad - Self::OK_BOX,
             self.y + inset + pad,
@@ -230,8 +236,12 @@ impl DialogPanel {
         if cw <= 0 {
             return;
         }
-        surf.fill_rect(cx, cy, cw, Self::CAPTION_H, Self::CAPTION_BG);
-        let ty = cy + (Self::CAPTION_H - font::GLYPH_H) / 2;
+        let caption_h = self.caption_h();
+        if caption_h == 0 {
+            return;
+        }
+        surf.fill_rect(cx, cy, cw, caption_h, Self::CAPTION_BG);
+        let ty = cy + (caption_h - font::GLYPH_H) / 2;
         // Stop the title before the boxes rather than under them.
         let right = self
             .help_box()
@@ -3170,6 +3180,7 @@ mod tests {
             border: false,
             caption: None,
             ok_pressed: false,
+            caption_height: None,
         });
         button(&mut controls, 2, 10, 10);
         let mut bitmap = Bitmap::new(100, 80);
@@ -3195,6 +3206,7 @@ mod tests {
             border: false,
             caption: None,
             ok_pressed: false,
+            caption_height: None,
         });
         controls.render(&mut Surface::Bitmap(&mut bitmap));
         assert_ne!(pixel(&bitmap, 90, 70), 0xf800); // another dialog remains above
@@ -3781,6 +3793,7 @@ mod tests {
             border: true,
             caption: Some("Options".into()),
             ok_pressed: false,
+            caption_height: None,
         }
     }
 
@@ -3981,6 +3994,7 @@ mod tests {
             border: false,
             caption: None,
             ok_pressed: false,
+            caption_height: None,
         });
         ctrls.create(
             STRIP,
@@ -4003,6 +4017,7 @@ mod tests {
             border: true,
             caption: Some("Options".into()),
             ok_pressed: false,
+            caption_height: None,
         });
         ctrls.render(&mut surf);
 

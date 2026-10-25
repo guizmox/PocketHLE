@@ -4979,6 +4979,7 @@ mod tests {
             border: true,
             caption: Some("Test".into()),
             ok_pressed: false,
+            caption_height: None,
         });
         let list = state.controls.create(
             parent,

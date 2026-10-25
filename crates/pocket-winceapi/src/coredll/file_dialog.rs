@@ -175,6 +175,7 @@ fn begin(ctx: &mut CallCtx<'_>, save: bool) -> Result<Option<FileDialog>, Kernel
             title
         }),
         ok_pressed: false,
+        caption_height: None,
     });
     ctx.kernel.window_classes.insert(hwnd, "#32770".into());
     ctx.kernel.window_parents.insert(hwnd, word(4));

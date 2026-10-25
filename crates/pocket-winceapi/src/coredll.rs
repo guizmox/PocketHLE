@@ -11593,6 +11593,32 @@ fn list_view_message(
     Ok(result)
 }
 
+/// SS_BITMAP uses the intrinsic image size both at creation and STM_SETIMAGE.
+/// SS_REALSIZECONTROL keeps the caller's rectangle; SS_CENTERIMAGE preserves
+/// its midpoint when the automatic size is applied.
+fn size_static_bitmap(kernel: &mut KernelState, hwnd: u32) {
+    let Some(c) = kernel.controls.get(hwnd) else {
+        return;
+    };
+    if c.class != ControlClass::Static || c.style & 0x1f != 0x0e || c.style & 0x40 != 0 {
+        return;
+    }
+    let Some((w, h)) = kernel
+        .gdi
+        .bitmap(c.image)
+        .map(|b| (b.width as i32, b.height as i32))
+    else {
+        return;
+    };
+    let c = kernel.controls.get_mut(hwnd).unwrap();
+    if c.style & 0x200 != 0 {
+        c.x += (c.w - w) / 2;
+        c.y += (c.h - h) / 2;
+    }
+    c.w = w;
+    c.h = h;
+}
+
 fn control_message(
     ctx: &mut CallCtx<'_>,
     hwnd: u32,
@@ -11636,31 +11662,11 @@ fn control_message(
         {
             return Ok(0);
         }
-        let size = ctx
-            .kernel
-            .gdi
-            .bitmap(handle)
-            .map(|b| (b.width as i32, b.height as i32));
         let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
         let old = c.image;
         c.image = handle;
-        // SS_BITMAP takes the bitmap's size, not the template's DLU size.
-        // In WinCE SS_CENTERIMAGE preserves the control's midpoint while
-        // its bounds change; SS_REALSIZECONTROL instead keeps those bounds.
-        if message == 0x172
-            && wparam == 0
-            && c.class == ControlClass::Static
-            && c.style & 0x1f == 0x0e
-            && c.style & 0x40 == 0
-        {
-            if let Some((width, height)) = size {
-                if c.style & 0x200 != 0 {
-                    c.x += (c.w - width) / 2;
-                    c.y += (c.h - height) / 2;
-                }
-                c.w = width;
-                c.h = height;
-            }
+        if message == 0x172 && wparam == 0 {
+            size_static_bitmap(ctx.kernel, hwnd);
         }
         repaint_controls(ctx);
         return Ok(old);
@@ -12655,7 +12661,6 @@ fn move_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel
             .window_rects
             .insert(hwnd, (x, y, w.max(0), h.max(0)));
-        resize_window_backing(ctx.kernel, hwnd, w, h);
         queue_window_size(ctx.kernel, hwnd, w, h);
     }
     if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
@@ -12675,6 +12680,7 @@ fn move_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         log::debug!("MoveWindow(0x{hwnd:08x}) -> ({x},{y},{w},{h})");
         repaint_controls(ctx);
     }
+    resize_window_dc(ctx.kernel, hwnd);
     if ctx.arg_u32(5)? != 0 {
         queue_visible_window_paints(ctx.kernel, hwnd);
     }
@@ -12740,9 +12746,6 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             queue_window_size(ctx.kernel, hwnd, w, h);
         }
         ctx.kernel.window_rects.insert(hwnd, rect);
-        if sized {
-            resize_window_backing(ctx.kernel, hwnd, rect.2, rect.3);
-        }
     }
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         if moved {
@@ -12799,10 +12802,19 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if flags & 0x40 != 0 && flags & 0x8 == 0 {
         queue_visible_window_paints(ctx.kernel, hwnd);
     }
+    resize_window_dc(ctx.kernel, hwnd);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 pub(crate) fn queue_window_size(kernel: &mut KernelState, hwnd: u32, w: i32, h: i32) {
+    let (w, h) = if let Some(p) = kernel.controls.panel(hwnd) {
+        (
+            w - 2 * i32::from(p.border),
+            h - 2 * i32::from(p.border) - p.caption_h(),
+        )
+    } else {
+        (w, h)
+    };
     if hwnd != FAKE_HWND && kernel.posted_messages.len() < 256 {
         kernel
             .posted_messages
@@ -14424,6 +14436,23 @@ fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 }
 
 // ---------- GDI ----------
+
+/// Refresh an existing window DC from the current client geometry.
+pub(crate) fn resize_window_dc(kernel: &mut KernelState, hwnd: u32) {
+    let size = kernel
+        .controls
+        .panel(hwnd)
+        .map(|p| {
+            (
+                p.w - 2 * i32::from(p.border),
+                p.h - 2 * i32::from(p.border) - p.caption_h(),
+            )
+        })
+        .or_else(|| kernel.window_rects.get(&hwnd).map(|r| (r.2, r.3)));
+    if let Some((w, h)) = size {
+        resize_window_backing(kernel, hwnd, w, h);
+    }
+}
 
 /// Window DC identity survives MoveWindow/SetWindowPos. Its backing and
 /// client-space clip change with the window, even if the guest caches its HDC.
@@ -21930,6 +21959,7 @@ fn build_dialog_from_template_for(
         border,
         caption,
         ok_pressed: false,
+        caption_height: None,
     });
 
     if modal {
@@ -21983,6 +22013,7 @@ fn build_dialog_from_template_for(
                     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
                         child.image = image;
                     }
+                    size_static_bitmap(ctx.kernel, hwnd);
                 }
             }
         }
@@ -21993,7 +22024,13 @@ fn build_dialog_from_template_for(
         }
         ctx.kernel.controls.update_choice_fonts(&ctx.kernel.gdi);
         if modal {
-            ctx.kernel.window_rects.insert(hwnd, (ix, iy, iw, ih));
+            let bounds = ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .map(|c| (c.x, c.y, c.w, c.h))
+                .unwrap_or((ix, iy, iw, ih));
+            ctx.kernel.window_rects.insert(hwnd, bounds);
             ctx.kernel.window_parents.insert(hwnd, owner_hwnd);
         }
         log::debug!(
@@ -22056,8 +22093,10 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
                 ctx.kernel.active_window = hwnd;
             }
             if let Some(panel) = ctx.kernel.controls.panel(hwnd) {
-                let w = panel.w - 2 * i32::from(panel.border);
-                let h = panel.h - 2 * i32::from(panel.border) - panel.caption_h();
+                // queue_window_size accepts the outer window dimensions and
+                // removes non-client decoration. Passing the client size here
+                // deducted a shell-managed caption twice after WM_INITDIALOG.
+                let (w, h) = (panel.w, panel.h);
                 queue_window_size(ctx.kernel, hwnd, w, h);
             }
             queue_window_paint(ctx.kernel, hwnd);
@@ -24868,6 +24907,7 @@ mod tests {
             caption: Some("Panel".into()),
             visible: true,
             ok_pressed: false,
+            caption_height: None,
         });
         let ev = InputEvent::PointerUp { x: 25, y: 50 };
         assert_eq!(
@@ -25416,6 +25456,7 @@ mod tests {
         while template.len() % 4 != 0 {
             template.push(0);
         }
+        let item_style_offset = template.len();
         template.extend_from_slice(&0x5000000eu32.to_le_bytes());
         template.extend_from_slice(&0u32.to_le_bytes());
         for word in [0u16, 0, 2, 1, 7, 0xffff, 0x82, 0xffff, 211, 0] {
@@ -25437,6 +25478,8 @@ mod tests {
             .unwrap()
             .image;
         assert_ne!(image, 0);
+        let control = ctx.kernel.controls.by_id(FAKE_DIALOG_HWND, 7).unwrap();
+        assert_eq!((control.w, control.h), (2, 1));
         let bitmap = ctx.kernel.gdi.bitmap(image).unwrap();
         assert_eq!((bitmap.width, bitmap.height), (2, 1));
         assert_eq!(&bitmap.pixels[..4], &[0, 0xf8, 0xe0, 7]);
@@ -25450,6 +25493,24 @@ mod tests {
             image
         );
         assert_eq!(ctx.kernel.gdi.dialog_bitmaps.len(), 1);
+        ctx.cpu
+            .write_mem(
+                0x1100 + item_style_offset as u32,
+                &0x5000004eu32.to_le_bytes(),
+            )
+            .unwrap();
+        build_dialog_from_template_for(&mut ctx, 0x1100, FAKE_DIALOG_HWND, false);
+        let control = ctx.kernel.controls.by_id(FAKE_DIALOG_HWND, 7).unwrap();
+        // REALSIZECONTROL preserves the template rectangle; conversion from
+        // dialog units belongs to Dlu, independently of bitmap autosizing.
+        assert_eq!(
+            (control.w, control.h),
+            (
+                crate::dlgtemplate::Dlu::default().x_to_px(2),
+                crate::dlgtemplate::Dlu::default().y_to_px(1)
+            )
+        );
+        assert_eq!(control.image, image);
     }
 
     #[test]
@@ -31082,6 +31143,7 @@ mod tests {
                 border: false,
                 caption: None,
                 ok_pressed: false,
+                caption_height: None,
             });
         assert!(!kernel.window_rects.contains_key(&hwnd));
         let mut ctx = CallCtx {
@@ -37538,6 +37600,66 @@ mod wave_open_capacity_tests {
 mod pocket_shell_geometry_tests {
     use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
     use super::*;
+    #[test]
+    fn dialog_init_return_reports_the_same_client_size_as_get_client_rect() {
+        for (width, height, caption_height, border) in [
+            (240, 294, 26, false),
+            (320, 214, 26, false),
+            (480, 614, 26, false),
+            (160, 100, 14, true),
+        ] {
+            let mut cpu = scanf_cpu();
+            let mut kernel = fresh_kernel();
+            let hwnd = FAKE_DIALOG_HWND;
+            kernel.controls.add_panel(DialogPanel {
+                hwnd,
+                x: 0,
+                y: 0,
+                w: width,
+                h: height,
+                visible: true,
+                border,
+                caption: Some(String::new()),
+                caption_height: Some(caption_height),
+                ok_pressed: false,
+            });
+            let sp = cpu.read_reg(ArmReg::Sp).unwrap();
+            kernel.dialog_frame = Some(GuestCallFrame {
+                args: [0; 4],
+                lr: 0x4000,
+                sp,
+            });
+            kernel.dialog_frame_hwnd = hwnd;
+            cpu.write_reg(ArmReg::R0, 1).unwrap();
+            let thunk = dummy_thunk();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                create_dialog_indirect_param_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(hwnd)
+            );
+            let size = ctx
+                .kernel
+                .posted_messages
+                .iter()
+                .find(|m| m.0 == hwnd && m.1 == WM_SIZE)
+                .unwrap()
+                .3;
+            ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
+            get_client_rect(&mut ctx).unwrap();
+            assert_eq!(size & 0xffff, ctx.cpu.read_u32_le(0x1808).unwrap());
+            assert_eq!(size >> 16, ctx.cpu.read_u32_le(0x180c).unwrap());
+            assert_eq!(
+                size >> 16,
+                (height - caption_height - 2 * i32::from(border)) as u32
+            );
+        }
+    }
+
     #[test]
     fn moved_primary_window_uses_local_dc_coordinates_and_real_client_size() {
         let mut cpu = scanf_cpu();

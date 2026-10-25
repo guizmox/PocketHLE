@@ -173,6 +173,29 @@ fn sh_full_screen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             bar.sip = false;
         }
     }
+    let caption = if ctx.kernel.pocket_pc_taskbar_visible() {
+        pocket_kernel::shell_menu::HEIGHT
+    } else {
+        0
+    };
+    let panels: Vec<_> = ctx.kernel.controls.panel_handles().collect();
+    for panel_hwnd in panels {
+        if let Some(panel) = ctx.kernel.controls.panel_mut(panel_hwnd) {
+            if panel.caption_height.is_some() {
+                panel.caption_height = Some(caption);
+            }
+        }
+    }
+    for panel_hwnd in ctx.kernel.controls.panel_handles().collect::<Vec<_>>() {
+        if ctx
+            .kernel
+            .controls
+            .panel(panel_hwnd)
+            .is_some_and(|p| p.caption_height.is_some())
+        {
+            crate::coredll::resize_window_dc(ctx.kernel, panel_hwnd);
+        }
+    }
     ctx.kernel.invalidate_presentation();
     ctx.kernel.composite_controls();
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -410,25 +433,61 @@ fn sh_init_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if mask & 1 != 0 && flags & 8 != 0 {
         crate::shell_keyboard::sip_show(ctx, false);
     }
-    if mask & 1 != 0 && flags & 0x14 != 0 {
+    if mask & 1 != 0 {
+        let pocket_pc = ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN;
         let (w, h) = (
             ctx.kernel.framebuffer.width as i32,
             ctx.kernel.framebuffer.height as i32,
         );
-        ctx.kernel.window_rects.insert(hwnd, (0, 0, w, h));
-        if let Some(s) = ctx.kernel.window_styles.get_mut(&hwnd) {
-            s.0 &= !0x00c00000;
+        if flags & 1 != 0 {
+            if let Some(style) = ctx.kernel.window_styles.get_mut(&hwnd) {
+                style.0 |= 0x00c00000;
+            }
+            if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
+                panel.caption.get_or_insert_with(String::new);
+            }
         }
-        if let Some(p) = ctx.kernel.controls.panel_mut(hwnd) {
-            p.x = 0;
-            p.y = 0;
-            p.w = w;
-            p.h = h;
-            p.border = false;
-            p.caption = None;
+        if flags & 0x54 != 0 {
+            let has_caption = ctx
+                .kernel
+                .controls
+                .panel(hwnd)
+                .is_some_and(|p| p.caption.is_some());
+            let navigation = if pocket_pc && ctx.kernel.pocket_pc_taskbar_visible() {
+                pocket_kernel::shell_menu::HEIGHT
+            } else {
+                0
+            };
+            let bottom = if pocket_pc && flags & 0x10 == 0 {
+                pocket_kernel::shell_menu::HEIGHT
+            } else {
+                0
+            };
+            let y = if has_caption { 0 } else { navigation };
+            let mut available = (h - bottom - y).max(0);
+            if flags & 0x40 != 0 && flags & 0x14 == 0 && ctx.kernel.shell_keyboard.visible {
+                let sip_top = pocket_kernel::classic_sip::top(w, h);
+                available = available.min((sip_top - y).max(0));
+            }
+            ctx.kernel.window_rects.insert(hwnd, (0, y, w, available));
+            if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
+                panel.x = 0;
+                panel.y = y;
+                panel.w = w;
+                panel.h = available;
+                panel.border = false;
+                if pocket_pc && has_caption {
+                    panel.caption_height = Some(navigation);
+                }
+            }
+            crate::coredll::resize_window_dc(ctx.kernel, hwnd);
+            crate::coredll::queue_window_size(ctx.kernel, hwnd, w, available);
+            crate::coredll::queue_window_paint(ctx.kernel, hwnd);
         }
-        crate::coredll::queue_window_size(ctx.kernel, hwnd, w, h);
-        crate::coredll::queue_window_paint(ctx.kernel, hwnd);
+        log::debug!(
+            "SHInitDialog hwnd=0x{hwnd:08x} mask=0x{mask:x} flags=0x{flags:x} rect={:?}",
+            ctx.kernel.window_rects.get(&hwnd)
+        );
     }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
@@ -757,5 +816,122 @@ mod taskbar_tests {
             &[0xdead0001, 1],
         );
         assert!(!k.pocket_pc_taskbar_visible());
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_dialog_layout_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
+    use pocket_kernel::controls::DialogPanel;
+    use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn fullscreen_dialog_preserves_caption_and_reserves_command_strip() {
+        for (width, height) in [(240, 320), (320, 240), (480, 640)] {
+            let (mut cpu, mut k, mut d) = setup();
+            k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+            k.framebuffer = pocket_kernel::Framebuffer::new(width, height);
+            k.active_window = 7;
+            k.window_classes.insert(7, "Dialog".into());
+            k.window_styles.insert(7, (0x90000000, 0));
+            k.controls.add_panel(DialogPanel {
+                hwnd: 7,
+                x: 0,
+                y: 0,
+                w: width as i32,
+                h: height as i32,
+                visible: true,
+                border: true,
+                caption: None,
+                caption_height: None,
+                ok_pressed: false,
+            });
+            cpu.write_mem(
+                0x2000,
+                &[1u32, 7, 13]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "aygshell.dll",
+                    "SHInitDialog",
+                    &[0x2000]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            let panel = k.controls.panel(7).unwrap();
+            assert_eq!(panel.client_origin(), (0, 26));
+            assert_eq!(panel.h - panel.caption_h(), height as i32 - 52);
+            assert_ne!(k.window_styles[&7].0 & 0xc00000, 0);
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetClientRect",
+                &[7, 0x2100],
+            );
+            assert_eq!(cpu.read_u32_le(0x210c).unwrap(), height - 52);
+            cpu.write_mem(
+                0x2200,
+                &[20i32, 30]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "ClientToScreen",
+                &[7, 0x2200],
+            );
+            assert_eq!(cpu.read_u32_le(0x2204).unwrap(), 56);
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "ScreenToClient",
+                &[7, 0x2200],
+            );
+            assert_eq!(cpu.read_u32_le(0x2204).unwrap(), 30);
+            cpu.write_mem(0x2008, &17u32.to_le_bytes()).unwrap();
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHInitDialog",
+                &[0x2000],
+            );
+            assert_eq!(k.controls.panel(7).unwrap().h, height as i32);
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHFullScreen",
+                &[7, 2],
+            );
+            assert_eq!(k.controls.panel(7).unwrap().caption_h(), 0);
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHFullScreen",
+                &[7, 1],
+            );
+            assert_eq!(k.controls.panel(7).unwrap().client_origin(), (0, 26));
+        }
     }
 }
