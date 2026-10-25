@@ -1,5 +1,6 @@
 Cargo.lock
 Cargo.toml
+crates/pocket-library/src/lib.rs
 crates\pocket-cab\src\install_recovery.rs
 crates\pocket-cab\src\lib.rs
 crates\pocket-core\src\lib.rs

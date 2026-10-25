@@ -37600,6 +37600,8 @@ mod wave_open_capacity_tests {
 mod pocket_shell_geometry_tests {
     use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
     use super::*;
+    use pocket_cpu::Cpu;
+    use pocket_kernel::controls::DialogPanel;
     #[test]
     fn dialog_init_return_reports_the_same_client_size_as_get_client_rect() {
         for (width, height, caption_height, border) in [

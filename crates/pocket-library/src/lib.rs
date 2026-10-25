@@ -3288,6 +3288,29 @@ fn is_desktop_cab_bundle(path: &Path) -> Result<bool, LibraryError> {
     Ok(cabinets > 0)
 }
 
+/// A data-only CAB can target the game directory or one of its descendants.
+/// Compare path components so similarly named sibling games never match.
+fn resource_install_dir_matches(installed: &str, resource: &str) -> bool {
+    fn components(path: &str) -> Option<Vec<String>> {
+        if !path.starts_with('\\') || path.contains('/') {
+            return None;
+        }
+        let parts: Vec<_> = path.split('\\').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty()
+            || parts
+                .iter()
+                .any(|p| matches!(*p, "." | "..") || p.contains(':'))
+        {
+            return None;
+        }
+        Some(parts.into_iter().map(str::to_ascii_lowercase).collect())
+    }
+    match (components(installed), components(resource)) {
+        (Some(root), Some(destination)) => destination.starts_with(&root),
+        _ => false,
+    }
+}
+
 fn stage_installer_cabinets(
     source: &Path,
     staging: &Path,
@@ -3371,11 +3394,10 @@ fn stage_installer_cabinets(
         for (path, dir, name) in neutral_resources {
             for game in target.games().iter().filter(|game| {
                 game.platform != Some(GamePlatform::Gizmondo)
-                    && game.install_dir.as_ref().is_some_and(|installed| {
-                        installed
-                            .trim_end_matches('\\')
-                            .eq_ignore_ascii_case(dir.trim_end_matches('\\'))
-                    })
+                    && game
+                        .install_dir
+                        .as_ref()
+                        .is_some_and(|installed| resource_install_dir_matches(installed, &dir))
             }) {
                 choices.push(InstallerCabinetChoice {
                     index: choices.len(),
@@ -3409,11 +3431,13 @@ fn import_installer_choice(
         }
         let extraction = tempfile::tempdir_in(&library.root)?;
         let (files, header) = pocket_cab::extract_for_install(&choice.path, extraction.path())?;
-        let header = header.filter(|h| h.structured).ok_or_else(|| {
+        let mut header = header.filter(|h| h.structured).ok_or_else(|| {
             LibraryError::NoPocketPcCab("Add-on has no structured installation metadata".into())
         })?;
-        // Matching the exact installation root preserves subdirectories and
-        // avoids guessing the target from a title or installer filename.
+        // Resolve every declared destination relative to the base game's root,
+        // not the add-on's root: a pack may install into a child directory.
+        // Preserve the destination strings from the CAB without guessing names.
+        header.install_dir = game.install_dir.clone();
         pocket_cab::materialise_install_header_names(&game_dir.join("extracted"), &files, &header);
         let mut entry = game.clone();
         for value in header.registry {
@@ -6193,5 +6217,19 @@ mod pocketpc_game_identity_tests {
         }
         .validate_pocketpc_identity()
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod resource_destination_tests {
+    use super::resource_install_dir_matches as matches;
+    #[test]
+    fn data_packs_match_roots_and_descendants_without_matching_siblings() {
+        assert!(matches(r"\Games\Example\", r"\games\EXAMPLE\"));
+        assert!(matches(r"\Games\Example", r"\Games\Example\campaign\"));
+        assert!(!matches(r"\Games\Example", r"\Games\Example Two\campaign"));
+        assert!(!matches(r"\Games\Example", r"\Games\Example\..\Other"));
+        assert!(!matches(r"\Games\Example", r"Games\Example"));
+        assert!(!matches(r"\", r"\Games\Example"));
     }
 }
