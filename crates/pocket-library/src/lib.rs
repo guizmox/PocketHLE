@@ -1788,7 +1788,7 @@ impl Library {
             .unwrap_or_else(|| pretty_id(&id));
         let provider = header.as_ref().and_then(|h| h.provider.clone());
 
-        let registry = {
+        let mut registry = {
             let from_setup = setup_registry(&files);
             if from_setup.is_empty() {
                 header
@@ -1799,6 +1799,9 @@ impl Library {
                 from_setup
             }
         };
+        if let Some(header) = header.as_ref().filter(|h| h.structured) {
+            register_cab_install_dir(&mut registry, header);
+        }
         let entry = GameEntry {
             platform: None,
             id: id.clone(),
@@ -3288,6 +3291,41 @@ fn is_desktop_cab_bundle(path: &Path) -> Result<bool, LibraryError> {
     Ok(cabinets > 0)
 }
 
+/// WCELOAD publishes the package's installation directory under its
+/// provider/application identity. This is installer state, not a game default.
+fn register_cab_install_dir(
+    registry: &mut Vec<pocket_cab::SetupRegistryValue>,
+    header: &pocket_cab::WinCeInstallHeader,
+) {
+    let (Some(provider), Some(app), Some(directory)) = (
+        header.provider.as_deref(),
+        header.app_name.as_deref(),
+        header.install_dir.as_deref(),
+    ) else {
+        return;
+    };
+    if provider.trim().is_empty()
+        || app.trim().is_empty()
+        || provider.contains('\\')
+        || app.contains('\\')
+        || !resource_install_dir_matches(directory, directory)
+    {
+        return;
+    }
+    let key = format!(r"HKLM\Software\Apps\{} {}", provider.trim(), app.trim());
+    if !registry
+        .iter()
+        .any(|v| v.key.eq_ignore_ascii_case(&key) && v.name.eq_ignore_ascii_case("InstallDir"))
+    {
+        registry.push(pocket_cab::SetupRegistryValue {
+            key,
+            name: "InstallDir".into(),
+            string: Some(directory.trim_end_matches('\\').into()),
+            dword: None,
+        });
+    }
+}
+
 /// A data-only CAB can target the game directory or one of its descendants.
 /// Compare path components so similarly named sibling games never match.
 fn resource_install_dir_matches(installed: &str, resource: &str) -> bool {
@@ -3434,6 +3472,10 @@ fn import_installer_choice(
         let mut header = header.filter(|h| h.structured).ok_or_else(|| {
             LibraryError::NoPocketPcCab("Add-on has no structured installation metadata".into())
         })?;
+        // Record this package's own installation path before rebasing its files.
+        let mut registry = header.registry.clone();
+        register_cab_install_dir(&mut registry, &header);
+        header.registry = registry;
         // Resolve every declared destination relative to the base game's root,
         // not the add-on's root: a pack may install into a child directory.
         // Preserve the destination strings from the CAB without guessing names.
@@ -6223,6 +6265,36 @@ mod pocketpc_game_identity_tests {
 #[cfg(test)]
 mod resource_destination_tests {
     use super::resource_install_dir_matches as matches;
+    #[test]
+    fn install_registration_preserves_explicit_cab_values() {
+        let header = pocket_cab::WinCeInstallHeader {
+            provider: Some("Example Publisher".into()),
+            app_name: Some("Example App".into()),
+            install_dir: Some(r"\Program Files\Example\".into()),
+            ..Default::default()
+        };
+        let mut registry = Vec::new();
+        super::register_cab_install_dir(&mut registry, &header);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry[0].key,
+            r"HKLM\Software\Apps\Example Publisher Example App"
+        );
+        assert_eq!(
+            registry[0].string.as_deref(),
+            Some(r"\Program Files\Example")
+        );
+        registry[0].key.make_ascii_uppercase();
+        registry[0].name.make_ascii_lowercase();
+        registry[0].string = Some(r"\Storage Card\Example".into());
+        super::register_cab_install_dir(&mut registry, &header);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry[0].string.as_deref(),
+            Some(r"\Storage Card\Example")
+        );
+    }
+
     #[test]
     fn data_packs_match_roots_and_descendants_without_matching_siblings() {
         assert!(matches(r"\Games\Example\", r"\games\EXAMPLE\"));

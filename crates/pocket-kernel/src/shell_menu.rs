@@ -465,10 +465,11 @@ impl ShellMenus {
             }
             if bar.sip {
                 // A keyboard glyph, with a separate real SIP hit target.
-                surface.fill_rect(w - 23, y + 8, 19, 12, 0x8410);
+                let icon_y = y + (HEIGHT - 12) / 2;
+                surface.fill_rect(w - 23, icon_y, 19, 12, 0x8410);
                 for row in 0..3 {
                     for col in 0..5 {
-                        surface.fill_rect(w - 21 + col * 3, y + 10 + row * 3, 2, 2, 0xffff);
+                        surface.fill_rect(w - 21 + col * 3, icon_y + 2 + row * 3, 2, 2, 0xffff);
                     }
                 }
             }
