@@ -45,6 +45,7 @@ pub fn register(d: &mut WinCeDispatcher) {
             }
             "SHRecognizeGesture" => gesture::recognize,
             "SHInitDialog" => sh_init_dialog,
+            "SHFullScreen" => sh_full_screen,
             "SHLoadImageFile" => sh_load_image_file,
             "SHSipInfo" => sh_sip_info,
             "SHCloseApps" => sh_close_apps,
@@ -71,6 +72,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     for ord in [12u16, 13, 14, 21, 49, 50, 65, 71, 72, 80, 84, 341, 344] {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
+    d.register_handler(dll, "ord:65", sh_full_screen);
     d.register_handler(dll, "ord:40", gesture::recognize);
     d.register_handler(dll, "ord:75", sh_load_image_file);
     // Racing Days requests 0x480000 bytes and treats FALSE as insufficient RAM.
@@ -120,6 +122,50 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ord:56", sh_init_dialog);
     d.register_handler(dll, "ord:21", crate::shell_keyboard::preference);
     d.register_handler(dll, "ord:74", sh_create_menu_bar);
+}
+
+/// SHFullScreen changes shell z-order/state; the app must resize itself.
+fn sh_full_screen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let flags = ctx.arg_u32(1)?;
+    let active = if ctx.kernel.active_window == 0 {
+        0xdead0001
+    } else {
+        ctx.kernel.active_window
+    };
+    if hwnd == 0 || (flags & 0x2a != 0 && hwnd != active) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let shell = &mut ctx.kernel.gdi.shell_menus;
+    if flags & 1 != 0 {
+        shell.taskbar_hidden = false;
+    }
+    if flags & 2 != 0 {
+        shell.taskbar_hidden = true;
+    }
+    if flags & 4 != 0 {
+        shell.sip_button_hidden = false;
+    }
+    if flags & 8 != 0 {
+        shell.sip_button_hidden = true;
+    }
+    if flags & 16 != 0 {
+        shell.start_icon_hidden = false;
+    }
+    if flags & 32 != 0 {
+        shell.start_icon_hidden = true;
+    }
+    for bar in shell.bars.values_mut().filter(|b| b.owner == hwnd) {
+        if flags & 4 != 0 {
+            bar.sip = true;
+        }
+        if flags & 8 != 0 {
+            bar.sip = false;
+        }
+    }
+    ctx.kernel.invalidate_presentation();
+    ctx.kernel.composite_controls();
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 fn ok(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -303,7 +349,7 @@ fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         pocket_kernel::shell_menu::Bar {
             owner: parent,
             menu,
-            sip: flags & 8 == 0,
+            sip: flags & 8 == 0 && !ctx.kernel.gdi.shell_menus.sip_button_hidden,
             background,
         },
     );

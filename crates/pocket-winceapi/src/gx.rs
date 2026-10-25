@@ -130,6 +130,9 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     ensure_fb_mapped(ctx)?;
     if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
         ctx.kernel.controls.direct_surface_hwnd = ctx.arg_u32(0)?;
+        if ctx.arg_u32(1)? & 1 != 0 {
+            ctx.kernel.gdi.shell_menus.taskbar_hidden = true;
+        }
     }
     let pc = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Pc).unwrap_or(0);
     let lr = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Lr).unwrap_or(0);

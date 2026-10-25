@@ -14290,8 +14290,8 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     block_on_wait(ctx, &handles, wait_all, timeout)
 }
 
-/// The emulated display has no reserved host taskbar. Its work area is
-/// the full guest panel, independent of host desktop size and scaling.
+/// Work area in guest coordinates, excluding the visible PocketPC shell.
+/// Physical screen metrics remain unchanged.
 fn system_parameters_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.arg_u32(0)? == 0x30 {
         // SPI_GETWORKAREA
@@ -14302,8 +14302,21 @@ fn system_parameters_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         }
         let (w, h) = screen_dims(ctx);
         let mut bytes = [0u8; 16];
+        let top = if ctx.kernel.pocket_pc_taskbar_visible() {
+            pocket_kernel::shell_menu::HEIGHT as u32
+        } else {
+            0
+        };
+        let bottom = if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
+            && ctx.kernel.active_shell_bar().is_some()
+        {
+            pocket_kernel::shell_menu::HEIGHT as u32
+        } else {
+            0
+        };
+        bytes[4..8].copy_from_slice(&top.min(h).to_le_bytes());
         bytes[8..12].copy_from_slice(&w.to_le_bytes());
-        bytes[12..16].copy_from_slice(&h.to_le_bytes());
+        bytes[12..16].copy_from_slice(&h.saturating_sub(bottom).max(top.min(h)).to_le_bytes());
         ctx.cpu.write_mem(out, &bytes)?;
     }
     // Retain existing handling of other SPI actions in this incremental change.
@@ -14390,7 +14403,24 @@ fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 // ---------- GDI ----------
 
 fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
-    if hwnd == 0 || hwnd == FAKE_HWND {
+    let (screen_w, screen_h) = screen_dims(ctx);
+    let direct_primary = hwnd == FAKE_HWND
+        && ctx
+            .kernel
+            .window_rects
+            .get(&hwnd)
+            .is_none_or(|r| *r == (0, 0, screen_w as i32, screen_h as i32));
+    if hwnd == 0 || direct_primary {
+        // A screen-sized primary client can use the direct DC. A moved or
+        // reduced primary window needs the same backing/origin as any window.
+        if direct_primary {
+            if let Some(dc) = ctx.kernel.window_dcs.remove(&hwnd) {
+                if let Some(bitmap) = ctx.kernel.gdi.dc(dc).and_then(|d| d.selected_bitmap) {
+                    ctx.kernel.gdi.delete(bitmap);
+                }
+                ctx.kernel.gdi.delete(dc);
+            }
+        }
         return GDI_SCREEN_DC;
     }
     // Modeless template dialogs and their children live in Controls, without
@@ -18006,7 +18036,7 @@ fn get_client_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
                 let frame = 2 * i32::from(panel.border);
                 (panel.w - frame, panel.h - frame - panel.caption_h())
             }
-            None if hwnd == FAKE_HWND => {
+            None if hwnd == FAKE_HWND && !ctx.kernel.window_rects.contains_key(&hwnd) => {
                 // The synthetic top-level window is the one panel-less
                 // handle every guest is allowed to ask about: answer
                 // with the whole display.

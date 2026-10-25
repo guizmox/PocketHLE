@@ -35,6 +35,9 @@ struct Popup {
 pub struct ShellMenus {
     pub bars: HashMap<u32, Bar>,
     pub tracking: Option<TrackingMenu>,
+    pub taskbar_hidden: bool,
+    pub start_icon_hidden: bool,
+    pub sip_button_hidden: bool,
     active: u32,
     column: usize,
     path: Vec<Popup>,

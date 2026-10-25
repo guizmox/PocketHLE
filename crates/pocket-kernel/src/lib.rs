@@ -1992,10 +1992,18 @@ impl KernelState {
             }
         }
     }
+    /// The PocketPC shell occupies a separate top-level strip. Apps retain
+    /// responsibility for resizing their windows after SHFullScreen.
+    pub fn pocket_pc_taskbar_visible(&self) -> bool {
+        self.gapi_action_key == gapi::VK_RETURN && !self.gdi.shell_menus.taskbar_hidden
+    }
+
     pub fn window_client_origin(&self, mut hwnd: u32) -> Option<(i32, i32)> {
         let (mut x, mut y) = (0i32, 0i32);
         for _ in 0..64 {
-            if matches!(hwnd, 0 | 0xdeadde5c | 0xdead0001) {
+            if matches!(hwnd, 0 | 0xdeadde5c)
+                || (hwnd == 0xdead0001 && !self.window_rects.contains_key(&hwnd))
+            {
                 return Some((x, y));
             }
             if let Some(p) = self.controls.panel(hwnd) {
@@ -2058,6 +2066,7 @@ impl KernelState {
             && self.controls.is_empty()
             && self.modal.is_none()
             && self.active_shell_bar().is_none()
+            && !self.pocket_pc_taskbar_visible()
         {
             return;
         }
@@ -2231,6 +2240,7 @@ impl KernelState {
         let controls = self.controls.clone();
         let modal = self.modal.clone();
         let shell_bar = self.active_shell_bar();
+        let taskbar = self.pocket_pc_taskbar_visible();
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
         let mut layers = Vec::new();
         for (&hwnd, &dc) in &self.window_dcs {
@@ -2247,7 +2257,10 @@ impl KernelState {
                     visible = false;
                     break;
                 }
-                if current == 0 || current == 0xdead0001 || current == 0xdead0000 {
+                if current == 0
+                    || current == 0xdead0000
+                    || (current == 0xdead0001 && !self.window_rects.contains_key(&current))
+                {
                     break;
                 }
                 if let Some(panel) = controls.panel(current) {
@@ -2334,6 +2347,37 @@ impl KernelState {
                 &self.menu_items,
                 &self.menus,
             );
+        }
+        if taskbar {
+            let (width, _) = surf.dimensions();
+            let width = width as i32;
+            for y in 0..shell_menu::HEIGHT {
+                // PocketHLE shell chrome, separate from the app's client pixels.
+                let shade = (5 + y / 5) as u16;
+                surf.fill_rect(
+                    0,
+                    y,
+                    width,
+                    1,
+                    (shade << 11) | ((shade + 7) << 5) | (shade + 12),
+                );
+            }
+            let font = text::selected(&self.gdi, gdi::STOCK_SYSTEM_FONT);
+            let clip = [0, 0, width, shell_menu::HEIGHT];
+            text::layout(
+                font.as_ref(),
+                &"PocketHLE".encode_utf16().collect::<Vec<_>>(),
+            )
+            .draw(&mut surf, 8, 6, 0xffff, clip);
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let clock = format!("{:02}:{:02}", (seconds / 3600) % 24, (seconds / 60) % 60);
+            let clock: Vec<_> = clock.encode_utf16().collect();
+            let layout = text::layout(font.as_ref(), &clock);
+            layout.draw(&mut surf, width - 48, 6, 0xffff, clip);
+            surf.fill_rect(0, shell_menu::HEIGHT - 1, width, 1, 0x3d5b);
         }
         if !self.shell_keyboard.sip {
             self.shell_keyboard.render(&mut surf);
