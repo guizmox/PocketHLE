@@ -15146,12 +15146,13 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn end_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // The game has already presented its completed surface when it calls
-    // EndPaint. Repainting the shell here can expose an all-white DIB
-    // frame before the next game frame is ready. Controls are composited
-    // by the frame hook at the presentation boundary instead.
+    // Mapping GAPI display memory does not disable GDI: an application can
+    // use GAPI for one screen and native WM_PAINT for the next. Publish real
+    // backing changes even while that mapping exists. The paint revision
+    // check keeps an empty EndPaint from replaying a stale GDI background.
+    ctx.kernel.present_window_surfaces();
+    // Shell overlays remain deferred while a direct display is mapped.
     if !ctx.kernel.fb_mapped {
-        ctx.kernel.present_window_surfaces();
         repaint_controls(ctx);
         repaint_status_bar(ctx);
     }
@@ -21929,9 +21930,7 @@ fn build_dialog_from_template_for(
     ctx.kernel
         .window_styles
         .insert(owner_hwnd, (tmpl.style, tmpl.ex_style));
-    ctx.kernel
-        .window_visibility
-        .insert(owner_hwnd, modal || tmpl.style & WS_VISIBLE != 0);
+    ctx.kernel.window_visibility.insert(owner_hwnd, modal);
     let dialog_font = tmpl.font.as_ref().map(|(points, name)| {
         let mut raw = [0u8; 92];
         // WinCE reports 96 logical DPI. A dialog point size specifies EM height.
@@ -21996,7 +21995,9 @@ fn build_dialog_from_template_for(
         h: win_h,
         // `DialogBox*` shows its dialog whether or not the template says
         // `WS_VISIBLE`; only a `CreateDialog*` panel starts hidden.
-        visible: modal || tmpl.style & WS_VISIBLE != 0,
+        // A modeless dialog is shown after WM_INITDIALOG returns. Its
+        // procedure can still explicitly ShowWindow during initialization.
+        visible: modal,
         border,
         caption,
         ok_pressed: false,
@@ -22088,6 +22089,24 @@ fn build_dialog_from_template_for(
     repaint_controls(ctx);
 }
 
+/// Complete the template's deferred show after the application's initializer.
+/// ShowWindow during WM_INITDIALOG updates WS_VISIBLE, so an explicit hide
+/// remains hidden and an explicit show remains visible. Destroyed dialogs
+/// must not be resurrected by the callback return.
+fn finish_modeless_dialog_show(ctx: &mut CallCtx<'_>, hwnd: u32) {
+    let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) else {
+        return;
+    };
+    let visible = ctx
+        .kernel
+        .window_styles
+        .get(&hwnd)
+        .is_some_and(|s| s.0 & WS_VISIBLE != 0);
+    panel.visible = visible;
+    ctx.kernel.window_visibility.insert(hwnd, visible);
+    repaint_controls(ctx);
+}
+
 /// `CreateDialogIndirectParamW(hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam)`
 ///
 /// Creates the dialog *and* delivers `WM_INITDIALOG` to `lpDialogFunc`
@@ -22110,6 +22129,7 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
         // saved value means our callback has actually returned.
         if ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp {
             let hwnd = ctx.kernel.dialog_frame_hwnd;
+            finish_modeless_dialog_show(ctx, hwnd);
             if ctx.cpu.read_reg(ArmReg::R0)? != 0 {
                 let focus = ctx.kernel.controls.children_of(hwnd).into_iter().find(|h| {
                     ctx.kernel.controls.get(*h).is_some_and(|c| {
@@ -22190,6 +22210,7 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
         );
     }
     if dialog_proc == 0 {
+        finish_modeless_dialog_show(ctx, hwnd);
         return Ok(DispatchOutcome::ReturnedR0(hwnd));
     }
     // Route later SendMessageW / DispatchMessageW for this handle to the
@@ -25247,6 +25268,60 @@ mod tests {
     }
 
     #[test]
+    fn modeless_dialog_show_waits_for_initializer_and_honors_explicit_visibility() {
+        for explicit_show in [None, Some(false), Some(true)] {
+            let mut kernel = fresh_kernel();
+            let mut cpu = scanf_cpu();
+            let mut template = [0u8; 64];
+            template[..4].copy_from_slice(&WS_VISIBLE.to_le_bytes());
+            template[14..16].copy_from_slice(&100i16.to_le_bytes());
+            template[16..18].copy_from_slice(&80i16.to_le_bytes());
+            cpu.write_mem(0x2000, &template).unwrap();
+            for (reg, value) in [
+                (ArmReg::R0, 0),
+                (ArmReg::R1, 0x2000),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, 0x4000),
+            ] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            let sp = cpu.read_reg(ArmReg::Sp).unwrap();
+            cpu.write_mem(sp, &0u32.to_le_bytes()).unwrap();
+            kernel.framebuffer.pixels.fill(0x55);
+            let previous = kernel.framebuffer.pixels.clone();
+            let thunk = dummy_thunk();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                create_dialog_indirect_param_w(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(0x4000)
+            );
+            let hwnd = ctx.kernel.dialog_frame_hwnd;
+            assert!(!window_is_visible(ctx.kernel, hwnd));
+            ctx.kernel.composite_controls();
+            assert_eq!(ctx.kernel.framebuffer.pixels, previous);
+            if let Some(show) = explicit_show {
+                ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+                ctx.cpu.write_reg(ArmReg::R1, u32::from(show)).unwrap();
+                show_window(&mut ctx).unwrap();
+                assert_eq!(window_is_visible(ctx.kernel, hwnd), show);
+            }
+            ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+            assert_eq!(
+                create_dialog_indirect_param_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(hwnd)
+            );
+            assert_eq!(
+                window_is_visible(ctx.kernel, hwnd),
+                explicit_show.unwrap_or(true)
+            );
+        }
+    }
+
+    #[test]
     fn nested_modeless_dialogs_keep_parent_panel_and_return_each_hwnd() {
         let mut kernel = fresh_kernel();
         let mut cpu = StubCpu::new();
@@ -25293,13 +25368,14 @@ mod tests {
         assert_eq!(ctx.kernel.window_extra[&(FAKE_DIALOG_HWND, 4)], 0x4000);
         assert_eq!(ctx.kernel.window_extra[&(child, 4)], 0x4100);
         assert!(!ctx.kernel.controls.panel(FAKE_DIALOG_HWND).unwrap().visible);
-        assert!(ctx.kernel.controls.panel(child).unwrap().visible);
+        assert!(!ctx.kernel.controls.panel(child).unwrap().visible);
         assert!(!window_is_visible(ctx.kernel, child));
         ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
         assert_eq!(
             create_dialog_indirect_param_w(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(child)
         );
+        assert!(ctx.kernel.controls.panel(child).unwrap().visible);
         assert_eq!(ctx.kernel.dialog_frame_hwnd, FAKE_DIALOG_HWND);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x4568);
         ctx.cpu.write_reg(ArmReg::Sp, 0x8800).unwrap();

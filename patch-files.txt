@@ -1,10 +1,1 @@
-.github\workflows\ci.yml
-Cargo.lock
-crates\pocket-kernel\src\gdi.rs
-crates\pocket-kernel\src\image_memory.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-winceapi\build.rs
 crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\recording_encoder.rs
-frontends\pocket-desktop\src\desktop_main.rs
-frontends\pocket-desktop\src\recording.rs
