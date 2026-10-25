@@ -127,9 +127,19 @@ pub struct Bitmap {
     /// per-pixel RGB565 -> dib_bpp encode used to dominate the
     /// per-frame budget.
     pub host_dirty: bool,
+    /// Drawing revision, independent of guest DIB synchronization.
+    pub paint_generation: u64,
+    /// Last revision explicitly presented from this window backing store.
+    pub published_generation: u64,
 }
 
 impl Bitmap {
+    /// Record a completed host-side pixel write, separately from DIB syncing.
+    pub fn mark_painted(&mut self) {
+        self.host_dirty = true;
+        self.paint_generation = self.paint_generation.wrapping_add(1);
+    }
+
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width: width.max(1),
@@ -143,6 +153,8 @@ impl Bitmap {
             dib_row_stride: 0,
             dib_rgb555: false,
             host_dirty: false,
+            paint_generation: 0,
+            published_generation: 0,
         }
     }
 
@@ -173,6 +185,8 @@ impl Bitmap {
             dib_row_stride: row_stride,
             dib_rgb555: rgb555,
             host_dirty: false,
+            paint_generation: 0,
+            published_generation: 0,
         }
     }
 }
@@ -798,7 +812,7 @@ impl<'a> Surface<'a> {
             // Memory DCs back DIB sections — flag them as needing
             // a host -> guest pixel resync before the next time the
             // guest is allowed to observe the DIB through `ppvBits`.
-            Surface::Bitmap(bm) => bm.host_dirty = true,
+            Surface::Bitmap(bm) => bm.mark_painted(),
         }
     }
 

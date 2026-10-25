@@ -204,6 +204,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked -p pocket-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: test native H264 and AAC recording at 30 and 60 FPS
+        shell: pwsh
+        run: |
+          cargo test --release --locked -p pocket-desktop --bin pockethle-gui compressed_recording_writes_mp4_through_native_ffmpeg -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: stage artifacts
         shell: bash
         run: |

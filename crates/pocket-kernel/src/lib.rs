@@ -2246,6 +2246,7 @@ impl KernelState {
         let taskbar = self.pocket_pc_taskbar_visible();
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
         let mut layers = Vec::new();
+        let mut native_paint_changed = false;
         for (&hwnd, &dc) in &self.window_dcs {
             if !present_windows
                 && controls.direct_surface_hwnd != 0
@@ -2310,6 +2311,7 @@ impl KernelState {
                 current = parent;
             }
             if visible {
+                native_paint_changed |= bitmap.paint_generation != bitmap.published_generation;
                 let clip = controls
                     .get(hwnd)
                     .map(|c| {
@@ -2334,6 +2336,11 @@ impl KernelState {
                     });
                 layers.push((hwnd, owner, x, y, bitmap.clone(), clip));
             }
+        }
+        // EndPaint validates the paint transaction; it is not a request to
+        // replay an unchanged cached background over an EGL/DirectDraw frame.
+        if present_windows && !native_paint_changed {
+            return;
         }
         layers.sort_by_key(|layer| layer.0);
         controls.render_composited_with_images(&mut surf, &self.gdi, |owner, surface| {
@@ -2372,7 +2379,17 @@ impl KernelState {
         // Explicit native GDI completion, however, presents window backing pixels
         // that were painted off-screen and never advanced the screen's counter.
         self.framebuffer.frame_counter = frame_counter;
-        if present_windows && !layers.is_empty() {
+        if present_windows && native_paint_changed {
+            for (hwnd, ..) in &layers {
+                let bitmap = self
+                    .window_dcs
+                    .get(hwnd)
+                    .and_then(|dc| self.gdi.dc(*dc))
+                    .and_then(|dc| dc.selected_bitmap);
+                if let Some(bitmap) = bitmap.and_then(|handle| self.gdi.bitmap_mut(handle)) {
+                    bitmap.published_generation = bitmap.paint_generation;
+                }
+            }
             self.framebuffer.mark_dirty();
         }
     }
@@ -4958,34 +4975,54 @@ mod tests {
     #[test]
     fn completed_native_window_paint_notifies_presentation_but_polling_does_not() {
         let mut cpu = StubCpu::new();
-        let mut process = Process::map_into(image_based_at(0x10000,0x1000), &mut cpu,
-            &|_,_| None, &NullDispatcher).unwrap();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
         let state = &mut process.state;
         let hwnd = 0xdead4000;
         let dc = state.gdi.create_memory_dc();
-        let bm = state.gdi.create_compatible_bitmap(20,20);
-        state.gdi.select_into(dc,bm);
-        state.window_dcs.insert(hwnd,dc);
-        state.window_rects.insert(hwnd,(40,50,20,20));
-        state.window_visibility.insert(hwnd,true);
+        let bm = state.gdi.create_compatible_bitmap(20, 20);
+        state.gdi.select_into(dc, bm);
+        state.window_dcs.insert(hwnd, dc);
+        state.window_rects.insert(hwnd, (40, 50, 20, 20));
+        state.window_visibility.insert(hwnd, true);
         let initial = state.framebuffer.frame_counter;
-        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0,0,20,20,0xf800);
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0, 0, 20, 20, 0xf800);
         state.present_window_surfaces();
-        assert_eq!(state.framebuffer.frame_counter,initial.wrapping_add(1));
-        let offset = ((55*state.framebuffer.width+45)*2) as usize;
-        assert_eq!(&state.framebuffer.pixels[offset..offset+2], &0xf800u16.to_le_bytes());
+        assert_eq!(state.framebuffer.frame_counter, initial.wrapping_add(1));
+        let offset = ((55 * state.framebuffer.width + 45) * 2) as usize;
+        assert_eq!(
+            &state.framebuffer.pixels[offset..offset + 2],
+            &0xf800u16.to_le_bytes()
+        );
         let presented = state.framebuffer.frame_counter;
         state.composite_controls();
         state.composite_controls();
-        assert_eq!(state.framebuffer.frame_counter,presented);
-        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0,0,20,20,0x07e0);
+        assert_eq!(state.framebuffer.frame_counter, presented);
+        state.framebuffer.fill(0x001f); // a subsequent EGL/DirectDraw presentation
+        let direct_frame = state.framebuffer.frame_counter;
+        state.present_window_surfaces(); // BeginPaint/EndPaint with no drawing
+        assert_eq!(state.framebuffer.frame_counter, direct_frame);
+        assert_eq!(
+            &state.framebuffer.pixels[offset..offset + 2],
+            &0x001fu16.to_le_bytes()
+        );
+        let presented = direct_frame;
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0, 0, 20, 20, 0x07e0);
         state.present_window_surfaces();
-        assert_eq!(state.framebuffer.frame_counter,presented.wrapping_add(1));
-        assert_eq!(&state.framebuffer.pixels[offset..offset+2], &0x07e0u16.to_le_bytes());
-        state.window_visibility.insert(hwnd,false);
+        assert_eq!(state.framebuffer.frame_counter, presented.wrapping_add(1));
+        assert_eq!(
+            &state.framebuffer.pixels[offset..offset + 2],
+            &0x07e0u16.to_le_bytes()
+        );
+        state.window_visibility.insert(hwnd, false);
         let hidden = state.framebuffer.frame_counter;
         state.present_window_surfaces();
-        assert_eq!(state.framebuffer.frame_counter,hidden);
+        assert_eq!(state.framebuffer.frame_counter, hidden);
     }
 
     #[test]

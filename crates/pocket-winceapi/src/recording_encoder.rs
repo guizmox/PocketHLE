@@ -36,13 +36,27 @@ pub fn unavailable_reason() -> String {
     #[cfg(feature = "video-static")]
     {
         let missing = unsafe { pocket_recording_missing() };
-        let names: Vec<_> = [(1, "H.264 (OpenH264) encoder"), (2, "AAC encoder"), (4, "MP4 muxer")]
-            .into_iter().filter_map(|(bit, name)| (missing & bit != 0).then_some(name)).collect();
-        if names.is_empty() { "available".into() }
-        else { format!("{} missing from linked FFmpeg; rebuild FFmpeg, then PocketHLE", names.join(", ")) }
+        let names: Vec<_> = [
+            (1, "H.264 (OpenH264) encoder"),
+            (2, "AAC encoder"),
+            (4, "MP4 muxer"),
+        ]
+        .into_iter()
+        .filter_map(|(bit, name)| (missing & bit != 0).then_some(name))
+        .collect();
+        if names.is_empty() {
+            "available".into()
+        } else {
+            format!(
+                "{} missing from linked FFmpeg; rebuild FFmpeg, then PocketHLE",
+                names.join(", ")
+            )
+        }
     }
     #[cfg(not(feature = "video-static"))]
-    { "PocketHLE was compiled without video-static".into() }
+    {
+        "PocketHLE was compiled without video-static".into()
+    }
 }
 pub struct Mp4Encoder {
     #[cfg(feature = "video-static")]

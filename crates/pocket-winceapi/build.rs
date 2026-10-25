@@ -17,7 +17,9 @@ fn main() {
     }
     let lib = prefix.join("lib");
     let mut archives = vec!["avformat", "avcodec", "swscale", "swresample", "avutil"];
-    if !target.contains("android") { archives.push("openh264"); }
+    if !target.contains("android") {
+        archives.push("openh264");
+    }
     for name in &archives {
         let file = if target.contains("msvc") {
             lib.join(format!("{name}.lib"))

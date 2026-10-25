@@ -4952,7 +4952,11 @@ fn map_resource_module_inner(
     let mut mapped = Vec::new();
     let mapping = (|| -> Result<(), KernelError> {
         for s in &image.sections {
-            let prot = pocket_kernel::image_memory::image_section_protection(image.machine, image.subsystem, s);
+            let prot = pocket_kernel::image_memory::image_section_protection(
+                image.machine,
+                image.subsystem,
+                s,
+            );
             let aligned = pocket_cpu::round_up_to_page(s.virtual_size.max(s.data.len() as u32));
             if aligned == 0 {
                 continue;
@@ -14500,6 +14504,9 @@ fn resize_window_backing(kernel: &mut KernelState, hwnd: u32, width: i32, height
             resized.painted.as_mut().unwrap()[dst..dst + cols].fill(1);
         }
     }
+    // Preserve revision identity when a persistent window HDC is resized.
+    resized.paint_generation = old.paint_generation.wrapping_add(1);
+    resized.published_generation = old.paint_generation;
     *old = resized;
     kernel.gdi.pending_window_erases.insert(hwnd);
 }
@@ -14563,8 +14570,8 @@ fn release_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel.present_window_surfaces();
     } else {
         ctx.kernel.composite_controls();
+        ctx.kernel.framebuffer.mark_dirty();
     }
-    ctx.kernel.framebuffer.mark_dirty();
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -19511,7 +19518,7 @@ fn set_bitmap_bits(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     let count = byte_count.min(expected) as usize;
     let data = ctx.cpu.read_mem(bits, count as u32)?;
     target.pixels[..count].copy_from_slice(&data);
-    target.host_dirty = true;
+    target.mark_painted();
     Ok(DispatchOutcome::ReturnedR0(count as u32))
 }
 
@@ -33302,12 +33309,11 @@ mod tests {
             thunk: &thunk,
         };
         let dc = window_dc(&mut ctx, hwnd);
-        let bitmap = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
-        let bm = ctx.kernel.gdi.bitmap_mut(bitmap).unwrap();
-        for p in bm.pixels.chunks_exact_mut(2) {
-            p.copy_from_slice(&0xf800u16.to_le_bytes());
-        }
-        bm.painted.as_mut().unwrap().fill(1);
+        // Use the same clipped drawing primitive as native GDI handlers;
+        // raw writes to the host bitmap bypass the paint transaction.
+        surface_for_dc(ctx.kernel, dc)
+            .unwrap()
+            .fill_rect(0, 0, 4, 4, 0xf800);
         assert!(ctx.kernel.controls.is_empty());
         ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, dc).unwrap();
@@ -33316,8 +33322,12 @@ mod tests {
             &ctx.kernel.framebuffer.pixels[..2],
             &0xf800u16.to_le_bytes()
         );
-        // An unrelated direct presentation is not overwritten by an idle hook.
+        // An unrelated direct presentation is not overwritten by an empty
+        // ReleaseDC or an idle hook, just as for an empty EndPaint.
         ctx.kernel.framebuffer.pixels[..2].copy_from_slice(&0x07e0u16.to_le_bytes());
+        let counter = ctx.kernel.framebuffer.frame_counter;
+        release_dc(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
         ctx.kernel.composite_controls();
         assert_eq!(
             &ctx.kernel.framebuffer.pixels[..2],
