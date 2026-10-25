@@ -2,6 +2,23 @@
 use crate::memory_division::MemoryDivision;
 use pocket_cpu::image_pages::ImagePageBudget;
 use std::sync::Mutex;
+/// Effective image permissions for the legacy ARM/Thumb WinCE target.
+/// ARMv4/v5 memory has no XN bit: a readable image page can contain instructions
+/// even when the PE section lacks IMAGE_SCN_MEM_EXECUTE. ARMNT and non-CE images
+/// retain the section's explicit execute permission. Never add write permission.
+/// ARM ARM DDI0406C.d, D12.6: XN is introduced by the VMSAv6 table format.
+pub fn image_section_protection(machine: u16, subsystem: u16, section: &pocket_pe::LoadedSection) -> pocket_cpu::Prot {
+    use pocket_cpu::Prot;
+    let mut prot = Prot::READ;
+    if section.is_writable() { prot |= Prot::WRITE; }
+    let legacy_arm_ce = subsystem == pocket_pe::subsystem::WINDOWS_CE_GUI
+        && matches!(machine, pocket_pe::machine::ARM | pocket_pe::machine::THUMB);
+    if section.is_executable() || (legacy_arm_ce && section.is_readable()) {
+        prot |= Prot::EXEC;
+    }
+    prot
+}
+
 #[derive(Default, Debug)]
 pub struct ImageMemory {
     state: Mutex<State>,
@@ -72,6 +89,23 @@ impl Drop for ImageMemory {
 mod tests {
     use super::*;
     use pocket_cpu::{stub::StubCpu, Cpu, Prot};
+    #[test]
+    fn legacy_arm_ce_image_reads_allow_execution_without_changing_writes() {
+        use pocket_pe::{machine, subsystem, LoadedSection};
+        for cpu in [machine::ARM,machine::THUMB] {
+            for writable in [false,true] {
+                let section = LoadedSection {name:"data".into(),virtual_address:0x1000,virtual_size:4,
+                    characteristics:0x40000040 | if writable {0x80000000} else {0},data:vec![0;4]};
+                let prot = image_section_protection(cpu,subsystem::WINDOWS_CE_GUI,&section);
+                assert!(prot.contains(Prot::READ | Prot::EXEC));
+                assert_eq!(prot.contains(Prot::WRITE),writable);
+                assert!(!image_section_protection(cpu,2,&section).contains(Prot::EXEC));
+                assert!(!image_section_protection(machine::ARMNT,subsystem::WINDOWS_CE_GUI,&section).contains(Prot::EXEC));
+                assert!(!image_section_protection(machine::MIPS_R4000,subsystem::WINDOWS_CE_GUI,&section).contains(Prot::EXEC));
+            }
+        }
+    }
+
     #[test]
     fn paged_images_and_heap_share_budget_and_profile_changes_are_atomic() {
         let ram = MemoryDivision::new(12 * 4096, 8).unwrap();

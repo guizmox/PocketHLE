@@ -9,7 +9,7 @@ media_prefix="$project_root/target/native/ffmpeg/$media_target"
 media_build="$project_root/target/native/ffmpeg-build/$media_target"
 # Separate desktop encoder build from earlier decoder-only object caches.
 if [[ "$media_target" != *android* ]]; then
-    media_build="${media_build}-recording-v2"
+    media_build="${media_build}-recording-h264"
 fi
 media_source="$project_root/target/native/ffmpeg-source/ffmpeg-8.0.1"
 media_archive="$project_root/third-party/ffmpeg/ffmpeg-8.0.1.tar.xz"
@@ -35,10 +35,16 @@ options=(
     --enable-decoder=wmv1,wmv2,wmv3,vc1,mpeg4,msmpeg4v1,msmpeg4v2,msmpeg4v3,mpeg1video,mpeg2video,h263,h264,mjpeg,wmav1,wmav2,mp3float,mp2,aac,vorbis,pcm_s16le,pcm_u8,adpcm_ms,adpcm_ima_wav
     --enable-parsers --enable-pic
 )
-# Desktop recording reuses the native MPEG-4 and AAC encoders. Android keeps
+# Desktop recording uses OpenH264 and native AAC. Android keeps
 # its decoder-only build; it does not expose the desktop recorder.
 if [[ "$media_target" != *android* ]]; then
-    options+=(--enable-encoder=mpeg4,aac --enable-muxer=mov,mp4)
+    if ! command -v pkg-config >/dev/null 2>&1; then
+        echo 'pkg-config is required. MSYS2: pacman -S --needed pkgconf; Linux: install pkg-config.' >&2
+        exit 1
+    fi
+    bash "$project_root/tools/build-openh264.sh" "$media_target" "$media_jobs"
+    export PKG_CONFIG_PATH="$media_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    options+=(--enable-libopenh264 --pkg-config-flags=--static --enable-encoder=libopenh264,aac --enable-muxer=mov,mp4)
 fi
 if [[ "$media_target" == x86_64-pc-windows-msvc ]]; then
     # Keep the vendored source archive unmodified; apply the reproducible
@@ -74,8 +80,14 @@ elif [[ "$media_target" != x86_64-unknown-linux-gnu ]]; then
 fi
 cd "$media_build"
 bash "$media_source/configure" "${options[@]}"
+if [[ "$media_target" == x86_64-pc-windows-msvc ]]; then
+    # Locale detection already accepts translated MSVC banners; also make the
+    # generated metadata safe for cl.exe's UTF-8 source code page.
+    LC_ALL=C awk -f "$project_root/tools/ffmpeg-msvc-ascii.awk" config.h > config.h.ascii
+    mv config.h.ascii config.h
+fi
 if [[ "$media_target" != *android* ]]; then
-    for component in MPEG4_ENCODER AAC_ENCODER MP4_MUXER; do
+    for component in LIBOPENH264_ENCODER AAC_ENCODER MP4_MUXER; do
         if ! grep -q "^#define CONFIG_${component} 1" config_components.h; then
             echo "FFmpeg recording component missing: $component" >&2
             exit 1

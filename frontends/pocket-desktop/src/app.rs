@@ -1949,15 +1949,20 @@ impl PocketLauncher {
                 ui.end_row();
 
                 ui.label("Recording format");
-                egui::ComboBox::from_id_source("recording_format").selected_text(if draft.recording_format=="avi"{"AVI (MJPEG + PCM)"}else{"MP4 (MPEG-4 + AAC)"}).show_ui(ui,|ui|{
+                egui::ComboBox::from_id_source("recording_format").selected_text(if draft.recording_format=="avi"{"AVI (MJPEG + PCM)"}else{"MP4 (H.264 + AAC)"}).show_ui(ui,|ui|{
                     ui.selectable_value(&mut draft.recording_format,"avi".into(),"AVI (MJPEG + PCM)");
-                    ui.add_enabled_ui(pocket_core::winceapi::recording_encoder::available(),|ui|{ui.selectable_value(&mut draft.recording_format,"mp4".into(),"MP4 (MPEG-4 + AAC)");});
+                    ui.add_enabled_ui(pocket_core::winceapi::recording_encoder::available(),|ui|{ui.selectable_value(&mut draft.recording_format,"mp4".into(),"MP4 (H.264 + AAC)");});
                 });
                 if !pocket_core::winceapi::recording_encoder::available(){ui.label(format!("MP4 unavailable: {}", pocket_core::winceapi::recording_encoder::unavailable_reason()));}
                 ui.end_row();
-                ui.label("Recording quality");
-                egui::ComboBox::from_id_source("recording_quality").selected_text(match draft.recording_quality.as_str(){"low"=>"Low","high"=>"High",_=>"Medium"}).show_ui(ui,|ui|{
-                    for (value,label) in [("low","Low"),("medium","Medium"),("high","High")]{ui.selectable_value(&mut draft.recording_quality,value.into(),label);}
+                ui.label("Recording quality / frame rate");
+                let selected = crate::recording::PRESETS.iter()
+                    .find(|(value, _)| *value == draft.recording_quality.as_str())
+                    .map(|(_, label)| *label).unwrap_or("Medium — 30 FPS");
+                egui::ComboBox::from_id_source("recording_quality").selected_text(selected).show_ui(ui, |ui| {
+                    for (value, label) in crate::recording::PRESETS {
+                        ui.selectable_value(&mut draft.recording_quality, value.into(), label);
+                    }
                 });
                 ui.end_row();
 

@@ -36,7 +36,7 @@ pub fn unavailable_reason() -> String {
     #[cfg(feature = "video-static")]
     {
         let missing = unsafe { pocket_recording_missing() };
-        let names: Vec<_> = [(1, "MPEG-4 encoder"), (2, "AAC encoder"), (4, "MP4 muxer")]
+        let names: Vec<_> = [(1, "H.264 (OpenH264) encoder"), (2, "AAC encoder"), (4, "MP4 muxer")]
             .into_iter().filter_map(|(bit, name)| (missing & bit != 0).then_some(name)).collect();
         if names.is_empty() { "available".into() }
         else { format!("{} missing from linked FFmpeg; rebuild FFmpeg, then PocketHLE", names.join(", ")) }
@@ -134,6 +134,6 @@ fn failure(rc: i32) -> io::Error {
     unsafe { pocket_recording_error(rc, text.as_mut_ptr(), 256) };
     let detail = unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }.to_string_lossy();
     io::Error::other(format!(
-        "FFmpeg recording: {detail} ({rc}); MPEG-4/AAC encoders and MP4 muxer must be enabled"
+        "FFmpeg recording: {detail} ({rc}); H.264/AAC encoders and MP4 muxer must be enabled"
     ))
 }

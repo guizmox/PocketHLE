@@ -7,7 +7,7 @@ if ($Jobs -lt 1) { throw 'Jobs must be positive.' }
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $bash = Join-Path $MsysRoot 'usr\bin\bash.exe'
 if (!(Test-Path $bash)) {
-    throw "MSYS2 is required only to build FFmpeg. Install it at https://www.msys2.org/, run 'pacman -S --needed make diffutils', then run this script again. Custom location: -MsysRoot D:\msys64"
+    throw "MSYS2 is required only to build FFmpeg. Install it at https://www.msys2.org/, run 'pacman -S --needed make diffutils pkgconf', then run this script again. Custom location: -MsysRoot D:\msys64"
 }
 if (!(Get-Command cl.exe -ErrorAction SilentlyContinue) -or $env:VSCMD_ARG_TGT_ARCH -ne 'x64') {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'

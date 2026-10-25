@@ -4120,3 +4120,33 @@ mount was incorrect and stopped before decoding). GIF logos, title/menu image
 and attract-mode3D are visible with the callback-only fix. Do not mistake a
 probe's missing mount for an emulator resource bug. Diagnostic probe sources and
 coordinates are not production changes. No change to the Gizmondo input table.
+
+
+## Native GDI completion and classic ARM image permissions (2026-10-25)
+
+MiniDogfight's mission paints a child window backing bitmap through BeginPaint,
+BitBlt and EndPaint. The pixels changed while frame_counter stayed at 32143:
+periodic headless snapshots moved, but desktop/Android skipped publication because
+they gate snapshots on frame_counter. composite_window_layers must preserve the
+counter for ordinary overlay polling, but explicit present_window_surfaces with
+visible native layers must advance it. Hidden layers and overlay-only passes do
+not announce another frame. Regression covers native paint, polling, repaint and
+hidden-window completion. Native replay reaches Exercise and updates scenery and
+frame_counter together. No title-specific presentation path.
+
+CrazyKart crashed after character/championship selection, at the start of the
+race, with FETCH_PROT at 0x00580000. This is its valid ARM DATA image section,
+not its stack. IMAGE_SCN_MEM_EXECUTE is absent on that readable/writable section.
+ARMv4/v5 classic WinCE has no independent XN permission: readable image pages
+can contain instructions. image_memory::image_section_protection centralizes the
+effective image mapping for the EXE loader and loaded DLLs. The rule applies to
+WINDOWS_CE_GUI ARM/THUMB images with IMAGE_SCN_MEM_READ; explicit execute still
+works. ARMNT, MIPS and non-CE images retain explicit execute flags. Write access
+is never added by compatibility. PE flags/file bytes, heaps/stacks and
+VirtualProtect semantics are unchanged. ARM ARM DDI0406C.d D12.6 describes the
+XN permission introduced with VMSAv6. No name/address/signature condition.
+
+Native 60-second replay passes the former CrazyKart crash and reaches an animated
+race (lap/timer visible); MiniDogfight Exercise also remains animated. Initial
+source is preserved with original imported files and registration data. Generic
+replay source/scripts and bounded traces are in the delivery's diagnostic/ tree.

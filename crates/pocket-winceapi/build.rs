@@ -16,7 +16,9 @@ fn main() {
         panic!("Static FFmpeg is missing at {}. On Windows run: powershell -ExecutionPolicy Bypass -File tools/build-ffmpeg.ps1. See third-party/ffmpeg/README.md.", prefix.display());
     }
     let lib = prefix.join("lib");
-    for name in ["avformat", "avcodec", "swscale", "swresample", "avutil"] {
+    let mut archives = vec!["avformat", "avcodec", "swscale", "swresample", "avutil"];
+    if !target.contains("android") { archives.push("openh264"); }
+    for name in &archives {
         let file = if target.contains("msvc") {
             lib.join(format!("{name}.lib"))
         } else {
@@ -33,7 +35,7 @@ fn main() {
         .flag_if_supported("-std=c11")
         .compile("pocket_media");
     println!("cargo:rustc-link-search=native={}", lib.display());
-    for name in ["avformat", "avcodec", "swscale", "swresample", "avutil"] {
+    for name in &archives {
         println!("cargo:rustc-link-lib=static={name}");
     }
     if target.contains("windows") {
@@ -47,7 +49,7 @@ fn main() {
             println!("cargo:rustc-link-lib={name}");
         }
     } else if target.contains("linux") {
-        for name in ["m", "pthread", "dl"] {
+        for name in ["m", "pthread", "dl", "stdc++"] {
             println!("cargo:rustc-link-lib={name}");
         }
     }

@@ -1,1 +1,16 @@
+crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\image_memory.rs
+crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\build.rs
+crates\pocket-winceapi\native\recording.c
+crates\pocket-winceapi\src\recording_encoder.rs
+frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\recording.rs
+tools\build-ffmpeg.sh
+tools\build-ffmpeg.ps1
+tools\build-openh264.sh
+tools\ffmpeg-msvc-ascii.awk
+third-party\openh264\openh264-2.6.0.tar.gz
+third-party\openh264\LICENSE
+third-party\openh264\README.md
+docs\AGENTS.md

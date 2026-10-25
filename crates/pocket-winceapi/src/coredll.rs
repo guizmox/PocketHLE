@@ -4952,13 +4952,7 @@ fn map_resource_module_inner(
     let mut mapped = Vec::new();
     let mapping = (|| -> Result<(), KernelError> {
         for s in &image.sections {
-            let mut prot = Prot::READ;
-            if s.is_writable() {
-                prot |= Prot::WRITE;
-            }
-            if s.is_executable() {
-                prot |= Prot::EXEC;
-            }
+            let prot = pocket_kernel::image_memory::image_section_protection(image.machine, image.subsystem, s);
             let aligned = pocket_cpu::round_up_to_page(s.virtual_size.max(s.data.len() as u32));
             if aligned == 0 {
                 continue;

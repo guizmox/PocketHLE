@@ -12,9 +12,24 @@ use std::{
     },
     time::{Duration, Instant},
 };
-const FPS: u64 = 30;
 const RATE: u64 = 48_000;
-const AUDIO_PER_FRAME: usize = 1600;
+/// Existing quality values keep their original 30 FPS behavior.
+pub const PRESETS: [(&str, &str); 6] = [
+    ("low", "Low — 30 FPS"), ("medium", "Medium — 30 FPS"), ("high", "High — 30 FPS"),
+    ("low_60", "Low — 60 FPS"), ("medium_60", "Medium — 60 FPS"), ("high_60", "High — 60 FPS"),
+];
+fn preset(value: &str) -> (u8, u32) {
+    match value {
+        "low" => (50, 30), "high" => (92, 30),
+        "low_60" => (50, 60), "medium_60" => (75, 60), "high_60" => (92, 60),
+        _ => (75, 30),
+    }
+}
+fn next_capture_deadline(next: Instant, now: Instant, fps: u32) -> Instant {
+    let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+    let remainder = now.saturating_duration_since(next).as_nanos() % period.as_nanos();
+    now + period - Duration::from_nanos(remainder as u64)
+}
 #[derive(Default)]
 pub struct Recording {
     session: Option<Session>,
@@ -31,6 +46,7 @@ struct Session {
     audio: Arc<OutputRecording>,
     stop: Arc<Mutex<Option<Instant>>>,
     next: Instant,
+    fps: u32,
 }
 struct Frame {
     at: Instant,
@@ -62,13 +78,9 @@ impl Recording {
             return Err("A recording is still being saved".into());
         }
         if compressed && !pocket_core::winceapi::recording_encoder::available() {
-            return Err("MP4 requires FFmpeg with MPEG-4/AAC encoders and MP4 muxer enabled. Choose AVI or rebuild FFmpeg with --enable-encoder=mpeg4,aac --enable-muxer=mp4".into());
+            return Err("MP4 requires FFmpeg with H.264/AAC encoders and MP4 muxer enabled. Choose AVI or rebuild FFmpeg with --enable-libopenh264 --enable-encoder=libopenh264,aac --enable-muxer=mp4".into());
         }
-        let quality = match quality {
-            "low" => 50,
-            "high" => 92,
-            _ => 75,
-        };
+        let (quality, fps) = preset(quality);
         let (tx, rx) = mpsc::sync_channel(3);
         let (done, ready) = mpsc::channel();
         let audio = Arc::new(OutputRecording::default());
@@ -87,6 +99,7 @@ impl Recording {
                     quality,
                     start,
                     compressed,
+                    fps,
                 )
                 .map_err(|e| e.to_string());
                 let _ = done.send(result);
@@ -98,6 +111,7 @@ impl Recording {
             audio: audio.clone(),
             stop,
             next: start,
+            fps,
         });
         self.result = Some(ready);
         self.held_keys.clear();
@@ -197,6 +211,19 @@ impl Recording {
         }
         self.lookup = Some((words.join(" "), Instant::now()));
     }
+    // Inputs have already been mapped into guest coordinates by the frontend.
+    // Rotate back into displayed coordinates for recorded input markers only.
+    fn screen_direction(vk: u16, turns: u8) -> u16 {
+        let directions = [0x26, 0x27, 0x28, 0x25];
+        directions.iter().position(|key| *key == vk)
+            .map(|i| directions[(i + usize::from(turns % 4)) % 4]).unwrap_or(vk)
+    }
+    fn screen_lookup(text: &str, turns: u8) -> String {
+        text.split_whitespace().map(|word| {
+            let vk = match word { "up" => 0x26, "right" => 0x27, "down" => 0x28, "left" => 0x25, _ => return word };
+            match Self::screen_direction(vk, turns) { 0x26 => "up", 0x27 => "right", 0x28 => "down", _ => "left" }
+        }).collect::<Vec<_>>().join(" ")
+    }
     fn overlay(&self, size: (u32, u32), turns: u8) -> Overlay {
         let point = self
             .point
@@ -215,7 +242,7 @@ impl Recording {
         Overlay {
             direction: self
                 .direction
-                .map(|(v, _)| v),
+                .map(|(v, _)| Self::screen_direction(v, turns)),
             button: self
                 .label
                 .as_ref()
@@ -223,7 +250,7 @@ impl Recording {
             lookup: self
                 .lookup
                 .as_ref()
-                .map(|(v, _)| v.clone()),
+                .map(|(v, _)| Self::screen_lookup(v, turns)),
             point,
         }
     }
@@ -267,7 +294,7 @@ pub fn capture(
     if now < s.next {
         return;
     }
-    s.next = now + Duration::from_secs_f64(1.0 / FPS as f64);
+    s.next = next_capture_deadline(s.next, now, s.fps);
     match crate::screenshot::read_game_pixels(gl, info) {
         Ok(pixels) => {
             let _ = s.tx.try_send(Frame {
@@ -403,6 +430,7 @@ fn draw_overlay(im: &mut image::RgbaImage, o: &Overlay) {
 }
 
 struct AudioTimeline {
+    audio_per_frame: usize,
     chunks: VecDeque<(u64, Vec<[i16; 2]>)>,
     next: Option<u64>,
     rate: u32,
@@ -410,8 +438,9 @@ struct AudioTimeline {
     last: Option<Instant>,
 }
 impl AudioTimeline {
-    fn new() -> Self {
+    fn new(fps: u32) -> Self {
         Self {
+            audio_per_frame: (RATE / u64::from(fps)) as usize,
             chunks: VecDeque::new(),
             next: None,
             rate: 0,
@@ -470,7 +499,7 @@ impl AudioTimeline {
         Ok(())
     }
     fn ready_frame(&mut self, audio: &OutputRecording, epoch: Instant, start: u64) -> io::Result<Vec<u8>> {
-        let end = start + AUDIO_PER_FRAME as u64;
+        let end = start + self.audio_per_frame as u64;
         let deadline = epoch + Duration::from_secs_f64(end as f64 / RATE as f64)
             + Duration::from_millis(100);
         loop {
@@ -485,8 +514,8 @@ impl AudioTimeline {
         }
     }
     fn frame(&mut self, start: u64) -> Vec<u8> {
-        let mut out = vec![0; AUDIO_PER_FRAME * 4];
-        for i in 0..AUDIO_PER_FRAME {
+        let mut out = vec![0; self.audio_per_frame * 4];
+        for i in 0..self.audio_per_frame {
             let at = start + i as u64;
             while self
                 .chunks
@@ -520,7 +549,7 @@ struct EncodedFrame {
     jpeg: Vec<u8>,
 }
 impl Clip {
-    fn new(path: &Path, w: u32, h: u32, quality: u8, compressed: bool) -> io::Result<Self> {
+    fn new(path: &Path, w: u32, h: u32, quality: u8, compressed: bool, fps: u32) -> io::Result<Self> {
         if compressed {
             let q = if quality < 60 {
                 0
@@ -531,13 +560,13 @@ impl Clip {
             };
             Ok(Self::Mp4 {
                 encoder: pocket_core::winceapi::recording_encoder::Mp4Encoder::open(
-                    path, w, h, FPS as u32, q,
+                    path, w, h, fps, q,
                 )?,
                 width: w,
                 height: h,
             })
         } else {
-            Ok(Self::Avi(Avi::new(path, w, h)?))
+            Ok(Self::Avi(Avi::new(path, w, h, fps)?))
         }
     }
     fn rollover(&self, w: u32, h: u32) -> bool {
@@ -567,8 +596,10 @@ fn encode(
     quality: u8,
     epoch: Instant,
     compressed: bool,
+    fps: u32,
 ) -> io::Result<Vec<PathBuf>> {
-    let mut timeline = AudioTimeline::new();
+    let audio_per_frame = RATE / u64::from(fps);
+    let mut timeline = AudioTimeline::new(fps);
     let mut clip: Option<Clip> = None;
     let mut paths = Vec::new();
     let mut last: Option<EncodedFrame> = None;
@@ -579,13 +610,15 @@ fn encode(
         if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 33_554_432 {
             return Err(io::Error::other("Video dimensions exceed capture limit"));
         }
-        let target = (frame.at.saturating_duration_since(epoch).as_secs_f64() * FPS as f64) as u64;
+        let target = (frame.at.saturating_duration_since(epoch).as_secs_f64() * f64::from(fps)) as u64;
+        // Never mux two captures into the same output time slot.
+        if global > target { continue; }
         if clip.as_ref().is_some_and(|c| c.rollover(w, h)) {
             if let Some(previous) = last.as_ref() {
                 while global < target {
                     clip.as_mut()
                         .unwrap()
-                        .frame(previous, &timeline.ready_frame(&audio, epoch, global * AUDIO_PER_FRAME as u64)?)?;
+                        .frame(previous, &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?)?;
                     global += 1;
                 }
             }
@@ -597,10 +630,10 @@ fn encode(
         }
         if clip.is_none() {
             let output = segment_path(&path, paths.len());
-            clip = Some(Clip::new(&output, w, h, quality, compressed)?);
+            clip = Some(Clip::new(&output, w, h, quality, compressed, fps)?);
             paths.push(output);
         }
-        let target = (frame.at.saturating_duration_since(epoch).as_secs_f64() * FPS as f64) as u64;
+        let target = (frame.at.saturating_duration_since(epoch).as_secs_f64() * f64::from(fps)) as u64;
         draw_overlay(&mut frame.pixels, &frame.overlay);
         let mut jpeg = Vec::new();
         if !compressed {
@@ -616,13 +649,13 @@ fn encode(
         while global < target {
             clip.as_mut().unwrap().frame(
                 last.as_ref().unwrap_or(&current),
-                &timeline.ready_frame(&audio, epoch, global * AUDIO_PER_FRAME as u64)?,
+                &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?,
             )?;
             global += 1;
         }
         clip.as_mut()
             .unwrap()
-            .frame(&current, &timeline.ready_frame(&audio, epoch, global * AUDIO_PER_FRAME as u64)?)?;
+            .frame(&current, &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?)?;
         global += 1;
         last = Some(current);
     }
@@ -631,11 +664,11 @@ fn encode(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .unwrap_or_else(Instant::now);
-    let target = (end.saturating_duration_since(epoch).as_secs_f64() * FPS as f64).ceil() as u64;
+    let target = (end.saturating_duration_since(epoch).as_secs_f64() * f64::from(fps)).ceil() as u64;
     if let Some(mut c) = clip {
         if let Some(last) = last {
             while global < target {
-                c.frame(&last, &timeline.ready_frame(&audio, epoch, global * AUDIO_PER_FRAME as u64)?)?;
+                c.frame(&last, &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?)?;
                 global += 1;
             }
         }
@@ -658,6 +691,7 @@ fn segment_path(base: &Path, index: usize) -> PathBuf {
     ))
 }
 struct Avi {
+    fps: u32,
     file: std::io::BufWriter<File>,
     width: u32,
     height: u32,
@@ -695,9 +729,10 @@ impl Avi {
     fn end_list(&mut self, at: u64) -> io::Result<()> {
         self.patch(at, (self.position - at - 4) as u32)
     }
-    fn new(path: &Path, width: u32, height: u32) -> io::Result<Self> {
+    fn new(path: &Path, width: u32, height: u32, fps: u32) -> io::Result<Self> {
         let file = File::options().write(true).create_new(true).open(path)?;
         let mut a = Self {
+            fps,
             file: std::io::BufWriter::new(file),
             width,
             height,
@@ -716,7 +751,7 @@ impl Avi {
         let hdrl = a.list(b"hdrl")?;
         a.bytes(b"avih")?;
         a.u32(56)?;
-        for n in [1_000_000 / FPS as u32, 0, 0, 0x10] {
+        for n in [1_000_000 / fps, 0, 0, 0x10] {
             a.u32(n)?;
         }
         a.total = a.position;
@@ -728,7 +763,7 @@ impl Avi {
         a.bytes(b"strh")?;
         a.u32(56)?;
         a.bytes(b"vidsMJPG")?;
-        for n in [0, 0, 0, 1, FPS as u32, 0] {
+        for n in [0, 0, 0, 1, fps, 0] {
             a.u32(n)?;
         }
         a.video_len = a.position;
@@ -759,7 +794,7 @@ impl Avi {
         }
         a.audio_len = a.position;
         a.u32(0)?;
-        for n in [AUDIO_PER_FRAME as u32 * 4, u32::MAX, 4, 0, 0] {
+        for n in [(RATE / u64::from(fps)) as u32 * 4, u32::MAX, 4, 0, 0] {
             a.u32(n)?;
         }
         a.bytes(b"strf")?;
@@ -807,7 +842,7 @@ impl Avi {
         self.patch(4, (self.position - 8) as u32)?;
         self.patch(self.total, self.frames)?;
         self.patch(self.video_len, self.frames)?;
-        self.patch(self.audio_len, self.frames * AUDIO_PER_FRAME as u32)?;
+        self.patch(self.audio_len, self.frames * (RATE / u64::from(self.fps)) as u32)?;
         self.file.flush()
     }
 }
@@ -824,6 +859,44 @@ impl Drop for Avi {
 mod tests {
     use super::*;
     #[test]
+    fn six_presets_keep_old_configuration_and_select_sixty_fps() {
+        let expected = [(50,30),(75,30),(92,30),(50,60),(75,60),(92,60)];
+        for ((value, _), expected) in PRESETS.into_iter().zip(expected) {
+            assert_eq!(preset(value), expected);
+        }
+        assert_eq!(preset("invalid"), (75,30));
+    }
+    #[test]
+    fn audio_frames_cover_exactly_one_second_at_both_rates() {
+        for fps in [30,60] {
+            let mut t = AudioTimeline::new(fps);
+            t.chunks.push_back((0, vec![[1234,-1234]; RATE as usize]));
+            let samples = RATE / u64::from(fps);
+            let mut total = 0;
+            for i in 0..u64::from(fps) {
+                let pcm = t.frame(i*samples);
+                assert_eq!(pcm.len(), samples as usize*4);
+                assert!(pcm.chunks_exact(4).all(|p| p == [0xd2,0x04,0x2e,0xfb]));
+                total += pcm.len();
+            }
+            assert_eq!(total, RATE as usize*4);
+        }
+    }
+    #[test]
+    fn capture_deadlines_keep_their_phase_under_paint_jitter() {
+        let epoch = Instant::now();
+        for fps in [30,60] {
+            let period = Duration::from_secs_f64(1.0/f64::from(fps));
+            let mut next = epoch;
+            for i in 0..fps {
+                let now = epoch + period*i + Duration::from_micros(1000);
+                assert!(now >= next);
+                next = next_capture_deadline(next, now, fps);
+                assert_eq!(next, epoch + period*(i+1));
+            }
+        }
+    }
+    #[test]
     fn input_markers_have_independent_columns_and_no_aim_tap_trail() {
         let (tx, _rx) = mpsc::sync_channel(3);
         let mut r = Recording::default();
@@ -832,6 +905,7 @@ mod tests {
             audio: Arc::new(OutputRecording::default()),
             stop: Arc::new(Mutex::new(None)),
             next: Instant::now(),
+            fps: 30,
         });
         r.observe(InputEvent::KeyDown { vk: 0x26 });
         r.observe(InputEvent::KeyDown { vk: 0xc2 });
@@ -902,6 +976,7 @@ mod tests {
             75,
             epoch,
             true,
+            30,
         )
         .unwrap();
         assert_eq!(paths.len(), 1);
@@ -948,6 +1023,7 @@ mod tests {
             75,
             epoch,
             false,
+            30,
         )
         .unwrap();
         assert_eq!(paths.len(), 2);

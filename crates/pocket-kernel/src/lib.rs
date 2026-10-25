@@ -2368,8 +2368,13 @@ impl KernelState {
         if let Some(modal) = modal {
             modal.render(&mut surf);
         }
-        // Presentation must not manufacture another guest frame.
+        // Polling/compositing overlays must not manufacture another guest frame.
+        // Explicit native GDI completion, however, presents window backing pixels
+        // that were painted off-screen and never advanced the screen's counter.
         self.framebuffer.frame_counter = frame_counter;
+        if present_windows && !layers.is_empty() {
+            self.framebuffer.mark_dirty();
+        }
     }
 
     /// Look up an already-loaded runtime module by its `HMODULE`.
@@ -3397,13 +3402,7 @@ impl Process {
         let image_memory = std::sync::Arc::new(image_memory::ImageMemory::default());
         let mut eager_images = Vec::new();
         for s in &image.sections {
-            let mut prot = Prot::READ;
-            if s.is_writable() {
-                prot |= Prot::WRITE;
-            }
-            if s.is_executable() {
-                prot |= Prot::EXEC;
-            }
+            let prot = image_memory::image_section_protection(image.machine, image.subsystem, s);
             let aligned = pocket_cpu::round_up_to_page(s.virtual_size.max(s.data.len() as u32));
             if aligned == 0 {
                 continue;
@@ -4954,6 +4953,39 @@ mod tests {
         assert!(heap.virtual_free(base, 0, true));
         assert_eq!(ram.snapshot().program_used, 0);
         assert_eq!(heap.free_bytes(), initial);
+    }
+
+    #[test]
+    fn completed_native_window_paint_notifies_presentation_but_polling_does_not() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(image_based_at(0x10000,0x1000), &mut cpu,
+            &|_,_| None, &NullDispatcher).unwrap();
+        let state = &mut process.state;
+        let hwnd = 0xdead4000;
+        let dc = state.gdi.create_memory_dc();
+        let bm = state.gdi.create_compatible_bitmap(20,20);
+        state.gdi.select_into(dc,bm);
+        state.window_dcs.insert(hwnd,dc);
+        state.window_rects.insert(hwnd,(40,50,20,20));
+        state.window_visibility.insert(hwnd,true);
+        let initial = state.framebuffer.frame_counter;
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0,0,20,20,0xf800);
+        state.present_window_surfaces();
+        assert_eq!(state.framebuffer.frame_counter,initial.wrapping_add(1));
+        let offset = ((55*state.framebuffer.width+45)*2) as usize;
+        assert_eq!(&state.framebuffer.pixels[offset..offset+2], &0xf800u16.to_le_bytes());
+        let presented = state.framebuffer.frame_counter;
+        state.composite_controls();
+        state.composite_controls();
+        assert_eq!(state.framebuffer.frame_counter,presented);
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0,0,20,20,0x07e0);
+        state.present_window_surfaces();
+        assert_eq!(state.framebuffer.frame_counter,presented.wrapping_add(1));
+        assert_eq!(&state.framebuffer.pixels[offset..offset+2], &0x07e0u16.to_le_bytes());
+        state.window_visibility.insert(hwnd,false);
+        let hidden = state.framebuffer.frame_counter;
+        state.present_window_surfaces();
+        assert_eq!(state.framebuffer.frame_counter,hidden);
     }
 
     #[test]
