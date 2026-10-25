@@ -36,6 +36,7 @@ use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry
 pub mod audio;
 pub mod bluetooth;
 pub mod camera;
+pub mod classic_sip;
 pub mod colors;
 pub mod controls;
 pub mod desktop_services;
@@ -2246,6 +2247,12 @@ impl KernelState {
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
         let mut layers = Vec::new();
         for (&hwnd, &dc) in &self.window_dcs {
+            if !present_windows
+                && controls.direct_surface_hwnd != 0
+                && hwnd == controls.direct_surface_hwnd
+            {
+                continue;
+            }
             let Some(meta) = self.gdi.dc(dc) else {
                 continue;
             };

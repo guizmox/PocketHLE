@@ -12655,6 +12655,7 @@ fn move_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel
             .window_rects
             .insert(hwnd, (x, y, w.max(0), h.max(0)));
+        resize_window_backing(ctx.kernel, hwnd, w, h);
         queue_window_size(ctx.kernel, hwnd, w, h);
     }
     if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
@@ -12739,6 +12740,9 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             queue_window_size(ctx.kernel, hwnd, w, h);
         }
         ctx.kernel.window_rects.insert(hwnd, rect);
+        if sized {
+            resize_window_backing(ctx.kernel, hwnd, rect.2, rect.3);
+        }
     }
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         if moved {
@@ -14421,25 +14425,48 @@ fn get_system_metrics(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 // ---------- GDI ----------
 
-fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
-    let (screen_w, screen_h) = screen_dims(ctx);
-    let direct_primary = hwnd == FAKE_HWND
-        && ctx
-            .kernel
-            .window_rects
-            .get(&hwnd)
-            .is_none_or(|r| *r == (0, 0, screen_w as i32, screen_h as i32));
-    if hwnd == 0 || direct_primary {
-        // A screen-sized primary client can use the direct DC. A moved or
-        // reduced primary window needs the same backing/origin as any window.
-        if direct_primary {
-            if let Some(dc) = ctx.kernel.window_dcs.remove(&hwnd) {
-                if let Some(bitmap) = ctx.kernel.gdi.dc(dc).and_then(|d| d.selected_bitmap) {
-                    ctx.kernel.gdi.delete(bitmap);
-                }
-                ctx.kernel.gdi.delete(dc);
-            }
+/// Window DC identity survives MoveWindow/SetWindowPos. Its backing and
+/// client-space clip change with the window, even if the guest caches its HDC.
+fn resize_window_backing(kernel: &mut KernelState, hwnd: u32, width: i32, height: i32) {
+    let Some(dc) = kernel.window_dcs.get(&hwnd).copied() else {
+        return;
+    };
+    let Some(bitmap) = kernel.gdi.dc(dc).and_then(|d| d.selected_bitmap) else {
+        return;
+    };
+    let (w, h) = (width.clamp(1, 2048) as u32, height.clamp(1, 2048) as u32);
+    let Some(old) = kernel.gdi.bitmap_mut(bitmap) else {
+        return;
+    };
+    if old.width == w && old.height == h {
+        return;
+    }
+    let mut resized = pocket_kernel::gdi::Bitmap::new(w, h);
+    resized.painted = Some(vec![0; (w * h) as usize]);
+    let cols = old.width.min(w) as usize;
+    for y in 0..old.height.min(h) as usize {
+        let (src, dst) = (y * old.width as usize, y * w as usize);
+        resized.pixels[dst * 2..(dst + cols) * 2]
+            .copy_from_slice(&old.pixels[src * 2..(src + cols) * 2]);
+        if let Some(mask) = old.painted.as_ref() {
+            resized.painted.as_mut().unwrap()[dst..dst + cols]
+                .copy_from_slice(&mask[src..src + cols]);
+        } else {
+            resized.painted.as_mut().unwrap()[dst..dst + cols].fill(1);
         }
+    }
+    *old = resized;
+    kernel.gdi.pending_window_erases.insert(hwnd);
+}
+
+fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
+    if hwnd == 0
+        || (hwnd == FAKE_HWND
+            && !ctx.kernel.window_rects.contains_key(&hwnd)
+            && ctx.kernel.controls.panel(hwnd).is_none())
+    {
+        // The legacy implicit canvas has no native window to bind. Once a
+        // window is created, even a fullscreen primary gets an owned DC.
         return GDI_SCREEN_DC;
     }
     // Modeless template dialogs and their children live in Controls, without
@@ -14457,27 +14484,21 @@ fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
             )
         })
         .or_else(|| ctx.kernel.window_rects.get(&hwnd).map(|r| (r.2, r.3)))
-        .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| (c.w, c.h)));
+        .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| (c.w, c.h)))
+        .or_else(|| {
+            (hwnd == FAKE_HWND).then(|| {
+                let (w, h) = screen_dims(ctx);
+                (w as i32, h as i32)
+            })
+        });
     let Some((w, h)) = size else {
         return GDI_SCREEN_DC;
     };
     let w = w.clamp(1, 2048) as u32;
     let h = h.clamp(1, 2048) as u32;
     if let Some(dc) = ctx.kernel.window_dcs.get(&hwnd).copied() {
-        let same = ctx
-            .kernel
-            .gdi
-            .dc(dc)
-            .and_then(|d| d.selected_bitmap)
-            .and_then(|b| ctx.kernel.gdi.bitmap(b))
-            .is_some_and(|b| b.width == w && b.height == h);
-        if same {
-            return dc;
-        }
-        if let Some(bitmap) = ctx.kernel.gdi.dc(dc).and_then(|d| d.selected_bitmap) {
-            ctx.kernel.gdi.delete(bitmap);
-        }
-        ctx.kernel.gdi.delete(dc);
+        resize_window_backing(ctx.kernel, hwnd, w as i32, h as i32);
+        return dc;
     }
     let dc = ctx.kernel.gdi.create_memory_dc();
     let bitmap = ctx.kernel.gdi.create_compatible_bitmap(w, h);
@@ -37522,21 +37543,40 @@ mod pocket_shell_geometry_tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         kernel.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
-        kernel.window_rects.insert(FAKE_HWND, (0, 26, 240, 268));
+        kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
         kernel.window_visibility.insert(FAKE_HWND, true);
-        assert_eq!(kernel.window_client_origin(FAKE_HWND), Some((0, 26)));
         let thunk = dummy_thunk();
         let mut ctx = CallCtx {
             cpu: &mut cpu,
             kernel: &mut kernel,
             thunk: &thunk,
         };
+        let retained = window_dc(&mut ctx, FAKE_HWND);
+        assert_ne!(retained, GDI_SCREEN_DC);
+        // Cache the DC before the application moves its fullscreen window.
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 26).unwrap();
+        ctx.cpu.write_reg(ArmReg::R3, 240).unwrap();
+        let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
+        ctx.cpu.write_mem(sp, &268u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(sp + 4, &1u32.to_le_bytes()).unwrap();
+        move_window(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.window_client_origin(FAKE_HWND), Some((0, 26)));
+        let backing = ctx
+            .kernel
+            .gdi
+            .dc(retained)
+            .unwrap()
+            .selected_bitmap
+            .unwrap();
+        assert_eq!(ctx.kernel.gdi.bitmap(backing).unwrap().height, 268);
         ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
         get_client_rect(&mut ctx).unwrap();
         assert_eq!(ctx.cpu.read_u32_le(0x180c).unwrap(), 268);
-        let dc = window_dc(&mut ctx, FAKE_HWND);
-        assert_ne!(dc, GDI_SCREEN_DC);
+        let dc = retained;
+        assert_eq!(window_dc(&mut ctx, FAKE_HWND), retained);
         let bitmap = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
         pocket_kernel::gdi::Surface::Bitmap(ctx.kernel.gdi.bitmap_mut(bitmap).unwrap())
             .fill_rect(0, 0, 240, 268, 0xf800);
@@ -37555,8 +37595,8 @@ mod pocket_shell_geometry_tests {
         assert_eq!(msg, WM_LBUTTONDOWN);
         assert_eq!(lp, 12 | (14 << 16));
         ctx.kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
-        assert_eq!(window_dc(&mut ctx, FAKE_HWND), GDI_SCREEN_DC);
-        assert!(!ctx.kernel.window_dcs.contains_key(&FAKE_HWND));
+        assert_eq!(window_dc(&mut ctx, FAKE_HWND), dc);
+        assert_eq!(ctx.kernel.gdi.bitmap(bitmap).unwrap().height, 320);
     }
     #[test]
     fn pocket_pc_taskbar_owns_touches_and_forwards_when_start_icon_is_hidden() {

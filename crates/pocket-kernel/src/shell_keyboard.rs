@@ -3,7 +3,7 @@
 use crate::{font, gdi::Surface};
 pub const HWND: u32 = 0xdead6f00;
 const KEYS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-'";
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ShellKeyboard {
     pub visible: bool,
     /// WinCE SIP request, independent of the Gizmondo shell protocol.
@@ -17,10 +17,36 @@ pub struct ShellKeyboard {
     pub selection: usize,
     /// Sticky case selection for the PocketPC SIP only.
     pub lowercase: bool,
+    pub shift: bool,
+    pub control: bool,
+    pub symbols: bool,
+    pub accents: bool,
+}
+impl Default for ShellKeyboard {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            sip: false,
+            pointer_captured: false,
+            pressed_key: None,
+            rotation: 0,
+            requested: false,
+            target: 0,
+            selection: 0,
+            lowercase: true,
+            shift: false,
+            control: false,
+            symbols: false,
+            accents: false,
+        }
+    }
 }
 impl ShellKeyboard {
     /// Same geometry as render; last row supplies delete and dismiss.
     pub fn tap(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<u32> {
+        if self.sip {
+            return crate::classic_sip::tap(self, x, y, w, h);
+        }
         self.pressed_key = None;
         let height = Self::panel_height(h);
         let top = h - height;
@@ -91,7 +117,7 @@ impl ShellKeyboard {
         let (_, _, dw, dh) = self.display_point(0, 0, w as i32, h as i32);
         let mut bitmap = crate::gdi::Bitmap::new(dw as u32, dh as u32);
         self.render_panel(&mut Surface::Bitmap(&mut bitmap));
-        for y in dh - Self::panel_height(dh)..dh {
+        for y in crate::classic_sip::top(dw, dh)..dh {
             for x in 0..dw {
                 let (gx, gy) = match self.rotation % 4 {
                     1 => (y, h as i32 - 1 - x),
@@ -109,6 +135,10 @@ impl ShellKeyboard {
     }
     fn render_panel(&self, surf: &mut Surface<'_>) {
         if !self.visible {
+            return;
+        }
+        if self.sip {
+            crate::classic_sip::render(self, surf);
             return;
         }
         let (w, h) = surf.dimensions();
@@ -210,8 +240,7 @@ mod rotation_tests {
                     ..Default::default()
                 };
                 let (_, _, dw, dh) = k.display_point(0, 0, w, h);
-                let dx = dw / 20;
-                let dy = dh - ShellKeyboard::panel_height(dh) + 10;
+                let (dx, dy) = crate::classic_sip::key_center("q", dw, dh).unwrap();
                 let (gx, gy) = match rotation {
                     1 => (dy, h - 1 - dx),
                     2 => (w - 1 - dx, h - 1 - dy),
@@ -220,7 +249,7 @@ mod rotation_tests {
                 };
                 let (x, y, _, _) = k.display_point(gx, gy, w, h);
                 assert_eq!((x, y), (dx, dy));
-                assert_eq!(k.tap(x, y, dw, dh), Some('A' as u32));
+                assert_eq!(k.tap(x, y, dw, dh), Some('q' as u32));
                 let mut bitmap = crate::gdi::Bitmap::new(w as u32, h as u32);
                 k.render(&mut Surface::Bitmap(&mut bitmap));
                 assert!(bitmap.pixels.iter().any(|b| *b != 0));
@@ -238,16 +267,20 @@ mod case_tests {
             sip: true,
             ..Default::default()
         };
-        assert_eq!(k.tap(10, 310, 240, 320), Some(u32::MAX));
-        assert_eq!(k.tap(10, 202, 240, 320), Some('a' as u32));
-        k.selection = 26;
-        assert_eq!(k.character(), '0' as u32);
-        assert_eq!(k.tap(10, 310, 240, 320), Some(u32::MAX));
-        assert_eq!(k.tap(10, 202, 240, 320), Some('A' as u32));
-        assert_eq!(k.tap(120, 310, 240, 320), Some(8));
-        assert_eq!(k.tap(200, 310, 240, 320), Some(0));
-        k.lowercase = true;
+        let tap = |k: &mut ShellKeyboard, label: &str| {
+            let (x, y) = crate::classic_sip::key_center(label, 240, 320).unwrap();
+            k.tap(x, y, 240, 320)
+        };
+        assert_eq!(tap(&mut k, "a"), Some('a' as u32));
+        assert_eq!(tap(&mut k, "CAP"), Some(u32::MAX));
+        assert_eq!(tap(&mut k, "a"), Some('A' as u32));
+        assert_eq!(tap(&mut k, "1"), Some('1' as u32));
+        assert_eq!(tap(&mut k, "CAP"), Some(u32::MAX));
+        assert_eq!(tap(&mut k, "a"), Some('a' as u32));
+        assert_eq!(tap(&mut k, "⌫"), Some(crate::classic_sip::VIRTUAL_KEY | 8));
+        assert_eq!(k.tap(232, 312, 240, 320), Some(0));
         k.sip = false;
+        k.selection = 0;
         assert_eq!(k.character(), 'A' as u32);
     }
     #[test]
@@ -260,7 +293,7 @@ mod case_tests {
             };
             let (w, h) = (240, 320);
             let (_, _, dw, dh) = k.display_point(0, 0, w, h);
-            let (dx, dy) = (dw / 6, dh - 10);
+            let (dx, dy) = crate::classic_sip::key_center("CAP", dw, dh).unwrap();
             let (gx, gy) = match rotation {
                 1 => (dy, h - 1 - dx),
                 2 => (w - 1 - dx, h - 1 - dy),
@@ -269,7 +302,7 @@ mod case_tests {
             };
             let (x, y, _, _) = k.display_point(gx, gy, w, h);
             assert_eq!(k.tap(x, y, dw, dh), Some(u32::MAX));
-            assert_eq!(k.character(), 'a' as u32);
+            assert!(!k.lowercase);
         }
     }
 }
@@ -287,18 +320,20 @@ mod pressed_tests {
         let pixel = |k: &ShellKeyboard| {
             let mut bitmap = crate::gdi::Bitmap::new(240, 320);
             k.render(&mut Surface::Bitmap(&mut bitmap));
-            let at = (200 * 240 + 3) * 2;
+            let at = (247 * 240 + 35) * 2;
             u16::from_le_bytes(bitmap.pixels[at..at + 2].try_into().unwrap())
         };
-        assert_eq!(pixel(&k), 0xc618);
-        k.tap(10, 202, 240, 320);
+        assert_eq!(pixel(&k), 0xffff);
+        let (x, y) = crate::classic_sip::key_center("a", 240, 320).unwrap();
+        k.tap(x, y, 240, 320);
         k.pointer_captured = true;
         assert_eq!(pixel(&k), 0x001f);
         k.pointer_captured = false;
-        assert_eq!(pixel(&k), 0xc618);
-        k.tap(10, 310, 240, 320); // Case button must not press the previous letter.
+        assert_eq!(pixel(&k), 0xffff);
+        let (x, y) = crate::classic_sip::key_center("CAP", 240, 320).unwrap();
+        k.tap(x, y, 240, 320); // Caps must not press the previous letter.
         k.pointer_captured = true;
-        assert_eq!(pixel(&k), 0xc618);
+        assert_eq!(pixel(&k), 0xffff);
         k.pointer_captured = false;
         k.sip = false;
         // Gizmondo panel starts at y=160, so its first key is at y=166.

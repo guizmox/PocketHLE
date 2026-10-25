@@ -130,6 +130,22 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     ensure_fb_mapped(ctx)?;
     if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
         ctx.kernel.controls.direct_surface_hwnd = ctx.arg_u32(0)?;
+        if let Some(bitmap) = ctx
+            .kernel
+            .window_dcs
+            .get(&ctx.kernel.controls.direct_surface_hwnd)
+            .and_then(|dc| ctx.kernel.gdi.dc(*dc))
+            .and_then(|d| d.selected_bitmap)
+        {
+            if let Some(mask) = ctx
+                .kernel
+                .gdi
+                .bitmap_mut(bitmap)
+                .and_then(|b| b.painted.as_mut())
+            {
+                mask.fill(0);
+            }
+        }
         ctx.kernel.gdi.shell_menus.gx_fullscreen = ctx.arg_u32(1)? & 1 != 0;
     }
     let pc = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Pc).unwrap_or(0);

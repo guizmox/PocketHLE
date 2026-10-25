@@ -279,7 +279,26 @@ pub(crate) fn input(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) -> boo
                 if ch == 0 {
                     sip_show(ctx, false);
                 } else if ch != u32::MAX {
-                    post(ctx, ctx.kernel.shell_keyboard.target, 0x102, ch, 1);
+                    use pocket_kernel::classic_sip::{CONTROL_KEY, VIRTUAL_KEY};
+                    if ch & (CONTROL_KEY | VIRTUAL_KEY) != 0 {
+                        let vk = (ch & 0xffff) as u16;
+                        if ch & CONTROL_KEY != 0 {
+                            ctx.kernel
+                                .pending_input
+                                .push_back(InputEvent::KeyDown { vk: 0x11 });
+                        }
+                        ctx.kernel
+                            .pending_input
+                            .push_back(InputEvent::KeyDown { vk });
+                        ctx.kernel.pending_input.push_back(InputEvent::KeyUp { vk });
+                        if ch & CONTROL_KEY != 0 {
+                            ctx.kernel
+                                .pending_input
+                                .push_back(InputEvent::KeyUp { vk: 0x11 });
+                        }
+                    } else {
+                        post(ctx, ctx.kernel.shell_keyboard.target, 0x102, ch, 1);
+                    }
                 }
                 return true;
             }
@@ -328,31 +347,25 @@ pub(crate) fn sip_info(ctx: &mut CallCtx<'_>, p: u32) -> Result<DispatchOutcome,
     let w = ctx.kernel.framebuffer.width;
     let h = ctx.kernel.framebuffer.height;
     let on = ctx.kernel.shell_keyboard.visible;
-    let height = pocket_kernel::shell_keyboard::ShellKeyboard::panel_height(if ctx
-        .kernel
-        .shell_keyboard
-        .rotation
-        % 2
-        == 0
-    {
-        h
+    let (dw, dh) = if ctx.kernel.shell_keyboard.rotation % 2 == 0 {
+        (w, h)
     } else {
-        w
-    } as i32) as u32;
+        (h, w)
+    };
+    let top = pocket_kernel::classic_sip::top(dw as i32, dh as i32).max(0) as u32;
+    let bottom = dh.saturating_sub(26);
     let (mut desktop, panel) = if !on {
         ([0, 0, w, h], [0, 0, 0, 0])
     } else {
         match ctx.kernel.shell_keyboard.rotation % 4 {
-            1 => ([0, 0, w - height, h], [w - height, 0, w, h]),
-            2 => ([0, height, w, h], [0, 0, w, height]),
-            3 => ([height, 0, w, h], [0, 0, height, h]),
-            _ => ([0, 0, w, h - height], [0, h - height, w, h]),
+            1 => ([0, 0, top, h], [top, 0, bottom, h]),
+            2 => ([0, h - top, w, h], [0, h - bottom, w, h - top]),
+            3 => ([w - top, 0, w, h], [w - bottom, 0, w - top, h]),
+            _ => ([0, 0, w, top], [0, top, w, bottom]),
         }
     };
     if ctx.kernel.pocket_pc_taskbar_visible() {
-        desktop[1] = desktop[1]
-            .max(pocket_kernel::shell_menu::HEIGHT as u32)
-            .min(desktop[3]);
+        desktop[1] = desktop[1].max(26).min(desktop[3]);
     }
     let mut bytes = [0u8; 48];
     bytes[0..4].copy_from_slice(&cb.to_le_bytes());
@@ -498,21 +511,22 @@ mod sip_tests {
         call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[1]);
         let h = k.framebuffer.height;
         let w = k.framebuffer.width;
-        let top = h - pocket_kernel::shell_keyboard::ShellKeyboard::panel_height(h as i32) as u32;
+        let (x, y) = pocket_kernel::classic_sip::key_center("a", w as i32, h as i32).unwrap();
+        let (x, y) = (x as u32, y as u32);
         call(
             &mut cpu,
             &mut k,
             &mut d,
             "coredll.dll",
             "test_pointer",
-            &[10, top + 10, 0],
+            &[x, y, 0],
         );
         assert!(k.shell_keyboard.pointer_captured);
-        assert_eq!(k.shell_keyboard.pressed_key, Some(0));
+        assert!(k.shell_keyboard.pressed_key.is_some());
         assert!(k
             .posted_messages
             .iter()
-            .any(|m| *m == (edit, 0x102, 'A' as u32, 1)));
+            .any(|m| *m == (edit, 0x102, 'a' as u32, 1)));
         assert!(matches!(
             call(
                 &mut cpu,
@@ -520,7 +534,7 @@ mod sip_tests {
                 &mut d,
                 "coredll.dll",
                 "test_pointer",
-                &[10, top + 10, 1]
+                &[x, y, 1]
             ),
             DispatchOutcome::ReturnedR0(1)
         ));
@@ -532,7 +546,7 @@ mod sip_tests {
             &mut d,
             "coredll.dll",
             "test_pointer",
-            &[w * 3 / 4, h - 10, 0],
+            &[w - 8, h - 8, 0],
         );
         assert!(!k.shell_keyboard.visible);
         assert!(matches!(
@@ -542,7 +556,7 @@ mod sip_tests {
                 &mut d,
                 "coredll.dll",
                 "test_pointer",
-                &[w * 3 / 4, h - 10, 1]
+                &[w - 8, h - 8, 1]
             ),
             DispatchOutcome::ReturnedR0(1)
         ));
@@ -647,7 +661,7 @@ mod sip_tests {
         assert_eq!(k.shell_keyboard.target, 0);
     }
     #[test]
-    fn sip_case_button_redraws_without_typing_and_lowercase_reaches_the_edit() {
+    fn sip_caps_redraws_without_typing_and_uppercase_reaches_the_edit() {
         let (mut cpu, mut k, mut d) = setup();
         d.register_handler("coredll.dll", "test_pointer", pointer);
         k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
@@ -665,7 +679,9 @@ mod sip_tests {
         k.controls.focus = edit;
         call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[1]);
         k.posted_messages.clear();
-        let h = k.framebuffer.height;
+        let (w, h) = (k.framebuffer.width, k.framebuffer.height);
+        let (cx, cy) = pocket_kernel::classic_sip::key_center("CAP", w as i32, h as i32).unwrap();
+        let (cx, cy) = (cx as u32, cy as u32);
         let count = k.framebuffer.frame_counter;
         call(
             &mut cpu,
@@ -673,9 +689,9 @@ mod sip_tests {
             &mut d,
             "coredll.dll",
             "test_pointer",
-            &[10, h - 10, 0],
+            &[cx, cy, 0],
         );
-        assert!(k.shell_keyboard.lowercase);
+        assert!(!k.shell_keyboard.lowercase);
         assert!(k.shell_keyboard.visible);
         assert!(k.posted_messages.is_empty());
         assert!(k.framebuffer.frame_counter > count);
@@ -685,16 +701,16 @@ mod sip_tests {
             &mut d,
             "coredll.dll",
             "test_pointer",
-            &[10, h - 10, 1],
+            &[cx, cy, 1],
         );
-        let top = h - pocket_kernel::shell_keyboard::ShellKeyboard::panel_height(h as i32) as u32;
+        let (x, y) = pocket_kernel::classic_sip::key_center("a", w as i32, h as i32).unwrap();
         call(
             &mut cpu,
             &mut k,
             &mut d,
             "coredll.dll",
             "test_pointer",
-            &[10, top + 10, 0],
+            &[x as u32, y as u32, 0],
         );
         assert_eq!(
             k.posted_messages
@@ -702,7 +718,7 @@ mod sip_tests {
                 .filter(|m| m.1 == 0x102)
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![(edit, 0x102, 'a' as u32, 1)]
+            vec![(edit, 0x102, 'A' as u32, 1)]
         );
     }
 }
