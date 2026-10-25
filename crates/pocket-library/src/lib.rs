@@ -1222,6 +1222,8 @@ pub struct InstallerCabinetChoice {
     path: PathBuf,
     #[serde(skip)]
     resources: Vec<PathBuf>,
+    #[serde(skip)]
+    addon_target: Option<(GameEntry, PathBuf)>,
 }
 
 impl PreparedImport {
@@ -1351,14 +1353,15 @@ impl Library {
             .unwrap_or("")
             .to_ascii_lowercase();
         let zip_source = count == 4 && signature[..2] == *b"PK" || ext == "zip";
-        let installer_cabinets = if (signature[..2] == *b"MZ"
-            && !sniff_pe(path)
-                .ok()
-                .flatten()
-                .is_some_and(|pe| pe.is_supported_guest()))
+        let installer_cabinets = if signature == *b"MSCF"
+            || (signature[..2] == *b"MZ"
+                && !sniff_pe(path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|pe| pe.is_supported_guest()))
             || (zip_source && is_desktop_cab_bundle(path)?)
         {
-            stage_installer_cabinets(path, staging.path())?
+            stage_installer_cabinets(path, staging.path(), self)?
         } else {
             None
         };
@@ -1864,8 +1867,8 @@ impl Library {
             let staging = tempfile::Builder::new()
                 .prefix(".installer-import-")
                 .tempdir_in(&self.root)?;
-            if let Some(choices) = stage_installer_cabinets(exe_path, staging.path())? {
-                if choices.len() != 1 {
+            if let Some(choices) = stage_installer_cabinets(exe_path, staging.path(), self)? {
+                if choices.len() != 1 || choices[0].addon_target.is_some() {
                     return Err(LibraryError::NoPocketPcCab(format!(
                         "Choose a cabinet using the import dialog: {}",
                         choices
@@ -3288,6 +3291,7 @@ fn is_desktop_cab_bundle(path: &Path) -> Result<bool, LibraryError> {
 fn stage_installer_cabinets(
     source: &Path,
     staging: &Path,
+    target: &Library,
 ) -> Result<Option<Vec<InstallerCabinetChoice>>, LibraryError> {
     if fs::metadata(source)?.len() > 256 * 1024 * 1024 {
         return Err(LibraryError::NoPocketPcCab(
@@ -3339,7 +3343,7 @@ fn stage_installer_cabinets(
             });
             let dir = header.as_ref().and_then(|h| h.install_dir.clone());
             if resource_header.is_some() && dir.is_some() {
-                neutral_resources.push((path, dir.unwrap()));
+                neutral_resources.push((path, dir.unwrap(), cabinet.name.clone()));
             } else {
                 install_dirs.push(dir);
                 choices.push(InstallerCabinetChoice {
@@ -3348,6 +3352,7 @@ fn stage_installer_cabinets(
                     architecture,
                     path,
                     resources: Vec::new(),
+                    addon_target: None,
                 });
             }
         }
@@ -3357,9 +3362,35 @@ fn stage_installer_cabinets(
         if let Some(dir) = dir {
             choice.resources = neutral_resources
                 .iter()
-                .filter(|(_, resource_dir)| resource_dir.eq_ignore_ascii_case(&dir))
-                .map(|(path, _)| path.clone())
+                .filter(|(_, resource_dir, _)| resource_dir.eq_ignore_ascii_case(&dir))
+                .map(|(path, _, _)| path.clone())
                 .collect();
+        }
+    }
+    if choices.is_empty() && !neutral_resources.is_empty() {
+        for (path, dir, name) in neutral_resources {
+            for game in target.games().iter().filter(|game| {
+                game.platform != Some(GamePlatform::Gizmondo)
+                    && game.install_dir.as_ref().is_some_and(|installed| {
+                        installed
+                            .trim_end_matches('\\')
+                            .eq_ignore_ascii_case(dir.trim_end_matches('\\'))
+                    })
+            }) {
+                choices.push(InstallerCabinetChoice {
+                    index: choices.len(),
+                    name: format!("{name} → {}", game.display_name),
+                    architecture: "Add-on (installed game)".into(),
+                    path: path.clone(),
+                    resources: Vec::new(),
+                    addon_target: Some((game.clone(), target.root.join("games").join(&game.id))),
+                });
+            }
+        }
+        if choices.is_empty() {
+            return Err(LibraryError::NoPocketPcCab(
+                "This data-only add-on requires a game installed at its declared WinCE destination. Install the base game first.".into(),
+            ));
         }
     }
     Ok(Some(choices))
@@ -3369,6 +3400,34 @@ fn import_installer_choice(
     library: &mut Library,
     choice: &InstallerCabinetChoice,
 ) -> Result<GameEntry, LibraryError> {
+    if let Some((game, source)) = &choice.addon_target {
+        let game_dir = library.root.join("games").join(&game.id);
+        for file in import_tree_files(source)? {
+            let destination = game_dir.join(file.strip_prefix(source).unwrap());
+            fs::create_dir_all(destination.parent().unwrap())?;
+            fs::copy(file, destination)?;
+        }
+        let extraction = tempfile::tempdir_in(&library.root)?;
+        let (files, header) = pocket_cab::extract_for_install(&choice.path, extraction.path())?;
+        let header = header.filter(|h| h.structured).ok_or_else(|| {
+            LibraryError::NoPocketPcCab("Add-on has no structured installation metadata".into())
+        })?;
+        // Matching the exact installation root preserves subdirectories and
+        // avoids guessing the target from a title or installer filename.
+        pocket_cab::materialise_install_header_names(&game_dir.join("extracted"), &files, &header);
+        let mut entry = game.clone();
+        for value in header.registry {
+            entry.registry.retain(|old| {
+                !(old.key.eq_ignore_ascii_case(&value.key)
+                    && old.name.eq_ignore_ascii_case(&value.name))
+            });
+            entry.registry.push(value);
+        }
+        write_json(&game_dir.join("game.json"), &entry)?;
+        library.library.games.retain(|old| old.id != entry.id);
+        library.library.games.push(entry.clone());
+        return Ok(entry);
+    }
     let entry = library.import_cab(&choice.path)?.clone();
     let game_dir = library.root.join("games").join(&entry.id);
     let extracted = game_dir.join("extracted");

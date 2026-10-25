@@ -273,12 +273,9 @@ pub(crate) fn input(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) -> boo
                 .kernel
                 .shell_keyboard
                 .display_point(x.into(), y.into(), w, h);
-            let lowercase = ctx.kernel.shell_keyboard.lowercase;
             if let Some(ch) = ctx.kernel.shell_keyboard.tap(x, y, w, h) {
-                if ctx.kernel.shell_keyboard.lowercase != lowercase {
-                    ctx.kernel.invalidate_presentation();
-                }
                 ctx.kernel.shell_keyboard.pointer_captured = true;
+                ctx.kernel.invalidate_presentation();
                 if ch == 0 {
                     sip_show(ctx, false);
                 } else if ch != u32::MAX {
@@ -312,6 +309,8 @@ pub(crate) fn input(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) -> boo
     {
         if matches!(ev, InputEvent::PointerUp { .. }) {
             ctx.kernel.shell_keyboard.pointer_captured = false;
+            ctx.kernel.shell_keyboard.pressed_key = None;
+            ctx.kernel.invalidate_presentation();
         }
         return true;
     }
@@ -503,6 +502,8 @@ mod sip_tests {
             "test_pointer",
             &[10, top + 10, 0],
         );
+        assert!(k.shell_keyboard.pointer_captured);
+        assert_eq!(k.shell_keyboard.pressed_key, Some(0));
         assert!(k
             .posted_messages
             .iter()
@@ -518,6 +519,8 @@ mod sip_tests {
             ),
             DispatchOutcome::ReturnedR0(1)
         ));
+        assert!(!k.shell_keyboard.pointer_captured);
+        assert_eq!(k.shell_keyboard.pressed_key, None);
         call(
             &mut cpu,
             &mut k,

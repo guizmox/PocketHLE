@@ -58,7 +58,14 @@ fn parse(b: &[u8]) -> Option<Vec<Parsed>> {
             out.push(Parsed {
                 item: MenuItem {
                     id,
-                    kind: flags & 0x6b64,
+                    // Standard MENU templates also encode separators as an
+                    // empty, zero-ID non-popup entry (without MF_SEPARATOR).
+                    kind: (flags & 0x6b64)
+                        | if flags & (0x10 | 0x104) == 0 && id == 0 && text.is_empty() {
+                            0x800
+                        } else {
+                            0
+                        },
                     text,
                     ..Default::default()
                 },
@@ -444,4 +451,24 @@ pub(super) fn set_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     }
     ctx.kernel.window_menus.insert(h, m);
     ret(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn standard_menu_implicit_and_explicit_separators_preserve_empty_commands() {
+        let mut b = vec![0u8; 4];
+        for (flags, id) in [(0u16, 0u16), (0x800, 0), (0x80, 123)] {
+            b.extend_from_slice(&flags.to_le_bytes());
+            b.extend_from_slice(&id.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+        }
+        let items = parse(&b).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_ne!(items[0].item.kind & 0x800, 0);
+        assert_ne!(items[1].item.kind & 0x800, 0);
+        assert_eq!(items[2].item.kind & 0x800, 0);
+        assert_eq!(items[2].item.id, 123);
+    }
 }

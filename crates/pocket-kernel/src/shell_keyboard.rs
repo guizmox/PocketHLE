@@ -9,6 +9,8 @@ pub struct ShellKeyboard {
     /// WinCE SIP request, independent of the Gizmondo shell protocol.
     pub sip: bool,
     pub pointer_captured: bool,
+    /// Touch highlight, independent of the controller selection.
+    pub pressed_key: Option<usize>,
     pub rotation: u8,
     pub requested: bool,
     pub target: u32,
@@ -19,6 +21,7 @@ pub struct ShellKeyboard {
 impl ShellKeyboard {
     /// Same geometry as render; last row supplies delete and dismiss.
     pub fn tap(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<u32> {
+        self.pressed_key = None;
         let height = Self::panel_height(h);
         let top = h - height;
         if x < 0 || x >= w || y < top || y >= h {
@@ -44,6 +47,7 @@ impl ShellKeyboard {
             return Some(u32::MAX);
         }
         self.selection = i;
+        self.pressed_key = Some(i);
         Some(self.character())
     }
     pub fn navigate(&mut self, vk: u32) {
@@ -122,7 +126,11 @@ impl ShellKeyboard {
         for (i, ch) in KEYS.iter().enumerate() {
             let x = (i % 10) as i32 * cell_w;
             let y = top + 6 + (i / 10) as i32 * cell_h;
-            let selected = i == self.selection;
+            let selected = if self.sip {
+                self.pointer_captured && self.pressed_key == Some(i)
+            } else {
+                i == self.selection
+            };
             surf.fill_rect(
                 x + 1,
                 y,
@@ -263,5 +271,43 @@ mod case_tests {
             assert_eq!(k.tap(x, y, dw, dh), Some(u32::MAX));
             assert_eq!(k.character(), 'a' as u32);
         }
+    }
+}
+
+#[cfg(test)]
+mod pressed_tests {
+    use super::*;
+    #[test]
+    fn sip_highlight_lasts_only_during_touch_but_gizmondo_keeps_selection() {
+        let mut k = ShellKeyboard {
+            visible: true,
+            sip: true,
+            ..Default::default()
+        };
+        let pixel = |k: &ShellKeyboard| {
+            let mut bitmap = crate::gdi::Bitmap::new(240, 320);
+            k.render(&mut Surface::Bitmap(&mut bitmap));
+            let at = (200 * 240 + 3) * 2;
+            u16::from_le_bytes(bitmap.pixels[at..at + 2].try_into().unwrap())
+        };
+        assert_eq!(pixel(&k), 0xc618);
+        k.tap(10, 202, 240, 320);
+        k.pointer_captured = true;
+        assert_eq!(pixel(&k), 0x001f);
+        k.pointer_captured = false;
+        assert_eq!(pixel(&k), 0xc618);
+        k.tap(10, 310, 240, 320); // Case button must not press the previous letter.
+        k.pointer_captured = true;
+        assert_eq!(pixel(&k), 0xc618);
+        k.pointer_captured = false;
+        k.sip = false;
+        // Gizmondo panel starts at y=160, so its first key is at y=166.
+        let mut bitmap = crate::gdi::Bitmap::new(240, 320);
+        k.render(&mut Surface::Bitmap(&mut bitmap));
+        let at = (168 * 240 + 3) * 2;
+        assert_eq!(
+            u16::from_le_bytes(bitmap.pixels[at..at + 2].try_into().unwrap()),
+            0x001f
+        );
     }
 }

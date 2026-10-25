@@ -244,6 +244,12 @@ impl ShellMenus {
                         .titles(bar, menus, width)
                         .iter()
                         .position(|(a, w)| x >= *a && x < *a + *w);
+                    if index.is_some_and(|i| {
+                        self.active == handle && self.column == i && !self.path.is_empty()
+                    }) {
+                        self.close();
+                        return Some(Action::Consumed);
+                    }
                     return Some(
                         index
                             .map(|i| self.activate(handle, i, menus, states))
@@ -581,5 +587,93 @@ mod tests {
             ),
             Some(Action::Command(7, 82))
         );
+    }
+    #[test]
+    fn second_title_tap_closes_and_next_tap_reopens() {
+        let (mut shell, menus, states) = fixture();
+        for expected in [Action::Open(7, 11), Action::Consumed, Action::Open(7, 11)] {
+            assert_eq!(
+                shell.input(
+                    1,
+                    InputEvent::PointerDown { x: 10, y: 306 },
+                    240,
+                    320,
+                    &menus,
+                    &states
+                ),
+                Some(expected)
+            );
+            assert_eq!(
+                shell.input(
+                    1,
+                    InputEvent::PointerUp { x: 10, y: 306 },
+                    240,
+                    320,
+                    &menus,
+                    &states
+                ),
+                Some(Action::Consumed)
+            );
+        }
+    }
+    #[test]
+    fn separator_renders_a_line_and_never_dispatches_a_command() {
+        let (mut shell, mut menus, states) = fixture();
+        menus.get_mut(&11).unwrap().insert(
+            0,
+            MenuItem {
+                kind: 0x800,
+                ..Default::default()
+            },
+        );
+        shell.input(
+            1,
+            InputEvent::PointerDown { x: 10, y: 306 },
+            240,
+            320,
+            &menus,
+            &states,
+        );
+        shell.input(
+            1,
+            InputEvent::PointerUp { x: 10, y: 306 },
+            240,
+            320,
+            &menus,
+            &states,
+        );
+        let mut fb = crate::Framebuffer::new(240, 320);
+        shell.render(
+            1,
+            &mut Surface::Screen(&mut fb),
+            &GdiState::new(),
+            &menus,
+            &states,
+        );
+        let at = (244 * 240 + 30) * 2;
+        assert_eq!(
+            u16::from_le_bytes(fb.pixels[at..at + 2].try_into().unwrap()),
+            0x8410
+        );
+        shell.input(
+            1,
+            InputEvent::PointerDown { x: 30, y: 244 },
+            240,
+            320,
+            &menus,
+            &states,
+        );
+        assert_eq!(
+            shell.input(
+                1,
+                InputEvent::PointerUp { x: 30, y: 244 },
+                240,
+                320,
+                &menus,
+                &states
+            ),
+            Some(Action::Consumed)
+        );
+        assert!(!shell.path.is_empty());
     }
 }
