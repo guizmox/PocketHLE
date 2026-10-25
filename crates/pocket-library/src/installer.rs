@@ -115,6 +115,7 @@ fn layer(
             for child in names.iter().filter(|n| {
                 let name = n.replace('\\', "/").to_ascii_lowercase();
                 name.ends_with(".cab")
+                    || name.ends_with(".hdr")
                     || name
                         .rsplit('/')
                         .next()
@@ -135,12 +136,7 @@ fn layer(
                     layer(&cabinet.bytes, &cabinet.name, depth + 1, budget, out)?;
                 }
             } else {
-                for (child, data) in entries
-                    .iter()
-                    .filter(|(n, _)| n.to_ascii_lowercase().ends_with(".cab"))
-                {
-                    layer(data, child, depth + 1, budget, out)?;
-                }
+                archive_layers(entries, depth, budget, out)?;
             }
             if out.len() > previous {
                 return Ok(true);

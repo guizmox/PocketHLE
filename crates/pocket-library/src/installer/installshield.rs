@@ -1,4 +1,4 @@
-//! InstallShield 6–13 cabinet sets, including length-prefixed Deflate blocks.
+//! InstallShield 5–13 cabinet sets, including length-prefixed Deflate blocks.
 //! Layout reference: Unshield (MIT); see the bundled third-party notice.
 use super::{charge, inflate, u16_at, u32_at, Cabinet, Result};
 
@@ -314,5 +314,55 @@ mod tests {
         let mut bad = original;
         put32(&mut bad[0].1, 12, u32::MAX);
         assert!(extract(&bad, &mut 65536).is_err());
+    }
+    fn stored_cab(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let table_len: usize = entries.iter().map(|(n, _)| 17 + n.len()).sum();
+        let data_len: usize = entries.iter().map(|(_, b)| b.len()).sum();
+        assert!(data_len <= 32768);
+        let data_offset = 44 + table_len;
+        let mut cab = vec![0u8; 44];
+        cab[..4].copy_from_slice(b"MSCF");
+        put32(&mut cab, 8, (data_offset + 8 + data_len) as u32);
+        put32(&mut cab, 16, 44);
+        cab[24] = 3;
+        cab[25] = 1;
+        cab[26..28].copy_from_slice(&1u16.to_le_bytes());
+        cab[28..30].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+        put32(&mut cab, 36, data_offset as u32);
+        cab[40..42].copy_from_slice(&1u16.to_le_bytes());
+        let mut offset = 0;
+        for (name, bytes) in entries {
+            cab.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            cab.extend_from_slice(&(offset as u32).to_le_bytes());
+            cab.extend_from_slice(&[0; 8]);
+            cab.extend_from_slice(name.as_bytes());
+            cab.push(0);
+            offset += bytes.len();
+        }
+        cab.extend_from_slice(&0u32.to_le_bytes());
+        cab.extend_from_slice(&(data_len as u16).to_le_bytes());
+        cab.extend_from_slice(&(data_len as u16).to_le_bytes());
+        for (_, bytes) in entries {
+            cab.extend_from_slice(bytes);
+        }
+        cab
+    }
+
+    #[test]
+    fn microsoft_cab_preserves_installshield_headers_for_nested_extraction() {
+        let inner = stored_cab(&[("GAME.000".into(), b"synthetic CE header".to_vec())]);
+        let mut entries = fixture5(false);
+        put32(&mut entries[0].1, 98, inner.len() as u32);
+        put32(&mut entries[0].1, 102, inner.len() as u32);
+        entries[0].1[130..146].copy_from_slice(&md5::compute(&inner).0);
+        entries[1].1.truncate(128);
+        entries[1].1.extend_from_slice(&inner);
+        for (name, _) in &mut entries {
+            *name = format!("\\Disk1\\{name}");
+        }
+        let outer = stored_cab(&entries);
+        let result = super::super::extract(&outer).unwrap().unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].bytes, inner);
     }
 }

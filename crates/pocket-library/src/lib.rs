@@ -1212,7 +1212,7 @@ pub struct PreparedImport {
     cabinet_choices: Vec<InstallerCabinetChoice>,
 }
 
-/// A cabinet offered by an installer; selecting one does not select others.
+/// A CPU cabinet offered by an installer, with matching CPU-neutral resources.
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallerCabinetChoice {
     pub index: usize,
@@ -1220,6 +1220,8 @@ pub struct InstallerCabinetChoice {
     pub architecture: String,
     #[serde(skip)]
     path: PathBuf,
+    #[serde(skip)]
+    resources: Vec<PathBuf>,
 }
 
 impl PreparedImport {
@@ -1236,7 +1238,7 @@ impl PreparedImport {
         let target = Library::open(&self.target_root)?;
         let mut provisional = Library::open(self.staging.path())?;
         provisional.config = target.config.clone();
-        provisional.import_cab(&choice.path)?;
+        import_installer_choice(&mut provisional, choice)?;
         let entries = provisional.games().to_vec();
         let mut updates = Vec::new();
         for entry in &entries {
@@ -1374,7 +1376,7 @@ impl Library {
             let choice = choices
                 .first()
                 .ok_or_else(|| LibraryError::NoPocketPcCab(path.display().to_string()))?;
-            vec![provisional.import_cab(&choice.path)?.clone()]
+            vec![import_installer_choice(&mut provisional, choice)?]
         } else if zip_source {
             provisional.import_zip_entries(path)?
         } else {
@@ -3306,6 +3308,8 @@ fn stage_installer_cabinets(
         return Err(LibraryError::InvalidId(source.display().to_string()));
     }
     let mut choices = Vec::new();
+    let mut neutral_resources = Vec::new();
+    let mut install_dirs = Vec::new();
     for (index, cabinet) in cabinets.iter().enumerate() {
         let path = staging.join(format!("{source_id}-cabinet-{index}.cab"));
         fs::write(&path, &cabinet.bytes)?;
@@ -3324,16 +3328,54 @@ fn stage_installer_cabinets(
                 Some(0) | None => "Unspecified CPU".into(),
                 Some(value) => format!("CPU {value}"),
             };
-            choices.push(InstallerCabinetChoice {
-                index,
-                name: cabinet.name.clone(),
-                architecture,
-                path,
+            let resource_header = header.as_ref().filter(|h| {
+                h.structured
+                    && h.arch == Some(0)
+                    && !h.files.is_empty()
+                    && h.files.iter().all(|f| {
+                        let name = f.destination.to_ascii_lowercase();
+                        !name.ends_with(".exe") && !name.ends_with(".dll")
+                    })
             });
+            let dir = header.as_ref().and_then(|h| h.install_dir.clone());
+            if resource_header.is_some() && dir.is_some() {
+                neutral_resources.push((path, dir.unwrap()));
+            } else {
+                install_dirs.push(dir);
+                choices.push(InstallerCabinetChoice {
+                    index,
+                    name: cabinet.name.clone(),
+                    architecture,
+                    path,
+                    resources: Vec::new(),
+                });
+            }
         }
         fs::remove_dir_all(probe)?;
     }
+    for (choice, dir) in choices.iter_mut().zip(install_dirs) {
+        if let Some(dir) = dir {
+            choice.resources = neutral_resources
+                .iter()
+                .filter(|(_, resource_dir)| resource_dir.eq_ignore_ascii_case(&dir))
+                .map(|(path, _)| path.clone())
+                .collect();
+        }
+    }
     Ok(Some(choices))
+}
+
+fn import_installer_choice(
+    library: &mut Library,
+    choice: &InstallerCabinetChoice,
+) -> Result<GameEntry, LibraryError> {
+    let entry = library.import_cab(&choice.path)?.clone();
+    let game_dir = library.root.join("games").join(&entry.id);
+    let extracted = game_dir.join("extracted");
+    for (index, resource) in choice.resources.iter().enumerate() {
+        import_resource_companion_cab(&game_dir, &extracted, index, resource);
+    }
+    Ok(entry)
 }
 
 fn is_nsis_installer(path: &Path) -> bool {
