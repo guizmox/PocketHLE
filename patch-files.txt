@@ -1,7 +1,11 @@
 Cargo.lock
 Cargo.toml
+crates/pocket-kernel/src/gdi.rs
 crates/pocket-kernel/src/shell_menu.rs
 crates/pocket-library/src/lib.rs
+crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/coredll/message_queue.rs
+crates/pocket-winceapi/src/gx.rs
 crates\pocket-cab\src\install_recovery.rs
 crates\pocket-cab\src\lib.rs
 crates\pocket-core\src\lib.rs

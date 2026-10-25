@@ -373,6 +373,8 @@ pub struct GdiState {
     pub list_paint_stamps: HashMap<u32, u64>,
     pub paint_erase_frames: Vec<PaintEraseFrame>,
     pub pending_window_erases: std::collections::HashSet<u32>,
+    /// Windows with a generated (rather than explicitly posted) paint in the queue.
+    pub generated_window_paints: std::collections::HashSet<u32>,
     pub owner_draw_states: HashMap<u32, (bool, bool, bool, i32, i32)>,
 }
 
@@ -399,6 +401,7 @@ impl GdiState {
             list_paint_stamps: HashMap::new(),
             paint_erase_frames: Vec::new(),
             pending_window_erases: std::collections::HashSet::new(),
+            generated_window_paints: std::collections::HashSet::new(),
             owner_draw_states: HashMap::new(),
         };
         // Pre-register stock objects so SelectObject(GetStockObject(...))
@@ -604,12 +607,14 @@ impl GdiState {
         if is_stock_handle(handle) || self.system_brushes.values().any(|h| *h == handle) {
             return true;
         }
-        if self.palette(handle).is_some()
-            && self
-                .objects
-                .values()
-                .any(|object| matches!(object,GdiObject::Dc(dc) if dc.selected_palette==handle))
-        {
+        // Selected GDI objects remain owned by their DC. In particular the
+        // DIB's guest pixel allocation must remain live after a failed delete.
+        if self.objects.values().any(|object| {
+            matches!(object, GdiObject::Dc(dc)
+            if dc.selected_bitmap == Some(handle)
+                || dc.selected_palette == handle || dc.selected_brush == handle
+                || dc.selected_pen == handle || dc.selected_font == handle)
+        }) {
             return false;
         }
         self.saved_dcs.remove(&handle);
@@ -1645,6 +1650,19 @@ mod tests {
         let p = g.create_pen(0x00_ff_ff_ff, 1);
         assert!(g.delete(p));
         assert!(g.get(p).is_none());
+    }
+
+    #[test]
+    fn selected_bitmap_survives_delete_until_deselected() {
+        let mut g = GdiState::new();
+        let dc = g.create_memory_dc();
+        let bitmap = g.create_compatible_bitmap(4, 3);
+        let previous = g.select_into(dc, bitmap);
+        assert!(!g.delete(bitmap));
+        assert!(g.bitmap(bitmap).is_some());
+        g.select_into(dc, previous);
+        assert!(g.delete(bitmap));
+        assert!(g.bitmap(bitmap).is_none());
     }
 
     #[test]

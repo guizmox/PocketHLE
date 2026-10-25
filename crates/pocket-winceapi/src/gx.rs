@@ -216,6 +216,25 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
         return Ok(outcome);
     }
+    readback_framebuffer(ctx)?;
+    ctx.kernel.gx_draw_active = false;
+    ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+/// GAPI exposes display memory, which remains visible while held. A voluntary
+/// main-thread sleep is a presentation boundary for direct writers that retain
+/// that pointer across frames. Do not release their access or wait another
+/// refresh interval: Sleep owns the caller's pacing. Ordinary GXEndDraw still
+/// presents explicitly, and CPU slice preemption never exposes a partial draw.
+pub(crate) fn publish_held_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+    if ctx.kernel.current_thread == 0 && ctx.kernel.fb_mapped && ctx.kernel.gx_draw_active {
+        readback_framebuffer(ctx)?;
+    }
+    Ok(())
+}
+
+fn readback_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     let pitch = guest_pitch_bytes(ctx) as usize;
     let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
     let fb_len = ctx.kernel.framebuffer.pixels.len();
@@ -249,9 +268,7 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel.gx_guest_signature = Some(signature);
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
-    ctx.kernel.gx_draw_active = false;
-    ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
-    Ok(DispatchOutcome::ReturnedR0(1))
+    Ok(())
 }
 
 fn sample_signature(bytes: &[u8], stride_bytes: usize) -> u64 {

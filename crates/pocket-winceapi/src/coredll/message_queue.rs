@@ -65,7 +65,7 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
                 && accepts(ctx.kernel, *m)
         }) {
             return if remove {
-                ctx.kernel.posted_messages.remove(i)
+                take_posted_message_at(ctx.kernel, i)
             } else {
                 Some(ctx.kernel.posted_messages[i])
             };
@@ -139,7 +139,7 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
                 && accepts(ctx.kernel, m)
         }) {
             return if remove {
-                ctx.kernel.posted_messages.remove(i)
+                take_posted_message_at(ctx.kernel, i)
             } else {
                 Some(ctx.kernel.posted_messages[i])
             };

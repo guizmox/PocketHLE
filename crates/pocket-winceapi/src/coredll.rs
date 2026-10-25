@@ -2654,6 +2654,9 @@ pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         return Ok(outcome);
     }
     let ms = ctx.arg_u32(0)?;
+    if ms != 0 && ctx.kernel.current_thread == 0 {
+        crate::gx::publish_held_framebuffer(ctx)?;
+    }
     if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
         if let Some(thread) = ctx.kernel.threads.get_mut(index) {
             // Sleep(0) yields immediately. Positive sleeps remain ineligible
@@ -10575,6 +10578,9 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(visible) = ctx.kernel.window_visibility.get_mut(&hwnd) {
         *visible = show;
     }
+    if !show {
+        cancel_hidden_generated_paints(ctx.kernel);
+    }
     if let Some(child) = ctx.kernel.controls.get_mut(hwnd) {
         let id = child.id;
         let exposed_parent = (!show && child.visible).then_some(child.parent);
@@ -10716,6 +10722,13 @@ pub(crate) fn enqueue_window_message(
         > 256
     {
         return false;
+    }
+    // An explicitly posted WM_PAINT must survive hiding the window. Replace
+    // a coalesced generated paint before appending the caller's real message.
+    if message == WM_PAINT {
+        for &window in &recipients {
+            cancel_generated_paint(kernel, window);
+        }
     }
     kernel.posted_messages.extend(
         recipients
@@ -12781,6 +12794,7 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         .get(&hwnd)
         .copied()
         .or_else(|| ctx.kernel.controls.get(hwnd).map(|c| (c.x, c.y, c.w, c.h)));
+    cancel_hidden_generated_paints(ctx.kernel);
     let visible = window_is_visible(ctx.kernel, hwnd);
     if flags & 0x8 == 0 && (old_rect != new_rect || was_visible != visible) {
         // Moving/hiding a native child exposes its parent. Compositing only
@@ -13664,6 +13678,14 @@ fn posted_message_belongs_to(
     kernel.window_threads.get(&message.0).copied().unwrap_or(0) == owner
 }
 
+fn take_posted_message_at(kernel: &mut KernelState, index: usize) -> Option<(u32, u32, u32, u32)> {
+    let message = kernel.posted_messages.remove(index)?;
+    if message.1 == WM_PAINT {
+        kernel.gdi.generated_window_paints.remove(&message.0);
+    }
+    Some(message)
+}
+
 fn take_posted_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     let i = ctx
         .kernel
@@ -13675,7 +13697,7 @@ fn take_posted_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     {
         return None;
     }
-    ctx.kernel.posted_messages.remove(i)
+    take_posted_message_at(ctx.kernel, i)
 }
 
 fn next_queued_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
@@ -13929,7 +13951,7 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             .position(|m| posted_message_belongs_to(ctx.kernel, m, ctx.kernel.current_thread))
         {
             let (hwnd, msg, wp, lp) = if remove_mode & 1 != 0 {
-                ctx.kernel.posted_messages.remove(i).unwrap()
+                take_posted_message_at(ctx.kernel, i).unwrap()
             } else {
                 ctx.kernel.posted_messages[i]
             };
@@ -15396,7 +15418,6 @@ fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
-    let palette = ctx.kernel.gdi.palette(h).is_some();
     let dib_bits = ctx.kernel.gdi.bitmap(h).and_then(|b| b.dib_bits_va);
     let deleted = ctx.kernel.gdi.delete(h);
     if deleted && ctx.kernel.gdi.bitmap(h).is_none() {
@@ -15404,11 +15425,7 @@ fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             ctx.kernel.heap.free(bits);
         }
     }
-    Ok(DispatchOutcome::ReturnedR0(if palette {
-        deleted as u32
-    } else {
-        1
-    }))
+    Ok(DispatchOutcome::ReturnedR0(u32::from(deleted)))
 }
 
 fn delete_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -17344,6 +17361,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.controls.destroy_children_of(*hwnd);
     ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
     ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
+    ctx.kernel.gdi.generated_window_paints.remove(hwnd);
     ctx.kernel.window_rects.remove(hwnd);
     ctx.kernel.window_menus.remove(hwnd);
     ctx.kernel
@@ -17961,6 +17979,28 @@ pub(crate) fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
             .any(|m| m.0 == hwnd && m.1 == WM_PAINT)
     {
         kernel.posted_messages.push_back((hwnd, WM_PAINT, 0, 0));
+        kernel.gdi.generated_window_paints.insert(hwnd);
+    }
+}
+
+fn cancel_generated_paint(kernel: &mut KernelState, hwnd: u32) {
+    if kernel.gdi.generated_window_paints.remove(&hwnd) {
+        kernel
+            .posted_messages
+            .retain(|m| *m != (hwnd, WM_PAINT, 0, 0));
+    }
+}
+
+fn cancel_hidden_generated_paints(kernel: &mut KernelState) {
+    let hidden: Vec<_> = kernel
+        .gdi
+        .generated_window_paints
+        .iter()
+        .copied()
+        .filter(|hwnd| !window_is_visible(kernel, *hwnd))
+        .collect();
+    for hwnd in hidden {
+        cancel_generated_paint(kernel, hwnd);
     }
 }
 
@@ -18455,7 +18495,7 @@ fn dialog_box_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         .iter()
         .position(|m| focus_belongs_to_window(ctx.kernel, m.0, modal_hwnd))
     {
-        let (hwnd, message, wp, lp) = ctx.kernel.posted_messages.remove(index).unwrap();
+        let (hwnd, message, wp, lp) = take_posted_message_at(ctx.kernel, index).unwrap();
         if let Some(outcome) = tab_control::dispatch(ctx, hwnd, message, wp, true)? {
             return Ok(outcome);
         }
@@ -37660,6 +37700,43 @@ mod pocket_shell_geometry_tests {
                 (height - caption_height - 2 * i32::from(border)) as u32
             );
         }
+    }
+
+    #[test]
+    fn hiding_a_window_cancels_generated_child_paints_but_keeps_explicit_posts() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let (parent, child) = (0xdead1200, 0xdead1201);
+        for hwnd in [parent, child] {
+            kernel.window_procs.insert(hwnd, 0x4000);
+            kernel.window_visibility.insert(hwnd, true);
+            kernel.window_styles.insert(hwnd, (0x50000000, 0));
+        }
+        kernel.window_parents.insert(child, parent);
+        queue_window_paint(&mut kernel, child);
+        assert!(kernel.posted_messages.contains(&(child, WM_PAINT, 0, 0)));
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, parent).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        show_window(&mut ctx).unwrap();
+        assert!(!ctx
+            .kernel
+            .posted_messages
+            .contains(&(child, WM_PAINT, 0, 0)));
+        ctx.kernel.window_visibility.insert(parent, true);
+        queue_window_paint(ctx.kernel, child);
+        assert!(enqueue_window_message(ctx.kernel, child, WM_PAINT, 0, 0));
+        show_window(&mut ctx).unwrap();
+        assert!(ctx
+            .kernel
+            .posted_messages
+            .contains(&(child, WM_PAINT, 0, 0)));
+        assert!(!ctx.kernel.gdi.generated_window_paints.contains(&child));
     }
 
     #[test]
