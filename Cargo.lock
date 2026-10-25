@@ -2967,6 +2967,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "log",
+ "png 0.17.16",
  "pocket-cpu",
  "pocket-pe",
  "rmp3",

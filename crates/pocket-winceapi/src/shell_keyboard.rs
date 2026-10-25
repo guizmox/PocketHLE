@@ -339,7 +339,7 @@ pub(crate) fn sip_info(ctx: &mut CallCtx<'_>, p: u32) -> Result<DispatchOutcome,
     } else {
         w
     } as i32) as u32;
-    let (desktop, panel) = if !on {
+    let (mut desktop, panel) = if !on {
         ([0, 0, w, h], [0, 0, 0, 0])
     } else {
         match ctx.kernel.shell_keyboard.rotation % 4 {
@@ -349,6 +349,11 @@ pub(crate) fn sip_info(ctx: &mut CallCtx<'_>, p: u32) -> Result<DispatchOutcome,
             _ => ([0, 0, w, h - height], [0, h - height, w, h]),
         }
     };
+    if ctx.kernel.pocket_pc_taskbar_visible() {
+        desktop[1] = desktop[1]
+            .max(pocket_kernel::shell_menu::HEIGHT as u32)
+            .min(desktop[3]);
+    }
     let mut bytes = [0u8; 48];
     bytes[0..4].copy_from_slice(&cb.to_le_bytes());
     bytes[4..8].copy_from_slice(&(if on { 3u32 } else { 0 }).to_le_bytes());

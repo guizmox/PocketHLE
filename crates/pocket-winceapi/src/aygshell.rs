@@ -133,12 +133,22 @@ fn sh_full_screen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     } else {
         ctx.kernel.active_window
     };
-    if hwnd == 0 || (flags & 0x2a != 0 && hwnd != active) {
+    let known = hwnd == 0xdead0001
+        || ctx.kernel.window_rects.contains_key(&hwnd)
+        || ctx.kernel.window_classes.contains_key(&hwnd)
+        || ctx.kernel.controls.panel(hwnd).is_some();
+    let child = ctx
+        .kernel
+        .window_styles
+        .get(&hwnd)
+        .is_some_and(|s| s.0 & 0x40000000 != 0);
+    if !known || child || (flags & 0x2a != 0 && hwnd != active) {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let shell = &mut ctx.kernel.gdi.shell_menus;
     if flags & 1 != 0 {
         shell.taskbar_hidden = false;
+        shell.gx_fullscreen = false;
     }
     if flags & 2 != 0 {
         shell.taskbar_hidden = true;
@@ -651,5 +661,101 @@ mod memory_tests {
         ));
         assert_eq!(k.heap.free_bytes(), before);
         assert!(!k.should_stop);
+    }
+}
+
+#[cfg(test)]
+mod taskbar_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn shell_show_hide_changes_work_area_and_chrome_without_resizing_the_app() {
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut k, mut d) = setup();
+        k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        k.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        k.active_window = 0xdead0001;
+        k.window_rects.insert(k.active_window, (0, 26, 240, 268));
+        k.window_visibility.insert(k.active_window, true);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "ord:65",
+                &[0xdead0001, 1]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(k.pocket_pc_taskbar_visible());
+        assert!(k.framebuffer.pixels[..26 * 240 * 2].iter().any(|b| *b != 0));
+        if let Some(path) = std::env::var_os("POCKETHLE_TASKBAR_PREVIEW") {
+            let rgb: Vec<_> = k.framebuffer.pixels[..26 * 240 * 2]
+                .chunks_exact(2)
+                .flat_map(|p| {
+                    let v = u16::from_le_bytes([p[0], p[1]]);
+                    [
+                        ((v >> 11) * 255 / 31) as u8,
+                        (((v >> 5) & 63) * 255 / 63) as u8,
+                        ((v & 31) * 255 / 31) as u8,
+                    ]
+                })
+                .collect();
+            image::save_buffer(path, &rgb, 240, 26, image::ColorType::Rgb8).unwrap();
+        }
+
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "SystemParametersInfoW",
+            &[0x30, 0, 0x2000, 0],
+        );
+        assert_eq!(cpu.read_u32_le(0x2004).unwrap(), 26);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHFullScreen",
+                &[0xdead0001, 2]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(!k.pocket_pc_taskbar_visible());
+        assert_eq!(k.window_rects[&0xdead0001], (0, 26, 240, 268));
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "SystemParametersInfoW",
+            &[0x30, 0, 0x2000, 0],
+        );
+        assert_eq!(cpu.read_u32_le(0x2004).unwrap(), 0);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHFullScreen",
+                &[7, 2]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        k.gapi_action_key = pocket_kernel::gapi::VK_A;
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "aygshell.dll",
+            "SHFullScreen",
+            &[0xdead0001, 1],
+        );
+        assert!(!k.pocket_pc_taskbar_visible());
     }
 }

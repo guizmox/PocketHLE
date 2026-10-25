@@ -36,6 +36,8 @@ pub struct ShellMenus {
     pub bars: HashMap<u32, Bar>,
     pub tracking: Option<TrackingMenu>,
     pub taskbar_hidden: bool,
+    pub gx_fullscreen: bool,
+    pub taskbar_captured: bool,
     pub start_icon_hidden: bool,
     pub sip_button_hidden: bool,
     active: u32,
@@ -69,6 +71,87 @@ fn enabled(item: &MenuItem, menu: u32, states: &HashMap<u32, HashMap<u32, u32>>)
             == 0
 }
 impl ShellMenus {
+    pub fn render_taskbar(&self, surface: &mut Surface<'_>) {
+        let (width, height) = surface.dimensions();
+        let width = width as i32;
+        for y in 0..HEIGHT {
+            let shade = (5 + y / 5) as u16;
+            surface.fill_rect(
+                0,
+                y,
+                width,
+                1,
+                (shade << 11) | ((shade + 7) << 5) | (shade + 12),
+            );
+        }
+        // Decode the original application icon once, then scale at presentation.
+        static ICON: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
+        if let Some((iw, ih, bytes)) = ICON.get_or_init(|| {
+            let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
+                "../assets/pockethle_logo.png"
+            )));
+            let mut reader = decoder.read_info().ok()?;
+            let mut bytes = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut bytes).ok()?;
+            if info.color_type != png::ColorType::Rgba {
+                return None;
+            }
+            bytes.truncate(info.buffer_size());
+            Some((info.width, info.height, bytes))
+        }) {
+            for y in 0..20u32 {
+                for x in 0..20u32 {
+                    let i = (((y * ih / 20) * iw + x * iw / 20) * 4) as usize;
+                    let alpha = u32::from(bytes[i + 3]);
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let px = 5 + x as i32;
+                    let py = (HEIGHT - 20) / 2 + y as i32;
+                    if px >= width || py >= height as i32 {
+                        continue;
+                    }
+                    let offset = (py as usize * width as usize + px as usize) * 2;
+                    let old = u16::from_le_bytes(
+                        surface.pixels()[offset..offset + 2].try_into().unwrap(),
+                    );
+                    let bg = [
+                        u32::from(old >> 11) * 255 / 31,
+                        u32::from((old >> 5) & 63) * 255 / 63,
+                        u32::from(old & 31) * 255 / 31,
+                    ];
+                    let c: [u8; 3] = std::array::from_fn(|n| {
+                        ((u32::from(bytes[i + n]) * alpha + bg[n] * (255 - alpha)) / 255) as u8
+                    });
+                    surface.put_pixel(px, py, crate::framebuffer::pack_rgb565(c[0], c[1], c[2]));
+                }
+            }
+        }
+        let clip = [0, 0, width, HEIGHT];
+        let mut title_font = crate::gdi::Font::new(-15);
+        title_font.logfont[16..20].copy_from_slice(&700i32.to_le_bytes());
+        let title = text::layout(
+            Some(&title_font),
+            &"PocketHLE".encode_utf16().collect::<Vec<_>>(),
+        );
+        title.draw(surface, 30, (HEIGHT - title.height) / 2, 0xffff, clip);
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let clock = format!("{:02}:{:02}", (seconds / 3600) % 24, (seconds / 60) % 60);
+        let clock_font = crate::gdi::Font::new(-13);
+        let clock = text::layout(Some(&clock_font), &clock.encode_utf16().collect::<Vec<_>>());
+        clock.draw(
+            surface,
+            width - clock.width - 8,
+            (HEIGHT - clock.height) / 2,
+            0xffff,
+            clip,
+        );
+        surface.fill_rect(0, HEIGHT - 1, width, 1, 0x3d5b);
+    }
+
     pub fn close(&mut self) {
         if let Some(t) = self.tracking.as_mut() {
             t.result.get_or_insert(0);

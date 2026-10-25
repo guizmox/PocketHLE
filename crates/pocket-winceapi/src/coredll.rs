@@ -12276,6 +12276,25 @@ fn controls_take_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
 ) -> Option<Option<(u32, u32, u32, u32)>> {
+    let shell = &mut ctx.kernel.gdi.shell_menus;
+    if shell.taskbar_captured {
+        match ev {
+            InputEvent::PointerUp { .. } => {
+                shell.taskbar_captured = false;
+                return Some(None);
+            }
+            InputEvent::PointerMove { .. } => return Some(None),
+            _ => {}
+        }
+    }
+    if ctx.kernel.pocket_pc_taskbar_visible() && !ctx.kernel.gdi.shell_menus.start_icon_hidden {
+        if let InputEvent::PointerDown { y, .. } = ev {
+            if i32::from(y) < pocket_kernel::shell_menu::HEIGHT {
+                ctx.kernel.gdi.shell_menus.taskbar_captured = true;
+                return Some(None);
+            }
+        }
+    }
     ctx.kernel.refresh_control_visibility();
     if matches!(ev, InputEvent::Text { .. }) && !crate::shell_keyboard::accepts_text(ctx) {
         return Some(None);
@@ -35090,13 +35109,16 @@ mod tests {
             DispatchOutcome::ReturnedR0(1)
         );
         assert_eq!(message(&mut cpu), WM_KEYDOWN);
+        // Keep wall-clock scheduling from introducing unrelated key repeats
+        // or a second timer tick while a parallel test worker is preempted.
+        k.key_repeat_next_ms = Some(u64::MAX);
         k.posted_messages.push_back((FAKE_HWND, 0x8001, 42, 0));
         assert_eq!(
             poll(&mut cpu, &mut k, &mut d, 1),
             DispatchOutcome::ReturnedR0(1)
         );
         assert_eq!(message(&mut cpu), 0x8001);
-        k.timers.insert((0, FAKE_HWND, 7), (100, 0, 0));
+        k.timers.insert((0, FAKE_HWND, 7), (u32::MAX, 0, 0));
         assert_eq!(
             poll(&mut cpu, &mut k, &mut d, 1),
             DispatchOutcome::ReturnedR0(1)
@@ -37488,5 +37510,81 @@ mod wave_open_capacity_tests {
         assert_eq!(kernel.wave_out.devices.len(), 127);
         assert!(!kernel.wave_out.devices.contains_key(&handles[0]));
         assert!(kernel.wave_out.devices.contains_key(&handles[127]));
+    }
+}
+
+#[cfg(test)]
+mod pocket_shell_geometry_tests {
+    use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
+    use super::*;
+    #[test]
+    fn moved_primary_window_uses_local_dc_coordinates_and_real_client_size() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        kernel.window_rects.insert(FAKE_HWND, (0, 26, 240, 268));
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        assert_eq!(kernel.window_client_origin(FAKE_HWND), Some((0, 26)));
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x1800).unwrap();
+        get_client_rect(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_u32_le(0x180c).unwrap(), 268);
+        let dc = window_dc(&mut ctx, FAKE_HWND);
+        assert_ne!(dc, GDI_SCREEN_DC);
+        let bitmap = ctx.kernel.gdi.dc(dc).unwrap().selected_bitmap.unwrap();
+        pocket_kernel::gdi::Surface::Bitmap(ctx.kernel.gdi.bitmap_mut(bitmap).unwrap())
+            .fill_rect(0, 0, 240, 268, 0xf800);
+        ctx.kernel.present_window_surfaces();
+        let offset = (26 * 240) * 2;
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &0xf800u16.to_le_bytes()
+        );
+        assert_ne!(
+            &ctx.kernel.framebuffer.pixels[..2],
+            &0xf800u16.to_le_bytes()
+        );
+        let (_, msg, _, lp) =
+            addressed_input(ctx.kernel, InputEvent::PointerDown { x: 12, y: 40 }).unwrap();
+        assert_eq!(msg, WM_LBUTTONDOWN);
+        assert_eq!(lp, 12 | (14 << 16));
+        ctx.kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
+        assert_eq!(window_dc(&mut ctx, FAKE_HWND), GDI_SCREEN_DC);
+        assert!(!ctx.kernel.window_dcs.contains_key(&FAKE_HWND));
+    }
+    #[test]
+    fn pocket_pc_taskbar_owns_touches_and_forwards_when_start_icon_is_hidden() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            controls_take_input(&mut ctx, InputEvent::PointerDown { x: 5, y: 10 }),
+            Some(None)
+        );
+        assert_eq!(
+            controls_take_input(&mut ctx, InputEvent::PointerMove { x: 5, y: 90 }),
+            Some(None)
+        );
+        assert_eq!(
+            controls_take_input(&mut ctx, InputEvent::PointerUp { x: 5, y: 90 }),
+            Some(None)
+        );
+        ctx.kernel.gdi.shell_menus.start_icon_hidden = true;
+        assert_eq!(
+            controls_take_input(&mut ctx, InputEvent::PointerDown { x: 5, y: 10 }),
+            None
+        );
     }
 }

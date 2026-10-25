@@ -130,9 +130,7 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     ensure_fb_mapped(ctx)?;
     if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
         ctx.kernel.controls.direct_surface_hwnd = ctx.arg_u32(0)?;
-        if ctx.arg_u32(1)? & 1 != 0 {
-            ctx.kernel.gdi.shell_menus.taskbar_hidden = true;
-        }
+        ctx.kernel.gdi.shell_menus.gx_fullscreen = ctx.arg_u32(1)? & 1 != 0;
     }
     let pc = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Pc).unwrap_or(0);
     let lr = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Lr).unwrap_or(0);
@@ -151,6 +149,7 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 fn gx_close_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.gx_draw_active = false;
     ctx.kernel.controls.direct_surface_hwnd = 0;
+    ctx.kernel.gdi.shell_menus.gx_fullscreen = false;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -743,5 +742,52 @@ pub(crate) mod tests {
                 assert_eq!(crate::coredll::remap_input(input, true, action), expected);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod taskbar_lifecycle_tests {
+    use crate::bluetooth::tests::{call, setup};
+    #[test]
+    fn gapi_fullscreen_hides_shell_until_close_and_preserves_explicit_hide() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        assert!(k.pocket_pc_taskbar_visible());
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "gx.dll",
+            "?GXOpenDisplay@@YAHPAUHWND__@@K@Z",
+            &[0xdead0001, 1],
+        );
+        assert!(!k.pocket_pc_taskbar_visible());
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "gx.dll",
+            "?GXCloseDisplay@@YAHXZ",
+            &[],
+        );
+        assert!(k.pocket_pc_taskbar_visible());
+        k.gdi.shell_menus.taskbar_hidden = true;
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "gx.dll",
+            "?GXOpenDisplay@@YAHPAUHWND__@@K@Z",
+            &[0xdead0001, 1],
+        );
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "gx.dll",
+            "?GXCloseDisplay@@YAHXZ",
+            &[],
+        );
+        assert!(!k.pocket_pc_taskbar_visible());
     }
 }

@@ -18,6 +18,7 @@ audio-cpal = ["dep:cpal"]
 
 [dependencies]
 ab_glyph = "=0.2.32"
+png = "0.17"
 flate2.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

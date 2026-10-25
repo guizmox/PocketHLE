@@ -1995,7 +1995,9 @@ impl KernelState {
     /// The PocketPC shell occupies a separate top-level strip. Apps retain
     /// responsibility for resizing their windows after SHFullScreen.
     pub fn pocket_pc_taskbar_visible(&self) -> bool {
-        self.gapi_action_key == gapi::VK_RETURN && !self.gdi.shell_menus.taskbar_hidden
+        self.gapi_action_key == gapi::VK_RETURN
+            && !self.gdi.shell_menus.taskbar_hidden
+            && !self.gdi.shell_menus.gx_fullscreen
     }
 
     pub fn window_client_origin(&self, mut hwnd: u32) -> Option<(i32, i32)> {
@@ -2349,35 +2351,7 @@ impl KernelState {
             );
         }
         if taskbar {
-            let (width, _) = surf.dimensions();
-            let width = width as i32;
-            for y in 0..shell_menu::HEIGHT {
-                // PocketHLE shell chrome, separate from the app's client pixels.
-                let shade = (5 + y / 5) as u16;
-                surf.fill_rect(
-                    0,
-                    y,
-                    width,
-                    1,
-                    (shade << 11) | ((shade + 7) << 5) | (shade + 12),
-                );
-            }
-            let font = text::selected(&self.gdi, gdi::STOCK_SYSTEM_FONT);
-            let clip = [0, 0, width, shell_menu::HEIGHT];
-            text::layout(
-                font.as_ref(),
-                &"PocketHLE".encode_utf16().collect::<Vec<_>>(),
-            )
-            .draw(&mut surf, 8, 6, 0xffff, clip);
-            let seconds = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let clock = format!("{:02}:{:02}", (seconds / 3600) % 24, (seconds / 60) % 60);
-            let clock: Vec<_> = clock.encode_utf16().collect();
-            let layout = text::layout(font.as_ref(), &clock);
-            layout.draw(&mut surf, width - 48, 6, 0xffff, clip);
-            surf.fill_rect(0, shell_menu::HEIGHT - 1, width, 1, 0x3d5b);
+            self.gdi.shell_menus.render_taskbar(&mut surf);
         }
         if !self.shell_keyboard.sip {
             self.shell_keyboard.render(&mut surf);
