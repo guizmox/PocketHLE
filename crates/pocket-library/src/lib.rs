@@ -891,6 +891,11 @@ fn identity_revision() -> u8 {
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default = "default_recording_format")]
+    pub recording_format: String,
+    /// Video recording JPEG quality preset: low, medium or high.
+    #[serde(default = "default_recording_quality")]
+    pub recording_quality: String,
     #[serde(default = "default_device_preset_id")]
     pub device_preset_id: String,
     #[serde(default = "String::new")]
@@ -1119,6 +1124,14 @@ fn default_upscale_filter() -> String {
     "reconstruction".into()
 }
 
+fn default_recording_format() -> String {
+    "mp4".into()
+}
+
+fn default_recording_quality() -> String {
+    "medium".into()
+}
+
 fn default_show_fps() -> bool {
     true
 }
@@ -1150,6 +1163,8 @@ impl LauncherConfig {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            recording_quality: default_recording_quality(),
+            recording_format: default_recording_format(),
             device_preset_id: default_device_preset_id(),
             device_platform_id: String::new(),
             gizmondo_preset_id: default_gizmondo_preset_id(),

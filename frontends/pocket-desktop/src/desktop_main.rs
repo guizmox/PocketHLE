@@ -17,6 +17,7 @@ mod reconstruction;
 mod rumble;
 mod runner;
 mod screenshot;
+mod recording;
 mod smaa;
 mod unimplemented_log;
 

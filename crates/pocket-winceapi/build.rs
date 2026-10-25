@@ -2,6 +2,7 @@ use std::{env, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=native/media.c");
+    println!("cargo:rerun-if-changed=native/recording.c");
     println!("cargo:rerun-if-env-changed=POCKETHLE_FFMPEG_STATIC_DIR");
     if env::var_os("CARGO_FEATURE_VIDEO_STATIC").is_none() {
         return;
@@ -26,6 +27,7 @@ fn main() {
     }
     cc::Build::new()
         .file("native/media.c")
+        .file("native/recording.c")
         .include(prefix.join("include"))
         .flag_if_supported("/std:c11")
         .flag_if_supported("-std=c11")

@@ -7,6 +7,10 @@ media_target="${1:-x86_64-unknown-linux-gnu}"
 media_jobs="${2:-4}"
 media_prefix="$project_root/target/native/ffmpeg/$media_target"
 media_build="$project_root/target/native/ffmpeg-build/$media_target"
+# Separate desktop encoder build from earlier decoder-only object caches.
+if [[ "$media_target" != *android* ]]; then
+    media_build="${media_build}-recording-v2"
+fi
 media_source="$project_root/target/native/ffmpeg-source/ffmpeg-8.0.1"
 media_archive="$project_root/third-party/ffmpeg/ffmpeg-8.0.1.tar.xz"
 mkdir -p "$media_build" "$media_prefix" "$(dirname "$media_source")"
@@ -31,6 +35,11 @@ options=(
     --enable-decoder=wmv1,wmv2,wmv3,vc1,mpeg4,msmpeg4v1,msmpeg4v2,msmpeg4v3,mpeg1video,mpeg2video,h263,h264,mjpeg,wmav1,wmav2,mp3float,mp2,aac,vorbis,pcm_s16le,pcm_u8,adpcm_ms,adpcm_ima_wav
     --enable-parsers --enable-pic
 )
+# Desktop recording reuses the native MPEG-4 and AAC encoders. Android keeps
+# its decoder-only build; it does not expose the desktop recorder.
+if [[ "$media_target" != *android* ]]; then
+    options+=(--enable-encoder=mpeg4,aac --enable-muxer=mov,mp4)
+fi
 if [[ "$media_target" == x86_64-pc-windows-msvc ]]; then
     # Keep the vendored source archive unmodified; apply the reproducible
     # configure-only locale fix to the extracted working source instead.
@@ -65,6 +74,14 @@ elif [[ "$media_target" != x86_64-unknown-linux-gnu ]]; then
 fi
 cd "$media_build"
 bash "$media_source/configure" "${options[@]}"
+if [[ "$media_target" != *android* ]]; then
+    for component in MPEG4_ENCODER AAC_ENCODER MP4_MUXER; do
+        if ! grep -q "^#define CONFIG_${component} 1" config_components.h; then
+            echo "FFmpeg recording component missing: $component" >&2
+            exit 1
+        fi
+    done
+fi
 make -j "$media_jobs"
 make install
 if [[ "$media_target" == x86_64-pc-windows-msvc ]]; then

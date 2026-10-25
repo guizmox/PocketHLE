@@ -19,6 +19,48 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Non-consuming copy of the mixed device output, for host video recording.
+#[derive(Debug)]
+pub struct MixedAudio {
+    pub at: Instant,
+    pub rate: u32,
+    pub channels: u16,
+    pub samples: Vec<f32>,
+}
+#[derive(Debug, Default)]
+pub struct OutputRecording {
+    queue: Mutex<std::collections::VecDeque<MixedAudio>>,
+    pub overflow: std::sync::atomic::AtomicBool,
+    pub stopped: std::sync::atomic::AtomicBool,
+}
+impl OutputRecording {
+    pub fn drain(&self) -> Vec<MixedAudio> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
+    }
+    fn push(&self, output: &[f32], rate: u32, channels: u16) {
+        if self.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut queue) = self.queue.lock() {
+            if queue.len() < 128 {
+                queue.push_back(MixedAudio {
+                    at: Instant::now(),
+                    rate,
+                    channels,
+                    samples: output.to_vec(),
+                });
+                return;
+            }
+        }
+        self.overflow
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Maximum number of i16 samples we keep buffered. At 44.1 kHz
 /// stereo this is about twelve seconds — plenty to absorb scheduling
 /// jitter, but small enough that overflows produce dropped samples
@@ -298,6 +340,7 @@ struct Shared {
     /// Optional WAV tap so headless runs can verify that a game
     /// really produces sound on a machine with no audio hardware.
     capture: Option<WavCapture>,
+    output_recording: Option<Arc<OutputRecording>>,
 }
 
 impl Shared {
@@ -324,6 +367,7 @@ impl Shared {
             #[cfg(feature = "audio-cpal")]
             voices: Vec::new(),
             capture: None,
+            output_recording: None,
         }
     }
 
@@ -542,6 +586,9 @@ impl Shared {
         }
         for sample in &mut output[frames * channels..] {
             *sample = 0.0;
+        }
+        if let Some(recording) = &self.output_recording {
+            recording.push(output, output_rate, output_channels);
         }
     }
 }
@@ -1167,6 +1214,12 @@ impl AudioEngine {
     ///
     /// The tap can be moved to another thread; it locks the same shared
     /// state the guest pushes into.
+    pub fn record_output(&self, recording: Option<Arc<OutputRecording>>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.output_recording = recording;
+        }
+    }
+
     pub fn tap(&self) -> AudioTap {
         AudioTap {
             shared: Arc::clone(&self.shared),
@@ -1971,5 +2024,40 @@ mod tests {
         let n = e.push_samples_u8(&[0x80, 0x00, 0xFF]);
         assert_eq!(n, 3);
         assert_eq!(e.buffered_samples(), 3);
+    }
+}
+
+#[cfg(test)]
+mod output_recording_tests {
+    use super::*;
+    #[test]
+    fn recording_is_a_non_consuming_copy_of_mixed_output() {
+        let e = AudioEngine::new();
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        e.open_wave_stream(
+            1,
+            GuestFormat {
+                sample_rate: 48000,
+                channels: 2,
+                bits_per_sample: 16,
+            },
+        );
+        let sink = Arc::new(OutputRecording::default());
+        e.record_output(Some(sink.clone()));
+        e.push_wave_samples(1, &[1000, -1000, 2000, -2000]);
+        let mut out = [0; 4];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [1000, -1000, 2000, -2000]);
+        let chunks = sink.drain();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].rate, 48000);
+        assert_eq!(chunks[0].channels, 2);
+        assert_eq!(chunks[0].samples.len(), 4);
+        e.record_output(None);
+        e.push_wave_samples(1, &[3000, -3000]);
+        tap.drain_into(&mut out[..2]);
+        assert!(sink.drain().is_empty());
+        assert_eq!(&out[..2], &[3000, -3000]);
     }
 }

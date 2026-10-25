@@ -142,6 +142,7 @@ pub struct PocketLauncher {
     fullscreen_window_size: Option<Vec2>,
     reconstruction: Option<std::sync::Arc<std::sync::Mutex<crate::reconstruction::Reconstruction>>>,
     screenshot: crate::screenshot::SharedScreenshot,
+    recording: crate::recording::SharedRecording,
     library: Library,
     selected_game: Option<String>,
     deck_library_actions: Vec<String>,
@@ -678,6 +679,7 @@ impl PocketLauncher {
                 }
             }),
             screenshot: Default::default(),
+            recording: Default::default(),
             selected_game: None,
             deck_library_actions: Vec::new(),
             deck_scroll_selection: false,
@@ -1016,6 +1018,68 @@ impl PocketLauncher {
         Ok(path)
     }
 
+    fn toggle_recording(&mut self) {
+        let mut recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
+        if recording.active() {
+            recording.stop();
+            if let Some(tx) = &self.input_tx {
+                let _ = tx.send(InputCommand::RecordAudio(None));
+            }
+            self.status = "Saving video…".into();
+            return;
+        }
+        if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
+            return;
+        }
+        let directory = self.library.root().join("recordings");
+        let result = std::fs::create_dir_all(&directory)
+            .map_err(|e| e.to_string())
+            .and_then(|_| {
+                let game: String = self
+                    .running_game
+                    .as_deref()
+                    .unwrap_or("PocketHLE")
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_millis();
+                recording.start(
+                    directory.join(format!(
+                        "{game}_{stamp}.{}",
+                        if self.library.config().recording_format == "avi" {
+                            "avi"
+                        } else {
+                            "mp4"
+                        }
+                    )),
+                    &self.library.config().recording_quality,
+                    self.library.config().recording_format != "avi",
+                )
+            });
+        match result {
+            Ok(audio) => {
+                if let Some(tx) = &self.input_tx {
+                    if tx.send(InputCommand::RecordAudio(Some(audio))).is_err() {
+                        recording.stop();
+                        self.status = "Video failed: game is no longer running".into();
+                        return;
+                    }
+                }
+                self.status = "Recording video (F11 to stop)".into();
+            }
+            Err(e) => self.status = format!("Video failed: {e}"),
+        }
+    }
+
     fn capture_screenshot(&mut self) {
         if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
             self.status = "Screenshot failed: return to a visible game first.".into();
@@ -1078,6 +1142,10 @@ impl PocketLauncher {
             {
                 self.capture_screenshot();
             }
+            let (active,busy)={let r=self.recording.lock().unwrap_or_else(|e|e.into_inner());(r.active(),r.busy())};
+            if ui.add_enabled(active||(can_screenshot&&!busy),egui::Button::new(if active {"Stop video (F11)"} else if busy {"Saving video…"} else {"Record video (F11)"}))
+                .on_hover_text("Record the displayed game and its audio. Resizing starts a new video segment. Input indicators appear only in the recording.")
+                .clicked(){self.toggle_recording();}
         });
         ui.separator();
     }
@@ -1221,7 +1289,7 @@ impl PocketLauncher {
             self.screen = Screen::GizmondoOptions;
             ui.close_menu();
         }
-        if ui.button("Fullscreen (F11)").clicked() {
+        if ui.button("Fullscreen (F12)").clicked() {
             let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
             self.set_fullscreen(ui.ctx(), !fullscreen);
             ui.close_menu();
@@ -1878,6 +1946,19 @@ impl PocketLauncher {
                 ui.label("Log unimplemented APIs");
                 ui.checkbox(&mut draft.log_unimplemented_apis,"")
                     .on_hover_text("Write game, process and missing API details to pockethle-unimplemented-apis.log next to the main log. Changes apply after Save, including a running game.");
+                ui.end_row();
+
+                ui.label("Recording format");
+                egui::ComboBox::from_id_source("recording_format").selected_text(if draft.recording_format=="avi"{"AVI (MJPEG + PCM)"}else{"MP4 (MPEG-4 + AAC)"}).show_ui(ui,|ui|{
+                    ui.selectable_value(&mut draft.recording_format,"avi".into(),"AVI (MJPEG + PCM)");
+                    ui.add_enabled_ui(pocket_core::winceapi::recording_encoder::available(),|ui|{ui.selectable_value(&mut draft.recording_format,"mp4".into(),"MP4 (MPEG-4 + AAC)");});
+                });
+                if !pocket_core::winceapi::recording_encoder::available(){ui.label(format!("MP4 unavailable: {}", pocket_core::winceapi::recording_encoder::unavailable_reason()));}
+                ui.end_row();
+                ui.label("Recording quality");
+                egui::ComboBox::from_id_source("recording_quality").selected_text(match draft.recording_quality.as_str(){"low"=>"Low","high"=>"High",_=>"Medium"}).show_ui(ui,|ui|{
+                    for (value,label) in [("low","Low"),("medium","Medium"),("high","High")]{ui.selectable_value(&mut draft.recording_quality,value.into(),label);}
+                });
                 ui.end_row();
 
                 ui.label("Show FPS in status bar");
@@ -2561,6 +2642,13 @@ impl PocketLauncher {
                 let renderer = std::sync::Arc::clone(renderer);
                 let filter = self.upscale_filter.gpu_filter();
                 let capture = std::sync::Arc::clone(&self.screenshot);
+                let recording = self.recording.clone();
+                let video_size = self
+                    .last_frame_snapshot
+                    .as_ref()
+                    .map(|f| (f.width, f.height))
+                    .unwrap_or((1, 1));
+                let video_turns = rotation_turns(self.game_rotation);
                 let ctx = ui.ctx().clone();
                 let transform = [
                     uv[0].x,
@@ -2579,7 +2667,24 @@ impl PocketLauncher {
                                 transform,
                                 filter,
                             );
-                            crate::screenshot::capture(painter.gl(), info, &capture, &ctx);
+                            crate::screenshot::capture(
+                                painter.gl(),
+                                egui::PaintCallbackInfo {
+                                    viewport: info.viewport,
+                                    clip_rect: info.clip_rect,
+                                    pixels_per_point: info.pixels_per_point,
+                                    screen_size_px: info.screen_size_px,
+                                },
+                                &capture,
+                                &ctx,
+                            );
+                            crate::recording::capture(
+                                painter.gl(),
+                                info,
+                                &recording,
+                                video_size,
+                                video_turns,
+                            );
                         },
                     )),
                 });
@@ -2608,14 +2713,43 @@ impl PocketLauncher {
                 .unwrap_or_else(|e| e.into_inner())
                 .pending
                 .is_some()
+                || self
+                    .recording
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .active()
             {
                 let capture = std::sync::Arc::clone(&self.screenshot);
+                let recording = self.recording.clone();
+                let video_size = self
+                    .last_frame_snapshot
+                    .as_ref()
+                    .map(|f| (f.width, f.height))
+                    .unwrap_or((1, 1));
+                let video_turns = rotation_turns(self.game_rotation);
                 let ctx = ui.ctx().clone();
                 ui.painter().add(egui::PaintCallback {
                     rect,
                     callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
                         move |info, painter| {
-                            crate::screenshot::capture(painter.gl(), info, &capture, &ctx);
+                            crate::screenshot::capture(
+                                painter.gl(),
+                                egui::PaintCallbackInfo {
+                                    viewport: info.viewport,
+                                    clip_rect: info.clip_rect,
+                                    pixels_per_point: info.pixels_per_point,
+                                    screen_size_px: info.screen_size_px,
+                                },
+                                &capture,
+                                &ctx,
+                            );
+                            crate::recording::capture(
+                                painter.gl(),
+                                info,
+                                &recording,
+                                video_size,
+                                video_turns,
+                            );
                         },
                     )),
                 });
@@ -3241,6 +3375,10 @@ impl PocketLauncher {
         } else {
             (0, 0)
         };
+        self.recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .aim(vector.0 as i32, vector.1 as i32);
         if vector != self.stylus_last {
             self.send_input(InputEvent::StylusAim {
                 x: vector.0,
@@ -3251,6 +3389,10 @@ impl PocketLauncher {
     }
 
     fn send_input(&self, ev: InputEvent) {
+        self.recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .observe(ev);
         if let Some(tx) = self.input_tx.as_ref() {
             let _ = tx.send(InputCommand::Input(ev));
         }
@@ -3743,8 +3885,9 @@ impl PocketLauncher {
                             | egui::Key::ArrowUp
                             | egui::Key::ArrowDown
                             | egui::Key::F10
-                            | egui::Key::F11
                             | egui::Key::F12
+                            | egui::Key::F11
+                            | egui::Key::F6
                     ) {
                         continue;
                     }
@@ -3766,7 +3909,13 @@ impl PocketLauncher {
                 }
                 continue;
             }
-            if key == egui::Key::F12
+            if key == egui::Key::F11 {
+                if pressed && !repeat {
+                    self.toggle_recording();
+                }
+                continue;
+            }
+            if key == egui::Key::F6
                 && self.screen == Screen::Run
                 && self.library.config().gps_fixed_enabled
                 && self.library.config().gps_fixed_random
@@ -3783,7 +3932,7 @@ impl PocketLauncher {
                 }
                 continue;
             }
-            if key == egui::Key::F11 {
+            if key == egui::Key::F12 {
                 if pressed && !repeat {
                     let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                     self.set_fullscreen(ctx, !fullscreen);
@@ -4020,7 +4169,7 @@ impl PocketLauncher {
                         ui.selectable_value(&mut draft.gps_fixed_random, false, "Manual coordinates");
                     });
                 if draft.gps_fixed_enabled && draft.gps_fixed_random {
-                    ui.label("F12 / Geofence: choose a new random position while playing.");
+                    ui.label("F6 / Geofence: choose a new random position while playing.");
                 }
                 if !draft.gps_fixed_random {
                 ui.horizontal(|ui| {
@@ -4220,6 +4369,10 @@ fn rotated_pointer_to_game(
 
 impl eframe::App for PocketLauncher {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finish_and_wait();
         if let (Some(gl), Some(renderer)) = (gl, self.reconstruction.take()) {
             renderer
                 .lock()
@@ -4229,6 +4382,31 @@ impl eframe::App for PocketLauncher {
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
+        if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
+            let mut r = self.recording.lock().unwrap_or_else(|e| e.into_inner());
+            if r.active() {
+                r.stop();
+                if let Some(tx) = &self.input_tx {
+                    let _ = tx.send(InputCommand::RecordAudio(None));
+                }
+            }
+        }
+        let video_result = {
+            self.recording
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .poll()
+        };
+        if let Some(result) = video_result {
+            self.status = match result {
+                Ok(paths) => format!(
+                    "Video saved: {} ({} segment(s))",
+                    paths[0].display(),
+                    paths.len()
+                ),
+                Err(e) => format!("Video recording failed: {e}"),
+            };
+        }
         if cfg!(feature = "steam-deck") {
             self.update_gamepad_input(ctx);
         }
@@ -4658,7 +4836,7 @@ mod tests {
                 expected
             );
         }
-        assert_eq!(bindings.vk_for_key(egui::Key::F12.name()), None);
+        assert_eq!(bindings.vk_for_key(egui::Key::F11.name()), None);
     }
 
     /// A quarter turn has to be undone on the way back in, or a tap

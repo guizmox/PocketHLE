@@ -49,6 +49,7 @@ mod mfc;
 mod number_format;
 pub mod ole32;
 pub mod ordinals;
+pub mod recording_encoder;
 mod scroll;
 mod sdl;
 mod serial;

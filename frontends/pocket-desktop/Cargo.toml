@@ -46,7 +46,7 @@ egui_extras = { version = "0.27", features = ["image"] }
 # GTK3 is synchronous and works inside a `std::thread::spawn`.
 rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 directories = "5"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 pocket-core = { path = "../../crates/pocket-core" }
 pocket-library = { path = "../../crates/pocket-library", features = ["release-updates"] }

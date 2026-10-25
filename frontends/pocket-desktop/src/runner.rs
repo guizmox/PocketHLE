@@ -650,8 +650,9 @@ impl FrameSnapshot {
 }
 
 /// Command pushed by the GUI thread into the running emulator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum InputCommand {
+    RecordAudio(Option<Arc<pocket_core::kernel::audio::OutputRecording>>),
     /// User input (tap / D-pad / key) to forward to the guest.
     Input(InputEvent),
     /// Explicitly choose another Colors Eiffel Tower simulated fix.
@@ -692,6 +693,8 @@ struct ChildJob {
 }
 
 struct RunHook {
+    recording_audio: Option<Arc<pocket_core::kernel::audio::OutputRecording>>,
+    recording_audio_pending: bool,
     colors_random_gps: Option<pocket_library::LauncherConfig>,
     refresh_colors_gps: bool,
     gps_notice_tx: Option<Sender<(f64, f64)>>,
@@ -918,6 +921,10 @@ impl RunHook {
                         }
 
                         Ok(InputCommand::RefreshColorsGps) => self.refresh_colors_gps = true,
+                        Ok(InputCommand::RecordAudio(recording)) => {
+                            self.recording_audio = recording;
+                            self.recording_audio_pending = true;
+                        }
                         Ok(InputCommand::Stop) => stop_requested = true,
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
@@ -937,6 +944,8 @@ impl RunHook {
 
     fn child_hook(&self) -> Self {
         let mut hook = Self::new(self.frame_tx.clone(), None);
+        hook.recording_audio = self.recording_audio.clone();
+        hook.recording_audio_pending = true;
         hook.input_rx = self.input_rx.clone();
         hook.stop_all = self.stop_all.clone();
         hook.foreground = self.foreground.clone();
@@ -981,6 +990,8 @@ impl RunHook {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
+            recording_audio: None,
+            recording_audio_pending: false,
             colors_random_gps: None,
             refresh_colors_gps: false,
             gps_notice_tx: None,
@@ -1012,6 +1023,9 @@ impl FrameHook for RunHook {
         } else {
             self.stop_all.load(Ordering::Acquire)
         };
+        if std::mem::take(&mut self.recording_audio_pending) {
+            state.audio.record_output(self.recording_audio.clone());
+        }
         if std::mem::take(&mut self.refresh_colors_gps) && !stop_requested {
             if let Some(config) = self.colors_random_gps.as_ref() {
                 if let Some(position) = config.simulated_gps_position() {

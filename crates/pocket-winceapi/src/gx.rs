@@ -592,6 +592,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn held_framebuffer_publishes_on_main_yield_without_releasing_access() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &t,
+            kernel: &mut kernel,
+        };
+        gx_open_display(&mut ctx).unwrap();
+        gx_begin_draw(&mut ctx).unwrap();
+        ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
+        let before = ctx.kernel.framebuffer.pixels.clone();
+        ctx.kernel.current_thread = 1;
+        publish_held_framebuffer(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.pixels, before);
+        ctx.kernel.current_thread = 0;
+        publish_held_framebuffer(&mut ctx).unwrap();
+        assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
+        assert!(ctx.kernel.gx_draw_active);
+        ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x00, 0x07]).unwrap();
+        publish_held_framebuffer(&mut ctx).unwrap();
+        assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x00, 0x07]);
+        assert!(ctx.kernel.gx_draw_active);
+    }
+
+    #[test]
     fn end_draw_copies_guest_pixels_to_host_framebuffer() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
