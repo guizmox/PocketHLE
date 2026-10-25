@@ -13149,6 +13149,18 @@ fn synthetic_paint_target(k: &KernelState) -> u32 {
     }
 }
 
+/// A direct display owner renders its own frames. Idle polling must not
+/// invent an invalidation that erases its independent animation. Explicit
+/// InvalidateRect/UpdateWindow/posted paints keep their normal queue path.
+fn idle_paint_target(k: &KernelState) -> u32 {
+    let target = synthetic_paint_target(k);
+    if k.fb_mapped && k.controls.direct_surface_hwnd == target {
+        0
+    } else {
+        target
+    }
+}
+
 fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     let now = monotonic_ms();
     let timer_next = ctx
@@ -13172,10 +13184,11 @@ fn synthetic_message_for(ctx: &mut CallCtx<'_>) -> (u32, u32, u32, u32) {
     if let Some(triple) = synthetic_message_if_due(ctx) {
         return triple;
     }
-    // Nothing was due even after the wait (clock granularity) — fall
-    // back to a paint so a blocking `GetMessageW` never stalls.
+    // Keep the cooperative pump moving without inventing a window paint
+    // for a direct display owner. A thread WM_NULL has no window procedure.
     ctx.kernel.synthetic_paint_next_ms = monotonic_ms().saturating_add(SYNTHETIC_PAINT_INTERVAL_MS);
-    (synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0)
+    let target = idle_paint_target(ctx.kernel);
+    (target, if target == 0 { 0 } else { WM_PAINT }, 0, 0)
 }
 
 /// How long a key must be held before the guest starts seeing repeats,
@@ -13314,7 +13327,8 @@ fn legacy_paint_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
             SYNTHETIC_PAINT_INTERVAL_MS,
             now,
         );
-        return Some((synthetic_paint_target(ctx.kernel), WM_PAINT, 0, 0));
+        let target = idle_paint_target(ctx.kernel);
+        return (target != 0).then_some((target, WM_PAINT, 0, 0));
     }
     None
 }

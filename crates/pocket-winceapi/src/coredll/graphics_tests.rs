@@ -3635,3 +3635,34 @@ fn indirect_rect_region_reads_signed_rect_and_supports_gdi_lifecycle() {
     }
     assert_eq!(ctx.kernel.gdi.regions.len(), count);
 }
+
+#[test]
+fn direct_display_idle_does_not_invalidate_but_explicit_paints_are_delivered() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let hwnd = FAKE_HWND;
+    kernel.active_window = hwnd;
+    kernel.window_procs.insert(hwnd, 0x2300);
+    kernel.window_visibility.insert(hwnd, true);
+    kernel.fb_mapped = true;
+    kernel.controls.direct_surface_hwnd = hwnd;
+    kernel.synthetic_paint_next_ms = 0;
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(synthetic_paint_target(ctx.kernel), hwnd);
+    assert_eq!(idle_paint_target(ctx.kernel), 0);
+    assert_eq!(legacy_paint_if_due(&mut ctx), None);
+    // This exercises the blocking GetMessage fallback too: never manufacture
+    // WM_PAINT after finding no timer or legacy paint due.
+    assert_eq!(synthetic_message_for(&mut ctx), (0, 0, 0, 0));
+    queue_window_paint(ctx.kernel, hwnd);
+    assert_eq!(take_posted_message(&mut ctx), Some((hwnd, WM_PAINT, 0, 0)));
+    // Ending direct ownership retains the existing legacy fallback.
+    ctx.kernel.controls.direct_surface_hwnd = 0;
+    ctx.kernel.synthetic_paint_next_ms = 0;
+    assert_eq!(legacy_paint_if_due(&mut ctx), Some((hwnd, WM_PAINT, 0, 0)));
+}
