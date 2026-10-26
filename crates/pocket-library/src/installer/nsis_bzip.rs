@@ -87,7 +87,7 @@ pub(super) fn extract(
 #[cfg(test)]
 mod tests {
     use super::*;
-    const SAMPLE: &[u8] = include_bytes!("../../tests/data/nsis1-bzip-synthetic.exe");
+    const SAMPLE: &[u8] = include_bytes!("../../tests/data/nsis1-bzip-synthetic.bin");
     #[test]
     fn legacy_solid_bzip_recovers_cab_and_checks_crc_and_budget() {
         let mut budget = 65536;

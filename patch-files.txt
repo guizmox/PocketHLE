@@ -1,11 +1,2 @@
-Cargo.lock
-frontends/pocket-desktop/Cargo.toml
-frontends/pocket-desktop/src/app.rs
-frontends/pocket-desktop/src/deck_navigation.rs
-frontends/pocket-desktop/src/desktop_main.rs
-frontends/pocket-desktop/src/native_share.rs
-frontends/pocket-desktop/src/recordings_gallery.rs
-crates/pocket-winceapi/src/recording_encoder.rs
-docs/STEAMDECK.md
-frontends/pocket-desktop/src/fullscreen_layout.rs
-frontends/pocket-desktop/src/controller_ui.rs
+crates/pocket-library/src/installer/nsis_bzip.rs
+crates/pocket-library/tests/data/nsis1-bzip-synthetic.bin
