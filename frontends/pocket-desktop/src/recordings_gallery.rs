@@ -138,13 +138,17 @@ fn open_capture(path: &Path) -> Result<(), String> {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
-        fn GetProcAddress(module: *mut std::ffi::c_void, name: *const u8) -> *mut std::ffi::c_void;
+        fn GetProcAddress(
+            module: *mut std::ffi::c_void,
+            name: *const std::ffi::c_char,
+        ) -> *mut std::ffi::c_void;
         fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     }
     let ntdll: Vec<u16> = "ntdll.dll".encode_utf16().chain(Some(0)).collect();
     let wine = unsafe {
         let module = GetModuleHandleW(ntdll.as_ptr());
-        !module.is_null() && !GetProcAddress(module, b"wine_get_version\0".as_ptr()).is_null()
+        !module.is_null()
+            && !GetProcAddress(module, b"wine_get_version\0".as_ptr().cast()).is_null()
     };
     if wine {
         // Deck builds run under Proton. Its Windows file associations need
