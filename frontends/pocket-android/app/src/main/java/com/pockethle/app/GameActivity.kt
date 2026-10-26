@@ -152,6 +152,8 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
+    private lateinit var controllerFullscreenHost: ControllerFullscreenHost
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val config = readLauncherConfig()
@@ -165,6 +167,11 @@ class GameActivity : AppCompatActivity() {
         gizmondoGame = gameId.isNotEmpty() && NativeBridge.isGizmondoGame(gameRoot,gameId)
         requestedOrientation = if (gizmondoGame) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         setContentView(if (gizmondoGame) R.layout.activity_game else R.layout.activity_game_pocketpc)
+        val content=findViewById<android.view.ViewGroup>(android.R.id.content)
+        val original=content.getChildAt(0)
+        content.removeView(original)
+        controllerFullscreenHost=ControllerFullscreenHost(this,original) { setControllerFullscreen(false) }
+        content.addView(controllerFullscreenHost)
         gameControls = findViewById(R.id.game_controls)
         gameControls.alpha = controlsOpacity
         if (gizmondoGame) {
@@ -175,11 +182,6 @@ class GameActivity : AppCompatActivity() {
             pocketPcFullscreenMode=config.fullscreenMode
             val toolbar=findViewById<androidx.appcompat.widget.Toolbar>(R.id.toolbar)
             setSupportActionBar(toolbar)
-            findViewById<View>(R.id.btn_fullscreen).setOnClickListener {
-                releaseHeldInput()
-                pocketPcFullscreen=!pocketPcFullscreen
-                updatePocketPcLayout()
-            }
             updatePocketPcLayout()
         }
 
@@ -188,6 +190,7 @@ class GameActivity : AppCompatActivity() {
 
         surface = findViewById(R.id.surface)
         glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, displayScale, showFps, !gizmondoGame)
+        findViewById<View>(R.id.btn_fullscreen).setOnClickListener { setControllerFullscreen(true) }
         surface.setEGLContextClientVersion(3)
         surface.setRenderer(glRenderer)
         surface.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
@@ -252,6 +255,10 @@ class GameActivity : AppCompatActivity() {
         BatteryHost.initialize(this)
         DeviceStatusHost.initialize(this)
         VibrationHost.initialize(this)
+        if (!gizmondoGame && pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") {
+            controllerFullscreenHost.setDisplaySize(240,320)
+            setControllerFullscreen(true)
+        }
         val permissions = (if (config.bluetoothEnabled) BluetoothHost.permissions().toList() else emptyList()) +
             (if (config.cameraEnabled) CameraHost.permissions().toList() else emptyList()) +
             (if (config.gpsEnabled && !fixedGps) GpsHost.permissions().toList() else emptyList()) +
@@ -361,6 +368,7 @@ class GameActivity : AppCompatActivity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (joiningSession) return
+        if (controllerFullscreenHost.active) { setControllerFullscreen(false); return }
         if (!gizmondoGame && pocketPcFullscreen) {
             releaseHeldInput()
             pocketPcFullscreen=false
@@ -581,8 +589,6 @@ class GameActivity : AppCompatActivity() {
         if (gizmondoGame) return
         findViewById<View>(R.id.toolbar).visibility=View.GONE
         gameControls.visibility=if (pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") View.GONE else View.VISIBLE
-        findViewById<android.widget.ImageButton>(R.id.btn_fullscreen)
-            .setImageResource(if (pocketPcFullscreen) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
         // Both PPC layouts are immersive game screens. The fullscreen preference
         // only changes the controls policy; it must not reserve a status bar.
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)
@@ -590,7 +596,24 @@ class GameActivity : AppCompatActivity() {
         findViewById<View>(R.id.game_root).requestLayout()
     }
 
+    private fun setControllerFullscreen(enabled: Boolean) {
+        releaseHeldInput()
+        glRenderer.controllerFullscreen=enabled
+        if(enabled) {
+            val display=findViewById<View>(if(gizmondoGame) R.id.game_area else R.id.content_column)
+            controllerFullscreenHost.enter(display)
+        } else {
+            controllerFullscreenHost.leave()
+            pocketPcFullscreen=false
+            if(!gizmondoGame) updatePocketPcLayout()
+        }
+        hideSystemBars()
+        lastFrame?.let { frame -> updatePocketPcDisplayGeometry(frame);glRenderer.submit(frame);surface.requestRender() }
+    }
+
     private fun updatePocketPcDisplayGeometry(frame: FrameSnapshot) {
+        val swapped=rotationDegrees==90 || rotationDegrees==270
+        controllerFullscreenHost.setDisplaySize(if(swapped) frame.height else frame.width,if(swapped) frame.width else frame.height)
         if (gizmondoGame) return
         val quarter = rotationDegrees == 90 || rotationDegrees == 270
         val width = if (quarter) frame.height else frame.width
@@ -1003,7 +1026,7 @@ class GameActivity : AppCompatActivity() {
         frame: FrameSnapshot,
         pointerIndex: Int = 0,
     ): Pair<Int, Int>? {
-        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame)
+        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame,controllerFullscreenHost.active)
     }
 
     data class FrameSnapshot(

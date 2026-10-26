@@ -3847,6 +3847,13 @@ impl PocketLauncher {
                         self.deck_library_actions.push(control);
                         continue;
                     }
+                    if self.screen == Screen::Library
+                        && self.library_tab == crate::deck_navigation::LibraryTab::Recordings
+                        && matches!(control.as_str(), "East" | "RightThumb")
+                    {
+                        self.deck_library_actions.push(control.clone());
+                        continue;
+                    }
                     if self.screen != Screen::Run {
                         if self.controller_ui.keyboard_open() {
                             self.controller_ui.press(&control);

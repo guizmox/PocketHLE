@@ -21,4 +21,5 @@
 <item name="btn_ppc_app3" type="id"/>
 <item name="btn_ppc_app4" type="id"/>
 <item name="btn_rotate_game" type="id"/>
+<item name="btn_fullscreen" type="id"/>
 </resources>

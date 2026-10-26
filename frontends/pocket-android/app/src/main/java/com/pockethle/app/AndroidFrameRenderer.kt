@@ -21,6 +21,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
     private val app = context.applicationContext
     @Volatile private var pending: GameActivity.FrameSnapshot? = null
     @Volatile private var turn = 0
+    @Volatile var controllerFullscreen = false
     @Volatile private var capture = false
     private var uploaded: GameActivity.FrameSnapshot? = null
     private var texture = 0
@@ -74,7 +75,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
             val quarter = turn == 90 || turn == 270
             val w = if (quarter) frame.height else frame.width
             val h = if (quarter) frame.width else frame.height
-            val rect = if(pocketPc) pocketPcDisplayRect(viewW,viewH,w,h,scale) else displayRect(viewW,viewH,w,h,scale)
+            val rect = if(controllerFullscreen) aspectDisplayRect(viewW,viewH,w,h) else if(pocketPc) pocketPcDisplayRect(viewW,viewH,w,h,scale) else displayRect(viewW,viewH,w,h,scale)
             val drawnW=rect.width;val drawnH=rect.height
             val x=rect.left;val y=viewH-rect.top-drawnH
             glViewport(x,y,drawnW,drawnH);glUseProgram(program)

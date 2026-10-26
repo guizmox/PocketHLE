@@ -1,2 +1,16 @@
+frontends/pocket-desktop/src/controller_ui.rs
+frontends/pocket-desktop/src/recordings_gallery.rs
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/ControllerFullscreenGeometry.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/ControllerFullscreenHost.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/AndroidFrameRenderer.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/DisplayGeometry.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/PocketPcControls.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/PocketPcGeometry.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GizmondoControls.kt
+frontends/pocket-android/app/src/main/res/layout/activity_game_pocketpc.xml
+frontends/pocket-android/app/src/main/res/values/controls_ids.xml
 crates/pocket-library/src/installer/nsis_bzip.rs
 crates/pocket-library/tests/data/nsis1-bzip-synthetic.bin
+frontends/pocket-android/app/src/test/java/com/pockethle/app/ControllerFullscreenGeometryTest.kt

@@ -15,6 +15,7 @@ struct Widgets {
     committed: HashMap<Id, String>,
     popup: Option<Popup>,
     collecting: Option<Vec<(Id, bool)>>,
+    keep_popup: bool,
 }
 #[derive(Clone)]
 struct Popup {
@@ -320,8 +321,16 @@ impl ComboBox {
     ) -> egui::InnerResponse<Option<R>> {
         let ctx = ui.ctx().clone();
         let old = widgets(&ctx).popup;
-        edit_widgets(&ctx, |w| w.collecting = Some(Vec::new()));
+        edit_widgets(&ctx, |w| {
+            w.collecting = Some(Vec::new());
+            w.keep_popup = false;
+        });
         let response = self.0.show_ui(ui, contents);
+        // egui 0.27 closes a popup for any mouse click away from its trigger,
+        // including a click on an expandable header inside that popup.
+        if widgets(&ctx).keep_popup {
+            ctx.memory_mut(|m| m.open_popup(response.response.id.with("popup")));
+        }
         let entries = widgets(&ctx).collecting.unwrap_or_default();
         edit_widgets(&ctx, |w| w.collecting = None);
         if response.inner.is_some() && ctx.memory(|m| m.any_popup_open()) {
@@ -589,6 +598,9 @@ pub fn menu_button<R>(
     if widgets(ui.ctx()).collecting.is_some() {
         let index = widgets(ui.ctx()).collecting.as_ref().map_or(0, Vec::len);
         let response = egui::CollapsingHeader::new(title).show(ui, contents);
+        if response.header_response.clicked() {
+            edit_widgets(ui.ctx(), |w| w.keep_popup = true);
+        }
         if response.header_response.enabled() {
             edit_widgets(ui.ctx(), |w| {
                 if let Some(entries) = &mut w.collecting {
@@ -646,4 +658,76 @@ pub fn hyperlink_to(ui: &mut Ui, text: impl Into<WidgetText>, url: impl ToString
     let r = ui.hyperlink_to(text, url);
     register(ui, &r, true);
     r
+}
+
+#[cfg(test)]
+mod mouse_menu_regression {
+    use super::*;
+    #[test]
+    fn clicking_a_nested_header_keeps_its_parent_open() {
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        let mut owner = Id::NULL;
+        let mut draw = |raw: egui::RawInput| {
+            let mut expanded = false;
+            let _ = ctx.run(raw, |ctx| {
+                begin_frame(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    owner = menu_button(ui, "Settings", |ui| {
+                        menu_button(ui, "Filters", |ui| {
+                            expanded = true;
+                            ui.label("Nearest");
+                        });
+                    })
+                    .response
+                    .id;
+                });
+            });
+            expanded
+        };
+        let raw = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        draw(raw());
+        ctx.memory_mut(|m| m.request_focus(owner));
+        let mut input = raw();
+        nav.press("South");
+        nav.prepare_input(&ctx, &mut input, true);
+        let render = |input| {
+            let mut expanded = false;
+            let _ = ctx.run(input, |ctx| {
+                begin_frame(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    menu_button(ui, "Settings", |ui| {
+                        menu_button(ui, "Filters", |ui| {
+                            expanded = true;
+                            ui.label("Nearest");
+                        });
+                    });
+                });
+            });
+            expanded
+        };
+        render(input);
+        render(raw());
+        let header = widgets(&ctx).popup.unwrap().items[0];
+        let point = ctx.read_response(header).unwrap().rect.center();
+        for pressed in [true, false] {
+            let mut input = raw();
+            input.events.push(Event::PointerMoved(point));
+            input.events.push(Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+            render(input);
+        }
+        assert!(ctx.memory(|m| m.any_popup_open()));
+        assert!(render(raw()));
+    }
 }

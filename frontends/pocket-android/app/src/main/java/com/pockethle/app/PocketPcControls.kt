@@ -15,7 +15,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
     private val keys=linkedMapOf<Int,Button>()
     private val actions=listOf(R.id.btn_a,R.id.btn_ppc_app2,R.id.btn_action,R.id.btn_ppc_app1,
         R.id.btn_ppc_app4,R.id.btn_c,R.id.btn_ppc_app3,R.id.btn_b)
-    private val auxiliary=listOf(R.id.btn_soft1,R.id.btn_soft2,R.id.btn_turbo,R.id.btn_stop_emulation,R.id.btn_rotate_game)
+    private val auxiliary=listOf(R.id.btn_soft1,R.id.btn_soft2,R.id.btn_turbo,R.id.btn_stop_emulation,R.id.btn_fullscreen,R.id.btn_rotate_game)
     internal var geometry=PocketPcGeometry.calculate(1,1,dp)
     init {
         layoutDirection=View.LAYOUT_DIRECTION_LTR
@@ -30,7 +30,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
             keys[id]=b;addView(b)
         }
         actions.zip(listOf("A","P2","Action","P1","P4","C","P3","B")).forEach { (id,label)->button(id,label) }
-        auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
+        auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","Full","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
         keys.getValue(R.id.btn_rotate_game).contentDescription="Rotate game screen"
         keys.getValue(R.id.btn_rotate_game).textSize=24f
         addView(dpad);addView(aim)

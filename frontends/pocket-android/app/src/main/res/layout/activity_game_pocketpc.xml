@@ -23,17 +23,7 @@
             android:background="?attr/colorPrimary"
             app:popupTheme="@style/ThemeOverlay.AppCompat.Light">
 
-            <ImageButton
-                android:id="@+id/btn_fullscreen"
-                android:layout_marginEnd="160dp"
-                android:layout_width="48dp"
-                android:layout_height="match_parent"
-                android:layout_gravity="end|center_vertical"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="@string/toggle_fullscreen"
-                android:padding="12dp"
-                android:src="@drawable/ic_fullscreen"
-                android:tint="#FFFFFFFF" />
+
         </androidx.appcompat.widget.Toolbar>
 
         <FrameLayout

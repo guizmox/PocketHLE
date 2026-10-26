@@ -34,6 +34,8 @@ pub struct Gallery {
     columns: usize,
     scroll: bool,
     error: Option<String>,
+    delete: Option<PathBuf>,
+    delete_confirm: bool,
 }
 fn poll_worker<T>(worker: &Option<mpsc::Receiver<Result<T, String>>>) -> Option<Result<T, String>> {
     match worker.as_ref()?.try_recv() {
@@ -200,7 +202,73 @@ impl Gallery {
             ctx.request_repaint();
         });
     }
-    pub fn show(&mut self, ui: &mut egui::Ui, root: &Path, actions: Vec<String>) {
+    fn delete_capture(&mut self) {
+        let Some(path) = self.delete.take() else {
+            return;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                self.entries.retain(|e| e.asset.key.path != path);
+                self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+                self.pending = None;
+                self.refreshed = None;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Could not delete capture: {error}")),
+        }
+    }
+    fn show_delete_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.delete.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Delete capture?")
+            .id(egui::Id::new("delete_capture_confirmation"))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                ui.label("Permanently delete this file?");
+                ui.horizontal(|ui| {
+                    cancel = ui
+                        .selectable_label(!self.delete_confirm, "Cancel")
+                        .clicked();
+                    confirm = ui.selectable_label(self.delete_confirm, "Delete").clicked();
+                });
+            });
+        if confirm {
+            self.delete_capture();
+        } else if cancel || !open {
+            self.delete = None;
+        }
+    }
+    pub fn show(&mut self, ui: &mut egui::Ui, root: &Path, mut actions: Vec<String>) {
+        if self.delete.is_some() {
+            for action in std::mem::take(&mut actions) {
+                match action.as_str() {
+                    "East" => self.delete = None,
+                    "DPadLeft" | "DPadRight" | "LeftStickLeft" | "LeftStickRight" => {
+                        self.delete_confirm = !self.delete_confirm
+                    }
+                    "South" => {
+                        if self.delete_confirm {
+                            self.delete_capture();
+                        } else {
+                            self.delete = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.show_delete_confirmation(ui.ctx());
+        if self.delete.is_some() {
+            ui.set_enabled(false);
+        }
         if let Some(result) = poll_worker(&self.pending) {
             self.pending = None;
             match result {
@@ -271,10 +339,16 @@ impl Gallery {
         }
         let mut open = None;
         let mut share = None;
+        let mut delete = None;
         let native_sharing = self.share.available();
         for action in actions {
             if action == "South" {
                 open = self
+                    .entries
+                    .get(self.selected)
+                    .map(|e| e.asset.key.path.clone());
+            } else if action == "RightThumb" {
+                delete = self
                     .entries
                     .get(self.selected)
                     .map(|e| e.asset.key.path.clone());
@@ -374,6 +448,9 @@ impl Gallery {
                                 if native_sharing && ui.small_button("Share").clicked() {
                                     share = Some(entry.asset.key.path.clone());
                                 }
+                                if ui.small_button("Delete").clicked() {
+                                    delete = Some(entry.asset.key.path.clone());
+                                }
                             });
                             let response = response.on_hover_text(
                                 entry
@@ -392,7 +469,11 @@ impl Gallery {
                         }
                     });
             });
-        if let Some(path) = share {
+        if let Some(path) = delete {
+            self.delete = Some(path);
+            self.delete_confirm = false;
+            ui.ctx().request_repaint();
+        } else if let Some(path) = share {
             if let Err(error) = self.share.share(&path) {
                 self.error = Some(error);
             }
@@ -445,6 +526,26 @@ mod tests {
         assert!(cached
             .iter()
             .all(|a| a.image.is_none() && a.error.is_none()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn deleting_a_capture_preserves_other_files_and_clears_cached_selection() {
+        let root = std::env::temp_dir().join(format!("pockethle-delete-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("capture.mp4");
+        let other = root.join("other.png");
+        std::fs::write(&capture, b"capture").unwrap();
+        std::fs::write(&other, b"keep").unwrap();
+        let mut gallery = Gallery {
+            delete: Some(capture.clone()),
+            ..Default::default()
+        };
+        assert!(capture.exists());
+        assert!(!gallery.delete_confirm);
+        gallery.delete_capture();
+        assert!(!capture.exists());
+        assert_eq!(std::fs::read(&other).unwrap(), b"keep");
+        assert!(gallery.delete.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

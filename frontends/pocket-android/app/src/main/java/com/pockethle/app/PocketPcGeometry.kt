@@ -11,7 +11,7 @@ internal data class PocketPcGeometry(
 ) {
     companion object {
         // Action order: A, P2, Action, P1, P4, C, P3, B.
-        // Auxiliary order: Tab, Esc, Turbo, Exit, Rotate.
+        // Auxiliary order: Tab, Esc, Turbo, Exit, Fullscreen, Rotate.
         fun calculate(width: Int, height: Int, density: Float): PocketPcGeometry {
             val w=width.coerceAtLeast(1); val h=height.coerceAtLeast(1)
             fun dp(n: Float)=(n*density).toInt().coerceAtLeast(1)
@@ -28,9 +28,9 @@ internal data class PocketPcGeometry(
                 val left=side+2*gap; val room=(w-2*left).coerceAtLeast(1)
                 val toolbarH=minOf(dp(32f),h/9).coerceAtLeast(1)
                 // Wider guest keys, with a distinct gap before the orange host actions.
-                val bw=minOf(dp(64f),((room-5*gap)/5).coerceAtLeast(1))
+                val bw=minOf(dp(64f),((room-6*gap)/6).coerceAtLeast(1))
                 val aux=(0..2).map { ControlRect(left+it*(bw+gap),gap,bw,toolbarH) } +
-                    listOf(ControlRect(w-left-2*bw-gap,gap,bw,toolbarH),ControlRect(w-left-bw,gap,bw,toolbarH))
+                    listOf(ControlRect(w-left-3*bw-2*gap,gap,bw,toolbarH),ControlRect(w-left-2*bw-gap,gap,bw,toolbarH),ControlRect(w-left-bw,gap,bw,toolbarH))
                 return PocketPcGeometry(ControlRect(left,toolbarH+2*gap,room,(h-toolbarH-3*gap).coerceAtLeast(1)),
                     bank(gap)+bank(w-side-gap),aux,ControlRect(gap,padY,pad,pad),ControlRect(w-gap-pad,padY,pad,pad))
             }
@@ -46,9 +46,9 @@ internal data class PocketPcGeometry(
             // Portrait tools stay above the display; separate host actions
             // from the three guest keys by at least three ordinary gaps.
             val toolbarH=rowH
-            val bw=minOf(dp(64f),((w-8*gap)/5).coerceAtLeast(1))
+            val bw=minOf(dp(64f),((w-9*gap)/6).coerceAtLeast(1))
             val aux=(0..2).map { ControlRect(gap+it*(bw+gap),gap,bw,toolbarH) } +
-                listOf(ControlRect(w-2*gap-2*bw,gap,bw,toolbarH),ControlRect(w-gap-bw,gap,bw,toolbarH))
+                listOf(ControlRect(w-3*gap-3*bw,gap,bw,toolbarH),ControlRect(w-2*gap-2*bw,gap,bw,toolbarH),ControlRect(w-gap-bw,gap,bw,toolbarH))
             val screenY=toolbarH+2*gap
             return PocketPcGeometry(ControlRect(0,screenY,w,(actionY-gap-screenY).coerceAtLeast(1)),actions,aux,
                 ControlRect(gap,h-gap-pad,pad,pad),ControlRect(w-gap-pad,h-gap-pad,pad,pad))

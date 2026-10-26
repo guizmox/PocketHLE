@@ -42,6 +42,7 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             }
             keys[id] = icon; addView(icon)
         }
+        button(R.id.btn_fullscreen, "Full").apply { (this as Button).textSize=13f; background=controlStyle.backgroundShape(emulatorAction=true) }
         button(R.id.btn_stop_emulation, "Exit").apply {
             (this as Button).textSize = 13f
             background = controlStyle.backgroundShape(emulatorAction = true)
@@ -60,10 +61,10 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY))
         keys.forEach { (id,v) ->
             val shoulder = id == R.id.btn_soft1 || id == R.id.btn_soft2
-            val toolbarScale = ((w / dp - 296f) / 344f).coerceIn(0.1f, 1f)
+            val toolbarScale = ((w / dp - 296f) / 416f).coerceIn(0.1f, 1f)
             val function = id in listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3,
-                R.id.btn_piano4, R.id.btn_piano5, R.id.btn_stop_emulation)
-            val bw = if (shoulder) 124f else if (id == R.id.btn_stop_emulation) 64f else 44f
+                R.id.btn_piano4, R.id.btn_piano5, R.id.btn_stop_emulation, R.id.btn_fullscreen)
+            val bw = if (shoulder) 124f else if (id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen) 64f else 44f
             val bh = if (shoulder) 132f else 44f
             val scale = if (function) toolbarScale else 1f
             v.measure(MeasureSpec.makeMeasureSpec((bw*dp*scale).toInt(),MeasureSpec.EXACTLY),
@@ -84,13 +85,14 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         dpad.layout(padLeft, padTop, padLeft + dpad.measuredWidth, padTop + dpad.measuredHeight)
         // Centre the complete toolbar, so the hardware group itself shifts left.
         // Exit has a 28dp gap after Power instead of the hardware buttons' 8dp gaps.
-        val toolbarScale = ((width / dp - 296f) / 344f).coerceIn(0.1f, 1f)
+        val toolbarScale = ((width / dp - 296f) / 416f).coerceIn(0.1f, 1f)
         val unit = dp * toolbarScale
-        val start = (width - 344 * unit) / 2f
+        val start = (width - 416 * unit) / 2f
         val topCenter = 8 * dp + 22 * unit
         listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5)
             .forEachIndexed { i,id -> place(id, start + (22 + i * 52) * unit, topCenter) }
         place(R.id.btn_stop_emulation, start + 312 * unit, topCenter)
+        place(R.id.btn_fullscreen, start + 384 * unit, topCenter)
     }
 }
 
