@@ -12638,9 +12638,9 @@ fn get_async_key_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     if vk >= 256 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    // CE leaves the low bit unspecified. Supply the conventional Win32 press
-    // history for portable callers (Chix tests it), without changing bit 15,
-    // the input queue, or GetKeyState's separate semantics.
+    // CE leaves the low bit unspecified. Capture history for legacy callers;
+    // the PocketPC profile exposes its continuous down-state below. Neither
+    // policy changes bit 15 or GetKeyState's separate semantics.
     ctx.kernel.async_keys.sync(
         &ctx.kernel.pending_input,
         ctx.kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN,
@@ -12679,7 +12679,16 @@ fn get_async_key_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
             .async_keys
             .take(usize::from(pocket_kernel::gapi::VK_RETURN));
     }
-    Ok(DispatchOutcome::ReturnedR0(held | u32::from(pressed)))
+    // PocketPC callers exist that treat CE's unspecified low bit as a
+    // current-down boolean (Chix's movement loop does so on every tick).
+    // Expose that driver-compatible state throughout the press, and drop it
+    // on release. Retain the legacy/Gizmondo one-shot press history.
+    let low = if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
+        held != 0
+    } else {
+        pressed
+    };
+    Ok(DispatchOutcome::ReturnedR0(held | u32::from(low)))
 }
 
 fn keybd_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -38307,6 +38316,49 @@ mod async_press_history_tests {
             ),
             DispatchOutcome::ReturnedR0(0)
         ));
+    }
+    #[test]
+    fn pocket_pc_polling_stays_active_until_direction_or_stylus_release() {
+        for vk in [1, 0x25, 0x26, 0x27, 0x28] {
+            let (mut cpu, mut k, mut d) = setup();
+            k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+            let down = if vk == 1 {
+                InputEvent::PointerDown { x: 10, y: 20 }
+            } else {
+                InputEvent::KeyDown { vk }
+            };
+            let up = if vk == 1 {
+                InputEvent::PointerUp { x: 10, y: 20 }
+            } else {
+                InputEvent::KeyUp { vk }
+            };
+            k.pending_input.push_back(down);
+            for _ in 0..10 {
+                assert!(matches!(
+                    call(
+                        &mut cpu,
+                        &mut k,
+                        &mut d,
+                        "coredll.dll",
+                        "GetAsyncKeyState",
+                        &[u32::from(vk)]
+                    ),
+                    DispatchOutcome::ReturnedR0(0x8001)
+                ));
+            }
+            k.pending_input.push_back(up);
+            assert!(matches!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "GetAsyncKeyState",
+                    &[u32::from(vk)]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            ));
+        }
     }
     #[test]
     fn held_key_repeat_does_not_create_new_presses() {
