@@ -216,3 +216,32 @@ mod catalogue_tests {
         }
     }
 }
+
+/// Move inside the game actions popup without moving the catalogue selection.
+pub fn menu_index(index: usize, control: &str, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    match control {
+        "DPadUp" | "LeftStickUp" => Some((index.min(count - 1) + count - 1) % count),
+        "DPadDown" | "LeftStickDown" => Some((index.min(count - 1) + 1) % count),
+        _ => None,
+    }
+}
+#[cfg(test)]
+mod game_menu_tests {
+    use super::*;
+    #[test]
+    fn popup_navigation_wraps_and_does_not_consume_activation_or_back() {
+        for up in ["DPadUp", "LeftStickUp"] {
+            assert_eq!(menu_index(0, up, 5), Some(4));
+        }
+        for down in ["DPadDown", "LeftStickDown"] {
+            assert_eq!(menu_index(4, down, 5), Some(0));
+        }
+        for other in ["South", "East", "DPadLeft", "DPadRight"] {
+            assert_eq!(menu_index(0, other, 5), None);
+        }
+        assert_eq!(menu_index(0, "DPadDown", 0), None);
+    }
+}

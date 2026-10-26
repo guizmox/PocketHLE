@@ -94,3 +94,13 @@ La compilation standard sans `steam-deck` garde ses commandes habituelles.
 L1/L2 passent à l’onglet précédent et R1/R2 au suivant, en boucle : Gizmondo / PocketPC / Recordings. Le menu à trois points de chaque jeu contient Informations. Dans Recordings, A ouvre la capture sélectionnée avec le lecteur par défaut. Share apparaît uniquement si le système fournit un panneau de partage natif ; aucune liste de destinations fixe n’est proposée.
 
 Un appui long sur Menu démarre la vidéo ; le bouton peut être relâché. Un nouvel appui long arrête la vidéo. Le témoin REC avec point rouge clignotant est visible uniquement sur l’écran local, après la capture du framebuffer.
+
+Dans le catalogue, A lance le jeu sélectionné ; Y ouvre son menu à trois points. Haut/bas au stick ou à la croix parcourent Informations, Play, Rename, Settings et Remove ; A valide. B quitte un sous-menu et revient au menu du jeu, puis B ferme ce menu.
+
+## Navigation des réglages à la manette (PC et Steam Deck)
+
+Haut/bas parcourent les champs ; gauche/droite ajustent les curseurs. A actionne le contrôle sélectionné (bouton, checkbox ou liste déroulante). Dans une liste, haut/bas parcourent les choix, A valide et B ferme sans modifier le choix. B quitte ensuite les réglages. Le focus apparaît avec un contour bleu, et les pages de réglages défilent pour le garder visible.
+
+A sur un champ de texte ouvre le clavier virtuel. Stick/croix choisissent les touches, A les saisit, Y bascule vers les symboles ; Shift change la casse. Apply valide le texte ; B annule la saisie. Les boîtes de fichiers externes restent celles du système d’exploitation.
+
+Dans Recordings : A ouvre la capture sélectionnée ; Y ouvre le partage natif lorsqu’il est disponible.

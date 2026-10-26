@@ -278,6 +278,11 @@ impl Gallery {
                     .entries
                     .get(self.selected)
                     .map(|e| e.asset.key.path.clone());
+            } else if action == "North" && native_sharing {
+                share = self
+                    .entries
+                    .get(self.selected)
+                    .map(|e| e.asset.key.path.clone());
             } else if let Some(next) = crate::deck_navigation::next_index(
                 self.selected,
                 self.entries.len(),
