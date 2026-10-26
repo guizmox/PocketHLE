@@ -1,6 +1,7 @@
 //! Desktop installer containers. Never execute host code; names are not used
 //! for format detection. Every decoded layer shares an allocation budget.
 use std::io::{Cursor, Read};
+mod inno;
 mod installshield;
 mod nsis_bzip;
 mod pocketsetup;
@@ -182,6 +183,10 @@ fn layer(
         return Ok(true);
     }
     if let Some(entries) = rar::extract(b, budget)? {
+        archive_layers(entries, depth, budget, out)?;
+        return Ok(true);
+    }
+    if let Some(entries) = inno::extract(b, budget)? {
         archive_layers(entries, depth, budget, out)?;
         return Ok(true);
     }
