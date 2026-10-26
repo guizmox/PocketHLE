@@ -489,6 +489,25 @@ pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, Guest
     bindings
 }
 
+/// Desktop launchers share the Deck layout. Upgrade only known factory
+/// maps; Android's defaults and explicitly customized maps stay untouched.
+pub fn migrate_desktop_gamepad_layout(
+    bindings: &mut std::collections::BTreeMap<String, GuestButton>,
+    fullscreen: &mut Option<String>,
+) -> bool {
+    let legacy_pc = *bindings == xbox_gamepad_bindings();
+    let mut legacy_deck = steam_deck_gamepad_bindings();
+    legacy_deck.insert("Start".into(), GuestButton::GizPiano1);
+    if !legacy_pc && *bindings != legacy_deck {
+        return false;
+    }
+    *bindings = steam_deck_gamepad_bindings();
+    if (legacy_pc && fullscreen.is_none()) || fullscreen.as_deref() == Some("LeftTrigger") {
+        *fullscreen = Some("Select".into());
+    }
+    true
+}
+
 /// PocketPC-only Steam Deck overrides. The Gizmondo branch is unchanged:
 /// it keeps using its own saved gamepad bindings and the volume shortcut.
 pub fn steam_deck_guest_button(control: &str, gizmondo: bool) -> Option<GuestButton> {
@@ -553,6 +572,31 @@ pub fn migrate_steam_deck_fullscreen(binding: &mut Option<String>) -> bool {
 #[cfg(test)]
 mod controller_tests {
     use super::*;
+    #[test]
+    fn desktop_factory_layout_migrates_and_keeps_explicit_customizations() {
+        let mut pc = xbox_gamepad_bindings();
+        let mut fullscreen = None;
+        assert!(migrate_desktop_gamepad_layout(&mut pc, &mut fullscreen));
+        assert_eq!(pc, steam_deck_gamepad_bindings());
+        assert_eq!(fullscreen.as_deref(), Some("Select"));
+        assert!(!migrate_desktop_gamepad_layout(&mut pc, &mut fullscreen));
+        fullscreen = None; // explicit disable after migration must remain disabled
+        assert!(!migrate_desktop_gamepad_layout(&mut pc, &mut fullscreen));
+        assert_eq!(fullscreen, None);
+        let mut custom = xbox_gamepad_bindings();
+        custom.insert("Start".into(), GuestButton::ButtonA);
+        let saved = custom.clone();
+        fullscreen = Some("West".into());
+        assert!(!migrate_desktop_gamepad_layout(&mut custom, &mut fullscreen));
+        assert_eq!(custom, saved);
+        assert_eq!(fullscreen.as_deref(), Some("West"));
+        let mut old_deck = steam_deck_gamepad_bindings();
+        old_deck.insert("Start".into(), GuestButton::GizPiano1);
+        fullscreen = Some("LeftTrigger".into());
+        assert!(migrate_desktop_gamepad_layout(&mut old_deck, &mut fullscreen));
+        assert_eq!(old_deck, steam_deck_gamepad_bindings());
+        assert_eq!(fullscreen.as_deref(), Some("Select"));
+    }
     #[test]
     fn legacy_fullscreen_moves_to_view_without_changing_custom_shortcuts() {
         let mut legacy = Some("LeftTrigger".to_owned());

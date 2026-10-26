@@ -622,7 +622,19 @@ impl FrameStats {
 }
 
 impl PocketLauncher {
-    pub fn new(cc: &eframe::CreationContext<'_>, library: Library) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mut library: Library) -> Self {
+        let migrated = {
+            let config = library.config_mut();
+            pocket_library::keybindings::migrate_desktop_gamepad_layout(
+                &mut config.gamepad_bindings,
+                &mut config.gamepad_fullscreen,
+            )
+        };
+        if migrated {
+            if let Err(error) = library.save() {
+                log::warn!("Could not save controller layout migration: {error}");
+            }
+        }
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(23, 25, 30);
         visuals.window_fill = Color32::from_rgb(41, 45, 54);
@@ -2417,7 +2429,7 @@ impl PocketLauncher {
             });
 
         ui.add_space(6.0);
-        if cfg!(feature = "steam-deck") {
+        {
             ui.horizontal(|ui| {
                 ui.label("Controller fullscreen:");
                 ui.label(
@@ -2445,14 +2457,10 @@ impl PocketLauncher {
             });
             ui.label("View tap toggles fullscreen in the UI and in game. PocketPC: View hold = exit, L3 = ESC, R3 = Action. Gizmondo: View hold = brightness; L1 = volume. Both: Menu / right FN tap = filter, hold = start/stop video. L1/L2/R1/R2 cycle catalogue tabs.");
             if crate::controller_ui::button(ui, "Apply Steam Deck preset").clicked() {
-                draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
-                draft.gamepad_fullscreen =
-                    pocket_library::keybindings::default_gamepad_fullscreen();
+                draft.gamepad_bindings = pocket_library::keybindings::steam_deck_gamepad_bindings();
+                draft.gamepad_fullscreen = Some("Select".to_owned());
                 self.gamepad_capture = None;
             }
-        } else if crate::controller_ui::button(ui, "Reset controller to defaults").clicked() {
-            draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
-            self.gamepad_capture = None;
         }
         if crate::controller_ui::button(ui, "Reset keys to defaults").clicked() {
             reset_clicked = true;
@@ -3668,8 +3676,7 @@ impl PocketLauncher {
                     let key = (device, control.clone());
                     if !down {
                         self.controller_ui.release(&control);
-                        if cfg!(feature = "steam-deck")
-                            && control == "Select"
+                        if control == "Select"
                             && self
                                 .deck_view_press
                                 .as_ref()
@@ -3694,8 +3701,7 @@ impl PocketLauncher {
                                 }
                             }
                         }
-                        if cfg!(feature = "steam-deck")
-                            && control == "Start"
+                        if control == "Start"
                             && self
                                 .deck_menu_press
                                 .as_ref()
@@ -3720,8 +3726,7 @@ impl PocketLauncher {
                                 }
                             }
                         }
-                        if cfg!(feature = "steam-deck")
-                            && self.screen == Screen::Run
+                        if self.screen == Screen::Run
                             && control == "Misc1"
                         {
                             if let Some(at) = self.deck_fn_press.remove(&key) {
@@ -3741,8 +3746,7 @@ impl PocketLauncher {
                                 }
                             }
                         }
-                        if cfg!(feature = "steam-deck")
-                            && self.screen == Screen::Run
+                        if self.screen == Screen::Run
                             && control != "Misc1"
                             && !self.running_is_gizmondo
                             && pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
@@ -3834,7 +3838,7 @@ impl PocketLauncher {
                             continue;
                         }
                     }
-                    if cfg!(feature = "steam-deck") && self.colors_startup_prompt.is_some() {
+                    if self.colors_startup_prompt.is_some() {
                         self.deck_library_actions.push(control);
                         continue;
                     }
@@ -3868,20 +3872,19 @@ impl PocketLauncher {
                             continue;
                         }
                     }
-                    let deck_reserved = cfg!(feature = "steam-deck")
-                        && ((self.screen==Screen::Library && crate::deck_navigation::tab_direction(&control).is_some())
-                            || matches!(control.as_str(), "Select" | "LeftTrigger")
-                            || (self.screen == Screen::Run
-                                && (matches!(control.as_str(), "Start" | "Misc1")
-                                    || pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
-                                        &control,
-                                        self.running_is_gizmondo,
-                                    )
-                                    || pocket_library::keybindings::steam_deck_guest_button(
-                                        &control,
-                                        self.running_is_gizmondo,
-                                    )
-                                    .is_some())));
+                    let deck_reserved = (self.screen == Screen::Library
+                        && crate::deck_navigation::tab_direction(&control).is_some())
+                        || matches!(control.as_str(), "Select" | "LeftTrigger")
+                        || (self.screen == Screen::Run
+                            && (matches!(control.as_str(), "Start" | "Misc1")
+                                || pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
+                                    &control,
+                                    self.running_is_gizmondo,
+                                )
+                                || pocket_library::keybindings::steam_deck_guest_button(
+                                    &control,
+                                    self.running_is_gizmondo,
+                                ).is_some()));
                     if self.screen == Screen::Run
                         && !deck_reserved
                         && self.library.config().gamepad_toggles_fullscreen(&control)
@@ -3890,7 +3893,7 @@ impl PocketLauncher {
                         self.set_fullscreen(ctx, !fullscreen);
                         continue;
                     }
-                    if cfg!(feature = "steam-deck") || self.screen != Screen::Run {
+                    {
                         if self.colors_startup_prompt.is_some() {
                             self.deck_library_actions.push(control);
                             continue;
@@ -3917,7 +3920,6 @@ impl PocketLauncher {
                             continue;
                         }
                         if control == "Select"
-                            && (cfg!(feature = "steam-deck") || self.screen == Screen::Run)
                         {
                             self.deck_view_press = Some((device, Instant::now()));
                             continue;
@@ -4015,14 +4017,10 @@ impl PocketLauncher {
                     if self.screen != Screen::Run {
                         continue;
                     }
-                    let deck_button = if cfg!(feature = "steam-deck") {
-                        pocket_library::keybindings::steam_deck_guest_button(
-                            &control,
-                            self.running_is_gizmondo,
-                        )
-                    } else {
-                        None
-                    };
+                    let deck_button = pocket_library::keybindings::steam_deck_guest_button(
+                        &control,
+                        self.running_is_gizmondo,
+                    );
                     if deck_button.is_none()
                         && !self.running_is_gizmondo
                         && self.library.config().stylus_stick.enabled
@@ -4387,7 +4385,7 @@ impl PocketLauncher {
         if self.library_busy {
             self.deck_library_actions.clear();
         }
-        if cfg!(feature = "steam-deck") && !self.library_busy {
+        if !self.library_busy {
             for control in std::mem::take(&mut self.deck_library_actions) {
                 match control.as_str() {
                     "South" => {
@@ -4690,7 +4688,7 @@ impl eframe::App for PocketLauncher {
                 self.release_gamepad_control(&(device, "DeckHostPulse".into()));
             }
         }
-        if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
+        if self.screen == Screen::Run {
             if let Some((device, pressed_at)) = self.deck_view_press {
                 if !self.running_is_gizmondo {
                     // In PocketPC, View/FN long-hold has the same EXIT timing as
@@ -4917,7 +4915,7 @@ impl eframe::App for PocketLauncher {
         if self.screen == Screen::Library {
             self.ui_game_information(ctx);
         }
-        if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
+        if self.screen == Screen::Run {
             if let Some((label, expires)) = self.deck_filter_notice.clone() {
                 if Instant::now() < expires {
                     egui::Area::new(egui::Id::new("deck_filter_notice"))

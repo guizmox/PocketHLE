@@ -1,1 +1,2 @@
-crates/pocket-winceapi/src/imgdecmp.rs
+crates/pocket-library/src/keybindings.rs
+frontends/pocket-desktop/src/app.rs
