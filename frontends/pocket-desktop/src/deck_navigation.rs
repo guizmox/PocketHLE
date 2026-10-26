@@ -1,4 +1,41 @@
 //! Grid navigation for the Steam Deck catalogue, independent of guest inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryTab {
+    Gizmondo,
+    PocketPc,
+    Recordings,
+}
+impl LibraryTab {
+    pub fn step(self, forward: bool) -> Self {
+        use LibraryTab::*;
+        match (self, forward) {
+            (Gizmondo, true) | (Recordings, false) => PocketPc,
+            (PocketPc, true) | (Gizmondo, false) => Recordings,
+            (Recordings, true) | (PocketPc, false) => Gizmondo,
+        }
+    }
+}
+pub fn tab_direction(control: &str) -> Option<bool> {
+    match control {
+        "LeftTrigger" | "LeftTrigger2" => Some(false),
+        "RightTrigger" | "RightTrigger2" | "West" => Some(true),
+        _ => None,
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightFnAction {
+    NextFilter,
+    ToggleRecording,
+}
+pub fn right_fn_action(elapsed: std::time::Duration, released: bool) -> Option<RightFnAction> {
+    if elapsed >= std::time::Duration::from_millis(650) {
+        Some(RightFnAction::ToggleRecording)
+    } else if released {
+        Some(RightFnAction::NextFilter)
+    } else {
+        None
+    }
+}
 pub fn is_direction(control: &str) -> bool {
     matches!(
         control,
@@ -137,5 +174,45 @@ mod tests {
         }
         assert!(!is_direction("South"));
         assert!(is_direction("LeftStickDown"));
+    }
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::*;
+    #[test]
+    fn shoulders_wrap_the_three_tabs_in_both_directions() {
+        for control in ["RightTrigger", "RightTrigger2"] {
+            let dir = tab_direction(control).unwrap();
+            assert_eq!(LibraryTab::Gizmondo.step(dir), LibraryTab::PocketPc);
+            assert_eq!(LibraryTab::PocketPc.step(dir), LibraryTab::Recordings);
+            assert_eq!(LibraryTab::Recordings.step(dir), LibraryTab::Gizmondo);
+        }
+        for control in ["LeftTrigger", "LeftTrigger2"] {
+            let dir = tab_direction(control).unwrap();
+            assert_eq!(LibraryTab::Gizmondo.step(dir), LibraryTab::Recordings);
+            assert_eq!(LibraryTab::Recordings.step(dir), LibraryTab::PocketPc);
+            assert_eq!(LibraryTab::PocketPc.step(dir), LibraryTab::Gizmondo);
+        }
+        assert_eq!(tab_direction("South"), None);
+    }
+    #[test]
+    fn right_fn_records_while_left_exit_gesture_is_unchanged() {
+        use std::time::Duration;
+        assert_eq!(right_fn_action(Duration::from_millis(649), false), None);
+        assert_eq!(
+            right_fn_action(Duration::from_millis(649), true),
+            Some(RightFnAction::NextFilter)
+        );
+        for released in [false, true] {
+            assert_eq!(
+                right_fn_action(Duration::from_millis(650), released),
+                Some(RightFnAction::ToggleRecording)
+            );
+            assert_eq!(
+                menu_action(Duration::from_millis(650), released),
+                Some(MenuAction::ReturnToLibrary)
+            );
+        }
     }
 }

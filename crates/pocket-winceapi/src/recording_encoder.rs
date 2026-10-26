@@ -32,6 +32,43 @@ pub fn available() -> bool {
         false
     }
 }
+
+/// Decode a bounded, letterboxed RGB thumbnail using the linked media decoder.
+/// Call on a media worker, never on the UI or guest execution thread.
+pub fn video_thumbnail(path: &Path, width: u32, height: u32) -> io::Result<Vec<u8>> {
+    if width == 0 || height == 0 || width > 512 || height > 512 {
+        return Err(io::Error::other("Invalid thumbnail dimensions"));
+    }
+    #[cfg(feature = "video-static")]
+    {
+        let mut decoder = super::media_static::Decoder::open(path, true, width, height)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("No video stream"))?;
+        let (pixels, _) = decoder
+            .next()
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("No video frame"))?;
+        if pixels.len() != width as usize * height as usize * 2 {
+            return Err(io::Error::other("Invalid video thumbnail buffer"));
+        }
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        for pair in pixels.chunks_exact(2) {
+            let p = u16::from_le_bytes([pair[0], pair[1]]);
+            let (r, g, b) = ((p >> 11) as u8, ((p >> 5) & 63) as u8, (p & 31) as u8);
+            rgb.extend_from_slice(&[
+                (r << 3) | (r >> 2),
+                (g << 2) | (g >> 4),
+                (b << 3) | (b >> 2),
+            ]);
+        }
+        Ok(rgb)
+    }
+    #[cfg(not(feature = "video-static"))]
+    {
+        let _ = path;
+        Err(io::Error::other("Video thumbnails require video-static"))
+    }
+}
 pub fn unavailable_reason() -> String {
     #[cfg(feature = "video-static")]
     {

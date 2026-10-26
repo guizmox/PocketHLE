@@ -1,2 +1,9 @@
-crates\pocket-kernel\src\lib.rs
-crates\pocket-winceapi\src\coredll.rs
+Cargo.lock
+frontends/pocket-desktop/Cargo.toml
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/deck_navigation.rs
+frontends/pocket-desktop/src/desktop_main.rs
+frontends/pocket-desktop/src/native_share.rs
+frontends/pocket-desktop/src/recordings_gallery.rs
+crates/pocket-winceapi/src/recording_encoder.rs
+docs/STEAMDECK.md

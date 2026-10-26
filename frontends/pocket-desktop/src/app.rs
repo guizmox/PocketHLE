@@ -149,7 +149,9 @@ pub struct PocketLauncher {
     deck_scroll_selection: bool,
     library_columns: usize,
     deck_nav_repeat: Option<(String, Instant)>,
-    library_gizmondo: bool,
+    library_tab: crate::deck_navigation::LibraryTab,
+    information_game: Option<String>,
+    recordings_gallery: crate::recordings_gallery::Gallery,
     rename_draft: Option<(String, String, bool)>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
@@ -652,7 +654,13 @@ impl PocketLauncher {
             .any(|g| is_gizmondo_game(g, library.root()));
         Self {
             library,
-            library_gizmondo,
+            library_tab: if library_gizmondo {
+                crate::deck_navigation::LibraryTab::Gizmondo
+            } else {
+                crate::deck_navigation::LibraryTab::PocketPc
+            },
+            information_game: None,
+            recordings_gallery: Default::default(),
             icon_cache: std::collections::HashMap::new(),
             screen_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
@@ -809,7 +817,11 @@ impl PocketLauncher {
                     self.icon_cache.clear();
                     if let Some(game) = entries.first() {
                         let (id, name) = (game.id.clone(), game.display_name.clone());
-                        self.library_gizmondo = is_gizmondo_game(game, self.library.root());
+                        self.library_tab = if is_gizmondo_game(game, self.library.root()) {
+                            crate::deck_navigation::LibraryTab::Gizmondo
+                        } else {
+                            crate::deck_navigation::LibraryTab::PocketPc
+                        };
                         self.selected_game = Some(id.clone());
                         if !updated && self.library.is_demo_card(&id) {
                             self.demo_import = Some((id, name));
@@ -1303,25 +1315,36 @@ impl PocketLauncher {
             .partition(|g| is_gizmondo_game(g, self.library.root()));
         ui.horizontal(|ui| {
             ui.selectable_value(
-                &mut self.library_gizmondo,
-                false,
+                &mut self.library_tab,
+                crate::deck_navigation::LibraryTab::Gizmondo,
+                format!("Gizmondo ({})", gizmondo.len()),
+            );
+            ui.selectable_value(
+                &mut self.library_tab,
+                crate::deck_navigation::LibraryTab::PocketPc,
                 format!("PocketPC ({})", pocketpc.len()),
             );
             ui.selectable_value(
-                &mut self.library_gizmondo,
-                true,
-                format!("Gizmondo ({})", gizmondo.len()),
+                &mut self.library_tab,
+                crate::deck_navigation::LibraryTab::Recordings,
+                "Recordings",
             );
         });
         ui.separator();
-        let games = if self.library_gizmondo {
+        if self.library_tab == crate::deck_navigation::LibraryTab::Recordings {
+            let actions = std::mem::take(&mut self.deck_library_actions);
+            self.recordings_gallery
+                .show(ui, self.library.root(), actions);
+            return;
+        }
+        let games = if self.library_tab == crate::deck_navigation::LibraryTab::Gizmondo {
             gizmondo
         } else {
             pocketpc
         };
         if cfg!(feature = "steam-deck") {
             ui.label(
-                "D-pad / stick: select • A: play • X: platform • Y: game options • Start: settings",
+                "D-pad / stick: select • A: play • L1/L2/R1/R2: tabs • Y: game options • Start: settings",
             );
         }
         if games.is_empty() {
@@ -1384,61 +1407,61 @@ impl PocketLauncher {
         }
         let selected = self.selected_game.clone();
 
-        ui.horizontal_top(|ui| {
-            let details_width = (ui.available_width() * 0.40).clamp(330.0, 470.0);
-            let cards_width = (ui.available_width() - details_width - 16.0).max(240.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(cards_width, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.heading("Library");
-                    ui.add_space(8.0);
-                    ScrollArea::vertical().show(ui, |ui| {
-                        let gap = 12.0;
-                        let card_size = Vec2::new(190.0, 210.0);
-                        let columns = ((ui.available_width() + gap) / (card_size.x + gap))
-                            .floor()
-                            .max(1.0) as usize;
-                        self.library_columns = columns;
-                        egui::Grid::new("library_grid")
-                            .num_columns(columns)
-                            .min_col_width(card_size.x)
-                            .max_col_width(card_size.x)
-                            .min_row_height(card_size.y)
-                            .spacing(Vec2::splat(gap))
-                            .show(ui, |ui| {
-                                for (index, game) in games.iter().enumerate() {
-                                    self.ui_game_card(
-                                        ui,
-                                        game,
-                                        card_size,
-                                        selected.as_deref() == Some(&game.id),
-                                    );
-                                    if (index + 1) % columns == 0 {
-                                        ui.end_row();
-                                    }
-                                }
-                                if !games.len().is_multiple_of(columns) {
-                                    ui.end_row();
-                                }
-                            });
-                    });
-                },
-            );
-            ui.separator();
-            ui.allocate_ui_with_layout(
-                Vec2::new(details_width, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    if let Some(game) = selected
-                        .as_ref()
-                        .and_then(|id| games.iter().find(|g| &g.id == id))
-                    {
-                        self.ui_game_details(ui, game);
+        ui.heading("Library");
+        ui.add_space(8.0);
+        ScrollArea::vertical().show(ui, |ui| {
+            let gap = 12.0;
+            let card_size = Vec2::new(190.0, 210.0);
+            let columns = ((ui.available_width() + gap) / (card_size.x + gap))
+                .floor()
+                .max(1.0) as usize;
+            self.library_columns = columns;
+            egui::Grid::new("library_grid")
+                .num_columns(columns)
+                .min_col_width(card_size.x)
+                .max_col_width(card_size.x)
+                .min_row_height(card_size.y)
+                .spacing(Vec2::splat(gap))
+                .show(ui, |ui| {
+                    for (index, game) in games.iter().enumerate() {
+                        self.ui_game_card(
+                            ui,
+                            game,
+                            card_size,
+                            selected.as_deref() == Some(&game.id),
+                        );
+                        if (index + 1) % columns == 0 {
+                            ui.end_row();
+                        }
                     }
-                },
-            );
+                    if !games.len().is_multiple_of(columns) {
+                        ui.end_row();
+                    }
+                });
         });
+    }
+
+    fn ui_game_information(&mut self, ctx: &egui::Context) {
+        let Some(game) = self
+            .information_game
+            .as_ref()
+            .and_then(|id| self.library.games().iter().find(|g| &g.id == id))
+            .cloned()
+        else {
+            self.information_game = None;
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Informations")
+            .id(egui::Id::new("game_information"))
+            .open(&mut open)
+            .default_size(Vec2::new(560., 540.))
+            .default_pos(ctx.screen_rect().center() - Vec2::new(280., 270.))
+            .collapsible(false)
+            .show(ctx, |ui| self.ui_game_details(ui, &game));
+        if !open || self.screen != Screen::Library {
+            self.information_game = None;
+        }
     }
 
     fn ui_game_card(&mut self, ui: &mut egui::Ui, game: &GameEntry, size: Vec2, selected: bool) {
@@ -1461,6 +1484,16 @@ impl PocketLauncher {
         );
         let mut menu_ui = ui.child_ui(menu_rect, egui::Layout::right_to_left(egui::Align::Center));
         let menu_response = menu_ui.menu_button("   ", |ui| {
+            if ui.button("Informations").clicked() {
+                self.selected_game = Some(game.id.clone());
+                self.information_game = Some(game.id.clone());
+                ui.close_menu();
+            }
+            if ui.button("Play").clicked() {
+                self.spawn_run(game);
+                ui.close_menu();
+            }
+
             if ui.button("Rename...").clicked() {
                 self.rename_draft = Some((game.id.clone(), game.display_name.clone(), true));
                 ui.close_menu();
@@ -2315,7 +2348,7 @@ impl PocketLauncher {
                     }
                 }
             });
-            ui.label("View tap toggles fullscreen in the UI and in game. PocketPC: View / Menu hold = exit, L3 = ESC, R3 = Action. Gizmondo: View hold = brightness; Menu = filter / hold exit; L1 = volume.");
+            ui.label("View tap toggles fullscreen in the UI and in game. PocketPC: View hold = exit, L3 = ESC, R3 = Action. Gizmondo: View hold = brightness; L1 = volume. Both: Menu / right FN tap = filter, hold = start/stop video. L1/L2/R1/R2 cycle catalogue tabs.");
             if ui.button("Apply Steam Deck preset").clicked() {
                 draft.gamepad_bindings = pocket_library::keybindings::default_gamepad_bindings();
                 draft.gamepad_fullscreen =
@@ -3523,7 +3556,7 @@ impl PocketLauncher {
                                                 crate::deck_navigation::MenuAction::ReturnToLibrary,
                                             )
                                     {
-                                        // PocketPC: left View/FN hold exits just like right Menu/FN.
+                                        // PocketPC: left View/FN hold returns to the catalogue.
                                         self.return_to_library(ctx);
                                     } else {
                                         // Short View tap and all Gizmondo gestures are unchanged.
@@ -3543,16 +3576,16 @@ impl PocketLauncher {
                                 if self.screen == Screen::Run
                                     && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                                 {
-                                    match crate::deck_navigation::menu_action(
+                                    match crate::deck_navigation::right_fn_action(
                                         pressed_at.elapsed(),
                                         true,
                                     ) {
-                                        Some(crate::deck_navigation::MenuAction::NextFilter) => {
+                                        Some(crate::deck_navigation::RightFnAction::NextFilter) => {
                                             self.cycle_deck_upscale_filter(ctx, true)
                                         }
                                         Some(
-                                            crate::deck_navigation::MenuAction::ReturnToLibrary,
-                                        ) => self.return_to_library(ctx),
+                                            crate::deck_navigation::RightFnAction::ToggleRecording,
+                                        ) => self.toggle_recording(),
                                         None => {}
                                     }
                                 }
@@ -3560,6 +3593,28 @@ impl PocketLauncher {
                         }
                         if cfg!(feature = "steam-deck")
                             && self.screen == Screen::Run
+                            && control == "Misc1"
+                        {
+                            if let Some(at) = self.deck_fn_press.remove(&key) {
+                                if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                                    match crate::deck_navigation::right_fn_action(
+                                        at.elapsed(),
+                                        true,
+                                    ) {
+                                        Some(crate::deck_navigation::RightFnAction::NextFilter) => {
+                                            self.cycle_deck_upscale_filter(ctx, true)
+                                        }
+                                        Some(
+                                            crate::deck_navigation::RightFnAction::ToggleRecording,
+                                        ) => self.toggle_recording(),
+                                        None => {}
+                                    }
+                                }
+                            }
+                        }
+                        if cfg!(feature = "steam-deck")
+                            && self.screen == Screen::Run
+                            && control != "Misc1"
                             && !self.running_is_gizmondo
                             && pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
                                 &control,
@@ -3651,9 +3706,10 @@ impl PocketLauncher {
                         }
                     }
                     let deck_reserved = cfg!(feature = "steam-deck")
-                        && (matches!(control.as_str(), "Select" | "LeftTrigger")
+                        && ((self.screen==Screen::Library && crate::deck_navigation::tab_direction(&control).is_some())
+                            || matches!(control.as_str(), "Select" | "LeftTrigger")
                             || (self.screen == Screen::Run
-                                && (control == "Start"
+                                && (matches!(control.as_str(), "Start" | "Misc1")
                                     || pocket_library::keybindings::steam_deck_pocketpc_fn_exit_control(
                                         &control,
                                         self.running_is_gizmondo,
@@ -3674,8 +3730,12 @@ impl PocketLauncher {
                             self.deck_library_actions.push(control);
                             continue;
                         }
+                        if self.screen == Screen::Run && control == "Misc1" {
+                            self.deck_fn_press.entry(key).or_insert_with(Instant::now);
+                            continue;
+                        }
                         if self.screen == Screen::Run && control == "Start" {
-                            self.deck_menu_press = Some((device, Instant::now()));
+                            self.deck_menu_press.get_or_insert((device, Instant::now()));
                             continue;
                         }
                         // Steam (Guide) and Quick Access (...) (Misc1) can be
@@ -3693,6 +3753,12 @@ impl PocketLauncher {
                         }
                         if control == "Select" {
                             self.deck_view_press = Some((device, Instant::now()));
+                            continue;
+                        }
+                        if self.screen == Screen::Library && self.information_game.is_some() {
+                            if control == "East" {
+                                self.information_game = None;
+                            }
                             continue;
                         }
                         if self.screen != Screen::Run && control == "East" {
@@ -3717,10 +3783,16 @@ impl PocketLauncher {
                             && self.demo_import.is_none()
                         {
                             match control.as_str() {
-                                "West" => {
-                                    self.library_gizmondo = !self.library_gizmondo;
+                                control
+                                    if crate::deck_navigation::tab_direction(control).is_some() =>
+                                {
+                                    self.library_tab = self.library_tab.step(
+                                        crate::deck_navigation::tab_direction(control).unwrap(),
+                                    );
                                     self.selected_game = None;
                                     self.deck_scroll_selection = true;
+                                    self.deck_library_actions.clear();
+                                    self.deck_nav_repeat = None;
                                 }
                                 "Start" => {
                                     self.config_draft = Some(self.settings_draft());
@@ -4440,21 +4512,41 @@ impl eframe::App for PocketLauncher {
                 }
             }
             if !self.running_is_gizmondo
-                && self.deck_fn_press.values().any(|pressed_at| {
-                    crate::deck_navigation::menu_action(pressed_at.elapsed(), false)
-                        == Some(crate::deck_navigation::MenuAction::ReturnToLibrary)
+                && self.deck_fn_press.iter().any(|((_, control), pressed_at)| {
+                    control != "Misc1"
+                        && crate::deck_navigation::menu_action(pressed_at.elapsed(), false)
+                            == Some(crate::deck_navigation::MenuAction::ReturnToLibrary)
                 })
             {
                 self.deck_fn_press.clear();
                 self.return_to_library(ctx);
             }
+            let right_fn: Vec<_> = self
+                .deck_fn_press
+                .iter()
+                .filter(|((_, control), at)| {
+                    control == "Misc1"
+                        && crate::deck_navigation::right_fn_action(at.elapsed(), false)
+                            == Some(crate::deck_navigation::RightFnAction::ToggleRecording)
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            let mut toggle_right_recording = !right_fn.is_empty();
+            if !right_fn.is_empty() {
+                for key in right_fn {
+                    self.deck_fn_press.remove(&key);
+                }
+            }
             if let Some((_, pressed_at)) = self.deck_menu_press {
-                if crate::deck_navigation::menu_action(pressed_at.elapsed(), false)
-                    == Some(crate::deck_navigation::MenuAction::ReturnToLibrary)
+                if crate::deck_navigation::right_fn_action(pressed_at.elapsed(), false)
+                    == Some(crate::deck_navigation::RightFnAction::ToggleRecording)
                 {
                     self.deck_menu_press = None;
-                    self.return_to_library(ctx);
+                    toggle_right_recording = true;
                 }
+            }
+            if toggle_right_recording {
+                self.toggle_recording();
             }
         }
         if self.screen != Screen::Library
@@ -4604,6 +4696,9 @@ impl eframe::App for PocketLauncher {
                 Screen::Run => self.ui_run(ui),
             }
         });
+        if self.screen == Screen::Library {
+            self.ui_game_information(ctx);
+        }
         if cfg!(feature = "steam-deck") && self.screen == Screen::Run {
             if let Some((label, expires)) = self.deck_filter_notice.clone() {
                 if Instant::now() < expires {

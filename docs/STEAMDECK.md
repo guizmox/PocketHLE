@@ -21,7 +21,7 @@ Les boutons Menu (☰, à droite) et View (à gauche) servent à l’émulateur 
 | Bouton Deck | Fonction |
 |---|---|
 | Menu — appui court | Filtre d’upscaling suivant |
-| Menu — maintien de 650 ms | Arrêter le jeu et revenir au catalogue |
+| Menu — maintien de 650 ms | Démarrer / arrêter l’enregistrement vidéo |
 | View — appui court | Basculer le plein écran |
 | View — maintien de 650 ms | Luminosité Gizmondo ; sortie du jeu sur PocketPC |
 
@@ -88,3 +88,7 @@ cargo build --release --locked -p pocket-desktop --features steam-deck --bin poc
 Le fichier produit est `target/release/pockethle-steamdeck.exe` (ou
 `target/cargo/release/pockethle-steamdeck.exe` dans la CI).
 La compilation standard sans `steam-deck` garde ses commandes habituelles.
+
+## Catalogue et captures
+
+L1/L2 passent à l’onglet précédent et R1/R2 au suivant, en boucle : Gizmondo / PocketPC / Recordings. Le menu à trois points de chaque jeu contient Informations. Dans Recordings, A ouvre la capture sélectionnée avec le lecteur par défaut. Share apparaît uniquement si le système fournit un panneau de partage natif ; aucune liste de destinations fixe n’est proposée.
