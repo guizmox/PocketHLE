@@ -10355,7 +10355,9 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     }
     let class_arg = ctx.arg_u32(1)?;
     let class_name = if class_arg != 0 && class_arg <= 0xffff {
-        registered_class_atom_name(ctx.kernel, class_arg).unwrap_or_default()
+        registered_class_atom_name(ctx.kernel, class_arg).unwrap_or_else(|| {
+            String::from_utf16_lossy(&read_wstr(ctx, class_arg, 128).unwrap_or_default())
+        })
     } else if class_arg != 0 {
         String::from_utf16_lossy(&read_wstr(ctx, class_arg, 128).unwrap_or_default())
             .trim_end_matches('\0')
@@ -19548,7 +19550,10 @@ fn create_dib_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let mut bi_bpp = u16::from_le_bytes([hdr[14], hdr[15]]);
     let mut bi_compression = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
     let bi_colors_used = u32::from_le_bytes([hdr[32], hdr[33], hdr[34], hdr[35]]);
-    let malformed = bi_size != 40 || bi_width <= 0 || bi_height == 0;
+    // V2/V3 and V4/V5 retain the first 40 bytes and embed their colour
+    // masks at offset 40. Treating these headers as malformed silently
+    // replaced small sprites and decoded images with screen-sized buffers.
+    let malformed = !matches!(bi_size, 40 | 52 | 56 | 108 | 124) || bi_width <= 0 || bi_height == 0;
     if malformed {
         log::debug!(
             "CreateDIBSection info=0x{pbmi:08x} has invalid header; using screen-sized RGB565 fallback"
@@ -19597,7 +19602,7 @@ fn create_dib_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     // as 565 shifted every channel and turned the artwork green.
     let rgb555 = bi_bpp == 16
         && if bi_compression == 3 {
-            let masks = ctx.cpu.read_mem(pbmi + bi_size, 12).unwrap_or_default();
+            let masks = ctx.cpu.read_mem(pbmi + 40, 12).unwrap_or_default();
             masks.len() == 12
                 && u32::from_le_bytes([masks[4], masks[5], masks[6], masks[7]]) == 0x0000_03E0
         } else {
@@ -31195,7 +31200,17 @@ mod tests {
         cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
             .unwrap();
         let mut wnd_class = [0u8; 40];
+        wnd_class[4..8].copy_from_slice(&0x20000u32.to_le_bytes());
         wnd_class[28..32].copy_from_slice(&6u32.to_le_bytes());
+        wnd_class[36..40].copy_from_slice(&0x1100u32.to_le_bytes());
+        cpu.write_mem(
+            0x1100,
+            &"BackgroundClass\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         cpu.write_mem(0x1000, &wnd_class).unwrap();
         cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         let t = dummy_thunk();
@@ -34315,7 +34330,7 @@ mod tests {
     #[test]
     fn unregister_class_removes_metadata_by_name_or_atom_and_rejects_live_windows() {
         let mut cpu = StubCpu::new();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+        cpu.map_region(0x100000, 0x100000, Prot::READ | Prot::WRITE)
             .unwrap();
         let mut kernel = fresh_kernel();
         let t = dummy_thunk();
@@ -34330,12 +34345,12 @@ mod tests {
                 .chain(Some(0))
                 .flat_map(u16::to_le_bytes)
                 .collect();
-            ctx.cpu.write_mem(0x1200, &name_bytes).unwrap();
+            ctx.cpu.write_mem(0x100200, &name_bytes).unwrap();
             let mut wc = [0u8; 40];
             wc[4..8].copy_from_slice(&(0x20000u32 + atom).to_le_bytes());
-            wc[36..40].copy_from_slice(&0x1200u32.to_le_bytes());
-            ctx.cpu.write_mem(0x1100, &wc).unwrap();
-            ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+            wc[36..40].copy_from_slice(&0x100200u32.to_le_bytes());
+            ctx.cpu.write_mem(0x100100, &wc).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, 0x100100).unwrap();
             assert_eq!(
                 register_class_w(&mut ctx).unwrap(),
                 DispatchOutcome::ReturnedR0(atom)
@@ -34364,8 +34379,8 @@ mod tests {
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect();
-        ctx.cpu.write_mem(0x1200, &name_bytes).unwrap();
-        ctx.cpu.write_reg(ArmReg::R0, 0x1200).unwrap();
+        ctx.cpu.write_mem(0x100200, &name_bytes).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0x100200).unwrap();
         assert_eq!(
             unregister_class_w(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(1)
