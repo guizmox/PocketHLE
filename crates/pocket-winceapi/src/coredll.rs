@@ -17783,15 +17783,15 @@ fn play_sound_impl(
     const SND_ASYNC: u32 = 0x0001;
     const SND_LOOP: u32 = 0x0008;
     const SND_NOSTOP: u32 = 0x0010;
-    const SND_PURGE: u32 = 0x0040;
     const SND_RESOURCE: u32 = 0x0004_0004;
     const SND_MEMORY: u32 = 0x0004;
 
     if sound == 0 {
-        if flags & SND_PURGE != 0 || flags == 0 {
-            ctx.kernel.audio.flush();
-            log::debug!("PlaySoundW(NULL, flags=0x{flags:08x}) -> stopped");
-        }
+        // NULL is the stop request for both PlaySound and sndPlaySound.
+        // Playback flags (including SND_NODEFAULT) do not turn it into a no-op.
+        // Fade's script STOP command uses sndPlaySoundW(NULL, SND_NODEFAULT).
+        ctx.kernel.audio.flush();
+        log::debug!("PlaySoundW(NULL, flags=0x{flags:08x}) -> stopped");
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     if flags & SND_RESOURCE == SND_RESOURCE {
@@ -37309,6 +37309,30 @@ mod pocket_menu_tests {
 #[cfg(test)]
 mod pointer_capture_tests {
     use super::*;
+    #[test]
+    fn null_sound_stops_playback_even_with_playback_flags() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut k, mut d) = setup();
+        for api in ["sndPlaySoundW", "sndPlaySoundA", "PlaySoundW", "PlaySoundA"] {
+            for flags in [0, 1, 2, 3, 0x0b, 0x40] {
+                k.audio.push_samples(&[1234; 8]);
+                let args = if api.starts_with("snd") {
+                    vec![0, flags, 0xdeadbeef]
+                } else {
+                    vec![0, 0, flags]
+                };
+                assert!(matches!(
+                    call(&mut cpu, &mut k, &mut d, "coredll.dll", api, &args),
+                    DispatchOutcome::ReturnedR0(1)
+                ));
+                assert_eq!(
+                    k.audio.tap().drain_into(&mut [0; 8]),
+                    0,
+                    "{api}, flags={flags:#x}"
+                );
+            }
+        }
+    }
     #[test]
     fn legacy_sound_uses_two_arguments_and_memory_wav_is_not_a_resource() {
         use crate::bluetooth::tests::{call, setup};
