@@ -5671,7 +5671,21 @@ fn sync_direct_framebuffer_write(
     dst: u32,
     len: usize,
 ) -> Result<(), KernelError> {
-    if ctx.kernel.gx_draw_active || !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty() {
+    // A single complete offscreen->display transfer is already an atomic
+    // publication boundary: the host copy has finished before we get here.
+    // Direct GAPI writers may retain their display pointer across frames
+    // (GXMark does this), without an EndDraw or Sleep after each transfer.
+    // Keep suppressing scanline copies and raw CPU polling during a draw;
+    // neither identifies a completed transfer. Padded displays need a
+    // row-aware commit and must not take this packed-buffer path.
+    let complete_gapi_transfer = ctx.kernel.fb_mapped
+        && dst == SYNTHETIC_FRAMEBUFFER_BASE
+        && len == ctx.kernel.framebuffer.pixels.len()
+        && (ctx.kernel.guest_fb_pitch == 0
+            || ctx.kernel.guest_fb_pitch == ctx.kernel.framebuffer.stride_bytes());
+    if (ctx.kernel.gx_draw_active && !complete_gapi_transfer)
+        || !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty()
+    {
         return Ok(());
     }
     let base = SYNTHETIC_FRAMEBUFFER_BASE;
