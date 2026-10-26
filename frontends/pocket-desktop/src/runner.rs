@@ -736,7 +736,11 @@ impl RunHook {
             // CreateProcess uses a path already resolved through the guest VFS.
             // SDCreateProcess keeps its validated foreground card restriction.
             if request.concurrent {
-                return Some(child);
+                return Some(
+                    context
+                        .game
+                        .child_executable_reference(&context.library_root, &child),
+                );
             }
             let root = context.card_root.canonicalize().ok()?;
             if !child.starts_with(root) {

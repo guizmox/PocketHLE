@@ -4176,3 +4176,27 @@ clearance. Landscape geometry, guest resolution, inverse touch mapping and
 external-controller bindings are unchanged. Gizmondo already uses140dp in both
 orientations. Pure Kotlin checks cover rotated size parity, bounds, separation
 and QVGA/VGA centre touch mapping.
+
+## Legacy Inno Setup import (2026-10-26)
+
+The installer reader recognizes the checked legacy Inno loader pointer and
+2.0.11 metadata layout, verifies both CRC-framed header streams, and reads
+the 41-byte file-location records. Internal single-slice zlib chunks are
+validated against their declared sizes and Adler32 before ordinary recursive
+CAB detection. Never execute setup scripts or desktop payloads, write their
+paths to the host, or guess another Inno version's record layout. External
+slices and unsupported versions return explicit errors. The supplied Leo's
+Flight Simulator installer yields one 2,624,822-byte CE CAB.
+
+## Child-process installation namespace (2026-10-26)
+
+Desktop/Deck and Android preserve a game-relative executable reference for
+CreateProcess children within the same installation. The resolved host file
+is already canonicalized by the launcher; external executables retain their
+absolute reference. Do not store an internal child as an absolute GameEntry
+path: executable_under_prefix then cannot derive guest_launch_paths, losing
+the installation and writable-save mounts. Mini Kayak relaunches itself with
+ARG:goNow after Start the adventure, enumerates resources/scenes/*.properties,
+and otherwise copies a NULL circuit name. Individual asset basename fallback
+can hide the missing mount, but enumeration correctly requires a directory.
+Do not change wcscpy NULL semantics or invent a circuit list to hide this.

@@ -259,6 +259,19 @@ impl GameEntry {
         Some(library_root.join(self.relative_dir()).join(icon))
     }
 
+    /// Keep child executables within this installation relative to its game
+    /// directory. An absolute reference cannot produce guest_launch_paths and
+    /// would drop the install-prefix and save mounts on a CreateProcess relaunch.
+    /// Executables outside this game retain the existing absolute launch path.
+    pub fn child_executable_reference(&self, library_root: &Path, executable: &Path) -> PathBuf {
+        let directory = library_root.join(self.relative_dir());
+        let directory = directory.canonicalize().unwrap_or(directory);
+        executable
+            .strip_prefix(&directory)
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| executable.to_path_buf())
+    }
+
     /// Absolute path to the directory holding the extracted cab.
     pub fn extracted_dir(&self, library_root: &Path) -> PathBuf {
         library_root.join(self.relative_dir()).join("extracted")
