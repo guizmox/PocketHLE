@@ -33,6 +33,7 @@ use pocket_cpu::{
 };
 use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry};
 
+pub mod async_keys;
 pub mod audio;
 pub mod bluetooth;
 pub mod camera;
@@ -1416,6 +1417,7 @@ pub struct KernelState {
     pub critical_sections: HashMap<u32, (usize, u32)>,
     /// Current state of the Pocket PC virtual keys.
     pub pressed_keys: [bool; 256],
+    pub async_keys: async_keys::AsyncKeys,
     /// Virtual keys the host is holding down, oldest press first.
     ///
     /// A host frontend sends one `KeyDown` when the user presses a key
@@ -1555,6 +1557,30 @@ pub struct MainThreadState {
 }
 
 impl KernelState {
+    /// Observe each host input once, whether queried asynchronously or removed by a pump.
+    pub fn pop_pending_input(&mut self) -> Option<InputEvent> {
+        self.async_keys
+            .sync(&self.pending_input, self.gapi_action_key != gapi::VK_RETURN);
+        let event = self.pending_input.pop_front();
+        if event.is_some() {
+            self.async_keys.removed();
+        }
+        event
+    }
+    pub fn remove_pending_input(&mut self, index: usize) -> Option<InputEvent> {
+        self.async_keys
+            .sync(&self.pending_input, self.gapi_action_key != gapi::VK_RETURN);
+        let event = self.pending_input.remove(index);
+        if event.is_some() {
+            self.async_keys.removed();
+        }
+        event
+    }
+    pub fn requeue_pending_front(&mut self, event: InputEvent) {
+        self.pending_input.push_front(event);
+        self.async_keys.requeued_front();
+    }
+
     pub fn switch_dialog_callbacks(&mut self, next: usize) {
         if next != self.current_thread {
             // A WM_INITDIALOG or DefDlgProc callback may load resources for seconds.
@@ -3972,6 +3998,7 @@ impl Process {
                 timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: HashMap::new(),
                 pressed_keys: [false; 256],
+                async_keys: Default::default(),
                 held_keys: Vec::new(),
                 key_repeat_next_ms: None,
                 key_repeat_cursor: 0,

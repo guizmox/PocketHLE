@@ -507,6 +507,7 @@ pub(crate) mod tests {
             timer_period_requests: std::collections::BTreeMap::new(),
             critical_sections: std::collections::HashMap::new(),
             pressed_keys: [false; 256],
+            async_keys: Default::default(),
             held_keys: Vec::new(),
             key_repeat_next_ms: None,
             key_repeat_cursor: 0,

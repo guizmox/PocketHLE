@@ -12610,6 +12610,13 @@ fn key_state_value(ctx: &mut CallCtx<'_>, vk: u32) -> u32 {
                 (keys[0] == queried[0] || keys[0] == queried[1] || keys[1] == queried[0])
                     .then_some(false)
             }
+            InputEvent::PointerDown { .. } if vk == 1 => Some(true),
+            InputEvent::PointerUp { .. } if vk == 1 => Some(false),
+            InputEvent::MouseMessage { message, .. } => match (vk, *message) {
+                (2, 0x204) | (4, 0x207) => Some(true),
+                (2, 0x205) | (4, 0x208) => Some(false),
+                _ => None,
+            },
             _ => None,
         })
         .unwrap_or(pressed_now);
@@ -12627,7 +12634,52 @@ fn get_key_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
 fn get_async_key_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let vk = ctx.arg_u32(0)?;
-    Ok(DispatchOutcome::ReturnedR0(key_state_value(ctx, vk)))
+    let held = key_state_value(ctx, vk);
+    if vk >= 256 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    // CE leaves the low bit unspecified. Supply the conventional Win32 press
+    // history for portable callers (Chix tests it), without changing bit 15,
+    // the input queue, or GetKeyState's separate semantics.
+    ctx.kernel.async_keys.sync(
+        &ctx.kernel.pending_input,
+        ctx.kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN,
+    );
+    let aliases = [
+        vk as usize,
+        if ctx.kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN {
+            match vk {
+                0xc1..=0xc4 => vk as usize + 0x10,
+                0xd1..=0xd4 => vk as usize - 0x10,
+                _ => vk as usize,
+            }
+        } else {
+            vk as usize
+        },
+    ];
+    let keys: &[usize] = match vk {
+        0x10 => &[0x10, 0xa0, 0xa1],
+        0x11 => &[0x11, 0xa2, 0xa3],
+        0x12 => &[0x12, 0xa4, 0xa5],
+        0xa0 => &[0xa0, 0x10],
+        0xa1 => &[0xa1, 0x10],
+        0xa2 => &[0xa2, 0x11],
+        0xa3 => &[0xa3, 0x11],
+        0xa4 => &[0xa4, 0x12],
+        0xa5 => &[0xa5, 0x12],
+        _ => &aliases,
+    };
+    let mut pressed = false;
+    for &key in keys {
+        pressed |= ctx.kernel.async_keys.take(key);
+    }
+    if ctx.kernel.gapi_keys_queried && vk == u32::from(ctx.kernel.gapi_action_key) {
+        pressed |= ctx
+            .kernel
+            .async_keys
+            .take(usize::from(pocket_kernel::gapi::VK_RETURN));
+    }
+    Ok(DispatchOutcome::ReturnedR0(held | u32::from(pressed)))
 }
 
 fn keybd_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -13568,7 +13620,7 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
 /// (COD2 binds it to Fire). Apply the same device choice in both queue paths.
 fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
     let ev = loop {
-        match ctx.kernel.pending_input.pop_front() {
+        match ctx.kernel.pop_pending_input() {
             Some(InputEvent::StylusAim { x, y }) => {
                 if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
                     && !ctx.kernel.shell_keyboard.visible
@@ -13580,7 +13632,7 @@ fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
                 // A real touch owns the single stylus. Release the emulated
                 // stroke first and don't resume it without a fresh host axis.
                 if let Some(up) = ctx.kernel.stylus_stick.cancel() {
-                    ctx.kernel.pending_input.push_front(event);
+                    ctx.kernel.requeue_pending_front(event);
                     break up;
                 }
                 break event;
@@ -13590,11 +13642,13 @@ fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
                 if ctx.kernel.shell_keyboard.visible {
                     break ctx.kernel.stylus_stick.cancel()?;
                 }
-                break ctx.kernel.stylus_stick.tick(
+                let event = ctx.kernel.stylus_stick.tick(
                     std::time::Instant::now(),
                     ctx.kernel.framebuffer.width,
                     ctx.kernel.framebuffer.height,
                 )?;
+                ctx.kernel.async_keys.observe(event);
+                break event;
             }
         }
     };
@@ -29435,6 +29489,7 @@ mod tests {
             timer_period_requests: std::collections::BTreeMap::new(),
             critical_sections: std::collections::HashMap::new(),
             pressed_keys: [false; 256],
+            async_keys: Default::default(),
             held_keys: Vec::new(),
             key_repeat_next_ms: None,
             key_repeat_cursor: 0,
@@ -38109,5 +38164,173 @@ mod pocket_shell_geometry_tests {
             controls_take_input(&mut ctx, InputEvent::PointerDown { x: 5, y: 10 }),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod async_press_history_tests {
+    use super::*;
+    use crate::bluetooth::tests::{call, setup};
+    #[test]
+    fn press_is_reported_once_before_and_after_message_delivery() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.pending_input.push_back(InputEvent::KeyDown { vk: 0x25 });
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[0x25]
+            ),
+            DispatchOutcome::ReturnedR0(0x8001)
+        ));
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[0x25]
+            ),
+            DispatchOutcome::ReturnedR0(0x8000)
+        ));
+        k.pop_pending_input();
+        k.pressed_keys[0x25] = true;
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[0x25]
+            ),
+            DispatchOutcome::ReturnedR0(0x8000)
+        ));
+        k.pending_input.push_back(InputEvent::KeyUp { vk: 0x25 });
+        k.pending_input.push_back(InputEvent::KeyDown { vk: 0x25 });
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetKeyState",
+                &[0x25]
+            ),
+            DispatchOutcome::ReturnedR0(0x8000)
+        ));
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[0x25]
+            ),
+            DispatchOutcome::ReturnedR0(0x8001)
+        ));
+    }
+    #[test]
+    fn quick_tap_survives_release_and_filtered_or_sdl_removal() {
+        for vk in [1, 0x26, 0xc1] {
+            let (mut cpu, mut k, mut d) = setup();
+            if vk == 1 {
+                k.pending_input
+                    .push_back(InputEvent::PointerDown { x: 20, y: 30 });
+                k.pending_input
+                    .push_back(InputEvent::PointerUp { x: 20, y: 30 });
+            } else {
+                k.pending_input.push_back(InputEvent::KeyDown { vk });
+                k.pending_input.push_back(InputEvent::KeyUp { vk });
+            }
+            k.remove_pending_input(0);
+            k.pop_pending_input();
+            assert!(matches!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "GetAsyncKeyState",
+                    &[u32::from(vk)]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            ));
+            assert!(matches!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "GetAsyncKeyState",
+                    &[u32::from(vk)]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            ));
+        }
+    }
+    #[test]
+    fn pending_stylus_and_mouse_buttons_report_the_current_held_state() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.pending_input
+            .push_back(InputEvent::PointerDown { x: 10, y: 20 });
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[1]
+            ),
+            DispatchOutcome::ReturnedR0(0x8001)
+        ));
+        assert!(matches!(
+            call(&mut cpu, &mut k, &mut d, "coredll.dll", "GetKeyState", &[1]),
+            DispatchOutcome::ReturnedR0(0x8000)
+        ));
+        k.pending_input
+            .push_back(InputEvent::PointerUp { x: 10, y: 20 });
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[1]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        ));
+    }
+    #[test]
+    fn held_key_repeat_does_not_create_new_presses() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.pending_input.push_back(InputEvent::KeyDown { vk: 0x27 });
+        let _ = call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "GetAsyncKeyState",
+            &[0x27],
+        );
+        k.pending_input.push_back(InputEvent::KeyDown { vk: 0x27 });
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "GetAsyncKeyState",
+                &[0x27]
+            ),
+            DispatchOutcome::ReturnedR0(0x8000)
+        ));
     }
 }

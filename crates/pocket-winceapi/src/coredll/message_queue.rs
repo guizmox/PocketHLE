@@ -124,7 +124,7 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             });
         if let Some((i, event, m)) = input {
             if remove {
-                ctx.kernel.pending_input.remove(i);
+                ctx.kernel.remove_pending_input(i);
                 if matches!(event, InputEvent::KeyDown { .. }) {
                     restore_active_dialog_focus(ctx.kernel);
                 }

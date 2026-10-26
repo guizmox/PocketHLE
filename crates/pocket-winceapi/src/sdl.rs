@@ -606,7 +606,7 @@ fn symbol(vk: u16) -> u32 {
 }
 fn pump_input(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     while ctx.kernel.sdl.events.len() < 1024 {
-        let Some(input) = ctx.kernel.pending_input.pop_front() else {
+        let Some(input) = ctx.kernel.pop_pending_input() else {
             break;
         };
         let mut event = [0; 20];

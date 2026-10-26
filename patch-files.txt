@@ -1,1 +1,6 @@
+crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/async_keys.rs
 crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/coredll/message_queue.rs
+crates/pocket-winceapi/src/sdl.rs
+crates/pocket-winceapi/src/gx.rs
