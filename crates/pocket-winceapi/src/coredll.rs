@@ -14031,6 +14031,10 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if let Some(outcome) = wave_out_enter_callback(ctx, thunk_va)? {
         return Ok(outcome);
     }
+    // Publish retained GAPI pixels at the next event-loop boundary, after
+    // wave_out_enter_callback has restored the original call on reentry.
+    // Mini Kayak copies scanlines from WM_TIMER without GXEndDraw/Sleep.
+    crate::gx::publish_held_framebuffer(ctx)?;
     let lp_msg = ctx.arg_u32(0)?;
     let count = ctx.kernel.synthetic_message_count;
     let budget = ctx.kernel.synthetic_message_budget;
@@ -14136,6 +14140,10 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if let Some(outcome) = wave_out_enter_callback(ctx, thunk_va)? {
         return Ok(outcome);
     }
+    // Publish retained GAPI pixels at the next event-loop boundary, after
+    // wave_out_enter_callback has restored the original call on reentry.
+    // Mini Kayak copies scanlines from WM_TIMER without GXEndDraw/Sleep.
+    crate::gx::publish_held_framebuffer(ctx)?;
     let lp_msg = ctx.arg_u32(0)?;
     let remove_mode = ctx.arg_u32(4)?;
     let count = ctx.kernel.synthetic_message_count;
@@ -15988,6 +15996,11 @@ fn bit_blt_inner(
     y1: i32,
     rop: u32,
 ) -> Result<(), KernelError> {
+    // CPU rendering through DIB bits and GDI drawing share the same pixels.
+    // Import the destination before a partial blit, otherwise publishing the
+    // host cache erases direct guest writes outside the blit (Mini Kayak HUD).
+    sync_dib_from_guest(ctx, hdc_dst)?;
+
     if std::env::var_os("POCKETHLE_CONTROL_PAINT_TRACE").is_some() {
         log::info!(
             "GDI blit dst={hdc_dst:x} ({x},{y},{cx},{cy}) src={hdc_src:x} ({x1},{y1}) rop={rop:x}"
@@ -16099,6 +16112,11 @@ pub(crate) fn stretch_blt_inner(
     sh: i32,
     rop: u32,
 ) -> Result<(), KernelError> {
+    // CPU rendering through DIB bits and GDI drawing share the same pixels.
+    // Import the destination before a partial blit, otherwise publishing the
+    // host cache erases direct guest writes outside the blit (Mini Kayak HUD).
+    sync_dib_from_guest(ctx, hdc_dst)?;
+
     if dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
         return Ok(());
     }
@@ -30063,6 +30081,50 @@ mod tests {
         );
         let data = ctx.cpu.read_mem(OUT, 92).unwrap();
         assert_eq!(i32::from_le_bytes(data[..4].try_into().unwrap()), -13);
+    }
+
+    #[test]
+    fn blits_preserve_direct_guest_dib_pixels_outside_the_destination() {
+        for stretch in [false, true] {
+            let mut cpu = StubCpu::new();
+            cpu.map_region(0x1000, 0x2000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let mut kernel = fresh_kernel();
+            let dst = kernel.gdi.create_memory_dc();
+            let src = kernel.gdi.create_memory_dc();
+            for (dc, bits) in [(dst, 0x1000), (src, 0x2000)] {
+                let bitmap = pocket_kernel::gdi::Bitmap::new_dib(
+                    2,
+                    2,
+                    16,
+                    bits,
+                    4,
+                    false,
+                    Vec::new(),
+                    false,
+                );
+                let bitmap = kernel.gdi.register_dib(bitmap);
+                kernel.gdi.select_into(dc, bitmap);
+            }
+            cpu.write_mem(0x1000, &[0, 0, 0, 0, 0, 0, 0xe0, 0x07])
+                .unwrap();
+            cpu.write_mem(0x2000, &[0, 0xf8, 0, 0, 0, 0, 0, 0]).unwrap();
+            let thunk = dummy_thunk();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            if stretch {
+                stretch_blt_inner(&mut ctx, dst, 0, 0, 1, 1, src, 0, 0, 1, 1, 0x00cc0020).unwrap();
+            } else {
+                bit_blt_inner(&mut ctx, dst, 0, 0, 1, 1, src, 0, 0, 0x00cc0020).unwrap();
+            }
+            assert_eq!(
+                ctx.cpu.read_mem(0x1000, 8).unwrap(),
+                [0, 0xf8, 0, 0, 0, 0, 0xe0, 0x07]
+            );
+        }
     }
 
     #[test]

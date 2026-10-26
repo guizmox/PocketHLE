@@ -223,7 +223,7 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 /// GAPI exposes display memory, which remains visible while held. A voluntary
-/// main-thread sleep is a presentation boundary for direct writers that retain
+/// main-thread sleep or message-pump poll is a presentation boundary for direct writers that retain
 /// that pointer across frames. Do not release their access or wait another
 /// refresh interval: Sleep owns the caller's pacing. Ordinary GXEndDraw still
 /// presents explicitly, and CPU slice preemption never exposes a partial draw.

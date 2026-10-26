@@ -4200,3 +4200,23 @@ ARG:goNow after Start the adventure, enumerates resources/scenes/*.properties,
 and otherwise copies a NULL circuit name. Individual asset basename fallback
 can hide the missing mount, but enumeration correctly requires a directory.
 Do not change wcscpy NULL semantics or invent a circuit list to hide this.
+
+## Retained GAPI display memory in event loops (2026-10-26)
+
+GetMessageW/PeekMessageW publish a retained active GAPI framebuffer on the
+main thread before the next message/callback. Mini Kayak obtains display
+memory once, copies scanlines from its timer callback and does not end the
+draw or Sleep per frame. Keeping readback exclusively at GXEndDraw/Sleep
+left its game view black despite completed guest writes. Reuse the existing
+held-surface readback used by Sleep; do not clear gx_draw_active, add frame
+waits, or expose partial images at arbitrary CPU slices or scanline copies.
+Non-GAPI and worker message pumps are unaffected by that helper's guard.
+
+## Mixed CPU/GDI writes into DIB destinations (2026-10-26)
+
+BitBlt and StretchBlt import the selected destination DIB before drawing,
+just like text output. A guest can render directly through ppvBits, then
+paint a small HUD using GDI. Publishing the entire stale host bitmap after
+that HUD previously erased the CPU-rendered scene outside the destination
+rectangle. Mini Kayak exercises this path. Keep the source readback and
+post-draw guest publication; ordinary non-DIB destinations remain unchanged.

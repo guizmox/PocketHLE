@@ -1,4 +1,3 @@
-crates/pocket-library/src/lib.rs
-frontends/pocket-desktop/src/runner.rs
-frontends/pocket-android-jni/src/runner.rs
+crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/gx.rs
 docs/AGENTS.md
