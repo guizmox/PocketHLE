@@ -169,10 +169,38 @@ jobs:
           name: PocketHLE-linux-x86_64
           path: PocketHLE-linux-x86_64.tar.gz
 
+  diagnostic-fixtures:
+    name: generate ARM fixtures for Windows tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install diagnostic compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld python3
+      - name: generate and package test fixtures
+        run: |
+          python3 tools/ramtest/build.py
+          python3 tools/vfstest/build.py
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('arm-diagnostic-fixtures.zip', 'w', ZIP_DEFLATED) as archive:
+              for root in [Path('tools/ramtest/dist'), Path('tools/vfstest/dist')]:
+                  for path in sorted(root.rglob('*')):
+                      if path.is_file():
+                          archive.write(path, path.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm-diagnostic-fixtures
+          path: arm-diagnostic-fixtures.zip
+          if-no-files-found: error
+
   build-windows:
     name: build windows release artifacts
     runs-on: windows-latest
-    needs: [fmt]
+    needs: [fmt, diagnostic-fixtures]
     steps:
       - run: git config --global core.autocrlf input
       - uses: actions/checkout@v4
@@ -204,6 +232,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked -p pocket-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/download-artifact@v4
+        with:
+          name: arm-diagnostic-fixtures
+          path: target/ci-fixtures
+      - name: unpack ARM diagnostic test fixtures
+        shell: pwsh
+        run: Expand-Archive -LiteralPath target/ci-fixtures/arm-diagnostic-fixtures.zip -DestinationPath . -Force
       - name: test native H264 and AAC recording at 30 and 60 FPS
         shell: pwsh
         run: |

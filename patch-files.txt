@@ -1,2 +1,4 @@
-crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\coredll\graphics_tests.rs
+.gitignore
+.github\workflows\ci.yml
+crates\pocket-winceapi\src\recording_encoder.rs
+crates\pocket-library\tests\data\nsis1-bzip-synthetic.exe

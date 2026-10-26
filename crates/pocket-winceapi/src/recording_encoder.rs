@@ -144,7 +144,7 @@ fn check(rc: i32) -> io::Result<()> {
 }
 #[cfg(feature = "video-static")]
 fn failure(rc: i32) -> io::Error {
-    let mut text = [0i8; 256];
+    let mut text = [0 as c_char; 256];
     unsafe { pocket_recording_error(rc, text.as_mut_ptr(), 256) };
     let detail = unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }.to_string_lossy();
     io::Error::other(format!(
