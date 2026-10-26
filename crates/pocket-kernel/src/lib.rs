@@ -881,6 +881,9 @@ pub enum CreateStage {
     /// The `WndProc` is running `WM_SIZE`, the last message of the
     /// sequence. When it returns, `CreateWindowExW` finally does too.
     Size,
+    /// Initial show/activation/focus of a visible Pocket PC primary window,
+    /// sent synchronously before CreateWindowExW returns.
+    InitialCreate,
     /// Pocket PC initial ShowWindow focus notification, sent before return.
     InitialFocus,
 }

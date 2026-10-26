@@ -10153,7 +10153,7 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     // callback's result rather than the original arguments.
     if matches!(
         ctx.kernel.create_stage,
-        CreateStage::Create | CreateStage::Size
+        CreateStage::Create | CreateStage::Size | CreateStage::InitialCreate
     ) {
         if let Some(frame) = ctx.kernel.create_frame {
             // A nested CreateWindowExW runs with a *lower* guest SP.
@@ -10162,8 +10162,45 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             if frame.thread == ctx.kernel.current_thread
                 && ctx.cpu.read_reg(ArmReg::Sp)? >= frame.sp
             {
-                if ctx.kernel.create_stage == CreateStage::Size {
+                if matches!(
+                    ctx.kernel.create_stage,
+                    CreateStage::Size | CreateStage::InitialCreate
+                ) {
                     let hwnd = ctx.kernel.create_frame_hwnd;
+                    // WS_VISIBLE takes effect during creation, not on a later
+                    // message-pump tick or redundant ShowWindow. Springer
+                    // initializes its running clock after CreateWindowExW;
+                    // a delayed first focus gain falsely resumes that clock
+                    // from an uninitialized pause timestamp.
+                    if hwnd == FAKE_HWND
+                        && ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
+                        && window_is_visible(ctx.kernel, hwnd)
+                    {
+                        if let Some(index) =
+                            ctx.kernel.pending_startup.iter().position(|m| {
+                                matches!(m.0, WM_SHOWWINDOW | WM_ACTIVATE | WM_SETFOCUS)
+                            })
+                        {
+                            if let Some(proc) = ctx
+                                .kernel
+                                .window_procs
+                                .get(&hwnd)
+                                .copied()
+                                .filter(|p| *p != 0)
+                            {
+                                let (message, wp, lp) =
+                                    ctx.kernel.pending_startup.remove(index).unwrap();
+                                ctx.kernel.create_stage = CreateStage::InitialCreate;
+                                ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                                ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
+                                ctx.cpu.write_reg(ArmReg::R1, message)?;
+                                ctx.cpu.write_reg(ArmReg::R2, wp)?;
+                                ctx.cpu.write_reg(ArmReg::R3, lp)?;
+                                ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+                                return Ok(DispatchOutcome::JumpTo(proc));
+                            }
+                        }
+                    }
                     ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
                     ctx.cpu.write_reg(ArmReg::R1, frame.args[1])?;
                     ctx.cpu.write_reg(ArmReg::R2, frame.args[2])?;
@@ -29140,6 +29177,84 @@ mod tests {
             send_message_w(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(0)
         );
+    }
+
+    #[test]
+    fn visible_pocket_pc_creation_sends_initial_notifications_before_return_once() {
+        for (action, visible) in [
+            (pocket_kernel::gapi::VK_RETURN, true),
+            (pocket_kernel::gapi::VK_RETURN, false),
+            (pocket_kernel::gapi::VK_A, true),
+        ] {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            kernel.gapi_action_key = action;
+            kernel.window_procs.insert(FAKE_HWND, 0x10000);
+            kernel.window_visibility.insert(FAKE_HWND, visible);
+            kernel
+                .window_styles
+                .insert(FAKE_HWND, (if visible { WS_VISIBLE } else { 0 }, 0));
+            let sequence = [
+                (WM_SHOWWINDOW, 1, 0),
+                (WM_ACTIVATE, 1, 0),
+                (WM_SETFOCUS, 0, 0),
+            ];
+            kernel.pending_startup.extend(sequence);
+            let frame = GuestCallFrame {
+                args: [0, 0x2000, 0x3000, WS_VISIBLE],
+                sp: 0x8000,
+                lr: 0x12345678,
+            };
+            begin_window_callback(&mut kernel, frame, CreateStage::Size, FAKE_HWND);
+            cpu.write_reg(ArmReg::Sp, frame.sp).unwrap();
+            let thunk = dummy_thunk();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let sent = action == pocket_kernel::gapi::VK_RETURN && visible;
+            if sent {
+                for (msg, wp, lp) in sequence {
+                    ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+                    assert_eq!(
+                        create_window_ex_w(&mut ctx).unwrap(),
+                        DispatchOutcome::JumpTo(0x10000)
+                    );
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), FAKE_HWND);
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), msg);
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), wp);
+                    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), lp);
+                }
+            }
+            ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+            assert_eq!(
+                create_window_ex_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(FAKE_HWND)
+            );
+            assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), frame.lr);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), frame.args[1]);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), frame.args[2]);
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), frame.args[3]);
+            assert_eq!(ctx.kernel.pending_startup.len(), if sent { 0 } else { 3 });
+            if sent {
+                // The caller can initialize its running clock here. A later
+                // redundant ShowWindow must not send another initial focus.
+                ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+                ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
+                assert_eq!(
+                    show_window(&mut ctx).unwrap(),
+                    DispatchOutcome::JumpTo(0x10000)
+                );
+                assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_SIZE);
+                ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+                assert_eq!(
+                    show_window(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(1)
+                );
+                assert!(ctx.kernel.pending_startup.is_empty());
+            }
+        }
     }
 
     #[test]
