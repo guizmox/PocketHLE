@@ -2726,6 +2726,7 @@ impl PocketLauncher {
                         },
                     )),
                 });
+                self.paint_recording_indicator(ui, rect);
                 return;
             }
         }
@@ -2793,6 +2794,41 @@ impl PocketLauncher {
                 });
             }
         }
+        self.paint_recording_indicator(ui, rect);
+    }
+
+    // Painted after the framebuffer capture callbacks: visible locally only.
+    fn paint_recording_indicator(&self, ui: &egui::Ui, rect: Rect) {
+        if !self
+            .recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active()
+        {
+            return;
+        }
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let origin = rect.left_top() + Vec2::new(14.0, 14.0);
+        if ui.ctx().input(|i| i.time).rem_euclid(1.0) < 0.5 {
+            painter.circle_filled(origin, 5.0, Color32::from_rgb(255, 45, 45));
+        }
+        let text = origin + Vec2::new(12.0, 0.0);
+        let font = egui::FontId::proportional(15.0);
+        painter.text(
+            text + Vec2::new(1.0, 1.0),
+            egui::Align2::LEFT_CENTER,
+            "REC",
+            font.clone(),
+            Color32::BLACK,
+        );
+        painter.text(
+            text,
+            egui::Align2::LEFT_CENTER,
+            "REC",
+            font,
+            Color32::from_rgb(255, 70, 70),
+        );
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
 
     fn ui_fullscreen_game(&mut self, ui: &mut egui::Ui) {

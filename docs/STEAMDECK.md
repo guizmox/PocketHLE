@@ -92,3 +92,5 @@ La compilation standard sans `steam-deck` garde ses commandes habituelles.
 ## Catalogue et captures
 
 L1/L2 passent à l’onglet précédent et R1/R2 au suivant, en boucle : Gizmondo / PocketPC / Recordings. Le menu à trois points de chaque jeu contient Informations. Dans Recordings, A ouvre la capture sélectionnée avec le lecteur par défaut. Share apparaît uniquement si le système fournit un panneau de partage natif ; aucune liste de destinations fixe n’est proposée.
+
+Un appui long sur Menu démarre la vidéo ; le bouton peut être relâché. Un nouvel appui long arrête la vidéo. Le témoin REC avec point rouge clignotant est visible uniquement sur l’écran local, après la capture du framebuffer.
