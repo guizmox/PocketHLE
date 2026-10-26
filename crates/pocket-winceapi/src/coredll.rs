@@ -501,6 +501,7 @@ pub fn register(d: &mut WinCeDispatcher) {
 
     // ---- Window / message stubs ----
     d.register_handler(dll, "RegisterClassW", register_class_w);
+    d.register_handler(dll, "UnregisterClassW", unregister_class_w);
     d.register_handler(dll, "CreateWindowExW", create_window_ex_w);
     d.register_handler(dll, "SetWindowLongW", set_window_long_w);
     d.register_handler(dll, "SetWindowLongA", set_window_long_w);
@@ -9976,6 +9977,7 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     // We only care about lpfnWndProc — capture it so DispatchMessageW
     // can trampoline into the guest WndProc.
     let lpwc = ctx.arg_u32(0)?;
+    let mut atom = 0;
     if lpwc != 0 {
         // hbrBackground sits at +28, between hCursor and lpszMenuName.
         // It is either a real HBRUSH or the `COLOR_xxx + 1` shorthand,
@@ -10026,6 +10028,24 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
                                         .insert((name.to_lowercase(), index), value);
                                 }
                             }
+                            let key = (name.to_lowercase(), -32);
+                            atom = ctx.kernel.gdi.class_values.get(&key).copied().unwrap_or(0);
+                            if atom == 0 {
+                                atom = (1..0xc000)
+                                    .find(|candidate| {
+                                        !ctx.kernel.gdi.class_values.iter().any(
+                                            |((_, index), value)| {
+                                                *index == -32 && value == candidate
+                                            },
+                                        )
+                                    })
+                                    .unwrap_or(0);
+                                if atom == 0 {
+                                    set_thread_error(ctx, 8);
+                                    return Ok(DispatchOutcome::ReturnedR0(0));
+                                }
+                                ctx.kernel.gdi.class_values.insert(key, atom);
+                            }
                             ctx.kernel.window_class_procs.insert(name, proc_va);
                         }
                     }
@@ -10041,7 +10061,65 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         }
     }
     // ATOMs are 16-bit; return a non-zero one.
-    Ok(DispatchOutcome::ReturnedR0(0xC001))
+    Ok(DispatchOutcome::ReturnedR0(atom))
+}
+
+fn registered_class_atom_name(kernel: &KernelState, atom: u32) -> Option<String> {
+    let name = kernel
+        .gdi
+        .class_values
+        .iter()
+        .find_map(|((name, index), value)| (*index == -32 && *value == atom).then_some(name))?;
+    kernel
+        .window_class_procs
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case(name))
+        .cloned()
+}
+
+/// CE ignores hInstance. Names and atoms identify process-owned classes;
+/// live windows and system classes prevent removal.
+fn unregister_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let id = ctx.arg_u32(0)?;
+    let name = if id != 0 && id <= 0xffff {
+        registered_class_atom_name(ctx.kernel, id)
+    } else if id != 0 {
+        Some(String::from_utf16_lossy(&read_wstr(ctx, id, 128)?))
+    } else {
+        None
+    };
+    let registered = name.and_then(|name| {
+        ctx.kernel
+            .window_class_procs
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(&name))
+            .cloned()
+    });
+    let Some(name) = registered else {
+        set_thread_error(ctx, 1411);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if ctx
+        .kernel
+        .window_classes
+        .values()
+        .any(|class| class.eq_ignore_ascii_case(&name))
+    {
+        set_thread_error(ctx, 1412);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let proc = ctx.kernel.window_class_procs.remove(&name).unwrap();
+    ctx.kernel
+        .window_class_controls
+        .retain(|key, _| !key.eq_ignore_ascii_case(&name));
+    ctx.kernel
+        .gdi
+        .class_values
+        .retain(|(key, _), _| !key.eq_ignore_ascii_case(&name));
+    if ctx.kernel.wnd_proc == proc && !ctx.kernel.window_class_procs.values().any(|p| *p == proc) {
+        ctx.kernel.wnd_proc = 0;
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 /// Keep the historical primary HWND, but give each additional app-defined
@@ -10276,7 +10354,9 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         }
     }
     let class_arg = ctx.arg_u32(1)?;
-    let class_name = if class_arg != 0 {
+    let class_name = if class_arg != 0 && class_arg <= 0xffff {
+        registered_class_atom_name(ctx.kernel, class_arg).unwrap_or_default()
+    } else if class_arg != 0 {
         String::from_utf16_lossy(&read_wstr(ctx, class_arg, 128).unwrap_or_default())
             .trim_end_matches('\0')
             .to_string()
@@ -21923,12 +22003,19 @@ fn get_class_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     let _instance = ctx.arg_u32(0)?;
     let name_ptr = ctx.arg_u32(1)?;
     let info = ctx.arg_u32(2)?;
-    if name_ptr == 0 || name_ptr <= 0xFFFF {
+    if name_ptr == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let class_name = String::from_utf16_lossy(&read_wstr(ctx, name_ptr, 128)?)
-        .trim_end_matches('\0')
-        .to_string();
+    let class_name = if name_ptr <= 0xffff {
+        let Some(name) = registered_class_atom_name(ctx.kernel, name_ptr) else {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        name
+    } else {
+        String::from_utf16_lossy(&read_wstr(ctx, name_ptr, 128)?)
+            .trim_end_matches('\0')
+            .to_string()
+    };
     let wnd_proc = ctx
         .kernel
         .window_class_procs
@@ -30182,7 +30269,7 @@ mod tests {
             };
             register_class_w(&mut ctx).unwrap()
         };
-        assert_eq!(outcome, DispatchOutcome::ReturnedR0(0xC001));
+        assert_eq!(outcome, DispatchOutcome::ReturnedR0(1));
 
         cpu.write_reg(ArmReg::R0, 0).unwrap();
         cpu.write_reg(ArmReg::R1, CLASS_NAME).unwrap();
@@ -31122,7 +31209,7 @@ mod tests {
             register_class_w(&mut c).unwrap()
         };
 
-        assert_eq!(result, DispatchOutcome::ReturnedR0(0xC001));
+        assert_eq!(result, DispatchOutcome::ReturnedR0(1));
         assert_eq!(kernel.window_background, Some(0x00FF_FFFF));
         assert!(kernel.window_background_erase_pending);
     }
@@ -34165,6 +34252,144 @@ mod tests {
         assert_eq!(
             local_free(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(new_p)
+        );
+    }
+
+    #[test]
+    fn held_gapi_full_copy_publishes_but_partial_fills_and_ddraw_stay_locked() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let base = SYNTHETIC_FRAMEBUFFER_BASE;
+        let source = 0x10000;
+        cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(source, 0x30000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        kernel.fb_mapped = true;
+        kernel.gx_draw_active = true;
+        kernel.guest_fb_pitch = kernel.framebuffer.stride_bytes();
+        let len = kernel.framebuffer.byte_size();
+        let frame: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(17) >> 3) as u8).collect();
+        cpu.write_mem(source, &frame).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        let before = ctx.kernel.framebuffer.frame_counter;
+        for size in [len - 2, len] {
+            ctx.cpu.write_reg(ArmReg::R0, base).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, source).unwrap();
+            ctx.cpu.write_reg(ArmReg::R2, size).unwrap();
+            assert_eq!(memcpy(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(base));
+            assert_eq!(
+                ctx.kernel.framebuffer.frame_counter,
+                before + u64::from(size == len)
+            );
+        }
+        assert_eq!(ctx.kernel.framebuffer.pixels, frame);
+        assert!(ctx.kernel.gx_draw_active);
+        memcpy(&mut ctx).unwrap(); // identical completed copy is not another frame
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        memset(&mut ctx).unwrap(); // clearing the held display is not a frame commit
+        assert_eq!(ctx.kernel.framebuffer.pixels, frame);
+        for padded in [false, true] {
+            ctx.kernel.guest_fb_pitch =
+                ctx.kernel.framebuffer.stride_bytes() + if padded { 2 } else { 0 };
+            if !padded {
+                ctx.kernel.framebuffer.directdraw.primary_locks.insert(base);
+            }
+            ctx.cpu.write_reg(ArmReg::R1, source).unwrap();
+            ctx.cpu
+                .write_mem(source, &vec![0x55; len as usize])
+                .unwrap();
+            memcpy(&mut ctx).unwrap();
+            assert_eq!(ctx.kernel.framebuffer.pixels, frame);
+            assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
+            ctx.kernel.framebuffer.directdraw.primary_locks.clear();
+        }
+    }
+
+    #[test]
+    fn unregister_class_removes_metadata_by_name_or_atom_and_rejects_live_windows() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        for (name, atom) in [("SampleClass", 1), ("OtherClass", 2)] {
+            let name_bytes: Vec<u8> = name
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            ctx.cpu.write_mem(0x1200, &name_bytes).unwrap();
+            let mut wc = [0u8; 40];
+            wc[4..8].copy_from_slice(&(0x20000u32 + atom).to_le_bytes());
+            wc[36..40].copy_from_slice(&0x1200u32.to_le_bytes());
+            ctx.cpu.write_mem(0x1100, &wc).unwrap();
+            ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+            assert_eq!(
+                register_class_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(atom)
+            );
+            assert_eq!(
+                registered_class_atom_name(ctx.kernel, atom).as_deref(),
+                Some(name)
+            );
+        }
+        ctx.kernel
+            .window_classes
+            .insert(0xdead0001, "SAMPLECLASS".into());
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x12345678).unwrap(); // ignored on CE
+        assert_eq!(
+            unregister_class_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1412)
+        );
+        assert!(registered_class_atom_name(ctx.kernel, 1).is_some());
+        ctx.kernel.window_classes.clear();
+        let name_bytes: Vec<u8> = "sampleclass\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        ctx.cpu.write_mem(0x1200, &name_bytes).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0x1200).unwrap();
+        assert_eq!(
+            unregister_class_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(registered_class_atom_name(ctx.kernel, 1).is_none());
+        assert!(!ctx
+            .kernel
+            .gdi
+            .class_values
+            .keys()
+            .any(|(name, _)| name == "sampleclass"));
+        ctx.cpu.write_reg(ArmReg::R0, 2).unwrap();
+        assert_eq!(
+            unregister_class_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.kernel.wnd_proc, 0);
+        assert_eq!(
+            unregister_class_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1411)
         );
     }
 
