@@ -447,9 +447,10 @@ fn decode_bitmap(
             16 => {
                 let at = row + x as usize * 2;
                 raw[at..at + 2].copy_from_slice(
-                    &pocket_kernel::gdi::rgb565_to_rgb555(
-                        pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]),
-                    ).to_le_bytes(),
+                    &pocket_kernel::gdi::rgb565_to_rgb555(pocket_kernel::framebuffer::pack_rgb565(
+                        c[0], c[1], c[2],
+                    ))
+                    .to_le_bytes(),
                 );
             }
             _ => {
@@ -474,7 +475,9 @@ fn decode_bitmap(
         let colour = pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]);
         let colour = if bpp == 16 {
             pocket_kernel::gdi::rgb555_to_rgb565(pocket_kernel::gdi::rgb565_to_rgb555(colour))
-        } else { colour };
+        } else {
+            colour
+        };
         bitmap.pixels[i * 2..i * 2 + 2].copy_from_slice(&colour.to_le_bytes());
     }
     if let Err(error) = ctx.cpu.write_mem(bits, &raw) {
@@ -498,6 +501,81 @@ mod tests {
             .unwrap();
         data
     }
+    #[test]
+    fn decoded_16_bit_dib_is_rgb555_with_matching_rgb565_cache() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let pixels = [
+            255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 123, 117, 45, 0, 0, 0,
+        ];
+        let mut bytes = Vec::new();
+        image::codecs::bmp::BmpEncoder::new(&mut bytes)
+            .encode(&pixels, 3, 2, image::ColorType::Rgb8)
+            .unwrap();
+        cpu.write_mem(0x1800, &bytes).unwrap();
+        let info = [
+            60u32,
+            0x1800,
+            bytes.len() as u32,
+            bytes.len() as u32,
+            0x2000,
+            0,
+            16,
+            0,
+            0,
+            100,
+            1000,
+            1000,
+            0,
+            0,
+            u32::MAX,
+        ];
+        cpu.write_mem(
+            0x1000,
+            &info
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "imgdecmp.dll",
+                "ord:1",
+                &[0x1000]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let handle = cpu.read_u32_le(0x2000).unwrap();
+        let bitmap = kernel.gdi.bitmap(handle).unwrap();
+        assert!(bitmap.dib_rgb555);
+        assert_eq!(
+            (
+                bitmap.width,
+                bitmap.height,
+                bitmap.bpp,
+                bitmap.dib_row_stride
+            ),
+            (3, 2, 16, 8)
+        );
+        let raw = cpu.read_mem(bitmap.dib_bits_va.unwrap(), 16).unwrap();
+        for (i, colour) in pixels.chunks_exact(3).enumerate() {
+            let rgb565 = pocket_kernel::framebuffer::pack_rgb565(colour[0], colour[1], colour[2]);
+            let expected = pocket_kernel::gdi::rgb565_to_rgb555(rgb565);
+            let offset = (1 - i / 3) * 8 + (i % 3) * 2;
+            assert_eq!(u16::from_le_bytes([raw[offset], raw[offset + 1]]), expected);
+            assert_eq!(expected & 0x8000, 0);
+            let cached = u16::from_le_bytes([bitmap.pixels[i * 2], bitmap.pixels[i * 2 + 1]]);
+            assert_eq!(cached, pocket_kernel::gdi::rgb555_to_rgb565(expected));
+        }
+        assert_eq!(&raw[6..8], &[0, 0]);
+        assert_eq!(&raw[14..16], &[0, 0]);
+    }
+
     #[test]
     fn completed_progress_receives_real_renderer_and_preserves_bitmap_ownership() {
         use pocket_cpu::regs::ArmReg;

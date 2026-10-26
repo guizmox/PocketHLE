@@ -1,2 +1,6 @@
 crates/pocket-library/src/keybindings.rs
+crates/pocket-winceapi/src/imgdecmp.rs
+docs/AGENTS.md
+frontends/pocket-android/app/src/main/java/com/pockethle/app/PocketPcGeometry.kt
+frontends/pocket-android/app/src/test/java/com/pockethle/app/PocketPcGeometryTest.kt
 frontends/pocket-desktop/src/app.rs

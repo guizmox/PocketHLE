@@ -34,7 +34,10 @@ internal data class PocketPcGeometry(
                 return PocketPcGeometry(ControlRect(left,toolbarH+2*gap,room,(h-toolbarH-3*gap).coerceAtLeast(1)),
                     bank(gap)+bank(w-side-gap),aux,ControlRect(gap,padY,pad,pad),ControlRect(w-gap-pad,padY,pad,pad))
             }
-            val pad=minOf(dp(112f),(w-6*gap)/3).coerceAtLeast(1)
+            // Match the landscape calculation after exchanging the screen
+            // axes: min(140dp, landscape width/5, landscape height/3).
+            // The taller thumb bank also lifts the action rows above it.
+            val pad=minOf(dp(140f),h/5,w/3).coerceAtLeast(1)
             val deckH=maxOf(pad,dp(108f))
             val deckY=h-gap-deckH
             val rowH=minOf(dp(44f),h/14).coerceAtLeast(1)

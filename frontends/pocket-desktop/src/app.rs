@@ -3726,9 +3726,7 @@ impl PocketLauncher {
                                 }
                             }
                         }
-                        if self.screen == Screen::Run
-                            && control == "Misc1"
-                        {
+                        if self.screen == Screen::Run && control == "Misc1" {
                             if let Some(at) = self.deck_fn_press.remove(&key) {
                                 if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
                                     match crate::deck_navigation::right_fn_action(
@@ -3884,7 +3882,8 @@ impl PocketLauncher {
                                 || pocket_library::keybindings::steam_deck_guest_button(
                                     &control,
                                     self.running_is_gizmondo,
-                                ).is_some()));
+                                )
+                                .is_some()));
                     if self.screen == Screen::Run
                         && !deck_reserved
                         && self.library.config().gamepad_toggles_fullscreen(&control)
@@ -3919,8 +3918,7 @@ impl PocketLauncher {
                             self.deck_fn_press.entry(key).or_insert_with(Instant::now);
                             continue;
                         }
-                        if control == "Select"
-                        {
+                        if control == "Select" {
                             self.deck_view_press = Some((device, Instant::now()));
                             continue;
                         }

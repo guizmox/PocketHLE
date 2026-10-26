@@ -1,0 +1,6 @@
+Local validation toolchain: rustc/cargo/rustfmt 1.88.0.
+Production source and Cargo.lock remain unchanged for toolchain compatibility.
+Library tests: --locked --ignore-rust-version --no-default-features; RUSTFLAGS='-D warnings -C link-arg=-fuse-ld=bfd --cfg aes_backend="soft"'. The AES software backend is a local validation setting, not a shipped config change.
+WinCE tests: --locked --no-default-features; RUSTC_BOOTSTRAP=1 and RUSTFLAGS='-D warnings -C link-arg=-fuse-ld=bfd -Zcrate-attr=feature(generic_arg_infer)'. This allows the existing [None; _] syntax with the older local compiler, without editing pocket-gles.
+Use the repository's regular supported toolchain (CI: Rust 1.90.0) for production builds. No extra flags from this file are required in the delivered sources.
+No full Windows GUI, APK, real controller hardware or complete MSR gameplay run is claimed.

@@ -4150,3 +4150,29 @@ Native 60-second replay passes the former CrazyKart crash and reaches an animate
 race (lap/timer visible); MiniDogfight Exercise also remains animated. Initial
 source is preserved with original imported files and registration data. Generic
 replay source/scripts and bounded traces are in the delivery's diagnostic/ tree.
+
+
+## Unmasked IMGDECMP RGB555 and shared desktop controllers (2026-10-26)
+IMGDECMP's public 16-bit BI_RGB DIB uses RGB555. Its guest bmBits and
+dib_rgb555 metadata must agree; the internal RGB565 cache is expanded from
+the same quantized 555 samples. GAPI and explicit BI_BITFIELDS 565 are separate
+and unchanged. MSR reads bmBits and explicitly widens 555 before its colour
+lookup: supplying 565 produces a red index up to63 for a32-entry table.
+Tests cover public bits, padding, bottom-up rows and cache consistency.
+
+The standard desktop launcher now uses the same in-game controller overrides
+and host View/Menu gestures as the Deck executable. Do not gate controller
+behavior on steam-deck; that feature still selects release/config identity
+and Deck display fitting. Startup migrates exact old factory maps only via
+migrate_desktop_gamepad_layout; customized maps and Android defaults are
+preserved. The shared preset remains explicitly selectable in controller
+settings. SDL already normalizes by physical position, including Switch Pro:
+South=Switch B/Xbox A; East=Switch A/Xbox B.
+
+PocketPC Android portrait uses the landscape thumb size with exchanged screen
+axes: min(140dp, portraitHeight/5, portraitWidth/3). Keep both D-pad and aim
+stick equal; deckH automatically lifts the two action rows to preserve thumb
+clearance. Landscape geometry, guest resolution, inverse touch mapping and
+external-controller bindings are unchanged. Gizmondo already uses140dp in both
+orientations. Pure Kotlin checks cover rotated size parity, bounds, separation
+and QVGA/VGA centre touch mapping.

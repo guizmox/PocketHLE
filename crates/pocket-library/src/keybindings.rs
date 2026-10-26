@@ -587,13 +587,19 @@ mod controller_tests {
         custom.insert("Start".into(), GuestButton::ButtonA);
         let saved = custom.clone();
         fullscreen = Some("West".into());
-        assert!(!migrate_desktop_gamepad_layout(&mut custom, &mut fullscreen));
+        assert!(!migrate_desktop_gamepad_layout(
+            &mut custom,
+            &mut fullscreen
+        ));
         assert_eq!(custom, saved);
         assert_eq!(fullscreen.as_deref(), Some("West"));
         let mut old_deck = steam_deck_gamepad_bindings();
         old_deck.insert("Start".into(), GuestButton::GizPiano1);
         fullscreen = Some("LeftTrigger".into());
-        assert!(migrate_desktop_gamepad_layout(&mut old_deck, &mut fullscreen));
+        assert!(migrate_desktop_gamepad_layout(
+            &mut old_deck,
+            &mut fullscreen
+        ));
         assert_eq!(old_deck, steam_deck_gamepad_bindings());
         assert_eq!(fullscreen.as_deref(), Some("Select"));
     }

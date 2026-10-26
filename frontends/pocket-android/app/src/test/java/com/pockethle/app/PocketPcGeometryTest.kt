@@ -5,6 +5,23 @@ import org.junit.Test
 
 class PocketPcGeometryTest {
     private fun overlaps(a:ControlRect,b:ControlRect)=a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h
+    @Test fun portraitThumbControlsMatchLandscapeSizeAndLiftActionRows() {
+        for(density in listOf(1f,2f,2.625f,3f)) for(size in listOf(360 to 800,412 to 915,480 to 960,800 to 1280)) {
+            val w=(size.first*density).toInt();val h=(size.second*density).toInt()
+            val portrait=PocketPcGeometry.calculate(w,h,density)
+            val landscape=PocketPcGeometry.calculate(h,w,density)
+            assertEquals(landscape.dpad.w,portrait.dpad.w)
+            assertEquals(landscape.stick.w,portrait.stick.w)
+            assertEquals(portrait.dpad.w,portrait.stick.w)
+            val gap=(6*density).toInt().coerceAtLeast(1)
+            val oldPad=minOf((112*density).toInt(),(w-6*gap)/3).coerceAtLeast(1)
+            assertTrue("portrait grows at $size / $density",portrait.dpad.w>oldPad)
+            val oldDeck=maxOf(oldPad,(108*density).toInt().coerceAtLeast(1))
+            val rowH=minOf((44*density).toInt().coerceAtLeast(1),h/14).coerceAtLeast(1)
+            val oldActionY=h-gap-oldDeck-(18*density).toInt().coerceAtLeast(1)-2*rowH-gap
+            assertTrue(portrait.actions.minOf { it.y }<oldActionY)
+        }
+    }
     @Test fun phoneRotationKeepsControlsSeparateFromSurfaceAndThumbs() {
         for(density in listOf(1f,2f,2.625f,3f)) for(size in listOf(360 to 800,412 to 915,800 to 360,915 to 412,1280 to 800)) {
             val w=(size.first*density).toInt();val h=(size.second*density).toInt()
