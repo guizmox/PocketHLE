@@ -1,5 +1,1 @@
-frontends/pocket-desktop/src/controller_ui.rs
-frontends/pocket-desktop/src/recordings_gallery.rs
-frontends/pocket-desktop/src/app.rs
-frontends/pocket-desktop/src/desktop_pointer.rs
-frontends/pocket-desktop/src/desktop_main.rs
+crates/pocket-winceapi/src/imgdecmp.rs

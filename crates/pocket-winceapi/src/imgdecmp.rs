@@ -420,8 +420,11 @@ fn decode_bitmap(
         .iter()
         .map(|c| pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]))
         .collect();
+    // Public 16-bit BI_RGB DIBs are RGB555, independently of the RGB565
+    // display/cache. MSR reads bmBits and widens 555 itself; supplying 565
+    // even sends its red-channel lookup outside the 32-entry colour table.
     let mut bitmap =
-        pocket_kernel::gdi::Bitmap::new_dib(w, h, bpp, bits, stride, true, palette, false);
+        pocket_kernel::gdi::Bitmap::new_dib(w, h, bpp, bits, stride, true, palette, bpp == 16);
     let mut raw = vec![0u8; size as usize];
     for (i, pixel) in rgba.pixels().enumerate() {
         let (x, y) = (i as u32 % w, i as u32 / w);
@@ -444,7 +447,9 @@ fn decode_bitmap(
             16 => {
                 let at = row + x as usize * 2;
                 raw[at..at + 2].copy_from_slice(
-                    &pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]).to_le_bytes(),
+                    &pocket_kernel::gdi::rgb565_to_rgb555(
+                        pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]),
+                    ).to_le_bytes(),
                 );
             }
             _ => {
@@ -466,9 +471,11 @@ fn decode_bitmap(
                 }
             }
         }
-        bitmap.pixels[i * 2..i * 2 + 2].copy_from_slice(
-            &pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]).to_le_bytes(),
-        );
+        let colour = pocket_kernel::framebuffer::pack_rgb565(c[0], c[1], c[2]);
+        let colour = if bpp == 16 {
+            pocket_kernel::gdi::rgb555_to_rgb565(pocket_kernel::gdi::rgb565_to_rgb555(colour))
+        } else { colour };
+        bitmap.pixels[i * 2..i * 2 + 2].copy_from_slice(&colour.to_le_bytes());
     }
     if let Err(error) = ctx.cpu.write_mem(bits, &raw) {
         ctx.kernel.heap.free(bits);
