@@ -2635,9 +2635,12 @@ impl PocketLauncher {
                 } else {
                     Vec2::new(frame.width as f32, frame.height as f32)
                 };
-                let screen = screen * scale / ui.ctx().pixels_per_point();
-                // Two fixed control banks surround the native integer-sized display.
-                Vec2::new((screen.x + 312.0).max(600.0), (screen.y + 36.0).max(340.0))
+                let body = crate::fullscreen_layout::pocket_pc_window_body(
+                    [screen.x as u32, screen.y as u32],
+                    if self.upscale_x2 { 2 } else { 1 },
+                    ui.ctx().pixels_per_point(),
+                );
+                Vec2::new(body[0], body[1])
             };
             // Keep only the measured top/status bars around the console.
             // Measuring avoids fixed guesses about title bars or display DPI.
@@ -2887,11 +2890,11 @@ impl PocketLauncher {
         let bounds = ui.available_rect_before_wrap();
         ui.painter()
             .rect_filled(bounds, 0.0, Color32::from_rgb(8, 13, 21));
-        let gap = 6.0;
+        let gap = crate::fullscreen_layout::POCKET_PC_GAP;
         let side = (bounds.width() * 0.19).clamp(72.0, 140.0);
         let pad = side.min((bounds.height() - 60.0).max(30.0) * 0.45);
         let pad_top = bounds.bottom() - pad - gap;
-        let top = bounds.top() + 36.0;
+        let top = bounds.top() + crate::fullscreen_layout::POCKET_PC_TOOLBAR_HEIGHT;
         let cell_w = (side - gap) / 2.0;
         let cell_h = ((pad_top - 18.0 - top - gap) / 2.0).max(20.0);
         let banks = [

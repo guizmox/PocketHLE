@@ -114,3 +114,37 @@ mod tests {
         assert_eq!(integer_fit([319, 239], [320, 240]).factor, 1);
     }
 }
+
+// Window sizing and the PocketPC display rectangle must reserve identical chrome.
+pub const POCKET_PC_TOOLBAR_HEIGHT: f32 = 36.0;
+pub const POCKET_PC_GAP: f32 = 6.0;
+pub fn pocket_pc_window_body(screen: [u32; 2], factor: u32, dpi: f32) -> [f32; 2] {
+    [
+        (screen[0] as f32 * factor as f32 / dpi + 312.0).max(600.0),
+        (screen[1] as f32 * factor as f32 / dpi + POCKET_PC_TOOLBAR_HEIGHT + POCKET_PC_GAP)
+            .max(340.0),
+    ]
+}
+#[cfg(test)]
+mod pocket_pc_window_tests {
+    use super::*;
+    #[test]
+    fn doubled_window_reserves_the_entire_toolbar_and_bottom_gap() {
+        for native in [[240, 320], [320, 240], [480, 640], [640, 480]] {
+            for dpi in [1.0, 1.25, 1.5, 2.0] {
+                let body = pocket_pc_window_body(native, 2, dpi);
+                let room = [
+                    ((body[0] - 304.0) * dpi).round() as u32,
+                    ((body[1] - POCKET_PC_TOOLBAR_HEIGHT - POCKET_PC_GAP) * dpi).round() as u32,
+                ];
+                assert_eq!(
+                    integer_fit_capped(room, native, 4).factor,
+                    2,
+                    "{native:?} at DPI {dpi}"
+                );
+            }
+        }
+        // Previously the body only reserved 36 points, losing six screen rows.
+        assert_eq!(integer_fit_capped([488, 634], [240, 320], 4).factor, 1);
+    }
+}

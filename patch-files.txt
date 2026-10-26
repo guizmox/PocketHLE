@@ -7,3 +7,4 @@ frontends/pocket-desktop/src/native_share.rs
 frontends/pocket-desktop/src/recordings_gallery.rs
 crates/pocket-winceapi/src/recording_encoder.rs
 docs/STEAMDECK.md
+frontends/pocket-desktop/src/fullscreen_layout.rs
