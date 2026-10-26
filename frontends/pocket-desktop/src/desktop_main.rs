@@ -9,6 +9,7 @@
 // framebuffer produced by [`pocket_core::Emulator`].
 
 mod app;
+mod desktop_pointer;
 mod controller_ui;
 mod deck_navigation;
 mod fullscreen_layout;

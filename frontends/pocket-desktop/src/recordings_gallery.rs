@@ -123,7 +123,7 @@ fn scan(root: &Path, known: &HashSet<Key>) -> Result<Vec<Asset>, String> {
 }
 #[cfg(windows)]
 fn open_capture(path: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     #[link(name = "shell32")]
     extern "system" {
         fn ShellExecuteW(
@@ -134,6 +134,37 @@ fn open_capture(path: &Path) -> Result<(), String> {
             directory: *const u16,
             show: i32,
         ) -> isize;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+        fn GetProcAddress(module: *mut std::ffi::c_void, name: *const u8) -> *mut std::ffi::c_void;
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+    let ntdll: Vec<u16> = "ntdll.dll".encode_utf16().chain(Some(0)).collect();
+    let wine = unsafe {
+        let module = GetModuleHandleW(ntdll.as_ptr());
+        !module.is_null() && !GetProcAddress(module, b"wine_get_version\0".as_ptr()).is_null()
+    };
+    if wine {
+        // Deck builds run under Proton. Its Windows file associations need
+        // not have a media player; Wine's bridge delegates to the host opener
+        // and translates the Windows path. Do not hardcode a Linux viewer.
+        let mut directory = vec![0u16; 32768];
+        let len = unsafe { GetSystemDirectoryW(directory.as_mut_ptr(), directory.len() as u32) };
+        if len == 0 || len as usize >= directory.len() {
+            return Err("Cannot locate the Wine system directory".into());
+        }
+        let system = PathBuf::from(std::ffi::OsString::from_wide(&directory[..len as usize]));
+        let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+        let status = wine_open_command(&system, &path)
+            .status()
+            .map_err(|e| format!("Cannot open capture through Wine: {e}"))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("Cannot open capture through Wine ({status})"))
+        };
     }
     let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
@@ -152,6 +183,13 @@ fn open_capture(path: &Path) -> Result<(), String> {
     } else {
         Err(format!("Cannot open capture (Windows error {result})"))
     }
+}
+
+#[cfg(any(windows, test))]
+fn wine_open_command(system: &Path, path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(system.join("winebrowser.exe"));
+    command.arg(path);
+    command
 }
 #[cfg(not(windows))]
 fn open_capture(path: &Path) -> Result<(), String> {
@@ -487,6 +525,17 @@ impl Gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wine_opener_passes_the_capture_as_one_literal_argument() {
+        let system = Path::new("C:/windows/system32");
+        let path = Path::new("C:/captures/Vidéo #1 & friends.mp4");
+        let command = wine_open_command(system, path);
+        assert_eq!(command.get_program(), system.join("winebrowser.exe"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![path.as_os_str()]
+        );
+    }
     #[test]
     fn supported_media_only() {
         assert_eq!(media_kind(Path::new("game.PNG")), Some(false));

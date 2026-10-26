@@ -16,6 +16,10 @@ struct Widgets {
     popup: Option<Popup>,
     collecting: Option<Vec<(Id, bool)>>,
     keep_popup: bool,
+    page: Option<Id>,
+    page_items: Vec<Id>,
+    page_collecting: bool,
+    page_seen: bool,
 }
 #[derive(Clone)]
 struct Popup {
@@ -117,6 +121,18 @@ impl Navigation {
                     continue;
                 }
             }
+            if w.page.is_some() && !ctx.memory(|m| m.any_popup_open()) {
+                if let Some(next) = crate::deck_navigation::menu_index(
+                    focused
+                        .and_then(|id| w.page_items.iter().position(|item| *item == id))
+                        .unwrap_or(0),
+                    &control,
+                    w.page_items.len(),
+                ) {
+                    ctx.memory_mut(|m| m.request_focus(w.page_items[next]));
+                    continue;
+                }
+            }
             match control.as_str() {
                 "Escape" => key(raw, Key::Escape, false),
                 "South" => {
@@ -186,6 +202,12 @@ impl Navigation {
         }
     }
     pub fn show(&mut self, ctx: &egui::Context) {
+        edit_widgets(ctx, |w| {
+            if !w.page_seen {
+                w.page = None;
+                w.page_items.clear();
+            }
+        });
         if self.used {
             if let Some(response) = ctx
                 .memory(|m| m.focused())
@@ -299,6 +321,7 @@ pub fn text_edit(ui: &mut Ui, value: &mut String, hint: &str) -> Response {
     edit_widgets(ui.ctx(), |w| {
         w.text.insert(response.id, value.clone());
     });
+    register_page_widget(ui, &response);
     if response.has_focus() {
         response.scroll_to_me(Some(egui::Align::Center));
     }
@@ -333,6 +356,7 @@ impl ComboBox {
         }
         let entries = widgets(&ctx).collecting.unwrap_or_default();
         edit_widgets(&ctx, |w| w.collecting = None);
+        register_page_widget(ui, &response.response);
         if response.inner.is_some() && ctx.memory(|m| m.any_popup_open()) {
             let items: Vec<_> = entries.iter().map(|(id, _)| *id).collect();
             if old
@@ -397,10 +421,52 @@ pub fn begin_frame(ctx: &egui::Context) {
     let open = ctx.memory(|m| m.any_popup_open());
     edit_widgets(ctx, |w| {
         w.text.clear();
+        w.page_seen = false;
         if !open {
             w.popup = None;
         }
     });
+}
+
+/// Page navigation excludes the launcher toolbar while popup controls retain
+/// their own navigation scope. Mouse interaction continues to use real widgets.
+pub fn page_scope<R>(ui: &mut Ui, id: impl Hash, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = Id::new(id);
+    let entering = widgets(ui.ctx()).page != Some(id);
+    if entering {
+        ui.memory_mut(|m| m.close_popup());
+    }
+    edit_widgets(ui.ctx(), |w| {
+        w.page = Some(id);
+        w.page_seen = true;
+        w.page_collecting = true;
+        w.page_items.clear();
+        if entering {
+            w.popup = None;
+        }
+    });
+    let result = contents(ui);
+    edit_widgets(ui.ctx(), |w| w.page_collecting = false);
+    let state = widgets(ui.ctx());
+    let focused = ui.memory(|m| m.focused());
+    if !ui.memory(|m| m.any_popup_open())
+        && (entering || !focused.is_some_and(|id| state.page_items.contains(&id)))
+    {
+        if let Some(first) = state.page_items.first() {
+            ui.memory_mut(|m| m.request_focus(*first));
+        }
+    }
+    result
+}
+
+fn register_page_widget(ui: &Ui, response: &Response) {
+    if response.enabled() {
+        edit_widgets(ui.ctx(), |w| {
+            if w.page_collecting && w.collecting.is_none() && !w.page_items.contains(&response.id) {
+                w.page_items.push(response.id);
+            }
+        });
+    }
 }
 
 pub fn scroll_focus(ui: &Ui) {
@@ -432,6 +498,80 @@ mod tests {
             egui::CentralPanel::default().show(ctx, ui);
         });
     }
+    #[test]
+    fn settings_page_takes_focus_from_toolbar_and_keeps_controller_navigation_inside() {
+        fn settings(ui: &mut Ui, checked: &mut bool, selected: &mut u8) -> (Id, Id, Id) {
+            button(ui, "Game library");
+            page_scope(ui, "settings", |ui| {
+                let checkbox = checkbox(ui, checked, "Enabled").id;
+                add_enabled(ui, false, egui::Button::new("Disabled"));
+                let combo = ComboBox::from_id_source("quality")
+                    .selected_text(selected.to_string())
+                    .show_ui(ui, |ui| {
+                        selectable_value(ui, selected, 0, "Low");
+                        selectable_value(ui, selected, 1, "High");
+                    })
+                    .response
+                    .id;
+                let save = button(ui, "Save").id;
+                (checkbox, combo, save)
+            })
+        }
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        let mut checked = false;
+        let mut selected = 0;
+        let mut ids = (Id::NULL, Id::NULL, Id::NULL);
+        let mut toolbar = Id::NULL;
+        frame(&ctx, &mut nav, |ui| {
+            toolbar = button(ui, "Game library").id;
+        });
+        ctx.memory_mut(|m| m.request_focus(toolbar));
+        frame(&ctx, &mut nav, |ui| {
+            ids = settings(ui, &mut checked, &mut selected);
+        });
+        assert_eq!(ctx.memory(|m| m.focused()), Some(ids.0));
+        nav.press("DPadDown");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        assert_eq!(ctx.memory(|m| m.focused()), Some(ids.1));
+        nav.press("South");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        assert!(menu_open(&ctx));
+        // The first egui popup pass only measures its disabled contents.
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        nav.press("DPadDown");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        nav.press("South");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        assert_eq!(selected, 1);
+        assert!(!menu_open(&ctx));
+        nav.press("DPadDown");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        assert_eq!(ctx.memory(|m| m.focused()), Some(ids.2));
+        nav.press("DPadDown");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        assert_eq!(ctx.memory(|m| m.focused()), Some(ids.0));
+        nav.press("South");
+        frame(&ctx, &mut nav, |ui| {
+            settings(ui, &mut checked, &mut selected);
+        });
+        assert!(checked);
+    }
+
     #[test]
     fn controller_a_toggles_real_checkbox_and_down_moves_focus() {
         let ctx = egui::Context::default();
@@ -619,6 +759,7 @@ pub fn menu_button<R>(
     }
 }
 fn register(ui: &Ui, response: &Response, close: bool) {
+    register_page_widget(ui, response);
     if response.enabled() {
         edit_widgets(ui.ctx(), |w| {
             if let Some(entries) = &mut w.collecting {

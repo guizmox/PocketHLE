@@ -3459,39 +3459,28 @@ impl PocketLauncher {
     }
 
     fn handle_pointer_clipped(&mut self, ctx: &egui::Context, rect: &Rect, size: Vec2, clip: Rect) {
-        let held = pointer_held_in(ctx, &rect.intersect(clip));
-        let pos = ctx.input(|input| input.pointer.latest_pos());
-        let coords = pos.map(|pos| {
-            // Map UI-space coords to guest framebuffer pixels. The panel
-            // scales whatever geometry the game actually runs at, so both
-            // factors have to come from the live texture rather than the
-            // compile-time constants — otherwise a 480×320 game would see
-            // taps land on the wrong pixels.
-            rotated_pointer_to_game(pos - rect.min, rect.size(), size, self.game_rotation)
-        });
-        match (self.pointer_down_at, held) {
-            (None, true) => {
-                if let Some((x, y)) = coords {
-                    self.send_input(InputEvent::PointerDown { x, y });
-                    self.pointer_down_at = Some((x, y));
+        let events = ctx.input(|input| input.events.clone());
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        let rotation = self.game_rotation;
+        let strokes = crate::desktop_pointer::gestures(
+            &events,
+            &mut self.pointer_down_at,
+            rect.intersect(clip),
+            focused,
+            |pos| rotated_pointer_to_game(pos - rect.min, rect.size(), size, rotation),
+        );
+        for stroke in strokes {
+            let event = match stroke {
+                crate::desktop_pointer::Stroke::Down(x, y) => {
+                    // The guest cancels its emulated stroke on physical Down.
+                    // Rearm a held stick after even a same-frame touch tap.
+                    self.stylus_last = (0, 0);
+                    InputEvent::PointerDown { x, y }
                 }
-            }
-            (Some(last), true) => {
-                // Only report movement that actually changed a guest
-                // pixel; a still stylus should not flood the pump.
-                if let Some((x, y)) = coords {
-                    if (x, y) != last {
-                        self.send_input(InputEvent::PointerMove { x, y });
-                        self.pointer_down_at = Some((x, y));
-                    }
-                }
-            }
-            (Some(last), false) => {
-                let (x, y) = coords.unwrap_or(last);
-                self.send_input(InputEvent::PointerUp { x, y });
-                self.pointer_down_at = None;
-            }
-            (None, false) => {}
+                crate::desktop_pointer::Stroke::Move(x, y) => InputEvent::PointerMove { x, y },
+                crate::desktop_pointer::Stroke::Up(x, y) => InputEvent::PointerUp { x, y },
+            };
+            self.send_input(event);
         }
     }
 
@@ -3538,14 +3527,16 @@ impl PocketLauncher {
             && !self
                 .last_frame_snapshot
                 .as_ref()
-                .is_some_and(|f| f.text_input)
-            && self.pointer_down_at.is_none();
+                .is_some_and(|f| f.text_input);
         if !active {
             self.stylus_keyboard.clear();
             self.stylus_gamepad.clear();
             self.stylus_touch = [0.0; 4];
         }
-        let vector = if active {
+        // Touch temporarily owns the stylus, but does not release held
+        // controller axes. SDL may not send another event for an unchanged
+        // stick position when the finger lifts.
+        let vector = if active && self.pointer_down_at.is_none() {
             config.velocity(strengths, rotation_turns(self.game_rotation))
         } else {
             (0, 0)
@@ -4618,13 +4609,7 @@ impl PocketLauncher {
 /// even if the pointer drifts off it, which is what a user dragging
 /// their thumb across a D-pad expects.
 fn pointer_held_in(ctx: &egui::Context, rect: &Rect) -> bool {
-    ctx.input(|input| {
-        input.pointer.primary_down()
-            && input
-                .pointer
-                .press_origin()
-                .is_some_and(|origin| rect.contains(origin))
-    })
+    crate::desktop_pointer::held_in(ctx, rect)
 }
 
 fn rotated_pointer_to_game(
@@ -4666,6 +4651,7 @@ impl eframe::App for PocketLauncher {
         }
     }
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        crate::desktop_pointer::finish_missing_releases(ctx, raw);
         self.controller_ui
             .prepare_input(ctx, raw, self.screen != Screen::Run);
     }
@@ -4918,9 +4904,11 @@ impl eframe::App for PocketLauncher {
                     self.ui_settings(ui)
                 }
                 Screen::GameSettings => {
-                    ScrollArea::vertical().show(ui, |ui| {
-                        self.ui_game_settings(ui);
-                        crate::controller_ui::scroll_focus(ui);
+                    crate::controller_ui::page_scope(ui, "game_settings_page", |ui| {
+                        ScrollArea::vertical().show(ui, |ui| {
+                            self.ui_game_settings(ui);
+                            crate::controller_ui::scroll_focus(ui);
+                        });
                     });
                 }
                 Screen::Run => self.ui_run(ui),
