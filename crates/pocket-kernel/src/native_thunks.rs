@@ -422,6 +422,36 @@ const GET_TICK_COUNT: [u32; 8] = [
     BX_LR,
 ];
 
+/// Boolean soft-float comparisons. VCMP produces unordered for either NaN;
+/// MI/LS (not signed LT/LE) keep unordered false for < and <=. NE alone
+/// returns true for NaNs, matching the existing Rust handlers.
+/// R0 is the result; caller-saved VFP/condition flags may change under the ABI.
+fn float_comparison_thunk(name: &str) -> Option<[u32; 8]> {
+    let condition = match name {
+        "__eqs" | "__eqd" => 0x0, // EQ: equal, excludes unordered
+        "__nes" | "__ned" => 0x1, // NE: unequal, includes unordered
+        "__lts" | "__ltd" => 0x4, // MI: less, excludes unordered
+        "__les" | "__led" => 0x9, // LS: less/equal, excludes unordered
+        "__gts" | "__gtd" => 0xc, // GT: greater, excludes unordered
+        "__ges" | "__ged" => 0xa, // GE: greater/equal, excludes unordered
+        _ => return None,
+    };
+    let (left, right, compare) = if name.ends_with('d') {
+        (0xEC41_0B10, 0xEC43_2B11, 0xEEB4_0B41) // vmov d0,r0,r1; vmov d1,r2,r3; vcmp.f64
+    } else {
+        (0xEE00_0A10, 0xEE00_1A90, 0xEEB4_0A60) // vmov s0,r0; vmov s1,r1; vcmp.f32
+    };
+    Some(pad(&[
+        left,
+        right,
+        compare,
+        0xEEF1_FA10,                     // vmrs APSR_nzcv,fpscr
+        0xE3A0_0000,                     // mov r0,#0 (does not change comparison flags)
+        (condition << 28) | 0x03A0_0001, // mov<condition> r0,#1
+        BX_LR,
+    ]))
+}
+
 /// Look up the native thunk for a `coredll.dll` symbol. Returns
 /// `None` if the symbol isn't one of the helpers we can JIT directly
 /// — the kernel falls back to the regular hooked dispatcher path
@@ -429,6 +459,9 @@ const GET_TICK_COUNT: [u32; 8] = [
 pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
     if !dll.eq_ignore_ascii_case("coredll.dll") {
         return None;
+    }
+    if let Some(words) = float_comparison_thunk(name) {
+        return Some(words);
     }
     Some(match name {
         "memcpy" | "memmove" => BYTE_COPY,
@@ -559,6 +592,21 @@ pub fn thunk_bytes(words: &[u32; 8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floating_comparisons_fit_native_slots_and_are_coredll_only() {
+        for name in [
+            "__eqs", "__nes", "__lts", "__les", "__gts", "__ges", "__eqd", "__ned", "__ltd",
+            "__led", "__gtd", "__ged",
+        ] {
+            let words = native_thunk_for("COREDLL.dll", name).unwrap();
+            assert_eq!(words[6], BX_LR);
+            assert_eq!(words[7], BX_LR);
+            assert!(native_thunk_for("unrelated.dll", name).is_none());
+            assert!(hybrid_fallback_offset("coredll.dll", name).is_none());
+        }
+        assert!(float_comparison_thunk("__cmps").is_none());
+    }
 
     #[test]
     fn constant_return_thunk_emits_mov_bx_lr() {

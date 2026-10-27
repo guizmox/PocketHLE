@@ -1,0 +1,12 @@
+__eqs ee000a10 ee001a90 eeb40a60 eef1fa10 e3a00000 03a00001 e12fff1e e12fff1e
+__nes ee000a10 ee001a90 eeb40a60 eef1fa10 e3a00000 13a00001 e12fff1e e12fff1e
+__lts ee000a10 ee001a90 eeb40a60 eef1fa10 e3a00000 43a00001 e12fff1e e12fff1e
+__les ee000a10 ee001a90 eeb40a60 eef1fa10 e3a00000 93a00001 e12fff1e e12fff1e
+__gts ee000a10 ee001a90 eeb40a60 eef1fa10 e3a00000 c3a00001 e12fff1e e12fff1e
+__ges ee000a10 ee001a90 eeb40a60 eef1fa10 e3a00000 a3a00001 e12fff1e e12fff1e
+__eqd ec410b10 ec432b11 eeb40b41 eef1fa10 e3a00000 03a00001 e12fff1e e12fff1e
+__ned ec410b10 ec432b11 eeb40b41 eef1fa10 e3a00000 13a00001 e12fff1e e12fff1e
+__ltd ec410b10 ec432b11 eeb40b41 eef1fa10 e3a00000 43a00001 e12fff1e e12fff1e
+__led ec410b10 ec432b11 eeb40b41 eef1fa10 e3a00000 93a00001 e12fff1e e12fff1e
+__gtd ec410b10 ec432b11 eeb40b41 eef1fa10 e3a00000 c3a00001 e12fff1e e12fff1e
+__ged ec410b10 ec432b11 eeb40b41 eef1fa10 e3a00000 a3a00001 e12fff1e e12fff1e

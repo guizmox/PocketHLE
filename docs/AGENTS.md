@@ -4399,3 +4399,23 @@ Full screen uses the host viewport and fits media proportionally while keeping
 controls visible. Button/double-click enter or exit; B/Escape exits fullscreen
 first and only closes the viewer when windowed. Drop restores the host's prior
 fullscreen state, including a Deck host that was already fullscreen.
+
+
+### JIT boolean floating-point comparisons
+
+native_thunks::float_comparison_thunk covers __eqs/__nes/__lts/__les/__gts/__ges
+and their double-precision d variants using VFP VCMP and boolean R0 results.
+These previously registered CRT helpers now stay in the existing native ARM
+thunk path; no game-specific patch, new API table, GPU dispatch, or build option.
+Each code sequence uses 7 of the 8 available ARM words; the last word is BX LR.
+MI implements < and LS implements <=: signed LT/LE would incorrectly accept
+unordered NaN. NE includes unordered; the other predicates exclude it. R4-R11,
+SP and non-result argument registers remain unchanged; VFP scratch/condition
+flags can change as allowed by the call ABI. Existing Rust fallback handlers
+remain unchanged, as do unsupported helpers such as __cmps/__cmpd.
+
+Validation executed the production Rust-generated words with Unicorn 2.1.4 on
+the ARM Cortex-A15 model, VFP enabled and FPSCR=0. 14,700 operand/predicate cases
+passed across f32/f64: ordinary/random values, +/-0, infinities, smallest/largest
+subnormals and quiet/signaling NaNs. Return addresses and preserved registers
+were checked. No Mini Kayak in-game timing or end-to-end FPS claim was made.
