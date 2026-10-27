@@ -521,7 +521,7 @@ impl Vfs {
             volume = Self::quota(mount);
             read_only = mount.read_only;
             // Preserve the validated wrapped-install fallback for reads only.
-            let target = if access == 1 && disposition == 3 {
+            let mut target = if access == 1 && disposition == 3 {
                 self.resolve(path).unwrap_or(exact)
             } else {
                 exact
@@ -562,6 +562,18 @@ impl Vfs {
             };
             if lower.is_some() && disposition == 1 {
                 return Err(80);
+            }
+            // Opening an existing file for writing must not rename it. The
+            // lookup key is case folded, but directory enumeration preserves
+            // the installed spelling when materializing a writable copy.
+            if let Some((source, source_root)) = &lower {
+                let relative = source.strip_prefix(source_root).map_err(|_| 5u32)?;
+                let spelling = format!(
+                    "{}{}",
+                    mount.prefix,
+                    relative.to_string_lossy().replace('\\', "/")
+                );
+                target = self.host_path_for_mount(mount, &spelling).ok_or(5u32)?;
             }
             // Materialize only directories which already exist in the merged
             // guest filesystem. An actually missing parent still fails.
@@ -1079,6 +1091,40 @@ impl Vfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn writable_copy_preserves_installed_spelling_and_case_insensitive_lookup() {
+        let lower = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        std::fs::create_dir(lower.path().join("Models")).unwrap();
+        std::fs::write(lower.path().join("Models/Vehicle.DAT"), b"original").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", lower.path());
+        v.mount_save_dir("\\Game\\", saves.path());
+        let path = "\\game\\models\\vehicle.dat";
+        let h = v.open_file(path, 3, 3, 3, false, 0).unwrap().handle;
+        assert_eq!(v.write(h, b"modified"), Some(8));
+        v.close(h);
+        assert_eq!(
+            std::fs::read(saves.path().join("Models/Vehicle.DAT")).unwrap(),
+            b"modified"
+        );
+        let entries = v.list_dir("\\GAME\\MODELS").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "Vehicle.DAT");
+        let h = v
+            .open_file("\\Game\\Models\\VEHICLE.dat", 1, 3, 3, false, 0)
+            .unwrap()
+            .handle;
+        let mut bytes = [0; 8];
+        assert_eq!(v.read(h, &mut bytes), Some(8));
+        assert_eq!(&bytes, b"modified");
+        v.close(h);
+        assert_eq!(
+            std::fs::read(lower.path().join("Models/Vehicle.DAT")).unwrap(),
+            b"original"
+        );
+    }
+
     #[test]
     fn creates_files_in_existing_lower_layer_directories_without_inventing_guest_parents() {
         let lower = tempfile::tempdir().unwrap();

@@ -1,7 +1,1 @@
-crates/pocket-core/src/cab_setup.rs
-crates/pocket-kernel/src/controls.rs
-crates/pocket-kernel/src/lib.rs
-crates/pocket-library/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/gx.rs
-docs/AGENTS.md
+crates/pocket-kernel/src/vfs_contract.rs
