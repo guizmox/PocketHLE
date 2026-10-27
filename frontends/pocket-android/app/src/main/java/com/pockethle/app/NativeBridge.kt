@@ -170,6 +170,7 @@ object NativeBridge {
      */
     @JvmStatic external fun nativeFinishGame(handle: Long): String
 
+    const val INPUT_TOUCH_STEERING: Int = 7
     const val INPUT_STYLUS_AIM: Int = 6
     const val INPUT_KEY_DOWN: Int = 0
     const val INPUT_KEY_UP: Int = 1

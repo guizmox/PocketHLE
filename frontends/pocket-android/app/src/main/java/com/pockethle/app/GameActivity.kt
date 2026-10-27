@@ -127,6 +127,18 @@ class GameActivity : AppCompatActivity() {
      * burning the CPU on a phone. */
     private var dependencyDialogVisible = false
 
+    private var touchSteeringEnabled = false
+    private var steeringDevice = -1
+    private val steeringDeviceListener = object : android.hardware.input.InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) {}
+        override fun onInputDeviceChanged(deviceId: Int) {}
+        override fun onInputDeviceRemoved(deviceId: Int) {
+            if (deviceId == steeringDevice && session != 0L) {
+                NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,0,0)
+                steeringDevice = -1
+            }
+        }
+    }
     private val pollTick = object : Runnable {
         override fun run() {
             if (session == 0L) return
@@ -241,6 +253,8 @@ class GameActivity : AppCompatActivity() {
         val isGizmondo = NativeBridge.isGizmondoGame(rootDir, id)
         val gameSettings = runCatching { GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(rootDir, id))) }.getOrDefault(GameSettings.default())
         dpadDeadzone = ControlDeadzone.from(gameSettings.dpadDeadzone)
+        touchSteeringEnabled = !gizmondoGame && gameSettings.pocketpcTouchSteering
+        getSystemService(android.hardware.input.InputManager::class.java)?.registerInputDeviceListener(steeringDeviceListener, mainHandler)
         (gameControls as? GizmondoControls)?.dpad?.deadZoneRadius = dpadDeadzone.radius
         val fixedGps = config.gpsFixedEnabled && NativeBridge.isColorsGame(rootDir, id)
         rotationDegrees = if (isGizmondo) 0 else readRotationDegrees(rootDir, id)
@@ -403,6 +417,7 @@ class GameActivity : AppCompatActivity() {
         finishSession()
         mainHandler.removeCallbacksAndMessages(null)
         surface.onPause()
+        getSystemService(android.hardware.input.InputManager::class.java)?.unregisterInputDeviceListener(steeringDeviceListener)
         super.onDestroy()
     }
 
@@ -789,8 +804,16 @@ class GameActivity : AppCompatActivity() {
         }
         axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_X),"Left","Right")
         axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_Y),"Up","Down")
-        axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_X),"Left","Right")
-        axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_Y),"Up","Down")
+        if (touchSteeringEnabled) {
+            steeringDevice = event.deviceId
+            val active = activityResumed && hasWindowFocus() && !surfacePointerDown
+            val x = if(active) (event.getAxisValue(MotionEvent.AXIS_X).coerceIn(-1f,1f)*1000).toInt() else 0
+            val y = if(active) (event.getAxisValue(MotionEvent.AXIS_Y).coerceIn(-1f,1f)*1000).toInt() else 0
+            NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,x,y)
+        } else {
+            axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_X),"Left","Right")
+            axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_Y),"Up","Down")
+        }
         axis("RightStick",event.getAxisValue(MotionEvent.AXIS_Z),"Left","Right")
         axis("RightStick",event.getAxisValue(MotionEvent.AXIS_RZ),"Up","Down")
         listOf("LeftTrigger2" to MotionEvent.AXIS_LTRIGGER,"RightTrigger2" to MotionEvent.AXIS_RTRIGGER).forEach { (name,axis) ->
@@ -842,6 +865,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseHeldInput() {
+        if(session!=0L && touchSteeringEnabled) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,0,0)
         stylusKeys.clear();stylusAxes.clear();stylusTouch.fill(0f)
         if(session!=0L && stylusSent!=(0 to 0)) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,0,0)
         stylusSent=0 to 0

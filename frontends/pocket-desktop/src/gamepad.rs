@@ -18,6 +18,11 @@ use std::{
 };
 
 pub enum Event {
+    SteeringAxis {
+        device: usize,
+        horizontal: bool,
+        value: f32,
+    },
     AimAxis {
         device: usize,
         horizontal: bool,
@@ -444,6 +449,13 @@ fn worker(
                     which, axis, value, ..
                 } => {
                     changes = state.controller_axis(which as usize, axis, value);
+                    if matches!(axis, Axis::LeftX | Axis::LeftY) {
+                        changes.push(Event::SteeringAxis {
+                            device: which as usize,
+                            horizontal: axis == Axis::LeftX,
+                            value: (value as f32 / 32767.0).clamp(-1.0, 1.0),
+                        });
+                    }
                     if matches!(axis, Axis::RightX | Axis::RightY) {
                         changes.push(Event::AimAxis {
                             device: which as usize,

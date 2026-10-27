@@ -613,6 +613,7 @@ fn pump_input(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
         match input {
             // Committed WinCE EDIT text is not an SDL hardware-key event.
             InputEvent::StylusAim { .. }
+            | InputEvent::TouchSteeringPosition { .. }
             | InputEvent::Text { .. }
             | InputEvent::KeyboardRotation { .. } => continue,
             InputEvent::KeyDown { vk } | InputEvent::KeyUp { vk } => {

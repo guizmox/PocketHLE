@@ -351,6 +351,11 @@ pub enum KernelError {
 /// back to its synthetic timer / paint loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
+    /// Left stick, display-relative position, normalized -1000..1000.
+    TouchSteeringPosition {
+        x: i16,
+        y: i16,
+    },
     /// Host-only Pocket PC stylus velocity, in guest pixels/second. Never a VK.
     StylusAim {
         x: i16,

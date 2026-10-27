@@ -32,7 +32,7 @@ extern "C" {
     fn pocket_media_error(code: c_int, text: *mut c_char, capacity: c_int);
 }
 
-pub(crate) struct Decoder(NonNull<c_void>);
+pub struct Decoder(NonNull<c_void>);
 // FFmpeg contexts are not accessed concurrently. Ownership transfers to one
 // worker, which performs all reads and drops the context on the same worker.
 unsafe impl Send for Decoder {}
@@ -47,14 +47,14 @@ fn error(code: i32) -> String {
 }
 
 impl Decoder {
-    pub(crate) fn info(&self) -> (f64, u32, u32, f64, i64) {
+    pub fn info(&self) -> (f64, u32, u32, f64, i64) {
         let (mut d, mut w, mut h, mut i, mut b) = (0.0, 0, 0, 0.0, 0);
         unsafe {
             pocket_media_info(self.0.as_ptr(), &mut d, &mut w, &mut h, &mut i, &mut b);
         }
         (d, w as u32, h as u32, i, b)
     }
-    pub(crate) fn seek(&mut self, seconds: f64) -> Result<(), String> {
+    pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
         let code = unsafe { pocket_media_seek(self.0.as_ptr(), seconds) };
         if code < 0 {
             Err(error(code))
@@ -62,12 +62,7 @@ impl Decoder {
             Ok(())
         }
     }
-    pub(crate) fn open(
-        path: &Path,
-        video: bool,
-        width: u32,
-        height: u32,
-    ) -> Result<Option<Self>, String> {
+    pub fn open(path: &Path, video: bool, width: u32, height: u32) -> Result<Option<Self>, String> {
         let path = CString::new(path.to_str().ok_or("Media path is not valid UTF-8")?)
             .map_err(|_| "Media path contains NUL")?;
         let mut code = 0;
@@ -89,7 +84,7 @@ impl Decoder {
         }
     }
 
-    pub(crate) fn next(&mut self) -> Result<Option<(Vec<u8>, f64)>, String> {
+    pub fn next(&mut self) -> Result<Option<(Vec<u8>, f64)>, String> {
         let mut data = std::ptr::null();
         let mut length = 0;
         let mut seconds = 0.0;

@@ -54,8 +54,8 @@ class GameSettingsActivity : AppCompatActivity() {
             if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
                 preferenceScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                     key = "pocketpc_touch_steering"
-                    title = "Touch steering with left/right arrows"
-                    summary = "Hold the stylus in the corresponding half of the displayed screen"
+                    title = "Touch steering: arrows and left stick"
+                    summary = "For games controlled by touching the screen, such as racing games.\nArrows hold fixed touch zones; left-stick tilt positions the touch progressively, including diagonals.\nRelease to return to the centre. Follows screen rotation."
                     isPersistent = false
                     isChecked = current.pocketpcTouchSteering
                     setOnPreferenceChangeListener { _, value ->

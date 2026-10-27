@@ -23,7 +23,7 @@ typedef struct PocketMedia {
     uint8_t *buffer;
     unsigned capacity;
     int stream, video, width, height, draining;
-    int64_t first_pts, frame_count;
+    int64_t first_pts, frame_count, audio_samples;
 } PocketMedia;
 
 void pocket_media_close(PocketMedia *m) {
@@ -111,11 +111,12 @@ int pocket_media_seek(PocketMedia *m, double seconds) {
     avcodec_flush_buffers(m->codec);
     av_packet_unref(m->packet); av_frame_unref(m->frame);
     m->draining = 0; m->frame_count = (int64_t)(seconds * 30);
+    m->audio_samples = (int64_t)(seconds * 44100);
     if (m->resample) { swr_close(m->resample); ret = swr_init(m->resample); }
     return ret;
 }
 
-static int audio_output(PocketMedia *m, const uint8_t **input, int count, const uint8_t **data, int *length) {
+static int audio_output(PocketMedia *m, const uint8_t **input, int count, const uint8_t **data, int *length, double *seconds) {
     int capacity = swr_get_out_samples(m->resample, count);
     int samples;
     uint8_t *output[1];
@@ -128,6 +129,8 @@ static int audio_output(PocketMedia *m, const uint8_t **input, int count, const 
     if (samples < 0) return samples;
     *data = m->buffer;
     *length = samples * 4;
+    *seconds = (double)m->audio_samples / 44100;
+    m->audio_samples += samples;
     return samples ? 1 : 0;
 }
 
@@ -140,11 +143,16 @@ int pocket_media_next(PocketMedia *m, const uint8_t **data, int *length, double 
         ret = avcodec_receive_frame(m->codec, m->frame);
         if (ret == AVERROR_EOF) {
             if (m->video) return 0;
-            return audio_output(m, NULL, 0, data, length);
+            return audio_output(m, NULL, 0, data, length, seconds);
         }
         if (ret == 0) {
             if (!m->video) {
-                ret = audio_output(m, (const uint8_t **)m->frame->extended_data, m->frame->nb_samples, data, length);
+                if (m->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+                    AVStream *stream = m->format->streams[m->stream];
+                    m->audio_samples = av_rescale_q(m->frame->best_effort_timestamp - m->first_pts,
+                        stream->time_base, (AVRational){1, 44100});
+                }
+                ret = audio_output(m, (const uint8_t **)m->frame->extended_data, m->frame->nb_samples, data, length, seconds);
                 av_frame_unref(m->frame);
                 if (ret == 0) continue;
                 return ret;

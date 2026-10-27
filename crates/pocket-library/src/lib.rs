@@ -563,7 +563,7 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
-    /// Display-relative left/right arrows hold the stylus in the corresponding half.
+    /// Display-relative arrows hold fixed touch zones; left-stick tilt controls position.
     #[serde(default)]
     pub pocketpc_touch_steering: bool,
     /// Empty strings inherit the emulated PocketPC device identity. Ignored on Gizmondo.

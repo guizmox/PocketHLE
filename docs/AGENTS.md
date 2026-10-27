@@ -4324,3 +4324,63 @@ rotation changes and the SIP cancel an emulated stroke. No game-specific code.
 The mapping runs in the common WinCE queued-input path, before native window/
 control/stylus routing, not in individual game renderers. No in-game validation
 was performed for this option; the user is doing that validation.
+
+
+### PocketPC proportional left-stick touch steering
+
+The existing per-game pocketpc_touch_steering option now enables four-direction
+D-pad zones and proportional left-stick positioning. No additional setting.
+Desktop and Android hide the option for Gizmondo; both runners also gate it on
+!is_gizmondo. SDL controller LeftX/LeftY remain distinct analog host events;
+only while this option is active does the desktop bypass digital LeftStick
+bindings. D-pad bindings and right-stick velocity steering remain available.
+Android uses the same normalized host-only TouchSteeringPosition event via JNI
+kind 7. Both frontends release the analog gesture on focus loss/disconnect.
+
+Coordinates are display-relative, inverse-rotated once in the common WinCE input
+path. The shared TouchSteering state handles per-axis D-pad overrides, analog
+18% deadzone with linear scaling beyond it, diagonals, and center move + center
+up when all inputs return to rest. Full analog tilt reaches the corresponding
+quarter/three-quarter screen positions used by the D-pad. Real touch/rotation/SIP
+cancel the gesture; switching to the right-stick velocity path releases touch
+steering before starting another stroke. No title-specific behavior.
+
+Validation: four standalone unit tests compile the actual touch_steering module,
+covering proportional response, deadzone/center release, diagonals and all four
+rotations. Rust syntax formatting succeeds for changed Rust files. No full
+frontend build/APK or physical-controller/in-game validation claimed.
+
+
+### Integrated capture viewer (desktop / Steam Deck / Linux)
+
+Recordings opens captures in capture_viewer.rs, not ShellExecute/Wine/xdg-open.
+The UI owns the texture and decoder workers own FFmpeg contexts and SDL audio.
+One mutex-protected replaceable frame slot bounds video buffering; PCM is
+44100 Hz signed 16-bit stereo and bounded to ~200ms in SDL AudioQueue. Images
+use their full resolution, unlike catalogue thumbnails. Display fits the native
+image/video dimensions inside the host viewport; the title bar/Close stay visible.
+B/Escape/Close drops the viewer and stops its worker/audio. Leaving Recordings
+also closes it. Left/right seek by 5 seconds; the slider supports arbitrary seeks.
+
+The existing static Decoder is now public (still video-static feature gated) to
+reuse the opaque C ABI; no FFmpeg structs or external media executable are used.
+media.c publishes audio chunk timestamps as well as video PTS, and resets its
+sample clock on seek, permitting the player to discard PCM before the requested
+seek point. Existing decoder bytes/formats stay unchanged. Seek commands are
+coalesced, decoder preroll is bounded per command check, and stale queued audio
+is cleared before seeking. No new Cargo dependency or FFmpeg codec build option.
+Standalone source/syntax inspection only for this delivery; a full frontend build
+and actual video/audio/controller verification remain to be performed.
+
+
+### Recorded steering indicator
+
+Recording observes TouchSteeringPosition separately from StylusAim. Under the
+PocketPC per-game steering option it draws a proportional direction/diagonal in
+the existing bottom-left arrow circle, using the same 18% deadzone. Analog axes
+are already display-relative and are not rotated a second time. Held D-pad keys
+are transformed back to display space and override each axis exactly as input
+steering does. At rest the circle disappears. Recording start seeds held keys
+and current left-stick axes. The bottom-right lookup/right-stick marker and the
+live emulation display remain unchanged. Two pure-method tests pass in a
+standalone harness; no full GUI/video encoding validation was performed here.

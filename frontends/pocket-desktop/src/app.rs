@@ -228,6 +228,7 @@ pub struct PocketLauncher {
     stylus_gamepad: std::collections::HashMap<(usize, String), f32>,
     stylus_touch: [f32; 4],
     stylus_last: (i16, i16),
+    steering_axes: (i16, i16),
 }
 
 fn rotation_turns(rotation: RotationPref) -> u8 {
@@ -763,6 +764,7 @@ impl PocketLauncher {
             stylus_gamepad: Default::default(),
             stylus_touch: [0.0; 4],
             stylus_last: (0, 0),
+            steering_axes: (0, 0),
         }
     }
 
@@ -1124,6 +1126,20 @@ impl PocketLauncher {
             });
         match result {
             Ok(audio) => {
+                recording.set_touch_steering_enabled(self.touch_steering_enabled());
+                for vk in self
+                    .held
+                    .keyboard
+                    .iter()
+                    .chain(self.held.pointer.iter())
+                    .chain(self.held.gamepad.iter())
+                {
+                    recording.observe(InputEvent::KeyDown { vk: *vk });
+                }
+                recording.observe(InputEvent::TouchSteeringPosition {
+                    x: self.steering_axes.0,
+                    y: self.steering_axes.1,
+                });
                 if let Some(tx) = &self.input_tx {
                     if tx.send(InputCommand::RecordAudio(Some(audio))).is_err() {
                         recording.stop();
@@ -2634,7 +2650,15 @@ impl PocketLauncher {
                 if !is_gizmondo {
                     ui.label("Touch steering");
                     crate::controller_ui::checkbox(ui, &mut draft.pocketpc_touch_steering,
-                        "Left/right arrows press the corresponding screen half");
+                        "Enable touch steering");
+                    ui.end_row();
+                    ui.label("");
+                    ui.vertical(|ui| {
+                        ui.set_max_width(360.0);
+                        ui.add(egui::Label::new(RichText::new(
+                            "For games controlled by touching the screen, such as racing games.\nArrows hold fixed touch zones; left-stick tilt positions the touch progressively, including diagonals.\nRelease to return to the centre. Follows screen rotation."
+                        ).small().color(Color32::from_gray(165))).wrap(true));
+                    });
                     ui.end_row();
                     ui.label("Owner name (PocketPC)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
@@ -3612,16 +3636,21 @@ impl PocketLauncher {
     }
 
     fn send_input(&self, ev: InputEvent) {
-        self.recording
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .observe(ev);
+        {
+            let mut recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
+            recording.set_touch_steering_enabled(self.touch_steering_enabled());
+            recording.observe(ev);
+        }
         if let Some(tx) = self.input_tx.as_ref() {
             let _ = tx.send(InputCommand::Input(ev));
         }
     }
 
     fn release_all_keys(&mut self) {
+        if self.steering_axes != (0, 0) {
+            self.send_input(InputEvent::TouchSteeringPosition { x: 0, y: 0 });
+            self.steering_axes = (0, 0);
+        }
         self.stylus_keyboard.clear();
         self.stylus_gamepad.clear();
         self.stylus_touch = [0.0; 4];
@@ -3657,9 +3686,40 @@ impl PocketLauncher {
         self.handle_gamepads(ctx);
     }
 
+    fn touch_steering_enabled(&self) -> bool {
+        self.screen == Screen::Run
+            && !self.running_is_gizmondo
+            && self
+                .running_game_id
+                .as_ref()
+                .and_then(|id| self.library.games().iter().find(|game| &game.id == id))
+                .is_some_and(|game| game.settings.pocketpc_touch_steering)
+    }
+
     fn handle_gamepads(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.gamepad_rx.rx.try_recv() {
             match event {
+                crate::gamepad::Event::SteeringAxis {
+                    device,
+                    horizontal,
+                    value,
+                } => {
+                    if self.touch_steering_enabled()
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        let value = (value.clamp(-1.0, 1.0) * 1000.0) as i16;
+                        if horizontal {
+                            self.steering_axes.0 = value;
+                        } else {
+                            self.steering_axes.1 = value;
+                        }
+                        self.send_input(InputEvent::TouchSteeringPosition {
+                            x: self.steering_axes.0,
+                            y: self.steering_axes.1,
+                        });
+                    }
+                }
                 crate::gamepad::Event::AimAxis {
                     device,
                     horizontal,
@@ -3687,6 +3747,13 @@ impl PocketLauncher {
                 }
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
                 crate::gamepad::Event::Devices(devices) => {
+                    if self
+                        .gamepad_selected
+                        .is_some_and(|id| !devices.iter().any(|(device, _)| *device == id))
+                    {
+                        self.send_input(InputEvent::TouchSteeringPosition { x: 0, y: 0 });
+                        self.steering_axes = (0, 0);
+                    }
                     self.deck_nav_repeat = None;
                     self.deck_menu_press = None;
                     self.deck_view_press = None;
@@ -3722,6 +3789,12 @@ impl PocketLauncher {
                     control,
                     down,
                 } => {
+                    if self.touch_steering_enabled()
+                        && control.starts_with("LeftStick")
+                        && Some(device) == self.gamepad_selected
+                    {
+                        continue;
+                    }
                     let key = (device, control.clone());
                     if !down {
                         self.controller_ui.release(&control);
@@ -4706,6 +4779,11 @@ impl eframe::App for PocketLauncher {
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::controller_ui::begin_frame(ctx);
+        if self.screen != Screen::Library
+            || self.library_tab != crate::deck_navigation::LibraryTab::Recordings
+        {
+            self.recordings_gallery.close_player();
+        }
         self.drain_events(ctx);
         if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
             let mut r = self.recording.lock().unwrap_or_else(|e| e.into_inner());

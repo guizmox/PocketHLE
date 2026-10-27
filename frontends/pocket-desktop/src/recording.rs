@@ -43,6 +43,8 @@ pub struct Recording {
     worker: Option<std::thread::JoinHandle<()>>,
     result: Option<Receiver<Result<Vec<PathBuf>, String>>>,
     held_keys: Vec<u16>,
+    touch_steering_enabled: bool,
+    steering_axes: (i16, i16),
     pub label: Option<(String, Instant)>,
     pub direction: Option<(u16, Instant)>,
     pub lookup: Option<(String, Instant)>,
@@ -63,6 +65,7 @@ struct Frame {
 #[derive(Default)]
 struct Overlay {
     direction: Option<u16>,
+    steering: Option<(f32, f32)>,
     button: Option<String>,
     lookup: Option<String>,
     point: Option<(f32, f32)>,
@@ -122,6 +125,7 @@ impl Recording {
         });
         self.result = Some(ready);
         self.held_keys.clear();
+        self.steering_axes = (0, 0);
         self.label = None;
         self.direction = None;
         self.lookup = None;
@@ -161,6 +165,12 @@ impl Recording {
             _ => None,
         }
     }
+    pub fn set_touch_steering_enabled(&mut self, enabled: bool) {
+        self.touch_steering_enabled = enabled;
+        if !enabled {
+            self.steering_axes = (0, 0);
+        }
+    }
     pub fn observe(&mut self, event: InputEvent) {
         if !self.active() {
             return;
@@ -178,6 +188,7 @@ impl Recording {
                 self.held_keys.retain(|key| *key != vk);
                 self.refresh_keys(now);
             }
+            InputEvent::TouchSteeringPosition { x, y } => self.steering_axes = (x, y),
             InputEvent::StylusAim { x, y } => self.aim(i32::from(x), i32::from(y)),
             InputEvent::PointerDown { x, y } => {
                 self.point = Some(((x, y), now));
@@ -260,6 +271,41 @@ impl Recording {
             .collect::<Vec<_>>()
             .join(" ")
     }
+    fn steering_direction(&self, turns: u8) -> Option<(f32, f32)> {
+        if !self.touch_steering_enabled {
+            return None;
+        }
+        let axis = |value: i16| {
+            let value = f32::from(value).clamp(-1000.0, 1000.0);
+            value.signum() * ((value.abs() - 180.0) / 820.0).clamp(0.0, 1.0)
+        };
+        // Analog values already use displayed coordinates; do not rotate twice.
+        let (mut x, mut y) = (axis(self.steering_axes.0), axis(self.steering_axes.1));
+        let mut horizontal = false;
+        let mut vertical = false;
+        for vk in self.held_keys.iter().rev() {
+            match Self::screen_direction(*vk, turns) {
+                0x25 if !horizontal => {
+                    x = -1.0;
+                    horizontal = true;
+                }
+                0x27 if !horizontal => {
+                    x = 1.0;
+                    horizontal = true;
+                }
+                0x26 if !vertical => {
+                    y = -1.0;
+                    vertical = true;
+                }
+                0x28 if !vertical => {
+                    y = 1.0;
+                    vertical = true;
+                }
+                _ => {}
+            }
+        }
+        (x != 0.0 || y != 0.0).then_some((x, y))
+    }
     fn overlay(&self, size: (u32, u32), turns: u8) -> Overlay {
         let point = self.point.map(|((x, y), _)| {
             let (u, v) = (
@@ -274,9 +320,13 @@ impl Recording {
             }
         });
         Overlay {
-            direction: self
-                .direction
-                .map(|(v, _)| Self::screen_direction(v, turns)),
+            steering: self.steering_direction(turns),
+            direction: if self.touch_steering_enabled {
+                None
+            } else {
+                self.direction
+                    .map(|(v, _)| Self::screen_direction(v, turns))
+            },
             button: self.label.as_ref().map(|(v, _)| v.clone()),
             lookup: self
                 .lookup
@@ -379,19 +429,24 @@ fn draw_overlay(im: &mut image::RgbaImage, o: &Overlay) {
     let r = 14 * scale;
     let y = im.height() as i32 - r - 5 * scale;
     let x = r + 5 * scale;
-    if let Some(vk) = o.direction {
+    let arrow = o
+        .steering
+        .map(|(dx, dy)| ((dx * 7.0).round() as i32, (dy * 7.0).round() as i32))
+        .or_else(|| {
+            o.direction.map(|vk| match vk {
+                0x25 => (-5, 0),
+                0x26 => (0, -5),
+                0x27 => (5, 0),
+                _ => (0, 5),
+            })
+        });
+    if let Some((dx, dy)) = arrow {
         circle(im, x, y, r);
-        let (dx, dy) = match vk {
-            0x25 => (-5, 0),
-            0x26 => (0, -5),
-            0x27 => (5, 0),
-            _ => (0, 5),
-        };
         let (dx, dy) = (dx * scale, dy * scale);
         line(im, (x - dx, y - dy), (x + dx, y + dy));
         let tip = (x + dx, y + dy);
-        line(im, tip, (x + dy / 2, y + dx / 2));
-        line(im, tip, (x - dy / 2, y - dx / 2));
+        line(im, tip, (x - dy / 2, y + dx / 2));
+        line(im, tip, (x + dy / 2, y - dx / 2));
     }
     if let Some(text) = &o.button {
         let x = x + 2 * r + 5 * scale;
@@ -915,6 +970,29 @@ impl Drop for Avi {
 mod tests {
     use super::*;
     #[test]
+    fn steering_marker_is_left_display_relative_and_clears_at_rest() {
+        let mut recording = Recording::default();
+        recording.set_touch_steering_enabled(true);
+        recording.steering_axes = (590, -1000);
+        for turns in 0..4 {
+            let (x, y) = recording.steering_direction(turns).unwrap();
+            assert!((x - 0.5).abs() < 0.001);
+            assert_eq!(y, -1.0);
+        }
+        recording.steering_axes = (0, 0);
+        assert!(recording.steering_direction(0).is_none());
+    }
+    #[test]
+    fn steering_marker_combines_rotated_dpad_axes_without_affecting_lookup() {
+        let mut recording = Recording::default();
+        recording.set_touch_steering_enabled(true);
+        // Guest right is displayed up with a 270-degree presentation rotation.
+        recording.held_keys = vec![0x27, 0x28];
+        assert_eq!(recording.steering_direction(3), Some((1.0, -1.0)));
+        recording.set_touch_steering_enabled(false);
+        assert!(recording.steering_direction(3).is_none());
+    }
+    #[test]
     fn six_presets_keep_old_configuration_and_select_sixty_fps() {
         let expected = [(50, 30), (75, 30), (92, 30), (50, 60), (75, 60), (92, 60)];
         for ((value, _), expected) in PRESETS.into_iter().zip(expected) {
@@ -1009,81 +1087,85 @@ mod tests {
             });
         std::fs::create_dir_all(&root).unwrap();
         for fps in [30, 60] {
-        let path = root.join(format!("compressed-{fps}.mp4"));
-        let _ = std::fs::remove_file(&path);
-        let (tx, rx) = mpsc::sync_channel(3);
-        let epoch = Instant::now();
-        tx.send(Frame {
-            at: epoch,
-            pixels: image::RgbaImage::from_pixel(321, 241, image::Rgba([40, 120, 180, 255])),
-            overlay: Overlay {
-                direction: Some(0x26),
-                button: Some("P2".into()),
-                lookup: Some("lookup right".into()),
-                ..Default::default()
-            },
-        })
-        .unwrap();
-        drop(tx);
-        let paths = encode(
-            rx,
-            Arc::new(OutputRecording::default()),
-            Arc::new(Mutex::new(Some(epoch + Duration::from_secs(1)))),
-            path,
-            75,
-            epoch,
-            true,
-            fps,
-        )
-        .unwrap();
-        assert_eq!(paths.len(), 1);
-        let bytes = std::fs::read(&paths[0]).unwrap();
-        assert!(bytes.len() > 1000);
-        // Inspect actual MP4 track metadata, not encoder settings: the video
-        // must contain fps samples over one second, with H.264 and AAC tracks.
-        fn boxes(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
-            let mut result = Vec::new();
-            while !data.is_empty() {
-                assert!(data.len() >= 8);
-                let size = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
-                assert!(size >= 8 && size <= data.len());
-                result.push((data[4..8].try_into().unwrap(), &data[8..size]));
-                data = &data[size..];
-            }
-            result
-        }
-        fn child<'a>(data: &'a [u8], tag: &[u8; 4]) -> &'a [u8] {
-            boxes(data).into_iter().find(|(kind, _)| kind == tag).unwrap().1
-        }
-        let movie = child(&bytes, b"moov");
-        let mut video_found = false;
-        let mut audio_found = false;
-        for (_, track) in boxes(movie).into_iter().filter(|(tag, _)| tag == b"trak") {
-            let media = child(track, b"mdia");
-            let handler = child(media, b"hdlr");
-            let samples = child(child(media, b"minf"), b"stbl");
-            let description = child(samples, b"stsd");
-            match &handler[8..12] {
-                b"vide" => {
-                    assert_eq!(&description[12..16], b"avc1");
-                    let header = child(media, b"mdhd");
-                    assert_eq!(header[0], 0); // short fixture uses version 0
-                    let timescale = u32::from_be_bytes(header[12..16].try_into().unwrap());
-                    let duration = u32::from_be_bytes(header[16..20].try_into().unwrap());
-                    assert_eq!(duration, timescale, "video duration must be one second");
-                    let sizes = child(samples, b"stsz");
-                    let count = u32::from_be_bytes(sizes[8..12].try_into().unwrap());
-                    assert_eq!(count, fps, "wrong native video frame rate");
-                    video_found = true;
+            let path = root.join(format!("compressed-{fps}.mp4"));
+            let _ = std::fs::remove_file(&path);
+            let (tx, rx) = mpsc::sync_channel(3);
+            let epoch = Instant::now();
+            tx.send(Frame {
+                at: epoch,
+                pixels: image::RgbaImage::from_pixel(321, 241, image::Rgba([40, 120, 180, 255])),
+                overlay: Overlay {
+                    direction: Some(0x26),
+                    button: Some("P2".into()),
+                    lookup: Some("lookup right".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+            drop(tx);
+            let paths = encode(
+                rx,
+                Arc::new(OutputRecording::default()),
+                Arc::new(Mutex::new(Some(epoch + Duration::from_secs(1)))),
+                path,
+                75,
+                epoch,
+                true,
+                fps,
+            )
+            .unwrap();
+            assert_eq!(paths.len(), 1);
+            let bytes = std::fs::read(&paths[0]).unwrap();
+            assert!(bytes.len() > 1000);
+            // Inspect actual MP4 track metadata, not encoder settings: the video
+            // must contain fps samples over one second, with H.264 and AAC tracks.
+            fn boxes(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+                let mut result = Vec::new();
+                while !data.is_empty() {
+                    assert!(data.len() >= 8);
+                    let size = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+                    assert!(size >= 8 && size <= data.len());
+                    result.push((data[4..8].try_into().unwrap(), &data[8..size]));
+                    data = &data[size..];
                 }
-                b"soun" => {
-                    assert_eq!(&description[12..16], b"mp4a");
-                    audio_found = true;
-                }
-                _ => {}
+                result
             }
-        }
-        assert!(video_found && audio_found);
+            fn child<'a>(data: &'a [u8], tag: &[u8; 4]) -> &'a [u8] {
+                boxes(data)
+                    .into_iter()
+                    .find(|(kind, _)| kind == tag)
+                    .unwrap()
+                    .1
+            }
+            let movie = child(&bytes, b"moov");
+            let mut video_found = false;
+            let mut audio_found = false;
+            for (_, track) in boxes(movie).into_iter().filter(|(tag, _)| tag == b"trak") {
+                let media = child(track, b"mdia");
+                let handler = child(media, b"hdlr");
+                let samples = child(child(media, b"minf"), b"stbl");
+                let description = child(samples, b"stsd");
+                match &handler[8..12] {
+                    b"vide" => {
+                        assert_eq!(&description[12..16], b"avc1");
+                        let header = child(media, b"mdhd");
+                        assert_eq!(header[0], 0); // short fixture uses version 0
+                        let timescale = u32::from_be_bytes(header[12..16].try_into().unwrap());
+                        let duration = u32::from_be_bytes(header[16..20].try_into().unwrap());
+                        assert_eq!(duration, timescale, "video duration must be one second");
+                        let sizes = child(samples, b"stsz");
+                        let count = u32::from_be_bytes(sizes[8..12].try_into().unwrap());
+                        assert_eq!(count, fps, "wrong native video frame rate");
+                        video_found = true;
+                    }
+                    b"soun" => {
+                        assert_eq!(&description[12..16], b"mp4a");
+                        audio_found = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(video_found && audio_found);
         }
     }
 

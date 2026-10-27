@@ -193,6 +193,7 @@ impl ManagedGame {
             },
             InputEvent::MouseMessage { .. }
             | InputEvent::StylusAim { .. }
+            | InputEvent::TouchSteeringPosition { .. }
             | InputEvent::KeyUp { .. }
             | InputEvent::Text { .. }
             | InputEvent::KeyboardRotation { .. } => {}

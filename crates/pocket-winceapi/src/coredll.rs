@@ -12431,7 +12431,9 @@ fn input_to_message(ev: pocket_kernel::InputEvent) -> Option<(u32, u32, u32)> {
             (data as u16 as u32) << 16,
             (u32::from(y) << 16) | u32::from(x),
         )),
-        InputEvent::KeyboardRotation { .. } | InputEvent::StylusAim { .. } => None,
+        InputEvent::TouchSteeringPosition { .. }
+        | InputEvent::KeyboardRotation { .. }
+        | InputEvent::StylusAim { .. } => None,
         pocket_kernel::InputEvent::PointerDown { x, y } => {
             let lparam = ((y as u32) << 16) | (x as u32);
             Some((WM_LBUTTONDOWN, MK_LBUTTON, lparam))
@@ -13354,7 +13356,8 @@ fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
                 .retain(|(thread, _, _, _)| *thread != ctx.kernel.current_thread);
             ctx.kernel.pressed_keys[1] = false;
         }
-        pocket_kernel::InputEvent::StylusAim { .. }
+        pocket_kernel::InputEvent::TouchSteeringPosition { .. }
+        | pocket_kernel::InputEvent::StylusAim { .. }
         | pocket_kernel::InputEvent::KeyboardRotation { .. }
         | pocket_kernel::InputEvent::Text { .. }
         | pocket_kernel::InputEvent::PointerMove { .. } => {}
@@ -13793,10 +13796,37 @@ fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
     }
     let ev = loop {
         match ctx.kernel.pop_pending_input() {
-            Some(InputEvent::StylusAim { x, y }) => {
+            Some(event @ InputEvent::TouchSteeringPosition { x, y }) => {
+                if ctx.kernel.touch_steering.enabled
+                    && ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
+                    && !ctx.kernel.shell_keyboard.visible
+                {
+                    if let Some(up) = ctx.kernel.stylus_stick.cancel() {
+                        ctx.kernel.requeue_pending_front(event);
+                        break up;
+                    }
+                    if let Some(mapped) = ctx.kernel.touch_steering.position(
+                        x,
+                        y,
+                        ctx.kernel.shell_keyboard.rotation,
+                        ctx.kernel.framebuffer.width,
+                        ctx.kernel.framebuffer.height,
+                    ) {
+                        ctx.kernel.async_keys.observe(mapped);
+                        break mapped;
+                    }
+                }
+            }
+            Some(event @ InputEvent::StylusAim { x, y }) => {
                 if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
                     && !ctx.kernel.shell_keyboard.visible
                 {
+                    if x != 0 || y != 0 {
+                        if let Some(up) = ctx.kernel.touch_steering.cancel() {
+                            ctx.kernel.requeue_pending_front(event);
+                            break up;
+                        }
+                    }
                     ctx.kernel.stylus_stick.velocity(x, y);
                 }
             }
