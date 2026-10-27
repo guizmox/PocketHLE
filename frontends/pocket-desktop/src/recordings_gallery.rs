@@ -405,9 +405,12 @@ impl Gallery {
                                     .asset
                                     .error
                                     .as_deref()
-                                    .unwrap_or("Open with your default viewer"),
+                                    .unwrap_or("Double-click or press A to open"),
                             );
                             if response.clicked() {
+                                self.selected = index;
+                            }
+                            if response.double_clicked() {
                                 self.selected = index;
                                 open = Some(entry.asset.key.path.clone());
                             }

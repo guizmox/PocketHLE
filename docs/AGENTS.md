@@ -4384,3 +4384,18 @@ steering does. At rest the circle disappears. Recording start seeds held keys
 and current left-stick axes. The bottom-right lookup/right-stick marker and the
 live emulation display remain unchanged. Two pure-method tests pass in a
 standalone harness; no full GUI/video encoding validation was performed here.
+
+
+### Capture player seeking, fullscreen and activation
+
+Capture tiles select on one click and open only on double-click or controller A.
+The player's full-width slider retains its drag value independently from the
+playback position; it sends exactly one seek on release, or a deliberate click/
+keyboard edit. Playback progress and slider rounding do not trigger seeks.
+This avoids repeated seek/preroll cycles starving playback. Seeking publishes
+its target position immediately while decoding preroll on the worker.
+
+Full screen uses the host viewport and fits media proportionally while keeping
+controls visible. Button/double-click enter or exit; B/Escape exits fullscreen
+first and only closes the viewer when windowed. Drop restores the host's prior
+fullscreen state, including a Deck host that was already fullscreen.

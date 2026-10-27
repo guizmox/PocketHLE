@@ -1,10 +1,3 @@
-crates/pocket-winceapi/native/media.c
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/lib.rs
-crates/pocket-winceapi/src/media_static.rs
-docs/AGENTS.md
-frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
-frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/capture_viewer.rs
-frontends/pocket-desktop/src/recording.rs
 frontends/pocket-desktop/src/recordings_gallery.rs
+docs/AGENTS.md

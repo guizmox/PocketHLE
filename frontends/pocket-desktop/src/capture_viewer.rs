@@ -23,6 +23,10 @@ struct Snapshot {
 }
 pub struct Viewer {
     title: String,
+    fullscreen: bool,
+    previous_fullscreen: Option<bool>,
+    context: egui::Context,
+    scrub_position: Option<f64>,
     command: mpsc::Sender<Command>,
     snapshot: Arc<Mutex<Snapshot>>,
     texture: Option<TextureHandle>,
@@ -60,15 +64,40 @@ impl Viewer {
         });
         Self {
             title,
+            fullscreen: false,
+            previous_fullscreen: None,
+            context: ctx.clone(),
+            scrub_position: None,
             command: tx,
             snapshot,
             texture: None,
             worker: Some(worker_thread),
         }
     }
-    /// True keeps the viewer open. B/Escape/Close all stop the worker on drop.
+    fn toggle_fullscreen(&mut self) {
+        if self.fullscreen {
+            if let Some(previous) = self.previous_fullscreen.take() {
+                self.context
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(previous));
+            }
+            self.fullscreen = false;
+        } else {
+            self.previous_fullscreen = Some(
+                self.context
+                    .input(|i| i.viewport().fullscreen.unwrap_or(false)),
+            );
+            self.context
+                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            self.fullscreen = true;
+        }
+    }
+    /// B/Escape first leave fullscreen; in windowed mode they close playback.
     pub fn show(&mut self, ctx: &egui::Context, actions: &[String]) -> bool {
         if actions.iter().any(|a| a == "East") || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.fullscreen {
+                self.toggle_fullscreen();
+                return true;
+            }
             return false;
         }
         let (dimensions, duration, mut position, ready, error) = {
@@ -92,16 +121,22 @@ impl Viewer {
                 state.error.clone(),
             )
         };
-        let bounds = ctx.screen_rect().shrink(12.0);
+        if let Some(scrub) = self.scrub_position {
+            position = scrub;
+        }
+        let bounds = ctx
+            .screen_rect()
+            .shrink(if self.fullscreen { 0.0 } else { 12.0 });
         let native = Vec2::new(dimensions[0].max(1) as f32, dimensions[1].max(1) as f32);
-        let scale = ((bounds.width() - 24.0) / native.x)
+        let fit = ((bounds.width() - 24.0) / native.x)
             .min((bounds.height() - 110.0) / native.y)
-            .min(1.0)
             .max(0.01);
+        let scale = if self.fullscreen { fit } else { fit.min(1.0) };
         let size = native * scale;
         let mut open = true;
         let mut close = false;
         let mut seek = None;
+        let mut toggle_fullscreen = false;
         for action in actions {
             match action.as_str() {
                 "DPadLeft" | "LeftStickLeft" => seek = Some((position - 5.0).max(0.0)),
@@ -109,40 +144,107 @@ impl Viewer {
                 _ => {}
             }
         }
-        egui::Window::new(&self.title)
+        let window = egui::Window::new(&self.title)
             .id(egui::Id::new("integrated_capture_viewer"))
             .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .title_bar(!self.fullscreen)
             .constrain_to(bounds)
             .collapsible(false)
-            .fixed_size(Vec2::new(
-                size.x.max(200.0).min((bounds.width() - 24.0).max(1.0)),
-                size.y + 76.0,
-            ))
-            .show(ctx, |ui| {
-                if let Some(texture) = &self.texture {
-                    ui.image((texture.id(), size));
-                } else if error.is_none() && !ready {
-                    ui.spinner();
-                    ui.label("Opening capture…");
-                }
-                if let Some(error) = error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-                if duration > 0.0 {
-                    let response =
-                        ui.add(egui::Slider::new(&mut position, 0.0..=duration).show_value(false));
-                    if response.changed() {
-                        seek = Some(position);
-                    }
-                    ui.label(format!(
-                        "{} / {}",
-                        time_label(position),
-                        time_label(duration)
-                    ));
-                }
-                close = crate::controller_ui::button(ui, "Close (B)").clicked();
+            .fixed_size(if self.fullscreen {
+                Vec2::new(
+                    (bounds.width() - 16.0).max(1.0),
+                    (bounds.height() - 16.0).max(1.0),
+                )
+            } else {
+                Vec2::new(
+                    size.x.max(200.0).min((bounds.width() - 24.0).max(1.0)),
+                    size.y + 76.0,
+                )
             });
+        let window = if self.fullscreen {
+            window
+                .fixed_pos(bounds.min)
+                .frame(egui::Frame::none().fill(egui::Color32::BLACK))
+        } else {
+            window.anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        };
+        window.show(ctx, |ui| {
+            if let Some(texture) = &self.texture {
+                ui.vertical_centered(|ui| {
+                    if ui
+                        .image((texture.id(), size))
+                        .interact(egui::Sense::click())
+                        .double_clicked()
+                    {
+                        toggle_fullscreen = true;
+                    }
+                });
+            } else if error.is_none() && !ready {
+                ui.spinner();
+                ui.label("Opening capture…");
+            }
+            if let Some(error) = error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+            if duration > 0.0 {
+                // Slider rounding/clamping is not a user seek. Retain the
+                // drag value instead of replacing it with playback updates,
+                // then submit a single seek on release (also outside the bar).
+                let width = ui.available_width();
+                ui.spacing_mut().slider_width = width;
+                let response = ui.add_sized(
+                    [width, 20.0],
+                    egui::Slider::new(&mut position, 0.0..=duration).show_value(false),
+                );
+                let keyboard_edit = response.has_focus()
+                    && ui.input(|i| {
+                        [
+                            egui::Key::ArrowLeft,
+                            egui::Key::ArrowRight,
+                            egui::Key::Home,
+                            egui::Key::End,
+                        ]
+                        .iter()
+                        .any(|key| i.key_pressed(*key))
+                    });
+                if let Some(target) = scrub_target(
+                    &mut self.scrub_position,
+                    position,
+                    response.is_pointer_button_down_on() || response.dragged(),
+                    response.changed() && (response.clicked() || keyboard_edit),
+                ) {
+                    seek = Some(target);
+                }
+                ui.label(format!(
+                    "{} / {}",
+                    time_label(position),
+                    time_label(duration)
+                ));
+            }
+            ui.horizontal(|ui| {
+                toggle_fullscreen |= crate::controller_ui::button(
+                    ui,
+                    if self.fullscreen {
+                        "Windowed"
+                    } else {
+                        "Full screen"
+                    },
+                )
+                .clicked();
+                close = crate::controller_ui::button(
+                    ui,
+                    if self.fullscreen {
+                        "Close viewer"
+                    } else {
+                        "Close (B)"
+                    },
+                )
+                .clicked();
+            });
+        });
+        if toggle_fullscreen {
+            self.toggle_fullscreen();
+        }
         if let Some(seconds) = seek {
             let _ = self.command.send(Command::Seek(seconds));
         }
@@ -155,6 +257,10 @@ impl Viewer {
 impl Drop for Viewer {
     fn drop(&mut self) {
         let _ = self.command.send(Command::Stop);
+        if let Some(previous) = self.previous_fullscreen.take() {
+            self.context
+                .send_viewport_cmd(egui::ViewportCommand::Fullscreen(previous));
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -240,6 +346,8 @@ fn play_video(
             audio_trim = target;
             anchor = Instant::now();
             seeking = true;
+            slot.lock().unwrap_or_else(|e| e.into_inner()).position = target;
+            ctx.request_repaint();
             frame = video.next()?;
             video_end = frame.is_none();
             audio_end = audio.is_none();
@@ -410,5 +518,38 @@ impl Drop for AudioOutput {
             sdl2::sys::SDL_CloseAudioDevice(self.0);
             sdl2::sys::SDL_QuitSubSystem(sdl2::sys::SDL_INIT_AUDIO);
         }
+    }
+}
+
+// Playback progress and slider rounding must never be sent back as seeks.
+// During a drag the UI retains its own value; release submits exactly once.
+fn scrub_target(state: &mut Option<f64>, value: f64, held: bool, user_edit: bool) -> Option<f64> {
+    if held {
+        *state = Some(value);
+        None
+    } else if let Some(target) = state.take() {
+        Some(target)
+    } else if user_edit {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_target;
+    #[test]
+    fn playback_updates_never_seek_and_drag_seeks_once_on_release() {
+        let mut state = None;
+        for value in [0.01, 0.1234, 10.5678] {
+            assert_eq!(scrub_target(&mut state, value, false, false), None);
+        }
+        for value in [5.0, 10.0, 25.0] {
+            assert_eq!(scrub_target(&mut state, value, true, true), None);
+        }
+        assert_eq!(scrub_target(&mut state, 25.0, false, false), Some(25.0));
+        assert_eq!(scrub_target(&mut state, 25.016, false, false), None);
+        assert_eq!(scrub_target(&mut state, 40.0, false, true), Some(40.0));
     }
 }
