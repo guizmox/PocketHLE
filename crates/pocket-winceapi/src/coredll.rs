@@ -10560,6 +10560,16 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     ctx.kernel.window_userdata.remove(&hwnd);
     ctx.kernel.window_procs.insert(hwnd, wnd_proc);
     ctx.kernel.window_classes.insert(hwnd, class_name.clone());
+    let title_ptr = ctx.arg_u32(2)?;
+    let title = if title_ptr == 0 {
+        String::new()
+    } else {
+        String::from_utf16_lossy(&read_wstr(ctx, title_ptr, 256)?)
+            .trim_end_matches('\0')
+            .to_owned()
+    };
+    log::debug!("CreateWindowExW caption hwnd=0x{hwnd:08x}: {title:?}");
+    ctx.kernel.window_titles.insert(hwnd, title);
     let create_struct = ctx.kernel.heap.alloc(0x40).unwrap_or(0);
     if create_struct != 0 {
         // CREATESTRUCTW: lpCreateParams, hInstance, hMenu, hwndParent, cy,
@@ -15043,6 +15053,24 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(outcome);
     }
     let hwnd = ctx.arg_u32(0)?;
+    if ctx.kernel.controls.get(hwnd).is_none() {
+        match ctx.arg_u32(1)? {
+            0x0c => {
+                let ptr = ctx.arg_u32(3)?;
+                ctx.cpu.write_reg(ArmReg::R1, ptr)?;
+                return set_window_text_w(ctx);
+            }
+            0x0d => {
+                let count = ctx.arg_u32(2)?;
+                let ptr = ctx.arg_u32(3)?;
+                ctx.cpu.write_reg(ArmReg::R1, ptr)?;
+                ctx.cpu.write_reg(ArmReg::R2, count)?;
+                return get_window_text_w(ctx);
+            }
+            0x0e => return get_window_text_length_w(ctx),
+            _ => {}
+        }
+    }
     if ctx.kernel.gdi.shell_menus.bars.contains_key(&hwnd) {
         let message = ctx.arg_u32(1)?;
         let wp = ctx.arg_u32(2)?;
@@ -17665,6 +17693,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     }
     ctx.kernel.gdi.shell_menus.bars.remove(hwnd);
     ctx.kernel.window_classes.remove(hwnd);
+    ctx.kernel.window_titles.remove(hwnd);
     ctx.kernel.window_ids.remove(hwnd);
     ctx.kernel.scroll_info.retain(|(h, _), _| h != hwnd);
     if let Some(ptr) = ctx.kernel.window_extra.get(&(*hwnd, -1001)).copied() {
@@ -17886,9 +17915,8 @@ fn set_dlg_item_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 
 /// `BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString)` — Pocket PC
 /// games (e.g. gspot) call this on every score update to refresh the
-/// window's title-bar caption. We have no real window manager, so
-/// just log the new caption when DEBUG tracing is enabled and report
-/// success. Returns TRUE.
+/// window's title-bar caption. Store the same caption read by the shell bar
+/// and GetWindowText. Returns TRUE.
 fn set_window_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = finish_control_notify(ctx)? {
         return Ok(outcome);
@@ -17939,6 +17967,13 @@ fn set_control_text(ctx: &mut CallCtx<'_>, hwnd: u32, text: &str) {
         ctx.kernel.gdi.dialog_backgrounds.remove(&hwnd);
         ctx.kernel.gdi.pending_window_erases.insert(hwnd);
         repaint_controls(ctx);
+    } else if ctx.kernel.window_classes.contains_key(&hwnd) {
+        ctx.kernel.window_titles.insert(hwnd, text.to_owned());
+        if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
+            if panel.caption.is_some() {
+                panel.caption = Some(text.to_owned());
+            }
+        }
     }
 }
 
@@ -17946,7 +17981,7 @@ fn set_control_text(ctx: &mut CallCtx<'_>, hwnd: u32, text: &str) {
 ///
 /// A control hands back the text it holds — for an `EDIT` that is
 /// whatever the user typed, which is the whole point of a working input
-/// field. Anything else has no caption we track, so it reads back empty.
+/// field. Native windows return their guest-supplied caption.
 fn get_window_text_length_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     // MFC sizes CString's buffer from this result before GetWindowTextW.
@@ -17955,7 +17990,9 @@ fn get_window_text_length_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         .kernel
         .controls
         .get(hwnd)
-        .map_or(0, |c| c.text.encode_utf16().count());
+        .map(|c| c.text.as_str())
+        .or_else(|| ctx.kernel.window_titles.get(&hwnd).map(String::as_str))
+        .map_or(0, |text| text.encode_utf16().count());
     Ok(DispatchOutcome::ReturnedR0(length as u32))
 }
 
@@ -17971,6 +18008,7 @@ fn get_window_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         .controls
         .get(hwnd)
         .map(|c| c.text.clone())
+        .or_else(|| ctx.kernel.window_titles.get(&hwnd).cloned())
         .unwrap_or_default();
     // Reserve one unit for the terminator, as the real API does.
     let room = (n as usize).saturating_sub(1);
@@ -22248,6 +22286,14 @@ fn build_dialog_from_template_for(
     let (px, py, pw, ph) = dlu.to_px(tmpl.x as i32, tmpl.y as i32, tmpl.cx as i32, tmpl.cy as i32);
     // Custom modal dialogs may deliberately omit the caption and draw
     // their own buttons. Modal ownership does not add window styles.
+    // Dialog templates are another standard source of window captions (MFC).
+    ctx.kernel
+        .window_titles
+        .insert(owner_hwnd, tmpl.title.clone());
+    log::debug!(
+        "Dialog template caption hwnd=0x{owner_hwnd:08x}: {:?}",
+        tmpl.title
+    );
     let caption = (tmpl.style & 0x00c0_0000 == 0x00c0_0000).then(|| tmpl.title.clone());
     let caption_h = i32::from(caption.is_some()) * DialogPanel::CAPTION_H;
     let border = tmpl.style & WS_BORDER != 0;
@@ -27411,6 +27457,41 @@ mod tests {
     }
 
     #[test]
+    fn native_window_caption_roundtrips_and_default_messages_update_it() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let hwnd = FAKE_HWND;
+        kernel.window_classes.insert(hwnd, "CaptionTest".into());
+        let bytes = wide_to_bytes(&"Guest title\0".encode_utf16().collect::<Vec<_>>());
+        cpu.write_mem(0x2000, &bytes).unwrap();
+        cpu.write_reg(ArmReg::R0, hwnd).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x0c).unwrap();
+        cpu.write_reg(ArmReg::R3, 0x2000).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            def_window_proc_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.kernel.window_titles[&hwnd], "Guest title");
+        assert_eq!(
+            get_window_text_length_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(11)
+        );
+        ctx.cpu.write_reg(ArmReg::R1, 0x3000).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 32).unwrap();
+        assert_eq!(
+            get_window_text_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(11)
+        );
+        assert_eq!(ctx.cpu.read_mem(0x3000, bytes.len() as u32).unwrap(), bytes);
+    }
+
+    #[test]
     fn mfc_window_text_length_then_read_preserves_address_query() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
@@ -29694,6 +29775,7 @@ mod tests {
             window_procs: std::collections::HashMap::new(),
             window_userdata: std::collections::HashMap::new(),
             window_classes: std::collections::HashMap::new(),
+            window_titles: std::collections::HashMap::new(),
             window_class_controls: std::collections::HashMap::new(),
             control_class_prototypes: std::collections::HashMap::new(),
             window_styles: std::collections::HashMap::new(),

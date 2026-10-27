@@ -1255,6 +1255,8 @@ pub struct KernelState {
     pub window_userdata: HashMap<u32, u32>,
     /// Window handles and their class names.
     pub window_classes: HashMap<u32, String>,
+    /// Captions supplied by CreateWindowEx/SetWindowText, never library metadata.
+    pub window_titles: HashMap<u32, String>,
     pub window_class_controls: HashMap<String, controls::ControlClass>,
     pub control_class_prototypes: HashMap<(usize, u32), controls::ControlClass>,
     /// Styles, extended styles and parent handles for each top-level HWND.
@@ -2275,6 +2277,16 @@ impl KernelState {
         let modal = self.modal.clone();
         let shell_bar = self.active_shell_bar();
         let taskbar = self.pocket_pc_taskbar_visible();
+        let title_owner = if self.active_window == 0 {
+            0xdead0001
+        } else {
+            self.active_window
+        };
+        let taskbar_title = self
+            .window_titles
+            .get(&title_owner)
+            .map(String::as_str)
+            .unwrap_or("");
         let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
         let mut layers = Vec::new();
         let mut native_paint_changed = false;
@@ -2396,7 +2408,9 @@ impl KernelState {
             );
         }
         if taskbar {
-            self.gdi.shell_menus.render_taskbar(&mut surf);
+            self.gdi
+                .shell_menus
+                .render_taskbar(&mut surf, taskbar_title);
         }
         if !self.shell_keyboard.sip {
             self.shell_keyboard.render(&mut surf);
@@ -3938,6 +3952,7 @@ impl Process {
                 window_procs: HashMap::new(),
                 window_userdata: HashMap::new(),
                 window_classes: HashMap::new(),
+                window_titles: HashMap::new(),
                 window_class_controls: HashMap::new(),
                 control_class_prototypes: HashMap::new(),
                 window_styles: HashMap::new(),

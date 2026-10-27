@@ -71,7 +71,7 @@ fn enabled(item: &MenuItem, menu: u32, states: &HashMap<u32, HashMap<u32, u32>>)
             == 0
 }
 impl ShellMenus {
-    pub fn render_taskbar(&self, surface: &mut Surface<'_>) {
+    pub fn render_taskbar(&self, surface: &mut Surface<'_>, caption: &str) {
         let (width, height) = surface.dimensions();
         let width = width as i32;
         for y in 0..HEIGHT {
@@ -128,13 +128,6 @@ impl ShellMenus {
             }
         }
         let clip = [0, 0, width, HEIGHT];
-        let mut title_font = crate::gdi::Font::new(-15);
-        title_font.logfont[16..20].copy_from_slice(&700i32.to_le_bytes());
-        let title = text::layout(
-            Some(&title_font),
-            &"PocketHLE".encode_utf16().collect::<Vec<_>>(),
-        );
-        title.draw(surface, 30, (HEIGHT - title.height) / 2, 0xffff, clip);
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -142,6 +135,15 @@ impl ShellMenus {
         let clock = format!("{:02}:{:02}", (seconds / 3600) % 24, (seconds / 60) % 60);
         let clock_font = crate::gdi::Font::new(-13);
         let clock = text::layout(Some(&clock_font), &clock.encode_utf16().collect::<Vec<_>>());
+        // Reserve the clock area: the guest caption is clipped underneath it,
+        // never compressed or wrapped onto a second line (PocketPC shell style).
+        let title_font = crate::gdi::Font::new(-12);
+        let title = text::layout(
+            Some(&title_font),
+            &caption.encode_utf16().collect::<Vec<_>>(),
+        );
+        let title_clip = [30, 0, (width - clock.width - 16).max(30), HEIGHT];
+        title.draw(surface, 30, (HEIGHT - title.height) / 2, 0xffff, title_clip);
         clock.draw(
             surface,
             width - clock.width - 8,

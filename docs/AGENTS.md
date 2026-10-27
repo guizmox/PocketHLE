@@ -4287,3 +4287,23 @@ not change the existing return/halting policy. Implemented API calls do no new
 work. System-library diagnostics ask for an HLE implementation; other missing
 libraries point to the shared runtime directory. Desktop and Android drain the
 notices on their UI thread, independently of missing-API file logging.
+
+
+### Guest window captions in the PocketPC shell bar
+
+`KernelState::window_titles` stores the guest caption from CreateWindowExW and
+DLGTEMPLATE titles. SetWindowTextW/A updates it; GetWindowTextW and
+GetWindowTextLengthW read it alongside native controls. DefWindowProc handles
+WM_SETTEXT/WM_GETTEXT/WM_GETTEXTLENGTH for native windows. Normal metadata
+cleanup removes captions, including closed modal dialogs. No game/library name
+is injected as a caption. The visible PocketPC taskbar follows active_window
+(and the legacy main HWND only when no active window has been set).
+
+The shell keeps its PocketHLE icon but renders the guest caption in a smaller
+font. Its text clip ends before the right-aligned clock, so long captions remain
+on one line underneath the clock's reserved region. Shell visibility, window/DC
+origins, client sizes, stylus coordinates and SIP layout are unchanged.
+
+Validation: the supplied SimCity executable passes "Simcity 2000 Pocket PC"
+through standard dialog templates, observed in a bounded ARM/Unicorn run at
+startup and main-menu creation (not inferred from the library display name).
