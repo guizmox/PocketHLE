@@ -312,7 +312,10 @@ fn detail_section(ui: &mut egui::Ui, title: &str, rows: &[(String, String)]) {
             .size(12.0)
             .color(Color32::from_gray(150)),
     );
+    let column_width = ((ui.available_width() - 12.0) * 0.5).max(1.0);
     egui::Grid::new(format!("detail-{title}"))
+        .min_col_width(0.0)
+        .max_col_width(column_width)
         .num_columns(2)
         .spacing(Vec2::new(12.0, 4.0))
         .show(ui, |ui| {
@@ -331,7 +334,7 @@ fn detail_section(ui: &mut egui::Ui, title: &str, rows: &[(String, String)]) {
                         ui.label(value.trim_start_matches('✓').trim());
                     });
                 } else {
-                    ui.label(value);
+                    ui.add(egui::Label::new(value).wrap(true));
                 }
                 ui.end_row();
             }
@@ -1537,11 +1540,19 @@ impl PocketLauncher {
             return;
         };
         let mut open = true;
+        // Keep the title bar/close button inside the host viewport, including
+        // small Deck windows and a viewport resized while this dialog is open.
+        let bounds = ctx.screen_rect().shrink(8.0);
+        let content_size = Vec2::new(
+            (bounds.width() - 24.0).clamp(1.0, 560.0),
+            (bounds.height() - 60.0).clamp(1.0, 540.0),
+        );
         egui::Window::new("Informations")
             .id(egui::Id::new("game_information"))
             .open(&mut open)
-            .default_size(Vec2::new(560., 540.))
-            .default_pos(ctx.screen_rect().center() - Vec2::new(280., 270.))
+            .constrain_to(bounds)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(content_size)
             .collapsible(false)
             .show(ctx, |ui| self.ui_game_details(ui, &game));
         if !open || self.screen != Screen::Library {
@@ -2009,6 +2020,7 @@ impl PocketLauncher {
             })
             .clone();
         ScrollArea::vertical()
+            .auto_shrink([false, false])
             .id_source("game_details")
             .show(ui, |ui| {
                 ui.heading(RichText::new(&game.display_name).size(24.0));
@@ -2039,7 +2051,7 @@ impl PocketLauncher {
                 detail_section(ui, "EXECUTABLE", &analysis.executable);
                 detail_section(ui, "DEPENDENCIES", &analysis.dependencies);
                 detail_section(ui, "DISPLAY & GRAPHICS", &analysis.graphics);
-                if !analysis.hardware.is_empty() {
+                if is_gizmondo_game(game, &root) && !analysis.hardware.is_empty() {
                     detail_section(ui, "HARDWARE", &analysis.hardware);
                 }
                 if !analysis.game_data.is_empty() {

@@ -136,9 +136,10 @@ object NativeBridge {
     /** Pull up to [maxSamples] interleaved signed 16-bit PCM samples. */
     @JvmStatic external fun nativePollAudio(handle: Long, maxSamples: Int): ShortArray?
 
-    /** `1` while the worker is still running, `0` once it has exited. */
+    /** Pending missing-dependency diagnostic, once per DLL and process. */
     @JvmStatic external fun nativePollDependencyNotice(handle: Long): String?
     @JvmStatic external fun nativePollGpsNotice(handle: Long): String?
+    /** `1` while the worker is running, `0` after it exits. */
     @JvmStatic external fun nativeIsRunning(handle: Long): Int
 
     /**

@@ -648,6 +648,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dependency_capabilities_follow_handler_registration() {
+        let mut dispatcher = WinCeDispatcher::capability_registry();
+        let binding = ImportBinding::Name("FutureAPI".into());
+        assert!(!dispatcher.supports_import("future.dll", &binding));
+        dispatcher.register_handler("future.dll", "FutureAPI", ignored_dll_stub);
+        assert!(dispatcher.supports_import("FUTURE.DLL", &binding));
+        assert!(
+            dispatcher.supports_import("coredll.dll", &ImportBinding::Name("GetLastError".into()))
+        );
+        assert!(!dispatcher.supports_import("unknown.dll", &ImportBinding::Ordinal(644)));
+        // A blanket ignored-library fallback is not reported as an implementation.
+        assert!(!dispatcher.supports_import("fmodce.dll", &binding));
+    }
+
+    #[test]
+    fn dependency_notice_is_opt_in_deduplicated_and_does_not_change_execution() {
+        use pocket_cpu::stub::StubCpu;
+        use std::sync::{Arc, Mutex};
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let mut dispatcher = WinCeDispatcher::capability_registry();
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let missing = fake_thunk("future.dll", "MissingAPI");
+        dispatcher
+            .dispatch(&mut cpu, &missing, &mut kernel)
+            .unwrap();
+        assert!(records.lock().unwrap().is_empty());
+        let sink = Arc::clone(&records);
+        dispatcher
+            .set_dependency_notice(Box::new(move |message| sink.lock().unwrap().push(message)));
+        for name in ["MissingAPI", "AnotherMissingAPI"] {
+            assert!(matches!(
+                dispatcher
+                    .dispatch(&mut cpu, &fake_thunk("future.dll", name), &mut kernel)
+                    .unwrap(),
+                DispatchOutcome::Unimplemented
+            ));
+        }
+        assert_eq!(records.lock().unwrap().len(), 1);
+        assert!(records.lock().unwrap()[0].contains("No native DLL was found"));
+        dispatcher
+            .dispatch(
+                &mut cpu,
+                &fake_thunk("coredll.dll", "GetLastError"),
+                &mut kernel,
+            )
+            .unwrap();
+        assert_eq!(records.lock().unwrap().len(), 1);
+        dispatcher
+            .dispatch(
+                &mut cpu,
+                &fake_thunk("coredll.dll", "MissingSystemAPI"),
+                &mut kernel,
+            )
+            .unwrap();
+        assert_eq!(records.lock().unwrap().len(), 2);
+        assert!(records.lock().unwrap()[1].contains("do not install a system DLL"));
+        dispatcher.register_handler("future.dll", "FixedAPI", ignored_dll_stub);
+        dispatcher
+            .dispatch(&mut cpu, &fake_thunk("future.dll", "FixedAPI"), &mut kernel)
+            .unwrap();
+        assert_eq!(records.lock().unwrap().len(), 2);
+    }
+
+    #[test]
     fn registers_built_in_handlers() {
         let d = WinCeDispatcher::new();
         assert!(d.registered_count() > 0);

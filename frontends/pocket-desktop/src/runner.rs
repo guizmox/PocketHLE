@@ -959,6 +959,7 @@ impl RunHook {
 
     fn child_hook(&self) -> Self {
         let mut hook = Self::new(self.frame_tx.clone(), None);
+        hook.dependency_notice_tx = self.dependency_notice_tx.clone();
         hook.recording_audio = self.recording_audio.clone();
         hook.recording_audio_pending = true;
         hook.input_rx = self.input_rx.clone();

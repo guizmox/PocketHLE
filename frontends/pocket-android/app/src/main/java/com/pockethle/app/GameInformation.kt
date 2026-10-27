@@ -34,6 +34,7 @@ object GameInformation {
             "graphics" to "DISPLAY & GRAPHICS", "hardware" to "HARDWARE",
             "game_data" to "GAME DATA", "languages" to "LANGUAGES"
         )) {
+            if (key == "hardware" && metadata.optString("platform") != "Gizmondo") continue
             val rows = metadata.optJSONArray(key) ?: continue
             if (rows.length() == 0) continue
             text(heading, true)
