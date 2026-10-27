@@ -4482,3 +4482,19 @@ Win32 LastError. CRT byte/line/scanner reads, writes and flush failures set them
 rewind and close clear them. Successful operations and fseek do not clear errors.
 fputc reports EOF on failed output. These changes do not alter raw ReadFile or
 WriteFile semantics. KernelState constructors must initialize crt_stream_errors.
+
+
+## Release 0.3.7 and case-preserving writable copies (2026-10-27)
+
+Rust workspace/local Cargo.lock packages and Android versionName are 0.3.7;
+Android versionCode is 11. Do not rewrite older release history.
+
+VFS case-insensitive lookup keys must not become new names when an existing
+read-only installed file is copied into its writable save overlay. Preserve the
+source spelling for missing path components, respecting already existing upper
+layer directories. Opening a file to modify its bytes is not a rename operation.
+Racing Days registers inside NSX.car; the previous nsx.car copy changed the name
+returned by enumeration. The registered NSX -> Integra -> nsx sequence reproduces
+its corruption message; a direct writable ROM test missed the save overlay.
+Existing lowercase overlays need a case-only rename, preserving their bytes.
+No filename, title or registration bypass belongs in the runtime fix.
