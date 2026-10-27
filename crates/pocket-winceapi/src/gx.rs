@@ -415,6 +415,7 @@ pub(crate) mod tests {
             image_size: 0,
             image_entry: 0,
             dynamic_exports: std::collections::HashMap::new(),
+            image_imports: Vec::new(),
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
             dll_notification_frame: None,

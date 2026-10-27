@@ -471,10 +471,14 @@ impl Dispatcher for WinCeDispatcher {
         if let Some(outcome) = coredll::wake_due_worker(&mut CallCtx { cpu, thunk, kernel })? {
             return Ok(outcome);
         }
-        let handler_opt = self.resolve_handler(thunk).or_else(|| {
-            coredll::native_import_available(kernel, thunk)
-                .then_some(coredll::native_import as Handler)
-        });
+        let handler_opt = if coredll::native_import_preferred(kernel, thunk) {
+            Some(coredll::native_import as Handler)
+        } else {
+            self.resolve_handler(thunk).or_else(|| {
+                coredll::native_import_available(kernel, thunk)
+                    .then_some(coredll::native_import as Handler)
+            })
+        };
         let report_missing = handler_opt.is_none()
             && self
                 .unimplemented_sink

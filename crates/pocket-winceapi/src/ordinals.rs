@@ -65,6 +65,7 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
     let key = dll.to_ascii_lowercase();
     if key == "mfcce300.dll" {
         match ordinal {
+            644 => return Some("?AfxGetModuleState@@YAPAVAFX_MODULE_STATE@@XZ".into()),
             47 => return Some("??0CByteArray@@QAA@XZ".into()),
             177 => return Some("??0CString@@QAA@PBD@Z".into()),
             321 => return Some("??4CString@@QAAABV0@ABV0@@Z".into()),
@@ -92,7 +93,7 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
     if key == "mfcce300.dll" {
-        return 10;
+        return 11;
     }
     if pocket_gles::ordinals::is_gles_dll(&key) {
         return pocket_gles::ordinals::entry_count(&key);

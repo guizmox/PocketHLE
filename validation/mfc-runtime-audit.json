@@ -1,0 +1,7 @@
+{
+  "runtime_sha256": "2e1ec7741447a63935b3129526e9320ff59d0acce378936e6003f412afa6c16b",
+  "machine": "0x1c0",
+  "ordinal_644_from_supplied_import_library": "?AfxGetModuleState@@YAPAVAFX_MODULE_STATE@@XZ",
+  "game_mfc_imports": 345,
+  "missing_exports": []
+}

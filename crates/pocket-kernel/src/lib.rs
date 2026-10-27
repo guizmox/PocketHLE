@@ -1118,6 +1118,8 @@ pub struct KernelState {
     pub image_size: u32,
     pub image_entry: u32,
     pub dynamic_exports: HashMap<u32, HashMap<String, u32>>,
+    /// Original executable IAT, retained for binding native DLL data and functions together.
+    pub image_imports: Vec<pocket_pe::ImportSymbol>,
     pub runtime_thunks: HashMap<u32, Thunk>,
     pub module_attach_frames: Vec<ModuleAttachFrame>,
     pub dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>,
@@ -3852,6 +3854,7 @@ impl Process {
         let img_base = image.image_base;
         let img_size = image.size_of_image;
         let img_entry = image.entry_va();
+        let image_imports = image.imports.clone();
         // A game's satellite DLLs sit next to the EXE on a real device, so
         // the directory we loaded the EXE from is the natural search path
         // for `LoadLibraryW`. For a CAB/ZIP run that directory *is* the
@@ -3898,6 +3901,7 @@ impl Process {
                 image_size: img_size,
                 image_entry: img_entry,
                 dynamic_exports,
+                image_imports,
                 runtime_thunks: HashMap::new(),
                 module_attach_frames: Vec::new(),
                 dll_notification_frame: None,

@@ -4220,3 +4220,46 @@ paint a small HUD using GDI. Publishing the entire stale host bitmap after
 that HUD previously erased the CPU-rendered scene outside the destination
 rectangle. Mini Kayak exercises this path. Keep the source readback and
 post-draw guest publication; ordinary non-DIB destinations remain unchanged.
+
+## User-supplied MFC CE3 runtime and executable data imports (2026-10-27)
+
+The supplied ARM SDK import library identifies MFCCE300 ordinal644 as
+AfxGetModuleState; Leo imports345 MFC entries including class/message-map data.
+When mfcce300.dll is present beside the executable, prefer that user's native
+ARM runtime from its first call rather than mixing HLE CString/allocator/state
+with native framework objects. Absence retains the existing HLE behavior. No
+Microsoft DLL is bundled or downloaded automatically; use the retail ARM DLL,
+not the debug DLL, import library or PDB.
+
+KernelState.image_imports retains the executable's resolved IAT metadata. After
+a native graph attaches successfully, resolve all that DLL's executable imports
+(names and ordinals, data and functions) before writing any of those slots.
+Imported data never calls a thunk and otherwise points at ARM instructions,
+not a CRuntimeClass or message map. Existing loader relocations, dependency
+order, attach failure and lifetime machinery remain responsible for the runtime.
+DocList.dll is a CE OS component routed through HLE imports, like commctrl;
+DocList_Create remains unimplemented and must be reported if called. Do not
+require a native DocList library merely to bind MFC's unused OS import.
+
+RegDeleteKeyW is implemented as a CE leaf-key deletion: validate a non-null
+subkey and parent handle, reject subkeys and open target handles in the local
+registry view, remove values/display metadata and refund store pages. Missing
+keys return2, invalid handles6, invalid parameters87, non-leaf/open keys5.
+Device-shared cross-process open-registry-handle exclusion is not modeled by
+the existing per-process Registry handle table. Reference:
+https://learn.microsoft.com/en-us/previous-versions/ms961348(v=msdn.10)
+
+## Invalid DIB sizes during native window initialization (2026-10-27)
+
+CreateDIBSection rejects unsupported header sizes, nonpositive width or zero
+height instead of inventing a screen-sized RGB565 bitmap. Valid V2/V3/V4/V5
+headers retain their existing handling. The old fallback gave Leo a successful
+bitmap for its initial zero-sized window, leaving its software renderer in an
+inconsistent state after resize; raster writes then overwrote a live object's
+vtable before the buffer. Returning NULL allows the original guest failure and
+resize path to initialize its valid 240x136 8-bit scene. No executable patch,
+buffer-padding workaround, renderer bounds override or title branch is used.
+The supplied retail ARM MFC runtime plus the corrected loader and RegDeleteKeyW
+reach a rendered runway and cockpit in a bounded 2,000,000-slice run with halt
+on missing API enabled. This is startup/render validation, not a complete flight,
+physical Android/Windows/Deck test, or audio validation.

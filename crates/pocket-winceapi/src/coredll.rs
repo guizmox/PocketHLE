@@ -961,6 +961,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "RegEnumKeyExW", reg_enum_key_ex_w);
     d.register_handler(dll, "RegSetValueExW", reg_set_value_ex_w);
     d.register_handler(dll, "RegDeleteValueW", reg_delete_value_w);
+    d.register_handler(dll, "RegDeleteKeyW", reg_delete_key_w);
     d.register_handler(dll, "RegCloseKey", reg_close_key);
     d.register_handler(dll, "RegFlushKey", reg_flush_key);
 
@@ -1118,6 +1119,25 @@ pub fn register(d: &mut WinCeDispatcher) {
             return Ok(DispatchOutcome::ReturnedR0(8));
         }
         Ok(DispatchOutcome::ReturnedR0(0))
+    }
+
+    fn reg_delete_key_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+        let root = ctx.arg_u32(0)?;
+        let pointer = ctx.arg_u32(1)?;
+        if pointer == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(87));
+        }
+        let name = match read_wstr(ctx, pointer, 32768) {
+            Ok(units) => String::from_utf16_lossy(&units),
+            Err(_) => return Ok(DispatchOutcome::ReturnedR0(87)),
+        };
+        let status = ctx
+            .kernel
+            .registry
+            .delete_key(root, &name)
+            .err()
+            .unwrap_or(0);
+        Ok(DispatchOutcome::ReturnedR0(status))
     }
 
     fn reg_delete_value_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -4409,6 +4429,13 @@ pub(crate) fn native_import_available(kernel: &KernelState, thunk: &pocket_kerne
     !runtime_hle_dll(&thunk.dll) && kernel.find_module_file(&thunk.dll).is_some()
 }
 
+// MFC functions and imported class data must belong to one implementation.
+// Prefer the user's actual runtime from its first call, avoiding split HLE /
+// native CString, allocator and module state. Other DLL policies are unchanged.
+pub(crate) fn native_import_preferred(kernel: &KernelState, thunk: &pocket_kernel::Thunk) -> bool {
+    thunk.dll.eq_ignore_ascii_case("mfcce300.dll") && native_import_available(kernel, thunk)
+}
+
 pub(crate) fn native_import(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = finish_module_attach(ctx)? {
         if matches!(outcome, DispatchOutcome::JumpTo(_)) {
@@ -4453,6 +4480,31 @@ pub(crate) fn native_import(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         set_thread_error(ctx, 127);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
+    // Imported data (MFC message maps / CRuntimeClass objects) is read without
+    // calling a thunk. Bind the executable's entire DLL IAT after successful
+    // attach, including functions with an HLE implementation, so data and
+    // methods share one runtime. Validate all exports before changing any slot.
+    let exports = &ctx.kernel.dynamic_exports[&base];
+    let bindings: Vec<_> = ctx
+        .kernel
+        .image_imports
+        .iter()
+        .filter(|import| import.dll.eq_ignore_ascii_case(&dll))
+        .map(|import| {
+            let key = match &import.binding {
+                pocket_pe::ImportBinding::Name(name) => name.clone(),
+                pocket_pe::ImportBinding::Ordinal(ordinal) => format!("#{ordinal}"),
+            };
+            exports
+                .get(&key)
+                .copied()
+                .map(|address| (import.iat_va, address))
+                .ok_or_else(|| KernelError::Loader(format!("Native import {dll}!{key} missing")))
+        })
+        .collect::<Result<_, _>>()?;
+    for (iat, address) in bindings {
+        ctx.cpu.write_mem(iat, &address.to_le_bytes())?;
+    }
     // A static import becomes a direct call after the dependency graph attaches.
     if ctx.thunk.iat_va != 0 {
         ctx.cpu
@@ -4467,6 +4519,7 @@ fn runtime_hle_dll(dll: &str) -> bool {
         name.as_str(),
         "coredll.dll"
             | "note_prj.dll"
+            | "doclist.dll"
             | "aygshell.dll"
             | "commctrl.dll"
             | "gx.dll"
@@ -19563,23 +19616,22 @@ fn create_dib_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if bi_size < 40 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let mut bi_width = i32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
-    let mut bi_height = i32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
-    let mut bi_bpp = u16::from_le_bytes([hdr[14], hdr[15]]);
-    let mut bi_compression = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
+    let bi_width = i32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+    let bi_height = i32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
+    let bi_bpp = u16::from_le_bytes([hdr[14], hdr[15]]);
+    let bi_compression = u32::from_le_bytes([hdr[16], hdr[17], hdr[18], hdr[19]]);
     let bi_colors_used = u32::from_le_bytes([hdr[32], hdr[33], hdr[34], hdr[35]]);
     // V2/V3 and V4/V5 retain the first 40 bytes and embed their colour
     // masks at offset 40. Treating these headers as malformed silently
     // replaced small sprites and decoded images with screen-sized buffers.
     let malformed = !matches!(bi_size, 40 | 52 | 56 | 108 | 124) || bi_width <= 0 || bi_height == 0;
     if malformed {
-        log::debug!(
-            "CreateDIBSection info=0x{pbmi:08x} has invalid header; using screen-sized RGB565 fallback"
-        );
-        bi_width = ctx.kernel.framebuffer.width as i32;
-        bi_height = -(ctx.kernel.framebuffer.height as i32);
-        bi_bpp = 16;
-        bi_compression = 0;
+        log::debug!("CreateDIBSection rejects invalid header at 0x{pbmi:08x}: size={bi_size} width={bi_width} height={bi_height}");
+        if pp_bits != 0 {
+            ctx.cpu.write_mem(pp_bits, &0u32.to_le_bytes())?;
+        }
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
     log::debug!(
         "CreateDIBSection info=0x{pbmi:08x} size={bi_size} width={bi_width} height={bi_height} bpp={bi_bpp} compression={bi_compression} colors={bi_colors_used}"
@@ -28680,6 +28732,85 @@ mod tests {
     }
 
     #[test]
+    fn supplied_mfc_runtime_preference_is_optional_and_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.module_search_dirs.push(root.path().to_path_buf());
+        let mut thunk = dummy_thunk();
+        thunk.dll = "mfcce300.dll".into();
+        assert!(!native_import_preferred(&kernel, &thunk));
+        std::fs::write(root.path().join("MFCCE300.DLL"), []).unwrap();
+        assert!(native_import_preferred(&kernel, &thunk));
+        thunk.dll = "coredll.dll".into();
+        std::fs::write(root.path().join("coredll.dll"), []).unwrap();
+        assert!(!native_import_preferred(&kernel, &thunk));
+    }
+
+    #[test]
+    fn native_import_binds_function_and_data_iat_as_one_runtime() {
+        for missing_export in [false, true] {
+            let mut cpu = StubCpu::new();
+            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            cpu.write_mem(0x1100, &[0x55; 12]).unwrap();
+            let mut kernel = fresh_kernel();
+            let mut module = lifecycle_test_module(0x31000000, 0x31001000);
+            module.name = "mfcce300.dll".into();
+            module.attached = true;
+            kernel.modules.push(module);
+            let mut exports = std::collections::HashMap::from([
+                ("#644".to_owned(), 0x31001000),
+                ("#181".to_owned(), 0x31001100),
+                ("class-data".to_owned(), 0x31002000),
+            ]);
+            if missing_export {
+                exports.remove("class-data");
+            }
+            kernel.dynamic_exports.insert(0x31000000, exports);
+            kernel.image_imports = vec![
+                pocket_pe::ImportSymbol {
+                    dll: "MFCCE300.dll".into(),
+                    binding: pocket_pe::ImportBinding::Ordinal(644),
+                    iat_va: 0x1100,
+                },
+                pocket_pe::ImportSymbol {
+                    dll: "MFCCE300.dll".into(),
+                    binding: pocket_pe::ImportBinding::Ordinal(181),
+                    iat_va: 0x1104,
+                },
+                pocket_pe::ImportSymbol {
+                    dll: "MFCCE300.dll".into(),
+                    binding: pocket_pe::ImportBinding::Name("class-data".into()),
+                    iat_va: 0x1108,
+                },
+            ];
+            let thunk = pocket_kernel::Thunk {
+                dll: "mfcce300.dll".into(),
+                binding: pocket_pe::ImportBinding::Ordinal(644),
+                friendly_name: None,
+                thunk_va: 0x70000000,
+                iat_va: 0x1100,
+            };
+            let result = native_import(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            });
+            if missing_export {
+                assert!(result.is_err());
+                assert_eq!(cpu.read_mem(0x1100, 12).unwrap(), [0x55; 12]);
+            } else {
+                assert_eq!(result.unwrap(), DispatchOutcome::JumpTo(0x31001000));
+                let expected: Vec<_> = [0x31001000u32, 0x31001100, 0x31002000]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect();
+                assert_eq!(cpu.read_mem(0x1100, 12).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
     fn runtime_module_attach_restores_caller_and_scopes_exports() {
         for success in [false, true] {
             let mut cpu = StubCpu::new();
@@ -29530,6 +29661,7 @@ mod tests {
             image_size: 0,
             image_entry: 0,
             dynamic_exports: std::collections::HashMap::new(),
+            image_imports: Vec::new(),
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
             dll_notification_frame: None,
@@ -30081,6 +30213,53 @@ mod tests {
         );
         let data = ctx.cpu.read_mem(OUT, 92).unwrap();
         assert_eq!(i32::from_le_bytes(data[..4].try_into().unwrap()), -13);
+    }
+
+    #[test]
+    fn zero_sized_dib_sections_fail_instead_of_inventing_a_display_bitmap() {
+        for (width, height, valid) in [(240i32, 0i32, false), (0, 136, false), (2, 2, true)] {
+            let mut cpu = StubCpu::new();
+            cpu.map_region(0x1000, 0x2000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let mut kernel = fresh_kernel();
+            let mut header = [0u8; 40];
+            header[0..4].copy_from_slice(&40u32.to_le_bytes());
+            header[4..8].copy_from_slice(&width.to_le_bytes());
+            header[8..12].copy_from_slice(&height.to_le_bytes());
+            header[12..14].copy_from_slice(&1u16.to_le_bytes());
+            header[14..16].copy_from_slice(&16u16.to_le_bytes());
+            cpu.write_mem(0x1000, &header).unwrap();
+            cpu.write_mem(0x1100, &0xfeedfaceu32.to_le_bytes()).unwrap();
+            for (reg, value) in [
+                (ArmReg::R0, GDI_SCREEN_DC),
+                (ArmReg::R1, 0x1000),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, 0x1100),
+            ] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            let thunk = dummy_thunk();
+            let result = create_dib_section(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap();
+            if valid {
+                let DispatchOutcome::ReturnedR0(bitmap) = result else {
+                    panic!("DIB result");
+                };
+                assert_ne!(bitmap, 0);
+                let bitmap = kernel.gdi.bitmap(bitmap).unwrap();
+                assert_eq!((bitmap.width, bitmap.height), (2, 2));
+            } else {
+                assert_eq!(result, DispatchOutcome::ReturnedR0(0));
+                assert_eq!(cpu.read_mem(0x1100, 4).unwrap(), [0; 4]);
+                assert_eq!(kernel.thread_last_errors[&0], ERROR_INVALID_PARAMETER);
+            }
+        }
     }
 
     #[test]

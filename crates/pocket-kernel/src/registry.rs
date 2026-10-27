@@ -812,6 +812,47 @@ impl Registry {
         children.into_values().collect()
     }
 
+    /// CE deletes a leaf key with its values; children and open target handles
+    /// must be closed/removed by the caller first. Errors are Win32 status codes.
+    pub fn delete_key(&mut self, root: u32, subkey: &str) -> Result<(), u32> {
+        if canonical_key(subkey).is_empty() {
+            return Err(87);
+        }
+        let path = self.resolve(root, subkey).ok_or(6u32)?;
+        let key = path.to_ascii_lowercase();
+        let prefix = format!("{key}\\");
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut volatile = self
+            .volatile_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !store.keys.contains_key(&key)
+            && !volatile
+                .keys()
+                .any(|(path, _)| path == &key || path.starts_with(&prefix))
+        {
+            return Err(2);
+        }
+        if store.keys.keys().any(|path| path.starts_with(&prefix))
+            || volatile.keys().any(|(path, _)| path.starts_with(&prefix))
+            || self
+                .handles
+                .values()
+                .any(|path| path.eq_ignore_ascii_case(&key))
+        {
+            return Err(5);
+        }
+        store.keys.remove(&key);
+        store.display.remove(&key);
+        store.value_display.remove(&key);
+        volatile.retain(|(path, _), _| path != &key);
+        let pages = Self::stored_pages(&store.keys);
+        if let Some(charge) = &mut store.charge {
+            charge.resize(pages);
+        }
+        Ok(())
+    }
+
     pub fn delete_value(&mut self, path: &str, name: &str) -> bool {
         if let Some(value) = self
             .volatile_values
@@ -1295,6 +1336,27 @@ mod tests {
         assert_eq!(sz.type_code(), 1);
         assert_eq!(sz.to_bytes(), vec![b'A', 0, b'B', 0, 0, 0]);
     }
+    #[test]
+    fn delete_leaf_key_rejects_open_handles_and_children() {
+        let mut reg = Registry::new();
+        let key = r"HKCU\Software\Example";
+        reg.set_value(key, "Name", RegistryValue::Dword(42));
+        let handle = reg.open(key).unwrap();
+        assert_eq!(reg.delete_key(0x80000001, r"Software\Example"), Err(5));
+        reg.close(handle);
+        reg.set_value(r"HKCU\Software\Example\Child", "", RegistryValue::Dword(1));
+        assert_eq!(reg.delete_key(0x80000001, r"Software\Example"), Err(5));
+        assert_eq!(
+            reg.delete_key(0x80000001, r"Software\Example\Child"),
+            Ok(())
+        );
+        assert_eq!(reg.delete_key(0x80000001, r"software\EXAMPLE"), Ok(()));
+        assert!(!reg.contains_key(key));
+        assert_eq!(reg.delete_key(0x80000001, r"Software\Example"), Err(2));
+        assert_eq!(reg.delete_key(0, "Example"), Err(6));
+        assert_eq!(reg.delete_key(0x80000001, ""), Err(87));
+    }
+
     #[test]
     fn game_overrides_read_and_enumerate_without_persisting_or_leaking() {
         let dir = tempfile::tempdir().unwrap();
