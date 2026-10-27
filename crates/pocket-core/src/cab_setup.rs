@@ -325,23 +325,58 @@ mod tests {
     use super::*;
     #[test]
     fn addon_setup_metadata_keeps_package_directory_and_rejects_bad_paths() {
-        let root=std::env::temp_dir().join(format!("pockethle-addon-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let extracted=root.join("extracted");std::fs::create_dir_all(&extracted).unwrap();
-        let mut emu=Emulator::with_stub_cpu();
-        assert_eq!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").unwrap(),0);
-        let id="0123456789abcdef0123456789abcdef";
-        let packages=root.join(".cab-setups");let directory=packages.join(id);
+        let root = std::env::temp_dir().join(format!(
+            "pockethle-addon-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let extracted = root.join("extracted");
+        std::fs::create_dir_all(&extracted).unwrap();
+        let mut emu = Emulator::with_stub_cpu();
+        assert_eq!(
+            emu.complete_cab_registry_setup(&extracted, r"\Program Files\Example")
+                .unwrap(),
+            0
+        );
+        let id = "0123456789abcdef0123456789abcdef";
+        let packages = root.join(".cab-setups");
+        let directory = packages.join(id);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(packages.join("order.txt"),format!("{id}\n")).unwrap();
-        std::fs::write(directory.join("install-dir.txt"),r"\Program Files\Example\Tracks").unwrap();
-        assert_eq!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").unwrap(),0);
-        std::fs::write(directory.join("install-dir.txt"),r"\Program Files\Example\..\Other").unwrap();
-        assert!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").is_err());
-        std::fs::write(directory.join("install-dir.txt"),r"\Program Files\Example\Tracks").unwrap();
-        std::fs::write(packages.join("order.txt"),"../escape\n").unwrap();
-        assert!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").is_err());
-        std::fs::write(packages.join("order.txt"),format!("{id}\n{id}\n")).unwrap();
-        assert!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").is_err());
+        std::fs::write(packages.join("order.txt"), format!("{id}\n")).unwrap();
+        std::fs::write(
+            directory.join("install-dir.txt"),
+            r"\Program Files\Example\Tracks",
+        )
+        .unwrap();
+        assert_eq!(
+            emu.complete_cab_registry_setup(&extracted, r"\Program Files\Example")
+                .unwrap(),
+            0
+        );
+        std::fs::write(
+            directory.join("install-dir.txt"),
+            r"\Program Files\Example\..\Other",
+        )
+        .unwrap();
+        assert!(emu
+            .complete_cab_registry_setup(&extracted, r"\Program Files\Example")
+            .is_err());
+        std::fs::write(
+            directory.join("install-dir.txt"),
+            r"\Program Files\Example\Tracks",
+        )
+        .unwrap();
+        std::fs::write(packages.join("order.txt"), "../escape\n").unwrap();
+        assert!(emu
+            .complete_cab_registry_setup(&extracted, r"\Program Files\Example")
+            .is_err());
+        std::fs::write(packages.join("order.txt"), format!("{id}\n{id}\n")).unwrap();
+        assert!(emu
+            .complete_cab_registry_setup(&extracted, r"\Program Files\Example")
+            .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
