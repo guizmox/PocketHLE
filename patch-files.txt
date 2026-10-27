@@ -3,7 +3,9 @@ crates/pocket-core/src/lib.rs
 crates/pocket-kernel/src/lib.rs
 crates/pocket-kernel/src/registry.rs
 crates/pocket-kernel/src/shell_menu.rs
+crates/pocket-kernel/src/touch_steering.rs
 crates/pocket-library/src/analysis.rs
+crates/pocket-library/src/lib.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/gx.rs
 crates/pocket-winceapi/src/lib.rs
@@ -12,7 +14,9 @@ docs/AGENTS.md
 frontends/pocket-android-jni/src/lib.rs
 frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameInformation.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs

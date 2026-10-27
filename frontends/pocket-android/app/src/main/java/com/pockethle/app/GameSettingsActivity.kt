@@ -52,6 +52,18 @@ class GameSettingsActivity : AppCompatActivity() {
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
+                preferenceScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                    key = "pocketpc_touch_steering"
+                    title = "Touch steering with left/right arrows"
+                    summary = "Hold the stylus in the corresponding half of the displayed screen"
+                    isPersistent = false
+                    isChecked = current.pocketpcTouchSteering
+                    setOnPreferenceChangeListener { _, value ->
+                        current = current.copy(pocketpcTouchSteering = value as Boolean)
+                        writeGameSettings()
+                        true
+                    }
+                })
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
                     preferenceScreen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                         key = keyName; title = label; isPersistent = false; text = initial

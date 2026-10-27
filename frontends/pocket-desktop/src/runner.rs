@@ -182,6 +182,10 @@ impl Runner {
         // platform before the title starts so GAPI sees the real geometry.
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
         emu.set_pocket_pc_input(!is_gizmondo);
+        if let Some(process) = emu.process_mut() {
+            process.state.touch_steering.enabled =
+                !is_gizmondo && game.settings.pocketpc_touch_steering;
+        }
         if !is_gizmondo {
             let tx = hook.dependency_notice_tx.clone();
             emu.configure_pocketpc_dependencies(library_root, move |message| {

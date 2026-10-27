@@ -563,6 +563,9 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
+    /// Display-relative left/right arrows hold the stylus in the corresponding half.
+    #[serde(default)]
+    pub pocketpc_touch_steering: bool,
     /// Empty strings inherit the emulated PocketPC device identity. Ignored on Gizmondo.
     #[serde(default)]
     pub pocketpc_owner_name: String,
@@ -678,6 +681,7 @@ impl GameSettings {
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
+            pocketpc_touch_steering: false,
             pocketpc_owner_name: String::new(),
             pocketpc_device_name: String::new(),
             pocketpc_device_id: String::new(),

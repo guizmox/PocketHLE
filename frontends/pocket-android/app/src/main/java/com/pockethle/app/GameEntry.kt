@@ -67,6 +67,7 @@ data class GameSettings(
     val gpuRenderer: Boolean? = null,
     val anisotropicFiltering: Int? = null,
     val dpadDeadzone: String = "large",
+    val pocketpcTouchSteering: Boolean = false,
     val pocketpcOwnerName: String = "",
     val pocketpcDeviceName: String = "",
     val pocketpcDeviceId: String = "",
@@ -82,6 +83,7 @@ data class GameSettings(
         put("halt_on_unimplemented", haltOnUnimplemented)
         put("screen", screen)
         put("rotation", rotation)
+        put("pocketpc_touch_steering", pocketpcTouchSteering)
         put("pocketpc_owner_name", pocketpcOwnerName)
         put("pocketpc_device_name", pocketpcDeviceName)
         put("pocketpc_device_id", pocketpcDeviceId)
@@ -107,6 +109,7 @@ data class GameSettings(
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
+            pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcOwnerName = obj.optString("pocketpc_owner_name", ""),
             pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),
             pocketpcDeviceId = obj.optString("pocketpc_device_id", ""),

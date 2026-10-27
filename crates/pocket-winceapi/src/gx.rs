@@ -487,6 +487,7 @@ pub(crate) mod tests {
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             stylus_stick: Default::default(),
+            touch_steering: Default::default(),
             gapi_keys_queried: false,
             gapi_action_key: pocket_kernel::gapi::VK_A,
             pending_message: None,

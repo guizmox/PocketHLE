@@ -2632,6 +2632,10 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 if !is_gizmondo {
+                    ui.label("Touch steering");
+                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_touch_steering,
+                        "Left/right arrows press the corresponding screen half");
+                    ui.end_row();
                     ui.label("Owner name (PocketPC)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
                     ui.end_row();

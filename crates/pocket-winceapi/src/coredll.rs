@@ -13787,6 +13787,10 @@ fn addressed_input(kernel: &KernelState, event: InputEvent) -> Option<(u32, u32,
 /// game can use the GAPI direction table and still bind Enter explicitly
 /// (COD2 binds it to Fire). Apply the same device choice in both queue paths.
 fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
+    if let Some(up) = ctx.kernel.touch_steering.take_release() {
+        ctx.kernel.async_keys.observe(up);
+        return Some(up);
+    }
     let ev = loop {
         match ctx.kernel.pop_pending_input() {
             Some(InputEvent::StylusAim { x, y }) => {
@@ -13797,6 +13801,10 @@ fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
                 }
             }
             Some(event @ InputEvent::PointerDown { .. }) => {
+                if let Some(up) = ctx.kernel.touch_steering.cancel() {
+                    ctx.kernel.requeue_pending_front(event);
+                    break up;
+                }
                 // A real touch owns the single stylus. Release the emulated
                 // stroke first and don't resume it without a fresh host axis.
                 if let Some(up) = ctx.kernel.stylus_stick.cancel() {
@@ -13805,10 +13813,38 @@ fn take_pending_input(ctx: &mut CallCtx<'_>) -> Option<InputEvent> {
                 }
                 break event;
             }
-            Some(event) => break event,
+            Some(event @ InputEvent::KeyboardRotation { .. }) => {
+                if let Some(up) = ctx.kernel.touch_steering.cancel() {
+                    ctx.kernel.requeue_pending_front(event);
+                    break up;
+                }
+                break event;
+            }
+            Some(event) => {
+                if ctx.kernel.touch_steering.enabled
+                    && ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
+                    && !ctx.kernel.shell_keyboard.visible
+                {
+                    if let Some(mapped) = ctx.kernel.touch_steering.input(
+                        event,
+                        ctx.kernel.shell_keyboard.rotation,
+                        ctx.kernel.framebuffer.width,
+                        ctx.kernel.framebuffer.height,
+                    ) {
+                        ctx.kernel.async_keys.observe(mapped);
+                        break mapped;
+                    }
+                } else {
+                    break event;
+                }
+            }
             None => {
                 if ctx.kernel.shell_keyboard.visible {
-                    break ctx.kernel.stylus_stick.cancel()?;
+                    break ctx
+                        .kernel
+                        .touch_steering
+                        .cancel()
+                        .or_else(|| ctx.kernel.stylus_stick.cancel())?;
                 }
                 let event = ctx.kernel.stylus_stick.tick(
                     std::time::Instant::now(),
@@ -29814,6 +29850,7 @@ mod tests {
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             stylus_stick: Default::default(),
+            touch_steering: Default::default(),
             gapi_keys_queried: false,
             gapi_action_key: pocket_kernel::gapi::VK_A,
             pending_message: None,

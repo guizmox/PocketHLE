@@ -4307,3 +4307,20 @@ origins, client sizes, stylus coordinates and SIP layout are unchanged.
 Validation: the supplied SimCity executable passes "Simcity 2000 Pocket PC"
 through standard dialog templates, observed in a bounded ARM/Unicorn run at
 startup and main-menu creation (not inferred from the library display name).
+
+
+### Optional PocketPC left/right touch steering
+
+`GameSettings.pocketpc_touch_steering` defaults false and is exposed only for
+PocketPC on desktop and Android. Both runners gate the per-process mapping on
+the PocketPC platform. `touch_steering::TouchSteering` maps the already inverse-
+rotated directional keys back to display-relative left/right, then transforms
+quarter-width/three-quarter-width, mid-height screen points into guest pixels.
+Up/down in display orientation remain keys. Down holds a stylus stroke; repeated
+key-downs are ignored; release moves the held stylus to the center, followed
+by PointerUp at the center before any later host input. Opposite directions use the most
+recent press and restore the still-held other direction on release. Real touch,
+rotation changes and the SIP cancel an emulated stroke. No game-specific code.
+The mapping runs in the common WinCE queued-input path, before native window/
+control/stylus routing, not in individual game renderers. No in-game validation
+was performed for this option; the user is doing that validation.

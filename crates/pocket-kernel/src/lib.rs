@@ -69,6 +69,7 @@ pub mod shell_menu;
 pub mod stylus_stick;
 pub mod text;
 mod tls;
+pub mod touch_steering;
 pub mod tracker;
 pub mod vfs;
 pub mod vibration;
@@ -1373,6 +1374,7 @@ pub struct KernelState {
     /// user input always wins over the synthetic pump.
     pub pending_input: VecDeque<InputEvent>,
     pub stylus_stick: stylus_stick::StylusStick,
+    pub touch_steering: touch_steering::TouchSteering,
     /// Set once the guest has fetched the GAPI key list through
     /// `GXGetDefaultKeys`. Such a guest only reacts to the virtual keys
     /// that table names, so the host's confirm key has to be delivered
@@ -3995,6 +3997,7 @@ impl Process {
                 modal_dialog: None,
                 pending_input: VecDeque::new(),
                 stylus_stick: Default::default(),
+                touch_steering: Default::default(),
                 gapi_keys_queried: false,
                 gapi_action_key: gapi::VK_A,
                 pending_message: None,
