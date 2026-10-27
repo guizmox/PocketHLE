@@ -4513,7 +4513,7 @@ pub(crate) fn native_import(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
     Ok(DispatchOutcome::JumpTo(address))
 }
 
-fn runtime_hle_dll(dll: &str) -> bool {
+pub(crate) fn runtime_hle_dll(dll: &str) -> bool {
     let name = dll.to_ascii_lowercase();
     matches!(
         name.as_str(),

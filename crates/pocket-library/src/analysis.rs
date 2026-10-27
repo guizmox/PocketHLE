@@ -13,6 +13,8 @@ pub struct GameAnalysis {
     pub game_data: Vec<(String, String)>,
     pub languages: Vec<(String, String)>,
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<(String, String)>,
 }
 
 pub fn detect_gizmondo_title_id(root: &std::path::Path) -> Option<String> {

@@ -223,6 +223,25 @@ impl Emulator {
         }
     }
 
+    /// Optional PocketPC shared runtime search path. Game-local paths stay first.
+    pub fn configure_pocketpc_dependencies(
+        &mut self,
+        root: &Path,
+        notice: impl FnMut(String) + Send + 'static,
+    ) {
+        let folder = root.join("runtimes").join("pocketpc");
+        if let Err(error) = std::fs::create_dir_all(&folder) {
+            log::warn!(
+                "Cannot create shared runtime directory {}: {error}",
+                folder.display()
+            );
+        }
+        if let Some(process) = self.process.as_mut() {
+            process.state.module_search_dirs.push(folder);
+        }
+        self.dispatcher.set_dependency_notice(Box::new(notice));
+    }
+
     pub fn dispatcher(&self) -> &WinCeDispatcher {
         &self.dispatcher
     }
@@ -532,3 +551,5 @@ impl Drop for Emulator {
 pub fn suspend_host_session() -> pocket_winceapi::SuspendedSession {
     pocket_winceapi::suspend_session()
 }
+
+pub mod dependencies;

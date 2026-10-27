@@ -1220,9 +1220,12 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_analyzeGame<'local>(
             .iter()
             .find(|game| game.id == id)
             .ok_or_else(|| anyhow::anyhow!("game not found: {id}"))?;
-        Ok(serde_json::to_string(&pocket_library::analyze_game(
-            game, &root,
-        ))?)
+        let mut analysis = pocket_library::analyze_game(game, &root);
+        if !pocket_library::is_gizmondo_game(game, &root) {
+            analysis.dependencies =
+                pocket_core::dependencies::information(&game.executable_path(&root), &root);
+        }
+        Ok(serde_json::to_string(&analysis)?)
     })();
     match result {
         Ok(json) => new_jstring(&env, json),
@@ -1264,4 +1267,18 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_splitDemoCard<'local>
         Ok(serde_json::to_string(&entries)?)
     })();
     new_jstring(&env, result.unwrap_or_else(|e| error_json(&e.to_string())))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollDependencyNotice<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jstring {
+    let Some(message) = session_from_handle(handle).and_then(|s| s.poll_dependency_notice()) else {
+        return std::ptr::null_mut();
+    };
+    env.new_string(message)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }

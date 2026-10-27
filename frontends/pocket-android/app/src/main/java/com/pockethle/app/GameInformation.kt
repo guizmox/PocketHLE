@@ -30,6 +30,7 @@ object GameInformation {
             ?.let { text("Title ID: $it") }
         for ((key, heading) in listOf(
             "identity" to "IDENTITY", "executable" to "EXECUTABLE",
+            "dependencies" to "DEPENDENCIES",
             "graphics" to "DISPLAY & GRAPHICS", "hardware" to "HARDWARE",
             "game_data" to "GAME DATA", "languages" to "LANGUAGES"
         )) {

@@ -125,6 +125,8 @@ class GameActivity : AppCompatActivity() {
 
     /** Polling tick. ~30 Hz keeps the SurfaceView smooth without
      * burning the CPU on a phone. */
+    private var dependencyDialogVisible = false
+
     private val pollTick = object : Runnable {
         override fun run() {
             if (session == 0L) return
@@ -135,6 +137,15 @@ class GameActivity : AppCompatActivity() {
                 decodeFrame(raw)?.let { frame ->
                     lastFrame = frame
                     paintFrame(frame)
+                }
+            }
+            if (!dependencyDialogVisible) {
+                NativeBridge.nativePollDependencyNotice(session)?.let { message ->
+                    dependencyDialogVisible = true
+                    androidx.appcompat.app.AlertDialog.Builder(this@GameActivity)
+                        .setTitle("PocketPC dependency").setMessage(message)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .setOnDismissListener { dependencyDialogVisible = false }.show()
                 }
             }
             NativeBridge.nativePollGpsNotice(session)?.let { message ->

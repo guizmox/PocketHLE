@@ -4263,3 +4263,27 @@ The supplied retail ARM MFC runtime plus the corrected loader and RegDeleteKeyW
 reach a rendered runway and cockpit in a bounded 2,000,000-slice run with halt
 on missing API enabled. This is startup/render validation, not a complete flight,
 physical Android/Windows/Deck test, or audio validation.
+
+
+### Shared PocketPC runtimes and dependency information
+
+Desktop (including Steam Deck/Linux) and Android append
+`<library root>/runtimes/pocketpc` to each PocketPC process's native module
+search directories, after the executable directory. Gizmondo never enables this
+path or the user-facing dependency callback. Files are user-supplied, not bundled.
+The existing native loader still validates architecture, relocations and exports.
+Do not install system DLLs to replace missing HLE system APIs.
+
+`WinCeDispatcher::capability_registry` constructs the same handler registrations
+as `new`, without resetting GLES state. `supports_import` uses dispatch's ordinal
+and name resolution. No parallel supported-API manifest is maintained. Information
+screens inspect static imports only when opened; a missing registration is not
+proof that the game will fail (unused imports and dynamic imports exist). Native
+file presence is explicitly not advertised as verified compatibility.
+
+The optional runtime callback is enabled only by PocketPC frontends. It runs in
+the existing unresolved-call branch, reports once per DLL per process and does
+not change the existing return/halting policy. Implemented API calls do no new
+work. System-library diagnostics ask for an HLE implementation; other missing
+libraries point to the shared runtime directory. Desktop and Android drain the
+notices on their UI thread, independently of missing-API file logging.

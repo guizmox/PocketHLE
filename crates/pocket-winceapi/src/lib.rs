@@ -240,6 +240,8 @@ pub struct WinCeDispatcher {
     /// Optional JSON-lines sink. One record per dispatched call.
     trace_sink: Option<Box<dyn Write + Send>>,
     unimplemented_sink: Option<Box<dyn UnimplementedApiSink>>,
+    dependency_notice: Option<Box<dyn FnMut(String) + Send>>,
+    dependency_reported: std::collections::HashSet<String>,
 }
 
 impl Default for WinCeDispatcher {
@@ -251,6 +253,11 @@ impl Default for WinCeDispatcher {
 impl WinCeDispatcher {
     pub fn new() -> Self {
         gles::reset_for_session();
+        Self::capability_registry()
+    }
+
+    /// Build the actual handler registry without resetting a running GPU session.
+    pub fn capability_registry() -> Self {
         let mut d = Self {
             by_name: HashMap::new(),
             by_name_constant: HashMap::new(),
@@ -258,6 +265,8 @@ impl WinCeDispatcher {
             halt_on_unimplemented: false,
             trace_sink: None,
             unimplemented_sink: None,
+            dependency_notice: None,
+            dependency_reported: Default::default(),
         };
         coredll::register(&mut d);
         mfc::register(&mut d);
@@ -293,6 +302,29 @@ impl WinCeDispatcher {
             }
         }
         d
+    }
+
+    /// Only frontends launching PocketPC games enable user-facing diagnostics.
+    pub fn set_dependency_notice(&mut self, sink: Box<dyn FnMut(String) + Send>) {
+        self.dependency_notice = Some(sink);
+        self.dependency_reported.clear();
+    }
+
+    /// Query the same registered handlers and ordinal resolution as dispatch.
+    /// Blanket ignored-library fallbacks are deliberately not implementations.
+    pub fn supports_import(&self, dll: &str, binding: &ImportBinding) -> bool {
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: dll.to_owned(),
+            binding: binding.clone(),
+            friendly_name: match binding {
+                ImportBinding::Ordinal(o) => resolve_ordinal(dll, *o),
+                _ => None,
+            },
+        };
+        self.by_name
+            .contains_key(&(dll.to_ascii_lowercase(), import_name(&thunk).into_owned()))
     }
 
     pub fn register_handler(&mut self, dll: &str, name: &str, handler: Handler) {
@@ -531,6 +563,26 @@ impl Dispatcher for WinCeDispatcher {
             }
         } else {
             log::warn!("unimplemented call -> {}", thunk.label());
+            if let Some(sink) = self.dependency_notice.as_mut() {
+                let label = thunk.label();
+                if self
+                    .dependency_reported
+                    .insert(thunk.dll.to_ascii_lowercase())
+                {
+                    let detail = if coredll::runtime_hle_dll(&thunk.dll) {
+                        "This system API needs an implementation in PocketHLE; do not install a system DLL.".to_owned()
+                    } else {
+                        let folder = kernel
+                            .module_search_dirs
+                            .last()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        format!("No native DLL was found. You can place a compatible WinCE DLL in {folder}. Game-local DLLs take priority.")
+                    };
+                    sink(format!("Unavailable API: {label}\n{detail}\nThe game may not work correctly. This call has no implementation."));
+                }
+            }
+
             if self.halt_on_unimplemented {
                 Ok(DispatchOutcome::Halt)
             } else {

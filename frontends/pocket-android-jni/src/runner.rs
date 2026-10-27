@@ -119,6 +119,7 @@ pub(crate) struct SessionState {
     /// cares about the newest frame.
     latest_frame: Mutex<Option<FrameSnapshot>>,
     gps_notice: Mutex<Option<(f64, f64)>>,
+    dependency_notices: Mutex<std::collections::VecDeque<String>>,
     /// `true` while the worker thread is still running. Flipped to
     /// `false` exactly once, just before the worker returns.
     running: Mutex<bool>,
@@ -138,6 +139,7 @@ impl SessionState {
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
             gps_notice: Mutex::new(None),
+            dependency_notices: Mutex::new(Default::default()),
             running: Mutex::new(true),
             summary: Mutex::new(None),
             audio: Mutex::new(None),
@@ -153,6 +155,9 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn poll_dependency_notice(&self) -> Option<String> {
+        self.state.dependency_notices.lock().ok()?.pop_front()
+    }
     pub fn poll_gps_notice(&self) -> Option<(f64, f64)> {
         self.state.gps_notice.lock().ok()?.take()
     }
@@ -396,6 +401,14 @@ fn run_process(
 
     let is_gizmondo = is_gizmondo_game(entry, library_root);
     emu.set_pocket_pc_input(!is_gizmondo);
+    if !is_gizmondo {
+        let state = Arc::clone(&hook.state);
+        emu.configure_pocketpc_dependencies(library_root, move |message| {
+            if let Ok(mut notices) = state.dependency_notices.lock() {
+                notices.push_back(message);
+            }
+        });
+    }
     if is_gizmondo {
         if let Ok(image) = &image {
             crate::colors_trace::install(&mut emu, image);

@@ -66,10 +66,12 @@ impl Runner {
         live_tx: Option<Sender<FrameSnapshot>>,
         input_rx: Option<Receiver<InputCommand>>,
         gps_notice_tx: Option<Sender<(f64, f64)>>,
+        dependency_notice_tx: Option<Sender<String>>,
     ) -> RunOutcome {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
         hook.gps_notice_tx = gps_notice_tx;
+        hook.dependency_notice_tx = dependency_notice_tx;
         let card_root = game.gizmondo_card_root(&library_root);
         self.run_process(
             &library_root,
@@ -180,6 +182,14 @@ impl Runner {
         // platform before the title starts so GAPI sees the real geometry.
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
         emu.set_pocket_pc_input(!is_gizmondo);
+        if !is_gizmondo {
+            let tx = hook.dependency_notice_tx.clone();
+            emu.configure_pocketpc_dependencies(library_root, move |message| {
+                if let Some(tx) = &tx {
+                    let _ = tx.send(message);
+                }
+            });
+        }
         if let Some(context) = handle_context {
             context.table.defer_process_exit();
             if let Some(process) = emu.process_mut() {
@@ -698,6 +708,7 @@ struct RunHook {
     colors_random_gps: Option<pocket_library::LauncherConfig>,
     refresh_colors_gps: bool,
     gps_notice_tx: Option<Sender<(f64, f64)>>,
+    dependency_notice_tx: Option<Sender<String>>,
     geofence_down: bool,
     frame_tx: Option<Sender<FrameSnapshot>>,
     input_rx: Option<Arc<Mutex<Receiver<InputCommand>>>>,
@@ -999,6 +1010,7 @@ impl RunHook {
             colors_random_gps: None,
             refresh_colors_gps: false,
             gps_notice_tx: None,
+            dependency_notice_tx: None,
             geofence_down: false,
             frame_tx,
             input_rx: input_rx.map(|rx| Arc::new(Mutex::new(rx))),

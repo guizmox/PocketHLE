@@ -178,6 +178,8 @@ pub struct PocketLauncher {
     /// `UiEvent::RunFinished`; `None` otherwise.
     frame_rx: Option<Receiver<FrameSnapshot>>,
     gps_notice_rx: Option<Receiver<(f64, f64)>>,
+    dependency_notice_rx: Option<Receiver<String>>,
+    dependency_notice: Option<String>,
     gps_notice: Option<(String, Instant)>,
     /// Channel for sending [`InputCommand`]s (taps / D-pad / stop)
     /// to the running emulator. Mirrors `frame_rx`.
@@ -728,6 +730,8 @@ impl PocketLauncher {
             colors_startup_notice: None,
             frame_rx: None,
             gps_notice_rx: None,
+            dependency_notice_rx: None,
+            dependency_notice: None,
             gps_notice: None,
             input_tx: None,
             held: HeldButtons::default(),
@@ -908,6 +912,24 @@ impl PocketLauncher {
             while let Ok(frame) = rx.try_recv() {
                 latest = Some(frame);
             }
+        }
+        if self.dependency_notice.is_none() {
+            if let Some(rx) = &self.dependency_notice_rx {
+                if let Ok(message) = rx.try_recv() {
+                    self.dependency_notice = Some(message);
+                }
+            }
+        }
+        if let Some(message) = self.dependency_notice.clone() {
+            egui::Window::new("PocketPC dependency")
+                .collapsible(false)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label(message);
+                    if crate::controller_ui::button(ui, "OK").clicked() {
+                        self.dependency_notice = None;
+                    }
+                });
         }
         if let Some(rx) = &self.gps_notice_rx {
             while let Ok((lat, lon)) = rx.try_recv() {
@@ -1587,7 +1609,10 @@ impl PocketLauncher {
                 self.game_menu_parent =
                     matches!(index, 0 | 2 | 3).then(|| (game.id.clone(), index));
                 match index {
-                    0 => self.information_game = Some(game.id.clone()),
+                    0 => {
+                        self.analysis_cache.remove(&game.id);
+                        self.information_game = Some(game.id.clone());
+                    }
                     1 => self.spawn_run(game),
                     2 => {
                         self.rename_draft = Some((game.id.clone(), game.display_name.clone(), true))
@@ -1974,7 +1999,14 @@ impl PocketLauncher {
         let analysis = self
             .analysis_cache
             .entry(game.id.clone())
-            .or_insert_with(|| analyze_game(game, &root))
+            .or_insert_with(|| {
+                let mut analysis = analyze_game(game, &root);
+                if !is_gizmondo_game(game, &root) {
+                    analysis.dependencies =
+                        pocket_core::dependencies::information(&game.executable_path(&root), &root);
+                }
+                analysis
+            })
             .clone();
         ScrollArea::vertical()
             .id_source("game_details")
@@ -2005,6 +2037,7 @@ impl PocketLauncher {
                 ui.add_space(12.0);
                 detail_section(ui, "IDENTITY", &analysis.identity);
                 detail_section(ui, "EXECUTABLE", &analysis.executable);
+                detail_section(ui, "DEPENDENCIES", &analysis.dependencies);
                 detail_section(ui, "DISPLAY & GRAPHICS", &analysis.graphics);
                 if !analysis.hardware.is_empty() {
                     detail_section(ui, "HARDWARE", &analysis.hardware);
@@ -4560,6 +4593,9 @@ impl PocketLauncher {
         self.console_fit_pending = true;
         let (frame_tx, frame_rx) = mpsc::channel();
         let (input_tx, input_rx) = mpsc::channel();
+        let (dependency_notice_tx, dependency_notice_rx) = mpsc::channel();
+        self.dependency_notice_rx = Some(dependency_notice_rx);
+        self.dependency_notice = None;
         let (gps_notice_tx, gps_notice_rx) = mpsc::channel();
         self.gps_notice_rx = Some(gps_notice_rx);
         self.gps_notice = None;
@@ -4583,6 +4619,7 @@ impl PocketLauncher {
                 Some(frame_tx),
                 Some(input_rx),
                 Some(gps_notice_tx),
+                Some(dependency_notice_tx),
             );
             let _ = tx.send(UiEvent::RunFinished(outcome));
         });
