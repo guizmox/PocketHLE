@@ -52,18 +52,34 @@ class GameSettingsActivity : AppCompatActivity() {
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
-                preferenceScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
-                    key = "pocketpc_touch_steering"
-                    title = "Touch steering: arrows and left stick"
-                    summary = "For games controlled by touching the screen, such as racing games.\nArrows hold fixed touch zones; left-stick tilt positions the touch progressively, including diagonals.\nRelease to return to the centre. Follows screen rotation."
-                    isPersistent = false
-                    isChecked = current.pocketpcTouchSteering
-                    setOnPreferenceChangeListener { _, value ->
-                        current = current.copy(pocketpcTouchSteering = value as Boolean)
-                        writeGameSettings()
+                val controlsCategory=androidx.preference.PreferenceCategory(requireContext()).apply {title="Controls";key="ppc_controls_category"}
+                preferenceScreen.addPreference(controlsCategory)
+                val editor=androidx.preference.Preference(requireContext()).apply {
+                    key="ppc_stylus_editor";isPersistent=false
+                    setOnPreferenceClickListener {
+                        val config=LauncherConfig.fromJson(JSONObject(NativeBridge.readConfig(rootDir)))
+                        StylusControlsDialog(requireContext(),current,config){grid->
+                            current=current.copy(pocketpcStylusGridJson=grid.json().toString());writeGameSettings()
+                        }.show()
                         true
                     }
+                }
+                fun updateEditor() {
+                    editor.isVisible=current.controlsMode()!="normal"
+                    editor.title=if(current.controlsMode()=="zones") "Test controls…" else "Configure grid…"
+                    editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Choose 4 × 3, 5 × 4 or 6 × 5. Select a zone and press an input. Reserved PocketHLE shortcuts cannot be assigned."
+                }
+                controlsCategory.addPreference(ListPreference(requireContext()).apply {
+                    key="pocketpc_controls";title="Controls";isPersistent=false
+                    entries=arrayOf("Normal","Touch steering","Touch zone mapping")
+                    entryValues=arrayOf("normal","zones","grid");value=current.controlsMode()
+                    summaryProvider=androidx.preference.Preference.SummaryProvider<ListPreference> { current.controlsDescription() }
+                    setOnPreferenceChangeListener {_,v->
+                        current=current.copy(pocketpcControls=v.toString(),pocketpcTouchSteering=v.toString()=="zones")
+                        writeGameSettings();updateEditor();true
+                    }
                 })
+                controlsCategory.addPreference(editor);updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
                     preferenceScreen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                         key = keyName; title = label; isPersistent = false; text = initial

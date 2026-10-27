@@ -4419,3 +4419,35 @@ the ARM Cortex-A15 model, VFP enabled and FPSCR=0. 14,700 operand/predicate case
 passed across f32/f64: ordinary/random values, +/-0, infinities, smallest/largest
 subnormals and quiet/signaling NaNs. Return addresses and preserved registers
 were checked. No Mini Kayak in-game timing or end-to-end FPS claim was made.
+
+
+### PocketPC controls modes and stylus grid (2026-10-27)
+
+Per-game pocketpc_controls selects normal/zones/grid. Absent/null preserves the
+legacy pocketpc_touch_steering bool. The setting is ignored and hidden on Gizmondo.
+Both runners enable kernel touch steering only for zones. Frontends snapshot the
+mode at game launch, so editing options mid-session cannot leave the host grid
+and kernel steering in different modes. Restart the game to apply mode changes.
+
+Grid input is intercepted in the host before guest bindings/rotation: unassigned
+keys/buttons/directions retain their normal path. Serialized bindings identify
+keyboard/controller separately, using stable controller position names. Back/Guide
+and stick-click Android aliases canonicalize to SDL names. Cells store display-
+relative normalized centers; convert once into unrotated guest framebuffer pixels,
+independent of host window, fullscreen and upscale. Grids are 4x3,5x4,6x5; changing
+size clears assignments. Editors follow the game's configured portrait/landscape
+orientation. Bindings are unique per cell/input; rebinding moves an existing input.
+
+There is one stylus, not multitouch: last pressed zone wins, release restores the
+last still-held zone, last release lifts at that zone. Repeated downs do not change
+priority. Focus loss, disconnect, physical touch and rotation release grid strokes.
+Assigned stick directions use 18% press/14% release deadzones, ignoring strength
+beyond that threshold. Unassigned right-stick aim remains available; held grid
+presses take priority over velocity aim. Real screen touch takes priority over both.
+
+Reserved Escape/F10/F11/F12 and View/Menu/Guide/QuickAccess controller inputs,
+plus the configured controller fullscreen input, are refused by capture and runtime
+lookups. Never steal these host gestures or silently route them to guest touch.
+Grid capture and steering preview are local editor operations, never guest input.
+Desktop preview reuses kernel TouchSteering; the Android preview uses the same
+18% deadzone, proportional displacement and per-axis arrow priority.

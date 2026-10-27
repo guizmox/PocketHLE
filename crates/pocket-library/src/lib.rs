@@ -42,6 +42,7 @@ pub mod gizmondo_titles;
 pub mod keybindings;
 pub mod save_data;
 pub mod stylus;
+pub mod stylus_grid;
 pub mod updates;
 
 pub use keybindings::{GuestButton, KeyBinding, KeyBindings};
@@ -566,6 +567,11 @@ pub struct GameSettings {
     /// Display-relative arrows hold fixed touch zones; left-stick tilt controls position.
     #[serde(default)]
     pub pocketpc_touch_steering: bool,
+    /// None migrates the legacy touch-steering checkbox without changing old games.
+    #[serde(default)]
+    pub pocketpc_controls: Option<stylus_grid::ControlsMode>,
+    #[serde(default)]
+    pub pocketpc_stylus_grid: stylus_grid::StylusGrid,
     /// Empty strings inherit the emulated PocketPC device identity. Ignored on Gizmondo.
     #[serde(default)]
     pub pocketpc_owner_name: String,
@@ -656,6 +662,19 @@ impl DpadDeadzone {
 }
 
 impl GameSettings {
+    pub fn controls_mode(&self) -> stylus_grid::ControlsMode {
+        self.pocketpc_controls
+            .unwrap_or(if self.pocketpc_touch_steering {
+                stylus_grid::ControlsMode::Zones
+            } else {
+                stylus_grid::ControlsMode::Normal
+            })
+    }
+    pub fn set_controls_mode(&mut self, mode: stylus_grid::ControlsMode) {
+        self.pocketpc_controls = Some(mode);
+        self.pocketpc_touch_steering = mode == stylus_grid::ControlsMode::Zones;
+    }
+
     pub fn validate_pocketpc_identity(&self) -> Result<(), String> {
         if self.pocketpc_owner_name.contains('\0')
             || self.pocketpc_owner_name.encode_utf16().count() > 255
@@ -682,6 +701,8 @@ impl Default for GameSettings {
     fn default() -> Self {
         Self {
             pocketpc_touch_steering: false,
+            pocketpc_controls: None,
+            pocketpc_stylus_grid: Default::default(),
             pocketpc_owner_name: String::new(),
             pocketpc_device_name: String::new(),
             pocketpc_device_id: String::new(),

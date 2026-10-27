@@ -52,6 +52,10 @@ struct Keyboard {
     symbols: bool,
 }
 impl Navigation {
+    pub fn stop_repeat(&mut self) {
+        self.pending.clear();
+        self.held = None;
+    }
     pub fn press(&mut self, control: &str) {
         self.used = true;
         self.pending.push(control.into());
@@ -782,6 +786,11 @@ fn register(ui: &Ui, response: &Response, close: bool) {
 }
 pub fn button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
     let r = ui.button(text);
+    register(ui, &r, true);
+    r
+}
+pub fn sized_button(ui: &mut Ui, size: egui::Vec2, text: impl Into<WidgetText>) -> Response {
+    let r = ui.add_sized(size, egui::Button::new(text).wrap(true));
     register(ui, &r, true);
     r
 }

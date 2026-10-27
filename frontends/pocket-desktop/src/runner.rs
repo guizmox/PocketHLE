@@ -183,8 +183,9 @@ impl Runner {
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
         emu.set_pocket_pc_input(!is_gizmondo);
         if let Some(process) = emu.process_mut() {
-            process.state.touch_steering.enabled =
-                !is_gizmondo && game.settings.pocketpc_touch_steering;
+            process.state.touch_steering.enabled = !is_gizmondo
+                && (game.settings.controls_mode()
+                    == pocket_library::stylus_grid::ControlsMode::Zones);
         }
         if !is_gizmondo {
             let tx = hook.dependency_notice_tx.clone();

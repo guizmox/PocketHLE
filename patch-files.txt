@@ -1,2 +1,14 @@
-crates/pocket-kernel/src/native_thunks.rs
+crates/pocket-library/src/lib.rs
+crates/pocket-library/src/stylus_grid.rs
 docs/AGENTS.md
+frontends/pocket-android-jni/src/runner.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusControlsDialog.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusGrid.kt
+frontends/pocket-android/app/src/test/java/com/pockethle/app/StylusGridTest.kt
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/controller_ui.rs
+frontends/pocket-desktop/src/runner.rs
+frontends/pocket-desktop/src/stylus_controls_ui.rs

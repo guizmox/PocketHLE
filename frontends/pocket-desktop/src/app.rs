@@ -1,8 +1,12 @@
 //! egui application: library screen, settings, per-game sheet.
 
+#[path = "stylus_controls_ui.rs"]
+mod stylus_controls_ui;
+use pocket_library::stylus_grid::{ControlsMode, GridRouter, HostInput};
 use pocket_library::{analyze_game, game_gizmondo_title_id, GameAnalysis};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
+use stylus_controls_ui::StylusEditor;
 
 use eframe::egui::{self, Color32, Mesh, Pos2, Rect, RichText, ScrollArea, Sense, Vec2};
 use egui_extras::image::load_image_bytes;
@@ -229,6 +233,11 @@ pub struct PocketLauncher {
     stylus_touch: [f32; 4],
     stylus_last: (i16, i16),
     steering_axes: (i16, i16),
+    stylus_editor: Option<StylusEditor>,
+    stylus_grid_router: GridRouter,
+    grid_modifiers: [bool; 4],
+    running_controls_mode: ControlsMode,
+    running_stylus_grid: pocket_library::stylus_grid::StylusGrid,
 }
 
 fn rotation_turns(rotation: RotationPref) -> u8 {
@@ -765,6 +774,11 @@ impl PocketLauncher {
             stylus_touch: [0.0; 4],
             stylus_last: (0, 0),
             steering_axes: (0, 0),
+            stylus_editor: None,
+            stylus_grid_router: Default::default(),
+            grid_modifiers: [false; 4],
+            running_controls_mode: ControlsMode::Normal,
+            running_stylus_grid: Default::default(),
         }
     }
 
@@ -2249,6 +2263,7 @@ impl PocketLauncher {
                 Screen::Library
             };
         } else if cancel_clicked {
+            self.stylus_editor = None;
             self.gamepad_capture = None;
             self.binding_capture = None;
             self.stylus_capture = None;
@@ -2648,16 +2663,25 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 if !is_gizmondo {
-                    ui.label("Touch steering");
-                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_touch_steering,
-                        "Enable touch steering");
+                    ui.label("Controls");
+                    let mut mode=draft.controls_mode();
+                    crate::controller_ui::ComboBox::from_id_source("ppc_controls_mode")
+                        .selected_text(mode.label()).show_ui(ui,|ui|{
+                            for value in ControlsMode::ALL {crate::controller_ui::selectable_value(ui,&mut mode,value,value.label());}
+                        });
+                    draft.set_controls_mode(mode);
                     ui.end_row();
                     ui.label("");
-                    ui.vertical(|ui| {
-                        ui.set_max_width(360.0);
-                        ui.add(egui::Label::new(RichText::new(
-                            "For games controlled by touching the screen, such as racing games.\nArrows hold fixed touch zones; left-stick tilt positions the touch progressively, including diagonals.\nRelease to return to the centre. Follows screen rotation."
-                        ).small().color(Color32::from_gray(165))).wrap(true));
+                    ui.vertical(|ui|{
+                        ui.set_max_width(380.0);
+                        ui.add(egui::Label::new(mode.description()).wrap(true));
+                        ui.label(RichText::new("Follows screen rotation. Applies at the next game launch.").small().color(Color32::GRAY));
+                        if mode != ControlsMode::Normal && crate::controller_ui::button(ui,if mode==ControlsMode::Zones {"Test controls…"}else{"Configure grid…"}).clicked(){
+                            let (w,h)=draft.screen.size();
+                            let portrait=if rotation_turns(draft.rotation)%2==0 {h>w}else{w>h};
+                            self.controller_ui.stop_repeat();
+                            self.stylus_editor=Some(StylusEditor::new(mode==ControlsMode::Zones,portrait));
+                        }
                     });
                     ui.end_row();
                     ui.label("Owner name (PocketPC)");
@@ -2760,6 +2784,8 @@ impl PocketLauncher {
             }
         });
         if save_clicked {
+            self.stylus_editor = None;
+            self.release_all_keys();
             if let Err(e) = self.library.update_settings(&id, draft) {
                 self.status = format!("Could not save game settings: {e}");
             } else {
@@ -2771,6 +2797,7 @@ impl PocketLauncher {
                 Screen::Library
             };
         } else if cancel_clicked {
+            self.stylus_editor = None;
             self.gamepad_capture = None;
             self.binding_capture = None;
             self.stylus_capture = None;
@@ -3555,6 +3582,7 @@ impl PocketLauncher {
                 crate::desktop_pointer::Stroke::Down(x, y) => {
                     // The guest cancels its emulated stroke on physical Down.
                     // Rearm a held stick after even a same-frame touch tap.
+                    self.cancel_grid();
                     self.stylus_last = (0, 0);
                     InputEvent::PointerDown { x, y }
                 }
@@ -3566,6 +3594,7 @@ impl PocketLauncher {
     }
 
     fn persist_rotation(&mut self, rotation: RotationPref) {
+        self.cancel_grid();
         if !self.running_is_gizmondo {
             self.send_input(InputEvent::KeyboardRotation {
                 turns: rotation_turns(rotation),
@@ -3617,11 +3646,12 @@ impl PocketLauncher {
         // Touch temporarily owns the stylus, but does not release held
         // controller axes. SDL may not send another event for an unchanged
         // stick position when the finger lifts.
-        let vector = if active && self.pointer_down_at.is_none() {
-            config.velocity(strengths, rotation_turns(self.game_rotation))
-        } else {
-            (0, 0)
-        };
+        let vector =
+            if active && self.pointer_down_at.is_none() && !self.stylus_grid_router.active() {
+                config.velocity(strengths, rotation_turns(self.game_rotation))
+            } else {
+                (0, 0)
+            };
         self.recording
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3647,6 +3677,8 @@ impl PocketLauncher {
     }
 
     fn release_all_keys(&mut self) {
+        self.cancel_grid();
+        self.grid_modifiers = [false; 4];
         if self.steering_axes != (0, 0) {
             self.send_input(InputEvent::TouchSteeringPosition { x: 0, y: 0 });
             self.steering_axes = (0, 0);
@@ -3689,11 +3721,7 @@ impl PocketLauncher {
     fn touch_steering_enabled(&self) -> bool {
         self.screen == Screen::Run
             && !self.running_is_gizmondo
-            && self
-                .running_game_id
-                .as_ref()
-                .and_then(|id| self.library.games().iter().find(|game| &game.id == id))
-                .is_some_and(|game| game.settings.pocketpc_touch_steering)
+            && self.running_controls_mode == ControlsMode::Zones
     }
 
     fn handle_gamepads(&mut self, ctx: &egui::Context) {
@@ -3704,6 +3732,22 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
+                    if Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if self.capture_grid_axis(ctx, false, horizontal, value) {
+                            continue;
+                        }
+                        if let Some(editor) = self.stylus_editor.as_mut() {
+                            editor.axis(horizontal, value);
+                            continue;
+                        }
+                    }
+                    if Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        self.route_grid_axis(false, horizontal, value);
+                    }
                     if self.touch_steering_enabled()
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
@@ -3725,6 +3769,14 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
+                    if Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if self.capture_grid_axis(ctx, true, horizontal, value) {
+                            continue;
+                        }
+                        self.route_grid_axis(true, horizontal, value);
+                    }
                     if self.screen == Screen::Run
                         && !self.running_is_gizmondo
                         && Some(device) == self.gamepad_selected
@@ -3737,7 +3789,9 @@ impl PocketLauncher {
                         for (name, strength) in [(negative, -value), (positive, value)] {
                             let key = (device, name.to_string());
                             let strength = ((strength - 0.18) / 0.82).clamp(0.0, 1.0);
-                            if strength > 0.0 {
+                            if strength > 0.0
+                                && !self.grid_assigned(&HostInput::Controller(name.into()))
+                            {
                                 self.stylus_gamepad.insert(key, strength);
                             } else {
                                 self.stylus_gamepad.remove(&key);
@@ -3747,6 +3801,12 @@ impl PocketLauncher {
                 }
                 crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
                 crate::gamepad::Event::Devices(devices) => {
+                    if self
+                        .gamepad_selected
+                        .is_some_and(|id| !devices.iter().any(|(d, _)| *d == id))
+                    {
+                        self.cancel_grid();
+                    }
                     if self
                         .gamepad_selected
                         .is_some_and(|id| !devices.iter().any(|(device, _)| *device == id))
@@ -3794,6 +3854,27 @@ impl PocketLauncher {
                         && Some(device) == self.gamepad_selected
                     {
                         continue;
+                    }
+                    if Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if (control.starts_with("LeftStick") || control.starts_with("RightStick"))
+                            && (self
+                                .stylus_editor
+                                .as_ref()
+                                .is_some_and(|e| e.owns_stick_input(&control))
+                                || self.grid_assigned(&HostInput::Controller(control.clone())))
+                        {
+                            continue;
+                        }
+                        if self.stylus_editor_pad(ctx, &control, down) {
+                            continue;
+                        }
+                        if ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                            && self.route_grid(HostInput::Controller(control.clone()), down)
+                        {
+                            continue;
+                        }
                     }
                     let key = (device, control.clone());
                     if !down {
@@ -4243,6 +4324,9 @@ impl PocketLauncher {
     }
 
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
+        if self.stylus_editor_keyboard(ctx) {
+            return;
+        }
         if !ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             return;
         }
@@ -4252,6 +4336,11 @@ impl PocketLauncher {
                 .last_frame_snapshot
                 .as_ref()
                 .is_some_and(|f| f.text_input);
+        if !text_input {
+            for (input, down) in self.grid_modifier_edges(ctx) {
+                self.route_grid(input, down);
+            }
+        }
         let events = ctx.input(|input| input.events.clone());
         for event in events {
             if text_input {
@@ -4345,8 +4434,19 @@ impl PocketLauncher {
             if self.screen != Screen::Run {
                 continue;
             }
+            if !text_input && self.route_grid(HostInput::Keyboard(key.name().into()), pressed) {
+                continue;
+            }
+            let steering_direction = self.touch_steering_enabled()
+                && self
+                    .library
+                    .config()
+                    .keybindings
+                    .vk_for_key(key.name())
+                    .is_some_and(|vk| matches!(vk, 0x25..=0x28));
             if !self.running_is_gizmondo
                 && !text_input
+                && !steering_direction
                 && self.library.config().stylus_stick.enabled
                 && self
                     .library
@@ -4679,6 +4779,12 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
+        self.running_controls_mode = if self.running_is_gizmondo {
+            ControlsMode::Normal
+        } else {
+            game.settings.controls_mode()
+        };
+        self.running_stylus_grid = game.settings.pocketpc_stylus_grid.clone();
         self.console_fit_pending = true;
         let (frame_tx, frame_rx) = mpsc::channel();
         let (input_tx, input_rx) = mpsc::channel();
@@ -5029,6 +5135,13 @@ impl eframe::App for PocketLauncher {
                 }
                 Screen::Settings | Screen::GizmondoOptions | Screen::InputSettings => {
                     self.ui_settings(ui)
+                }
+                Screen::GameSettings if self.stylus_editor.is_some() => {
+                    if let Some((id, mut draft)) = self.game_settings_draft.take() {
+                        ui.heading("PocketPC controls");
+                        self.ui_stylus_editor(ui.ctx(), &mut draft);
+                        self.game_settings_draft = Some((id, draft));
+                    }
                 }
                 Screen::GameSettings => {
                     crate::controller_ui::page_scope(ui, "game_settings_page", |ui| {

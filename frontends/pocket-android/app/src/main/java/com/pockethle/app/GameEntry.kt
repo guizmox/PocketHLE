@@ -68,6 +68,8 @@ data class GameSettings(
     val anisotropicFiltering: Int? = null,
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
+    val pocketpcControls: String? = null,
+    val pocketpcStylusGridJson: String = "{}",
     val pocketpcOwnerName: String = "",
     val pocketpcDeviceName: String = "",
     val pocketpcDeviceId: String = "",
@@ -84,10 +86,19 @@ data class GameSettings(
         put("screen", screen)
         put("rotation", rotation)
         put("pocketpc_touch_steering", pocketpcTouchSteering)
+        put("pocketpc_controls", pocketpcControls ?: JSONObject.NULL)
+        put("pocketpc_stylus_grid", JSONObject(pocketpcStylusGridJson))
         put("pocketpc_owner_name", pocketpcOwnerName)
         put("pocketpc_device_name", pocketpcDeviceName)
         put("pocketpc_device_id", pocketpcDeviceId)
     }
+
+    fun controlsMode() = pocketpcControls ?: if(pocketpcTouchSteering) "zones" else "normal"
+    fun controlsDescription() = when(controlsMode()) {
+        "zones" -> "Arrows / D-pad hold fixed touch zones; left-stick tilt positions the touch progressively, including diagonals. Release returns to the centre. Other buttons work normally.\nExample: steer in Racing Days."
+        "grid" -> "Map keys, controller buttons or stick directions to touch zones. Hold to press; release to lift. Only assigned inputs are replaced; the last held zone takes priority.\nExample: map Tomb Raider's on-screen actions to controller buttons."
+        else -> "Standard keyboard/controller bindings and touch controls. No button is converted into a screen-zone press."
+    } + "\nFollows screen rotation. Applies at the next game launch."
 
     companion object {
         fun default(): GameSettings = GameSettings(
@@ -110,6 +121,8 @@ data class GameSettings(
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
+            pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
+            pocketpcStylusGridJson = obj.optJSONObject("pocketpc_stylus_grid")?.toString() ?: "{}",
             pocketpcOwnerName = obj.optString("pocketpc_owner_name", ""),
             pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),
             pocketpcDeviceId = obj.optString("pocketpc_device_id", ""),
