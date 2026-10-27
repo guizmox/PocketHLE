@@ -1526,6 +1526,8 @@ pub struct KernelState {
     pub zlib_streams: crate::zlib::ZlibStreams,
     /// One-byte CRT pushback, separate from raw Win32 file I/O.
     pub crt_pushback: HashMap<u32, u8>,
+    /// Sticky CRT FILE error indicators; EOF is not an I/O error.
+    pub crt_stream_errors: std::collections::HashSet<u32>,
     pub sdl: crate::sdl::SdlState,
     /// Messages posted with `PostMessageW` (and the `MM_WOM_DONE`
     /// notifications we synthesise for `waveOut`), waiting to be
@@ -4044,6 +4046,7 @@ impl Process {
                 gz_files: Default::default(),
                 zlib_streams: Default::default(),
                 crt_pushback: HashMap::new(),
+                crt_stream_errors: Default::default(),
                 sdl: Default::default(),
                 posted_messages: Default::default(),
                 msg_queues: HashMap::new(),

@@ -529,6 +529,7 @@ pub(crate) mod tests {
             gz_files: Default::default(),
             zlib_streams: Default::default(),
             crt_pushback: Default::default(),
+            crt_stream_errors: Default::default(),
             sdl: Default::default(),
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),

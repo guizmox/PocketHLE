@@ -420,6 +420,18 @@ impl Default for ToolbarState {
 const LIST_VIEW_ROW_HEIGHT: i32 = 14;
 
 impl ChildWindow {
+    /// A drop-down list has no editable text buffer: its window text is the
+    /// selected item's label (WM_GETTEXT / GetWindowText), or empty if unset.
+    pub fn window_text(&self) -> &str {
+        if self.class == ControlClass::ComboBox && self.style & 3 == 3 {
+            self.list_selected
+                .and_then(|index| self.list_items.get(index))
+                .map_or("", |(text, _)| text.as_str())
+        } else {
+            &self.text
+        }
+    }
+
     /// Tab rectangles are shared by painting, TCM_GETITEMRECT and hit testing.
     pub fn tab_rect(&self, index: usize) -> Option<(i32, i32, i32, i32)> {
         self.tab.items.get(index)?;

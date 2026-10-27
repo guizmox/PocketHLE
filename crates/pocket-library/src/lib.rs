@@ -3402,6 +3402,23 @@ fn resource_install_dir_matches(installed: &str, resource: &str) -> bool {
     }
 }
 
+/// Architecture tags describe the CAB target, not whether it contains code.
+/// Resource packs built by CabWiz may declare ARM even when every payload is data.
+fn data_only_cab(header: &pocket_cab::WinCeInstallHeader, files: &[pocket_cab::CabFile]) -> bool {
+    header.structured && !header.files.is_empty()
+        && header.files.iter().all(|entry| {
+            let name=entry.destination.to_ascii_lowercase();
+            !name.ends_with(".exe") && !name.ends_with(".dll")
+        })
+        // .999 is CabWiz's setup callback, not an installed application file.
+        // Preserve it separately for the bounded registry-setup executor.
+        && files.iter().all(|file| {
+            let installer=file.short_name.rsplit('.').next().is_some_and(|id|id=="999")
+                && !header.files.iter().any(|entry|entry.file_id==999);
+            installer || !is_pe_file(&file.extracted_path)
+        })
+}
+
 fn stage_installer_cabinets(
     source: &Path,
     staging: &Path,
@@ -3446,15 +3463,7 @@ fn stage_installer_cabinets(
                 Some(0) | None => "Unspecified CPU".into(),
                 Some(value) => format!("CPU {value}"),
             };
-            let resource_header = header.as_ref().filter(|h| {
-                h.structured
-                    && h.arch == Some(0)
-                    && !h.files.is_empty()
-                    && h.files.iter().all(|f| {
-                        let name = f.destination.to_ascii_lowercase();
-                        !name.ends_with(".exe") && !name.ends_with(".dll")
-                    })
-            });
+            let resource_header = header.as_ref().filter(|h| data_only_cab(h, &files));
             let dir = header.as_ref().and_then(|h| h.install_dir.clone());
             if resource_header.is_some() && dir.is_some() {
                 neutral_resources.push((path, dir.unwrap(), cabinet.name.clone()));
@@ -3525,6 +3534,41 @@ fn import_installer_choice(
         let mut header = header.filter(|h| h.structured).ok_or_else(|| {
             LibraryError::NoPocketPcCab("Add-on has no structured installation metadata".into())
         })?;
+        // Retain the original setup callback without replacing the base CAB's
+        // .999 DLL. Its directory argument must remain this CAB's own path.
+        if let Some(install_dir) = header.install_dir.as_deref() {
+            let setup_files: Vec<_> = files
+                .iter()
+                .filter(|file| {
+                    file.short_name.rsplit('.').next() == Some("999")
+                        && !header.files.iter().any(|entry| entry.file_id == 999)
+                })
+                .collect();
+            if !setup_files.is_empty() {
+                let identity = format!("{:x}", md5::compute(fs::read(&choice.path)?));
+                let packages = game_dir.join(".cab-setups");
+                let setup_root = packages.join(&identity);
+                fs::create_dir_all(&setup_root)?;
+                let order_path = packages.join("order.txt");
+                let mut order = match fs::read_to_string(&order_path) {
+                    Ok(order) => order,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(e) => return Err(e.into()),
+                };
+                if !order.lines().any(|old| old == identity) {
+                    order.push_str(&identity);
+                    order.push('\n');
+                    fs::write(order_path, order)?;
+                }
+                fs::write(setup_root.join("install-dir.txt"), install_dir)?;
+                for (index, file) in setup_files.iter().enumerate() {
+                    fs::copy(
+                        &file.extracted_path,
+                        setup_root.join(format!("setup-{index}.999")),
+                    )?;
+                }
+            }
+        }
         // Record this package's own installation path before rebasing its files.
         let mut registry = header.registry.clone();
         register_cab_install_dir(&mut registry, &header);
@@ -6318,6 +6362,50 @@ mod pocketpc_game_identity_tests {
 #[cfg(test)]
 mod resource_destination_tests {
     use super::resource_install_dir_matches as matches;
+    #[test]
+    fn data_only_cab_uses_payload_not_cpu_annotation() {
+        use pocket_cab::{CabFile, WinCeInstallFile, WinCeInstallHeader};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.001");
+        std::fs::write(&path, b"resource data").unwrap();
+        let files = [CabFile {
+            short_name: "data.001".into(),
+            size: 13,
+            extracted_path: path.clone(),
+        }];
+        let mut header = WinCeInstallHeader {
+            structured: true,
+            arch: Some(2577),
+            files: vec![WinCeInstallFile {
+                file_id: 1,
+                source: ".001".into(),
+                destination: r"\Program Files\Example\Tracks\Extra.dat".into(),
+            }],
+            ..Default::default()
+        };
+        for arch in [0, 2577, 4000, 10003] {
+            header.arch = Some(arch);
+            assert!(super::data_only_cab(&header, &files));
+        }
+        let setup = dir.path().join("setup.999");
+        std::fs::write(&setup, b"MZ setup callback").unwrap();
+        let mut with_setup = files.to_vec();
+        with_setup.push(CabFile {
+            short_name: "setup.999".into(),
+            size: 17,
+            extracted_path: setup,
+        });
+        assert!(super::data_only_cab(&header, &with_setup));
+        // PE bytes disguised as generated numeric filenames must never be a data-only pack.
+        std::fs::write(&path, b"MZ executable payload").unwrap();
+        assert!(!super::data_only_cab(&header, &files));
+        std::fs::write(&path, b"resource data").unwrap();
+        header.files[0].destination = r"\Program Files\Example\Extra.dll".into();
+        assert!(!super::data_only_cab(&header, &files));
+        header.structured = false;
+        assert!(!super::data_only_cab(&header, &files));
+    }
+
     #[test]
     fn install_registration_preserves_explicit_cab_values() {
         let header = pocket_cab::WinCeInstallHeader {

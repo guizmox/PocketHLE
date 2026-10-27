@@ -390,6 +390,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "fgetpos", crt_fgetpos);
     d.register_handler(dll, "fsetpos", crt_fsetpos);
     d.register_handler(dll, "feof", crt_feof);
+    d.register_handler(dll, "ferror", crt_ferror);
     d.register_handler(dll, "fflush", crt_fflush);
     d.register_handler(dll, "_fcloseall", crt_fcloseall);
     // CeGCC's C runtime startup (`crt3.c`) calls `_fpreset` before it
@@ -2925,6 +2926,7 @@ fn close_owned_handle(kernel: &mut KernelState, handle: u32) -> bool {
         return false;
     };
     kernel.crt_pushback.remove(&handle);
+    kernel.crt_stream_errors.remove(&handle);
     match object {
         HandleObject::Thread(index) => {
             if let Some(thread) = index.checked_sub(1).and_then(|i| kernel.threads.get_mut(i)) {
@@ -7332,7 +7334,7 @@ fn emit_stream_text(ctx: &mut CallCtx<'_>, stream: u32, text: &str) -> Result<()
         return Ok(());
     }
     if ctx.kernel.vfs.is_open(stream) {
-        ctx.kernel.vfs.write(stream, &crate::crt_ansi::encode(text));
+        write_stdio_raw(ctx, stream, &crate::crt_ansi::encode(text));
     } else {
         log::debug!("guest fprintf to unknown stream 0x{stream:08x}: {text}");
     }
@@ -7797,7 +7799,7 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
-        match ctx.kernel.vfs.read(handle, &mut chunk) {
+        match read_stdio_raw(ctx, handle, &mut chunk) {
             Some(0) => break,
             Some(n) => raw.extend_from_slice(&chunk[..n]),
             None => {
@@ -9134,13 +9136,37 @@ fn crt_fpreset(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn crt_fflush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
-    Ok(DispatchOutcome::ReturnedR0(
-        if ctx.kernel.vfs.flush(h).is_ok() {
-            0
-        } else {
-            u32::MAX
-        },
-    ))
+    let success = ctx.kernel.vfs.flush(h).is_ok();
+    if !success {
+        ctx.kernel.crt_stream_errors.insert(h);
+    }
+    Ok(DispatchOutcome::ReturnedR0(if success {
+        0
+    } else {
+        u32::MAX
+    }))
+}
+
+/// Sticky FILE error state is independent of EOF and Win32 LastError.
+fn read_stdio_raw(ctx: &mut CallCtx<'_>, stream: u32, bytes: &mut [u8]) -> Option<usize> {
+    let result = ctx.kernel.vfs.read(stream, bytes);
+    if result.is_none() {
+        ctx.kernel.crt_stream_errors.insert(stream);
+    }
+    result
+}
+fn write_stdio_raw(ctx: &mut CallCtx<'_>, stream: u32, bytes: &[u8]) -> Option<usize> {
+    let result = ctx.kernel.vfs.write(stream, bytes);
+    if result.is_none_or(|written| written < bytes.len()) {
+        ctx.kernel.crt_stream_errors.insert(stream);
+    }
+    result
+}
+fn crt_ferror(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let stream = ctx.arg_u32(0)?;
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        ctx.kernel.crt_stream_errors.contains(&stream),
+    )))
 }
 
 /// Read logical CRT bytes while keeping VFS/ReadFile byte-exact. Text-mode
@@ -9159,12 +9185,12 @@ fn read_stdio_bytes(ctx: &mut CallCtx<'_>, h: u32, output: &mut [u8]) -> usize {
         0
     };
     if !ctx.kernel.vfs.is_text_mode(h) {
-        return written + ctx.kernel.vfs.read(h, &mut output[written..]).unwrap_or(0);
+        return written + read_stdio_raw(ctx, h, &mut output[written..]).unwrap_or(0);
     }
     let mut raw = [0u8; 4096];
     while written < output.len() {
         let capacity = raw.len().min(output.len() - written);
-        let count = ctx.kernel.vfs.read(h, &mut raw[..capacity]).unwrap_or(0);
+        let count = read_stdio_raw(ctx, h, &mut raw[..capacity]).unwrap_or(0);
         if count == 0 {
             break;
         }
@@ -9180,7 +9206,7 @@ fn read_stdio_bytes(ctx: &mut CallCtx<'_>, h: u32, output: &mut [u8]) -> usize {
                     }
                 } else {
                     let mut next = [0u8; 1];
-                    if ctx.kernel.vfs.read(h, &mut next).unwrap_or(0) != 0 {
+                    if read_stdio_raw(ctx, h, &mut next).unwrap_or(0) != 0 {
                         if next[0] == b'\n' {
                             byte = b'\n';
                         } else {
@@ -9235,7 +9261,7 @@ fn crt_fwrite(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let bytes = ctx.cpu.read_mem(buf, total)?;
-    let n = ctx.kernel.vfs.write(h, &bytes).unwrap_or(0);
+    let n = write_stdio_raw(ctx, h, &bytes).unwrap_or(0);
     let elements = (n as u32).checked_div(size).unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(elements))
 }
@@ -9340,6 +9366,7 @@ fn crt_feof(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn crt_rewind(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
+    ctx.kernel.crt_stream_errors.remove(&h);
     if ctx.kernel.vfs.seek(h, 0, SeekKind::Begin).is_some() {
         ctx.kernel.crt_pushback.remove(&h);
     }
@@ -9380,8 +9407,12 @@ fn crt_fputc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !ctx.kernel.vfs.is_open(h) {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
-    let _ = ctx.kernel.vfs.write(h, &[c as u8]);
-    Ok(DispatchOutcome::ReturnedR0(c & 0xFF))
+    let result = write_stdio_raw(ctx, h, &[c as u8]);
+    Ok(DispatchOutcome::ReturnedR0(if result == Some(1) {
+        c & 0xFF
+    } else {
+        u32::MAX
+    }))
 }
 
 fn read_stdio_line(ctx: &mut CallCtx<'_>, h: u32, max: usize, text_mode: bool) -> Vec<u8> {
@@ -9394,13 +9425,13 @@ fn read_stdio_line(ctx: &mut CallCtx<'_>, h: u32, max: usize, text_mode: bool) -
     }
     let mut byte = [0u8; 1];
     while out.len() + 1 < max {
-        let read = ctx.kernel.vfs.read(h, &mut byte).unwrap_or(0);
+        let read = read_stdio_raw(ctx, h, &mut byte).unwrap_or(0);
         if read == 0 {
             break;
         }
         if text_mode && byte[0] == b'\r' {
             let mut next = [0u8; 1];
-            let peeked = ctx.kernel.vfs.read(h, &mut next).unwrap_or(0);
+            let peeked = read_stdio_raw(ctx, h, &mut next).unwrap_or(0);
             if peeked == 0 {
                 out.push(b'\r');
                 break;
@@ -9474,7 +9505,7 @@ fn crt_fputs(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
     let s = read_cstr(ctx, s_p, 4096)?;
-    let n = ctx.kernel.vfs.write(h, &s).unwrap_or(0);
+    let n = write_stdio_raw(ctx, h, &s).unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(if n > 0 {
         1
     } else {
@@ -9498,7 +9529,7 @@ fn crt_fputws(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     let text = String::from_utf16_lossy(&read_wstr(ctx, text_ptr, 4096)?);
     let bytes = text.as_bytes();
-    let written = ctx.kernel.vfs.write(stream, bytes).unwrap_or(0);
+    let written = write_stdio_raw(ctx, stream, bytes).unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(if written == bytes.len() {
         0
     } else {
@@ -12009,7 +12040,7 @@ fn control_message(
                 .kernel
                 .controls
                 .get(hwnd)
-                .map(|c| c.text.clone())
+                .map(|c| c.window_text().to_owned())
                 .unwrap_or_default();
             if lparam == 0 || wparam == 0 {
                 return Ok(0);
@@ -12025,7 +12056,7 @@ fn control_message(
             .kernel
             .controls
             .get(hwnd)
-            .map(|c| c.text.encode_utf16().count() as u32)
+            .map(|c| c.window_text().encode_utf16().count() as u32)
             .unwrap_or(0)),
         BM_GETCHECK => Ok(ctx
             .kernel
@@ -18056,7 +18087,7 @@ fn get_window_text_length_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         .kernel
         .controls
         .get(hwnd)
-        .map(|c| c.text.as_str())
+        .map(|c| c.window_text())
         .or_else(|| ctx.kernel.window_titles.get(&hwnd).map(String::as_str))
         .map_or(0, |text| text.encode_utf16().count());
     Ok(DispatchOutcome::ReturnedR0(length as u32))
@@ -18073,7 +18104,7 @@ fn get_window_text_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         .kernel
         .controls
         .get(hwnd)
-        .map(|c| c.text.clone())
+        .map(|c| c.window_text().to_owned())
         .or_else(|| ctx.kernel.window_titles.get(&hwnd).cloned())
         .unwrap_or_default();
     // Reserve one unit for the terminator, as the real API does.
@@ -27183,6 +27214,124 @@ mod tests {
     }
 
     #[test]
+    fn dropdown_window_text_follows_selection_and_preserves_edit_controls() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut k, mut d) = setup();
+        let combo = k.controls.create(
+            0,
+            ControlClass::ComboBox,
+            1,
+            "stale caption".into(),
+            3,
+            0,
+            0,
+            100,
+            200,
+        );
+        k.controls.get_mut(combo).unwrap().list_items =
+            vec![("First".into(), 0), ("Été 🚗".into(), 0)];
+        macro_rules! api {
+            ($name:literal,$args:expr) => {
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", $name, $args)
+            };
+        }
+        assert_eq!(
+            api!("GetWindowTextLengthW", &[combo]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        api!("SendMessageW", &[combo, 0x14e, 1, 0]);
+        let expected: Vec<u16> = "Été 🚗".encode_utf16().collect();
+        assert_eq!(
+            api!("GetWindowTextLengthW", &[combo]),
+            DispatchOutcome::ReturnedR0(expected.len() as u32)
+        );
+        assert_eq!(
+            api!("GetWindowTextW", &[combo, 0x1000, 32]),
+            DispatchOutcome::ReturnedR0(expected.len() as u32)
+        );
+        let mut bytes = wide_to_bytes(&expected);
+        bytes.extend_from_slice(&[0, 0]);
+        assert_eq!(cpu.read_mem(0x1000, bytes.len() as u32).unwrap(), bytes);
+        assert_eq!(
+            api!("SendMessageW", &[combo, 0x0d, 3, 0x1200]),
+            DispatchOutcome::ReturnedR0(2)
+        );
+        assert_eq!(
+            cpu.read_mem(0x1200, 6).unwrap(),
+            wide_to_bytes(&[0x00c9, 0x0074, 0])
+        );
+        assert_eq!(
+            api!("SendMessageW", &[combo, 0x0e, 0, 0]),
+            DispatchOutcome::ReturnedR0(expected.len() as u32)
+        );
+        api!("SendMessageW", &[combo, 0x14e, u32::MAX, 0]);
+        assert_eq!(
+            api!("GetWindowTextLengthW", &[combo]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let edit = k.controls.create(
+            0,
+            ControlClass::Edit,
+            2,
+            "Typed text".into(),
+            0,
+            0,
+            0,
+            100,
+            20,
+        );
+        assert_eq!(
+            api!("GetWindowTextLengthW", &[edit]),
+            DispatchOutcome::ReturnedR0(10)
+        );
+    }
+
+    #[test]
+    fn stdio_ferror_is_sticky_and_distinct_from_eof() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_kernel::vfs::Access;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stream.dat"), b"A").unwrap();
+        let (mut cpu, mut k, mut d) = setup();
+        k.vfs.mount("\\Data\\", dir.path());
+        let reader = k
+            .vfs
+            .open("\\Data\\stream.dat", Access::Read, false)
+            .unwrap();
+        let writer = k
+            .vfs
+            .open("\\Data\\output.dat", Access::Write, true)
+            .unwrap();
+        macro_rules! api {
+            ($name:literal,$args:expr) => {
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", $name, $args)
+            };
+        }
+        assert_eq!(api!("ferror", &[reader]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(api!("fgetc", &[reader]), DispatchOutcome::ReturnedR0(65));
+        assert_eq!(
+            api!("fgetc", &[reader]),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(api!("ferror", &[reader]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            api!("fputc", &[90, reader]),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+        assert_eq!(api!("ferror", &[reader]), DispatchOutcome::ReturnedR0(1));
+        api!("fseek", &[reader, 0, 0]);
+        api!("fgetc", &[reader]);
+        assert_eq!(api!("ferror", &[reader]), DispatchOutcome::ReturnedR0(1));
+        api!("rewind", &[reader]);
+        assert_eq!(api!("ferror", &[reader]), DispatchOutcome::ReturnedR0(0));
+        api!("fgetc", &[writer]);
+        assert_eq!(api!("ferror", &[writer]), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(api!("ferror", &[reader]), DispatchOutcome::ReturnedR0(0));
+        api!("fclose", &[writer]);
+        assert!(!k.crt_stream_errors.contains(&writer));
+    }
+
+    #[test]
     fn stdio_ungetc_preserves_files_and_works_with_reads_scans_and_positioning() {
         use crate::bluetooth::tests::{call, setup};
         use pocket_kernel::vfs::{Access, SeekKind};
@@ -29922,6 +30071,7 @@ mod tests {
             gz_files: Default::default(),
             zlib_streams: Default::default(),
             crt_pushback: Default::default(),
+            crt_stream_errors: Default::default(),
             sdl: Default::default(),
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),

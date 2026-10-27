@@ -76,6 +76,58 @@ impl Emulator {
     /// commit only after successful callbacks; the DLL hash + install directory
     /// marker lives in the same persistent device registry as those changes.
     pub fn complete_cab_registry_setup(&mut self, root: &Path, install_dir: &str) -> Result<usize> {
+        let mut completed = self.complete_cab_registry_setup_dir(root, install_dir)?;
+        // The importer keeps add-on setup callbacks outside the guest mount.
+        // Only its bounded, hash-named package directories are eligible here.
+        let packages = root.parent().map(|parent| parent.join(".cab-setups"));
+        if let Some(packages) =
+            packages.filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
+        {
+            let order_path = packages.join("order.txt");
+            let metadata = std::fs::symlink_metadata(&order_path)?;
+            ensure!(
+                metadata.is_file() && metadata.len() <= 8192,
+                "Invalid add-on setup order metadata"
+            );
+            let order = std::fs::read_to_string(order_path)?;
+            let mut entries = Vec::new();
+            for name in order.lines() {
+                ensure!(
+                    name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "Invalid add-on setup identity"
+                );
+                let path = packages.join(name);
+                ensure!(
+                    std::fs::symlink_metadata(&path)?.is_dir(),
+                    "Invalid add-on setup package directory"
+                );
+                ensure!(!entries.contains(&path), "Duplicate add-on setup package");
+                entries.push(path);
+                ensure!(entries.len() <= 64, "Too many add-on setup packages");
+            }
+            for directory in entries {
+                let path = directory.join("install-dir.txt");
+                let metadata = std::fs::symlink_metadata(&path)?;
+                ensure!(
+                    metadata.is_file() && metadata.len() <= 8192,
+                    "Invalid add-on setup directory metadata"
+                );
+                let install_dir = std::fs::read_to_string(&path)?;
+                ensure!(
+                    install_dir.starts_with('\\')
+                        && !install_dir.contains(['\0', '/'])
+                        && install_dir
+                            .split('\\')
+                            .all(|c| !matches!(c, "." | "..") && !c.contains(':')),
+                    "Invalid add-on WinCE installation directory"
+                );
+                completed += self.complete_cab_registry_setup_dir(&directory, &install_dir)?;
+            }
+        }
+        Ok(completed)
+    }
+
+    fn complete_cab_registry_setup_dir(&mut self, root: &Path, install_dir: &str) -> Result<usize> {
         #[allow(unused_mut)]
         let mut completed = 0;
         for path in setup_files(root)? {
@@ -271,6 +323,28 @@ fn harness(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn addon_setup_metadata_keeps_package_directory_and_rejects_bad_paths() {
+        let root=std::env::temp_dir().join(format!("pockethle-addon-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let extracted=root.join("extracted");std::fs::create_dir_all(&extracted).unwrap();
+        let mut emu=Emulator::with_stub_cpu();
+        assert_eq!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").unwrap(),0);
+        let id="0123456789abcdef0123456789abcdef";
+        let packages=root.join(".cab-setups");let directory=packages.join(id);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(packages.join("order.txt"),format!("{id}\n")).unwrap();
+        std::fs::write(directory.join("install-dir.txt"),r"\Program Files\Example\Tracks").unwrap();
+        assert_eq!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").unwrap(),0);
+        std::fs::write(directory.join("install-dir.txt"),r"\Program Files\Example\..\Other").unwrap();
+        assert!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").is_err());
+        std::fs::write(directory.join("install-dir.txt"),r"\Program Files\Example\Tracks").unwrap();
+        std::fs::write(packages.join("order.txt"),"../escape\n").unwrap();
+        assert!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").is_err());
+        std::fs::write(packages.join("order.txt"),format!("{id}\n{id}\n")).unwrap();
+        assert!(emu.complete_cab_registry_setup(&extracted,r"\Program Files\Example").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn fixture() -> LoadedImage {
         LoadedImage {
             source_path: "synthetic-setup".into(),

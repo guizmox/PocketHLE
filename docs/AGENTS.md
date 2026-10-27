@@ -4451,3 +4451,34 @@ lookups. Never steal these host gestures or silently route them to guest touch.
 Grid capture and steering preview are local editor operations, never guest input.
 Desktop preview reuses kernel TouchSteering; the Android preview uses the same
 18% deadzone, proportional displacement and per-axis arrow priority.
+
+
+### Drop-down selection text, architecture-tagged add-ons and ferror (2026-10-27)
+
+CBS_DROPDOWNLIST has no edit buffer: ChildWindow::window_text returns the selected
+list item's string, or empty with no valid selection. GetWindowTextW/LengthW and
+native WM_GETTEXT/WM_GETTEXTLENGTH use the same accessor. EDIT and other window
+text semantics are unchanged. Racing Days calls GetWindowTextW after choosing a
+skin/car: returning its empty creation caption made it open a nonexistent asset;
+its 3D renderer and RLE8 textures are not the cause. No game-name condition.
+
+A CAB's CPU tag does not establish that its installed payload contains code.
+Classify structured data-only packages by their declared destinations and actual
+runtime payloads. CabWiz .999 is an installer callback, not an installed game
+binary, unless explicitly declared as a runtime file. Preserve add-on callbacks
+under the game's private .cab-setups/<cab-hash>/ directory, outside extracted,
+with their original install-dir.txt and a persisted order.txt. Do not replace the
+base setup DLL or pass its install directory to an add-on for a child directory.
+The common complete_cab_registry_setup service consumes these records in order
+using the existing ARM registry/time-only capability gate and atomic per-DLL
+markers. GUI/file/service installers remain unsupported and are not run partially.
+India's CAB declares ARM and contains ADDSETUP.999, but all installed files are
+track data. That setup callback only checks the installed application and requires
+UI APIs outside the supported profile. Its data files can be mounted normally.
+Original payload bytes, filenames, saves and settings must be preserved.
+
+ferror reads process-local sticky FILE error indicators, independent of EOF and
+Win32 LastError. CRT byte/line/scanner reads, writes and flush failures set them;
+rewind and close clear them. Successful operations and fseek do not clear errors.
+fputc reports EOF on failed output. These changes do not alter raw ReadFile or
+WriteFile semantics. KernelState constructors must initialize crt_stream_errors.
