@@ -78,16 +78,6 @@ fn init_logging(library_root: &std::path::Path) -> Option<std::path::PathBuf> {
     result
 }
 
-// Driver hints must be exported from the executable before any GL context exists.
-#[cfg(windows)]
-#[no_mangle]
-#[used]
-pub static NvOptimusEnablement: u32 = 1;
-#[cfg(windows)]
-#[no_mangle]
-#[used]
-pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
-
 fn main() -> Result<()> {
     let title = if cfg!(feature = "steam-deck") {
         "PocketHLE — Steam Deck"

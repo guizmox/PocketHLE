@@ -2144,7 +2144,7 @@ impl PocketLauncher {
                         if crate::controller_ui::button(ui, "Choose GPU in Windows…").clicked() {
                             crate::host_gpu::open_settings();
                         }
-                        ui.small("Select this PocketHLE executable in Windows Graphics settings, choose a GPU, then restart PocketHLE. The driver receives a high-performance GPU request by default.");
+                        ui.small("Select this PocketHLE executable in Windows Graphics settings, choose a GPU, then restart PocketHLE. By default, PocketHLE lets the system choose the GPU.");
                     });
                     ui.end_row();
                 }

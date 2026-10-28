@@ -1,3 +1,3 @@
-crates/pocket-kernel/src/vfs.rs
-crates/pocket-core/src/pocketpc_storage.rs
-docs/AGENTS.md
+frontends/pocket-desktop/build.rs
+frontends/pocket-desktop/src/desktop_main.rs
+frontends/pocket-desktop/src/app.rs
