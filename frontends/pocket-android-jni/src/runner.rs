@@ -433,6 +433,14 @@ fn run_process(
         summary_lines.push("Insufficient device RAM to load process".to_string());
         return (summary_lines.join("\n"), 0xc0000135);
     }
+    if !is_gizmondo {
+        if let Err(error) = emu.configure_pocketpc_storage(library_root) {
+            if let Some(startup) = startup.as_mut() {
+                startup.error = 29;
+            }
+            return (format!("Cannot initialize PocketPC storage: {error:#}"), 29);
+        }
+    }
     let registry_path = library_root.join(if is_gizmondo {
         "registry-gizmondo.json"
     } else {

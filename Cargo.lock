@@ -2909,6 +2909,7 @@ dependencies = [
  "pocket-pe",
  "pocket-winceapi",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 

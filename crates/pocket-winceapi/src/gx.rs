@@ -39,7 +39,6 @@ pub fn register(d: &mut WinCeDispatcher) {
     // dispatch lookup.
     d.register_handler(dll, "?GXOpenDisplay@@YAHPAUHWND__@@K@Z", gx_open_display);
     d.register_handler(dll, "?GXCloseDisplay@@YAHXZ", gx_close_display);
-    d.register_constant(dll, "?GXCloseDisplay@@YAHXZ", 1, gx_close_display);
     d.register_handler(dll, "?GXBeginDraw@@YAPAXXZ", gx_begin_draw);
     d.register_handler(dll, "?GXEndDraw@@YAHXZ", gx_end_draw);
     d.register_handler(dll, "?GXSuspend@@YAHXZ", gx_suspend);
@@ -127,6 +126,7 @@ fn ensure_fb_mapped(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
 }
 
 fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    ctx.kernel.gx_explicit_present = false;
     ensure_fb_mapped(ctx)?;
     if ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN {
         ctx.kernel.controls.direct_surface_hwnd = ctx.arg_u32(0)?;
@@ -164,6 +164,7 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 
 fn gx_close_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.gx_draw_active = false;
+    ctx.kernel.gx_explicit_present = false;
     ctx.kernel.controls.direct_surface_hwnd = 0;
     ctx.kernel.gdi.shell_menus.gx_fullscreen = false;
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -217,6 +218,9 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(outcome);
     }
     readback_framebuffer(ctx)?;
+    // Explicit presentation takes precedence over the retained-pointer bulk-copy
+    // fallback. A whole-screen background copy need not be the finished frame.
+    ctx.kernel.gx_explicit_present = true;
     ctx.kernel.gx_draw_active = false;
     ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -475,6 +479,7 @@ pub(crate) mod tests {
             dib_decode_scratch: Vec::new(),
             gx_last_pushed_counter: 0,
             gx_draw_active: false,
+            gx_explicit_present: false,
             gx_guest_signature: None,
             gles_strings: std::collections::HashMap::new(),
             synthetic_message_count: 0,
@@ -648,6 +653,8 @@ pub(crate) mod tests {
         };
         gx_open_display(&mut ctx).unwrap();
         gx_begin_draw(&mut ctx).unwrap();
+        // A title may switch from explicit menu frames to a retained pointer.
+        ctx.kernel.gx_explicit_present = true;
         ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
         let before = ctx.kernel.framebuffer.pixels.clone();
         ctx.kernel.current_thread = 1;

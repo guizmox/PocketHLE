@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 
 use pocket_cpu::{stub::StubCpu, Cpu};
 use pocket_kernel::{run_main_loop, run_main_loop_with_hook, FrameHook, Process};
-use pocket_winceapi::{resolve_ordinal, WinCeDispatcher};
+use pocket_winceapi::{resolve_ordinal_for_arch, WinCeDispatcher};
 
 pub use pocket_cab as cab;
 pub use pocket_cpu as cpu;
@@ -138,10 +138,11 @@ impl Emulator {
         image.source_path = path.display().to_string();
         colors_wallet::apply(&raw, &mut image).context("Colors wallet compatibility")?;
         pocket_winceapi::reset_media_backends();
+        let arch = self.cpu.arch();
         let process = Process::map_into(
             image,
             self.cpu.as_mut(),
-            &|dll, ord| resolve_ordinal(dll, ord),
+            &|dll, ord| resolve_ordinal_for_arch(dll, ord, arch),
             &self.dispatcher,
         )
         .context("mapping image into CPU")?;
@@ -290,6 +291,23 @@ impl Emulator {
         self.cpu
             .add_register_trace(va, label)
             .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Provide the ordinary writable PocketPC system namespace between launches.
+    /// Existing per-game and card mounts remain more specific than this root.
+    pub fn configure_pocketpc_storage(&mut self, library_root: &Path) -> Result<()> {
+        let process = self
+            .process
+            .as_mut()
+            .context("PocketPC storage requires a loaded process")?;
+        // Never replace the quota-managed RAM namespace of another profile with
+        // an uncharged host mount. Current PocketPC launchers use the host model.
+        anyhow::ensure!(
+            process.state.memory_division.is_none(),
+            "PocketPC host storage cannot replace a RAM-backed device profile"
+        );
+        pocketpc_storage::mount(&mut process.state.vfs, library_root)
+            .context("initializing PocketPC object store")
     }
 
     /// Mount a host directory at a guest WinCE path. Useful for
@@ -584,3 +602,4 @@ pub fn suspend_host_session() -> pocket_winceapi::SuspendedSession {
 }
 
 pub mod dependencies;
+mod pocketpc_storage;

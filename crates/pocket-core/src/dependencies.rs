@@ -26,6 +26,14 @@ pub fn information(executable: &Path, library_root: &Path) -> Vec<(String, Strin
             )]
         }
     };
+    let arch = if matches!(
+        image.machine,
+        pocket_pe::machine::MIPS_R3000 | pocket_pe::machine::MIPS_R4000
+    ) {
+        pocket_cpu::Arch::Mips
+    } else {
+        pocket_cpu::Arch::Arm
+    };
     let registry = pocket_winceapi::WinCeDispatcher::capability_registry();
     let shared = library_root.join("runtimes").join("pocketpc");
     let mut imports = BTreeMap::<String, Vec<_>>::new();
@@ -42,7 +50,7 @@ pub fn information(executable: &Path, library_root: &Path) -> Vec<(String, Strin
     for (dll, bindings) in imports {
         let missing: Vec<_> = bindings
             .iter()
-            .filter(|binding| !registry.supports_import(&dll, binding))
+            .filter(|binding| !registry.supports_import_for_arch(&dll, binding, arch))
             .collect();
         let local = executable.parent().and_then(|dir| find_file(dir, &dll));
         let native = local.or_else(|| find_file(&shared, &dll));

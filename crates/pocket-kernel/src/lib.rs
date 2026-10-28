@@ -1203,6 +1203,8 @@ pub struct KernelState {
     /// GXBeginDraw owns guest pixels until GXEndDraw publishes the frame.
     /// Raw framebuffer polling must not expose an unfinished GAPI draw.
     pub gx_draw_active: bool,
+    /// This display session has declared explicit GXEndDraw frame boundaries.
+    pub gx_explicit_present: bool,
     /// Signature of sampled guest framebuffer rows from the last sync.
     pub gx_guest_signature: Option<u64>,
     /// Guest addresses of the strings `glGetString` / `eglQueryString`
@@ -3948,6 +3950,7 @@ impl Process {
                 dib_decode_scratch: Vec::new(),
                 gx_last_pushed_counter: 0,
                 gx_draw_active: false,
+                gx_explicit_present: false,
                 gx_guest_signature: None,
                 gles_strings: HashMap::new(),
                 synthetic_message_count: 0,

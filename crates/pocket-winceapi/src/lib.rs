@@ -74,6 +74,10 @@ pub fn resolve_ordinal(dll: &str, ordinal: u16) -> Option<String> {
     ordinals::lookup(dll, ordinal)
 }
 
+pub fn resolve_ordinal_for_arch(dll: &str, ordinal: u16, arch: pocket_cpu::Arch) -> Option<String> {
+    ordinals::lookup_for_arch(dll, ordinal, arch)
+}
+
 /// A third-party library we deliberately do not emulate.
 ///
 /// Games bundle their own middleware — audio mixers, movie players,
@@ -313,13 +317,22 @@ impl WinCeDispatcher {
     /// Query the same registered handlers and ordinal resolution as dispatch.
     /// Blanket ignored-library fallbacks are deliberately not implementations.
     pub fn supports_import(&self, dll: &str, binding: &ImportBinding) -> bool {
+        self.supports_import_for_arch(dll, binding, pocket_cpu::Arch::Arm)
+    }
+
+    pub fn supports_import_for_arch(
+        &self,
+        dll: &str,
+        binding: &ImportBinding,
+        arch: pocket_cpu::Arch,
+    ) -> bool {
         let thunk = Thunk {
             thunk_va: 0,
             iat_va: 0,
             dll: dll.to_owned(),
             binding: binding.clone(),
             friendly_name: match binding {
-                ImportBinding::Ordinal(o) => resolve_ordinal(dll, *o),
+                ImportBinding::Ordinal(o) => resolve_ordinal_for_arch(dll, *o, arch),
                 _ => None,
             },
         };
@@ -503,6 +516,30 @@ impl Dispatcher for WinCeDispatcher {
         if let Some(outcome) = coredll::wake_due_worker(&mut CallCtx { cpu, thunk, kernel })? {
             return Ok(outcome);
         }
+        let adjusted;
+        let thunk = if cpu.arch() == pocket_cpu::Arch::Mips
+            && thunk.dll.eq_ignore_ascii_case("coredll.dll")
+        {
+            let ordinal = match &thunk.binding {
+                ImportBinding::Ordinal(o) if thunk.friendly_name.is_none() => Some(*o),
+                ImportBinding::Ordinal(_) => None,
+                ImportBinding::Name(n) => n
+                    .strip_prefix("ord:")
+                    .or_else(|| n.strip_prefix('#'))
+                    .and_then(|s| s.parse().ok()),
+            };
+            if let Some(ordinal) = ordinal.filter(|o| (2000..=2053).contains(o)) {
+                adjusted = Thunk {
+                    friendly_name: resolve_ordinal_for_arch(&thunk.dll, ordinal, cpu.arch()),
+                    ..thunk.clone()
+                };
+                &adjusted
+            } else {
+                thunk
+            }
+        } else {
+            thunk
+        };
         let handler_opt = if coredll::native_import_preferred(kernel, thunk) {
             Some(coredll::native_import as Handler)
         } else {
@@ -710,6 +747,25 @@ mod tests {
             .dispatch(&mut cpu, &fake_thunk("future.dll", "FixedAPI"), &mut kernel)
             .unwrap();
         assert_eq!(records.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mips_numeric_names_and_capability_queries_use_the_same_registered_handlers() {
+        let d = WinCeDispatcher::capability_registry();
+        for ordinal in [
+            2010, 2025, 2026, 2028, 2032, 2034, 2036, 2038, 2042, 2048, 2053,
+        ] {
+            assert!(d.supports_import_for_arch(
+                "coredll.dll",
+                &ImportBinding::Ordinal(ordinal),
+                pocket_cpu::Arch::Mips
+            ));
+        }
+        assert!(d.supports_import_for_arch(
+            "coredll.dll",
+            &ImportBinding::Ordinal(2028),
+            pocket_cpu::Arch::Arm
+        ));
     }
 
     #[test]

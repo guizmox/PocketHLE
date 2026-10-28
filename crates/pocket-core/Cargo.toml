@@ -38,3 +38,6 @@ required-features = ["unicorn"]
 [[example]]
 name = "navigator_input_probe"
 required-features = ["unicorn"]
+
+[dev-dependencies]
+tempfile = "3"

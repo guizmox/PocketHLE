@@ -1,6 +1,7 @@
-crates/pocket-library/src/installer.rs
-crates/pocket-library/src/installer/installshield.rs
-crates/pocket-library/src/installer/cabwiz.rs
-crates/pocket-library/src/lib.rs
-crates/pocket-cab/src/lib.rs
+Cargo.lock
+crates/pocket-core/Cargo.toml
+crates/pocket-core/src/lib.rs
+crates/pocket-core/src/pocketpc_storage.rs
+frontends/pocket-desktop/src/runner.rs
+frontends/pocket-android-jni/src/runner.rs
 docs/AGENTS.md

@@ -212,6 +212,34 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "__dtoi64", soft_dtoi64);
     d.register_handler(dll, "__dtou64", soft_dtou64);
 
+    // MIPS soft-float spellings from the Microsoft CE import libraries.
+    d.register_handler(dll, "__fpadd", soft_adds);
+    d.register_handler(dll, "__dpadd", soft_addd);
+    d.register_handler(dll, "__fpsub", soft_subs);
+    d.register_handler(dll, "__dpsub", soft_subd);
+    d.register_handler(dll, "__fpmul", soft_muls);
+    d.register_handler(dll, "__dpmul", soft_muld);
+    d.register_handler(dll, "__fpdiv", soft_divs);
+    d.register_handler(dll, "__dpdiv", soft_divd);
+    d.register_handler(dll, "__fptoli", soft_stoi);
+    d.register_handler(dll, "__fptoul", soft_stou);
+    d.register_handler(dll, "__litofp", soft_itos);
+    d.register_handler(dll, "__ultofp", soft_utos);
+    d.register_handler(dll, "__dptoli", soft_dtoi);
+    d.register_handler(dll, "__dptoul", soft_dtou);
+    d.register_handler(dll, "__litodp", soft_itod);
+    d.register_handler(dll, "__ultodp", soft_utod);
+    d.register_handler(dll, "__fptodp", soft_stod);
+    d.register_handler(dll, "__dptofp", soft_dtos);
+    d.register_handler(dll, "__ll_to_f", soft_i64tos);
+    d.register_handler(dll, "__ll_to_d", soft_i64tod);
+    d.register_handler(dll, "__ull_to_f", soft_u64tos);
+    d.register_handler(dll, "__ull_to_d", soft_u64tod);
+    d.register_handler(dll, "__f_to_ll", soft_stoi64);
+    d.register_handler(dll, "__d_to_ll", soft_dtoi64);
+    d.register_handler(dll, "__f_to_ull", soft_stou64);
+    d.register_handler(dll, "__d_to_ull", soft_dtou64);
+
     // ---- Memory / string CRT ----
     d.register_handler(dll, "memset", memset);
     d.register_handler(dll, "memcpy", memcpy);
@@ -5089,7 +5117,7 @@ fn map_resource_module_inner(
                 let friendly_name = match &import.binding {
                     pocket_pe::ImportBinding::Name(name) => Some(name.clone()),
                     pocket_pe::ImportBinding::Ordinal(ordinal) => {
-                        crate::resolve_ordinal(&import.dll, *ordinal)
+                        crate::resolve_ordinal_for_arch(&import.dll, *ordinal, ctx.cpu.arch())
                     }
                 };
                 let thunk = pocket_kernel::Thunk {
@@ -5768,7 +5796,11 @@ fn memcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn complete_gapi_transfer(ctx: &CallCtx<'_>, dst: u32, len: usize) -> bool {
-    ctx.kernel.fb_mapped
+    // GapiDraw/Strip4You copies its background before drawing menu controls.
+    // Once GXEndDraw is used, respect that explicit publication boundary.
+    // GXMark's retained-pointer path never announces one and keeps its fallback.
+    !ctx.kernel.gx_explicit_present
+        && ctx.kernel.fb_mapped
         && dst == SYNTHETIC_FRAMEBUFFER_BASE
         && len == ctx.kernel.framebuffer.pixels.len()
         && (ctx.kernel.guest_fb_pitch == 0
@@ -30105,6 +30137,7 @@ mod tests {
             dib_decode_scratch: Vec::new(),
             gx_last_pushed_counter: 0,
             gx_draw_active: false,
+            gx_explicit_present: false,
             gx_guest_signature: None,
             gles_strings: std::collections::HashMap::new(),
             synthetic_message_count: 0,
@@ -34936,6 +34969,68 @@ mod tests {
             local_free(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(new_p)
         );
+    }
+
+    #[test]
+    fn explicit_gapi_background_copy_waits_for_end_draw_and_close_resets_mode() {
+        use pocket_kernel::Dispatcher;
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        kernel.framebuffer.resize(2, 2);
+        let base = SYNTHETIC_FRAMEBUFFER_BASE;
+        cpu.map_region(base, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(0x10000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        kernel.fb_mapped = true;
+        let mut dispatcher = crate::WinCeDispatcher::new();
+        let gx = |name: &str| pocket_kernel::Thunk {
+            thunk_va: 0x70000000,
+            iat_va: 0,
+            dll: "gx.dll".into(),
+            binding: pocket_pe::ImportBinding::Name(name.into()),
+            friendly_name: None,
+        };
+        let end = gx("?GXEndDraw@@YAHXZ");
+        assert_eq!(
+            dispatcher.dispatch(&mut cpu, &end, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(kernel.gx_explicit_present);
+        dispatcher
+            .dispatch(&mut cpu, &gx("?GXBeginDraw@@YAPAXXZ"), &mut kernel)
+            .unwrap();
+        let before = kernel.framebuffer.frame_counter;
+        cpu.write_mem(0x10000, &[0x11; 8]).unwrap();
+        cpu.write_reg(ArmReg::R0, base).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x10000).unwrap();
+        cpu.write_reg(ArmReg::R2, 8).unwrap();
+        let t = dummy_thunk();
+        assert_eq!(
+            memcpy(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(base)
+        );
+        assert_eq!(kernel.framebuffer.frame_counter, before);
+        assert_eq!(cpu.read_mem(base, 8).unwrap(), vec![0x11; 8]);
+        cpu.write_mem(base + 6, &[0x22; 2]).unwrap(); // menu overlay after the background
+        while dispatcher.dispatch(&mut cpu, &end, &mut kernel).unwrap()
+            != DispatchOutcome::ReturnedR0(1)
+        {}
+        assert_eq!(
+            kernel.framebuffer.pixels,
+            [vec![0x11; 6], vec![0x22; 2]].concat()
+        );
+        assert_eq!(kernel.framebuffer.frame_counter, before + 1);
+        dispatcher
+            .dispatch(&mut cpu, &gx("?GXCloseDisplay@@YAHXZ"), &mut kernel)
+            .unwrap();
+        assert!(!kernel.gx_explicit_present);
+        assert!(!kernel.gx_draw_active);
     }
 
     #[test]

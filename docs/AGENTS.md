@@ -4697,3 +4697,61 @@ The supplied Strip4You installer produces three cabinets. Targeted validation
 checks architecture selection, actual ARM PE bytes, data/module presence,
 registry values, non-installation of desktop tools and staging isolation.
 No gameplay, Windows build, APK build or physical-device test is claimed.
+
+
+## MIPS compiler runtime ordinal profile and GAPI explicit frames (2026-10-28)
+
+COREDLL ordinals 2000..2053 are architecture dependent. Microsoft Pocket PC
+2000 CE3 MIPS and Standard CE4.2 Mipsii coredll.lib have identical mappings,
+but differ from ARM (2028=__fpdiv vs __lts, 2034=__dptoli vs __i64tos,
+2036=__litodp vs __gts). The generated MIPS-only overlay is clean-room
+integer/name data from those short-import objects; do not ship SDK libraries.
+The shared resolver remains ARM by default; core loading, runtime module imports,
+dynamic ordinal dispatch and static dependency information select the active
+CPU profile. MIPS arithmetic/conversion spellings reuse the existing numerical
+handlers. Unimplemented integer-runtime helpers retain missing-handler behavior,
+not incorrect ARM aliases. ARM/Gizmondo resolution remains unchanged.
+
+PhoenixStudio's original MIPS sine-table initialization was executed in
+isolation with only imported arithmetic/sin substituted. ARM resolution gave
+64 identical erroneous entries 1216348096. MIPS resolution produced the expected
+64 integer sine samples exactly (0,25,50,75,...). This is not a physical audio
+playback test or a claim that every synth feature is validated.
+
+GapiDraw's Strip4You Flip calls GXEndDraw then GXBeginDraw. Its flat full-surface
+BltFast branch calls COREDLL memcpy(width*height*2); copying the menu background
+is not a completed frame. Remember use of explicit GXEndDraw per display session
+and suppress bulk-copy publication/pacing inside that explicit draw. EndDraw
+still performs the completed-frame wait/readback; close/new open reset this mode.
+GXCloseDisplay is no longer a native constant because it mutates display state.
+The retained-pointer full-copy fallback (GXMark, no EndDraw) and voluntary-yield
+readback (including titles switching from menus to retained draws) remain intact.
+Before the session's first EndDraw, the existing retained fallback is unchanged.
+No game-title branch, buffer rewriting, FPS workaround or recording-only fix.
+
+
+## Persistent PocketPC system filesystem (2026-10-28)
+
+Current desktop and Android PocketPC runners select memory_division=None;
+only Gizmondo selects the quota-managed SDK RAM store by default. PhoenixStudio
+reads the owner from HKCU/ControlPanel/Owner, but writes its validated serial
+and padding via CreateFileW/WriteFile to \Windows\hpsdata.dll. No RegSetValue
+import is used. That path had no mount or Windows directory, so CREATE_ALWAYS
+failed (not merely a registry flush problem). Never inject serial/owner data.
+
+Emulator::configure_pocketpc_storage mounts library_root/object-store-pocketpc
+as the writable device root and its Windows child as a same-prefix Windows
+copy-on-write overlay. It creates only standard CE directories. More-specific
+install, game-save, My Documents and card mounts keep their existing priority
+and read-only policy. Ordinary host-backed VFS write/flush/close provide
+persistence; no shutdown-only RAM snapshot, background thread or bespoke file
+redirect is involved. Existing files are never seeded/replaced. Standard child
+directories may not escape the store through symlinks. A real quota-managed RAM
+profile is explicitly refused by this host-store setup, not silently bypassed.
+
+Desktop (PC/Linux/Deck) and Android configure this only for PocketPC, after
+memory-profile selection and before guest execution. Gizmondo is unchanged.
+The core API is available to diagnostic callers; CLI does not auto-configure it.
+Three core tests cover close/reopen in a fresh VFS, exact saved bytes, game save
+precedence, Windows COW, read-only cards and escaping directory symlinks. No
+full Phoenix registration UI, Windows build or APK validation is claimed.

@@ -89,6 +89,25 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
         .and_then(|m| m.get(&ordinal).cloned())
 }
 
+/// MIPS uses a different compiler runtime export block than ARM.
+pub fn lookup_for_arch(dll: &str, ordinal: u16, arch: pocket_cpu::Arch) -> Option<String> {
+    if arch == pocket_cpu::Arch::Mips && dll.eq_ignore_ascii_case("coredll.dll") {
+        static MIPS: Lazy<HashMap<u16, String>> = Lazy::new(|| {
+            let file: OrdinalFile =
+                serde_json::from_str(include_str!("../data/coredll-mips-ordinals.json"))
+                    .expect("valid bundled MIPS ordinal table");
+            file.map
+                .into_iter()
+                .map(|(key, value)| (key.parse().expect("valid ordinal"), value))
+                .collect()
+        });
+        if let Some(name) = MIPS.get(&ordinal) {
+            return Some(name.clone());
+        }
+    }
+    lookup(dll, ordinal)
+}
+
 /// Number of ordinal entries for `dll` — used by tests.
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
@@ -133,5 +152,33 @@ mod tests {
         );
         assert_eq!(entry_count("libgles_cm.dll"), 140);
         assert_eq!(entry_count("libgles_cl.dll"), 102);
+    }
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    use super::*;
+    #[test]
+    fn mips_compiler_exports_do_not_use_the_arm_numeric_block() {
+        for (ordinal, mips, arm) in [
+            (2028, "__fpdiv", "__lts"),
+            (2034, "__dptoli", "__i64tos"),
+            (2036, "__litodp", "__gts"),
+            (2038, "__fptodp", "__ges"),
+            (2053, "__ned", "__addd"),
+        ] {
+            assert_eq!(
+                lookup_for_arch("COREDLL.DLL", ordinal, pocket_cpu::Arch::Mips).as_deref(),
+                Some(mips)
+            );
+            assert_eq!(
+                lookup_for_arch("coredll.dll", ordinal, pocket_cpu::Arch::Arm).as_deref(),
+                Some(arm)
+            );
+        }
+        assert_eq!(
+            lookup_for_arch("coredll.dll", 632, pocket_cpu::Arch::Mips),
+            lookup("coredll.dll", 632)
+        );
     }
 }

@@ -218,6 +218,20 @@ impl Runner {
                 0xc0000017,
             );
         }
+        if !is_gizmondo {
+            if let Err(error) = emu.configure_pocketpc_storage(library_root) {
+                if let Some(startup) = startup.as_mut() {
+                    startup.error = 29;
+                }
+                return (
+                    RunOutcome {
+                        summary: format!("Cannot initialize PocketPC storage: {error:#}"),
+                        framebuffer: None,
+                    },
+                    29,
+                );
+            }
+        }
         let registry_path = library_root.join(if is_gizmondo {
             "registry-gizmondo.json"
         } else {
