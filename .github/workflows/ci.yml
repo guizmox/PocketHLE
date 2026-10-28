@@ -161,6 +161,8 @@ jobs:
           mkdir -p dist/PocketHLE-linux
           cp target/cargo/release/pockethle dist/PocketHLE-linux/
           cp target/cargo/release/pockethle-gui dist/PocketHLE-linux/
+          cp tools/install-desktop-entry.sh dist/PocketHLE-linux/
+          cp frontends/pocket-desktop/assets/pockethle-256.png dist/PocketHLE-linux/pockethle.png
           cp README.md dist/PocketHLE-linux/
           cp -f README.ru.md dist/PocketHLE-linux/ 2>/dev/null || true
           tar -C dist -czf PocketHLE-linux-x86_64.tar.gz PocketHLE-linux

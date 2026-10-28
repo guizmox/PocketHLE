@@ -57,4 +57,7 @@ xbrz-rs = "=0.1.0"
 sdl2 = { version = "=0.38.0", features = ["bundled", "static-link"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = ["implement", "ApplicationModel_DataTransfer", "Foundation", "Foundation_Collections", "Storage", "Win32_Foundation", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.54", features = ["implement", "ApplicationModel_DataTransfer", "Foundation", "Foundation_Collections", "Storage", "Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[build-dependencies]
+winres = "0.1.12"

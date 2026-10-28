@@ -186,7 +186,9 @@ impl Vfs {
         } else {
             first
         };
-        let host = self.host_path_for_mount(mount, &normal).ok_or(5u32)?;
+        // Case folding is a lookup key, never the spelling of a newly created file.
+        let spelling = self.spelled_guest_path(path);
+        let host = self.host_path_for_mount(mount, &spelling).ok_or(5u32)?;
         let root = mount.host_dir.canonicalize().map_err(|e| io_error(&e))?;
         let ancestor = host
             .ancestors()
@@ -1091,6 +1093,58 @@ impl Vfs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_files_keep_requested_case_and_old_overlays_recover_without_losing_bytes() {
+        let lower = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join("Vehicle.DAT"), b"original").unwrap();
+        std::fs::write(saves.path().join("vehicle.dat"), b"registered").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", lower.path());
+        v.mount_save_dir("\\Game\\", saves.path());
+        assert_eq!(
+            std::fs::read(saves.path().join("Vehicle.DAT")).unwrap(),
+            b"registered"
+        );
+        assert_eq!(v.list_dir("\\GAME").unwrap()[0].0, "Vehicle.DAT");
+        let h = v
+            .open_file("\\GAME\\NewFile.DAT", 2, 3, 2, false, 0)
+            .unwrap()
+            .handle;
+        v.close(h);
+        assert!(saves.path().join("NewFile.DAT").exists());
+        assert_eq!(
+            std::fs::read(lower.path().join("Vehicle.DAT")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn overlay_case_recovery_preserves_ambiguous_files_and_does_not_follow_links() {
+        let lower = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join("Vehicle.DAT"), b"asset").unwrap();
+        std::fs::write(saves.path().join("vehicle.dat"), b"one").unwrap();
+        std::fs::write(saves.path().join("VEHICLE.DAT"), b"two").unwrap();
+        std::fs::write(external.path().join("vehicle.dat"), b"external").unwrap();
+        std::os::unix::fs::symlink(external.path(), saves.path().join("link")).unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", lower.path());
+        v.mount_save_dir("\\Game\\", saves.path());
+        assert_eq!(
+            std::fs::read(saves.path().join("vehicle.dat")).unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            std::fs::read(saves.path().join("VEHICLE.DAT")).unwrap(),
+            b"two"
+        );
+        assert!(external.path().join("vehicle.dat").exists());
+        assert!(!external.path().join("Vehicle.DAT").exists());
+    }
+
     #[test]
     fn writable_copy_preserves_installed_spelling_and_case_insensitive_lookup() {
         let lower = tempfile::tempdir().unwrap();

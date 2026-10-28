@@ -15,6 +15,7 @@ mod desktop_pointer;
 mod fullscreen_layout;
 mod gamepad;
 mod gamepad_host;
+mod host_gpu;
 mod native_share;
 mod reconstruction;
 mod recording;
@@ -77,6 +78,16 @@ fn init_logging(library_root: &std::path::Path) -> Option<std::path::PathBuf> {
     result
 }
 
+// Driver hints must be exported from the executable before any GL context exists.
+#[cfg(windows)]
+#[no_mangle]
+#[used]
+pub static NvOptimusEnablement: u32 = 1;
+#[cfg(windows)]
+#[no_mangle]
+#[used]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 fn main() -> Result<()> {
     let title = if cfg!(feature = "steam-deck") {
         "PocketHLE — Steam Deck"
@@ -101,6 +112,7 @@ fn main() -> Result<()> {
                 height: icon.height(),
                 rgba: icon.into_raw(),
             }))
+            .with_app_id("PocketHLE")
             .with_inner_size([960.0, 600.0])
             .with_min_inner_size([640.0, 420.0])
             .with_fullscreen(library.config().fullscreen)

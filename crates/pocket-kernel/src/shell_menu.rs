@@ -128,11 +128,8 @@ impl ShellMenus {
             }
         }
         let clip = [0, 0, width, HEIGHT];
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let clock = format!("{:02}:{:02}", (seconds / 3600) % 24, (seconds / 60) % 60);
+        let (hour, minute) = host_local_clock();
+        let clock = format!("{hour:02}:{minute:02}");
         let clock_font = crate::gdi::Font::new(-13);
         let clock = text::layout(Some(&clock_font), &clock.encode_utf16().collect::<Vec<_>>());
         // Reserve the clock area: the guest caption is clipped underneath it,
@@ -765,4 +762,31 @@ mod tests {
         );
         assert!(!shell.path.is_empty());
     }
+}
+
+/// Shell chrome follows the host's local civil time, including its DST rules.
+/// This does not change the guest's separately modeled WinCE time zone.
+fn host_local_clock() -> (u16, u16) {
+    #[cfg(unix)]
+    unsafe {
+        let timestamp = libc::time(std::ptr::null_mut());
+        let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+        if !libc::localtime_r(&timestamp, local.as_mut_ptr()).is_null() {
+            let local = local.assume_init();
+            return (local.tm_hour as u16, local.tm_min as u16);
+        }
+    }
+    #[cfg(windows)]
+    unsafe {
+        // SYSTEMTIME consists of eight WORD fields, in this exact order.
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetLocalTime(time: *mut [u16; 8]);
+        }
+        let mut local = [0u16; 8];
+        GetLocalTime(&mut local);
+        return (local[4], local[5]);
+    }
+    #[allow(unreachable_code)]
+    (0, 0)
 }

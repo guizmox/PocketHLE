@@ -697,7 +697,90 @@ impl Vfs {
         if let Err(error) = std::fs::create_dir_all(&host_dir) {
             log::warn!("vfs.mount_save_dir({host_dir:?}) could not create directory: {error}");
         }
-        self.mount_with_options(guest_prefix, host_dir, false);
+        self.mount_with_options(guest_prefix, host_dir.clone(), false);
+        self.restore_overlay_spelling(guest_prefix, &host_dir);
+    }
+
+    /// Recover names case-folded by older writable overlays. Only an unambiguous
+    /// installed file at the same guest path supplies spelling; saved bytes win.
+    /// Run before guest execution, without touching file contents or new assets.
+    fn restore_overlay_spelling(&self, guest_prefix: &str, root: &Path) {
+        let prefix = self.normalise_guest_path(guest_prefix);
+        let prefix = format!("{}/", prefix.trim_end_matches('/'));
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                    continue;
+                }
+                if !kind.is_file() {
+                    continue;
+                } // Never follow symlinks.
+                let path = entry.path();
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let guest = format!("{prefix}{}", relative.to_string_lossy().replace('\\', "/"));
+                let normal = self.normalise_guest_path(&guest);
+                let installed = self
+                    .matching_mounts(&normal)
+                    .into_iter()
+                    .filter(|m| m.read_only && m.prefix == prefix)
+                    .find_map(|m| self.host_path_for_mount(m, &normal).filter(|p| p.is_file()));
+                let Some(installed) = installed else { continue };
+                let Some(name) = installed.file_name() else {
+                    continue;
+                };
+                let Some(parent) = installed.parent() else {
+                    continue;
+                };
+                let Ok(lower_entries) = std::fs::read_dir(parent) else {
+                    continue;
+                };
+                if lower_entries
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&name.to_string_lossy())
+                    })
+                    .count()
+                    != 1
+                {
+                    continue;
+                }
+                if name == entry.file_name() {
+                    continue;
+                }
+                // Ambiguous case-colliding upper files must never be overwritten.
+                let Ok(siblings) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                if siblings
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&name.to_string_lossy())
+                    })
+                    .count()
+                    != 1
+                {
+                    continue;
+                }
+                let destination = dir.join(name);
+                if let Err(error) = std::fs::rename(&path, &destination) {
+                    log::warn!("vfs: cannot restore overlay spelling {path:?}: {error}");
+                }
+            }
+        }
     }
 
     fn mount_with_options(
@@ -785,8 +868,12 @@ impl Vfs {
     }
 
     fn normalise_guest_path(&self, guest_path: &str) -> String {
+        self.spelled_guest_path(guest_path).to_ascii_lowercase()
+    }
+
+    fn spelled_guest_path(&self, guest_path: &str) -> String {
         let absolute = self.absolute(guest_path);
-        let mut normalised = absolute.replace('\\', "/").to_ascii_lowercase();
+        let mut normalised = absolute.replace('\\', "/");
         while normalised.contains("//") {
             normalised = normalised.replace("//", "/");
         }
@@ -815,7 +902,7 @@ impl Vfs {
 
     fn host_path_for_mount(&self, mount: &Mount, normalised: &str) -> Option<PathBuf> {
         let root = mount.prefix.trim_end_matches('/');
-        if normalised == root {
+        if normalised.eq_ignore_ascii_case(root) {
             return Some(mount.host_dir.clone());
         }
         let rel = &normalised[mount.prefix.len()..];
@@ -2745,7 +2832,7 @@ mod tests {
         let host_path = v
             .resolve("\\Save\\My Documents\\My Saved Games\\settings.pdb")
             .unwrap();
-        assert!(host_path.ends_with("my documents/my saved games/settings.pdb"));
+        assert!(host_path.ends_with("My Documents/My Saved Games/settings.pdb"));
         assert_eq!(v.write(h, b"settings"), Some(8));
         v.flush(h).unwrap();
         v.close(h);

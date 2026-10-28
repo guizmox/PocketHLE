@@ -4626,3 +4626,36 @@ control, listener and resources are removed from Android and desktop per-game
 UI. There is no global GUI halt switch in this source tree. GUI/JNI launch paths
 no longer enable the dispatcher's halt mode from legacy settings. CLI explicit
 diagnostics / kernel API remain separate. Missing-API logging is unchanged.
+
+
+## Writable filename case, host clock and desktop integration (2026-10-28)
+
+Case folding remains a VFS lookup identity, not a host filename. exact_path
+uses the normalized but case-preserving guest spelling for missing components.
+Existing lower-layer copy-on-write names remain preserved. mount_save_dir also
+recovers legacy case-folded file names when a same-prefix installed lower file
+and exactly one case-insensitive sibling in each layer identify the spelling.
+It renames only the upper leaf, retaining all saved bytes. Ambiguous siblings,
+new assets and symlinks are untouched. This repairs old Racing Days registered
+NSX.car overlays without a game-name branch or registration rewrite. Gameplay
+has not been rerun; 55 VFS tests pass, including recovery and collisions.
+
+Shell taskbar chrome uses the host's local time (localtime_r on Unix,
+GetLocalTime on Windows), including host DST. Guest time APIs retain their
+existing virtual UTC contract. The exact Unix helper was checked against the
+system clock with UTC, Europe/Paris and America/New_York.
+
+Desktop Windows binaries embed the existing logo as a multi-size ICO through
+winres. The build script also explicitly exports NVIDIA/AMD high-performance
+GPU request variables. These are driver preferences, not an adapter guarantee.
+The global options enumerate real DXGI hardware names and open Windows Graphics
+settings for the authoritative per-executable choice, requiring a restart.
+Do not claim a direct WGL adapter-selection API or alter undocumented registry
+values. Hide the Windows settings link under Wine/Proton. The Windows API module
+passes isolated type checking; a complete Windows link and device check remain.
+
+Native Linux uses the PocketHLE app_id and PocketHLE.desktop filename together.
+tools/install-desktop-entry.sh installs a per-user launcher and hicolor PNG;
+it works from a source checkout or the Linux CI archive, which includes the
+script and icon. ELF file icons are desktop integration, not PE resources.
+The full desktop check here stops at missing GLib/GTK development packages.

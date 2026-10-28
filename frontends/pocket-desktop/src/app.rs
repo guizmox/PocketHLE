@@ -2136,6 +2136,18 @@ impl PocketLauncher {
                 ui.label("GPU rendering");
                 crate::controller_ui::checkbox(ui, &mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
                 ui.end_row();
+                #[cfg(windows)]
+                if !crate::gamepad_host::is_wine() {
+                    ui.label("Graphics adapter");
+                    ui.vertical(|ui| {
+                        for name in crate::host_gpu::adapters() { ui.label(name); }
+                        if crate::controller_ui::button(ui, "Choose GPU in Windows…").clicked() {
+                            crate::host_gpu::open_settings();
+                        }
+                        ui.small("Select this PocketHLE executable in Windows Graphics settings, choose a GPU, then restart PocketHLE. The driver receives a high-performance GPU request by default.");
+                    });
+                    ui.end_row();
+                }
                 ui.label("Anisotropic filtering (GPU only)");
                 ui.add_enabled_ui(draft.gpu_renderer, |ui| {
                     crate::controller_ui::ComboBox::from_id_source("global_anisotropy")
