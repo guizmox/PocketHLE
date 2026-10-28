@@ -4673,3 +4673,27 @@ spelling only for missing components. No game names or registration edits.
 Two additional regressions cover stored path spelling and exact-case sibling
 selection. All 57 VFS tests pass on Linux. Windows/gameplay are not claimed as
 executed; the stored-spelling test specifically exposes the old Windows failure.
+
+
+## InstallShield 5 raw CabWiz INF packages (2026-10-28)
+
+installer::installshield first preserves prebuilt CAB payloads. If none exist
+and a decoded INF declares CESignature="$Windows CE$", decode the original
+IS5 file table with source directory indices and MD5 validation. cabwiz.rs
+reconstructs ordinary Microsoft cabinets in memory, one per CEDevice variant,
+using the declared SourceDisksNames/Files, CopyFiles, DestinationDirs, AddReg
+(string/DWORD) and file shortcut target. No host EXE, CabWiz or script runs.
+Unknown DefaultInstall directives, copy/registry flags, missing/ambiguous source
+files, path traversal, oversized metadata and substitution cycles fail explicitly.
+This is a bounded declarative profile, not a full Microsoft INF implementation.
+Current text encodings are ASCII/UTF-8/UTF-16LE; raw source directory decoding
+is IS5 only. Ordinary existing IS5–13 CAB extraction remains available.
+
+Generated _setup.xml uses the existing long-name/destination/registry importer.
+WinCeSetupScript.processor_type is optional; the installer architecture chooser
+uses it only if the binary CAB header has no CPU field. The existing shared
+chooser therefore offers ARM/MIPS/SH3 without frontend-specific import logic.
+The supplied Strip4You installer produces three cabinets. Targeted validation
+checks architecture selection, actual ARM PE bytes, data/module presence,
+registry values, non-installation of desktop tools and staging isolation.
+No gameplay, Windows build, APK build or physical-device test is claimed.

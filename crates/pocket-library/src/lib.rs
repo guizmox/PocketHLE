@@ -3456,7 +3456,13 @@ fn stage_installer_cabinets(
                 .iter()
                 .any(|f| f.short_name.eq_ignore_ascii_case("_setup.xml"));
         if is_ce {
-            let arch = header.as_ref().and_then(|h| h.arch);
+            let arch = header.as_ref().and_then(|h| h.arch).or_else(|| {
+                let setup = files
+                    .iter()
+                    .find(|f| f.short_name.eq_ignore_ascii_case("_setup.xml"))?;
+                let bytes = fs::read(&setup.extracted_path).ok()?;
+                pocket_cab::WinCeSetupScript::parse_bytes(&bytes).processor_type
+            });
             let architecture = match arch {
                 Some(2577 | 1824) => "ARM".into(),
                 Some(4000) => "MIPS".into(),

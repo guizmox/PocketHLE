@@ -16,6 +16,27 @@ fn wide(b: &[u8], p: usize) -> Result<usize> {
 }
 
 pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Result<Vec<Cabinet>> {
+    let files = extract_files(entries, budget, false)?;
+    // Preserve existing CAB imports; rebuild only when no prebuilt CAB exists.
+    if !files
+        .iter()
+        .any(|f| f.name.to_ascii_lowercase().ends_with(".cab"))
+        && files.iter().any(super::cabwiz::is_manifest)
+    {
+        let assets = extract_files(entries, budget, true)?;
+        return super::cabwiz::extract(&assets, budget);
+    }
+    Ok(files
+        .into_iter()
+        .filter(|f| f.name.to_ascii_lowercase().ends_with(".cab"))
+        .collect())
+}
+
+fn extract_files(
+    entries: &[(String, Vec<u8>)],
+    budget: &mut usize,
+    assets: bool,
+) -> Result<Vec<Cabinet>> {
     let mut out = Vec::new();
     let headers: Vec<_> = entries
         .iter()
@@ -108,9 +129,38 @@ pub(super) fn extract(entries: &[(String, Vec<u8>)], budget: &mut usize) -> Resu
                 .iter()
                 .position(|b| *b == 0)
                 .ok_or("Unterminated InstallShield filename")?;
-            let name = String::from_utf8_lossy(&name[..end]).into_owned();
-            if !name.to_ascii_lowercase().ends_with(".cab") {
+            let mut name = String::from_utf8_lossy(&name[..end]).into_owned();
+            if !assets
+                && !name.to_ascii_lowercase().ends_with(".cab")
+                && !name.to_ascii_lowercase().ends_with(".inf")
+            {
                 continue;
+            }
+            if assets {
+                if major != 5 {
+                    return Err(
+                        "Raw CabWiz payloads require InstallShield 5 directory metadata".into(),
+                    );
+                }
+                let directory = number(descriptor, 4)?;
+                let directories = number(header, base + 28)?;
+                if directory >= directories {
+                    return Err("Invalid InstallShield source directory".into());
+                }
+                let offset = table
+                    .checked_add(number(header, table + directory * 4)?)
+                    .ok_or("InstallShield directory overflow")?;
+                let directory = header
+                    .get(offset..)
+                    .ok_or("Invalid InstallShield source directory")?;
+                let end = directory
+                    .iter()
+                    .position(|c| *c == 0)
+                    .ok_or("Unterminated InstallShield directory")?;
+                let directory = String::from_utf8_lossy(&directory[..end]);
+                if !directory.is_empty() {
+                    name = format!("{directory}/{name}");
+                }
             }
             // Split/obfuscated/linked payloads need different decoding. Never
             // silently concatenate volumes or substitute a neighbouring file.

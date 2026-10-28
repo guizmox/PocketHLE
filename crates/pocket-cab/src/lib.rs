@@ -870,6 +870,8 @@ fn header_from_files(files: &[CabFile]) -> Result<Option<WinCeInstallHeader>, Ca
 ///   compiled to read from.
 #[derive(Debug, Clone, Default)]
 pub struct WinCeSetupScript {
+    /// Optional CabWiz processor identifier (2577 ARM, 4000 MIPS, 10003 SH3).
+    pub processor_type: Option<u32>,
     /// Resolved install directory on the device. Always uses backslash
     /// separators and ends with a backslash, e.g.
     /// `\Program Files\Astraware\Zuma\`.
@@ -943,6 +945,8 @@ impl WinCeSetupScript {
                 if script.install_dir.is_none() && !name.eq_ignore_ascii_case("%InstallDir%") {
                     script.install_dir = Some(canonicalise_install_dir(&name));
                 }
+            } else if let Some(value) = parm_value(line, "ProcessorType") {
+                script.processor_type = parse_setup_integer(&value);
             } else if let Some(name) = parm_value(line, "AppName") {
                 script.app_name = Some(name);
             }

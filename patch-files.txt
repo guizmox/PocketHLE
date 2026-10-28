@@ -1,2 +1,6 @@
-crates/pocket-kernel/src/vfs.rs
+crates/pocket-library/src/installer.rs
+crates/pocket-library/src/installer/installshield.rs
+crates/pocket-library/src/installer/cabwiz.rs
+crates/pocket-library/src/lib.rs
+crates/pocket-cab/src/lib.rs
 docs/AGENTS.md

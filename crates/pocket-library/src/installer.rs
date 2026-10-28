@@ -1,6 +1,7 @@
 //! Desktop installer containers. Never execute host code; names are not used
 //! for format detection. Every decoded layer shares an allocation budget.
 use std::io::{Cursor, Read};
+mod cabwiz;
 mod inno;
 mod installshield;
 mod nsis_bzip;
