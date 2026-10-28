@@ -224,17 +224,54 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 /// GAPI exposes display memory, which remains visible while held. A voluntary
 /// main-thread sleep or message-pump poll is a presentation boundary for direct writers that retain
-/// that pointer across frames. Do not release their access or wait another
-/// refresh interval: Sleep owns the caller's pacing. Ordinary GXEndDraw still
-/// presents explicitly, and CPU slice preemption never exposes a partial draw.
-pub(crate) fn publish_held_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+/// that pointer across frames. Unlimited keeps the existing immediate readback.
+/// A user cap paces changed frames at this boundary, never individual writes or
+/// unchanged message polls. CPU slice preemption never exposes a partial draw.
+pub(crate) fn publish_held_framebuffer(
+    ctx: &mut CallCtx<'_>,
+) -> Result<Option<DispatchOutcome>, KernelError> {
     if ctx.kernel.current_thread == 0 && ctx.kernel.fb_mapped && ctx.kernel.gx_draw_active {
-        readback_framebuffer(ctx)?;
+        if ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some() {
+            read_guest_framebuffer(ctx)?;
+            if ctx.kernel.gx_readback_scratch != ctx.kernel.framebuffer.pixels {
+                if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
+                    return Ok(Some(outcome));
+                }
+                publish_readback(ctx);
+                ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+            } else {
+                // A repaint/worker may have made the pending snapshot redundant.
+                // Do not leave a stale deadline or throttle idle/input polling.
+                let key = (
+                    0,
+                    ctx.thunk.thunk_va,
+                    ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Sp)?,
+                );
+                if ctx
+                    .kernel
+                    .framebuffer
+                    .directdraw
+                    .pending
+                    .remove(&key)
+                    .is_some()
+                {
+                    ctx.kernel.wait_deadlines.remove(&key);
+                }
+            }
+        } else {
+            readback_framebuffer(ctx)?;
+        }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn readback_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+    read_guest_framebuffer(ctx)?;
+    publish_readback(ctx);
+    Ok(())
+}
+
+fn read_guest_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     let pitch = guest_pitch_bytes(ctx) as usize;
     let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
     let fb_len = ctx.kernel.framebuffer.pixels.len();
@@ -254,6 +291,10 @@ fn readback_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
             )?;
         }
     }
+    Ok(())
+}
+
+fn publish_readback(ctx: &mut CallCtx<'_>) {
     let signature = sample_signature(
         &ctx.kernel.gx_readback_scratch,
         ctx.kernel.framebuffer.stride_bytes() as usize,
@@ -268,7 +309,6 @@ fn readback_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
         ctx.kernel.gx_guest_signature = Some(signature);
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
-    Ok(())
 }
 
 fn sample_signature(bytes: &[u8], stride_bytes: usize) -> u64 {
@@ -611,16 +651,89 @@ pub(crate) mod tests {
         ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
         let before = ctx.kernel.framebuffer.pixels.clone();
         ctx.kernel.current_thread = 1;
-        publish_held_framebuffer(&mut ctx).unwrap();
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
         assert_eq!(ctx.kernel.framebuffer.pixels, before);
         ctx.kernel.current_thread = 0;
-        publish_held_framebuffer(&mut ctx).unwrap();
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
         assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
         assert!(ctx.kernel.gx_draw_active);
         ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x00, 0x07]).unwrap();
-        publish_held_framebuffer(&mut ctx).unwrap();
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
         assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x00, 0x07]);
         assert!(ctx.kernel.gx_draw_active);
+    }
+
+    #[test]
+    fn retained_frame_cap_waits_before_publish_but_not_on_idle_polls() {
+        use std::time::{Duration, Instant};
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        gx_open_display(&mut ctx).unwrap();
+        gx_begin_draw(&mut ctx).unwrap();
+        ctx.cpu
+            .write_reg(pocket_cpu::regs::ArmReg::Sp, 0x4000)
+            .unwrap();
+        ctx.kernel.framebuffer.directdraw.frame_rate_limit = Some(20);
+        let anchor = Instant::now() + Duration::from_secs(60);
+        ctx.kernel.framebuffer.directdraw.last_present = Some(anchor);
+        let before = ctx.kernel.framebuffer.pixels.clone();
+        ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
+        let key = (0, thunk.thunk_va, 0x4000);
+        for _ in 0..2 {
+            assert_eq!(
+                publish_held_framebuffer(&mut ctx).unwrap(),
+                Some(DispatchOutcome::JumpTo(thunk.thunk_va))
+            );
+            assert_eq!(
+                ctx.kernel.framebuffer.directdraw.pending[&key],
+                anchor + Duration::from_millis(50)
+            );
+            assert_eq!(ctx.kernel.framebuffer.pixels, before);
+        }
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .pending
+            .insert(key, Instant::now() - Duration::from_secs(1));
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
+        assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
+        let last = ctx.kernel.framebuffer.directdraw.last_present;
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
+        assert_eq!(ctx.kernel.framebuffer.directdraw.last_present, last);
+        assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
+        assert!(ctx.kernel.gx_draw_active);
+    }
+
+    #[test]
+    fn retained_frame_cap_limits_actual_changed_presentations() {
+        use std::time::{Duration, Instant};
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        gx_open_display(&mut ctx).unwrap();
+        gx_begin_draw(&mut ctx).unwrap();
+        ctx.kernel.framebuffer.directdraw.frame_rate_limit = Some(20);
+        let counter = ctx.kernel.framebuffer.frame_counter;
+        let start = Instant::now();
+        for pixel in 1..=6u16 {
+            ctx.cpu
+                .write_mem(SYNTHETIC_FB_BASE, &pixel.to_le_bytes())
+                .unwrap();
+            while publish_held_framebuffer(&mut ctx).unwrap().is_some() {}
+        }
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, counter + 6);
     }
 
     #[test]

@@ -3,7 +3,9 @@ crates/pocket-cpu/src/unicorn.rs
 crates/pocket-kernel/src/framebuffer.rs
 crates/pocket-library/src/frame_rate.rs
 crates/pocket-library/src/lib.rs
+crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/ddraw.rs
+crates/pocket-winceapi/src/gx.rs
 docs/AGENTS.md
 frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameEntry.kt

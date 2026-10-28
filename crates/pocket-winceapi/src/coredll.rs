@@ -2677,7 +2677,28 @@ pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     }
     let ms = ctx.arg_u32(0)?;
     if ms != 0 && ctx.kernel.current_thread == 0 {
-        crate::gx::publish_held_framebuffer(ctx)?;
+        let key = (0, thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+        // A capped retained-GAPI frame and Sleep overlap rather than adding
+        // their durations. Preserve Sleep's deadline when the display wait
+        // retires its own continuation (which has the same thunk/SP key).
+        let sleep_deadline = if ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some() {
+            Some(*ctx.kernel.wait_deadlines.entry(key).or_insert_with(|| {
+                if ms == u32::MAX {
+                    u64::MAX
+                } else {
+                    monotonic_ms().saturating_add(u64::from(ms))
+                }
+            }))
+        } else {
+            None
+        };
+        let outcome = crate::gx::publish_held_framebuffer(ctx)?;
+        if let Some(deadline) = sleep_deadline {
+            ctx.kernel.wait_deadlines.insert(key, deadline);
+        }
+        if let Some(outcome) = outcome {
+            return Ok(outcome);
+        }
     }
     if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
         if let Some(thread) = ctx.kernel.threads.get_mut(index) {
@@ -14194,7 +14215,9 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // Publish retained GAPI pixels at the next event-loop boundary, after
     // wave_out_enter_callback has restored the original call on reentry.
     // Mini Kayak copies scanlines from WM_TIMER without GXEndDraw/Sleep.
-    crate::gx::publish_held_framebuffer(ctx)?;
+    if let Some(outcome) = crate::gx::publish_held_framebuffer(ctx)? {
+        return Ok(outcome);
+    }
     let lp_msg = ctx.arg_u32(0)?;
     let count = ctx.kernel.synthetic_message_count;
     let budget = ctx.kernel.synthetic_message_budget;
@@ -14303,7 +14326,9 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     // Publish retained GAPI pixels at the next event-loop boundary, after
     // wave_out_enter_callback has restored the original call on reentry.
     // Mini Kayak copies scanlines from WM_TIMER without GXEndDraw/Sleep.
-    crate::gx::publish_held_framebuffer(ctx)?;
+    if let Some(outcome) = crate::gx::publish_held_framebuffer(ctx)? {
+        return Ok(outcome);
+    }
     let lp_msg = ctx.arg_u32(0)?;
     let remove_mode = ctx.arg_u32(4)?;
     let count = ctx.kernel.synthetic_message_count;
@@ -25066,6 +25091,72 @@ fn find_close_change_notification(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_frame_cap_is_obeyed_by_message_pumps_and_sleep() {
+        use std::time::{Duration, Instant};
+        for boundary in 0..3 {
+            let mut cpu = scanf_cpu();
+            let mut kernel = fresh_kernel();
+            let thunk = dummy_thunk();
+            let fb = pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE;
+            cpu.map_region(fb, 0x1000, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)
+                .unwrap();
+            kernel.framebuffer.resize(2, 2);
+            kernel.fb_mapped = true;
+            kernel.gx_draw_active = true;
+            kernel.framebuffer.directdraw.frame_rate_limit = Some(20);
+            let anchor = Instant::now() + Duration::from_secs(60);
+            kernel.framebuffer.directdraw.last_present = Some(anchor);
+            cpu.write_mem(fb, &[0x1f, 0xf8]).unwrap();
+            cpu.write_reg(ArmReg::Sp, 0x8000).unwrap();
+            cpu.write_reg(ArmReg::R0, if boundary == 2 { 50 } else { 0x2000 })
+                .unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let key = (0, thunk.thunk_va, 0x8000);
+            let mut sleep_deadline = None;
+            for _ in 0..2 {
+                let outcome = match boundary {
+                    0 => get_message_w(&mut ctx).unwrap(),
+                    1 => peek_message_w(&mut ctx).unwrap(),
+                    _ => sleep(&mut ctx).unwrap(),
+                };
+                assert_eq!(outcome, DispatchOutcome::JumpTo(thunk.thunk_va));
+                assert_eq!(
+                    ctx.kernel.framebuffer.directdraw.pending[&key],
+                    anchor + Duration::from_millis(50)
+                );
+                assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0, 0]);
+                if boundary == 2 {
+                    let deadline = ctx.kernel.wait_deadlines[&key];
+                    if let Some(saved) = sleep_deadline {
+                        assert_eq!(deadline, saved);
+                    }
+                    sleep_deadline = Some(deadline);
+                }
+            }
+            if boundary == 2 {
+                // Both original waits have elapsed. Completing the display
+                // continuation must not start a fresh 50 ms Sleep afterward.
+                ctx.kernel
+                    .wait_deadlines
+                    .insert(key, monotonic_ms().saturating_sub(1));
+                ctx.kernel
+                    .framebuffer
+                    .directdraw
+                    .pending
+                    .insert(key, Instant::now() - Duration::from_secs(1));
+                assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+                assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
+                assert!(!ctx.kernel.wait_deadlines.contains_key(&key));
+                assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
+            }
+        }
+    }
+
     #[test]
     fn single_monitor_reports_guest_dimensions_and_checks_buffer_size() {
         let mut cpu = scanf_cpu();

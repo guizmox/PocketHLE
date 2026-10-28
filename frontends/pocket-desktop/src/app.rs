@@ -2653,21 +2653,8 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
-                ui.label("Frame rate limit");
-                crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
-                    .selected_text(draft.frame_rate_limit.label())
-                    .show_ui(ui, |ui| {
-                        for value in pocket_library::FrameRateLimit::ALL {
-                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, value, value.label());
-                        }
-                    });
-                ui.end_row();
+                ui.heading("Controls");
                 ui.label("");
-                ui.vertical(|ui| {
-                    ui.set_max_width(380.0);
-                    ui.add(egui::Label::new("Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. Restart the game to apply.").wrap(true))
-                        .on_hover_text("Caps game presentations, not video recording FPS. A cap does not speed up a slow game.");
-                });
                 ui.end_row();
                 ui.label("D-pad dead zone");
                 crate::controller_ui::ComboBox::from_id_source("game_dpad_deadzone")
@@ -2679,7 +2666,7 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 if !is_gizmondo {
-                    ui.label("Controls");
+                    ui.label("Control mode");
                     let mut mode=draft.controls_mode();
                     crate::controller_ui::ComboBox::from_id_source("ppc_controls_mode")
                         .selected_text(mode.label()).show_ui(ui,|ui|{
@@ -2700,15 +2687,27 @@ impl PocketLauncher {
                         }
                     });
                     ui.end_row();
-                    ui.label("Owner name (PocketPC)");
-                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
-                    ui.end_row();
-                    ui.label("Device name (Preset ID — ASCII)");
-                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_name, "Device default");
-                    ui.end_row();
-                    ui.label("PocketPC ID (Platform ID — hexadecimal)");
-                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_id, "Device default");
-                    ui.end_row();
+                }
+                ui.heading("Graphics");
+                ui.label("");
+                ui.end_row();
+                ui.label("Frame rate limit");
+                crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
+                    .selected_text(draft.frame_rate_limit.label())
+                    .show_ui(ui, |ui| {
+                        for value in pocket_library::FrameRateLimit::ALL {
+                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, value, value.label());
+                        }
+                    });
+                ui.end_row();
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.set_max_width(380.0);
+                    ui.add(egui::Label::new("Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. Restart the game to apply.").wrap(true))
+                        .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
+                });
+                ui.end_row();
+                if !is_gizmondo {
                     ui.label("Screen");
                     crate::controller_ui::ComboBox::from_id_source("game_screen")
                         .selected_text(draft.screen.label())
@@ -2765,6 +2764,23 @@ impl PocketLauncher {
                 }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
                 ui.end_row();
 
+                ui.heading("Sound");
+                ui.label("No per-game sound options yet.");
+                ui.end_row();
+                ui.heading("Misc");
+                ui.label("");
+                ui.end_row();
+                if !is_gizmondo {
+                    ui.label("Owner name (PocketPC)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
+                    ui.end_row();
+                    ui.label("Device name (Preset ID — ASCII)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_name, "Device default");
+                    ui.end_row();
+                    ui.label("PocketPC ID (Platform ID — hexadecimal)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_id, "Device default");
+                    ui.end_row();
+                }
                 ui.label("Halt on unimplemented API");
                 crate::controller_ui::checkbox(ui, &mut draft.halt_on_unimplemented, "");
                 ui.end_row();

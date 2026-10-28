@@ -4582,3 +4582,28 @@ of its previous position and taking 5 percent of the next target per update.
 trial. The older engine alone changed camera following when dt changed from
 100 to33ms. No sharp 20/30fps threshold was established; 20fps is a compromise
 to try, not a validated cure. No game-specific patch or clock modification.
+
+
+## Retained-GAPI frame caps and per-game settings groups (2026-10-28)
+
+Mini Kayak renders from WM_TIMER while retaining GXBeginDraw's pointer; it
+publishes on GetMessage/PeekMessage, not GXEndDraw. The first cap only covered
+explicit presents and therefore did not limit this title. publish_held_framebuffer
+now returns an optional cooperative continuation. GetMessageW/PeekMessageW and
+positive main-thread Sleep must propagate it before consuming messages or
+starting a second wait. Read into scratch, wait only when pixels changed, then
+publish; keep gx_draw_active and block raw CPU-slice readback as before. Unchanged
+polls do not incur frame waits. Unlimited takes the original immediate path.
+
+Sleep initializes its own deadline before the capped present and preserves it
+across the shared display continuation. This overlaps waits rather than adding
+Sleep(50) to another50ms at20fps, and retains the deadline across worker handoff.
+No game-name condition, GetTickCount change, frontend-only FPS counter change,
+or per-BitBlt throttling. OpenGL ES/EGL, DirectDraw and GAPI explicit waits stay
+on the shared clock. Pure GDI still has no general cap; do not claim otherwise.
+
+Per-game settings use Controls / Graphics / Sound / Misc on desktop and Android.
+Touch controls remain PocketPC-only. Screen/GPU/filter/FPS/rotation are Graphics;
+identity and API diagnostics are Misc. Sound has a noninteractive placeholder.
+Android reuses the XML categories for dynamic controls/identity, without duplicate
+categories or a second preferences store. Existing controller widgets/IDs stay.

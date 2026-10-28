@@ -52,8 +52,8 @@ class GameSettingsActivity : AppCompatActivity() {
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
-                val controlsCategory=androidx.preference.PreferenceCategory(requireContext()).apply {title="Controls";key="ppc_controls_category"}
-                preferenceScreen.addPreference(controlsCategory)
+                val controlsCategory = findPreference<androidx.preference.PreferenceCategory>("controls_category")!!
+                val miscCategory = findPreference<androidx.preference.PreferenceCategory>("misc_category")!!
                 val editor=androidx.preference.Preference(requireContext()).apply {
                     key="ppc_stylus_editor";isPersistent=false
                     setOnPreferenceClickListener {
@@ -70,7 +70,7 @@ class GameSettingsActivity : AppCompatActivity() {
                     editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Choose 4 × 3, 5 × 4 or 6 × 5. Select a zone and press an input. Reserved PocketHLE shortcuts cannot be assigned."
                 }
                 controlsCategory.addPreference(ListPreference(requireContext()).apply {
-                    key="pocketpc_controls";title="Controls";isPersistent=false
+                    key="pocketpc_controls";title="Control mode";isPersistent=false
                     entries=arrayOf("Normal","Touch steering","Touch zone mapping")
                     entryValues=arrayOf("normal","zones","grid");value=current.controlsMode()
                     summaryProvider=androidx.preference.Preference.SummaryProvider<ListPreference> { current.controlsDescription() }
@@ -81,7 +81,7 @@ class GameSettingsActivity : AppCompatActivity() {
                 })
                 controlsCategory.addPreference(editor);updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
-                    preferenceScreen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
+                    miscCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                         key = keyName; title = label; isPersistent = false; text = initial
                         summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
                         dialogMessage = "Empty = device default. Applies at the next launch." + if (keyName.endsWith("device_id")) " Enter hexadecimal byte pairs." else ""
@@ -115,7 +115,7 @@ class GameSettingsActivity : AppCompatActivity() {
                 entryValues = arrayOf("unlimited", "20", "30", "40", "50", "60")
                 value = current.frameRateLimit
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
-                    "${pref.entry ?: "Unlimited"}. Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. Restart the game to apply."
+                    "${pref.entry ?: "Unlimited"}. Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. GAPI / DirectDraw / OpenGL ES; GDI-only drawing is not capped. Restart the game to apply."
                 }
                 setOnPreferenceChangeListener { _, newValue ->
                     current = current.copy(frameRateLimit = newValue.toString())

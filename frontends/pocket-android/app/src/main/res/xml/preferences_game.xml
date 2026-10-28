@@ -1,46 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto">
-
-    <ListPreference
-        android:key="screen"
-        android:title="@string/pref_screen_title"
-        android:entries="@array/screen_entries"
-        android:entryValues="@array/screen_values"
-        android:defaultValue="portrait" />
-
-    <!--
-        Presentation-only quarter turn. A landscape-designed game such
-        as JumpyBall renders correctly only while it believes it sits on
-        a 240x320 portrait panel, so forcing `screen` to 320x240 breaks
-        it; leaving the guest portrait and rotating the picture 90°
-        gives the intended landscape view. Mirrors the desktop
-        launcher's "Rotate display" setting.
-    -->
-    <ListPreference
-        android:key="rotation"
-        android:title="@string/pref_rotation_title"
-        android:summary="@string/pref_rotation_summary"
-        android:entries="@array/rotation_entries"
-        android:entryValues="@array/rotation_values"
-        android:defaultValue="none" />
-
-    <ListPreference android:key="frame_rate_limit" android:title="Frame rate limit"
-        android:persistent="false" />
-
-    <ListPreference android:key="dpad_deadzone" android:title="D-pad dead zone"
-        android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values"
-        android:defaultValue="large" app:useSimpleSummaryProvider="true" />
-
-    <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering"
-        android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
-    <ListPreference android:key="anisotropic_filtering" android:title="Anisotropic filtering (GPU only)"
-        android:summary="Sharper textures at oblique angles; limited by the GPU driver."
-        android:persistent="false" />
-
-    <SwitchPreferenceCompat
-        android:key="halt_on_unimplemented"
-        android:title="@string/pref_halt_unimpl_title"
-        android:summary="@string/pref_halt_unimpl_summary"
-        android:defaultValue="false" />
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+    <PreferenceCategory android:key="controls_category" android:title="Controls">
+        <ListPreference android:key="dpad_deadzone" android:title="D-pad dead zone" android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values" android:defaultValue="large" app:useSimpleSummaryProvider="true" />
+    </PreferenceCategory>
+    <PreferenceCategory android:key="graphics_category" android:title="Graphics">
+        <ListPreference android:key="frame_rate_limit" android:title="Frame rate limit" android:persistent="false" />
+        <ListPreference android:key="screen" android:title="@string/pref_screen_title" android:entries="@array/screen_entries" android:entryValues="@array/screen_values" android:defaultValue="portrait" />
+        <ListPreference android:key="rotation" android:title="@string/pref_rotation_title" android:summary="@string/pref_rotation_summary" android:entries="@array/rotation_entries" android:entryValues="@array/rotation_values" android:defaultValue="none" />
+        <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering" android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
+        <ListPreference android:key="anisotropic_filtering" android:title="Anisotropic filtering (GPU only)" android:summary="Sharper textures at oblique angles; limited by the GPU driver." android:persistent="false" />
+    </PreferenceCategory>
+    <PreferenceCategory android:key="sound_category" android:title="Sound">
+        <Preference android:title="No per-game sound options yet." android:selectable="false" android:persistent="false" />
+    </PreferenceCategory>
+    <PreferenceCategory android:key="misc_category" android:title="Misc">
+        <SwitchPreferenceCompat android:key="halt_on_unimplemented" android:title="@string/pref_halt_unimpl_title" android:summary="@string/pref_halt_unimpl_summary" android:defaultValue="false" />
+    </PreferenceCategory>
 </PreferenceScreen>
