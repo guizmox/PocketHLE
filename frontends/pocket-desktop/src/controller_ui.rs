@@ -326,7 +326,7 @@ pub fn text_edit(ui: &mut Ui, value: &mut String, hint: &str) -> Response {
         w.text.insert(response.id, value.clone());
     });
     register_page_widget(ui, &response);
-    if response.has_focus() {
+    if response.gained_focus() {
         response.scroll_to_me(Some(egui::Align::Center));
     }
     response
@@ -384,7 +384,7 @@ impl ComboBox {
         } else if old.is_some_and(|p| p.owner == response.response.id) {
             edit_widgets(&ctx, |w| w.popup = None);
         }
-        if response.response.has_focus() {
+        if response.response.gained_focus() {
             response.response.scroll_to_me(Some(egui::Align::Center));
         }
         response
@@ -405,7 +405,7 @@ pub fn selectable_value<T: PartialEq>(
                 entries.push((response.id, selected));
             }
         });
-        if response.has_focus() {
+        if response.gained_focus() {
             response.scroll_to_me(Some(egui::Align::Center));
         }
         if response.clicked() {
@@ -473,6 +473,9 @@ fn register_page_widget(ui: &Ui, response: &Response) {
     }
 }
 
+// Reveal controls only when focus changes. Persistent focus must not override
+// wheel/scrollbar navigation on every frame; controller navigation still reveals
+// each newly focused control.
 pub fn scroll_focus(ui: &Ui) {
     if let Some(response) = ui
         .ctx()
@@ -771,7 +774,7 @@ fn register(ui: &Ui, response: &Response, close: bool) {
             }
         });
     }
-    if response.has_focus() {
+    if response.gained_focus() {
         response.scroll_to_me(Some(egui::Align::Center));
     }
     if close && response.clicked() && widgets(ui.ctx()).collecting.is_some() {
