@@ -4860,3 +4860,47 @@ Public contract: Microsoft Learn timeSetEvent (ms713423), timeKillEvent
 (dd757630), timeBeginPeriod. Four targeted tests cover callback ABI/Thumb state,
 periodic wait/cancel, one-shot completion, invalid input and synchronous join.
 No full THPS2 gameplay test has been performed.
+
+
+## Companion GLES ordinal metadata (2026-10-28)
+
+gles_exports::local_tables reads only imported GLES CM/CL companions adjacent
+to the importing image, with a16MiB input cap and CPU compatibility checks.
+Use PE exports at the original base as ordinal->named-handler metadata; never
+execute the supplied GPU driver. Main mapping retains original ordinal bindings
+and dynamic #ordinal aliases, supplying corrected friendly names through its
+resolver. Runtime guest modules use their own companion table or the established
+main profile; contradictory main/module profiles fail explicitly.
+
+Missing companion preserves existing global tables. Present but malformed,
+missing/unnamed used ordinal or ambiguous aliases are errors, never a fallback
+to an unrelated vendor ABI. Unknown exported names retain missing-handler
+behavior. Companion search is local only, not recursive and not shared runtimes.
+Dependency information uses the same resolver. No title condition/global table
+replacement/native code/DLL payload is shipped. Synthetic export-only test DLL
+is source-created and contains only four BX LR functions/names for metadata tests.
+
+Actual supplied ChopperFight.exe companion has132 named ordinal mappings, with
+14=eglGetDisplay and17=eglInitialize. The old CM global table maps these to
+eglGetCurrentContext and eglGetDisplay. Three tests cover CM/CL local metadata,
+no-companion fallback, malformed/missing/ambiguous exports. Core no-default
+check passes. No full game, Windows or APK run is claimed.
+
+THPS2 optional marker is explicitly a user-requested workaround, not a generic
+API implementation: original startup fopen("\\Windows\\wmv9decoder2700g.dll","r")
+only checks a nonnull result at that point. The optional text file must live
+in the object-store Windows tree, not runtimes/pocketpc; it is not an executable
+codec and must never be represented as one. No automatic game-name branch.
+
+
+## Automatic 2700G presence marker (2026-10-28)
+
+At the user's explicit request PocketPC storage initialization creates
+Windows/wmv9decoder2700G.dll as a plain text presence marker if no case-insensitive
+entry already exists. This is an intentional hardware-probe workaround, not
+a generic WinCE API implementation or an executable codec. No DLL is bundled.
+Use create_new and never truncate or replace existing bytes (including genuine
+DLLs, case variants or other existing entries). Storage path containment checks
+run before creation. Gizmondo does not call PocketPC storage initialization.
+The marker is generated before guest startup on desktop/Deck/Linux/Android.
+No game-name branch, registry/registration modification or codec implementation.

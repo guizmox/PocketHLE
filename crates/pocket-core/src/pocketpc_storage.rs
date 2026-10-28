@@ -7,8 +7,8 @@ pub(crate) fn mount(vfs: &mut Vfs, library_root: &Path) -> std::io::Result<()> {
     let root = library_root.join("object-store-pocketpc");
     std::fs::create_dir_all(&root)?;
     let canonical = root.canonicalize()?;
-    // These are standard WinCE directories, not application resources. Never
-    // manufacture files/registration data or replace a preexisting payload.
+    // Standard WinCE directories; existing files and registration are preserved.
+    // The explicitly requested hardware-presence marker is created separately.
     for directory in [
         "Windows",
         "Temp",
@@ -33,6 +33,7 @@ pub(crate) fn mount(vfs: &mut Vfs, library_root: &Path) -> std::io::Result<()> {
             ));
         }
     }
+    ensure_2700g_presence_marker(&root.join("Windows"))?;
     vfs.mount_filesystem("\\", &root);
     // A same-prefix writable Windows overlay also permits copy-on-write when
     // an installer mounts its bundled shared Windows files read-only.
@@ -40,10 +41,44 @@ pub(crate) fn mount(vfs: &mut Vfs, library_root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Explicit compatibility marker requested by the user, not a codec or hardware
+/// implementation. THPS2's startup fopen probe only checks whether this opens.
+fn ensure_2700g_presence_marker(windows: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    const NAME: &str = "wmv9decoder2700G.dll";
+    // Preserve genuine DLLs and any existing entry, including case variants
+    // on case-sensitive hosts. Never open an existing file for writing.
+    for entry in std::fs::read_dir(windows)? {
+        if entry?.file_name().to_string_lossy().eq_ignore_ascii_case(NAME) {
+            return Ok(());
+        }
+    }
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(windows.join(NAME)) {
+        Ok(mut file) => file.write_all(b"PocketHLE hardware-presence marker. Not an executable codec.\r\n"),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pocket_kernel::vfs::{Access, SeekKind};
+    #[test]
+    fn marker_is_created_once_and_existing_case_variant_is_preserved() {
+        let library = tempfile::tempdir().unwrap();
+        mount(&mut Vfs::new(), library.path()).unwrap();
+        let windows = library.path().join("object-store-pocketpc/Windows");
+        let marker = windows.join("wmv9decoder2700G.dll");
+        assert!(std::fs::read(&marker).unwrap().starts_with(b"PocketHLE"));
+        std::fs::remove_file(&marker).unwrap();
+        let real = windows.join("WMV9DECODER2700G.DLL");
+        std::fs::write(&real, b"existing original bytes").unwrap();
+        mount(&mut Vfs::new(), library.path()).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"existing original bytes");
+        assert_eq!(std::fs::read_dir(&windows).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("wmv9decoder2700g.dll")).count(),1);
+    }
     #[test]
     fn system_file_survives_new_vfs_without_changing_registered_bytes() {
         let library = tempfile::tempdir().unwrap();
