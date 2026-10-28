@@ -25,6 +25,9 @@
         android:entryValues="@array/rotation_values"
         android:defaultValue="none" />
 
+    <ListPreference android:key="frame_rate_limit" android:title="Frame rate limit"
+        android:persistent="false" />
+
     <ListPreference android:key="dpad_deadzone" android:title="D-pad dead zone"
         android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values"
         android:defaultValue="large" app:useSimpleSummaryProvider="true" />

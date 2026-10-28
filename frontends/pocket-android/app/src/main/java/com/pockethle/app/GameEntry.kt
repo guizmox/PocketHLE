@@ -64,6 +64,7 @@ data class GameSettings(
      * keep the guest portrait and turn the *picture* instead.
      */
     val rotation: String,
+    val frameRateLimit: String = "unlimited",
     val gpuRenderer: Boolean? = null,
     val anisotropicFiltering: Int? = null,
     val dpadDeadzone: String = "large",
@@ -76,6 +77,7 @@ data class GameSettings(
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        put("frame_rate_limit", frameRateLimit)
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
         put("anisotropic_filtering", anisotropicFiltering ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
@@ -118,6 +120,7 @@ data class GameSettings(
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
+            frameRateLimit = obj.optString("frame_rate_limit", "unlimited"),
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),

@@ -37,6 +37,7 @@ pub struct Emulator {
     /// [`Emulator::set_screen_size`] works whether it is called before
     /// or after [`Emulator::load_pe`]. See that method for why.
     requested_screen: Option<(u32, u32)>,
+    requested_frame_rate_limit: Option<u32>,
     pub instruction_budget_per_slice: u64,
     pub max_slices: u64,
 }
@@ -48,6 +49,7 @@ impl Emulator {
             process: None,
             dispatcher: WinCeDispatcher::new(),
             requested_screen: None,
+            requested_frame_rate_limit: None,
             instruction_budget_per_slice: 1_000_000,
             max_slices: 1024,
         }
@@ -69,6 +71,7 @@ impl Emulator {
             process: None,
             dispatcher: WinCeDispatcher::new(),
             requested_screen: None,
+            requested_frame_rate_limit: None,
             instruction_budget_per_slice: 1_000_000,
             max_slices: 1024,
         })
@@ -83,6 +86,17 @@ impl Emulator {
             } else {
                 pocket_kernel::gapi::VK_A
             };
+        }
+    }
+
+    /// Add an optional presentation ceiling without changing the guest clock.
+    /// May be called before or after loading. None retains existing display sync.
+    pub fn set_frame_rate_limit(&mut self, fps: Option<u32>) {
+        self.requested_frame_rate_limit = fps.filter(|fps| matches!(fps, 20 | 30 | 40 | 50 | 60));
+        if let Some(process) = self.process.as_mut() {
+            let clock = &mut process.state.framebuffer.directdraw;
+            clock.frame_rate_limit = self.requested_frame_rate_limit;
+            clock.pending.clear();
         }
     }
 
@@ -136,6 +150,7 @@ impl Emulator {
         if let Some((w, h)) = self.requested_screen {
             self.apply_screen_size(w, h);
         }
+        self.set_frame_rate_limit(self.requested_frame_rate_limit);
         Ok(self.process.as_ref().unwrap())
     }
 
@@ -495,6 +510,7 @@ impl Emulator {
             return;
         };
         p.state.framebuffer = pocket_kernel::Framebuffer::new(width, height);
+        p.state.framebuffer.directdraw.frame_rate_limit = self.requested_frame_rate_limit;
         // The GAPI mapping is sized from the framebuffer, so drop it;
         // the next GXOpenDisplay/GXBeginDraw re-maps at the new size.
         p.state.fb_mapped = false;
@@ -510,6 +526,20 @@ mod tests {
     #[test]
     fn stub_emulator_constructs() {
         let _ = Emulator::with_stub_cpu();
+    }
+
+    #[test]
+    fn frame_rate_limit_can_be_configured_before_loading() {
+        let mut emu = Emulator::with_stub_cpu();
+        assert_eq!(emu.requested_frame_rate_limit, None);
+        emu.set_frame_rate_limit(Some(20));
+        emu.set_screen_size(640, 480);
+        assert_eq!(emu.requested_frame_rate_limit, Some(20));
+        emu.set_frame_rate_limit(Some(0));
+        assert_eq!(emu.requested_frame_rate_limit, None);
+        emu.set_frame_rate_limit(Some(60));
+        emu.set_frame_rate_limit(None);
+        assert_eq!(emu.requested_frame_rate_limit, None);
     }
 
     #[test]

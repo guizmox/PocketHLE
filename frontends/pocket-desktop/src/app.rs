@@ -2653,6 +2653,22 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
+                ui.label("Frame rate limit");
+                crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
+                    .selected_text(draft.frame_rate_limit.label())
+                    .show_ui(ui, |ui| {
+                        for value in pocket_library::FrameRateLimit::ALL {
+                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, value, value.label());
+                        }
+                    });
+                ui.end_row();
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.set_max_width(380.0);
+                    ui.add(egui::Label::new("Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. Restart the game to apply.").wrap(true))
+                        .on_hover_text("Caps game presentations, not video recording FPS. A cap does not speed up a slow game.");
+                });
+                ui.end_row();
                 ui.label("D-pad dead zone");
                 crate::controller_ui::ComboBox::from_id_source("game_dpad_deadzone")
                     .selected_text(draft.dpad_deadzone.label())

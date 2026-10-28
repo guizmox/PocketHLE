@@ -28,6 +28,8 @@ pub const FB_BYTES: u32 = FB_WIDTH * FB_HEIGHT * (FB_BPP / 8);
 pub struct DirectDrawTiming {
     pub epoch: std::time::Instant,
     pub last_present: Option<std::time::Instant>,
+    /// Optional user ceiling, separate from the modeled LCD/vblank clock.
+    pub frame_rate_limit: Option<u32>,
     pub pending: std::collections::HashMap<(usize, u32, u32), std::time::Instant>,
     pub recent_blank: std::collections::HashMap<usize, std::time::Instant>,
     pub paced_primary_locks: std::collections::HashSet<u32>,
@@ -38,6 +40,7 @@ impl Default for DirectDrawTiming {
         Self {
             epoch: std::time::Instant::now(),
             last_present: None,
+            frame_rate_limit: None,
             pending: Default::default(),
             recent_blank: Default::default(),
             paced_primary_locks: Default::default(),
@@ -62,9 +65,23 @@ impl DirectDrawTiming {
         };
         self.epoch + std::time::Duration::from_nanos(target as u64)
     }
+    /// An optional cap does not change vblank timing, manufacture ticks, or catch up.
+    pub fn frame_limit_deadline(&self, now: std::time::Instant) -> std::time::Instant {
+        let fps = self
+            .frame_rate_limit
+            .filter(|fps| matches!(fps, 20 | 30 | 40 | 50 | 60));
+        match (fps, self.last_present) {
+            (Some(fps), Some(last)) => {
+                let nanos = 1_000_000_000u64.div_ceil(u64::from(fps));
+                (last + std::time::Duration::from_nanos(nanos)).max(now)
+            }
+            _ => now,
+        }
+    }
     pub fn present_deadline(&self, now: std::time::Instant) -> std::time::Instant {
         self.last_present
             .map_or(now, |last| (last + Self::PERIOD).max(now))
+            .max(self.frame_limit_deadline(now))
     }
     pub fn in_blank(&self, now: std::time::Instant) -> bool {
         now.saturating_duration_since(self.epoch).as_nanos() % Self::PERIOD.as_nanos()
@@ -565,5 +582,36 @@ mod display_timing_tests {
             clock.present_deadline(late),
             late + DirectDrawTiming::PERIOD
         );
+    }
+
+    #[test]
+    fn user_frame_limits_leave_vblank_unchanged_and_do_not_catch_up() {
+        let mut clock = DirectDrawTiming::default();
+        let start = clock.epoch;
+        let blank = clock.blank_deadline(start, true);
+        for fps in [20, 30, 40, 50, 60] {
+            clock.frame_rate_limit = Some(fps);
+            clock.last_present = None;
+            assert_eq!(clock.present_deadline(start), start);
+            clock.last_present = Some(start);
+            let period = std::time::Duration::from_nanos(1_000_000_000u64.div_ceil(fps as u64));
+            assert_eq!(clock.frame_limit_deadline(start), start + period);
+            assert_eq!(clock.present_deadline(start), start + period);
+            assert_eq!(clock.blank_deadline(start, true), blank);
+            let late = start + std::time::Duration::from_secs(2);
+            assert_eq!(clock.present_deadline(late), late);
+            clock.last_present = Some(late);
+            assert_eq!(clock.present_deadline(late), late + period);
+        }
+        // Unlimited/invalid values add no extra cap; existing LCD pacing remains.
+        clock.last_present = Some(start);
+        for value in [None, Some(0), Some(17), Some(u32::MAX)] {
+            clock.frame_rate_limit = value;
+            assert_eq!(clock.frame_limit_deadline(start), start);
+            assert_eq!(
+                clock.present_deadline(start),
+                start + DirectDrawTiming::PERIOD
+            );
+        }
     }
 }

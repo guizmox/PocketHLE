@@ -109,6 +109,20 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
+            findPreference<ListPreference>("frame_rate_limit")?.apply {
+                isPersistent = false
+                entries = arrayOf("Unlimited", "20 fps", "30 fps", "40 fps", "50 fps", "60 fps")
+                entryValues = arrayOf("unlimited", "20", "30", "40", "50", "60")
+                value = current.frameRateLimit
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
+                    "${pref.entry ?: "Unlimited"}. Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. Restart the game to apply."
+                }
+                setOnPreferenceChangeListener { _, newValue ->
+                    current = current.copy(frameRateLimit = newValue.toString())
+                    writeGameSettings()
+                    true
+                }
+            }
             findPreference<ListPreference>("dpad_deadzone")?.apply {
                 value = current.dpadDeadzone
                 setOnPreferenceChangeListener { _, newValue ->
@@ -179,7 +193,8 @@ class GameSettingsActivity : AppCompatActivity() {
             val gpuSaved = saved != null && saved.has("gpu_renderer") &&
                 (if (saved.isNull("gpu_renderer")) null else saved.optBoolean("gpu_renderer")) == current.gpuRenderer && saved.has("anisotropic_filtering") &&
                 (if (saved.isNull("anisotropic_filtering")) null else saved.optInt("anisotropic_filtering")) == current.anisotropicFiltering
-            if (result?.optBoolean("ok", false) != true || !gpuSaved) {
+            val frameLimitSaved = saved?.optString("frame_rate_limit", "") == current.frameRateLimit
+            if (result?.optBoolean("ok", false) != true || !gpuSaved || !frameLimitSaved) {
                 android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }
         }

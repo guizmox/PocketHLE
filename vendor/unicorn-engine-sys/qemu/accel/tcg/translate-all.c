@@ -1701,6 +1701,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     CPUArchState *env = cpu->env_ptr;
     TranslationBlock *tb, *existing_tb;
     tb_page_addr_t phys_pc, phys_page2;
+    void *host_pc = NULL, *host_page2 = NULL;
     target_ulong virt_page2;
     tcg_insn_unit *gen_code_buf;
     int gen_code_size, search_size, max_insns;
@@ -1709,7 +1710,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 #ifdef HAVE_PTHREAD_JIT_PROTECT
     tb_exec_unlock(cpu->uc);
 #endif
-    phys_pc = get_page_addr_code(env, pc);
+    phys_pc = get_page_addr_code_hostp(env, pc, &host_pc);
 
     if (phys_pc == -1) {
         /* Generate a temporary TB; do not cache */
@@ -1835,13 +1836,24 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     virt_page2 = (pc + tb->size - 1) & TARGET_PAGE_MASK;
     phys_page2 = -1;
     if ((pc & TARGET_PAGE_MASK) != virt_page2) {
-        phys_page2 = get_page_addr_code(env, virt_page2);
+        phys_page2 = get_page_addr_code_hostp(env, virt_page2, &host_page2);
     }
 
-    /* Undoes tlb_set_dirty in notdirty_write. */
-    if (!uc_mem_hook_installed(cpu->uc, tb->pc)) {
-        tlb_reset_dirty_by_vaddr(cpu, pc & TARGET_PAGE_MASK,
-                                (pc & ~TARGET_PAGE_MASK) + tb->size);
+    /* Re-arm writes when data becomes translated code. Match host backing
+     * addresses so other virtual aliases cannot retain a clean write entry.
+     * Do this even with hooks: hooks must not suppress code coherency. */
+    if (host_pc) {
+        tlb_reset_dirty(cpu, (uintptr_t)host_pc - (pc & ~TARGET_PAGE_MASK),
+                        TARGET_PAGE_SIZE);
+    } else {
+        tlb_reset_dirty_by_vaddr(cpu, pc & TARGET_PAGE_MASK, TARGET_PAGE_SIZE);
+    }
+    if ((pc & TARGET_PAGE_MASK) != virt_page2) {
+        if (host_page2) {
+            tlb_reset_dirty(cpu, (uintptr_t)host_page2, TARGET_PAGE_SIZE);
+        } else {
+            tlb_reset_dirty_by_vaddr(cpu, virt_page2, TARGET_PAGE_SIZE);
+        }
     }
 
     /*
@@ -2016,7 +2028,7 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
  *
  * Call with all @pages in the range [@start, @start + len[ locked.
  */
-void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
+bool tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
                                   tb_page_addr_t start, int len,
                                   uintptr_t retaddr)
 {
@@ -2026,7 +2038,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
 
     p = page_find(uc, start >> TARGET_PAGE_BITS);
     if (!p) {
-        return;
+        return false;
     }
 
     assert_page_locked(p);
@@ -2048,6 +2060,9 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
         tb_invalidate_phys_page_range__locked(uc, pages, p, start, start + len,
                                               retaddr);
     }
+    /* A write outside a block can leave other blocks on the same page. */
+    return p->first_tb != (uintptr_t)NULL;
+
 }
 
 /* user-mode: call with mmap_lock held */

@@ -4525,3 +4525,60 @@ An earlier deferred-execute prototype was discarded: its initial game measure
 did not demonstrate a gain. Do not restore it or alter image permissions.
 When archiving source, exclude only the root target build directory: the tracked
 vendor/unicorn-engine-sys/qemu/target directory contains required CPU sources.
+
+
+## Executable-data store experiment on fixed TLB (2026-10-28)
+
+Separate trial, not measured or validated in game. At the user's request, they
+perform tests. This trial uses the measured fixed 4096-entry cache, not the
+separate adaptive TLB experiment; do not combine performance claims.
+
+notdirty_write can clear its slow-write flag for private executable RAM only
+when no translated block remains on the whole physical page. The existing
+invalidation routine now returns that fact while its page collection is locked.
+A bitmap miss outside one block does not imply the rest of the page is code-free.
+Externally provided RAM_PREALLOC backing keeps its previous conservative policy.
+Clear only the checked translation, since another MMU mode can map the same VA
+to different physical code. Memory hooks and snapshot copy-on-write guards are
+unchanged. No PE/VirtualAlloc
+permission changes or game/PC-specific conditions are introduced.
+
+When translating code, re-arm writes against host backing addresses, including
+all virtual aliases in both main/victim TLBs, for both pages of a crossing block.
+Do not omit re-arming when hooks exist. Non-RAM code retains a virtual-address
+fallback. Existing guest self-modification invalidation and precise-SMC exits
+remain in place; this is not the abandoned deferred-execute permission prototype.
+
+Two native regression tests are supplied but not executed: data->code through a
+virtual alias followed by writes inside/outside the translated block, and
+retention of all memory-write callbacks. No FPS improvement is claimed until
+the user tests the trial. Keep the supplied fixed-TLB rollback files.
+
+
+## Optional per-game presentation ceiling (2026-10-28)
+
+GameSettings.frame_rate_limit is an enum serialized as "unlimited", "20", "30",
+"40", "50", or "60". Missing means Unlimited, preserving all existing display
+synchronization; do not remove the modeled 60 Hz LCD/vblank timing. Both game
+profiles expose it on desktop/Steam Deck/Linux and Android. Android round-trips
+this setting through the shared native JSON; recording FPS remains independent.
+
+Core remembers the request before loading and restores it after frontend screen
+replacement. Child launchers use the same per-game settings. The shared GAPI /
+DirectDraw / EGL presentation deadline combines the native cadence and the
+optional user cap. An explicit vblank credit or DDFLIP_NOVSYNC cannot bypass a
+selected cap. Primary unlocks honor it even without the native WAIT flag. No
+catch-up bursts: each deadline is based on the last completed presentation;
+slow frames are not accelerated. Use existing cooperative wait_display_until
+so workers, audio and frontend polling can continue; never sleep for the whole
+frame interval in a frontend hook. Do not pace individual GDI drawing commands
+or change GetTickCount / game camera calculations. Pure GDI and applications
+that never present through these display boundaries have no added frame cap.
+This ceiling changes presentation rate, not every independent simulation loop.
+
+Mini Kayak diagnostic observed the original camera blend retaining 95 percent
+of its previous position and taking 5 percent of the next target per update.
+300 updates at the same deterministic dt matched exactly before/after the SMC
+trial. The older engine alone changed camera following when dt changed from
+100 to33ms. No sharp 20/30fps threshold was established; 20fps is a compromise
+to try, not a validated cure. No game-specific patch or clock modification.

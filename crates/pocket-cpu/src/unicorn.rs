@@ -1244,4 +1244,78 @@ mod tests {
         map.insert(0x2000, 0x1000, true);
         assert_eq!(map.region_for(0x2000), Some(true));
     }
+    #[test]
+    fn executable_data_fast_stores_rearm_when_code_is_generated_through_an_alias() {
+        let mut uc: Unicorn<'_, ()> = Unicorn::new(UcArch::ARM, Mode::LITTLE_ENDIAN).unwrap();
+        uc.mem_map(0x1000, 0x1000, UcProt::ALL).unwrap();
+        uc.mem_map(0x100000, 0x1000, UcProt::ALL).unwrap();
+        uc.ctl_set_tlb_type(TlbType::VIRTUAL).unwrap();
+        uc.add_tlb_hook(1, 0, |_, page, _| {
+            let physical = if (0x300000..0x301000).contains(&page) {
+                0x100000 + page - 0x300000
+            } else if (0x1000..0x2000).contains(&page) || (0x100000..0x101000).contains(&page) {
+                page
+            } else {
+                return None;
+            };
+            Some(TlbEntry {
+                paddr: physical,
+                perms: UcProt::ALL,
+            })
+        })
+        .unwrap();
+        uc.mem_write(0x1000, &[0x00, 0x30, 0x81, 0xe5, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        uc.mem_write(0x100100, &[0x01, 0x00, 0xa0, 0xe3, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        uc.reg_write(RegisterARM::LR, 0x1800).unwrap();
+        // First use is data-only: a store through the alias may become fast.
+        uc.reg_write(RegisterARM::R1, 0x300100).unwrap();
+        uc.reg_write(RegisterARM::R3, 0xe3a00007).unwrap();
+        uc.emu_start(0x1000, 0x1800, 0, 0).unwrap();
+        // Generating code through another VA must re-arm the alias as well.
+        uc.emu_start(0x100100, 0x1800, 0, 0).unwrap();
+        assert_eq!(uc.reg_read(RegisterARM::R0).unwrap(), 7);
+        // A write elsewhere on this page must not hide the remaining code.
+        uc.reg_write(RegisterARM::R1, 0x300300).unwrap();
+        uc.emu_start(0x1000, 0x1800, 0, 0).unwrap();
+        uc.reg_write(RegisterARM::R1, 0x300100).unwrap();
+        uc.reg_write(RegisterARM::R3, 0xe3a00009).unwrap();
+        uc.emu_start(0x1000, 0x1800, 0, 0).unwrap();
+        uc.emu_start(0x100100, 0x1800, 0, 0).unwrap();
+        assert_eq!(uc.reg_read(RegisterARM::R0).unwrap(), 9);
+    }
+
+    #[test]
+    fn executable_data_fast_store_policy_preserves_memory_write_hooks() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.map_region(0x100000, 0x1000, Prot::ALL).unwrap();
+        let code: [u32; 4] = [0xe5813000, 0xe2500001, 0x1afffffc, 0xea0001fb];
+        let bytes: Vec<_> = code.iter().flat_map(|i| i.to_le_bytes()).collect();
+        cpu.write_mem(0x1000, &bytes).unwrap();
+        cpu.add_code_hook(0x1800).unwrap();
+        let writes = Rc::new(std::cell::Cell::new(0u32));
+        let sink = writes.clone();
+        cpu.uc
+            .add_mem_hook(
+                ::unicorn_engine::unicorn_const::HookType::MEM_WRITE,
+                0x100000,
+                0x100fff,
+                move |_, _, _, _, _| {
+                    sink.set(sink.get() + 1);
+                    true
+                },
+            )
+            .unwrap();
+        cpu.write_reg(ArmReg::R0, 8).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x100000).unwrap();
+        cpu.write_reg(ArmReg::R3, 123).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 100).unwrap(),
+            StopReason::Hook(0x1800)
+        );
+        assert_eq!(writes.get(), 8);
+        assert_eq!(cpu.read_mem(0x100000, 4).unwrap(), 123u32.to_le_bytes());
+    }
 }

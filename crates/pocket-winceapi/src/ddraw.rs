@@ -730,7 +730,9 @@ pub(crate) fn wait_display(
                             < pocket_kernel::framebuffer::DirectDrawTiming::PERIOD
                     })
                 {
-                    now
+                    // A vblank wait pays for normal LCD synchronization, but
+                    // cannot bypass a lower user-selected frame ceiling.
+                    clock.frame_limit_deadline(now)
                 } else {
                     clock.present_deadline(now)
                 }
@@ -1174,7 +1176,8 @@ fn surface_unlock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             .framebuffer
             .directdraw
             .paced_primary_locks
-            .contains(&SYNTHETIC_FRAMEBUFFER_BASE);
+            .contains(&SYNTHETIC_FRAMEBUFFER_BASE)
+            || ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some();
         if paced {
             if let Some(outcome) = wait_display(ctx, None)? {
                 return Ok(outcome);
@@ -1294,7 +1297,7 @@ fn copy_rect(
 /// Copy an explicit back buffer and publish on the modeled display cadence.
 /// DDFLIP_NOVSYNC allows a caller to opt out of the presentation wait.
 fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.arg_u32(2)? & 8 == 0 {
+    if ctx.arg_u32(2)? & 8 == 0 || ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some() {
         if let Some(outcome) = wait_display(ctx, None)? {
             return Ok(outcome);
         }
@@ -1417,6 +1420,62 @@ mod tests {
             ddraw_wait_for_vertical_blank(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(0x80070057)
         );
+    }
+
+    #[test]
+    fn user_frame_cap_survives_vblank_credit_and_cooperative_reentry() {
+        use super::*;
+        use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu};
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        use std::time::{Duration, Instant};
+        let mut cpu = StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let thunk = Thunk {
+            thunk_va: 0x70002000,
+            iat_va: 0,
+            dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("surface_flip".into()),
+            friendly_name: None,
+        };
+        cpu.write_reg(ArmReg::Sp, 0x4000).unwrap();
+        cpu.write_reg(ArmReg::R2, 8).unwrap(); // DDFLIP_NOVSYNC
+        let anchor = Instant::now() + Duration::from_secs(60);
+        let clock = &mut kernel.framebuffer.directdraw;
+        clock.frame_rate_limit = Some(20);
+        clock.last_present = Some(anchor);
+        clock.recent_blank.insert(0, Instant::now());
+        let key = (0, thunk.thunk_va, 0x4000);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                surface_flip(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(thunk.thunk_va)
+            );
+            assert_eq!(
+                ctx.kernel.framebuffer.directdraw.pending[&key],
+                anchor + Duration::from_millis(50)
+            );
+            assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 8);
+        }
+        // Completing the original deadline consumes the vblank credit once.
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .pending
+            .insert(key, Instant::now() - Duration::from_secs(1));
+        assert_eq!(wait_display(&mut ctx, None).unwrap(), None);
+        assert!(!ctx
+            .kernel
+            .framebuffer
+            .directdraw
+            .recent_blank
+            .contains_key(&0));
+        assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
     }
 
     #[test]

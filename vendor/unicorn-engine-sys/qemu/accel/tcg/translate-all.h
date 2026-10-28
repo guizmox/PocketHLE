@@ -26,7 +26,9 @@
 struct page_collection *page_collection_lock(struct uc_struct *uc, tb_page_addr_t start,
                                              tb_page_addr_t end);
 void page_collection_unlock(struct page_collection *set);
-void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
+/* Called with the page collection locked; returns whether any translated
+ * code remains anywhere on the physical page after invalidation. */
+bool tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
                                   tb_page_addr_t start, int len,
                                   uintptr_t retaddr);
 void tb_invalidate_phys_page_range(struct uc_struct *uc, tb_page_addr_t start, tb_page_addr_t end);

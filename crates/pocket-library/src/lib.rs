@@ -28,6 +28,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub mod colors_save;
+pub mod frame_rate;
+pub use frame_rate::FrameRateLimit;
 
 use rars::ArchiveReader;
 
@@ -564,6 +566,9 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
+    /// No additional ceiling by default; display synchronization remains unchanged.
+    #[serde(default)]
+    pub frame_rate_limit: FrameRateLimit,
     /// Display-relative arrows hold fixed touch zones; left-stick tilt controls position.
     #[serde(default)]
     pub pocketpc_touch_steering: bool,
@@ -700,6 +705,7 @@ impl GameSettings {
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
+            frame_rate_limit: FrameRateLimit::default(),
             pocketpc_touch_steering: false,
             pocketpc_controls: None,
             pocketpc_stylus_grid: Default::default(),

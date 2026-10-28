@@ -150,6 +150,7 @@ impl Runner {
         summary_lines.push(format!("Backend: {}", effective_backend.label()));
         summary_lines.push(format!("Executable: {}", exe.display()));
 
+        emu.set_frame_rate_limit(game.settings.frame_rate_limit.fps());
         emu.set_halt_on_unimplemented(game.settings.halt_on_unimplemented);
         emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
             library_root.join("pockethle-unimplemented-apis.log"),

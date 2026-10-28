@@ -1197,24 +1197,33 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     struct uc_struct *uc = cpu->uc;
 #endif
     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
+    bool page_has_code = true;
     MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
 
     if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
         struct page_collection *pages
             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
-        tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
+        page_has_code = tb_invalidate_phys_page_fast(cpu->uc, pages,
+                                                     ram_addr, size, retaddr);
         page_collection_unlock(pages);
     }
 
-    /* For exec pages, this is cleared in tb_gen_code. */
+    /* Executable permission alone does not imply translated code exists.
+     * Private RAM with no remaining TBs can use ordinary inline stores;
+     * tb_gen_code re-arms all aliases before publishing code. Keep externally
+     * supplied backing (mem_map_ptr) on its existing conservative path. */
     // If we:
     // - have memory hooks installed
     // - or doing snapshot
     // , then never clean the tlb
     if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
-            !(tlbe->addr_code != -1) &&
+            (tlbe->addr_code == (target_ulong)-1 ||
+             (!page_has_code && mr->ram_block &&
+              !(mr->ram_block->flags & RAM_PREALLOC))) &&
             !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
-        tlb_set_dirty(cpu, mem_vaddr);
+        /* Other MMU modes may map this VA to different physical code.
+         * Clear only the entry whose physical page was checked above. */
+        tlb_set_dirty1_locked(tlbe, mem_vaddr & TARGET_PAGE_MASK);
     }
 }
 

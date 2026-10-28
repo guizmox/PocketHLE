@@ -390,6 +390,7 @@ fn run_process(
     };
     summary_lines.push(format!("Effective backend: {}", effective_backend.label()));
 
+    emu.set_frame_rate_limit(entry.settings.frame_rate_limit.fps());
     emu.set_halt_on_unimplemented(entry.settings.halt_on_unimplemented);
     emu.max_slices = entry.settings.max_slices;
     emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
