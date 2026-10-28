@@ -42,6 +42,7 @@ pub mod colors;
 pub mod controls;
 pub mod desktop_services;
 pub mod device_identity;
+pub mod processor_info;
 pub mod device_status;
 pub mod dll_lifecycle;
 pub mod file_mapping;
@@ -1146,6 +1147,7 @@ pub struct KernelState {
     pub dynamic_exports: HashMap<u32, HashMap<String, u32>>,
     /// Original executable IAT, retained for binding native DLL data and functions together.
     pub image_imports: Vec<pocket_pe::ImportSymbol>,
+    pub gles_local_ordinals: HashMap<String, HashMap<u16,String>>,
     pub runtime_thunks: HashMap<u32, Thunk>,
     pub module_attach_frames: Vec<ModuleAttachFrame>,
     pub dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>,
@@ -1409,6 +1411,7 @@ pub struct KernelState {
     pub gapi_keys_queried: bool,
     /// Hardware action key advertised by GAPI. Legacy/Gizmondo keeps 0xD1;
     /// Pocket PC uses the physical D-pad select key VK_RETURN.
+    pub pocketpc_processor: Option<processor_info::PocketPcProcessor>,
     pub gapi_action_key: u16,
     /// Message previewed by `PeekMessageW` with PM_NOREMOVE. The next
     /// `GetMessageW` must return the same message instead of advancing
@@ -3959,7 +3962,8 @@ impl Process {
                 image_entry: img_entry,
                 dynamic_exports,
                 image_imports,
-                runtime_thunks: HashMap::new(),
+                gles_local_ordinals: HashMap::new(),
+            runtime_thunks: HashMap::new(),
                 module_attach_frames: Vec::new(),
                 dll_notification_frame: None,
                 next_module_handle: 0x1000_0001,
@@ -4041,6 +4045,7 @@ impl Process {
                 stylus_stick: Default::default(),
                 touch_steering: Default::default(),
                 gapi_keys_queried: false,
+                pocketpc_processor: None,
                 gapi_action_key: gapi::VK_A,
                 pending_message: None,
                 threads: Vec::new(),

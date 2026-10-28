@@ -4988,6 +4988,16 @@ fn map_resource_module_inner(
             return Ok(None);
         }
     };
+    let mut local_gles = crate::gles_exports::local_tables(host_path, &image)
+        .map_err(KernelError::Loader)?;
+    for (dll, table) in &local_gles {
+        if ctx.kernel.gles_local_ordinals.get(dll).is_some_and(|active| active != table) {
+            return Err(KernelError::Loader(format!("Conflicting companion GLES ordinal profiles: {dll}")));
+        }
+    }
+    for (dll,table) in &ctx.kernel.gles_local_ordinals {
+        local_gles.entry(dll.clone()).or_insert_with(||table.clone());
+    }
     let base = ctx
         .kernel
         .free_module_bases
@@ -5130,7 +5140,7 @@ fn map_resource_module_inner(
                 let friendly_name = match &import.binding {
                     pocket_pe::ImportBinding::Name(name) => Some(name.clone()),
                     pocket_pe::ImportBinding::Ordinal(ordinal) => {
-                        crate::resolve_ordinal_for_arch(&import.dll, *ordinal, ctx.cpu.arch())
+                        crate::gles_exports::resolve(&local_gles, &import.dll, *ordinal, ctx.cpu.arch())
                     }
                 };
                 let thunk = pocket_kernel::Thunk {
@@ -13226,7 +13236,30 @@ pub(crate) fn queue_window_size(kernel: &mut KernelState, hwnd: u32, w: i32, h: 
         ));
     }
 }
+/// PROCESSOR_INFO: WORDs and UTF-16 arrays, DWORD-aligned tail (576 bytes).
+fn ioctl_processor_information(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError> {
+    let Some(profile)=ctx.kernel.pocketpc_processor else {return vfs_api_bool(ctx,Err(50));};
+    if ctx.arg_u32(1)?!=0 || ctx.arg_u32(2)?!=0 {return vfs_api_bool(ctx,Err(87));}
+    let out=ctx.arg_u32(3)?;
+    let size=ctx.arg_u32(4)?;
+    let returned=ctx.arg_u32(5)?;
+    if returned!=0 && !vfs_probe_output(ctx,returned,4) {return vfs_api_bool(ctx,Err(87));}
+    if size<576 {
+        if returned!=0 {ctx.cpu.write_mem(returned,&576u32.to_le_bytes())?;}
+        return vfs_api_bool(ctx,Err(122));
+    }
+    if out==0 || !vfs_probe_output(ctx,out,576) {return vfs_api_bool(ctx,Err(87));}
+    let data=profile.encode(ctx.cpu.arch());
+    ctx.cpu.write_mem(out,&data)?;
+    if returned!=0 {ctx.cpu.write_mem(returned,&576u32.to_le_bytes())?;}
+    vfs_api_bool(ctx,Ok(()))
+}
+
 fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const IOCTL_PROCESSOR_INFORMATION:u32=0x0101_0064;
+    if ctx.arg_u32(0)?==IOCTL_PROCESSOR_INFORMATION {
+        return ioctl_processor_information(ctx);
+    }
     const IOCTL_HAL_GET_DEVICEID: u32 = 0x0101_0054;
     if ctx.arg_u32(0)? != IOCTL_HAL_GET_DEVICEID {
         return vfs_api_bool(ctx, Err(50)); // ERROR_NOT_SUPPORTED
@@ -20913,7 +20946,8 @@ fn get_system_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         // dwAllocationGranularity: WinCE reserves virtual memory in 64K
         // blocks, and guests use this to size their own pools.
         data[28..32].copy_from_slice(&65536u32.to_le_bytes());
-        data[32..34].copy_from_slice(&4u16.to_le_bytes()); // wProcessorLevel
+        let level=ctx.kernel.pocketpc_processor.map(|p|p.core_revision()).unwrap_or(4);
+        data[32..34].copy_from_slice(&level.to_le_bytes()); // wProcessorLevel
         data[34..36].copy_from_slice(&0u16.to_le_bytes()); // wProcessorRevision
         ctx.cpu.write_mem(p, &data)?;
     }
@@ -30252,6 +30286,7 @@ mod tests {
             image_entry: 0,
             dynamic_exports: std::collections::HashMap::new(),
             image_imports: Vec::new(),
+            gles_local_ordinals: std::collections::HashMap::new(),
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
             dll_notification_frame: None,
@@ -30326,6 +30361,7 @@ mod tests {
             stylus_stick: Default::default(),
             touch_steering: Default::default(),
             gapi_keys_queried: false,
+            pocketpc_processor: None,
             gapi_action_key: pocket_kernel::gapi::VK_A,
             pending_message: None,
             threads: Vec::new(),
@@ -34319,6 +34355,47 @@ mod tests {
         ctx.cpu.write_reg(ArmReg::R0,id).unwrap();ctx.cpu.write_reg(ArmReg::Sp,0x9000).unwrap();
         assert_eq!(time_kill_event(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
         assert!(ctx.kernel.multimedia_timer_joins.is_empty());
+    }
+
+    #[test]
+    fn processor_information_layout_and_all_arm_profiles() {
+        use pocket_kernel::processor_info::PocketPcProcessor;
+        let mut cpu=scanf_cpu();let mut kernel=fresh_kernel();let thunk=dummy_thunk();
+        for (id,name,level) in [("pxa270","PXA270",5),("pxa255","PXA255",5),("sa1110","SA-1110",4),("arm","ARM",5)] {
+            kernel.pocketpc_processor=PocketPcProcessor::from_id(id);
+            for (reg,value) in [(ArmReg::R0,0x01010064),(ArmReg::R1,0),(ArmReg::R2,0),(ArmReg::R3,0x2000)] {cpu.write_reg(reg,value).unwrap();}
+            cpu.write_mem(0x9000,&576u32.to_le_bytes()).unwrap();cpu.write_mem(0x9004,&0x3000u32.to_le_bytes()).unwrap();
+            cpu.write_mem(0x2240,&[0xaa;4]).unwrap();
+            let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+            assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
+            assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(),576);
+            let data=ctx.cpu.read_mem(0x2000,576).unwrap();
+            assert_eq!(u16::from_le_bytes([data[0],data[1]]),1);
+            assert_eq!(u16::from_le_bytes([data[82],data[83]]),level);
+            let actual=String::from_utf16_lossy(&data[84..164].chunks_exact(2).map(|c|u16::from_le_bytes([c[0],c[1]])).take_while(|c|*c!=0).collect::<Vec<_>>());
+            assert_eq!(actual,name);
+            assert!(data[568..576].iter().all(|v|*v==0));
+            assert_eq!(ctx.cpu.read_u32_le(0x2240).unwrap(),0xaaaaaaaa);
+        }
+    }
+    #[test]
+    fn processor_information_validates_buffers_and_does_not_enable_gizmondo() {
+        use pocket_kernel::processor_info::PocketPcProcessor;
+        let mut cpu=scanf_cpu();let mut kernel=fresh_kernel();let thunk=dummy_thunk();
+        cpu.write_reg(ArmReg::R0,0x01010064).unwrap();
+        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        ctx.kernel.pocketpc_processor=Some(PocketPcProcessor::Pxa270);
+        ctx.cpu.write_reg(ArmReg::R3,0x2000).unwrap();
+        ctx.cpu.write_mem(0x9000,&575u32.to_le_bytes()).unwrap();ctx.cpu.write_mem(0x9004,&0x3000u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x2000,&[0xaa;576]).unwrap();
+        assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(),576);
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(),0xaaaaaaaa);
+        ctx.cpu.write_mem(0x9000,&576u32.to_le_bytes()).unwrap();ctx.cpu.write_reg(ArmReg::R1,1).unwrap();
+        assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        let data=PocketPcProcessor::Pxa270.encode(pocket_cpu::Arch::Mips);
+        assert_eq!(&data[2..10],&[b'M',0,b'I',0,b'P',0,b'S',0]);
     }
 
     #[test]

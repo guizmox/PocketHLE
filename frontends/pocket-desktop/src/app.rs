@@ -2143,6 +2143,22 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
+                ui.label("PocketPC");
+                ui.label("Global device profile (all PocketPC games)");
+                ui.end_row();
+                ui.label("Processor profile");
+                crate::controller_ui::ComboBox::from_id_source("pocketpc_processor")
+                    .selected_text(match draft.pocketpc_processor.as_str() {
+                        "pxa255"=>"Intel PXA255", "sa1110"=>"StrongARM SA-1110", "arm"=>"Generic ARM", _=>"Intel PXA270 (Dell Axim X51v)",
+                    }).show_ui(ui, |ui| {
+                        for (id,label) in [("pxa270","Intel PXA270 (Dell Axim X51v)"),("pxa255","Intel PXA255"),("sa1110","StrongARM SA-1110"),("arm","Generic ARM")] {
+                            crate::controller_ui::selectable_value(ui,&mut draft.pocketpc_processor,id.to_owned(),label);
+                        }
+                    });
+                ui.end_row();
+                ui.label("");
+                ui.small("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.");
+                ui.end_row();
                 ui.label("GPU rendering");
                 crate::controller_ui::checkbox(ui, &mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
                 ui.end_row();

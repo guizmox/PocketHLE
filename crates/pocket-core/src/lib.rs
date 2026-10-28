@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 
 use pocket_cpu::{stub::StubCpu, Cpu};
 use pocket_kernel::{run_main_loop, run_main_loop_with_hook, FrameHook, Process};
-use pocket_winceapi::{resolve_ordinal_for_arch, WinCeDispatcher};
+use pocket_winceapi::WinCeDispatcher;
 
 pub use pocket_cab as cab;
 pub use pocket_cpu as cpu;
@@ -139,13 +139,16 @@ impl Emulator {
         colors_wallet::apply(&raw, &mut image).context("Colors wallet compatibility")?;
         pocket_winceapi::reset_media_backends();
         let arch = self.cpu.arch();
-        let process = Process::map_into(
+        let gles_tables = pocket_winceapi::gles_exports::local_tables(path, &image)
+            .map_err(anyhow::Error::msg)?;
+        let mut process = Process::map_into(
             image,
             self.cpu.as_mut(),
-            &|dll, ord| resolve_ordinal_for_arch(dll, ord, arch),
+            &|dll, ord| pocket_winceapi::gles_exports::resolve(&gles_tables, dll, ord, arch),
             &self.dispatcher,
         )
         .context("mapping image into CPU")?;
+        process.state.gles_local_ordinals = gles_tables;
         self.process = Some(process);
         // A frontend that sized the screen before loading gets its
         // request honoured here rather than silently dropped.
@@ -238,6 +241,15 @@ impl Emulator {
         if let Some(process) = self.process.as_mut() {
             process.state.audio.stop();
         }
+    }
+
+    /// Select the global PocketPC OEM processor identity for this process.
+    pub fn set_pocketpc_processor(&mut self, id: &str) -> Result<()> {
+        let profile=pocket_kernel::processor_info::PocketPcProcessor::from_id(id)
+            .ok_or_else(||anyhow::anyhow!("Unknown PocketPC processor profile: {id}"))?;
+        let process=self.process.as_mut().ok_or_else(||anyhow::anyhow!("No loaded process"))?;
+        process.state.pocketpc_processor=Some(profile);
+        Ok(())
     }
 
     /// Optional PocketPC shared runtime search path. Game-local paths stay first.

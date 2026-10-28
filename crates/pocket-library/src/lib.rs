@@ -930,6 +930,8 @@ fn identity_revision() -> u8 {
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default = "default_pocketpc_processor")]
+    pub pocketpc_processor: String,
     #[serde(default = "default_recording_format")]
     pub recording_format: String,
     /// Video recording JPEG quality preset: low, medium or high.
@@ -1199,9 +1201,12 @@ impl LauncherConfig {
     }
 }
 
+fn default_pocketpc_processor()->String { "pxa270".into() }
+
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            pocketpc_processor: default_pocketpc_processor(),
             recording_quality: default_recording_quality(),
             recording_format: default_recording_format(),
             device_preset_id: default_device_preset_id(),

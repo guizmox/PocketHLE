@@ -240,6 +240,12 @@ impl Runner {
         let launcher_config = pocket_library::Library::open(library_root)
             .map(|l| l.config().clone())
             .unwrap_or_default();
+        if !is_gizmondo {
+            if let Err(error)=emu.set_pocketpc_processor(&launcher_config.pocketpc_processor) {
+                log::warn!("{error}; using default PXA270 identity");
+                let _=emu.set_pocketpc_processor("pxa270");
+            }
+        }
         emu.set_gpu_renderer(
             game.settings
                 .gpu_renderer

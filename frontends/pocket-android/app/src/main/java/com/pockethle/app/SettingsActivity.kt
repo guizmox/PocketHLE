@@ -83,6 +83,20 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             val emulator = findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!
+            val pocketpc=androidx.preference.PreferenceCategory(requireContext()).apply { title="PocketPC" }
+            emulator.addPreference(pocketpc)
+            pocketpc.addPreference(ListPreference(requireContext()).apply {
+                key="pocketpc_processor"; title="Processor profile"; isPersistent=false
+                entries=arrayOf("Intel PXA270 (Dell Axim X51v)","Intel PXA255","StrongARM SA-1110","Generic ARM")
+                entryValues=arrayOf("pxa270","pxa255","sa1110","arm")
+                value=current.toJson().optString("pocketpc_processor","pxa270")
+                summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
+                dialogMessage="Identity reported to ARM PocketPC games. Applies next launch; does not change CPU speed or backend. MIPS games retain MIPS identity."
+                setOnPreferenceChangeListener { _,v ->
+                    current=current.copy(originalJson=current.toJson().put("pocketpc_processor",v.toString()).toString())
+                    writeConfig();true
+                }
+            })
             identityField(emulator, "device_preset_id", "Device name (Preset ID — WinCE)")
             identityField(emulator, "device_platform_id", "Console identifier (Platform ID — hexadecimal, WinCE)")
             identityField(giz, "gizmondo_preset_id", "Device name (Preset ID — Gizmondo)")

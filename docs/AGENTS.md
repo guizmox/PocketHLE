@@ -4904,3 +4904,33 @@ DLLs, case variants or other existing entries). Storage path containment checks
 run before creation. Gizmondo does not call PocketPC storage initialization.
 The marker is generated before guest startup on desktop/Deck/Linux/Android.
 No game-name branch, registry/registration modification or codec implementation.
+
+
+## Global PocketPC processor identity and IOCTL (2026-10-28)
+
+LauncherConfig.pocketpc_processor is a global string (default pxa270), never
+a GameSettings field. Desktop/Deck/Linux and Android global Emulator Settings
+PocketPC section expose pxa270,pxa255,sa1110,arm. Android keeps the shared key
+in originalJson and writes through the existing config pipeline. Both runners
+apply the selected profile after loading, before any PocketPC guest instruction;
+Gizmondo never enables it. Unknown config values log and use default PXA270.
+
+KernelIoControl IOCTL_PROCESSOR_INFORMATION=0x01010064 implements Microsoft's
+576-byte PROCESSOR_INFO layout: version WORD at0; UTF16 core[40] at2; core
+revision WORD at82; name[40] at84; processor revision WORD at164; catalogue[100]
+at166; vendor[100] at366; DWORD instruction flags at568 and optional clock at572.
+Input must be null/0, output writable and >=576; optional returned-size pointer
+validated, undersized output gets122 and required size, invalid pointers get87.
+Unconfigured/Gizmondo profiles keep ERROR_NOT_SUPPORTED. Unknown other IOCTLs
+and existing GET_DEVICEID remain unchanged. Silicon revision/catalogue/clock
+remain unspecified; DSP/FPU flags are not invented from an identity choice.
+For actual MIPS guest architecture the IOCTL says MIPS, regardless of ARM menu.
+The profile is descriptive, not a CPU backend/ISA/clock-speed switch.
+
+Chopper Fight's original 0x22c0c request reads the processor-name at+0x54;
+0x11080..0x110d0 checks PXA and27/28. This layout matches that original call.
+No game-name condition or executable patch. GetSystemInfo ARM processor-level
+uses the selected4/5 revision when enabled, otherwise its old value.
+Two unit tests cover all four profiles, exact offsets/bounds, short output,
+invalid input, MIPS identity and profile isolation; core no-default check passes.
+No full Windows/Android build or gameplay test has been performed.
