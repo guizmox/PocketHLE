@@ -4659,3 +4659,17 @@ tools/install-desktop-entry.sh installs a per-user launcher and hicolor PNG;
 it works from a source checkout or the Linux CI archive, which includes the
 script and icon. ELF file icons are desktop integration, not PE resources.
 The full desktop check here stops at missing GLib/GTK development packages.
+
+
+## Windows case-insensitive existence and writable copies (2026-10-28)
+
+Do not use Path::exists to infer a stored filename. On Windows, requesting
+models/vehicle.dat succeeds even when the real entry is Models/Vehicle.DAT.
+The previous resolver returned that requested lower-case path, so copy-up and
+overlay case recovery both copied the wrong spelling despite passing on Linux.
+host_path_for_mount now obtains actual directory-entry spelling for existing
+components, prefers exact entries over folded siblings, and retains requested
+spelling only for missing components. No game names or registration edits.
+Two additional regressions cover stored path spelling and exact-case sibling
+selection. All 57 VFS tests pass on Linux. Windows/gameplay are not claimed as
+executed; the stored-spelling test specifically exposes the old Windows failure.

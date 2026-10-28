@@ -912,22 +912,29 @@ impl Vfs {
                 Component::Normal(n) => {
                     let wanted = n.to_string_lossy();
                     let exact = p.join(n);
-                    if exact.exists() {
-                        p = exact;
-                    } else if let Ok(entries) = std::fs::read_dir(&p) {
-                        if let Some(entry) = entries.flatten().find(|entry| {
-                            entry
-                                .file_name()
-                                .to_string_lossy()
-                                .eq_ignore_ascii_case(&wanted)
-                        }) {
-                            p = entry.path();
-                        } else {
-                            p = exact;
+                    // exists() cannot tell us the stored spelling: on Windows
+                    // it succeeds for "vehicle.dat" when the real name is
+                    // "Vehicle.DAT". Reusing that requested spelling during
+                    // copy-up then changes the name returned by enumeration.
+                    // Use actual directory entries, preferring an exact spelling
+                    // when a case-sensitive host contains colliding names.
+                    let mut folded = None;
+                    let mut stored = None;
+                    if let Ok(entries) = std::fs::read_dir(&p) {
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            if name == n {
+                                stored = Some(entry.path());
+                                break;
+                            }
+                            if folded.is_none()
+                                && name.to_string_lossy().eq_ignore_ascii_case(&wanted)
+                            {
+                                folded = Some(entry.path());
+                            }
                         }
-                    } else {
-                        p = exact;
                     }
+                    p = stored.or(folded).unwrap_or(exact);
                 }
                 Component::CurDir => {}
                 Component::ParentDir => {
@@ -2815,6 +2822,35 @@ mod tests {
         v.mount_read_only("\\Rom\\", dir.path());
         assert!(v.open("\\Rom\\data.bin", Access::Read, false).is_some());
         assert!(v.open("\\Rom\\new.bin", Access::Write, true).is_none());
+    }
+
+    #[test]
+    fn resolved_path_reports_stored_spelling_even_on_case_insensitive_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Models")).unwrap();
+        std::fs::write(dir.path().join("Models/Vehicle.DAT"), b"asset").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", dir.path());
+        let resolved = v.resolve("\\game\\models\\vehicle.dat").unwrap();
+        // Path comparison itself is case-sensitive, even if the host filesystem
+        // accepts all case variants. This used to fail on Windows only.
+        assert_eq!(resolved.file_name().unwrap(), "Vehicle.DAT");
+        assert_eq!(resolved.parent().unwrap().file_name().unwrap(), "Models");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stored_spelling_lookup_prefers_exact_case_over_a_folded_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Vehicle.DAT"), b"upper").unwrap();
+        std::fs::write(dir.path().join("vehicle.dat"), b"lower").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("\\Game\\", dir.path());
+        // resolve uses a folded key today, so test the component resolver with
+        // the original spelling as used by writable opens/copy-up.
+        let mount = &v.mounts[0];
+        let resolved = v.host_path_for_mount(mount, "/Game/Vehicle.DAT").unwrap();
+        assert_eq!(std::fs::read(resolved).unwrap(), b"upper");
     }
 
     #[test]

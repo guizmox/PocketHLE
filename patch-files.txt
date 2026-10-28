@@ -1,1 +1,2 @@
-frontends/pocket-desktop/build.rs
+crates/pocket-kernel/src/vfs.rs
+docs/AGENTS.md
