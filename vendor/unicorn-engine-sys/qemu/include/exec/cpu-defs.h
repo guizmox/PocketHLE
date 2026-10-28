@@ -83,7 +83,11 @@ typedef uint64_t target_ulong;
 #endif
 
 #define CPU_TLB_DYN_MIN_BITS 6
-#define CPU_TLB_DYN_DEFAULT_BITS 8
+/* A flat guest can alternate frame/depth/texture buffers several MiB apart.
+ * A 256-entry direct-mapped TLB aliases those buffers, especially with ARM's
+ * 1 KiB pages. Start with 4096 entries; keep the allocation-failure minimum
+ * small so a larger preferred cache does not remove the low-memory fallback. */
+#define CPU_TLB_DYN_DEFAULT_BITS 12
 
 # if HOST_LONG_BITS == 32
 /* Make sure we do not require a double-word shift for the TLB load */

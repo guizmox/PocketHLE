@@ -1,1 +1,3 @@
-crates/pocket-core/src/cab_setup.rs
+vendor/unicorn-engine-sys/qemu/include/exec/cpu-defs.h
+vendor/unicorn-engine-sys/qemu/accel/tcg/cputlb.c
+docs/AGENTS.md

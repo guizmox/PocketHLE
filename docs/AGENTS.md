@@ -4498,3 +4498,30 @@ returned by enumeration. The registered NSX -> Integra -> nsx sequence reproduce
 its corruption message; a direct writable ROM test missed the save overlay.
 Existing lowercase overlays need a case-only rename, preserving their bytes.
 No filename, title or registration bypass belongs in the runtime fix.
+
+
+## Software-renderer TLB capacity (2026-10-28)
+
+The vendored Unicorn softmmu starts with 4096 TLB entries and ordinary shrinking
+keeps at least that preferred capacity. The hard allocation-failure minimum
+remains 64 entries. This is a host CPU translation cache, not a guest RAM or
+framebuffer allocation and not the separate translation-block jump cache.
+ARM's 1 KiB pages made buffers 2 MiB apart collide at the previous small sizes.
+No memory permission, MMU mapping, code invalidation, hook or renderer behavior
+is changed. Existing build.rs watches these C/header files for rebuilds.
+
+One headless A/B used the same locally built vendored Unicorn 2.1.5 and CLI
+binary, with only a temporary capacity selector: original initial256/min64 vs
+initial4096/min4096. The final source retains min64 for allocation failure only.
+Mini Kayak Snowfield was launched via the original WinMain command
+ARG:goNow/0,1,5,1,0,unnamed. After 60 identified scene updates, 200 updates took
+46.032796s vs 27.117476s, a 69.75% throughput increase. Host-side TLB profiling
+was disabled during timing. This single dev/headless comparison is not a
+promise of those absolute FPS in release/on Android. User gameplay validation
+and full platform CI remain separate. All temporary CLI/CPU instrumentation
+and runtime cache override were removed from production sources.
+
+An earlier deferred-execute prototype was discarded: its initial game measure
+did not demonstrate a gain. Do not restore it or alter image permissions.
+When archiving source, exclude only the root target build directory: the tracked
+vendor/unicorn-engine-sys/qemu/target directory contains required CPU sources.

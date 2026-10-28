@@ -161,7 +161,10 @@ static void tlb_mmu_resize_locked(struct uc_struct *uc, CPUTLBDesc *desc, CPUTLB
         if (expected_rate > 70) {
             ceil *= 2;
         }
-        new_size = MAX(ceil, 1 << CPU_TLB_DYN_MIN_BITS);
+        /* Preserve the preferred capacity under normal operation. A small
+         * observed working set can still have costly direct-map conflicts.
+         * Allocation failures below retain the original hard minimum. */
+        new_size = MAX(ceil, 1 << CPU_TLB_DYN_DEFAULT_BITS);
     }
 
     if (new_size == old_size) {
