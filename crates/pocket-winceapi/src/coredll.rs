@@ -2336,6 +2336,11 @@ fn resume_worker(
     switch_guest_fp(ctx, thread_index + 1)?;
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
+    // Charge the worker's quantum from this handoff, not from the previous
+    // main-thread poll. Audio servicing or a blocking message pump may have
+    // consumed that old deadline before this worker executed anything.
+    ctx.kernel.worker_preempt_after_ms =
+        monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
 
     log::debug!(
         "scheduling worker thread {} at 0x{:08x}",
@@ -2412,6 +2417,11 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
     switch_guest_fp(ctx, thread_index + 1)?;
     write_guest_regs(ctx.cpu, &worker_regs)?;
     ctx.kernel.current_thread = thread_index + 1;
+    // Charge the worker's quantum from this handoff, not from the previous
+    // main-thread poll. Audio servicing or a blocking message pump may have
+    // consumed that old deadline before this worker executed anything.
+    ctx.kernel.worker_preempt_after_ms =
+        monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
 
     log::debug!(
         "scheduling worker thread {} at 0x{:08x} from a blocking wait",
@@ -2469,6 +2479,8 @@ fn resume_ready_worker_after_sleep(
     switch_guest_fp(ctx, index + 1)?;
     write_guest_regs(ctx.cpu, &regs)?;
     ctx.kernel.current_thread = index + 1;
+    ctx.kernel.worker_preempt_after_ms =
+        monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
     Ok(Some(DispatchOutcome::JumpTo(regs[15] & !1)))
 }
 
@@ -23324,6 +23336,7 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 fn wave_out_close(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     ctx.kernel.wave_out.live_loops.remove(&h);
+    ctx.kernel.wave_out.loop_pcm_bytes.remove(&h);
     retire_wave_buffers_for(ctx, h)?;
     ctx.kernel.audio.close_wave_stream(h);
     wave_out_notify(ctx, h, MM_WOM_CLOSE, 0, 0);
@@ -23357,6 +23370,7 @@ fn wave_out_break_loop(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 fn wave_out_reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     ctx.kernel.wave_out.live_loops.remove(&h);
+    ctx.kernel.wave_out.loop_pcm_bytes.remove(&h);
     ctx.kernel.audio.reset_wave_stream(h);
     if let Some(d) = ctx.kernel.wave_out.devices.get_mut(&h) {
         d.paused = false;
@@ -23481,22 +23495,24 @@ fn wave_pcm_samples(bytes: &[u8], bits: u16) -> Vec<i16> {
 /// Copy live mixer memory only on the emulator thread. cpal/Android render
 /// host-owned PCM and never touch Cpu or guest pointers from their threads.
 fn refresh_wave_loops(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
-    let sources: Vec<_> = ctx
-        .kernel
-        .wave_out
-        .live_loops
-        .iter()
-        .map(|(&h, &v)| (h, v))
-        .collect();
-    for (handle, source) in sources {
-        let Some(device) = ctx.kernel.wave_out.devices.get(&handle) else {
+    let wave = &mut ctx.kernel.wave_out;
+    for (&handle, source) in &wave.live_loops {
+        let Some(device) = wave.devices.get(&handle) else {
             continue;
         };
         let bits = device.format.bits_per_sample;
-        let bytes = ctx.cpu.read_mem(source.data, source.bytes)?;
-        let samples = wave_pcm_samples(&bytes, bits);
-
-        ctx.kernel.audio.update_wave_loop(handle, samples);
+        wave.loop_pcm_readback.resize(source.bytes as usize, 0);
+        ctx.cpu
+            .read_mem_into(source.data, &mut wave.loop_pcm_readback)?;
+        let previous = wave.loop_pcm_bytes.entry(handle).or_default();
+        // Still inspect every byte on every poll: mixers can overwrite DMA
+        // rings without another waveOut call (including silence to stop a SFX).
+        // Only decoding/replacing identical host PCM is redundant.
+        if *previous != wave.loop_pcm_readback {
+            let samples = wave_pcm_samples(&wave.loop_pcm_readback, bits);
+            ctx.kernel.audio.update_wave_loop(handle, samples);
+            std::mem::swap(previous, &mut wave.loop_pcm_readback);
+        }
     }
     Ok(())
 }
@@ -23560,6 +23576,7 @@ fn wave_out_write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
                     bytes: n_bytes,
                 },
             );
+            ctx.kernel.wave_out.loop_pcm_bytes.insert(h, bytes);
         } else {
             ctx.kernel.audio.push_wave_samples(h, &samples);
         }
@@ -23645,6 +23662,7 @@ fn retire_completed_wave_buffers(ctx: &mut CallCtx<'_>) -> Result<(), KernelErro
                 == Some(buffer.hdr)
             {
                 ctx.kernel.wave_out.live_loops.remove(&buffer.handle);
+                ctx.kernel.wave_out.loop_pcm_bytes.remove(&buffer.handle);
             }
             retire_wave_buffer(ctx, buffer.handle, buffer.hdr)?;
         } else {
@@ -37025,6 +37043,45 @@ mod tests {
     }
 
     #[test]
+    fn worker_handoffs_start_a_fresh_quantum_after_main_work() {
+        for path in 0..3 {
+            let mut cpu = StubCpu::new();
+            let mut kernel = fresh_kernel();
+            let thunk = dummy_thunk();
+            let mut main = std::array::from_fn(|i| 0x5000 + i as u32 * 4);
+            main[15] = 0x5010;
+            main[16] = 0x10;
+            let mut worker = GuestThread::new(
+                0x10000, 0, 0x20000, 0x1000, 0x30000, main[15], 0xdead7c00, main,
+            );
+            worker.started = true;
+            worker.worker_saved = true;
+            worker.worker_regs[15] = 0x10000;
+            worker.worker_regs[16] = 0x10;
+            kernel.threads.push(worker);
+            write_guest_regs(&mut cpu, &main).unwrap();
+            // Simulate main work outlasting the preceding scheduling quantum.
+            kernel.worker_preempt_after_ms = 0;
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let before = monotonic_ms();
+            let result = match path {
+                0 => resume_worker(&mut ctx, 77),
+                1 => resume_worker_reenter(&mut ctx),
+                _ => resume_ready_worker_after_sleep(&mut ctx),
+            }
+            .unwrap();
+            assert_eq!(result, Some(DispatchOutcome::JumpTo(0x10000)));
+            assert_eq!(ctx.kernel.current_thread, 1);
+            assert!(ctx.kernel.worker_preempt_after_ms >= before + timer_poll_interval(ctx.kernel));
+            assert!(!ctx.kernel.threads[0].worker_saved);
+        }
+    }
+
+    #[test]
     fn audio_worker_preemption_retries_api_without_losing_args_flags_or_fp() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -37077,6 +37134,75 @@ mod tests {
         );
         assert_eq!(read_guest_regs(ctx.cpu).unwrap(), interrupted);
         assert_eq!(ctx.cpu.read_fpscr().unwrap(), 0x00800012);
+    }
+
+    #[test]
+    fn live_wave_pcm_cache_detects_eight_bit_changes_and_reuses_readback() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let format = pocket_kernel::audio::GuestFormat {
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: 8,
+        };
+        kernel.audio.open_wave_stream(1, format);
+        kernel.wave_out.devices.insert(
+            1,
+            pocket_kernel::WaveOutDevice {
+                format,
+                callback_kind: WaveCallbackKind::None,
+                callback_target: 0,
+                instance: 0,
+                owner_thread: 0,
+                paused: false,
+            },
+        );
+        kernel.audio.queue_wave_loop(1, vec![0; 4], u32::MAX);
+        kernel.wave_out.live_loops.insert(
+            1,
+            pocket_kernel::LiveWaveLoop {
+                hdr: 0,
+                data: 0x1000,
+                bytes: 4,
+            },
+        );
+        cpu.write_mem(0x1000, &[128; 4]).unwrap();
+        let tap = kernel.audio.tap();
+        tap.drain_into(&mut []);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        refresh_wave_loops(&mut ctx).unwrap();
+        refresh_wave_loops(&mut ctx).unwrap(); // warm both reusable buffers
+        let cache_pointer = ctx.kernel.wave_out.loop_pcm_bytes[&1].as_ptr();
+        let scratch_pointer = ctx.kernel.wave_out.loop_pcm_readback.as_ptr();
+        refresh_wave_loops(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.kernel.wave_out.loop_pcm_bytes[&1].as_ptr(),
+            cache_pointer
+        );
+        assert_eq!(
+            ctx.kernel.wave_out.loop_pcm_readback.as_ptr(),
+            scratch_pointer
+        );
+        ctx.cpu.write_mem(0x1000, &[129; 4]).unwrap();
+        refresh_wave_loops(&mut ctx).unwrap();
+        let mut out = [0; 4];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [256; 4]);
+        // An in-place clear must be observed even without waveOutWrite.
+        ctx.cpu.write_mem(0x1000, &[128; 4]).unwrap();
+        refresh_wave_loops(&mut ctx).unwrap();
+        tap.drain_into(&mut out);
+        assert_eq!(out, [0; 4]);
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        wave_out_close(&mut ctx).unwrap();
+        assert!(!ctx.kernel.wave_out.loop_pcm_bytes.contains_key(&1));
     }
 
     #[test]
@@ -37134,6 +37260,19 @@ mod tests {
             run(wave_out_write, [H, HDR, 32], &mut cpu, &mut kernel),
             DispatchOutcome::ReturnedR0(0)
         );
+        assert_eq!(kernel.wave_out.loop_pcm_bytes.get(&H).unwrap(), &[0; 8]);
+        let cached_pointer = kernel.wave_out.loop_pcm_bytes[&H].as_ptr();
+        let written = kernel.audio.wave_written_samples(H);
+        for _ in 0..3 {
+            refresh_wave_loops(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            })
+            .unwrap();
+        }
+        assert_eq!(kernel.wave_out.loop_pcm_bytes[&H].as_ptr(), cached_pointer);
+        assert_eq!(kernel.audio.wave_written_samples(H), written);
         assert_eq!(cpu.read_mem(HDR + 16, 4).unwrap(), 0x1eu32.to_le_bytes());
         let mut initial = [1; 4];
         tap.drain_into(&mut initial);
@@ -37167,6 +37306,7 @@ mod tests {
         );
         run(wave_out_reset, [H, 0, 0], &mut cpu, &mut kernel);
         assert!(kernel.wave_out.live_loops.is_empty());
+        assert!(kernel.wave_out.loop_pcm_bytes.is_empty());
         assert!(kernel.wave_out.pending.is_empty());
         let flags = u32::from_le_bytes(cpu.read_mem(HDR + 16, 4).unwrap().try_into().unwrap());
         assert_eq!(flags & WHDR_INQUEUE, 0);

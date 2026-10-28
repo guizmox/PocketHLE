@@ -465,6 +465,10 @@ pub struct WaveOutState {
     /// Independently opened WinMM output handles.
     pub devices: HashMap<u32, WaveOutDevice>,
     pub live_loops: HashMap<u32, LiveWaveLoop>,
+    /// Last PCM bytes decoded for each live, guest-writable wave ring.
+    pub loop_pcm_bytes: HashMap<u32, Vec<u8>>,
+    /// Reused readback storage; unchanged rings require no PCM allocation.
+    pub loop_pcm_readback: Vec<u8>,
     /// Monotonic allocator for synthetic HWAVEOUT values.
     pub next_handle: u32,
     pub callback_kind: WaveCallbackKind,
