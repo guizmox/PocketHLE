@@ -68,8 +68,6 @@
     <string name="pref_screen_title">Screen geometry</string>
     <string name="pref_rotation_title">Rotate display</string>
     <string name="pref_rotation_summary">Turn the picture without changing what the game thinks its screen is. Use 90° for a landscape game that only renders correctly at 240x320.</string>
-    <string name="pref_halt_unimpl_title">Halt on unimplemented API</string>
-    <string name="pref_halt_unimpl_summary">Stop the emulator the first time the guest hits an API that PocketHLE has not yet implemented.</string>
 
     <string-array name="cpu_backend_entries">
         <item>Stub (safe)</item>

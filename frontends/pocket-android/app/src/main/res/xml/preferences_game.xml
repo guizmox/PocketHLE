@@ -14,6 +14,5 @@
         <Preference android:title="No per-game sound options yet." android:selectable="false" android:persistent="false" />
     </PreferenceCategory>
     <PreferenceCategory android:key="misc_category" android:title="Misc">
-        <SwitchPreferenceCompat android:key="halt_on_unimplemented" android:title="@string/pref_halt_unimpl_title" android:summary="@string/pref_halt_unimpl_summary" android:defaultValue="false" />
     </PreferenceCategory>
 </PreferenceScreen>

@@ -5,7 +5,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceFragmentCompat
-import androidx.preference.SwitchPreferenceCompat
 import org.json.JSONObject
 
 /** Per-game settings sheet. */
@@ -111,8 +110,8 @@ class GameSettingsActivity : AppCompatActivity() {
             }
             findPreference<ListPreference>("frame_rate_limit")?.apply {
                 isPersistent = false
-                entries = arrayOf("Unlimited", "20 fps", "30 fps", "40 fps", "50 fps", "60 fps")
-                entryValues = arrayOf("unlimited", "20", "30", "40", "50", "60")
+                entries = arrayOf("Unlimited", "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps")
+                entryValues = arrayOf("unlimited", "10", "15", "20", "30", "45", "60")
                 value = current.frameRateLimit
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
                     "${pref.entry ?: "Unlimited"}. Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. GAPI / DirectDraw / OpenGL ES; GDI-only drawing is not capped. Restart the game to apply."
@@ -166,14 +165,7 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
-            findPreference<SwitchPreferenceCompat>("halt_on_unimplemented")?.apply {
-                isChecked = current.haltOnUnimplemented
-                setOnPreferenceChangeListener { _, newValue ->
-                    current = current.copy(haltOnUnimplemented = newValue as Boolean)
-                    writeGameSettings()
-                    true
-                }
-            }
+
         }
 
         private fun readGameSettings(): GameSettings? {

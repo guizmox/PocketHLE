@@ -53,7 +53,6 @@ data class GameSettings(
     val cpuBackend: String, // "stub" or "unicorn"
     val maxSlices: Long,
     val instructionsPerSlice: Long,
-    val haltOnUnimplemented: Boolean,
     val screen: String,
     /**
      * Mirrors `pocket_library::RotationPref`: `"none"`, `"cw90"`,
@@ -84,7 +83,7 @@ data class GameSettings(
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
         put("instructions_per_slice", instructionsPerSlice)
-        put("halt_on_unimplemented", haltOnUnimplemented)
+        remove("halt_on_unimplemented")
         put("screen", screen)
         put("rotation", rotation)
         put("pocketpc_touch_steering", pocketpcTouchSteering)
@@ -107,7 +106,6 @@ data class GameSettings(
             cpuBackend = "unicorn",
             maxSlices = 50_000_000L,
             instructionsPerSlice = 1_000_000L,
-            haltOnUnimplemented = false,
             screen = "portrait",
             rotation = "none",
         )
@@ -116,7 +114,6 @@ data class GameSettings(
             cpuBackend = obj.optString("cpu_backend", "unicorn"),
             maxSlices = obj.optLong("max_slices", 50_000_000L),
             instructionsPerSlice = obj.optLong("instructions_per_slice", 1_000_000L),
-            haltOnUnimplemented = obj.optBoolean("halt_on_unimplemented", false),
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),

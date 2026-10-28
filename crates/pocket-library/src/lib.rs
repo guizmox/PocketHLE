@@ -599,10 +599,6 @@ pub struct GameSettings {
     /// Instructions per slice budget passed to the CPU.
     #[serde(default = "default_instructions_per_slice")]
     pub instructions_per_slice: u64,
-    /// If true, the run loop halts as soon as an unimplemented API
-    /// is encountered (great for debugging).
-    #[serde(default)]
-    pub halt_on_unimplemented: bool,
     /// Emulated display geometry. Smartphone builds are shipped for a
     /// specific screen and query it once at start-up, so a landscape
     /// title rendered into a portrait framebuffer comes out clipped.
@@ -717,7 +713,6 @@ impl Default for GameSettings {
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
             instructions_per_slice: default_instructions_per_slice(),
-            halt_on_unimplemented: false,
             screen: ScreenPref::default(),
             rotation: RotationPref::default(),
             dpad_deadzone: DpadDeadzone::default(),

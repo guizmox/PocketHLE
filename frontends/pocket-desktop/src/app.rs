@@ -2781,9 +2781,6 @@ impl PocketLauncher {
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_id, "Device default");
                     ui.end_row();
                 }
-                ui.label("Halt on unimplemented API");
-                crate::controller_ui::checkbox(ui, &mut draft.halt_on_unimplemented, "");
-                ui.end_row();
             });
 
         // Satellite libraries are not a setting — they are a fact about

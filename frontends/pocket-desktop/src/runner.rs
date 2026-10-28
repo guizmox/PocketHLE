@@ -151,7 +151,6 @@ impl Runner {
         summary_lines.push(format!("Executable: {}", exe.display()));
 
         emu.set_frame_rate_limit(game.settings.frame_rate_limit.fps());
-        emu.set_halt_on_unimplemented(game.settings.halt_on_unimplemented);
         emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
             library_root.join("pockethle-unimplemented-apis.log"),
             game.display_name.clone(),
@@ -1189,7 +1188,6 @@ mod launcher_return_tests {
         let mut settings = pocket_library::GameSettings::default();
         settings.cpu_backend = CpuBackendPref::Unicorn;
         settings.max_slices = 3_000_000;
-        settings.halt_on_unimplemented = true;
         let game = GameEntry {
             platform: None,
             id: "probe".into(),
@@ -1265,7 +1263,6 @@ mod launcher_return_tests {
         let mut settings = pocket_library::GameSettings::default();
         settings.cpu_backend = CpuBackendPref::Unicorn;
         settings.max_slices = 3_000_000;
-        settings.halt_on_unimplemented = true;
         let game = GameEntry {
             platform: None,
             id: "probe".into(),

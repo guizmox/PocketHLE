@@ -4607,3 +4607,22 @@ Touch controls remain PocketPC-only. Screen/GPU/filter/FPS/rotation are Graphics
 identity and API diagnostics are Misc. Sound has a noninteractive placeholder.
 Android reuses the XML categories for dynamic controls/identity, without duplicate
 categories or a second preferences store. Existing controller widgets/IDs stay.
+
+
+## Revised FPS scale (2026-10-28)
+
+The per-game menu now offers Unlimited (unchanged default),10,15,20,30,45,60.
+Rust/Android/core/display validation agree. No migration of the unreleased40/50
+settings is provided, as requested by the user. Existing
+Unicorn optimizations and retained/explicit presentation waits stay unchanged.
+No new Mini Kayak gameplay test or camera-specific patch.
+
+
+## Remove GUI halt-on-missing-API option (2026-10-28)
+
+GameSettings no longer stores halt_on_unimplemented. Old JSON keys are ignored;
+Kotlin removes the obsolete key when saving its preserved original JSON. The
+control, listener and resources are removed from Android and desktop per-game
+UI. There is no global GUI halt switch in this source tree. GUI/JNI launch paths
+no longer enable the dispatcher's halt mode from legacy settings. CLI explicit
+diagnostics / kernel API remain separate. Missing-API logging is unchanged.

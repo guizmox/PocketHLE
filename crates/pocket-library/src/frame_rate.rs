@@ -6,35 +6,39 @@ pub enum FrameRateLimit {
     #[default]
     #[serde(rename = "unlimited")]
     Unlimited,
+    #[serde(rename = "10")]
+    Fps10,
+    #[serde(rename = "15")]
+    Fps15,
     #[serde(rename = "20")]
     Fps20,
     #[serde(rename = "30")]
     Fps30,
-    #[serde(rename = "40")]
-    Fps40,
-    #[serde(rename = "50")]
-    Fps50,
+    #[serde(rename = "45")]
+    Fps45,
     #[serde(rename = "60")]
     Fps60,
 }
 
 impl FrameRateLimit {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Unlimited,
+        Self::Fps10,
+        Self::Fps15,
         Self::Fps20,
         Self::Fps30,
-        Self::Fps40,
-        Self::Fps50,
+        Self::Fps45,
         Self::Fps60,
     ];
 
     pub fn fps(self) -> Option<u32> {
         match self {
             Self::Unlimited => None,
+            Self::Fps10 => Some(10),
+            Self::Fps15 => Some(15),
             Self::Fps20 => Some(20),
             Self::Fps30 => Some(30),
-            Self::Fps40 => Some(40),
-            Self::Fps50 => Some(50),
+            Self::Fps45 => Some(45),
             Self::Fps60 => Some(60),
         }
     }
@@ -42,10 +46,11 @@ impl FrameRateLimit {
     pub fn label(self) -> &'static str {
         match self {
             Self::Unlimited => "Unlimited",
+            Self::Fps10 => "10 fps",
+            Self::Fps15 => "15 fps",
             Self::Fps20 => "20 fps",
             Self::Fps30 => "30 fps",
-            Self::Fps40 => "40 fps",
-            Self::Fps50 => "50 fps",
+            Self::Fps45 => "45 fps",
             Self::Fps60 => "60 fps",
         }
     }
@@ -61,6 +66,16 @@ mod tests {
         let old: GameSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.frame_rate_limit, FrameRateLimit::Unlimited);
         assert_eq!(old.frame_rate_limit.fps(), None);
+    }
+
+    #[test]
+    fn legacy_halt_setting_cannot_be_reenabled_by_old_game_json() {
+        let settings: GameSettings =
+            serde_json::from_str(r#"{"halt_on_unimplemented":true}"#).unwrap();
+        assert!(serde_json::to_value(settings)
+            .unwrap()
+            .get("halt_on_unimplemented")
+            .is_none());
     }
 
     #[test]

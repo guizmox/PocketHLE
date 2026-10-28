@@ -92,7 +92,8 @@ impl Emulator {
     /// Add an optional presentation ceiling without changing the guest clock.
     /// May be called before or after loading. None retains existing display sync.
     pub fn set_frame_rate_limit(&mut self, fps: Option<u32>) {
-        self.requested_frame_rate_limit = fps.filter(|fps| matches!(fps, 20 | 30 | 40 | 50 | 60));
+        self.requested_frame_rate_limit =
+            fps.filter(|fps| matches!(fps, 10 | 15 | 20 | 30 | 45 | 60));
         if let Some(process) = self.process.as_mut() {
             let clock = &mut process.state.framebuffer.directdraw;
             clock.frame_rate_limit = self.requested_frame_rate_limit;

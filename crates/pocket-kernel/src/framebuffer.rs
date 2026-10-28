@@ -69,7 +69,7 @@ impl DirectDrawTiming {
     pub fn frame_limit_deadline(&self, now: std::time::Instant) -> std::time::Instant {
         let fps = self
             .frame_rate_limit
-            .filter(|fps| matches!(fps, 20 | 30 | 40 | 50 | 60));
+            .filter(|fps| matches!(fps, 10 | 15 | 20 | 30 | 45 | 60));
         match (fps, self.last_present) {
             (Some(fps), Some(last)) => {
                 let nanos = 1_000_000_000u64.div_ceil(u64::from(fps));
@@ -589,7 +589,7 @@ mod display_timing_tests {
         let mut clock = DirectDrawTiming::default();
         let start = clock.epoch;
         let blank = clock.blank_deadline(start, true);
-        for fps in [20, 30, 40, 50, 60] {
+        for fps in [10, 15, 20, 30, 45, 60] {
             clock.frame_rate_limit = Some(fps);
             clock.last_present = None;
             assert_eq!(clock.present_deadline(start), start);
