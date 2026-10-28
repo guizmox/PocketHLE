@@ -249,6 +249,12 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile private var pendingImportToken: Long? = null
 
+    private fun showImportError(message:String) {
+        if(isFinishing || isDestroyed)return
+        AlertDialog.Builder(this).setTitle("Import failed")
+            .setMessage(message).setPositiveButton(android.R.string.ok,null).show()
+    }
+
     private fun handleImport(uri: Uri) {
         if (libraryBusy) return
         setLibraryBusy("Importing games…")
@@ -283,11 +289,7 @@ class MainActivity : AppCompatActivity() {
                     showPreparedImport(raw)
                 },
                 onFailure = { err ->
-                    Snackbar.make(
-                        recycler,
-                        getString(R.string.import_failed, err.message ?: "unknown"),
-                        Snackbar.LENGTH_LONG,
-                    ).show()
+                    showImportError(err.message ?: "Unknown error")
                 },
             )
         }
@@ -322,7 +324,7 @@ class MainActivity : AppCompatActivity() {
                         result.onSuccess { showPreparedImport(it) }.onFailure { error ->
                             NativeBridge.cancelPreparedImport(rootDir, token)
                             pendingImportToken = null
-                            Snackbar.make(recycler, error.message ?: "Import failed", Snackbar.LENGTH_LONG).show()
+                            showImportError(error.message ?: "Unknown error")
                         }
                     }
                 }
@@ -349,7 +351,7 @@ class MainActivity : AppCompatActivity() {
                     NativeBridge.cancelPreparedImport(rootDir, token)
                     pendingImportToken = null
                     setLibraryBusy(null)
-                    Snackbar.make(recycler, error.message ?: "Import failed", Snackbar.LENGTH_LONG).show()
+                    showImportError(error.message ?: "Unknown error")
                 }
             }
             AlertDialog.Builder(this).setTitle("Choose game platform")
@@ -420,11 +422,7 @@ class MainActivity : AppCompatActivity() {
             }
             val obj = JSONObject(raw)
             if (!obj.optBoolean("ok", true)) {
-                Snackbar.make(
-                    recycler,
-                    getString(R.string.import_failed, obj.optString("error")),
-                    Snackbar.LENGTH_LONG,
-                ).show()
+                showImportError(obj.optString("error"))
                 return
             }
             val name = obj.optString("display_name", obj.optString("id", "?"))

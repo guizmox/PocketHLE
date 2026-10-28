@@ -206,6 +206,7 @@ pub struct PocketLauncher {
     /// while the run is in progress.
     running_game: Option<String>,
     status: String,
+    import_error: Option<String>,
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
     last_frame_texture: Option<egui::TextureHandle>,
@@ -758,6 +759,7 @@ impl PocketLauncher {
             pointer_down_at: None,
             running_game: None,
             status: String::new(),
+            import_error: None,
             config_draft: None,
             game_settings_draft: None,
             last_frame_texture: None,
@@ -880,6 +882,7 @@ impl PocketLauncher {
                     self.updating_import = false;
                     self.library_busy = false;
                     self.status = format!("Import failed: {e}");
+                    if e != "cancelled" { self.import_error = Some(e); }
                     self.reload_library();
                 }
                 UiEvent::DemoSplitFinished(id, result) => {
@@ -4932,6 +4935,23 @@ impl eframe::App for PocketLauncher {
             self.recordings_gallery.close_player();
         }
         self.drain_events(ctx);
+        if let Some(error) = self.import_error.clone() {
+            egui::CentralPanel::default().show(ctx, |_| {});
+            let mut open = true;
+            let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            egui::Window::new("Import failed")
+                .open(&mut open).collapsible(false).resizable(true)
+                .default_width(440.0)
+                .max_width((ctx.screen_rect().width()-32.0).max(100.0))
+                .max_height((ctx.screen_rect().height()-32.0).max(100.0))
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| { ui.label(&error); });
+                    if crate::controller_ui::button(ui, "Close").clicked() { close = true; }
+                });
+            if close || !open { self.import_error = None; }
+            return;
+        }
         if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
             let mut r = self.recording.lock().unwrap_or_else(|e| e.into_inner());
             if r.active() {

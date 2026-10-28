@@ -3310,6 +3310,32 @@ fn is_desktop_cab_bundle(path: &Path) -> Result<bool, LibraryError> {
     if archive.len() > 4096 {
         return Ok(false);
     }
+    // InstallShield sets include arbitrary support files, unlike loose CE CAB
+    // bundles. Recognize a real header/volume pair before the strict loose-file
+    // classifier; filenames alone are not evidence of this container format.
+    let mut is_headers = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.is_dir() || !entry.name().to_ascii_lowercase().ends_with(".hdr") {
+            continue;
+        }
+        let mut signature = [0u8; 4];
+        if entry.read(&mut signature)? == 4 && signature == *b"ISc(" {
+            is_headers.push(entry.name().to_owned());
+        }
+    }
+    for header in is_headers {
+        let volume = format!("{}.cab", &header[..header.len()-4]);
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index)?;
+            if entry.name().eq_ignore_ascii_case(&volume) {
+                let mut signature = [0u8; 4];
+                if entry.read(&mut signature)? == 4 && signature == *b"ISc(" {
+                    return Ok(true);
+                }
+            }
+        }
+    }
     let mut cabinets = 0;
     for index in 0..archive.len() {
         let mut entry = archive
@@ -4681,6 +4707,27 @@ mod tests {
             game.gizmondo_card_root(root.path()),
             game.extracted_dir(root.path())
         );
+    }
+
+    #[test]
+    fn installshield_bundle_with_support_files_uses_cabinet_import() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        for valid in [false, true] {
+            let path = root.path().join(if valid { "real.zip" } else { "names-only.zip" });
+            let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            for (name, bytes) in [
+                ("wrapper/DATA.TAG", b"support".as_slice()),
+                ("wrapper/_Setup.dll", b"support".as_slice()),
+                ("wrapper/data1.hdr", if valid { b"ISc(".as_slice() } else { b"fake".as_slice() }),
+                ("wrapper/data1.cab", b"ISc(".as_slice()),
+            ] {
+                zip.start_file(name, zip::write::FileOptions::default()).unwrap();
+                zip.write_all(bytes).unwrap();
+            }
+            zip.finish().unwrap();
+            assert_eq!(is_desktop_cab_bundle(&path).unwrap(), valid);
+        }
     }
 
     #[test]
