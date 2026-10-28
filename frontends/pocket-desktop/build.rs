@@ -6,8 +6,11 @@ fn main() {
             "AmdPowerXpressRequestHighPerformance",
         ];
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-            for symbol in exports {
-                println!("cargo:rustc-link-arg-bins=/EXPORT:{symbol},DATA");
+            // Diagnostic binaries do not define these launcher-only symbols.
+            for binary in ["pockethle-gui", "pockethle-steamdeck"] {
+                for symbol in exports {
+                    println!("cargo:rustc-link-arg-bin={binary}=/EXPORT:{symbol},DATA");
+                }
             }
         } else {
             let definition = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
@@ -20,7 +23,9 @@ fn main() {
                 ),
             )
             .unwrap();
-            println!("cargo:rustc-link-arg-bins={}", definition.display());
+            for binary in ["pockethle-gui", "pockethle-steamdeck"] {
+                println!("cargo:rustc-link-arg-bin={binary}={}", definition.display());
+            }
         }
         winres::WindowsResource::new()
             .set_icon("assets/pockethle.ico")

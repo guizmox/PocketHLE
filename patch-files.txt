@@ -1,16 +1,1 @@
-.github/workflows/ci.yml
-Cargo.lock
-crates/pocket-kernel/Cargo.toml
-crates/pocket-kernel/src/shell_menu.rs
-crates/pocket-kernel/src/vfs.rs
-crates/pocket-kernel/src/vfs_contract.rs
-docs/AGENTS.md
-frontends/pocket-desktop/Cargo.toml
-frontends/pocket-desktop/assets/pockethle-256.png
-frontends/pocket-desktop/assets/pockethle.ico
 frontends/pocket-desktop/build.rs
-frontends/pocket-desktop/src/app.rs
-frontends/pocket-desktop/src/desktop_main.rs
-frontends/pocket-desktop/src/host_gpu.rs
-patch-files.txt
-tools/install-desktop-entry.sh
