@@ -5738,9 +5738,29 @@ fn memcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         scratch.resize(len, 0);
     }
     ctx.cpu.read_mem_into(src, &mut scratch[..len])?;
-    ctx.cpu.write_mem(dst, &scratch[..len])?;
+    // GXMark retains its GAPI pointer and presents complete offscreen copies.
+    // Pace this atomic transfer before writing, never scanlines or individual
+    // drawing operations. Reentry rereads the source after workers have run.
+    if complete_gapi_transfer(ctx, dst, len)
+        && ctx.kernel.framebuffer.directdraw.primary_locks.is_empty()
+        && ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some()
+        && ctx.kernel.mem_op_scratch[..len] != ctx.kernel.framebuffer.pixels
+    {
+        if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
+            return Ok(outcome);
+        }
+    }
+    ctx.cpu.write_mem(dst, &ctx.kernel.mem_op_scratch[..len])?;
     sync_direct_framebuffer_write(ctx, dst, len)?;
     Ok(DispatchOutcome::ReturnedR0(dst))
+}
+
+fn complete_gapi_transfer(ctx: &CallCtx<'_>, dst: u32, len: usize) -> bool {
+    ctx.kernel.fb_mapped
+        && dst == SYNTHETIC_FRAMEBUFFER_BASE
+        && len == ctx.kernel.framebuffer.pixels.len()
+        && (ctx.kernel.guest_fb_pitch == 0
+            || ctx.kernel.guest_fb_pitch == ctx.kernel.framebuffer.stride_bytes())
 }
 
 fn sync_direct_framebuffer_write(
@@ -5755,11 +5775,7 @@ fn sync_direct_framebuffer_write(
     // Keep suppressing scanline copies and raw CPU polling during a draw;
     // neither identifies a completed transfer. Padded displays need a
     // row-aware commit and must not take this packed-buffer path.
-    let complete_gapi_transfer = ctx.kernel.fb_mapped
-        && dst == SYNTHETIC_FRAMEBUFFER_BASE
-        && len == ctx.kernel.framebuffer.pixels.len()
-        && (ctx.kernel.guest_fb_pitch == 0
-            || ctx.kernel.guest_fb_pitch == ctx.kernel.framebuffer.stride_bytes());
+    let complete_gapi_transfer = complete_gapi_transfer(ctx, dst, len);
     if (ctx.kernel.gx_draw_active && !complete_gapi_transfer)
         || !ctx.kernel.framebuffer.directdraw.primary_locks.is_empty()
     {
@@ -5787,6 +5803,9 @@ fn sync_direct_framebuffer_write(
         // Tell the run loop the guest announces its own frames, so it
         // can stop polling for plain stores it will never find.
         ctx.kernel.direct_fb_frames = ctx.kernel.direct_fb_frames.saturating_add(1);
+        if complete_gapi_transfer && ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some() {
+            ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+        }
     }
     Ok(())
 }
@@ -34899,6 +34918,42 @@ mod tests {
             local_free(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(new_p)
         );
+    }
+
+    #[test]
+    fn held_gapi_complete_transfers_obey_frame_cap() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let t = dummy_thunk();
+        let base = SYNTHETIC_FRAMEBUFFER_BASE;
+        let source = 0x10000;
+        cpu.map_region(base, 0x30000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(source, 0x30000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        kernel.fb_mapped = true;
+        kernel.gx_draw_active = true;
+        kernel.framebuffer.directdraw.frame_rate_limit = Some(20);
+        let len = kernel.framebuffer.byte_size() as usize;
+        cpu.write_reg(ArmReg::R0, base).unwrap();
+        cpu.write_reg(ArmReg::R1, source).unwrap();
+        cpu.write_reg(ArmReg::R2, len as u32).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &t,
+        };
+        let start = std::time::Instant::now();
+        let before = ctx.kernel.framebuffer.frame_counter;
+        for value in 1..=4 {
+            ctx.cpu.write_mem(source, &vec![value; len]).unwrap();
+            while memcpy(&mut ctx).unwrap() != DispatchOutcome::ReturnedR0(base) {}
+            assert_eq!(ctx.kernel.framebuffer.pixels, vec![value; len]);
+        }
+        assert!(start.elapsed() >= std::time::Duration::from_millis(150));
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 4);
+        assert_eq!(memcpy(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(base));
+        assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
     }
 
     #[test]
