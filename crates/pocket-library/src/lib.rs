@@ -1201,7 +1201,9 @@ impl LauncherConfig {
     }
 }
 
-fn default_pocketpc_processor()->String { "pxa270".into() }
+fn default_pocketpc_processor() -> String {
+    "pxa270".into()
+}
 
 impl Default for LauncherConfig {
     fn default() -> Self {
@@ -3330,7 +3332,7 @@ fn is_desktop_cab_bundle(path: &Path) -> Result<bool, LibraryError> {
         }
     }
     for header in is_headers {
-        let volume = format!("{}.cab", &header[..header.len()-4]);
+        let volume = format!("{}.cab", &header[..header.len() - 4]);
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
             if entry.name().eq_ignore_ascii_case(&volume) {
@@ -4719,15 +4721,25 @@ mod tests {
         use std::io::Write;
         let root = tempfile::tempdir().unwrap();
         for valid in [false, true] {
-            let path = root.path().join(if valid { "real.zip" } else { "names-only.zip" });
+            let path = root
+                .path()
+                .join(if valid { "real.zip" } else { "names-only.zip" });
             let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
             for (name, bytes) in [
                 ("wrapper/DATA.TAG", b"support".as_slice()),
                 ("wrapper/_Setup.dll", b"support".as_slice()),
-                ("wrapper/data1.hdr", if valid { b"ISc(".as_slice() } else { b"fake".as_slice() }),
+                (
+                    "wrapper/data1.hdr",
+                    if valid {
+                        b"ISc(".as_slice()
+                    } else {
+                        b"fake".as_slice()
+                    },
+                ),
                 ("wrapper/data1.cab", b"ISc(".as_slice()),
             ] {
-                zip.start_file(name, zip::write::FileOptions::default()).unwrap();
+                zip.start_file(name, zip::write::FileOptions::default())
+                    .unwrap();
                 zip.write_all(bytes).unwrap();
             }
             zip.finish().unwrap();

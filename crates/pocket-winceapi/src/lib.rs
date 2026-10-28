@@ -38,6 +38,7 @@ mod directshow;
 pub mod dlgtemplate;
 pub mod game_dlls;
 pub mod gles;
+pub mod gles_exports;
 mod gps;
 pub mod gx;
 pub mod hss;

@@ -245,10 +245,13 @@ impl Emulator {
 
     /// Select the global PocketPC OEM processor identity for this process.
     pub fn set_pocketpc_processor(&mut self, id: &str) -> Result<()> {
-        let profile=pocket_kernel::processor_info::PocketPcProcessor::from_id(id)
-            .ok_or_else(||anyhow::anyhow!("Unknown PocketPC processor profile: {id}"))?;
-        let process=self.process.as_mut().ok_or_else(||anyhow::anyhow!("No loaded process"))?;
-        process.state.pocketpc_processor=Some(profile);
+        let profile = pocket_kernel::processor_info::PocketPcProcessor::from_id(id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown PocketPC processor profile: {id}"))?;
+        let process = self
+            .process
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No loaded process"))?;
+        process.state.pocketpc_processor = Some(profile);
         Ok(())
     }
 

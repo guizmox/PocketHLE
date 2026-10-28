@@ -2522,7 +2522,10 @@ fn resume_ready_worker_after_sleep(
 pub(crate) fn wake_due_worker(
     ctx: &mut CallCtx<'_>,
 ) -> Result<Option<DispatchOutcome>, KernelError> {
-    if ctx.kernel.current_thread != 0 && ctx.kernel.wave_out.live_loops.is_empty() && ctx.kernel.multimedia_timers.is_empty() {
+    if ctx.kernel.current_thread != 0
+        && ctx.kernel.wave_out.live_loops.is_empty()
+        && ctx.kernel.multimedia_timers.is_empty()
+    {
         return Ok(None);
     }
     let now = monotonic_ms();
@@ -4241,7 +4244,9 @@ fn global_memory_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     // Quota-managed profiles above retain their separate device accounting.
     let total = ctx.kernel.heap.capacity_bytes();
     let available = ctx.kernel.heap.free_bytes().min(total);
-    let load = if total == 0 { 0 } else {
+    let load = if total == 0 {
+        0
+    } else {
         (u64::from(total - available) * 100 / u64::from(total)) as u32
     };
     let private_free = ctx.kernel.heap.private_virtual_free();
@@ -4250,7 +4255,16 @@ fn global_memory_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     } else {
         (total, available)
     };
-    let values = [32, load, total, available, 0, 0, virtual_total, virtual_free];
+    let values = [
+        32,
+        load,
+        total,
+        available,
+        0,
+        0,
+        virtual_total,
+        virtual_free,
+    ];
     let mut data = [0u8; 32];
     for (i, value) in values.into_iter().enumerate() {
         data[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
@@ -4988,15 +5002,24 @@ fn map_resource_module_inner(
             return Ok(None);
         }
     };
-    let mut local_gles = crate::gles_exports::local_tables(host_path, &image)
-        .map_err(KernelError::Loader)?;
+    let mut local_gles =
+        crate::gles_exports::local_tables(host_path, &image).map_err(KernelError::Loader)?;
     for (dll, table) in &local_gles {
-        if ctx.kernel.gles_local_ordinals.get(dll).is_some_and(|active| active != table) {
-            return Err(KernelError::Loader(format!("Conflicting companion GLES ordinal profiles: {dll}")));
+        if ctx
+            .kernel
+            .gles_local_ordinals
+            .get(dll)
+            .is_some_and(|active| active != table)
+        {
+            return Err(KernelError::Loader(format!(
+                "Conflicting companion GLES ordinal profiles: {dll}"
+            )));
         }
     }
-    for (dll,table) in &ctx.kernel.gles_local_ordinals {
-        local_gles.entry(dll.clone()).or_insert_with(||table.clone());
+    for (dll, table) in &ctx.kernel.gles_local_ordinals {
+        local_gles
+            .entry(dll.clone())
+            .or_insert_with(|| table.clone());
     }
     let base = ctx
         .kernel
@@ -5139,9 +5162,12 @@ fn map_resource_module_inner(
                 let address = thunk_base + index as u32 * pocket_kernel::THUNK_STRIDE;
                 let friendly_name = match &import.binding {
                     pocket_pe::ImportBinding::Name(name) => Some(name.clone()),
-                    pocket_pe::ImportBinding::Ordinal(ordinal) => {
-                        crate::gles_exports::resolve(&local_gles, &import.dll, *ordinal, ctx.cpu.arch())
-                    }
+                    pocket_pe::ImportBinding::Ordinal(ordinal) => crate::gles_exports::resolve(
+                        &local_gles,
+                        &import.dll,
+                        *ordinal,
+                        ctx.cpu.arch(),
+                    ),
                 };
                 let thunk = pocket_kernel::Thunk {
                     thunk_va: address,
@@ -13237,27 +13263,39 @@ pub(crate) fn queue_window_size(kernel: &mut KernelState, hwnd: u32, w: i32, h: 
     }
 }
 /// PROCESSOR_INFO: WORDs and UTF-16 arrays, DWORD-aligned tail (576 bytes).
-fn ioctl_processor_information(ctx:&mut CallCtx<'_>)->Result<DispatchOutcome,KernelError> {
-    let Some(profile)=ctx.kernel.pocketpc_processor else {return vfs_api_bool(ctx,Err(50));};
-    if ctx.arg_u32(1)?!=0 || ctx.arg_u32(2)?!=0 {return vfs_api_bool(ctx,Err(87));}
-    let out=ctx.arg_u32(3)?;
-    let size=ctx.arg_u32(4)?;
-    let returned=ctx.arg_u32(5)?;
-    if returned!=0 && !vfs_probe_output(ctx,returned,4) {return vfs_api_bool(ctx,Err(87));}
-    if size<576 {
-        if returned!=0 {ctx.cpu.write_mem(returned,&576u32.to_le_bytes())?;}
-        return vfs_api_bool(ctx,Err(122));
+fn ioctl_processor_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let Some(profile) = ctx.kernel.pocketpc_processor else {
+        return vfs_api_bool(ctx, Err(50));
+    };
+    if ctx.arg_u32(1)? != 0 || ctx.arg_u32(2)? != 0 {
+        return vfs_api_bool(ctx, Err(87));
     }
-    if out==0 || !vfs_probe_output(ctx,out,576) {return vfs_api_bool(ctx,Err(87));}
-    let data=profile.encode(ctx.cpu.arch());
-    ctx.cpu.write_mem(out,&data)?;
-    if returned!=0 {ctx.cpu.write_mem(returned,&576u32.to_le_bytes())?;}
-    vfs_api_bool(ctx,Ok(()))
+    let out = ctx.arg_u32(3)?;
+    let size = ctx.arg_u32(4)?;
+    let returned = ctx.arg_u32(5)?;
+    if returned != 0 && !vfs_probe_output(ctx, returned, 4) {
+        return vfs_api_bool(ctx, Err(87));
+    }
+    if size < 576 {
+        if returned != 0 {
+            ctx.cpu.write_mem(returned, &576u32.to_le_bytes())?;
+        }
+        return vfs_api_bool(ctx, Err(122));
+    }
+    if out == 0 || !vfs_probe_output(ctx, out, 576) {
+        return vfs_api_bool(ctx, Err(87));
+    }
+    let data = profile.encode(ctx.cpu.arch());
+    ctx.cpu.write_mem(out, &data)?;
+    if returned != 0 {
+        ctx.cpu.write_mem(returned, &576u32.to_le_bytes())?;
+    }
+    vfs_api_bool(ctx, Ok(()))
 }
 
 fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    const IOCTL_PROCESSOR_INFORMATION:u32=0x0101_0064;
-    if ctx.arg_u32(0)?==IOCTL_PROCESSOR_INFORMATION {
+    const IOCTL_PROCESSOR_INFORMATION: u32 = 0x0101_0064;
+    if ctx.arg_u32(0)? == IOCTL_PROCESSOR_INFORMATION {
         return ioctl_processor_information(ctx);
     }
     const IOCTL_HAL_GET_DEVICEID: u32 = 0x0101_0054;
@@ -19543,11 +19581,24 @@ const CREATE_SUSPENDED: u32 = 0x4;
 
 fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let _security_attributes = ctx.arg_u32(0)?;
-    let args=[ctx.arg_u32(1)?,ctx.arg_u32(2)?,ctx.arg_u32(3)?,ctx.arg_u32(4)?,ctx.arg_u32(5)?];
-    create_guest_thread(ctx,args[0],args[1],args[2],args[3],args[4])
+    let args = [
+        ctx.arg_u32(1)?,
+        ctx.arg_u32(2)?,
+        ctx.arg_u32(3)?,
+        ctx.arg_u32(4)?,
+        ctx.arg_u32(5)?,
+    ];
+    create_guest_thread(ctx, args[0], args[1], args[2], args[3], args[4])
 }
 
-fn create_guest_thread(ctx: &mut CallCtx<'_>, stack_size:u32, entry:u32, parameter:u32, creation_flags:u32, thread_id_out:u32) -> Result<DispatchOutcome, KernelError> {
+fn create_guest_thread(
+    ctx: &mut CallCtx<'_>,
+    stack_size: u32,
+    entry: u32,
+    parameter: u32,
+    creation_flags: u32,
+    thread_id_out: u32,
+) -> Result<DispatchOutcome, KernelError> {
     let stack_size = stack_size.max(0x1000);
     if entry == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -20946,7 +20997,11 @@ fn get_system_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         // dwAllocationGranularity: WinCE reserves virtual memory in 64K
         // blocks, and guests use this to size their own pools.
         data[28..32].copy_from_slice(&65536u32.to_le_bytes());
-        let level=ctx.kernel.pocketpc_processor.map(|p|p.core_revision()).unwrap_or(4);
+        let level = ctx
+            .kernel
+            .pocketpc_processor
+            .map(|p| p.core_revision())
+            .unwrap_or(4);
         data[32..34].copy_from_slice(&level.to_le_bytes()); // wProcessorLevel
         data[34..36].copy_from_slice(&0u16.to_le_bytes()); // wProcessorRevision
         ctx.cpu.write_mem(p, &data)?;
@@ -24521,118 +24576,171 @@ fn timer_poll_interval(kernel: &KernelState) -> u64 {
 // Stack identity separates that scheduler continuation from nested guest API calls.
 fn multimedia_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
-    let Some(id) = ctx.kernel.multimedia_timers.iter().find_map(|(id,t)| {
-        (t.worker == ctx.kernel.current_thread && t.thunk == ctx.thunk.thunk_va
-            && sp == if t.in_callback { t.worker_sp-8 } else { t.worker_sp }).then_some(*id)
-    }) else { return Ok(None); };
+    let Some(id) = ctx.kernel.multimedia_timers.iter().find_map(|(id, t)| {
+        (t.worker == ctx.kernel.current_thread
+            && t.thunk == ctx.thunk.thunk_va
+            && sp
+                == if t.in_callback {
+                    t.worker_sp - 8
+                } else {
+                    t.worker_sp
+                })
+        .then_some(*id)
+    }) else {
+        return Ok(None);
+    };
     let mut timer = ctx.kernel.multimedia_timers[&id].clone();
     if timer.in_callback {
-        ctx.cpu.write_reg(ArmReg::Sp,timer.worker_sp)?;
-        ctx.cpu.write_reg(ArmReg::Cpsr,timer.cpsr)?;
-        timer.in_callback=false;
-        if timer.flags & 1 == 0 { timer.cancelled=true; }
+        ctx.cpu.write_reg(ArmReg::Sp, timer.worker_sp)?;
+        ctx.cpu.write_reg(ArmReg::Cpsr, timer.cpsr)?;
+        timer.in_callback = false;
+        if timer.flags & 1 == 0 {
+            timer.cancelled = true;
+        }
     }
-    let exit = ctx.kernel.threads[timer.worker-1].exit_va;
-    ctx.cpu.write_reg(ArmReg::Lr,exit)?;
+    let exit = ctx.kernel.threads[timer.worker - 1].exit_va;
+    ctx.cpu.write_reg(ArmReg::Lr, exit)?;
     if timer.cancelled {
         ctx.kernel.multimedia_timers.remove(&id);
-        ctx.cpu.write_reg(ArmReg::R0,0)?;
+        ctx.cpu.write_reg(ArmReg::R0, 0)?;
         return Ok(Some(DispatchOutcome::JumpTo(exit)));
     }
-    let now=monotonic_ms();
+    let now = monotonic_ms();
     if now < timer.deadline {
-        ctx.kernel.threads[timer.worker-1].sleep_until_ms=timer.deadline;
-        ctx.kernel.multimedia_timers.insert(id,timer);
-        let outcome=park_worker_at(ctx,None,Some(ctx.thunk.thunk_va))?;
+        ctx.kernel.threads[timer.worker - 1].sleep_until_ms = timer.deadline;
+        ctx.kernel.multimedia_timers.insert(id, timer);
+        let outcome = park_worker_at(ctx, None, Some(ctx.thunk.thunk_va))?;
         // This is a deadline wait, not a GetMessage wait requiring a message.
-        ctx.kernel.threads[ctx.kernel.multimedia_timers[&id].worker-1].parked_in_pump=false;
+        ctx.kernel.threads[ctx.kernel.multimedia_timers[&id].worker - 1].parked_in_pump = false;
         return Ok(outcome);
     }
-    let delay=u64::from(timer.delay);
-    timer.deadline=timer.deadline.saturating_add(((now-timer.deadline)/delay+1)*delay);
+    let delay = u64::from(timer.delay);
+    timer.deadline = timer
+        .deadline
+        .saturating_add(((now - timer.deadline) / delay + 1) * delay);
     // Event callbacks use the existing event object, not a guest function address.
     if timer.flags & 0x30 != 0 {
-        let key=event_key(ctx.kernel,timer.callback);
-        if let Some(mut event)=ctx.kernel.events.get_mut(&key) { event.signalled=true; }
-        if timer.flags & 1 == 0 { timer.cancelled=true; }
-        ctx.kernel.multimedia_timers.insert(id,timer);
+        let key = event_key(ctx.kernel, timer.callback);
+        if let Some(mut event) = ctx.kernel.events.get_mut(&key) {
+            event.signalled = true;
+        }
+        if timer.flags & 1 == 0 {
+            timer.cancelled = true;
+        }
+        ctx.kernel.multimedia_timers.insert(id, timer);
         return Ok(Some(DispatchOutcome::JumpTo(ctx.thunk.thunk_va)));
     }
-    ctx.cpu.write_mem(timer.worker_sp-8,&[0u8;8])?;
-    ctx.cpu.write_reg(ArmReg::Sp,timer.worker_sp-8)?;
-    for (reg,value) in [(ArmReg::R0,id),(ArmReg::R1,0),(ArmReg::R2,timer.user),(ArmReg::R3,0)] {
-        ctx.cpu.write_reg(reg,value)?;
+    ctx.cpu.write_mem(timer.worker_sp - 8, &[0u8; 8])?;
+    ctx.cpu.write_reg(ArmReg::Sp, timer.worker_sp - 8)?;
+    for (reg, value) in [
+        (ArmReg::R0, id),
+        (ArmReg::R1, 0),
+        (ArmReg::R2, timer.user),
+        (ArmReg::R3, 0),
+    ] {
+        ctx.cpu.write_reg(reg, value)?;
     }
-    ctx.cpu.write_reg(ArmReg::Lr,timer.thunk)?;
-    let cpsr=(timer.cpsr & !(1<<5)) | ((timer.callback & 1)<<5);
-    ctx.cpu.write_reg(ArmReg::Cpsr,cpsr)?;
-    timer.in_callback=true;
-    let callback=timer.callback & !1;
-    ctx.kernel.multimedia_timers.insert(id,timer);
+    ctx.cpu.write_reg(ArmReg::Lr, timer.thunk)?;
+    let cpsr = (timer.cpsr & !(1 << 5)) | ((timer.callback & 1) << 5);
+    ctx.cpu.write_reg(ArmReg::Cpsr, cpsr)?;
+    timer.in_callback = true;
+    let callback = timer.callback & !1;
+    ctx.kernel.multimedia_timers.insert(id, timer);
     Ok(Some(DispatchOutcome::JumpTo(callback)))
 }
 
 fn time_set_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if let Some(outcome)=multimedia_worker(ctx)? { return Ok(outcome); }
-    let delay=ctx.arg_u32(0)?;
-    let _resolution=ctx.arg_u32(1)?;
-    let callback=ctx.arg_u32(2)?;
-    let user=ctx.arg_u32(3)?;
-    let flags=ctx.arg_u32(4)?;
+    if let Some(outcome) = multimedia_worker(ctx)? {
+        return Ok(outcome);
+    }
+    let delay = ctx.arg_u32(0)?;
+    let _resolution = ctx.arg_u32(1)?;
+    let callback = ctx.arg_u32(2)?;
+    let user = ctx.arg_u32(3)?;
+    let flags = ctx.arg_u32(4)?;
     // The worker callback ABI below is ARM/Thumb. Reject other architectures
     // explicitly until their five-argument callback frame is implemented.
     if ctx.cpu.arch()!=pocket_cpu::Arch::Arm || !(TIMER_MIN_PERIOD..=TIMER_MAX_PERIOD).contains(&delay)
         || callback==0 || flags & !0x131 != 0 || flags & 0x30 == 0x30
         || flags & 0x20 != 0 // PulseEvent needs waiter-only pulse semantics.
-        || ctx.kernel.multimedia_timers.len()>=64 {
+        || ctx.kernel.multimedia_timers.len()>=64
+    {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if flags & 0x10 != 0 && !ctx.kernel.events.contains_key(&event_key(ctx.kernel,callback)) {
+    if flags & 0x10 != 0
+        && !ctx
+            .kernel
+            .events
+            .contains_key(&event_key(ctx.kernel, callback))
+    {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let index=ctx.kernel.threads.len();
-    let thunk=ctx.thunk.thunk_va;
-    let result=create_guest_thread(ctx,0,thunk,0,0,0)?;
-    if !matches!(result,DispatchOutcome::ReturnedR0(handle) if handle!=0) { return Ok(result); }
-    let thread=&ctx.kernel.threads[index];
-    let id=thread.id;
-    let timer=pocket_kernel::MultimediaTimer {
-        worker:index+1, worker_sp:thread.worker_regs[13], cpsr:thread.worker_regs[16],
-        thunk:ctx.thunk.thunk_va, callback,user,delay,flags,
-        deadline:monotonic_ms().saturating_add(u64::from(delay)),cancelled:false,in_callback:false,
+    let index = ctx.kernel.threads.len();
+    let thunk = ctx.thunk.thunk_va;
+    let result = create_guest_thread(ctx, 0, thunk, 0, 0, 0)?;
+    if !matches!(result,DispatchOutcome::ReturnedR0(handle) if handle!=0) {
+        return Ok(result);
+    }
+    let thread = &ctx.kernel.threads[index];
+    let id = thread.id;
+    let timer = pocket_kernel::MultimediaTimer {
+        worker: index + 1,
+        worker_sp: thread.worker_regs[13],
+        cpsr: thread.worker_regs[16],
+        thunk: ctx.thunk.thunk_va,
+        callback,
+        user,
+        delay,
+        flags,
+        deadline: monotonic_ms().saturating_add(u64::from(delay)),
+        cancelled: false,
+        in_callback: false,
     };
-    ctx.kernel.multimedia_timers.insert(id,timer);
-    if let DispatchOutcome::ReturnedR0(handle)=result {
+    ctx.kernel.multimedia_timers.insert(id, timer);
+    if let DispatchOutcome::ReturnedR0(handle) = result {
         ctx.kernel.object_handles.close(handle);
-        ctx.kernel.threads[index].handle_closed=true;
+        ctx.kernel.threads[index].handle_closed = true;
     }
     Ok(DispatchOutcome::ReturnedR0(id))
 }
 
 fn time_kill_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let id=ctx.arg_u32(0)?;
-    let key=(ctx.kernel.current_thread,ctx.thunk.thunk_va,ctx.cpu.read_reg(ArmReg::Sp)?);
-    let joining=ctx.kernel.multimedia_timer_joins.get(&key)==Some(&id);
-    let Some(timer)=ctx.kernel.multimedia_timers.get_mut(&id) else {
+    let id = ctx.arg_u32(0)?;
+    let key = (
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        ctx.cpu.read_reg(ArmReg::Sp)?,
+    );
+    let joining = ctx.kernel.multimedia_timer_joins.get(&key) == Some(&id);
+    let Some(timer) = ctx.kernel.multimedia_timers.get_mut(&id) else {
         ctx.kernel.multimedia_timer_joins.remove(&key);
-        return Ok(DispatchOutcome::ReturnedR0(if joining {0} else {11}));
+        return Ok(DispatchOutcome::ReturnedR0(if joining { 0 } else { 11 }));
     };
-    if timer.cancelled && !joining { return Ok(DispatchOutcome::ReturnedR0(11)); }
-    timer.cancelled=true;
-    let wait=timer.flags & 0x100 != 0 && timer.in_callback && timer.worker!=ctx.kernel.current_thread;
-    let worker=timer.worker;
-    if !timer.in_callback { ctx.kernel.threads[worker-1].sleep_until_ms=0; }
+    if timer.cancelled && !joining {
+        return Ok(DispatchOutcome::ReturnedR0(11));
+    }
+    timer.cancelled = true;
+    let wait =
+        timer.flags & 0x100 != 0 && timer.in_callback && timer.worker != ctx.kernel.current_thread;
+    let worker = timer.worker;
+    if !timer.in_callback {
+        ctx.kernel.threads[worker - 1].sleep_until_ms = 0;
+    }
     if !wait {
         ctx.kernel.multimedia_timer_joins.remove(&key);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    ctx.kernel.multimedia_timer_joins.insert(key,id);
-    if let Some(index)=ctx.kernel.current_thread.checked_sub(1) {
-        ctx.kernel.threads[index].sleep_until_ms=monotonic_ms()+1;
-        let outcome=park_worker_at(ctx,None,Some(ctx.thunk.thunk_va))?;
-        ctx.kernel.threads[index].parked_in_pump=false;
-        if let Some(outcome)=outcome { return Ok(outcome); }
-    } else if let Some(outcome)=resume_worker_reenter(ctx)? { return Ok(outcome); }
+    ctx.kernel.multimedia_timer_joins.insert(key, id);
+    if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
+        ctx.kernel.threads[index].sleep_until_ms = monotonic_ms() + 1;
+        let outcome = park_worker_at(ctx, None, Some(ctx.thunk.thunk_va))?;
+        ctx.kernel.threads[index].parked_in_pump = false;
+        if let Some(outcome) = outcome {
+            return Ok(outcome);
+        }
+    } else if let Some(outcome) = resume_worker_reenter(ctx)? {
+        return Ok(outcome);
+    }
     std::thread::sleep(std::time::Duration::from_millis(1));
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
 }
@@ -34276,55 +34384,79 @@ mod tests {
         assert_eq!(ram.snapshot().program_used, 0);
     }
 
-    fn setup_multimedia_timer(flags:u32) -> (StubCpu,KernelState,pocket_kernel::Thunk,u32) {
-        let mut cpu=scanf_cpu();
-        let mut kernel=fresh_kernel();
-        let thunk=thunk_at(0x70001000);
-        cpu.write_reg(ArmReg::R0,10).unwrap();
-        cpu.write_reg(ArmReg::R1,0).unwrap();
-        cpu.write_reg(ArmReg::R2,0x12341).unwrap(); // Thumb callback
-        cpu.write_reg(ArmReg::R3,0xabcdef).unwrap();
-        cpu.write_reg(ArmReg::Lr,0x2000).unwrap();
-        cpu.write_mem(0x9000,&flags.to_le_bytes()).unwrap();
-        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        let DispatchOutcome::ReturnedR0(id)=time_set_event(&mut ctx).unwrap() else {panic!()};
-        assert_ne!(id,0);
-        (cpu,kernel,thunk,id)
+    fn setup_multimedia_timer(flags: u32) -> (StubCpu, KernelState, pocket_kernel::Thunk, u32) {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70001000);
+        cpu.write_reg(ArmReg::R0, 10).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x12341).unwrap(); // Thumb callback
+        cpu.write_reg(ArmReg::R3, 0xabcdef).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x2000).unwrap();
+        cpu.write_mem(0x9000, &flags.to_le_bytes()).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let DispatchOutcome::ReturnedR0(id) = time_set_event(&mut ctx).unwrap() else {
+            panic!()
+        };
+        assert_ne!(id, 0);
+        (cpu, kernel, thunk, id)
     }
     #[test]
     fn multimedia_timer_callback_abi_periodic_and_cancel() {
-        let (mut cpu,mut kernel,thunk,id)=setup_multimedia_timer(1);
-        let timer=kernel.multimedia_timers[&id].clone();
-        assert_eq!(kernel.current_thread,0); // timer creation does not hijack creator
-        kernel.current_thread=timer.worker;
-        kernel.multimedia_timers.get_mut(&id).unwrap().deadline=0;
-        cpu.write_reg(ArmReg::Sp,timer.worker_sp).unwrap();
-        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        assert_eq!(time_set_event(&mut ctx).unwrap(),DispatchOutcome::JumpTo(0x12340));
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(),id);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(),0);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(),0xabcdef);
-        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(),0);
-        assert_eq!(ctx.cpu.read_u32_le(timer.worker_sp-8).unwrap(),0);
-        assert_ne!(ctx.cpu.read_reg(ArmReg::Cpsr).unwrap() & 32,0);
+        let (mut cpu, mut kernel, thunk, id) = setup_multimedia_timer(1);
+        let timer = kernel.multimedia_timers[&id].clone();
+        assert_eq!(kernel.current_thread, 0); // timer creation does not hijack creator
+        kernel.current_thread = timer.worker;
+        kernel.multimedia_timers.get_mut(&id).unwrap().deadline = 0;
+        cpu.write_reg(ArmReg::Sp, timer.worker_sp).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            time_set_event(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x12340)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), id);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), 0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), 0xabcdef);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 0);
+        assert_eq!(ctx.cpu.read_u32_le(timer.worker_sp - 8).unwrap(), 0);
+        assert_ne!(ctx.cpu.read_reg(ArmReg::Cpsr).unwrap() & 32, 0);
         // Callback return parks at the next deadline, with SP/T-state restored.
         time_set_event(&mut ctx).unwrap();
         assert!(!ctx.kernel.multimedia_timers[&id].in_callback);
-        assert_eq!(ctx.kernel.current_thread,0);
-        ctx.cpu.write_reg(ArmReg::R0,id).unwrap();
-        assert_eq!(time_kill_event(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        ctx.kernel.current_thread=timer.worker;
-        ctx.cpu.write_reg(ArmReg::Sp,timer.worker_sp).unwrap();
-        assert_eq!(time_set_event(&mut ctx).unwrap(),DispatchOutcome::JumpTo(ctx.kernel.threads[timer.worker-1].exit_va));
+        assert_eq!(ctx.kernel.current_thread, 0);
+        ctx.cpu.write_reg(ArmReg::R0, id).unwrap();
+        assert_eq!(
+            time_kill_event(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.kernel.current_thread = timer.worker;
+        ctx.cpu.write_reg(ArmReg::Sp, timer.worker_sp).unwrap();
+        assert_eq!(
+            time_set_event(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(ctx.kernel.threads[timer.worker - 1].exit_va)
+        );
         assert!(!ctx.kernel.multimedia_timers.contains_key(&id));
     }
     #[test]
     fn multimedia_timer_oneshot_is_removed_after_callback() {
-        let (mut cpu,mut kernel,thunk,id)=setup_multimedia_timer(0);
-        let timer=kernel.multimedia_timers[&id].clone();
-        kernel.current_thread=timer.worker;kernel.multimedia_timers.get_mut(&id).unwrap().deadline=0;
-        cpu.write_reg(ArmReg::Sp,timer.worker_sp).unwrap();
-        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        let (mut cpu, mut kernel, thunk, id) = setup_multimedia_timer(0);
+        let timer = kernel.multimedia_timers[&id].clone();
+        kernel.current_thread = timer.worker;
+        kernel.multimedia_timers.get_mut(&id).unwrap().deadline = 0;
+        cpu.write_reg(ArmReg::Sp, timer.worker_sp).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         time_set_event(&mut ctx).unwrap();
         assert!(ctx.kernel.multimedia_timers[&id].in_callback);
         time_set_event(&mut ctx).unwrap();
@@ -34332,70 +34464,135 @@ mod tests {
     }
     #[test]
     fn multimedia_timer_invalid_delay_or_pulse_does_not_create_thread() {
-        for (delay,flags) in [(0,0),(65536,0),(10,0x20),(10,0x8000)] {
-            let mut cpu=scanf_cpu();let mut kernel=fresh_kernel();let thunk=dummy_thunk();
-            cpu.write_reg(ArmReg::R0,delay).unwrap();cpu.write_reg(ArmReg::R2,0x1234).unwrap();
-            cpu.write_mem(0x9000,&(flags as u32).to_le_bytes()).unwrap();
-            assert_eq!(time_set_event(&mut CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk}).unwrap(),DispatchOutcome::ReturnedR0(0));
+        for (delay, flags) in [(0, 0), (65536, 0), (10, 0x20), (10, 0x8000)] {
+            let mut cpu = scanf_cpu();
+            let mut kernel = fresh_kernel();
+            let thunk = dummy_thunk();
+            cpu.write_reg(ArmReg::R0, delay).unwrap();
+            cpu.write_reg(ArmReg::R2, 0x1234).unwrap();
+            cpu.write_mem(0x9000, &(flags as u32).to_le_bytes())
+                .unwrap();
+            assert_eq!(
+                time_set_event(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
             assert!(kernel.threads.is_empty());
         }
     }
     #[test]
     fn multimedia_timer_synchronous_cancel_tracks_inflight_completion() {
-        let (mut cpu,mut kernel,thunk,id)=setup_multimedia_timer(0x101);
-        kernel.multimedia_timers.get_mut(&id).unwrap().in_callback=true;
-        cpu.write_reg(ArmReg::R0,id).unwrap();
-        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        let outcome=time_kill_event(&mut ctx).unwrap();
-        assert!(matches!(outcome,DispatchOutcome::JumpTo(_)));
+        let (mut cpu, mut kernel, thunk, id) = setup_multimedia_timer(0x101);
+        kernel.multimedia_timers.get_mut(&id).unwrap().in_callback = true;
+        cpu.write_reg(ArmReg::R0, id).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let outcome = time_kill_event(&mut ctx).unwrap();
+        assert!(matches!(outcome, DispatchOutcome::JumpTo(_)));
         assert!(ctx.kernel.multimedia_timers[&id].cancelled);
         assert!(!ctx.kernel.multimedia_timer_joins.is_empty());
-        ctx.kernel.current_thread=0;
+        ctx.kernel.current_thread = 0;
         ctx.kernel.multimedia_timers.remove(&id); // callback finishes on its worker
-        ctx.cpu.write_reg(ArmReg::R0,id).unwrap();ctx.cpu.write_reg(ArmReg::Sp,0x9000).unwrap();
-        assert_eq!(time_kill_event(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        ctx.cpu.write_reg(ArmReg::R0, id).unwrap();
+        ctx.cpu.write_reg(ArmReg::Sp, 0x9000).unwrap();
+        assert_eq!(
+            time_kill_event(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(ctx.kernel.multimedia_timer_joins.is_empty());
     }
 
     #[test]
     fn processor_information_layout_and_all_arm_profiles() {
         use pocket_kernel::processor_info::PocketPcProcessor;
-        let mut cpu=scanf_cpu();let mut kernel=fresh_kernel();let thunk=dummy_thunk();
-        for (id,name,level) in [("pxa270","PXA270",5),("pxa255","PXA255",5),("sa1110","SA-1110",4),("arm","ARM",5)] {
-            kernel.pocketpc_processor=PocketPcProcessor::from_id(id);
-            for (reg,value) in [(ArmReg::R0,0x01010064),(ArmReg::R1,0),(ArmReg::R2,0),(ArmReg::R3,0x2000)] {cpu.write_reg(reg,value).unwrap();}
-            cpu.write_mem(0x9000,&576u32.to_le_bytes()).unwrap();cpu.write_mem(0x9004,&0x3000u32.to_le_bytes()).unwrap();
-            cpu.write_mem(0x2240,&[0xaa;4]).unwrap();
-            let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-            assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
-            assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(),576);
-            let data=ctx.cpu.read_mem(0x2000,576).unwrap();
-            assert_eq!(u16::from_le_bytes([data[0],data[1]]),1);
-            assert_eq!(u16::from_le_bytes([data[82],data[83]]),level);
-            let actual=String::from_utf16_lossy(&data[84..164].chunks_exact(2).map(|c|u16::from_le_bytes([c[0],c[1]])).take_while(|c|*c!=0).collect::<Vec<_>>());
-            assert_eq!(actual,name);
-            assert!(data[568..576].iter().all(|v|*v==0));
-            assert_eq!(ctx.cpu.read_u32_le(0x2240).unwrap(),0xaaaaaaaa);
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        for (id, name, level) in [
+            ("pxa270", "PXA270", 5),
+            ("pxa255", "PXA255", 5),
+            ("sa1110", "SA-1110", 4),
+            ("arm", "ARM", 5),
+        ] {
+            kernel.pocketpc_processor = PocketPcProcessor::from_id(id);
+            for (reg, value) in [
+                (ArmReg::R0, 0x01010064),
+                (ArmReg::R1, 0),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, 0x2000),
+            ] {
+                cpu.write_reg(reg, value).unwrap();
+            }
+            cpu.write_mem(0x9000, &576u32.to_le_bytes()).unwrap();
+            cpu.write_mem(0x9004, &0x3000u32.to_le_bytes()).unwrap();
+            cpu.write_mem(0x2240, &[0xaa; 4]).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                kernel_io_control(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 576);
+            let data = ctx.cpu.read_mem(0x2000, 576).unwrap();
+            assert_eq!(u16::from_le_bytes([data[0], data[1]]), 1);
+            assert_eq!(u16::from_le_bytes([data[82], data[83]]), level);
+            let actual = String::from_utf16_lossy(
+                &data[84..164]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .take_while(|c| *c != 0)
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(actual, name);
+            assert!(data[568..576].iter().all(|v| *v == 0));
+            assert_eq!(ctx.cpu.read_u32_le(0x2240).unwrap(), 0xaaaaaaaa);
         }
     }
     #[test]
     fn processor_information_validates_buffers_and_does_not_enable_gizmondo() {
         use pocket_kernel::processor_info::PocketPcProcessor;
-        let mut cpu=scanf_cpu();let mut kernel=fresh_kernel();let thunk=dummy_thunk();
-        cpu.write_reg(ArmReg::R0,0x01010064).unwrap();
-        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        ctx.kernel.pocketpc_processor=Some(PocketPcProcessor::Pxa270);
-        ctx.cpu.write_reg(ArmReg::R3,0x2000).unwrap();
-        ctx.cpu.write_mem(0x9000,&575u32.to_le_bytes()).unwrap();ctx.cpu.write_mem(0x9004,&0x3000u32.to_le_bytes()).unwrap();
-        ctx.cpu.write_mem(0x2000,&[0xaa;576]).unwrap();
-        assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(),576);
-        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(),0xaaaaaaaa);
-        ctx.cpu.write_mem(0x9000,&576u32.to_le_bytes()).unwrap();ctx.cpu.write_reg(ArmReg::R1,1).unwrap();
-        assert_eq!(kernel_io_control(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        let data=PocketPcProcessor::Pxa270.encode(pocket_cpu::Arch::Mips);
-        assert_eq!(&data[2..10],&[b'M',0,b'I',0,b'P',0,b'S',0]);
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, 0x01010064).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.kernel.pocketpc_processor = Some(PocketPcProcessor::Pxa270);
+        ctx.cpu.write_reg(ArmReg::R3, 0x2000).unwrap();
+        ctx.cpu.write_mem(0x9000, &575u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x9004, &0x3000u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x2000, &[0xaa; 576]).unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 576);
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), 0xaaaaaaaa);
+        ctx.cpu.write_mem(0x9000, &576u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 1).unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let data = PocketPcProcessor::Pxa270.encode(pocket_cpu::Arch::Mips);
+        assert_eq!(&data[2..10], &[b'M', 0, b'I', 0, b'P', 0, b'S', 0]);
     }
 
     #[test]
@@ -34404,15 +34601,28 @@ mod tests {
         let mut kernel = fresh_kernel();
         kernel.heap = pocket_kernel::Heap::new(0x5000_0000, 64 * 1024 * 1024);
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
-        assert_eq!(global_memory_status(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            global_memory_status(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.cpu.read_u32_le(0x1108).unwrap(), 64 * 1024 * 1024);
-        assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), ctx.kernel.heap.free_bytes());
+        assert_eq!(
+            ctx.cpu.read_u32_le(0x110c).unwrap(),
+            ctx.kernel.heap.free_bytes()
+        );
         assert!(ctx.cpu.read_u32_le(0x110c).unwrap() >= 28 * 1024 * 1024);
         let allocation = ctx.kernel.heap.alloc(40 * 1024 * 1024).unwrap();
         global_memory_status(&mut ctx).unwrap();
-        assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), ctx.kernel.heap.free_bytes());
+        assert_eq!(
+            ctx.cpu.read_u32_le(0x110c).unwrap(),
+            ctx.kernel.heap.free_bytes()
+        );
         assert!(ctx.cpu.read_u32_le(0x110c).unwrap() < 28 * 1024 * 1024);
         assert_eq!(ctx.cpu.read_u32_le(0x1110).unwrap(), 0); // no page file
         ctx.kernel.heap.free(allocation);

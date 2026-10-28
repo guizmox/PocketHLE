@@ -34,6 +34,10 @@ pub fn information(executable: &Path, library_root: &Path) -> Vec<(String, Strin
     } else {
         pocket_cpu::Arch::Arm
     };
+    let gles_tables = match pocket_winceapi::gles_exports::local_tables(executable, &image) {
+        Ok(tables) => tables,
+        Err(error) => return vec![("GLES companion exports".into(), error)],
+    };
     let registry = pocket_winceapi::WinCeDispatcher::capability_registry();
     let shared = library_root.join("runtimes").join("pocketpc");
     let mut imports = BTreeMap::<String, Vec<_>>::new();
@@ -50,7 +54,16 @@ pub fn information(executable: &Path, library_root: &Path) -> Vec<(String, Strin
     for (dll, bindings) in imports {
         let missing: Vec<_> = bindings
             .iter()
-            .filter(|binding| !registry.supports_import_for_arch(&dll, binding, arch))
+            .filter(|binding| {
+                let resolved = match binding {
+                    pocket_pe::ImportBinding::Ordinal(n) if gles_tables.contains_key(&dll) => {
+                        pocket_winceapi::gles_exports::resolve(&gles_tables, &dll, *n, arch)
+                            .map(pocket_pe::ImportBinding::Name)
+                    }
+                    _ => None,
+                };
+                !registry.supports_import_for_arch(&dll, resolved.as_ref().unwrap_or(binding), arch)
+            })
             .collect();
         let local = executable.parent().and_then(|dir| find_file(dir, &dll));
         let native = local.or_else(|| find_file(&shared, &dll));

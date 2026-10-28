@@ -42,7 +42,6 @@ pub mod colors;
 pub mod controls;
 pub mod desktop_services;
 pub mod device_identity;
-pub mod processor_info;
 pub mod device_status;
 pub mod dll_lifecycle;
 pub mod file_mapping;
@@ -61,6 +60,7 @@ pub mod msgbox;
 pub mod native_thunks;
 pub mod power;
 mod process_control;
+pub mod processor_info;
 pub mod registry;
 pub mod sdl;
 pub mod serial;
@@ -1147,7 +1147,7 @@ pub struct KernelState {
     pub dynamic_exports: HashMap<u32, HashMap<String, u32>>,
     /// Original executable IAT, retained for binding native DLL data and functions together.
     pub image_imports: Vec<pocket_pe::ImportSymbol>,
-    pub gles_local_ordinals: HashMap<String, HashMap<u16,String>>,
+    pub gles_local_ordinals: HashMap<String, HashMap<u16, String>>,
     pub runtime_thunks: HashMap<u32, Thunk>,
     pub module_attach_frames: Vec<ModuleAttachFrame>,
     pub dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>,
@@ -1539,7 +1539,7 @@ pub struct KernelState {
     /// into [`AudioEngine`] right then.
     pub wave_out_format: GuestFormat,
     /// Buffer-done bookkeeping for the emulated `waveOut` device.
-    pub multimedia_timer_joins: HashMap<(usize,u32,u32),u32>,
+    pub multimedia_timer_joins: HashMap<(usize, u32, u32), u32>,
     pub multimedia_timers: HashMap<u32, MultimediaTimer>,
     pub wave_out: WaveOutState,
     /// Clips and mixer settings for `hss.dll`. Independent of
@@ -3316,13 +3316,18 @@ impl Heap {
     }
 
     pub fn has_private_arena(&self) -> bool {
-        self.regions.iter().any(|(start, size)| *start < 0x0200_0000 && *size > 0)
+        self.regions
+            .iter()
+            .any(|(start, size)| *start < 0x0200_0000 && *size > 0)
     }
 
     /// Capacity of the mapped allocation arenas, independent of host RAM size.
     pub fn capacity_bytes(&self) -> u32 {
-        self.regions.iter().map(|(_, size)| u64::from(*size))
-            .sum::<u64>().min(u64::from(u32::MAX)) as u32
+        self.regions
+            .iter()
+            .map(|(_, size)| u64::from(*size))
+            .sum::<u64>()
+            .min(u64::from(u32::MAX)) as u32
     }
 
     pub fn free_bytes(&self) -> u32 {
@@ -3963,7 +3968,7 @@ impl Process {
                 dynamic_exports,
                 image_imports,
                 gles_local_ordinals: HashMap::new(),
-            runtime_thunks: HashMap::new(),
+                runtime_thunks: HashMap::new(),
                 module_attach_frames: Vec::new(),
                 dll_notification_frame: None,
                 next_module_handle: 0x1000_0001,
@@ -4082,7 +4087,7 @@ impl Process {
                 audio: AudioEngine::new(),
                 wave_out_format: GuestFormat::default(),
                 multimedia_timer_joins: Default::default(),
-            multimedia_timers: Default::default(),
+                multimedia_timers: Default::default(),
                 wave_out: Default::default(),
                 hss: Default::default(),
                 gz_files: Default::default(),

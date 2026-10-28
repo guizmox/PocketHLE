@@ -49,12 +49,22 @@ fn ensure_2700g_presence_marker(windows: &Path) -> std::io::Result<()> {
     // Preserve genuine DLLs and any existing entry, including case variants
     // on case-sensitive hosts. Never open an existing file for writing.
     for entry in std::fs::read_dir(windows)? {
-        if entry?.file_name().to_string_lossy().eq_ignore_ascii_case(NAME) {
+        if entry?
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(NAME)
+        {
             return Ok(());
         }
     }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(windows.join(NAME)) {
-        Ok(mut file) => file.write_all(b"PocketHLE hardware-presence marker. Not an executable codec.\r\n"),
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(windows.join(NAME))
+    {
+        Ok(mut file) => {
+            file.write_all(b"PocketHLE hardware-presence marker. Not an executable codec.\r\n")
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }
@@ -76,8 +86,17 @@ mod tests {
         std::fs::write(&real, b"existing original bytes").unwrap();
         mount(&mut Vfs::new(), library.path()).unwrap();
         assert_eq!(std::fs::read(&real).unwrap(), b"existing original bytes");
-        assert_eq!(std::fs::read_dir(&windows).unwrap().filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("wmv9decoder2700g.dll")).count(),1);
+        assert_eq!(
+            std::fs::read_dir(&windows)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("wmv9decoder2700g.dll"))
+                .count(),
+            1
+        );
     }
     #[test]
     fn system_file_survives_new_vfs_without_changing_registered_bytes() {
