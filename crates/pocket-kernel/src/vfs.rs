@@ -249,6 +249,9 @@ struct Mount {
     display_prefix: String,
     host_dir: PathBuf,
     read_only: bool,
+    /// Installed archives may need suffix aliases; an already laid-out device
+    /// filesystem supplies exact paths, never a recursive asset search pool.
+    resource_fallback: bool,
     /// Read-only mounts are a session snapshot for recursive fallback.
     /// Exact lookups remain live; writable mounts never use this index.
     fallback_files: RefCell<Option<Vec<PathBuf>>>,
@@ -687,6 +690,16 @@ impl Vfs {
         self.mount_with_options(guest_prefix, host_dir, false);
     }
 
+    /// Mount a writable, already laid-out guest filesystem. Unlike installed
+    /// archive mounts, this backing tree is not a recursive resource alias pool.
+    pub fn mount_filesystem(&mut self, guest_prefix: &str, host_dir: impl Into<PathBuf>) {
+        self.mount_with_options(guest_prefix, host_dir, false);
+        self.mounts
+            .last_mut()
+            .expect("new filesystem mount")
+            .resource_fallback = false;
+    }
+
     /// Mount a host directory as read-only guest storage.
     pub fn mount_read_only(&mut self, guest_prefix: &str, host_dir: impl Into<PathBuf>) {
         self.mount_with_options(guest_prefix, host_dir, true);
@@ -819,6 +832,7 @@ impl Vfs {
             display_prefix: display,
             host_dir: host_dir.into(),
             read_only,
+            resource_fallback: true,
             fallback_files: RefCell::new(None),
         });
     }
@@ -1087,6 +1101,9 @@ impl Vfs {
             return None;
         }
         let mounts = self.matching_mounts(&normalised);
+        // Exact device files participate in the merged namespace, but a broad
+        // system filesystem must not alter an installed archive's suffix rules.
+        let fallback_prefix_len = mounts.first().map_or(0, |mount| mount.prefix.len());
         let mut fallback = None;
         let mut known_parent = false;
         // Exhaust exact paths before considering a fallback from any mount.
@@ -1100,15 +1117,16 @@ impl Vfs {
             if path.exists() {
                 return Some(path);
             }
-            known_parent |= path.parent().is_some_and(|parent| parent.is_dir());
-            // A missing intermediate component does not make the requested
-            // existing directory disappear (e.g. app/app/asset). Keep the
-            // basename-only fallback from crossing into a sibling directory.
-            known_parent |= path
-                .ancestors()
-                .skip(1)
-                .take_while(|parent| *parent != mount.host_dir.as_path())
-                .any(|parent| parent.is_dir());
+            if mount.resource_fallback || mount.prefix.len() == fallback_prefix_len {
+                known_parent |= path.parent().is_some_and(|parent| parent.is_dir());
+                // Keep the previous installed-overlay directory evidence;
+                // only an explicit, broader filesystem backing is excluded.
+                known_parent |= path
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|parent| *parent != mount.host_dir.as_path())
+                    .any(|parent| parent.is_dir());
+            }
         }
         let wanted: Vec<_> = normalised
             .split('/')
@@ -1116,7 +1134,7 @@ impl Vfs {
             .collect();
         let mut best = 0;
         let mut candidates = Vec::new();
-        for mount in mounts {
+        for mount in mounts.into_iter().filter(|mount| mount.resource_fallback) {
             let (score, found) = Self::find_path_recursive(mount, &wanted);
             if score > best {
                 best = score;

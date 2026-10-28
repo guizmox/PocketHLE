@@ -4755,3 +4755,22 @@ The core API is available to diagnostic callers; CLI does not auto-configure it.
 Three core tests cover close/reopen in a fresh VFS, exact saved bytes, game save
 precedence, Windows COW, read-only cards and escaping directory symlinks. No
 full Phoenix registration UI, Windows build or APK validation is claimed.
+
+
+## Device filesystem backing versus installer resource aliases (2026-10-28)
+
+Vfs::mount_filesystem describes a correctly laid-out writable device tree.
+It still serves exact paths in normal overlay order, but is not a recursive
+resource search pool. Its directory evidence affects suffix lookup only at the
+most-specific matched prefix, not a more-specific game's installed namespace.
+All preexisting mount/mount_read_only/mount_save_dir calls retain their previous
+resource fallback behavior. This is a mount-role distinction, not a title rule.
+
+The newly seeded PocketPC Program Files directory previously made known_parent
+true globally and vetoed flat-install fallback for data/foo inside another
+mount. Phoenix's startup resource loads exposed this regression. The system
+root and Windows backing now use mount_filesystem; game resource resolution
+and overlay directory guards remain intact. Core regression fails before this
+change and passes after it, including a conflicting system filename and a
+real directory in the save overlay. Persistence of Windows files is preserved.
+No data migration/deletion/reinstallation or licence rewrite is needed.

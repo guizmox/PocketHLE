@@ -33,10 +33,10 @@ pub(crate) fn mount(vfs: &mut Vfs, library_root: &Path) -> std::io::Result<()> {
             ));
         }
     }
-    vfs.mount("\\", &root);
+    vfs.mount_filesystem("\\", &root);
     // A same-prefix writable Windows overlay also permits copy-on-write when
     // an installer mounts its bundled shared Windows files read-only.
-    vfs.mount("\\Windows\\", root.join("Windows"));
+    vfs.mount_filesystem("\\Windows\\", root.join("Windows"));
     Ok(())
 }
 
@@ -123,6 +123,54 @@ mod tests {
             .open("\\SD Card\\asset.dat", Access::Write, true)
             .is_none());
     }
+    #[test]
+    fn broad_device_root_does_not_hide_flat_install_resources() {
+        let library = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        std::fs::write(install.path().join("default.pnx"), b"original resource").unwrap();
+        let mut vfs = Vfs::new();
+        mount(&mut vfs, library.path()).unwrap();
+        // A same-named system file is outside this game's fallback namespace.
+        std::fs::write(
+            library
+                .path()
+                .join("object-store-pocketpc/Windows/default.pnx"),
+            b"other",
+        )
+        .unwrap();
+        vfs.mount_read_only("\\Program Files\\Example\\", install.path());
+        vfs.mount_save_dir("\\Program Files\\Example\\", saves.path());
+        let h = vfs
+            .open_file(
+                "\\Program Files\\Example\\data\\default.pnx",
+                1,
+                3,
+                3,
+                false,
+                0,
+            )
+            .unwrap()
+            .handle;
+        let mut bytes = [0; 17];
+        assert_eq!(vfs.read(h, &mut bytes), Some(17));
+        assert_eq!(&bytes, b"original resource");
+        vfs.close(h);
+        // A real directory in either overlay forbids borrowing a missing leaf
+        // from elsewhere in the installation, just as before the root mount.
+        std::fs::create_dir(saves.path().join("data")).unwrap();
+        assert!(vfs
+            .open_file(
+                "\\Program Files\\Example\\data\\default.pnx",
+                1,
+                3,
+                3,
+                false,
+                0
+            )
+            .is_err());
+    }
+
     #[test]
     #[cfg(unix)]
     fn system_directory_symlink_cannot_escape_storage() {
