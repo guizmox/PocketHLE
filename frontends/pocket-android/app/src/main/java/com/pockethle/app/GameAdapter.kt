@@ -47,6 +47,7 @@ class GameAdapter(
     inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         private val title: TextView = view.findViewById(R.id.game_title)
         private val caption: TextView = view.findViewById(R.id.game_caption)
+        private val launchId: TextView = view.findViewById(R.id.game_launch_id)
         private val serial: TextView = view.findViewById(R.id.game_serial)
         private val publisherLabel: TextView = view.findViewById(R.id.game_publisher)
         private val moreBtn: ImageButton = view.findViewById(R.id.btn_more)
@@ -54,6 +55,8 @@ class GameAdapter(
         fun bind(entry: GameEntry) {
             title.text = entry.displayName
             caption.text = entry.displayName
+            launchId.text = "ID: ${entry.id}"
+            launchId.isSelected = true
             caption.isSelected = true
             val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
             val label = itemView.findViewById<View>(R.id.game_label)

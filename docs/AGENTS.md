@@ -4816,3 +4816,17 @@ THPS2's original ARM startup at 0x1b90c/0x1b92c calls GlobalMemoryStatus and
 compares dwAvailPhys to 0x1c00000 (28 MiB). The previous 24 MiB constant made
 this reject even when the mapped allocator had sufficient room. No binary
 patch, registration change, game name or unconditional success is used.
+
+
+## Desktop direct library launch (2026-10-28)
+
+Both desktop_main.rs entrypoints accept game name/ID, display mode 0=fullscreen
+1=windowed, and filter index 0..7 in UpscaleFilter::ALL menu order. No arguments
+retain the launcher. Resolve exact ID first then unique case-insensitive display
+name; ambiguity/errors fail explicitly before opening the game. --help documents
+the syntax. Reuse spawn_run and its startup/dependency prompts, not a second runner.
+Initial CLI display/filter overrides do not write saved preferences. Existing
+interactive settings actions retain their normal behavior. The existing CLI
+package executable named pockethle remains distinct; GUI binaries are still
+pockethle-gui and pockethle-steamdeck. Four pure argument/lookup tests pass;
+no full native desktop build is claimed.

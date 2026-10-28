@@ -1532,7 +1532,7 @@ impl PocketLauncher {
         ui.add_space(8.0);
         ScrollArea::vertical().show(ui, |ui| {
             let gap = 12.0;
-            let card_size = Vec2::new(190.0, 210.0);
+            let card_size = Vec2::new(190.0, 230.0);
             let columns = ((ui.available_width() + gap) / (card_size.x + gap))
                 .floor()
                 .max(1.0) as usize;
@@ -1783,8 +1783,8 @@ impl PocketLauncher {
         menu_response.clone().on_hover_text("Game actions");
 
         let label_rect = Rect::from_min_size(
-            Pos2::new(card_rect.left(), card_rect.bottom() - 78.0),
-            Vec2::new(size.x, 78.0),
+            Pos2::new(card_rect.left(), card_rect.bottom() - 98.0),
+            Vec2::new(size.x, 98.0),
         );
         ui.painter()
             .rect_filled(label_rect, 0.0, Color32::from_rgb(28, 29, 32));
@@ -1821,6 +1821,12 @@ impl PocketLauncher {
                     .color(Color32::from_gray(145)),
             );
         }
+
+        text_ui.add(
+            egui::Label::new(RichText::new(format!("ID: {}", game.id))
+                .monospace().size(10.0).color(Color32::from_gray(160)))
+                .truncate(true),
+        ).on_hover_text(format!("Launch ID: {}", game.id));
 
         if card_response.clicked() && !menu_response.clicked() {
             self.selected_game = Some(game.id.clone());
@@ -4595,6 +4601,15 @@ impl PocketLauncher {
             }
         });
         self.status = "Importing...".to_string();
+    }
+
+    pub fn launch_from_command_line(&mut self, game: &GameEntry, filter: Option<usize>) {
+        if let Some(filter) = filter.and_then(|i| UpscaleFilter::ALL.get(i)).copied() {
+            self.upscale_filter = filter;
+        }
+        self.selected_game = Some(game.id.clone());
+        // Preserve the normal launch path, including required startup prompts.
+        self.spawn_run(game);
     }
 
     fn spawn_run(&mut self, game: &GameEntry) {

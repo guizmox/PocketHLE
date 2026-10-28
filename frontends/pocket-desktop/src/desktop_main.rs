@@ -16,6 +16,7 @@ mod fullscreen_layout;
 mod gamepad;
 mod gamepad_host;
 mod host_gpu;
+mod launch_args;
 mod native_share;
 mod reconstruction;
 mod recording;
@@ -79,6 +80,30 @@ fn init_logging(library_root: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
+    let result = run_launcher();
+    if let Err(error) = &result {
+        log::error!("{error:#}");
+        rfd::MessageDialog::new()
+            .set_title("PocketHLE startup error")
+            .set_description(format!("{error:#}"))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
+    result
+}
+
+fn run_launcher() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        println!("{}", launch_args::HELP);
+        #[cfg(windows)]
+        rfd::MessageDialog::new()
+            .set_title("PocketHLE command line")
+            .set_description(launch_args::HELP)
+            .show();
+        return Ok(());
+    }
+    let launch = launch_args::parse(args).map_err(anyhow::Error::msg)?;
     let title = if cfg!(feature = "steam-deck") {
         "PocketHLE — Steam Deck"
     } else {
@@ -91,6 +116,25 @@ fn main() -> Result<()> {
         log::info!("Logging to {}", path.display());
     }
     let library = Library::open(&library_root).context("opening PocketHLE library")?;
+
+    let launch_game = launch
+        .as_ref()
+        .map(|args| {
+            launch_args::find_game(
+                &args.game,
+                library
+                    .games()
+                    .iter()
+                    .map(|g| (g.id.as_str(), g.display_name.as_str())),
+            )
+            .map(|id| library.games().iter().find(|g| g.id == id).unwrap().clone())
+            .map_err(anyhow::Error::msg)
+        })
+        .transpose()?;
+    let fullscreen = launch
+        .as_ref()
+        .and_then(|a| a.fullscreen)
+        .unwrap_or(library.config().fullscreen);
 
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE logo")?
@@ -105,7 +149,7 @@ fn main() -> Result<()> {
             .with_app_id("PocketHLE")
             .with_inner_size([960.0, 600.0])
             .with_min_inner_size([640.0, 420.0])
-            .with_fullscreen(library.config().fullscreen)
+            .with_fullscreen(fullscreen)
             .with_title(title),
         ..Default::default()
     };
@@ -115,7 +159,11 @@ fn main() -> Result<()> {
         native_options,
         Box::new(move |cc| {
             let lib = library_slot.take().expect("PocketLauncher built twice");
-            Box::new(app::PocketLauncher::new(cc, lib)) as Box<dyn eframe::App>
+            let mut app = app::PocketLauncher::new(cc, lib);
+            if let Some(game) = &launch_game {
+                app.launch_from_command_line(game, launch.as_ref().and_then(|a| a.filter));
+            }
+            Box::new(app) as Box<dyn eframe::App>
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
