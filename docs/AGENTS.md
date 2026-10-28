@@ -4830,3 +4830,33 @@ interactive settings actions retain their normal behavior. The existing CLI
 package executable named pockethle remains distinct; GUI binaries are still
 pockethle-gui and pockethle-steamdeck. Four pure argument/lookup tests pass;
 no full native desktop build is claimed.
+
+
+## Multimedia timer callbacks (2026-10-28)
+
+MMTimer/winmm/coredll timeSetEvent/timeKillEvent use a dedicated cooperative
+guest thread per timer. Existing Begin/EndPeriod and DevCaps handlers stay.
+The original timeSetEvent thunk is the worker's scheduler entry; exact worker
+thread + thunk + SP identity separates it from nested callback API calls.
+ARM/Thumb callbacks receive ID,0,user,0,0 with the fifth argument on the stack;
+restore SP, CPSR and thread-exit continuation after return. One-shot timers end;
+periodic deadlines preserve phase but skip missed intervals instead of bursts.
+The shared CPU-slice/API scheduler now also services timers in CPU-only loops.
+
+Cancellation sets a flag checked before callback dispatch; synchronous foreign
+in-flight cancellation retries cooperatively until callback completion, using
+a per-caller thunk/SP join key. No native host thread executes guest callbacks.
+The timer's internal thread handle is closed without terminating the worker.
+Timers/state belong to KernelState and disappear with the process. No game names
+or original DLL/ROM bytes are shipped. Runtime DLLs are not needed for these APIs.
+
+Supported profile: ARM/Thumb function callbacks and EVENT_SET, delays1..65535ms,
+up to64 active timers. EVENT_PULSE and non-ARM worker callback ABIs explicitly
+fail timeSetEvent with zero; do not claim full Win32/WinCE multimedia semantics.
+Event-set targets must resolve to a valid event object. Scheduling is cooperative,
+not a hard real-time latency guarantee. BeginPeriod uses existing scheduler polling.
+
+Public contract: Microsoft Learn timeSetEvent (ms713423), timeKillEvent
+(dd757630), timeBeginPeriod. Four targeted tests cover callback ABI/Thumb state,
+periodic wait/cancel, one-shot completion, invalid input and synchronous join.
+No full THPS2 gameplay test has been performed.

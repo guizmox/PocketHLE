@@ -569,6 +569,8 @@ pub(crate) mod tests {
             security_cookie: 0,
             audio: AudioEngine::new(),
             wave_out_format: GuestFormat::default(),
+            multimedia_timer_joins: Default::default(),
+            multimedia_timers: Default::default(),
             wave_out: Default::default(),
             hss: Default::default(),
             gz_files: Default::default(),

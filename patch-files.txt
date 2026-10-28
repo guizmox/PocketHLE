@@ -1,6 +1,4 @@
-frontends/pocket-desktop/src/launch_args.rs
-frontends/pocket-desktop/src/desktop_main.rs
-frontends/pocket-desktop/src/app.rs
+crates/pocket-kernel/src/lib.rs
+crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/gx.rs
 docs/AGENTS.md
-frontends/pocket-android/app/src/main/java/com/pockethle/app/GameAdapter.kt
-frontends/pocket-android/app/src/main/res/layout/item_game_grid.xml

@@ -447,6 +447,22 @@ pub struct LiveWaveLoop {
     pub bytes: u32,
 }
 
+/// One multimedia timer and its dedicated cooperative callback thread.
+#[derive(Debug, Clone)]
+pub struct MultimediaTimer {
+    pub worker: usize,
+    pub worker_sp: u32,
+    pub cpsr: u32,
+    pub thunk: u32,
+    pub callback: u32,
+    pub user: u32,
+    pub delay: u32,
+    pub flags: u32,
+    pub deadline: u64,
+    pub cancelled: bool,
+    pub in_callback: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WaveOutDevice {
     pub callback_kind: WaveCallbackKind,
@@ -1520,6 +1536,8 @@ pub struct KernelState {
     /// into [`AudioEngine`] right then.
     pub wave_out_format: GuestFormat,
     /// Buffer-done bookkeeping for the emulated `waveOut` device.
+    pub multimedia_timer_joins: HashMap<(usize,u32,u32),u32>,
+    pub multimedia_timers: HashMap<u32, MultimediaTimer>,
     pub wave_out: WaveOutState,
     /// Clips and mixer settings for `hss.dll`. Independent of
     /// [`Self::wave_out`]: HSS games talk to the library's C++ classes
@@ -4058,6 +4076,8 @@ impl Process {
                 security_cookie: 0,
                 audio: AudioEngine::new(),
                 wave_out_format: GuestFormat::default(),
+                multimedia_timer_joins: Default::default(),
+            multimedia_timers: Default::default(),
                 wave_out: Default::default(),
                 hss: Default::default(),
                 gz_files: Default::default(),

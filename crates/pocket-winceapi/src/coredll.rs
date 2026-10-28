@@ -972,6 +972,10 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "timeGetTime", time_get_time);
     // WinMineCE imports `timeGetTime` from a third-party redist
     // (`MMTimer.dll`) instead. Same semantics — a millisecond clock.
+    for timer_dll in ["mmtimer.dll", "winmm.dll", "coredll.dll"] {
+        d.register_handler(timer_dll, "timeSetEvent", time_set_event);
+        d.register_handler(timer_dll, "timeKillEvent", time_kill_event);
+    }
     d.register_handler("MMTimer.dll", "timeGetTime", time_get_time);
     d.register_handler("winmm.dll", "timeGetTime", time_get_time);
 
@@ -2518,7 +2522,7 @@ fn resume_ready_worker_after_sleep(
 pub(crate) fn wake_due_worker(
     ctx: &mut CallCtx<'_>,
 ) -> Result<Option<DispatchOutcome>, KernelError> {
-    if ctx.kernel.current_thread != 0 && ctx.kernel.wave_out.live_loops.is_empty() {
+    if ctx.kernel.current_thread != 0 && ctx.kernel.wave_out.live_loops.is_empty() && ctx.kernel.multimedia_timers.is_empty() {
         return Ok(None);
     }
     let now = monotonic_ms();
@@ -2594,7 +2598,7 @@ pub(crate) fn schedule_audio_cpu_slice(
     cpu: &mut dyn pocket_cpu::Cpu,
     kernel: &mut KernelState,
 ) -> Result<Option<u32>, KernelError> {
-    if kernel.wave_out.live_loops.is_empty()
+    if (kernel.wave_out.live_loops.is_empty() && kernel.multimedia_timers.is_empty())
         || kernel.threads.is_empty()
         || monotonic_ms() < kernel.worker_preempt_after_ms
     {
@@ -19506,10 +19510,12 @@ const CREATE_SUSPENDED: u32 = 0x4;
 
 fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let _security_attributes = ctx.arg_u32(0)?;
-    let stack_size = ctx.arg_u32(1)?.max(0x1000);
-    let entry = ctx.arg_u32(2)?;
-    let parameter = ctx.arg_u32(3)?;
-    let creation_flags = ctx.arg_u32(4)?;
+    let args=[ctx.arg_u32(1)?,ctx.arg_u32(2)?,ctx.arg_u32(3)?,ctx.arg_u32(4)?,ctx.arg_u32(5)?];
+    create_guest_thread(ctx,args[0],args[1],args[2],args[3],args[4])
+}
+
+fn create_guest_thread(ctx: &mut CallCtx<'_>, stack_size:u32, entry:u32, parameter:u32, creation_flags:u32, thread_id_out:u32) -> Result<DispatchOutcome, KernelError> {
+    let stack_size = stack_size.max(0x1000);
     if entry == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -19626,7 +19632,6 @@ fn create_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // here, and leaving the caller's variable untouched made it ask the
     // driver to notify thread 0.
     let setup = (|| -> Result<(), KernelError> {
-        let thread_id_out = ctx.arg_u32(5)?;
         if thread_id_out != 0 {
             ctx.cpu.write_mem(thread_id_out, &thread_id.to_le_bytes())?;
         }
@@ -24478,6 +24483,126 @@ fn timer_poll_interval(kernel: &KernelState) -> u64 {
             .min(2),
     )
 }
+// A timer re-enters its own timeSetEvent thunk on a dedicated guest thread.
+// Stack identity separates that scheduler continuation from nested guest API calls.
+fn multimedia_worker(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    let Some(id) = ctx.kernel.multimedia_timers.iter().find_map(|(id,t)| {
+        (t.worker == ctx.kernel.current_thread && t.thunk == ctx.thunk.thunk_va
+            && sp == if t.in_callback { t.worker_sp-8 } else { t.worker_sp }).then_some(*id)
+    }) else { return Ok(None); };
+    let mut timer = ctx.kernel.multimedia_timers[&id].clone();
+    if timer.in_callback {
+        ctx.cpu.write_reg(ArmReg::Sp,timer.worker_sp)?;
+        ctx.cpu.write_reg(ArmReg::Cpsr,timer.cpsr)?;
+        timer.in_callback=false;
+        if timer.flags & 1 == 0 { timer.cancelled=true; }
+    }
+    let exit = ctx.kernel.threads[timer.worker-1].exit_va;
+    ctx.cpu.write_reg(ArmReg::Lr,exit)?;
+    if timer.cancelled {
+        ctx.kernel.multimedia_timers.remove(&id);
+        ctx.cpu.write_reg(ArmReg::R0,0)?;
+        return Ok(Some(DispatchOutcome::JumpTo(exit)));
+    }
+    let now=monotonic_ms();
+    if now < timer.deadline {
+        ctx.kernel.threads[timer.worker-1].sleep_until_ms=timer.deadline;
+        ctx.kernel.multimedia_timers.insert(id,timer);
+        let outcome=park_worker_at(ctx,None,Some(ctx.thunk.thunk_va))?;
+        // This is a deadline wait, not a GetMessage wait requiring a message.
+        ctx.kernel.threads[ctx.kernel.multimedia_timers[&id].worker-1].parked_in_pump=false;
+        return Ok(outcome);
+    }
+    let delay=u64::from(timer.delay);
+    timer.deadline=timer.deadline.saturating_add(((now-timer.deadline)/delay+1)*delay);
+    // Event callbacks use the existing event object, not a guest function address.
+    if timer.flags & 0x30 != 0 {
+        let key=event_key(ctx.kernel,timer.callback);
+        if let Some(mut event)=ctx.kernel.events.get_mut(&key) { event.signalled=true; }
+        if timer.flags & 1 == 0 { timer.cancelled=true; }
+        ctx.kernel.multimedia_timers.insert(id,timer);
+        return Ok(Some(DispatchOutcome::JumpTo(ctx.thunk.thunk_va)));
+    }
+    ctx.cpu.write_mem(timer.worker_sp-8,&[0u8;8])?;
+    ctx.cpu.write_reg(ArmReg::Sp,timer.worker_sp-8)?;
+    for (reg,value) in [(ArmReg::R0,id),(ArmReg::R1,0),(ArmReg::R2,timer.user),(ArmReg::R3,0)] {
+        ctx.cpu.write_reg(reg,value)?;
+    }
+    ctx.cpu.write_reg(ArmReg::Lr,timer.thunk)?;
+    let cpsr=(timer.cpsr & !(1<<5)) | ((timer.callback & 1)<<5);
+    ctx.cpu.write_reg(ArmReg::Cpsr,cpsr)?;
+    timer.in_callback=true;
+    let callback=timer.callback & !1;
+    ctx.kernel.multimedia_timers.insert(id,timer);
+    Ok(Some(DispatchOutcome::JumpTo(callback)))
+}
+
+fn time_set_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome)=multimedia_worker(ctx)? { return Ok(outcome); }
+    let delay=ctx.arg_u32(0)?;
+    let _resolution=ctx.arg_u32(1)?;
+    let callback=ctx.arg_u32(2)?;
+    let user=ctx.arg_u32(3)?;
+    let flags=ctx.arg_u32(4)?;
+    // The worker callback ABI below is ARM/Thumb. Reject other architectures
+    // explicitly until their five-argument callback frame is implemented.
+    if ctx.cpu.arch()!=pocket_cpu::Arch::Arm || !(TIMER_MIN_PERIOD..=TIMER_MAX_PERIOD).contains(&delay)
+        || callback==0 || flags & !0x131 != 0 || flags & 0x30 == 0x30
+        || flags & 0x20 != 0 // PulseEvent needs waiter-only pulse semantics.
+        || ctx.kernel.multimedia_timers.len()>=64 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if flags & 0x10 != 0 && !ctx.kernel.events.contains_key(&event_key(ctx.kernel,callback)) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let index=ctx.kernel.threads.len();
+    let thunk=ctx.thunk.thunk_va;
+    let result=create_guest_thread(ctx,0,thunk,0,0,0)?;
+    if !matches!(result,DispatchOutcome::ReturnedR0(handle) if handle!=0) { return Ok(result); }
+    let thread=&ctx.kernel.threads[index];
+    let id=thread.id;
+    let timer=pocket_kernel::MultimediaTimer {
+        worker:index+1, worker_sp:thread.worker_regs[13], cpsr:thread.worker_regs[16],
+        thunk:ctx.thunk.thunk_va, callback,user,delay,flags,
+        deadline:monotonic_ms().saturating_add(u64::from(delay)),cancelled:false,in_callback:false,
+    };
+    ctx.kernel.multimedia_timers.insert(id,timer);
+    if let DispatchOutcome::ReturnedR0(handle)=result {
+        ctx.kernel.object_handles.close(handle);
+        ctx.kernel.threads[index].handle_closed=true;
+    }
+    Ok(DispatchOutcome::ReturnedR0(id))
+}
+
+fn time_kill_event(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let id=ctx.arg_u32(0)?;
+    let key=(ctx.kernel.current_thread,ctx.thunk.thunk_va,ctx.cpu.read_reg(ArmReg::Sp)?);
+    let joining=ctx.kernel.multimedia_timer_joins.get(&key)==Some(&id);
+    let Some(timer)=ctx.kernel.multimedia_timers.get_mut(&id) else {
+        ctx.kernel.multimedia_timer_joins.remove(&key);
+        return Ok(DispatchOutcome::ReturnedR0(if joining {0} else {11}));
+    };
+    if timer.cancelled && !joining { return Ok(DispatchOutcome::ReturnedR0(11)); }
+    timer.cancelled=true;
+    let wait=timer.flags & 0x100 != 0 && timer.in_callback && timer.worker!=ctx.kernel.current_thread;
+    let worker=timer.worker;
+    if !timer.in_callback { ctx.kernel.threads[worker-1].sleep_until_ms=0; }
+    if !wait {
+        ctx.kernel.multimedia_timer_joins.remove(&key);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    ctx.kernel.multimedia_timer_joins.insert(key,id);
+    if let Some(index)=ctx.kernel.current_thread.checked_sub(1) {
+        ctx.kernel.threads[index].sleep_until_ms=monotonic_ms()+1;
+        let outcome=park_worker_at(ctx,None,Some(ctx.thunk.thunk_va))?;
+        ctx.kernel.threads[index].parked_in_pump=false;
+        if let Some(outcome)=outcome { return Ok(outcome); }
+    } else if let Some(outcome)=resume_worker_reenter(ctx)? { return Ok(outcome); }
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
+}
+
 fn time_begin_period(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let period = ctx.arg_u32(0)?;
     if !(TIMER_MIN_PERIOD..=TIMER_MAX_PERIOD).contains(&period) {
@@ -30236,6 +30361,8 @@ mod tests {
             security_cookie: 0,
             audio: AudioEngine::new(),
             wave_out_format: GuestFormat::default(),
+            multimedia_timer_joins: Default::default(),
+            multimedia_timers: Default::default(),
             wave_out: Default::default(),
             hss: Default::default(),
             gz_files: Default::default(),
@@ -34111,6 +34238,87 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(ram.snapshot().program_used, 0);
+    }
+
+    fn setup_multimedia_timer(flags:u32) -> (StubCpu,KernelState,pocket_kernel::Thunk,u32) {
+        let mut cpu=scanf_cpu();
+        let mut kernel=fresh_kernel();
+        let thunk=thunk_at(0x70001000);
+        cpu.write_reg(ArmReg::R0,10).unwrap();
+        cpu.write_reg(ArmReg::R1,0).unwrap();
+        cpu.write_reg(ArmReg::R2,0x12341).unwrap(); // Thumb callback
+        cpu.write_reg(ArmReg::R3,0xabcdef).unwrap();
+        cpu.write_reg(ArmReg::Lr,0x2000).unwrap();
+        cpu.write_mem(0x9000,&flags.to_le_bytes()).unwrap();
+        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        let DispatchOutcome::ReturnedR0(id)=time_set_event(&mut ctx).unwrap() else {panic!()};
+        assert_ne!(id,0);
+        (cpu,kernel,thunk,id)
+    }
+    #[test]
+    fn multimedia_timer_callback_abi_periodic_and_cancel() {
+        let (mut cpu,mut kernel,thunk,id)=setup_multimedia_timer(1);
+        let timer=kernel.multimedia_timers[&id].clone();
+        assert_eq!(kernel.current_thread,0); // timer creation does not hijack creator
+        kernel.current_thread=timer.worker;
+        kernel.multimedia_timers.get_mut(&id).unwrap().deadline=0;
+        cpu.write_reg(ArmReg::Sp,timer.worker_sp).unwrap();
+        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        assert_eq!(time_set_event(&mut ctx).unwrap(),DispatchOutcome::JumpTo(0x12340));
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(),id);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(),0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(),0xabcdef);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(),0);
+        assert_eq!(ctx.cpu.read_u32_le(timer.worker_sp-8).unwrap(),0);
+        assert_ne!(ctx.cpu.read_reg(ArmReg::Cpsr).unwrap() & 32,0);
+        // Callback return parks at the next deadline, with SP/T-state restored.
+        time_set_event(&mut ctx).unwrap();
+        assert!(!ctx.kernel.multimedia_timers[&id].in_callback);
+        assert_eq!(ctx.kernel.current_thread,0);
+        ctx.cpu.write_reg(ArmReg::R0,id).unwrap();
+        assert_eq!(time_kill_event(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        ctx.kernel.current_thread=timer.worker;
+        ctx.cpu.write_reg(ArmReg::Sp,timer.worker_sp).unwrap();
+        assert_eq!(time_set_event(&mut ctx).unwrap(),DispatchOutcome::JumpTo(ctx.kernel.threads[timer.worker-1].exit_va));
+        assert!(!ctx.kernel.multimedia_timers.contains_key(&id));
+    }
+    #[test]
+    fn multimedia_timer_oneshot_is_removed_after_callback() {
+        let (mut cpu,mut kernel,thunk,id)=setup_multimedia_timer(0);
+        let timer=kernel.multimedia_timers[&id].clone();
+        kernel.current_thread=timer.worker;kernel.multimedia_timers.get_mut(&id).unwrap().deadline=0;
+        cpu.write_reg(ArmReg::Sp,timer.worker_sp).unwrap();
+        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        time_set_event(&mut ctx).unwrap();
+        assert!(ctx.kernel.multimedia_timers[&id].in_callback);
+        time_set_event(&mut ctx).unwrap();
+        assert!(!ctx.kernel.multimedia_timers.contains_key(&id));
+    }
+    #[test]
+    fn multimedia_timer_invalid_delay_or_pulse_does_not_create_thread() {
+        for (delay,flags) in [(0,0),(65536,0),(10,0x20),(10,0x8000)] {
+            let mut cpu=scanf_cpu();let mut kernel=fresh_kernel();let thunk=dummy_thunk();
+            cpu.write_reg(ArmReg::R0,delay).unwrap();cpu.write_reg(ArmReg::R2,0x1234).unwrap();
+            cpu.write_mem(0x9000,&(flags as u32).to_le_bytes()).unwrap();
+            assert_eq!(time_set_event(&mut CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk}).unwrap(),DispatchOutcome::ReturnedR0(0));
+            assert!(kernel.threads.is_empty());
+        }
+    }
+    #[test]
+    fn multimedia_timer_synchronous_cancel_tracks_inflight_completion() {
+        let (mut cpu,mut kernel,thunk,id)=setup_multimedia_timer(0x101);
+        kernel.multimedia_timers.get_mut(&id).unwrap().in_callback=true;
+        cpu.write_reg(ArmReg::R0,id).unwrap();
+        let mut ctx=CallCtx{cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
+        let outcome=time_kill_event(&mut ctx).unwrap();
+        assert!(matches!(outcome,DispatchOutcome::JumpTo(_)));
+        assert!(ctx.kernel.multimedia_timers[&id].cancelled);
+        assert!(!ctx.kernel.multimedia_timer_joins.is_empty());
+        ctx.kernel.current_thread=0;
+        ctx.kernel.multimedia_timers.remove(&id); // callback finishes on its worker
+        ctx.cpu.write_reg(ArmReg::R0,id).unwrap();ctx.cpu.write_reg(ArmReg::Sp,0x9000).unwrap();
+        assert_eq!(time_kill_event(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
+        assert!(ctx.kernel.multimedia_timer_joins.is_empty());
     }
 
     #[test]
