@@ -22,6 +22,7 @@ internal class StylusControlsDialog(
     private val grid=StylusGridConfig.parse(settings.pocketpcStylusGridJson)
     private val bindings=InputBindings(config)
     private val fullscreen=JSONObject(config.originalJson).optString("gamepad_fullscreen").takeIf{it.isNotEmpty() && it!="null"}
+    private var virtualDialog:Dialog?=null
     private var waiting:Int?=null
     private var selected:Int?=null
     private lateinit var status:TextView
@@ -76,6 +77,7 @@ internal class StylusControlsDialog(
             val width=minOf(maxWidth,(maxHeight*ratio).toInt())
             content.addView(preview,LinearLayout.LayoutParams(width,(width/ratio).toInt()).apply{gravity=android.view.Gravity.CENTER_HORIZONTAL})
         }
+        if(testing) content.addView(Button(context).apply{text="Test with touch controls";setOnClickListener{showVirtualControls()}})
         content.addView(Button(context).apply{text="Done";setOnClickListener{if(!testing) save(grid);dismiss()}})
         if(!testing)content.addView(Button(context).apply{text="Cancel";setOnClickListener{dismiss()}})
         window?.setLayout((context.resources.displayMetrics.widthPixels*.94f).toInt(),android.view.WindowManager.LayoutParams.WRAP_CONTENT)
@@ -94,12 +96,73 @@ internal class StylusControlsDialog(
                 setPadding(2,2,2,2);tag=cell
                 contentDescription="Zone ${cell+1}: $label"
                 if(waiting==cell)setBackgroundColor(Color.rgb(40,110,180))
-                setOnClickListener{selected=cell;waiting=cell;status.text="Press an input. Back cancels assignment.";refreshCells()}
+                setOnClickListener{selected=cell;waiting=cell;status.text="Press an input. Back cancels assignment.";refreshCells();showVirtualControls()}
             }
             cells.addView(button,GridLayout.LayoutParams().apply{this.width=width/grid.columns;this.height=(width/ratio/grid.rows).toInt();setMargins(1,1,1,1)})
             if(focused==cell)button.requestFocus()
         }
     }
+    /** Reuse the in-game bank and screen geometry; no native session exists here. */
+    private fun showVirtualControls() {
+        virtualDialog?.dismiss()
+        val dialog=object:Dialog(context) {
+            override fun dispatchKeyEvent(event:KeyEvent):Boolean {
+                if(event.keyCode==KeyEvent.KEYCODE_BACK || event.keyCode==KeyEvent.KEYCODE_ESCAPE) {
+                    if(event.action==KeyEvent.ACTION_UP)dismiss()
+                    return true
+                }
+                return this@StylusControlsDialog.dispatchKeyEvent(event)
+            }
+            override fun onGenericMotionEvent(event:MotionEvent)=this@StylusControlsDialog.onGenericMotionEvent(event)
+        }
+        virtualDialog=dialog
+        val root=PocketPcLayout(context)
+        val screen=FrameLayout(context).apply{id=R.id.content_column}
+        val bank=PocketPcControls(context).apply{id=R.id.game_controls}
+        root.addView(screen);root.addView(bank)
+        root.setDisplaySize(if(portrait)240 else 320,if(portrait)320 else 240,4)
+        val test=if(testing)TestSurface(context) else null
+        if(test!=null)screen.addView(test,FrameLayout.LayoutParams(-1,-1))
+        val hint=TextView(context).apply {
+            text=if(testing)"Touch steering — release to centre" else "Zone ${(waiting ?: 0)+1}: press a virtual control"
+            setTextColor(Color.WHITE);setBackgroundColor(0xaa101824.toInt());gravity=android.view.Gravity.CENTER
+        }
+        screen.addView(hint,FrameLayout.LayoutParams(-1,-2,android.view.Gravity.TOP))
+        screen.addView(Button(context).apply{text="Back";setOnClickListener{dialog.dismiss()}},FrameLayout.LayoutParams(-2,-2,android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL))
+        fun redraw(){if(test!=null){updatePreview();test.xFraction=preview.xFraction;test.yFraction=preview.yFraction;test.invalidate()}}
+        bank.dpad.onDirectionsChanged={_,mask->
+            listOf(DpadDirections.UP to 0x26,DpadDirections.RIGHT to 0x27,DpadDirections.DOWN to 0x28,DpadDirections.LEFT to 0x25).forEachIndexed{i,(bit,vk)->
+                val down=mask and bit!=0
+                if(testing)setArrow("virtual:$vk",i,down) else if(down)virtualGridInput(vk)?.let{capture(it)}
+            };redraw()
+        }
+        bank.aim.onAim={x,y->
+            if(testing){stickX=x;stickY=y;redraw()}else {
+                val direction=listOf("Left" to -x,"Right" to x,"Up" to -y,"Down" to y).maxByOrNull{it.second}
+                if(direction!=null && direction.second>.18f)capture(GridInput("controller","Touch:Stick${direction.first}"))
+            }
+        }
+        val keys=mapOf(R.id.btn_a to 0x11,R.id.btn_b to 0x20,R.id.btn_c to 0x10,R.id.btn_action to 0x0d,
+            R.id.btn_ppc_app1 to 0xc1,R.id.btn_ppc_app2 to 0xc2,R.id.btn_ppc_app3 to 0xc3,R.id.btn_ppc_app4 to 0xc4,R.id.btn_soft1 to 0x09)
+        keys.forEach{(id,vk)->bank.findViewById<View>(id).setOnTouchListener{v,e->
+            v.isPressed=e.actionMasked==MotionEvent.ACTION_DOWN
+            if(e.actionMasked==MotionEvent.ACTION_DOWN && !testing)virtualGridInput(vk)?.let{capture(it)}
+            true
+        }}
+        // Host commands stay reserved and cannot be assigned to game zones.
+        listOf(R.id.btn_soft2,R.id.btn_turbo,R.id.btn_stop_emulation,R.id.btn_fullscreen,R.id.btn_rotate_game).forEach{bank.findViewById<View>(it).isEnabled=false}
+        dialog.setContentView(root)
+        dialog.setOnDismissListener {
+            bank.clearPressedControls();arrowSources.clear();arrows.fill(false);stickX=0f;stickY=0f
+            if(waiting!=null){waiting=null;status.text="Assignment cancelled.";refreshCells()}
+            if(testing)updatePreview()
+            virtualDialog=null
+        }
+        dialog.show()
+        dialog.window?.setLayout(android.view.WindowManager.LayoutParams.MATCH_PARENT,android.view.WindowManager.LayoutParams.MATCH_PARENT)
+    }
+    override fun dismiss(){virtualDialog?.dismiss();super.dismiss()}
+
     override fun dispatchKeyEvent(event:KeyEvent):Boolean {
         val down=event.action==KeyEvent.ACTION_DOWN
         if(event.keyCode==KeyEvent.KEYCODE_BACK || event.keyCode==KeyEvent.KEYCODE_ESCAPE) {
@@ -125,7 +188,7 @@ internal class StylusControlsDialog(
     private fun capture(input:GridInput) {
         val cell=waiting ?: return
         val error=grid.bind(cell,input,fullscreen)
-        if(error==null){waiting=null;status.text="Assigned ${input.label()}. Press Done to save.";refreshCells()}else{status.text=error}
+        if(error==null){waiting=null;status.text="Assigned ${input.label()}. Press Done to save.";refreshCells();virtualDialog?.dismiss()}else{status.text=error}
     }
     override fun onGenericMotionEvent(event:MotionEvent):Boolean {
         if(event.action!=MotionEvent.ACTION_MOVE)return super.onGenericMotionEvent(event)

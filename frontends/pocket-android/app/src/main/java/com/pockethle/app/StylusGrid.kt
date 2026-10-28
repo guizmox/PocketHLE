@@ -30,7 +30,7 @@ internal data class GridInput(val source:String,val name:String) {
     fun canonical()=copy(name=if(source=="keyboard") InputBindings.canonical(name).uppercase() else when(name){
         "Back"->"Select";"Guide"->"Mode";"LeftStick"->"LeftThumb";"RightStick"->"RightThumb";else->name
     })
-    fun label()=if(source=="keyboard") "Key $name" else name
+    fun label()=if(source=="keyboard") "Key $name" else name.removePrefix("Touch:").let { if(name.startsWith("Touch:")) "Touch $it" else it }
     fun conflict(fullscreen:String?):String? {
         val input=canonical()
         if(source=="keyboard" && input.name in listOf("ESCAPE","F10","F11","F12")) return "Reserved by PocketHLE (Escape / F10 / F11 / F12)."
@@ -101,3 +101,11 @@ internal class StylusGridRouter(val config:StylusGridConfig,private val fullscre
     }
     fun cancel():GridTouch? {held.clear();val p=point ?: return null;point=null;return GridTouch(2,p.first,p.second)}
 }
+
+/** Virtual controls have their own identity, independent of physical pad bindings. */
+internal fun virtualGridInput(vk:Int):GridInput? = when(vk) {
+    0x26->"Up";0x28->"Down";0x25->"Left";0x27->"Right"
+    0x0d->"Action";0x11->"A";0x20->"B";0x10->"C";0x09->"Tab"
+    0xc1->"P1";0xc2->"P2";0xc3->"P3";0xc4->"P4"
+    else->null
+}?.let{GridInput("controller","Touch:$it")}

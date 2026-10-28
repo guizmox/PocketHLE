@@ -1,3 +1,7 @@
-frontends/pocket-desktop/build.rs
-frontends/pocket-desktop/src/desktop_main.rs
-frontends/pocket-desktop/src/app.rs
+frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusControlsDialog.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusGrid.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+docs/AGENTS.md
+Cargo.toml
+Cargo.lock
+frontends/pocket-android/app/build.gradle.kts

@@ -870,6 +870,15 @@ class GameActivity : AppCompatActivity() {
         return true
     }
 
+    private fun acquireVirtualKey(handle:Long,vk:Int) {
+        if(!gizmondoGame && virtualGridInput(vk)?.let{routeGrid(it,true)}==true)return
+        acquireGuestKey(handle,vk)
+    }
+    private fun releaseVirtualKey(handle:Long,vk:Int) {
+        if(!gizmondoGame && virtualGridInput(vk)?.let{routeGrid(it,false)}==true)return
+        releaseGuestKey(handle,vk)
+    }
+
     private fun acquireGuestKey(handle: Long, requestedVk: Int) {
         val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: 0
@@ -994,8 +1003,18 @@ class GameActivity : AppCompatActivity() {
      */
     private fun wireVirtualGamepad() {
         (gameControls as? PocketPcControls)?.aim?.apply {
-            visibility=if(stylusBindings.enabled) View.VISIBLE else View.GONE
-            onAim={ x,y -> stylusTouch=floatArrayOf(maxOf(-y,0f),maxOf(y,0f),maxOf(-x,0f),maxOf(x,0f));updateStylusAim() }
+            visibility=if(stylusBindings.enabled || touchSteeringEnabled || gridRouter!=null) View.VISIBLE else View.GONE
+            onAim={ x,y ->
+                if(touchSteeringEnabled) {
+                    NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,(x*1000).toInt(),(y*1000).toInt())
+                } else {
+                    val values=floatArrayOf(maxOf(-y,0f),maxOf(y,0f),maxOf(-x,0f),maxOf(x,0f))
+                    listOf("Up","Down","Left","Right").forEachIndexed { i,d ->
+                        if(routeGrid(GridInput("controller","Touch:Stick$d"),values[i]>.18f))values[i]=0f
+                    }
+                    stylusTouch=values;updateStylusAim()
+                }
+            }
         }
         val dpad=(gameControls as? GizmondoControls)?.dpad ?: (gameControls as? PocketPcControls)?.dpad
         dpad?.onDirectionsChanged = { view, mask ->
@@ -1007,11 +1026,11 @@ class GameActivity : AppCompatActivity() {
                 // Release the previous sector before pressing the next one. Other input
                 // sources retain their own references to these guest keys.
                 directions.forEach { (bit, vk) ->
-                    if (mask and bit == 0 && heldVirtualKeys.remove(vk)) releaseGuestKey(handle, vk)
+                    if (mask and bit == 0 && heldVirtualKeys.remove(vk)) releaseVirtualKey(handle, vk)
                 }
                 directions.forEach { (bit, vk) ->
                     if (mask and bit != 0 && heldVirtualKeys.add(vk)) {
-                        acquireGuestKey(handle, vk)
+                        acquireVirtualKey(handle, vk)
                         newlyPressed = true
                     }
                 }
@@ -1071,13 +1090,13 @@ class GameActivity : AppCompatActivity() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     if (heldVirtualKeys.add(vk)) {
-                        acquireGuestKey(handle, vk)
+                        acquireVirtualKey(handle, vk)
                         controlHaptic(v)
                     }
                     v.isPressed = true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (heldVirtualKeys.remove(vk)) releaseGuestKey(handle, vk)
+                    if (heldVirtualKeys.remove(vk)) releaseVirtualKey(handle, vk)
                     v.isPressed = false
                     if (event.actionMasked == MotionEvent.ACTION_UP) v.performClick()
                 }

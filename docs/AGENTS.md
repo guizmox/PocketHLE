@@ -4774,3 +4774,30 @@ and overlay directory guards remain intact. Core regression fails before this
 change and passes after it, including a conflicting system filename and a
 real directory in the save overlay. Persistence of Windows files is preserved.
 No data migration/deletion/reinstallation or licence rewrite is needed.
+
+
+## Android virtual controls in stylus configuration (2026-10-28)
+
+StylusControlsDialog reuses PocketPcControls and PocketPcLayout in a full-window
+local input panel. Selecting a grid cell opens the panel; successful capture
+closes it, while external keyboard/controller capture remains available. Steering
+has a touch-test button, with its preview in the layout's reserved game rectangle.
+Device orientation lays out the bank, and game geometry/rotation sets preview aspect.
+The preview and input callbacks never own a native session.
+
+Virtual inputs use controller names Touch:Action/A/B/C/P1..P4/Tab/Up/Down/Left/Right
+and Touch:StickUp/Down/Left/Right, separate from external controller bindings.
+They use the existing serialized string namespace; no new schema variant.
+GameActivity routes virtual key edges before normal keys, only for PocketPC grid
+mode. Assigned stick components are consumed; other components retain normal aim.
+Steering uses the existing normalized native position event (-1000..1000).
+Host buttons (Esc, Turbo, Exit, Fullscreen, rotation) are not assignable here.
+The existing grid router owns display-to-guest rotation; do not rotate twice.
+No Android SDK/build toolchain is available in this workspace; device/APK tests
+remain required. Do not claim physical Android testing.
+
+
+## Release 0.3.8 (2026-10-28)
+
+Workspace and local Cargo.lock packages are 0.3.8; Android versionName is
+0.3.8 and versionCode is 12. Historical release notes remain unchanged.
