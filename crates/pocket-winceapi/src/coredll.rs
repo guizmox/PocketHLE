@@ -4232,18 +4232,27 @@ fn global_memory_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
         }
         return Ok(DispatchOutcome::ReturnedR0(0)); // VOID
     }
-    // PocketPC compatibility path is unchanged by the Gizmondo profile.
+    // The unpartitioned PocketPC profile allocates from host-backed mapped
+    // arenas. Report that actual capacity, not a fixed 24 MiB free estimate.
+    // Quota-managed profiles above retain their separate device accounting.
+    let total = ctx.kernel.heap.capacity_bytes();
+    let available = ctx.kernel.heap.free_bytes().min(total);
+    let load = if total == 0 { 0 } else {
+        (u64::from(total - available) * 100 / u64::from(total)) as u32
+    };
+    let private_free = ctx.kernel.heap.private_virtual_free();
+    let (virtual_total, virtual_free) = if ctx.kernel.heap.has_private_arena() {
+        (0x0200_0000, private_free)
+    } else {
+        (total, available)
+    };
+    let values = [32, load, total, available, 0, 0, virtual_total, virtual_free];
     let mut data = [0u8; 32];
-    data[0..4].copy_from_slice(&32u32.to_le_bytes());
-    data[4..8].copy_from_slice(&20u32.to_le_bytes());
-    data[8..12].copy_from_slice(&(32u32 * 1024 * 1024).to_le_bytes());
-    data[12..16].copy_from_slice(&(24u32 * 1024 * 1024).to_le_bytes());
-    data[16..20].copy_from_slice(&(32u32 * 1024 * 1024).to_le_bytes());
-    data[20..24].copy_from_slice(&(24u32 * 1024 * 1024).to_le_bytes());
-    data[24..28].copy_from_slice(&(64u32 * 1024 * 1024).to_le_bytes());
-    data[28..32].copy_from_slice(&(48u32 * 1024 * 1024).to_le_bytes());
+    for (i, value) in values.into_iter().enumerate() {
+        data[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
     ctx.cpu.write_mem(status, &data)?;
-    Ok(DispatchOutcome::ReturnedR0(1))
+    Ok(DispatchOutcome::ReturnedR0(0)) // VOID
 }
 
 fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -34102,6 +34111,28 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(ram.snapshot().program_used, 0);
+    }
+
+    #[test]
+    fn pocketpc_memory_status_tracks_allocator_instead_of_fixed_estimate() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.heap = pocket_kernel::Heap::new(0x5000_0000, 64 * 1024 * 1024);
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        ctx.cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+        assert_eq!(global_memory_status(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.cpu.read_u32_le(0x1108).unwrap(), 64 * 1024 * 1024);
+        assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), ctx.kernel.heap.free_bytes());
+        assert!(ctx.cpu.read_u32_le(0x110c).unwrap() >= 28 * 1024 * 1024);
+        let allocation = ctx.kernel.heap.alloc(40 * 1024 * 1024).unwrap();
+        global_memory_status(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), ctx.kernel.heap.free_bytes());
+        assert!(ctx.cpu.read_u32_le(0x110c).unwrap() < 28 * 1024 * 1024);
+        assert_eq!(ctx.cpu.read_u32_le(0x1110).unwrap(), 0); // no page file
+        ctx.kernel.heap.free(allocation);
+        global_memory_status(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_u32_le(0x110c).unwrap(), 64 * 1024 * 1024);
     }
 
     #[test]

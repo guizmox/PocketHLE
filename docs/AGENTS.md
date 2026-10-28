@@ -4801,3 +4801,18 @@ remain required. Do not claim physical Android testing.
 
 Workspace and local Cargo.lock packages are 0.3.8; Android versionName is
 0.3.8 and versionCode is 12. Historical release notes remain unchanged.
+
+
+## PocketPC GlobalMemoryStatus allocation accounting (2026-10-28)
+
+The unpartitioned PocketPC profile no longer reports fixed 32 MiB total / 24 MiB
+free physical memory. It reports mapped heap arena capacity and current free
+bytes, with computed load and zero pagefile. Private virtual fields describe
+the 32 MiB low slot when present, including when exhausted; high-only profiles
+use their actual arena capacity. This is emulated allocator capacity, not host
+physical RAM or a claim of a hardware RAM profile. Quota-managed Gizmondo/device
+branches remain unchanged. The API is VOID (ReturnedR0(0)).
+THPS2's original ARM startup at 0x1b90c/0x1b92c calls GlobalMemoryStatus and
+compares dwAvailPhys to 0x1c00000 (28 MiB). The previous 24 MiB constant made
+this reject even when the mapped allocator had sufficient room. No binary
+patch, registration change, game name or unconditional success is used.

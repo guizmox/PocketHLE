@@ -3294,6 +3294,16 @@ impl Heap {
         true
     }
 
+    pub fn has_private_arena(&self) -> bool {
+        self.regions.iter().any(|(start, size)| *start < 0x0200_0000 && *size > 0)
+    }
+
+    /// Capacity of the mapped allocation arenas, independent of host RAM size.
+    pub fn capacity_bytes(&self) -> u32 {
+        self.regions.iter().map(|(_, size)| u64::from(*size))
+            .sum::<u64>().min(u64::from(u32::MAX)) as u32
+    }
+
     pub fn free_bytes(&self) -> u32 {
         self.free.iter().map(|(_, s)| *s).sum()
     }
