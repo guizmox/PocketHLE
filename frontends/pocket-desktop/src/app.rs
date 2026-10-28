@@ -207,6 +207,7 @@ pub struct PocketLauncher {
     running_game: Option<String>,
     status: String,
     import_error: Option<String>,
+    game_id_popup: Option<String>,
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
     last_frame_texture: Option<egui::TextureHandle>,
@@ -760,6 +761,7 @@ impl PocketLauncher {
             running_game: None,
             status: String::new(),
             import_error: None,
+            game_id_popup: None,
             config_draft: None,
             game_settings_draft: None,
             last_frame_texture: None,
@@ -1493,7 +1495,7 @@ impl PocketLauncher {
                         }
                         direction => {
                             if let Some(next) =
-                                crate::deck_navigation::menu_index(*selection, direction, 5)
+                                crate::deck_navigation::menu_index(*selection, direction, 6)
                             {
                                 *selection = next;
                             }
@@ -1532,7 +1534,7 @@ impl PocketLauncher {
         ui.add_space(8.0);
         ScrollArea::vertical().show(ui, |ui| {
             let gap = 12.0;
-            let card_size = Vec2::new(190.0, 230.0);
+            let card_size = Vec2::new(190.0, 210.0);
             let columns = ((ui.available_width() + gap) / (card_size.x + gap))
                 .floor()
                 .max(1.0) as usize;
@@ -1635,7 +1637,7 @@ impl PocketLauncher {
             let mut chosen = None;
             egui::popup_below_widget(ui, popup_id, &menu_response, |ui| {
                 ui.set_min_width(170.0);
-                for (index, label) in ["Informations", "Play", "Rename...", "Settings", "Remove"]
+                for (index, label) in ["Informations", "Play", "Rename...", "Settings", "Remove", "Game ID"]
                     .into_iter()
                     .enumerate()
                 {
@@ -1671,6 +1673,10 @@ impl PocketLauncher {
                         } else {
                             self.status = format!("Removed {}", game.display_name);
                         }
+                    }
+                    5 => {
+                        ui.ctx().output_mut(|o| o.copied_text = game.id.clone());
+                        self.game_id_popup = Some(game.id.clone());
                     }
                     _ => unreachable!(),
                 }
@@ -1783,8 +1789,8 @@ impl PocketLauncher {
         menu_response.clone().on_hover_text("Game actions");
 
         let label_rect = Rect::from_min_size(
-            Pos2::new(card_rect.left(), card_rect.bottom() - 98.0),
-            Vec2::new(size.x, 98.0),
+            Pos2::new(card_rect.left(), card_rect.bottom() - 78.0),
+            Vec2::new(size.x, 78.0),
         );
         ui.painter()
             .rect_filled(label_rect, 0.0, Color32::from_rgb(28, 29, 32));
@@ -1822,11 +1828,6 @@ impl PocketLauncher {
             );
         }
 
-        text_ui.add(
-            egui::Label::new(RichText::new(format!("ID: {}", game.id))
-                .monospace().size(10.0).color(Color32::from_gray(160)))
-                .truncate(true),
-        ).on_hover_text(format!("Launch ID: {}", game.id));
 
         if card_response.clicked() && !menu_response.clicked() {
             self.selected_game = Some(game.id.clone());
@@ -4101,6 +4102,11 @@ impl PocketLauncher {
                         continue;
                     }
                     if self.screen != Screen::Run {
+                        if self.game_id_popup.is_some() {
+                            if control == "East" { self.game_id_popup = None; }
+                            else { self.controller_ui.press(&control); }
+                            continue;
+                        }
                         if self.controller_ui.keyboard_open() {
                             self.controller_ui.press(&control);
                             continue;
@@ -4950,6 +4956,29 @@ impl eframe::App for PocketLauncher {
             self.recordings_gallery.close_player();
         }
         self.drain_events(ctx);
+        if let Some(id) = self.game_id_popup.clone() {
+            self.handle_gamepads(ctx);
+            egui::CentralPanel::default().show(ctx, |_| {});
+            let mut open = true;
+            let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            egui::Window::new("Game ID").open(&mut open)
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .max_width((ctx.screen_rect().width()-32.0).max(100.0))
+                .show(ctx, |ui| {
+                    crate::controller_ui::page_scope(ui, "game_id_popup", |ui| {
+                        ui.label(egui::RichText::new(&id).monospace());
+                        ui.label("Copied to clipboard.");
+                        if crate::controller_ui::button(ui, "Copy again").clicked() {
+                            ctx.output_mut(|o| o.copied_text = id.clone());
+                        }
+                        if crate::controller_ui::button(ui, "Close").clicked() { close = true; }
+                    });
+                });
+            if close || !open { self.game_id_popup = None; }
+            return;
+        }
+
         if let Some(error) = self.import_error.clone() {
             egui::CentralPanel::default().show(ctx, |_| {});
             let mut open = true;

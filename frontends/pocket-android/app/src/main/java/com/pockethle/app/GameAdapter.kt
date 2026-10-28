@@ -47,7 +47,6 @@ class GameAdapter(
     inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         private val title: TextView = view.findViewById(R.id.game_title)
         private val caption: TextView = view.findViewById(R.id.game_caption)
-        private val launchId: TextView = view.findViewById(R.id.game_launch_id)
         private val serial: TextView = view.findViewById(R.id.game_serial)
         private val publisherLabel: TextView = view.findViewById(R.id.game_publisher)
         private val moreBtn: ImageButton = view.findViewById(R.id.btn_more)
@@ -55,8 +54,6 @@ class GameAdapter(
         fun bind(entry: GameEntry) {
             title.text = entry.displayName
             caption.text = entry.displayName
-            launchId.text = "ID: ${entry.id}"
-            launchId.isSelected = true
             caption.isSelected = true
             val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
             val label = itemView.findViewById<View>(R.id.game_label)
@@ -84,6 +81,7 @@ class GameAdapter(
             popup.menu.add(0, 3, 2, "Rename")
             popup.menu.add(0, 0, 3, R.string.action_settings)
             popup.menu.add(0, 1, 4, R.string.action_remove)
+            popup.menu.add(0, 5, 5, "Game ID")
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     2 -> onRun(entry)
@@ -91,6 +89,15 @@ class GameAdapter(
                     4 -> onInformation(entry)
                     0 -> onSettings(entry)
                     1 -> onRemove(entry)
+                    5 -> {
+                        val context = itemView.context
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Game ID", entry.id))
+                        androidx.appcompat.app.AlertDialog.Builder(context)
+                            .setTitle("Game ID")
+                            .setMessage("${entry.id}\n\nCopied to clipboard.")
+                            .setPositiveButton(android.R.string.ok, null).show()
+                    }
                 }
                 true
             }
