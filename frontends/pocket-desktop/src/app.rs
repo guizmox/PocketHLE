@@ -166,6 +166,7 @@ pub struct PocketLauncher {
     updating_import: bool,
     library_busy: bool,
     restore_archive: Option<std::path::PathBuf>,
+    file_dialog: Option<crate::file_dialog::FileDialog>,
     pending_run: Option<GameEntry>,
     colors_startup_prompt: Option<(
         GameEntry,
@@ -575,7 +576,6 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
-    BackupSelected(Option<std::path::PathBuf>),
     BackupFinished(Result<String, String>),
     ColorsUnlocked(Result<String, String>),
     ReleaseAvailable(pocket_library::updates::Update),
@@ -749,6 +749,7 @@ impl PocketLauncher {
             updating_import: false,
             library_busy: false,
             restore_archive: None,
+            file_dialog: None,
             pending_run: None,
             colors_startup_prompt: None,
             screen: Screen::Library,
@@ -848,11 +849,6 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
-                UiEvent::BackupSelected(path) => {
-                    self.restore_archive = path;
-                    // Keep the library locked until the mode is chosen or cancelled.
-                    if self.restore_archive.is_none() { self.library_busy = false; }
-                }
                 UiEvent::BackupFinished(result) => {
                     self.library_busy = false;
                     match result {
@@ -3815,7 +3811,7 @@ impl PocketLauncher {
 
     fn update_gamepad_input(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if self.screen != Screen::Run || !focused {
+        if self.screen != Screen::Run || !focused || self.file_dialog.is_some() || self.restore_archive.is_some() {
             // UI frames release guest inputs, but a focused View press must
             // survive until release so the UI uses the same tap/hold gesture.
             let view_press = if focused { self.deck_view_press } else { None };
@@ -3825,6 +3821,7 @@ impl PocketLauncher {
         self.gamepad_rx.set_output(
             self.gamepad_selected,
             self.screen == Screen::Run
+                && self.file_dialog.is_none() && self.restore_archive.is_none()
                 && self.running_game.is_some()
                 && ctx.input(|i| i.viewport().focused.unwrap_or(true)),
         );
@@ -3845,6 +3842,7 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
+                    if self.file_dialog.is_some() || self.restore_archive.is_some() { continue; }
                     if Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -3882,6 +3880,7 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
+                    if self.file_dialog.is_some() || self.restore_archive.is_some() { continue; }
                     if Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -3962,6 +3961,25 @@ impl PocketLauncher {
                     control,
                     down,
                 } => {
+                    if (self.file_dialog.is_some() || self.restore_archive.is_some())
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if !down { self.controller_ui.release(&control); }
+                        else if self.controller_ui.keyboard_open() {
+                            self.controller_ui.press(&control);
+                        } else if control == "East" && self.controller_ui.back(ctx) {
+                            // Close a popup before closing its owner.
+                        } else if let Some(dialog) = self.file_dialog.as_mut() {
+                            if !dialog.controller(&control) { self.controller_ui.press(&control); }
+                        } else {
+                            self.controller_ui.press(if control == "East" { "Escape" } else { &control });
+                        }
+                        // Controller events arrive after raw_input_hook. Schedule
+                        // the next frame to consume the queued widget input.
+                        ctx.request_repaint();
+                        continue;
+                    }
                     if self.touch_steering_enabled()
                         && control.starts_with("LeftStick")
                         && Some(device) == self.gamepad_selected
@@ -4618,23 +4636,52 @@ impl PocketLauncher {
             || self.rename_draft.is_some() || self.pending_import.is_some() { return; }
         self.library_busy = true;
         self.status = if restore { "Choose a PocketHLE backup…" } else { "Saving library backup…" }.into();
-        let root = self.library.root().to_path_buf();
-        let tx = self.events_tx.clone();
-        std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().add_filter("PocketHLE backup", &["zip"]);
-            if restore {
-                let _ = tx.send(UiEvent::BackupSelected(dialog.set_title("Restore PocketHLE backup").pick_file()));
-            } else {
-                let path = dialog.set_title("Save PocketHLE backup")
-                    .set_file_name(pocket_library::backup::suggested_filename()).save_file();
-                let result = match path {
-                    Some(path) => pocket_library::backup::save(&root, &path)
-                        .map(|()| format!("Backup saved: {}", path.display())).map_err(|e| format!("{e:#}")),
-                    None => Ok("Backup cancelled.".into()),
-                };
-                let _ = tx.send(UiEvent::BackupFinished(result));
+        let purpose = if restore { crate::file_dialog::Purpose::RestoreBackup }
+            else { crate::file_dialog::Purpose::SaveBackup };
+        self.open_file_dialog(purpose, None, pocket_library::backup::suggested_filename());
+    }
+
+    fn open_file_dialog(&mut self, purpose: crate::file_dialog::Purpose, directory: Option<std::path::PathBuf>, filename: String) {
+        self.controller_ui.stop_repeat();
+        self.deck_nav_repeat = None;
+        self.deck_library_actions.clear();
+        self.file_dialog = Some(crate::file_dialog::FileDialog::new(purpose, directory, filename));
+    }
+
+    fn ui_file_dialog(&mut self, ctx: &egui::Context) {
+        let keyboard_open = self.controller_ui.keyboard_open();
+        if keyboard_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.controller_ui.back(ctx);
+        }
+        let outcome = self.file_dialog.as_mut().and_then(|dialog| dialog.show(ctx, keyboard_open));
+        self.controller_ui.show(ctx);
+        let Some(outcome) = outcome else { return; };
+        ctx.request_repaint();
+        self.file_dialog = None;
+        if keyboard_open { self.controller_ui.back(ctx); }
+        self.controller_ui.stop_repeat();
+        use crate::file_dialog::{Outcome, Purpose};
+        match outcome {
+            Outcome::Cancelled(_) => {
+                self.library_busy = false;
+                self.status = "File selection cancelled.".into();
             }
-        });
+            Outcome::Selected(Purpose::Import, path) => self.import_selected_file(path),
+            Outcome::Selected(Purpose::RestoreBackup, path) => {
+                self.restore_archive = Some(path);
+                self.status = "Choose a restore mode.".into();
+            }
+            Outcome::Selected(Purpose::SaveBackup, path) => {
+                self.status = "Saving library backup…".into();
+                let root = self.library.root().to_path_buf();
+                let tx = self.events_tx.clone();
+                std::thread::spawn(move || {
+                    let result = pocket_library::backup::save(&root, &path)
+                        .map(|()| format!("Backup saved: {}", path.display())).map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(UiEvent::BackupFinished(result));
+                });
+            }
+        }
     }
 
     fn ui_restore_backup(&mut self, ctx: &egui::Context) {
@@ -4677,36 +4724,15 @@ impl PocketLauncher {
             return;
         }
         self.library_busy = true;
+        let directory = self.library.config().last_import_dir.clone();
+        self.open_file_dialog(crate::file_dialog::Purpose::Import, directory, String::new());
+        self.status = "Choose a game to import…".into();
+    }
+
+    fn import_selected_file(&mut self, path: std::path::PathBuf) {
         let library_root = self.library.root().to_path_buf();
-        let last_dir = self.library.config().last_import_dir.clone();
         let tx = self.events_tx.clone();
         std::thread::spawn(move || {
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Import Pocket PC game")
-                // A single "Pocket PC game" filter that matches every
-                // shape we know how to import keeps the dialog UX
-                // simple — the user picks a file and we pick the
-                // right loader from the extension below. `.dll` is
-                // included so a user who mistakenly picks a support
-                // library gets a clear error directing them to import
-                // the `.exe` instead, rather than seeing nothing in
-                // the picker at all.
-                .add_filter(
-                    "Pocket PC game (.rar / .cab / .zip / .exe / .dll)",
-                    &[
-                        "rar", "RAR", "cab", "CAB", "zip", "ZIP", "exe", "EXE", "dll", "DLL",
-                    ],
-                )
-                .add_filter("Cabinet archive", &["cab", "CAB"])
-                .add_filter("Zip archive", &["zip", "ZIP"])
-                .add_filter("ARM PE executable", &["exe", "EXE"]);
-            if let Some(d) = last_dir {
-                dialog = dialog.set_directory(d);
-            }
-            let Some(path) = dialog.pick_file() else {
-                let _ = tx.send(UiEvent::ImportFinished(Err("cancelled".into())));
-                return;
-            };
             let result = (|| -> Result<Vec<GameEntry>, String> {
                 let mut lib = Library::open(&library_root).map_err(|e| e.to_string())?;
                 let parent = path
@@ -5071,7 +5097,7 @@ impl eframe::App for PocketLauncher {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         crate::desktop_pointer::finish_missing_releases(ctx, raw);
         self.controller_ui
-            .prepare_input(ctx, raw, self.screen != Screen::Run);
+            .prepare_input(ctx, raw, self.screen != Screen::Run || self.file_dialog.is_some() || self.restore_archive.is_some());
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::controller_ui::begin_frame(ctx);
@@ -5081,7 +5107,13 @@ impl eframe::App for PocketLauncher {
             self.recordings_gallery.close_player();
         }
         self.drain_events(ctx);
+        if self.file_dialog.is_some() {
+            self.update_gamepad_input(ctx);
+            self.ui_file_dialog(ctx);
+            return;
+        }
         if self.restore_archive.is_some() {
+            self.update_gamepad_input(ctx);
             egui::CentralPanel::default().show(ctx, |_| {});
             self.ui_restore_backup(ctx);
             self.controller_ui.show(ctx);

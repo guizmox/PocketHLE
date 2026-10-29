@@ -3,7 +3,7 @@
 // Targets Linux and Windows. The interface is deliberately modeled
 // after [`j2me-loader`](https://github.com/nikita36078/j2me-loader): a
 // library screen with cards for every imported game, an "Import" button
-// that pulls a `.CAB` file in via a native file dialog, a "Settings"
+// that pulls a `.CAB` file in via a controller-friendly file dialog, a "Settings"
 // screen, and a per-game settings sheet. Selecting a card and pressing
 // "Run" opens a separate emulator viewport that displays the
 // framebuffer produced by [`pocket_core::Emulator`].
@@ -12,6 +12,7 @@ mod app;
 mod controller_ui;
 mod deck_navigation;
 mod desktop_pointer;
+mod file_dialog;
 mod fullscreen_layout;
 mod gamepad;
 mod gamepad_host;
