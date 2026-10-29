@@ -23439,9 +23439,17 @@ fn wave_out_open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         return Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR));
     }
 
-    // The mixer owns a dynamically sized map of WaveStream values. Opening a
-    // handle does not consume a hardware voice or start a separate host device.
-    // Do not impose a fictitious 32-stream hardware limit on these software streams.
+    // Queries check the format even when the explicit compatibility budget is
+    // exhausted. Reject before allocating a handle, touching *phwo, opening a
+    // mixer stream or publishing WOM_OPEN. The default remains unbounded.
+    if ctx
+        .kernel
+        .wave_out
+        .open_handle_limit
+        .is_some_and(|limit| ctx.kernel.wave_out.devices.len() >= limit)
+    {
+        return Ok(DispatchOutcome::ReturnedR0(4)); // MMSYSERR_ALLOCATED
+    }
     let kind = match flags & 0x0007_0000 {
         0x0001_0000 => WaveCallbackKind::Window,
         0x0002_0000 => WaveCallbackKind::Thread,
@@ -39703,6 +39711,95 @@ mod wave_open_capacity_tests {
     use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
     use super::*;
     use pocket_cpu::Cpu;
+    #[test]
+    fn finite_profile_refuses_33rd_open_without_side_effects_and_reuses_closed_slot() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.wave_out.open_handle_limit = Some(32);
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+        cpu.write_mem(0x1800, &[0; 8]).unwrap();
+        // Function callbacks make duplicate WOM_OPEN notifications observable.
+        cpu.write_mem(0x1804, &0x30000u32.to_le_bytes()).unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            for (reg, val) in [
+                (ArmReg::R0, 0x1100),
+                (ArmReg::R1, u32::MAX),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, 0x2000),
+            ] {
+                cpu.write_reg(reg, val).unwrap();
+            }
+            assert_eq!(
+                wave_out_open(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                })
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            handles.push(cpu.read_u32_le(0x1100).unwrap());
+        }
+        let next = kernel.wave_out.next_handle;
+        let notifications = kernel.wave_out.function_done.len();
+        cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+        cpu.write_mem(0x1100, &0x12345678u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            wave_out_open(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                })
+                .unwrap(),
+            DispatchOutcome::ReturnedR0(4)
+        );
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0x12345678);
+        assert_eq!(kernel.wave_out.next_handle, next);
+        assert_eq!(kernel.wave_out.devices.len(), 32);
+        assert_eq!(kernel.wave_out.function_done.len(), notifications);
+        // WAVE_FORMAT_QUERY still succeeds at capacity without consuming a slot.
+        cpu.write_mem(0x1804, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            wave_out_open(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                })
+                .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0x12345678);
+        assert_eq!(kernel.wave_out.next_handle, next);
+        assert_eq!(kernel.wave_out.devices.len(), 32);
+        assert_eq!(kernel.wave_out.function_done.len(), notifications);
+        cpu.write_reg(ArmReg::R0, handles[0]).unwrap();
+        assert_eq!(
+            wave_out_close(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        cpu.write_mem(0x1804, &0u32.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+        assert_eq!(
+            wave_out_open(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                })
+                .unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.wave_out.devices.len(), 32);
+        assert!(kernel.wave_out.devices.contains_key(&handles[31]));
+        assert!(!kernel.wave_out.devices.contains_key(&handles[0]));
+    }
+
     #[test]
     fn software_streams_open_beyond_32_query_is_side_effect_free_and_close_isolated() {
         let mut cpu = scanf_cpu();

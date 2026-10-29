@@ -89,6 +89,16 @@ impl Emulator {
         }
     }
 
+    /// Apply the Gizmondo audio compatibility profile after loading a process.
+    /// The 32-handle budget restores finite-capacity enumeration for console
+    /// software. It is a compatibility policy, not a ROM-proven hardware limit.
+    /// Pocket PC retains dynamically allocated software streams without a cap.
+    pub fn set_gizmondo_audio_compatibility(&mut self, enabled: bool) {
+        if let Some(process) = self.process.as_mut() {
+            process.state.wave_out.open_handle_limit = enabled.then_some(32);
+        }
+    }
+
     /// Add an optional presentation ceiling without changing the guest clock.
     /// May be called before or after loading. None retains existing display sync.
     pub fn set_frame_rate_limit(&mut self, fps: Option<u32>) {

@@ -634,6 +634,7 @@ fn cmd_run(
         return Ok(());
     }
     emu.load_pe(&_launcher.exe)?;
+    emu.set_gizmondo_audio_compatibility(_launcher.native_screen.is_some());
     // An explicit `--screen` wins; otherwise a launcher that recognised
     // the device the game shipped on picks the geometry, because the
     // game reads it during start-up and cannot be told later.

@@ -477,6 +477,10 @@ pub struct WaveOutDevice {
 /// State shared by all open `waveOut` handles.
 #[derive(Debug, Default)]
 pub struct WaveOutState {
+    /// Optional compatibility budget for simultaneously open output handles.
+    /// None preserves the unbounded software mixer. This is not a measured
+    /// hardware voice count; device launchers may explicitly opt into a budget.
+    pub open_handle_limit: Option<usize>,
     /// Legacy/current handle used while dispatching a callback.
     pub handle: u32,
     /// Independently opened WinMM output handles.
