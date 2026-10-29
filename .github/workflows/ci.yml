@@ -19,6 +19,19 @@ env:
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
+  android-backup-tools:
+    name: Android ADB backup tools
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Windows, Linux and Python rescue scripts
+        run: bash tools/package-android-adb-backup.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketHLE-Android-ADB-Backup
+          path: dist/android-backup/PocketHLE-Android-ADB-Backup.zip
+          if-no-files-found: error
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-24.04

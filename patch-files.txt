@@ -1,2 +1,7 @@
-crates\pocket-library\data\gizmondo-titles.json
-crates\pocket-library\src\lib.rs
+.github\workflows\ci.yml
+tools\README-android-adb-backup.txt
+tools\backup-android-adb.bat
+tools\backup-android-adb.ps1
+tools\backup-android-adb.py
+tools\backup-android-adb.sh
+tools\package-android-adb-backup.sh
