@@ -241,9 +241,9 @@ impl Runner {
             .map(|l| l.config().clone())
             .unwrap_or_default();
         if !is_gizmondo {
-            if let Err(error)=emu.set_pocketpc_processor(&launcher_config.pocketpc_processor) {
+            if let Err(error) = emu.set_pocketpc_processor(&launcher_config.pocketpc_processor) {
                 log::warn!("{error}; using default PXA270 identity");
-                let _=emu.set_pocketpc_processor("pxa270");
+                let _ = emu.set_pocketpc_processor("pxa270");
             }
         }
         emu.set_gpu_renderer(
@@ -650,6 +650,7 @@ pub struct RunOutcome {
 
 #[derive(Debug, Clone)]
 pub struct FrameSnapshot {
+    pub presentation_stats: pocket_core::kernel::framebuffer::PresentationStats,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
@@ -659,6 +660,7 @@ pub struct FrameSnapshot {
 impl FrameSnapshot {
     fn from_framebuffer(fb: &pocket_core::kernel::Framebuffer) -> Self {
         Self {
+            presentation_stats: fb.presentation_stats.clone(),
             text_input: false,
             width: fb.width,
             height: fb.height,
@@ -672,6 +674,7 @@ impl FrameSnapshot {
     fn fill_from_framebuffer(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
         fb.snapshot_rgba8888_into(scratch);
         Self {
+            presentation_stats: fb.presentation_stats.clone(),
             text_input: false,
             width: fb.width,
             height: fb.height,

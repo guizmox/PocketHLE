@@ -2127,6 +2127,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     }
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+    ctx.kernel.framebuffer.presentation_stats.record_present();
     log::trace!(
         "eglSwapBuffers() -> frame {}",
         ctx.kernel.framebuffer.frame_counter
@@ -3644,6 +3645,8 @@ mod tests {
             &[DISPLAY_HANDLE, SURFACE_HANDLE],
         );
         let previous = kernel.framebuffer.directdraw.last_present.unwrap();
+        let presented = kernel.framebuffer.presentation_stats.completed();
+        assert_eq!(presented, 1);
         with_ctx(|c| {
             c.clear_color = [1., 0., 0., 1.];
             c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
@@ -3670,6 +3673,10 @@ mod tests {
         assert_eq!(ctx.kernel.framebuffer.pixels, before);
         assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
         let key = (0, t.thunk_va, ctx.cpu.read_reg(ArmReg::Sp).unwrap());
+        assert_eq!(
+            ctx.kernel.framebuffer.presentation_stats.completed(),
+            presented
+        );
         let deadline = ctx.kernel.framebuffer.directdraw.pending[&key];
         assert_eq!(deadline, anchor + DirectDrawTiming::PERIOD);
         // Each retry retains the same deadline and intact arguments.
@@ -3685,6 +3692,10 @@ mod tests {
             }
         }
         assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
+        assert_eq!(
+            ctx.kernel.framebuffer.presentation_stats.completed(),
+            presented + 1
+        );
         assert!(ctx.kernel.framebuffer.directdraw.last_present.unwrap() >= deadline);
         assert!(ctx.kernel.framebuffer.directdraw.last_present.unwrap() > previous);
         assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0, 0xf8]);
@@ -3704,6 +3715,10 @@ mod tests {
         assert!(
             ctx.kernel.framebuffer.directdraw.last_present.unwrap()
                 >= first + DirectDrawTiming::PERIOD
+        );
+        assert_eq!(
+            ctx.kernel.framebuffer.presentation_stats.completed(),
+            presented + 2
         );
         // Resuming a late process does not produce a catch-up burst.
         ctx.kernel.framebuffer.directdraw.last_present =

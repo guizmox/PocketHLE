@@ -164,6 +164,7 @@ fn gx_open_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 
 fn gx_close_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.gx_draw_active = false;
+    ctx.kernel.framebuffer.presentation_stats.reset();
     ctx.kernel.gx_explicit_present = false;
     ctx.kernel.controls.direct_surface_hwnd = 0;
     ctx.kernel.gdi.shell_menus.gx_fullscreen = false;
@@ -218,6 +219,7 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(outcome);
     }
     readback_framebuffer(ctx)?;
+    ctx.kernel.framebuffer.presentation_stats.record_present();
     // Explicit presentation takes precedence over the retained-pointer bulk-copy
     // fallback. A whole-screen background copy need not be the finished frame.
     ctx.kernel.gx_explicit_present = true;
@@ -810,6 +812,7 @@ pub(crate) mod tests {
             c.kernel.framebuffer.directdraw.last_present = Some(anchor);
             let key = (0, thunk.thunk_va, 0x4000);
             for _ in 0..2 {
+                assert_eq!(c.kernel.framebuffer.presentation_stats.completed(), 0);
                 assert_eq!(
                     gx_end_draw(&mut c).unwrap(),
                     DispatchOutcome::JumpTo(thunk.thunk_va)
@@ -829,6 +832,7 @@ pub(crate) mod tests {
             assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
             assert_eq!(&c.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
             assert!(c.kernel.framebuffer.directdraw.pending.is_empty());
+            assert_eq!(c.kernel.framebuffer.presentation_stats.completed(), 1);
             let counter = c.kernel.framebuffer.frame_counter;
             c.kernel.framebuffer.directdraw.last_present = Some(anchor);
             assert_eq!(
@@ -842,6 +846,7 @@ pub(crate) mod tests {
                 .insert(key, Instant::now() - Duration::from_secs(1));
             assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
             assert_eq!(c.kernel.framebuffer.frame_counter, counter);
+            assert_eq!(c.kernel.framebuffer.presentation_stats.completed(), 2);
             // DirectDraw's explicit vertical-blank wait is a one-shot credit.
             c.kernel.framebuffer.directdraw.last_present = Some(anchor);
             c.kernel

@@ -886,6 +886,17 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePresentationFps(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jni::sys::jfloat {
+    session_from_handle(handle)
+        .and_then(|session| session.presentation_fps())
+        .unwrap_or(-1.0)
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollFrame<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,

@@ -1184,6 +1184,7 @@ fn surface_unlock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             }
         }
         publish_framebuffer(ctx)?;
+        ctx.kernel.framebuffer.presentation_stats.record_present();
         let clock = &mut ctx.kernel.framebuffer.directdraw;
         clock.primary_locks.remove(&SYNTHETIC_FRAMEBUFFER_BASE);
         clock
@@ -1310,6 +1311,7 @@ fn surface_flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         copy_rect(ctx, src, (0, 0, src.width, src.height), dest, area)?;
     }
     publish_framebuffer(ctx)?;
+    ctx.kernel.framebuffer.presentation_stats.record_present();
     ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     Ok(DispatchOutcome::ReturnedR0(0))
 }

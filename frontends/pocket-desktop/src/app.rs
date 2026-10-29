@@ -583,6 +583,7 @@ pub enum UiEvent {
 
 #[derive(Debug, Clone)]
 struct FrameStats {
+    presentation_stats: Option<pocket_core::kernel::framebuffer::PresentationStats>,
     fps: f32,
     window_started_at: Option<Instant>,
     window_frames: u32,
@@ -592,6 +593,7 @@ struct FrameStats {
 impl Default for FrameStats {
     fn default() -> Self {
         Self {
+            presentation_stats: None,
             fps: 0.0,
             window_started_at: None,
             window_frames: 0,
@@ -626,6 +628,13 @@ impl FrameStats {
     }
 
     fn current_fps(&self) -> f32 {
+        if let Some(fps) = self
+            .presentation_stats
+            .as_ref()
+            .and_then(|stats| stats.fps())
+        {
+            return fps;
+        }
         if self
             .last_frame_at
             .map(|t| t.elapsed() > Duration::from_secs(1))
@@ -884,7 +893,9 @@ impl PocketLauncher {
                     self.updating_import = false;
                     self.library_busy = false;
                     self.status = format!("Import failed: {e}");
-                    if e != "cancelled" { self.import_error = Some(e); }
+                    if e != "cancelled" {
+                        self.import_error = Some(e);
+                    }
                     self.reload_library();
                 }
                 UiEvent::DemoSplitFinished(id, result) => {
@@ -994,6 +1005,7 @@ impl PocketLauncher {
         // Keep native pixels for input coordinates and rebuilding filtered images.
         self.last_frame_snapshot = Some(frame.clone());
         self.refresh_frame_texture(ctx, frame);
+        self.frame_stats.presentation_stats = Some(frame.presentation_stats.clone());
         self.frame_stats.record_frame();
     }
 
@@ -1637,9 +1649,16 @@ impl PocketLauncher {
             let mut chosen = None;
             egui::popup_below_widget(ui, popup_id, &menu_response, |ui| {
                 ui.set_min_width(170.0);
-                for (index, label) in ["Informations", "Play", "Rename...", "Settings", "Remove", "Game ID"]
-                    .into_iter()
-                    .enumerate()
+                for (index, label) in [
+                    "Informations",
+                    "Play",
+                    "Rename...",
+                    "Settings",
+                    "Remove",
+                    "Game ID",
+                ]
+                .into_iter()
+                .enumerate()
                 {
                     if ui.selectable_label(index == selection, label).clicked()
                         || (activate && index == selection)
@@ -1827,7 +1846,6 @@ impl PocketLauncher {
                     .color(Color32::from_gray(145)),
             );
         }
-
 
         if card_response.clicked() && !menu_response.clicked() {
             self.selected_game = Some(game.id.clone());
@@ -4119,8 +4137,11 @@ impl PocketLauncher {
                     }
                     if self.screen != Screen::Run {
                         if self.game_id_popup.is_some() {
-                            if control == "East" { self.game_id_popup = None; }
-                            else { self.controller_ui.press(&control); }
+                            if control == "East" {
+                                self.game_id_popup = None;
+                            } else {
+                                self.controller_ui.press(&control);
+                            }
                             continue;
                         }
                         if self.controller_ui.keyboard_open() {
@@ -4977,10 +4998,12 @@ impl eframe::App for PocketLauncher {
             egui::CentralPanel::default().show(ctx, |_| {});
             let mut open = true;
             let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-            egui::Window::new("Game ID").open(&mut open)
-                .collapsible(false).resizable(false)
+            egui::Window::new("Game ID")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .max_width((ctx.screen_rect().width()-32.0).max(100.0))
+                .max_width((ctx.screen_rect().width() - 32.0).max(100.0))
                 .show(ctx, |ui| {
                     crate::controller_ui::page_scope(ui, "game_id_popup", |ui| {
                         ui.label(egui::RichText::new(&id).monospace());
@@ -4988,10 +5011,14 @@ impl eframe::App for PocketLauncher {
                         if crate::controller_ui::button(ui, "Copy again").clicked() {
                             ctx.output_mut(|o| o.copied_text = id.clone());
                         }
-                        if crate::controller_ui::button(ui, "Close").clicked() { close = true; }
+                        if crate::controller_ui::button(ui, "Close").clicked() {
+                            close = true;
+                        }
                     });
                 });
-            if close || !open { self.game_id_popup = None; }
+            if close || !open {
+                self.game_id_popup = None;
+            }
             return;
         }
 
@@ -5000,16 +5027,24 @@ impl eframe::App for PocketLauncher {
             let mut open = true;
             let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             egui::Window::new("Import failed")
-                .open(&mut open).collapsible(false).resizable(true)
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
                 .default_width(440.0)
-                .max_width((ctx.screen_rect().width()-32.0).max(100.0))
-                .max_height((ctx.screen_rect().height()-32.0).max(100.0))
+                .max_width((ctx.screen_rect().width() - 32.0).max(100.0))
+                .max_height((ctx.screen_rect().height() - 32.0).max(100.0))
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| { ui.label(&error); });
-                    if crate::controller_ui::button(ui, "Close").clicked() { close = true; }
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(&error);
+                    });
+                    if crate::controller_ui::button(ui, "Close").clicked() {
+                        close = true;
+                    }
                 });
-            if close || !open { self.import_error = None; }
+            if close || !open {
+                self.import_error = None;
+            }
             return;
         }
         if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
@@ -5209,9 +5244,23 @@ impl eframe::App for PocketLauncher {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if show_fps {
                             ui.label(
-                                RichText::new(format!("{:.1} IPS", self.frame_stats.current_fps()))
-                                    .small()
-                                    .color(Color32::from_rgb(116, 205, 176)),
+                                RichText::new(format!(
+                                    "{:.1} {}",
+                                    self.frame_stats.current_fps(),
+                                    if self
+                                        .frame_stats
+                                        .presentation_stats
+                                        .as_ref()
+                                        .and_then(|stats| stats.fps())
+                                        .is_some()
+                                    {
+                                        "FPS"
+                                    } else {
+                                        "IPS"
+                                    }
+                                ))
+                                .small()
+                                .color(Color32::from_rgb(116, 205, 176)),
                             )
                             .on_hover_text(
                                 "Game frames per second. The frame rate may drop in static menus.",

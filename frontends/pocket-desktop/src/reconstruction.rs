@@ -236,6 +236,7 @@ mod tests {
             }
         }
         let native = FrameSnapshot {
+            presentation_stats: Default::default(),
             text_input: false,
             width: 16,
             height: 16,

@@ -5886,6 +5886,9 @@ fn sync_direct_framebuffer_write(
     }
     ctx.cpu
         .read_mem_into(base, &mut ctx.kernel.gx_readback_scratch)?;
+    if complete_gapi_transfer {
+        ctx.kernel.framebuffer.presentation_stats.record_present();
+    }
     if ctx.kernel.gx_readback_scratch != ctx.kernel.framebuffer.pixels {
         ctx.kernel
             .framebuffer
@@ -14455,6 +14458,23 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     // bug; it was scheduling all along).
     if let Some(outcome) = resume_worker_reenter(ctx)? {
         return Ok(outcome);
+    }
+    if ctx.kernel.current_thread == 0
+        && ctx
+            .kernel
+            .threads
+            .iter()
+            .any(|thread| thread.started && !thread.finished && thread.worker_saved)
+    {
+        // GetMessage blocks its caller, not the other guest threads. A worker
+        // can become ready while the main pump waits (Sleep deadline, waveOut
+        // completion, event). Sleeping until the next synthetic paint delays
+        // that wake by up to 16 ms on every handoff. Keep this call open and
+        // re-evaluate input, driver notifications and worker readiness after a
+        // bounded wait, preserving lpMsg and the original filter arguments.
+        // Reuse the scheduler's existing argument-preserving wait continuation.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1);
+        return Ok(wait_display_until(ctx, deadline)?.unwrap_or(DispatchOutcome::JumpTo(thunk_va)));
     }
     let (hwnd, msg, wp, lp) = next_message(ctx);
     write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
@@ -30755,6 +30775,71 @@ mod tests {
         );
         c.cpu.write_reg(ArmReg::R0, handle).unwrap();
         assert_eq!(find_close(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
+    }
+
+    #[test]
+    fn blocked_main_get_message_preserves_call_until_worker_or_message_is_ready() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        kernel.pending_startup.clear();
+        kernel.pending_create = None;
+        kernel.posted_messages.clear();
+        kernel.synthetic_paint_next_ms = monotonic_ms() + 60_000;
+        let mut worker = GuestThread::new(
+            0x10200, 0, 0x2000, 0x1000, 0x10300, 0x10400, 0xdead7c00, [0; 17],
+        );
+        worker.started = true;
+        worker.worker_saved = true;
+        worker.worker_regs[15] = 0x10200;
+        worker.worker_regs[13] = 0x1800;
+        worker.sleep_until_ms = monotonic_ms() + 60_000;
+        kernel.threads.push(worker);
+        for (reg, value) in [
+            (ArmReg::R0, 0x2000),
+            (ArmReg::R1, 0),
+            (ArmReg::R2, 0),
+            (ArmReg::R3, 0),
+            (ArmReg::Sp, 0x1900),
+            (ArmReg::Lr, 0x10500),
+        ] {
+            cpu.write_reg(reg, value).unwrap();
+        }
+        cpu.write_mem(0x2000, &[0xa5; 28]).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            get_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
+        assert_eq!(ctx.kernel.current_thread, 0);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x2000);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10500);
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), 0xa5a5a5a5);
+        assert_eq!(ctx.kernel.synthetic_message_count, 0);
+        // Expiring the worker sleep wakes it without a synthetic paint. The
+        // main continuation must retry GetMessage with its original MSG pointer.
+        ctx.kernel.threads[0].sleep_until_ms = 0;
+        assert_eq!(
+            get_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10200)
+        );
+        assert_eq!(ctx.kernel.current_thread, 1);
+        assert_eq!(ctx.kernel.threads[0].saved_regs[0], 0x2000);
+        assert_eq!(ctx.kernel.threads[0].saved_regs[15], thunk.thunk_va);
+        park_worker(&mut ctx, 0).unwrap();
+        ctx.kernel.threads[0].sleep_until_ms = monotonic_ms() + 60_000;
+        ctx.kernel
+            .posted_messages
+            .push_back((FAKE_HWND, WM_QUIT, 0, 0));
+        assert_eq!(
+            get_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), WM_QUIT);
     }
 
     #[test]

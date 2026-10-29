@@ -78,6 +78,7 @@ fn presentation_phase(last: Option<Instant>, now: Instant) -> Option<Instant> {
 /// needs to paint it onto a `SurfaceView`.
 #[derive(Debug, Clone)]
 pub struct FrameSnapshot {
+    pub presentation_stats: pocket_core::kernel::framebuffer::PresentationStats,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
@@ -86,6 +87,7 @@ pub struct FrameSnapshot {
 impl FrameSnapshot {
     pub(crate) fn from_framebuffer(fb: &pocket_core::kernel::Framebuffer) -> Self {
         Self {
+            presentation_stats: fb.presentation_stats.clone(),
             width: fb.width,
             height: fb.height,
             rgba: fb.snapshot_rgba8888(),
@@ -95,6 +97,7 @@ impl FrameSnapshot {
     fn from_framebuffer_into(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
         fb.snapshot_rgba8888_into(scratch);
         Self {
+            presentation_stats: fb.presentation_stats.clone(),
             width: fb.width,
             height: fb.height,
             rgba: std::mem::take(scratch),
@@ -118,6 +121,7 @@ pub(crate) struct SessionState {
     /// overwrites whatever was there because the UI only ever
     /// cares about the newest frame.
     latest_frame: Mutex<Option<FrameSnapshot>>,
+    presentation_stats: Mutex<Option<pocket_core::kernel::framebuffer::PresentationStats>>,
     gps_notice: Mutex<Option<(f64, f64)>>,
     dependency_notices: Mutex<std::collections::VecDeque<String>>,
     /// `true` while the worker thread is still running. Flipped to
@@ -138,6 +142,7 @@ impl SessionState {
         Self {
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
+            presentation_stats: Mutex::new(None),
             gps_notice: Mutex::new(None),
             dependency_notices: Mutex::new(Default::default()),
             running: Mutex::new(true),
@@ -200,6 +205,10 @@ impl Session {
     pub fn request_stop(&self) {
         self.state.stop_all.store(true, Ordering::Release);
         self.send_input(InputCommand::Stop);
+    }
+
+    pub fn presentation_fps(&self) -> Option<f32> {
+        self.state.presentation_stats.lock().ok()?.as_ref()?.fps()
     }
 
     pub fn is_running(&self) -> bool {
@@ -775,6 +784,9 @@ fn build_unicorn_for_machine(_machine: u16) -> anyhow::Result<Emulator> {
 }
 
 pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
+    if let Ok(mut stats) = state.presentation_stats.lock() {
+        *stats = Some(frame.presentation_stats.clone());
+    }
     if let Ok(mut slot) = state.latest_frame.lock() {
         *slot = Some(frame);
     }

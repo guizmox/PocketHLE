@@ -122,6 +122,9 @@ object NativeBridge {
      */
     @JvmStatic external fun nativeStartGame(libraryRoot: String, id: String): Long
 
+    /** Completed display presentations per second, or -1 for changed-image (IPS) fallback. */
+    @JvmStatic external fun nativePresentationFps(handle: Long): Float
+
     /**
      * Poll for the latest framebuffer the worker has produced.
      * Returns `null` if no new frame is available, or a flat byte

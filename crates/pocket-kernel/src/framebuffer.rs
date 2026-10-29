@@ -89,6 +89,77 @@ impl DirectDrawTiming {
     }
 }
 
+/// Presentation telemetry shared with frontends independently of pixel uploads.
+/// Only completed, explicit display boundaries are FPS. Without one, callers
+/// retain their changed-image rate (IPS), rather than guessing GDI frames.
+#[derive(Debug, Clone, Default)]
+pub struct PresentationStats(std::sync::Arc<std::sync::Mutex<PresentationRate>>);
+
+#[derive(Debug, Default)]
+struct PresentationRate {
+    completed: u64,
+    started: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+    frames: u64,
+    fps: f32,
+}
+
+impl PresentationStats {
+    pub fn record_present(&self) {
+        self.record_at(std::time::Instant::now());
+    }
+
+    fn record_at(&self, now: std::time::Instant) {
+        let Ok(mut rate) = self.0.lock() else { return };
+        rate.completed = rate.completed.wrapping_add(1);
+        if rate.last.is_some_and(|last| {
+            now.saturating_duration_since(last) >= std::time::Duration::from_secs(1)
+        }) {
+            rate.started = None;
+            rate.frames = 0;
+            rate.fps = 0.0;
+        }
+        rate.last = Some(now);
+        if let Some(start) = rate.started {
+            rate.frames += 1;
+            let elapsed = now.saturating_duration_since(start);
+            if elapsed >= std::time::Duration::from_secs(1) {
+                rate.fps = rate.frames as f32 / elapsed.as_secs_f32();
+                rate.frames = 0;
+                rate.started = Some(now);
+            }
+        } else {
+            rate.started = Some(now);
+        }
+    }
+
+    pub fn fps(&self) -> Option<f32> {
+        self.fps_at(std::time::Instant::now())
+    }
+
+    fn fps_at(&self, now: std::time::Instant) -> Option<f32> {
+        let rate = self.0.lock().ok()?;
+        let last = rate.last?;
+        Some(
+            if now.saturating_duration_since(last) >= std::time::Duration::from_secs(1) {
+                0.0
+            } else {
+                rate.fps
+            },
+        )
+    }
+
+    pub fn completed(&self) -> u64 {
+        self.0.lock().map_or(0, |rate| rate.completed)
+    }
+
+    pub fn reset(&self) {
+        if let Ok(mut rate) = self.0.lock() {
+            *rate = PresentationRate::default();
+        }
+    }
+}
+
 /// A simple RGB565 framebuffer.
 #[derive(Debug, Clone)]
 pub struct Framebuffer {
@@ -101,6 +172,7 @@ pub struct Framebuffer {
     /// Incremented every time the framebuffer is mutated. Hosts use
     /// it to decide whether they need to re-upload the surface.
     pub frame_counter: u64,
+    pub presentation_stats: PresentationStats,
     pub directdraw: DirectDrawTiming,
     /// Host presentation only; RGB565 guest pixels remain unchanged.
     backlight_level: u32,
@@ -120,6 +192,7 @@ impl Framebuffer {
             bpp: FB_BPP,
             pixels: vec![0u8; (width * height * 2) as usize],
             frame_counter: 0,
+            presentation_stats: PresentationStats::default(),
             directdraw: DirectDrawTiming::default(),
             backlight_level: 11,
         }
@@ -613,5 +686,48 @@ mod display_timing_tests {
                 start + DirectDrawTiming::PERIOD
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_stats_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn completed_presentations_do_not_dirty_pixels_and_survive_snapshot_clones() {
+        let fb = Framebuffer::new(2, 2);
+        let snapshot = fb.clone();
+        let start = Instant::now();
+        assert_eq!(fb.presentation_stats.fps_at(start), None);
+        for frame in 0..=60 {
+            fb.presentation_stats
+                .record_at(start + Duration::from_nanos(frame * 1_000_000_000 / 60));
+        }
+        assert_eq!(fb.frame_counter, 0);
+        assert_eq!(fb.pixels, vec![0; 8]);
+        assert_eq!(snapshot.presentation_stats.completed(), 61);
+        assert!(
+            (snapshot
+                .presentation_stats
+                .fps_at(start + Duration::from_secs(1))
+                .unwrap()
+                - 60.0)
+                .abs()
+                < 0.01
+        );
+        assert_eq!(
+            snapshot
+                .presentation_stats
+                .fps_at(start + Duration::from_secs(2)),
+            Some(0.0)
+        );
+        fb.presentation_stats.reset();
+        assert_eq!(
+            snapshot
+                .presentation_stats
+                .fps_at(start + Duration::from_secs(2)),
+            None
+        );
     }
 }

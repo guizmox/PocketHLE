@@ -605,13 +605,19 @@ class GameActivity : AppCompatActivity() {
 
     private fun updateFpsOverlay() {
         if (!showFps || !activityResumed) return
+        val presentationFps = NativeBridge.nativePresentationFps(session)
+        if (presentationFps >= 0f) {
+            fpsOverlay.text = String.format(java.util.Locale.US, "%.1f FPS", presentationFps)
+            fpsOverlay.visibility = View.VISIBLE
+            return
+        }
         val total = glRenderer.presentedFrameCount
         if (total == 0L) {
             fpsMeter.reset(0L, System.nanoTime())
             return
         }
         fpsMeter.sample(total, System.nanoTime())?.let { fps ->
-            fpsOverlay.text = String.format(java.util.Locale.US, "%.1f FPS", fps)
+            fpsOverlay.text = String.format(java.util.Locale.US, "%.1f IPS", fps)
             fpsOverlay.visibility = View.VISIBLE
         }
     }
