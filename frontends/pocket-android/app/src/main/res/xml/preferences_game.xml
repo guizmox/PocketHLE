@@ -13,6 +13,6 @@
     <PreferenceCategory android:key="sound_category" android:title="Sound">
         <Preference android:title="No per-game sound options yet." android:selectable="false" android:persistent="false" />
     </PreferenceCategory>
-    <PreferenceCategory android:key="misc_category" android:title="Misc">
+    <PreferenceCategory android:key="device_identity_category" android:title="Device Identity">
     </PreferenceCategory>
 </PreferenceScreen>

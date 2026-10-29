@@ -50,9 +50,11 @@ class GameSettingsActivity : AppCompatActivity() {
             setPreferencesFromResource(R.xml.preferences_game, rootKey)
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
+            findPreference<androidx.preference.PreferenceCategory>("device_identity_category")?.isVisible =
+                !NativeBridge.isGizmondoGame(rootDir, gameId)
             if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
                 val controlsCategory = findPreference<androidx.preference.PreferenceCategory>("controls_category")!!
-                val miscCategory = findPreference<androidx.preference.PreferenceCategory>("misc_category")!!
+                val identityCategory = findPreference<androidx.preference.PreferenceCategory>("device_identity_category")!!
                 val editor=androidx.preference.Preference(requireContext()).apply {
                     key="ppc_stylus_editor";isPersistent=false
                     setOnPreferenceClickListener {
@@ -80,10 +82,10 @@ class GameSettingsActivity : AppCompatActivity() {
                 })
                 controlsCategory.addPreference(editor);updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
-                    miscCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
+                    identityCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                         key = keyName; title = label; isPersistent = false; text = initial
                         summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
-                        dialogMessage = "Empty = device default. Applies at the next launch." + if (keyName.endsWith("device_id")) " Enter hexadecimal byte pairs." else ""
+                        dialogMessage = "Empty = device default. Applies at the next launch." + if ((keyName.endsWith("device_id") || keyName.endsWith("preset_id"))) " Enter hexadecimal byte pairs." else ""
                         setOnPreferenceChangeListener { _, value ->
                             val input = value.toString()
                             val valid = !input.contains('\u0000') && when (keyName) {
@@ -98,6 +100,7 @@ class GameSettingsActivity : AppCompatActivity() {
                 }
                 identityField("pocketpc_owner_name", "Owner name (PocketPC)", current.pocketpcOwnerName) {current=current.copy(pocketpcOwnerName=it)}
                 identityField("pocketpc_device_name", "Device name (Preset ID — ASCII)", current.pocketpcDeviceName) {current=current.copy(pocketpcDeviceName=it)}
+                identityField("pocketpc_preset_id", "Preset ID override (hexadecimal)", current.pocketpcPresetId) {current=current.copy(pocketpcPresetId=it)}
                 identityField("pocketpc_device_id", "PocketPC ID (Platform ID — hexadecimal)", current.pocketpcDeviceId) {current=current.copy(pocketpcDeviceId=it)}
             }
             findPreference<ListPreference>("screen")?.apply {

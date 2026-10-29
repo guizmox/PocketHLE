@@ -852,8 +852,18 @@ impl PocketLauncher {
                 UiEvent::BackupFinished(result) => {
                     self.library_busy = false;
                     match result {
-                        Ok(message) => { self.status = message; self.reload_library(); self.icon_cache.clear(); self.screen_cache.clear(); self.selected_game = None; }
-                        Err(error) => { self.status = format!("Backup/restore failed: {error}"); self.import_error_title = "Backup/restore failed"; self.import_error = Some(error); }
+                        Ok(message) => {
+                            self.status = message;
+                            self.reload_library();
+                            self.icon_cache.clear();
+                            self.screen_cache.clear();
+                            self.selected_game = None;
+                        }
+                        Err(error) => {
+                            self.status = format!("Backup/restore failed: {error}");
+                            self.import_error_title = "Backup/restore failed";
+                            self.import_error = Some(error);
+                        }
                     }
                 }
                 UiEvent::ColorsUnlocked(result) => {
@@ -2847,15 +2857,18 @@ impl PocketLauncher {
                 ui.heading("Sound");
                 ui.label("No per-game sound options yet.");
                 ui.end_row();
-                ui.heading("Misc");
-                ui.label("");
-                ui.end_row();
                 if !is_gizmondo {
+                    ui.heading("Device Identity");
+                    ui.label("");
+                    ui.end_row();
                     ui.label("Owner name (PocketPC)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
                     ui.end_row();
                     ui.label("Device name (Preset ID — ASCII)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_name, "Device default");
+                    ui.end_row();
+                    ui.label("Preset ID override (hexadecimal)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_preset_id, "Empty = use device name/default");
                     ui.end_row();
                     ui.label("PocketPC ID (Platform ID — hexadecimal)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_id, "Device default");
@@ -3811,7 +3824,11 @@ impl PocketLauncher {
 
     fn update_gamepad_input(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if self.screen != Screen::Run || !focused || self.file_dialog.is_some() || self.restore_archive.is_some() {
+        if self.screen != Screen::Run
+            || !focused
+            || self.file_dialog.is_some()
+            || self.restore_archive.is_some()
+        {
             // UI frames release guest inputs, but a focused View press must
             // survive until release so the UI uses the same tap/hold gesture.
             let view_press = if focused { self.deck_view_press } else { None };
@@ -3821,7 +3838,8 @@ impl PocketLauncher {
         self.gamepad_rx.set_output(
             self.gamepad_selected,
             self.screen == Screen::Run
-                && self.file_dialog.is_none() && self.restore_archive.is_none()
+                && self.file_dialog.is_none()
+                && self.restore_archive.is_none()
                 && self.running_game.is_some()
                 && ctx.input(|i| i.viewport().focused.unwrap_or(true)),
         );
@@ -3842,7 +3860,9 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
-                    if self.file_dialog.is_some() || self.restore_archive.is_some() { continue; }
+                    if self.file_dialog.is_some() || self.restore_archive.is_some() {
+                        continue;
+                    }
                     if Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -3880,7 +3900,9 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
-                    if self.file_dialog.is_some() || self.restore_archive.is_some() { continue; }
+                    if self.file_dialog.is_some() || self.restore_archive.is_some() {
+                        continue;
+                    }
                     if Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -3965,15 +3987,22 @@ impl PocketLauncher {
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
-                        if !down { self.controller_ui.release(&control); }
-                        else if self.controller_ui.keyboard_open() {
+                        if !down {
+                            self.controller_ui.release(&control);
+                        } else if self.controller_ui.keyboard_open() {
                             self.controller_ui.press(&control);
                         } else if control == "East" && self.controller_ui.back(ctx) {
                             // Close a popup before closing its owner.
                         } else if let Some(dialog) = self.file_dialog.as_mut() {
-                            if !dialog.controller(&control) { self.controller_ui.press(&control); }
+                            if !dialog.controller(&control) {
+                                self.controller_ui.press(&control);
+                            }
                         } else {
-                            self.controller_ui.press(if control == "East" { "Escape" } else { &control });
+                            self.controller_ui.press(if control == "East" {
+                                "Escape"
+                            } else {
+                                &control
+                            });
                         }
                         // Controller events arrive after raw_input_hook. Schedule
                         // the next frame to consume the queued widget input.
@@ -4631,21 +4660,43 @@ impl PocketLauncher {
     }
 
     fn spawn_backup_dialog(&mut self, restore: bool) {
-        if self.library_busy || self.running_game.is_some() || self.pending_run.is_some()
-            || self.config_draft.is_some() || self.game_settings_draft.is_some()
-            || self.rename_draft.is_some() || self.pending_import.is_some() { return; }
+        if self.library_busy
+            || self.running_game.is_some()
+            || self.pending_run.is_some()
+            || self.config_draft.is_some()
+            || self.game_settings_draft.is_some()
+            || self.rename_draft.is_some()
+            || self.pending_import.is_some()
+        {
+            return;
+        }
         self.library_busy = true;
-        self.status = if restore { "Choose a PocketHLE backup…" } else { "Saving library backup…" }.into();
-        let purpose = if restore { crate::file_dialog::Purpose::RestoreBackup }
-            else { crate::file_dialog::Purpose::SaveBackup };
+        self.status = if restore {
+            "Choose a PocketHLE backup…"
+        } else {
+            "Saving library backup…"
+        }
+        .into();
+        let purpose = if restore {
+            crate::file_dialog::Purpose::RestoreBackup
+        } else {
+            crate::file_dialog::Purpose::SaveBackup
+        };
         self.open_file_dialog(purpose, None, pocket_library::backup::suggested_filename());
     }
 
-    fn open_file_dialog(&mut self, purpose: crate::file_dialog::Purpose, directory: Option<std::path::PathBuf>, filename: String) {
+    fn open_file_dialog(
+        &mut self,
+        purpose: crate::file_dialog::Purpose,
+        directory: Option<std::path::PathBuf>,
+        filename: String,
+    ) {
         self.controller_ui.stop_repeat();
         self.deck_nav_repeat = None;
         self.deck_library_actions.clear();
-        self.file_dialog = Some(crate::file_dialog::FileDialog::new(purpose, directory, filename));
+        self.file_dialog = Some(crate::file_dialog::FileDialog::new(
+            purpose, directory, filename,
+        ));
     }
 
     fn ui_file_dialog(&mut self, ctx: &egui::Context) {
@@ -4653,12 +4704,19 @@ impl PocketLauncher {
         if keyboard_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.controller_ui.back(ctx);
         }
-        let outcome = self.file_dialog.as_mut().and_then(|dialog| dialog.show(ctx, keyboard_open));
+        let outcome = self
+            .file_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.show(ctx, keyboard_open));
         self.controller_ui.show(ctx);
-        let Some(outcome) = outcome else { return; };
+        let Some(outcome) = outcome else {
+            return;
+        };
         ctx.request_repaint();
         self.file_dialog = None;
-        if keyboard_open { self.controller_ui.back(ctx); }
+        if keyboard_open {
+            self.controller_ui.back(ctx);
+        }
         self.controller_ui.stop_repeat();
         use crate::file_dialog::{Outcome, Purpose};
         match outcome {
@@ -4677,7 +4735,8 @@ impl PocketLauncher {
                 let tx = self.events_tx.clone();
                 std::thread::spawn(move || {
                     let result = pocket_library::backup::save(&root, &path)
-                        .map(|()| format!("Backup saved: {}", path.display())).map_err(|e| format!("{e:#}"));
+                        .map(|()| format!("Backup saved: {}", path.display()))
+                        .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(UiEvent::BackupFinished(result));
                 });
             }
@@ -4689,7 +4748,8 @@ impl PocketLauncher {
         let mut chosen = None;
         let mut cancel = ctx.input(|input| input.key_pressed(egui::Key::Escape));
         egui::Window::new("Restore library backup")
-            .collapsible(false).resizable(false)
+            .collapsible(false)
+            .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 crate::controller_ui::page_scope(ui, "restore_backup", |ui| {
@@ -4700,20 +4760,28 @@ impl PocketLauncher {
                         ("Merge (overwrite)", RestoreMode::MergeOverwrite),
                         ("Replace", RestoreMode::Replace),
                     ] {
-                        if crate::controller_ui::button(ui, label).clicked() { chosen = Some(mode); }
+                        if crate::controller_ui::button(ui, label).clicked() {
+                            chosen = Some(mode);
+                        }
                     }
-                    if crate::controller_ui::button(ui, "Cancel").clicked() { cancel = true; }
+                    if crate::controller_ui::button(ui, "Cancel").clicked() {
+                        cancel = true;
+                    }
                 });
             });
-        if cancel { self.restore_archive = None; self.library_busy = false; self.status = "Restore cancelled.".into(); }
-        else if let Some(mode) = chosen {
+        if cancel {
+            self.restore_archive = None;
+            self.library_busy = false;
+            self.status = "Restore cancelled.".into();
+        } else if let Some(mode) = chosen {
             let archive = self.restore_archive.take().unwrap();
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
             self.status = "Validating and restoring backup…".into();
             std::thread::spawn(move || {
                 let result = pocket_library::backup::restore(&root, &archive, mode)
-                    .map(|()| "Library restored.".into()).map_err(|e| format!("{e:#}"));
+                    .map(|()| "Library restored.".into())
+                    .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(UiEvent::BackupFinished(result));
             });
         }
@@ -4725,7 +4793,11 @@ impl PocketLauncher {
         }
         self.library_busy = true;
         let directory = self.library.config().last_import_dir.clone();
-        self.open_file_dialog(crate::file_dialog::Purpose::Import, directory, String::new());
+        self.open_file_dialog(
+            crate::file_dialog::Purpose::Import,
+            directory,
+            String::new(),
+        );
         self.status = "Choose a game to import…".into();
     }
 
@@ -5096,8 +5168,13 @@ impl eframe::App for PocketLauncher {
     }
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         crate::desktop_pointer::finish_missing_releases(ctx, raw);
-        self.controller_ui
-            .prepare_input(ctx, raw, self.screen != Screen::Run || self.file_dialog.is_some() || self.restore_archive.is_some());
+        self.controller_ui.prepare_input(
+            ctx,
+            raw,
+            self.screen != Screen::Run
+                || self.file_dialog.is_some()
+                || self.restore_archive.is_some(),
+        );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::controller_ui::begin_frame(ctx);
