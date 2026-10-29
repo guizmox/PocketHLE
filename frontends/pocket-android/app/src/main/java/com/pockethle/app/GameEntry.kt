@@ -75,6 +75,7 @@ data class GameSettings(
     val pocketpcDeviceId: String = "",
     val pocketpcPresetId: String = "",
     val pocketpcOemInfo: String = "",
+    val pocketpcRandomSeed: String = "",
     val pocketpcPlatformType: String = "",
     val pocketpcGapiColumns: Boolean = false,
     val originalJson: String = "{}",
@@ -98,6 +99,7 @@ data class GameSettings(
         put("pocketpc_device_id", pocketpcDeviceId)
         put("pocketpc_preset_id", pocketpcPresetId)
         put("pocketpc_oem_info", pocketpcOemInfo)
+        put("pocketpc_random_seed", pocketpcRandomSeed)
         put("pocketpc_platform_type", pocketpcPlatformType)
         put("pocketpc_gapi_columns", pocketpcGapiColumns)
     }
@@ -136,6 +138,7 @@ data class GameSettings(
             pocketpcDeviceId = obj.optString("pocketpc_device_id", ""),
             pocketpcPresetId = obj.optString("pocketpc_preset_id", ""),
             pocketpcOemInfo = obj.optString("pocketpc_oem_info", ""),
+            pocketpcRandomSeed = obj.optString("pocketpc_random_seed", ""),
             pocketpcPlatformType = obj.optString("pocketpc_platform_type", ""),
             pocketpcGapiColumns = obj.optBoolean("pocketpc_gapi_columns", false),
             originalJson = obj.toString(),

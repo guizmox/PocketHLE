@@ -2880,6 +2880,12 @@ impl PocketLauncher {
                     ui.label("Platform type (readable text)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_platform_type, "PocketPC");
                     ui.end_row();
+                    ui.label("Random seed override (compatibility)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_random_seed, "Empty = normal randomness");
+                    ui.end_row();
+                    ui.label("");
+                    ui.small("Use to reproduce a legacy registration request. Decimal value; overrides every srand seed for this game. Not a hardware identity field. Leave empty for normal randomness.");
+                    ui.end_row();
                     ui.label("Owner name (PocketPC)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
                     ui.end_row();

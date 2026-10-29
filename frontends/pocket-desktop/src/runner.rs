@@ -390,6 +390,7 @@ impl Runner {
                     &game.settings.pocketpc_device_id,
                 )
                 .and_then(|_| emu.set_pocketpc_preset_hex(&game.settings.pocketpc_preset_id))
+            .and_then(|_| emu.set_pocketpc_random_seed(&game.settings.pocketpc_random_seed))
             .and_then(|_| emu.set_pocketpc_oem_identity(&game.settings.pocketpc_oem_info, &game.settings.pocketpc_platform_type))
             .map(|_| emu.set_pocketpc_gapi_columns(game.settings.pocketpc_gapi_columns))
             {

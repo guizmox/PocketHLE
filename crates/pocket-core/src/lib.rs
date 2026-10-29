@@ -442,6 +442,28 @@ impl Emulator {
         }
     }
 
+    /// Opt-in srand seed override for repeatable legacy registration requests.
+    /// This affects every srand call in the process; it is not hardware identity.
+    pub fn set_pocketpc_random_seed(&mut self, seed: &str) -> Result<()> {
+        if seed.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            seed.bytes().all(|b| b.is_ascii_digit()),
+            "Random seed must use decimal digits"
+        );
+        let seed: u32 = seed
+            .parse()
+            .context("Random seed must be between 0 and 4294967295")?;
+        let process = self.process.as_mut().context("no PE loaded")?;
+        process.state.registry.set_volatile_value(
+            r"HKLM\System\PocketHLE\Compatibility",
+            "CrtSrandSeed",
+            pocket_kernel::registry::RegistryValue::Dword(seed),
+        );
+        Ok(())
+    }
+
     /// Override readable OEM/platform identity for this process only.
     pub fn set_pocketpc_oem_identity(&mut self, oem: &str, platform: &str) -> Result<()> {
         for text in [oem, platform] {

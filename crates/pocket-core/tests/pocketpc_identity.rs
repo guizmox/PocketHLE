@@ -115,6 +115,17 @@ fn settings_override_owner_and_hal_identity_but_device_registry_stays_unchanged(
             .value(r"HKCU\ControlPanel\Owner", "Owner"),
         Some(RegistryValue::Sz("Élodie".into()))
     );
+    emu.set_pocketpc_random_seed("5").unwrap();
+    assert!(emu.set_pocketpc_random_seed("4294967296").is_err());
+    assert!(emu.set_pocketpc_random_seed("+1").is_err());
+    assert_eq!(
+        emu.process()
+            .unwrap()
+            .state
+            .registry
+            .value(r"HKLM\System\PocketHLE\Compatibility", "CrtSrandSeed"),
+        Some(RegistryValue::Dword(5))
+    );
     emu.set_pocketpc_oem_identity("Legacy PDA", "PocketPC")
         .unwrap();
     emu.set_pocketpc_gapi_columns(true);
@@ -138,6 +149,10 @@ fn settings_override_owner_and_hal_identity_but_device_registry_stays_unchanged(
     );
     assert!(!other.contains_key(r"HKLM\Ident"));
     assert_eq!(other.value(r"HKLM\System\Platform", "OEMInfo"), None);
+    assert_eq!(
+        other.value(r"HKLM\System\PocketHLE\Compatibility", "CrtSrandSeed"),
+        None
+    );
     assert_eq!(
         DeviceIdentity::load_or_create(&mut other).unwrap(),
         original_id

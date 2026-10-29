@@ -21095,7 +21095,15 @@ fn rand_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn srand_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    ctx.kernel.random_seed = ctx.arg_u32(0)?;
+    let requested = ctx.arg_u32(0)?;
+    ctx.kernel.random_seed = match ctx
+        .kernel
+        .registry
+        .value(r"HKLM\System\PocketHLE\Compatibility", "CrtSrandSeed")
+    {
+        Some(pocket_kernel::registry::RegistryValue::Dword(seed)) => seed,
+        _ => requested,
+    };
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -31474,6 +31482,38 @@ mod tests {
         let after = ctx.cpu.read_mem(BITS, stride * height).unwrap();
         assert_eq!(&after[far_pixel..far_pixel + 2], &0x07e0u16.to_le_bytes());
         assert_ne!(&after[..32], &initial[..32]);
+    }
+
+    #[test]
+    fn srand_override_is_opt_in_and_repeats_the_normal_generator_sequence() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, 123).unwrap();
+        srand_handler(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.random_seed, 123);
+        ctx.kernel.registry.set_volatile_value(
+            r"HKLM\System\PocketHLE\Compatibility",
+            "CrtSrandSeed",
+            pocket_kernel::registry::RegistryValue::Dword(5),
+        );
+        for requested in [0, 123, u32::MAX] {
+            ctx.cpu.write_reg(ArmReg::R0, requested).unwrap();
+            srand_handler(&mut ctx).unwrap();
+            assert_eq!(
+                rand_handler(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(29088)
+            );
+            assert_eq!(
+                rand_handler(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(30847)
+            );
+        }
     }
 
     #[test]

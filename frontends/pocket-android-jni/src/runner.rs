@@ -578,6 +578,7 @@ fn run_process(
                 &entry.settings.pocketpc_device_id,
             )
             .and_then(|_| emu.set_pocketpc_preset_hex(&entry.settings.pocketpc_preset_id))
+            .and_then(|_| emu.set_pocketpc_random_seed(&entry.settings.pocketpc_random_seed))
             .and_then(|_| {
                 emu.set_pocketpc_oem_identity(
                     &entry.settings.pocketpc_oem_info,

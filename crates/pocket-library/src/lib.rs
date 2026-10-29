@@ -591,6 +591,10 @@ pub struct GameSettings {
     /// Readable OEM model and OS family returned by SystemParametersInfoW.
     #[serde(default)]
     pub pocketpc_oem_info: String,
+    /// Optional decimal srand seed override, for reproducible legacy requests.
+    /// Emulator compatibility policy, not a hardware identity field.
+    #[serde(default)]
+    pub pocketpc_random_seed: String,
     #[serde(default)]
     pub pocketpc_platform_type: String,
     /// Emulate a portrait LCD with positive column pitch and negative vertical pitch.
@@ -702,6 +706,17 @@ impl GameSettings {
                 "PocketPC device name must use ASCII without NUL (maximum 4096 bytes)".into(),
             );
         }
+        if !self.pocketpc_random_seed.is_empty()
+            && (!self
+                .pocketpc_random_seed
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+                || self.pocketpc_random_seed.parse::<u32>().is_err())
+        {
+            return Err(
+                "Random seed must be empty or a decimal integer from 0 to 4294967295".into(),
+            );
+        }
         for text in [&self.pocketpc_oem_info, &self.pocketpc_platform_type] {
             if text.contains('\0') || text.encode_utf16().count() > 255 {
                 return Err("OEM model and platform type must contain at most 255 UTF-16 characters and no NUL".into());
@@ -734,6 +749,7 @@ impl Default for GameSettings {
             pocketpc_device_id: String::new(),
             pocketpc_preset_id: String::new(),
             pocketpc_oem_info: String::new(),
+            pocketpc_random_seed: String::new(),
             pocketpc_platform_type: String::new(),
             pocketpc_gapi_columns: false,
             gpu_renderer: None,
@@ -6582,6 +6598,8 @@ fn raw_pocketpc_preset_override_validates_and_round_trips() {
     assert!(settings.pocketpc_preset_id.is_empty());
     assert!(!settings.pocketpc_gapi_columns);
     assert!(settings.pocketpc_oem_info.is_empty());
+    assert!(settings.pocketpc_random_seed.is_empty());
+    settings.pocketpc_random_seed = "5".into();
     settings.pocketpc_oem_info = "PDA é".into();
     settings.pocketpc_platform_type = "PocketPC".into();
     settings.pocketpc_gapi_columns = true;
@@ -6591,6 +6609,12 @@ fn raw_pocketpc_preset_override_validates_and_round_trips() {
         serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
     assert_eq!(restored.pocketpc_preset_id, settings.pocketpc_preset_id);
     assert_eq!(restored.pocketpc_oem_info, settings.pocketpc_oem_info);
+    assert_eq!(restored.pocketpc_random_seed, "5");
+    for bad in ["-1", "+1", "4294967296", " 5", "hello"] {
+        settings.pocketpc_random_seed = bad.into();
+        assert!(settings.validate_pocketpc_identity().is_err());
+    }
+    settings.pocketpc_random_seed = "5".into();
     assert_eq!(
         restored.pocketpc_platform_type,
         settings.pocketpc_platform_type

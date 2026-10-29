@@ -86,9 +86,14 @@ class GameSettingsActivity : AppCompatActivity() {
                         key = keyName; title = label; isPersistent = false; text = initial
                         summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
                         dialogMessage = "Empty = device default. Applies at the next launch." + if ((keyName.endsWith("device_id") || keyName.endsWith("preset_id"))) " Enter hexadecimal byte pairs." else ""
+                        if (keyName == "pocketpc_random_seed") {
+                            dialogMessage = "Compatibility setting, not hardware identity. Use to reproduce a legacy registration request. Decimal 0–4294967295; empty = normal randomness. Overrides every srand seed for this game."
+                            setOnBindEditTextListener { it.inputType = android.text.InputType.TYPE_CLASS_NUMBER }
+                        }
                         setOnPreferenceChangeListener { _, value ->
                             val input = value.toString()
                             val valid = !input.contains('\u0000') && when (keyName) {
+                                "pocketpc_random_seed" -> input.isEmpty() || (input.all { it in '0'..'9' } && input.toLongOrNull()?.let { it in 0L..4294967295L } == true)
                                 "pocketpc_oem_info", "pocketpc_platform_type", "pocketpc_owner_name" -> input.length <= 255
                                 "pocketpc_device_name" -> input.length <= 4096 && input.all { it.code <= 127 }
                                 else -> input.length <= 8192 && input.length % 2 == 0 && input.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
@@ -110,6 +115,7 @@ class GameSettingsActivity : AppCompatActivity() {
                         current=current.copy(pocketpcGapiColumns=value.toString()=="true");writeGameSettings();true
                     }
                 })
+                identityField("pocketpc_random_seed", "Random seed override (compatibility)", current.pocketpcRandomSeed) {current=current.copy(pocketpcRandomSeed=it)}
                 identityField("pocketpc_owner_name", "Owner name (PocketPC)", current.pocketpcOwnerName) {current=current.copy(pocketpcOwnerName=it)}
                 identityField("pocketpc_device_name", "Device name (Preset ID — ASCII)", current.pocketpcDeviceName) {current=current.copy(pocketpcDeviceName=it)}
                 identityField("pocketpc_preset_id", "Preset ID override (hexadecimal)", current.pocketpcPresetId) {current=current.copy(pocketpcPresetId=it)}
