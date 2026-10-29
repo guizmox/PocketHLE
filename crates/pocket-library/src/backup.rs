@@ -178,8 +178,11 @@ fn validate_library(root: &Path) -> Result<()> {
     let library: super::LibraryFile =
         serde_json::from_reader(File::open(root.join("library.json"))?)
             .context("Not a PocketHLE library backup")?;
-    if library.schema_version != 1 {
-        bail!("Unsupported library schema");
+    // LibraryFile derives Default: a library created through Library::open
+    // therefore uses schema 0 until explicitly versioned. Serde's missing-field
+    // default uses schema 1. Both are existing PocketHLE catalogue formats.
+    if !matches!(library.schema_version, 0 | 1) {
+        bail!("Unsupported library schema: {}", library.schema_version);
     }
     let mut ids = HashSet::new();
     for game in library.games {
@@ -387,46 +390,56 @@ mod tests {
 
     #[test]
     fn all_restore_modes_preserve_expected_files_and_catalogue() {
-        for mode in [
-            RestoreMode::MergeNoOverwrite,
-            RestoreMode::MergeOverwrite,
-            RestoreMode::Replace,
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let source = temp.path().join("source");
-            let target = temp.path().join("target");
-            library(&source, "incoming", "new game");
-            library(&target, "existing", "old game");
-            fs::write(source.join("shared-save"), "backup save").unwrap();
-            fs::write(target.join("shared-save"), "current save").unwrap();
-            fs::create_dir(source.join("empty-directory")).unwrap();
-            let archive = temp.path().join("backup.zip");
-            save(&source, &archive).unwrap();
-            restore(&target, &archive, mode).unwrap();
-            assert_eq!(
-                fs::read_to_string(target.join("games/incoming/extracted/game.exe")).unwrap(),
-                "new game"
-            );
-            assert_eq!(
-                fs::read_to_string(target.join("shared-save")).unwrap(),
-                if mode == RestoreMode::MergeNoOverwrite {
-                    "current save"
-                } else {
-                    "backup save"
+        for schema in [0, 1] {
+            for mode in [
+                RestoreMode::MergeNoOverwrite,
+                RestoreMode::MergeOverwrite,
+                RestoreMode::Replace,
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let source = temp.path().join("source");
+                let target = temp.path().join("target");
+                library(&source, "incoming", "new game");
+                library(&target, "existing", "old game");
+                for root in [&source, &target] {
+                    let file = root.join("library.json");
+                    let mut catalog: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                    catalog["schema_version"] = schema.into();
+                    fs::write(file, serde_json::to_vec(&catalog).unwrap()).unwrap();
                 }
-            );
-            assert!(target.join("empty-directory").is_dir());
-            assert!(!target.join(MARKER).exists());
-            let catalog: crate::LibraryFile =
-                serde_json::from_slice(&fs::read(target.join("library.json")).unwrap()).unwrap();
-            assert_eq!(
-                catalog.games.len(),
-                if mode == RestoreMode::Replace { 1 } else { 2 }
-            );
-            assert_eq!(
-                target.join("games/existing").exists(),
-                mode != RestoreMode::Replace
-            );
+                fs::write(source.join("shared-save"), "backup save").unwrap();
+                fs::write(target.join("shared-save"), "current save").unwrap();
+                fs::create_dir(source.join("empty-directory")).unwrap();
+                let archive = temp.path().join("backup.zip");
+                save(&source, &archive).unwrap();
+                restore(&target, &archive, mode).unwrap();
+                assert_eq!(
+                    fs::read_to_string(target.join("games/incoming/extracted/game.exe")).unwrap(),
+                    "new game"
+                );
+                assert_eq!(
+                    fs::read_to_string(target.join("shared-save")).unwrap(),
+                    if mode == RestoreMode::MergeNoOverwrite {
+                        "current save"
+                    } else {
+                        "backup save"
+                    }
+                );
+                assert!(target.join("empty-directory").is_dir());
+                assert!(!target.join(MARKER).exists());
+                let catalog: crate::LibraryFile =
+                    serde_json::from_slice(&fs::read(target.join("library.json")).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    catalog.games.len(),
+                    if mode == RestoreMode::Replace { 1 } else { 2 }
+                );
+                assert_eq!(
+                    target.join("games/existing").exists(),
+                    mode != RestoreMode::Replace
+                );
+            }
         }
     }
 
@@ -520,6 +533,54 @@ mod tests {
             "extracted/game.exe"
         );
         assert!(catalog.games[0].executable_path(&target).is_file());
+    }
+
+    #[test]
+    fn catalogue_created_by_library_api_can_be_backed_up_and_restored() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        // Use production initialization and persistence, not a schema-1 fixture.
+        crate::Library::open(&source).unwrap().save().unwrap();
+        fs::write(source.join("save.dat"), b"keep these saves").unwrap();
+        let archive = temp.path().join("backup.zip");
+        save(&source, &archive).unwrap();
+        for mode in [
+            RestoreMode::MergeNoOverwrite,
+            RestoreMode::MergeOverwrite,
+            RestoreMode::Replace,
+        ] {
+            crate::Library::open(&target).unwrap().save().unwrap();
+            restore(&target, &archive, mode).unwrap();
+            assert!(crate::Library::open(&target).unwrap().games().is_empty());
+            assert_eq!(
+                fs::read(target.join("save.dat")).unwrap(),
+                b"keep these saves"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_schema_error_identifies_version_without_modifying_library() {
+        let temp = tempfile::tempdir().unwrap();
+        library(temp.path(), "game", "bytes");
+        let file = temp.path().join("library.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        value["schema_version"] = 99.into();
+        fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+        let before = fs::read(&file).unwrap();
+        let output = temp
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("unsupported-schema-{}.zip", std::process::id()));
+        assert!(save(temp.path(), &output)
+            .unwrap_err()
+            .to_string()
+            .contains("99"));
+        assert_eq!(fs::read(file).unwrap(), before);
+        assert!(!output.exists());
     }
 
     #[test]

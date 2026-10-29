@@ -208,6 +208,7 @@ pub struct PocketLauncher {
     running_game: Option<String>,
     status: String,
     import_error: Option<String>,
+    import_error_title: &'static str,
     game_id_popup: Option<String>,
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
@@ -774,6 +775,7 @@ impl PocketLauncher {
             running_game: None,
             status: String::new(),
             import_error: None,
+            import_error_title: "Import failed",
             game_id_popup: None,
             config_draft: None,
             game_settings_draft: None,
@@ -855,7 +857,7 @@ impl PocketLauncher {
                     self.library_busy = false;
                     match result {
                         Ok(message) => { self.status = message; self.reload_library(); self.icon_cache.clear(); self.screen_cache.clear(); self.selected_game = None; }
-                        Err(error) => { self.status = format!("Backup/restore failed: {error}"); self.import_error = Some(error); }
+                        Err(error) => { self.status = format!("Backup/restore failed: {error}"); self.import_error_title = "Backup/restore failed"; self.import_error = Some(error); }
                     }
                 }
                 UiEvent::ColorsUnlocked(result) => {
@@ -910,6 +912,7 @@ impl PocketLauncher {
                     self.library_busy = false;
                     self.status = format!("Import failed: {e}");
                     if e != "cancelled" {
+                        self.import_error_title = "Import failed";
                         self.import_error = Some(e);
                     }
                     self.reload_library();
@@ -5117,7 +5120,7 @@ impl eframe::App for PocketLauncher {
             egui::CentralPanel::default().show(ctx, |_| {});
             let mut open = true;
             let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-            egui::Window::new("Import failed")
+            egui::Window::new(self.import_error_title)
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(true)
