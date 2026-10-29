@@ -62,6 +62,51 @@ class MainActivity : AppCompatActivity() {
         if (uri != null) handleImport(uri)
     }
 
+    private val backupPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
+        if (allowed) saveLibraryBackup()
+        else Snackbar.make(recycler, "Downloads permission denied. Backup cancelled.", Snackbar.LENGTH_LONG).show()
+    }
+    private val restoreBackup = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            AlertDialog.Builder(this).setTitle("Restore library backup")
+                .setItems(arrayOf("Merge (no overwrite)", "Merge (overwrite)", "Replace — remove existing files", "Cancel")) { _, mode ->
+                    if (mode < 3) runLibraryBackup("Validating and restoring backup…") {
+                        LibraryBackup.restore(this@MainActivity, rootDir, uri, mode)
+                        "Library restored."
+                    }
+                }.setNegativeButton(android.R.string.cancel, null).show()
+        }
+    }
+
+    private fun saveLibraryBackup() {
+        if (android.os.Build.VERSION.SDK_INT < 29 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            backupPermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
+        runLibraryBackup("Saving library backup to Downloads…") {
+            "Backup saved to Downloads/" + LibraryBackup.save(this@MainActivity, rootDir)
+        }
+    }
+
+    private fun runLibraryBackup(message: String, operation: () -> String) {
+        if (libraryBusy) return
+        setLibraryBusy(message)
+        lifecycleScope.launch {
+            val result = try {
+                withContext(Dispatchers.IO) { runCatching { operation() } }
+            } finally { setLibraryBusy(null) }
+            result.onSuccess {
+                refreshLibrary()
+                AlertDialog.Builder(this@MainActivity).setTitle("PocketHLE backup").setMessage(it)
+                    .setPositiveButton(android.R.string.ok, null).show()
+            }.onFailure {
+                AlertDialog.Builder(this@MainActivity).setTitle("Backup/restore failed").setMessage(it.message ?: "Unknown error")
+                    .setPositiveButton(android.R.string.ok, null).show()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -134,6 +179,8 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         if (libraryBusy) return true
         return when (item.itemId) {
+            R.id.action_backup -> { saveLibraryBackup(); true }
+            R.id.action_restore -> { restoreBackup.launch(arrayOf("application/zip", "application/octet-stream", "*/*")); true }
             R.id.action_settings -> {
                 startActivity(Intent(this, SettingsActivity::class.java))
                 true
@@ -738,6 +785,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startGame(entry: GameEntry) {
+        if (libraryBusy) return
         startActivity(
             Intent(this, GameActivity::class.java)
                 .putExtra(GameActivity.EXTRA_GAME_ID, entry.id)

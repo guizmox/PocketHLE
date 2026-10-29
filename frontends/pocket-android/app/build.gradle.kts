@@ -8,6 +8,16 @@ plugins {
 val pocketReleaseVersion = Regex("""(?m)^version\s*=\s*"([^"]+)"""")
     .find(rootProject.file("../../Cargo.toml").readText())!!.groupValues[1]
 
+// Supply the same keystore for every signed build. Never generate a CI key.
+val signingStore = System.getenv("POCKETHLE_KEYSTORE")
+val signingPassword = System.getenv("POCKETHLE_KEYSTORE_PASSWORD")
+val signingAlias = System.getenv("POCKETHLE_KEY_ALIAS")
+val signingKeyPassword = System.getenv("POCKETHLE_KEY_PASSWORD")
+val signingValues = listOf(signingStore, signingPassword, signingAlias, signingKeyPassword)
+check(signingValues.all { it.isNullOrBlank() } || signingValues.all { !it.isNullOrBlank() }) {
+    "Provide all four POCKETHLE signing variables, or none for an unsigned APK"
+}
+
 android {
     namespace = "com.pockethle.app"
     compileSdk = 35
@@ -18,8 +28,8 @@ android {
         applicationId = "com.pockethle.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 12
-        versionName = "0.3.8"
+        versionCode = 13
+        versionName = pocketReleaseVersion
         buildConfigField("String", "UPDATE_VERSION", "\"$pocketReleaseVersion\"")
 
         ndk {
@@ -27,9 +37,20 @@ android {
         }
     }
 
+    signingConfigs {
+        if (!signingStore.isNullOrBlank()) {
+            create("stable") {
+                storeFile = file(signingStore)
+                storePassword = signingPassword
+                keyAlias = signingAlias
+                keyPassword = signingKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (!signingStore.isNullOrBlank()) signingConfig = signingConfigs.getByName("stable")
         }
     }
 

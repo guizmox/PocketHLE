@@ -50,6 +50,35 @@ use serde::Serialize;
 
 use crate::runner::{InputCommand, Session};
 
+// A running or still-joining session can write saves. Keep backups exclusive
+// with session creation, and retain the count until the worker has joined.
+static LIBRARY_SESSIONS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_libraryBackup<'local>(
+    mut env: JNIEnv<'local>, _class: JClass<'local>,
+    library_root: JString<'local>, archive: JString<'local>, mode: jint,
+) -> jstring {
+    let result = (|| -> anyhow::Result<()> {
+        let sessions = LIBRARY_SESSIONS.lock().map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
+        anyhow::ensure!(*sessions == 0, "Stop the running game before backup/restore");
+        let root = jstring_to_path(&mut env, library_root).context("Missing library root")?;
+        let archive = jstring_to_path(&mut env, archive).context("Missing ZIP path")?;
+        use pocket_library::backup::{self, RestoreMode};
+        match mode {
+            -1 => backup::save(&root, &archive),
+            0 => backup::restore(&root, &archive, RestoreMode::MergeNoOverwrite),
+            1 => backup::restore(&root, &archive, RestoreMode::MergeOverwrite),
+            2 => backup::restore(&root, &archive, RestoreMode::Replace),
+            _ => anyhow::bail!("Unknown restore mode"),
+        }
+    })();
+    new_jstring(&env, match result {
+        Ok(()) => serde_json::json!({"ok": true}).to_string(),
+        Err(error) => error_json(&format!("{error:#}")),
+    })
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_banner<'local>(
     env: JNIEnv<'local>,
@@ -876,8 +905,9 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
             return 0;
         }
     };
+    let mut sessions = LIBRARY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     match runner::start(root, id) {
-        Ok(session) => Box::into_raw(Box::new(session)) as jlong,
+        Ok(session) => { *sessions += 1; Box::into_raw(Box::new(session)) as jlong },
         Err(e) => {
             log::error!("nativeStartGame: {e:#}");
             0
@@ -1084,6 +1114,8 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeFinishGame<'loc
     // any subsequent call from Kotlin.
     let session = unsafe { Box::from_raw(handle as *mut Session) };
     let summary = session.finish();
+    let mut sessions = LIBRARY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    *sessions = sessions.saturating_sub(1);
     new_jstring(&env, summary)
 }
 

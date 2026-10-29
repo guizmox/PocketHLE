@@ -27,6 +27,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+pub mod backup;
 pub mod colors_save;
 pub mod frame_rate;
 pub use frame_rate::FrameRateLimit;

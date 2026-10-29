@@ -165,6 +165,7 @@ pub struct PocketLauncher {
     pending_import: Option<PreparedImport>,
     updating_import: bool,
     library_busy: bool,
+    restore_archive: Option<std::path::PathBuf>,
     pending_run: Option<GameEntry>,
     colors_startup_prompt: Option<(
         GameEntry,
@@ -573,6 +574,8 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
+    BackupSelected(Option<std::path::PathBuf>),
+    BackupFinished(Result<String, String>),
     ColorsUnlocked(Result<String, String>),
     ReleaseAvailable(pocket_library::updates::Update),
     ImportFinished(Result<Vec<GameEntry>, String>),
@@ -744,6 +747,7 @@ impl PocketLauncher {
             pending_import: None,
             updating_import: false,
             library_busy: false,
+            restore_archive: None,
             pending_run: None,
             colors_startup_prompt: None,
             screen: Screen::Library,
@@ -842,6 +846,18 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                UiEvent::BackupSelected(path) => {
+                    self.restore_archive = path;
+                    // Keep the library locked until the mode is chosen or cancelled.
+                    if self.restore_archive.is_none() { self.library_busy = false; }
+                }
+                UiEvent::BackupFinished(result) => {
+                    self.library_busy = false;
+                    match result {
+                        Ok(message) => { self.status = message; self.reload_library(); self.icon_cache.clear(); self.screen_cache.clear(); self.selected_game = None; }
+                        Err(error) => { self.status = format!("Backup/restore failed: {error}"); self.import_error = Some(error); }
+                    }
+                }
                 UiEvent::ColorsUnlocked(result) => {
                     self.library_busy = false;
                     self.colors_startup_notice = Some((
@@ -1230,6 +1246,15 @@ impl PocketLauncher {
                 if crate::controller_ui::button(ui, "Import .CAB / .ZIP / .RAR…").clicked() {
                     self.spawn_import_dialog(); ui.close_menu();
                 }
+                ui.separator();
+                let available = !self.library_busy && self.running_game.is_none() && self.pending_run.is_none();
+                if crate::controller_ui::add_enabled(ui, available, egui::Button::new("Save library backup (ZIP)…")).clicked() {
+                    self.spawn_backup_dialog(false); ui.close_menu();
+                }
+                if crate::controller_ui::add_enabled(ui, available, egui::Button::new("Restore library backup (ZIP)…")).clicked() {
+                    self.spawn_backup_dialog(true); ui.close_menu();
+                }
+                if !available { ui.label("Stop the game and finish imports before backing up or restoring."); }
             });
             crate::controller_ui::menu_button(ui, "Settings", |ui| self.ui_settings_menu(ui));
             crate::controller_ui::menu_button(ui, "About", |ui| {
@@ -4584,6 +4609,66 @@ impl PocketLauncher {
         }
     }
 
+    fn spawn_backup_dialog(&mut self, restore: bool) {
+        if self.library_busy || self.running_game.is_some() || self.pending_run.is_some()
+            || self.config_draft.is_some() || self.game_settings_draft.is_some()
+            || self.rename_draft.is_some() || self.pending_import.is_some() { return; }
+        self.library_busy = true;
+        self.status = if restore { "Choose a PocketHLE backup…" } else { "Saving library backup…" }.into();
+        let root = self.library.root().to_path_buf();
+        let tx = self.events_tx.clone();
+        std::thread::spawn(move || {
+            let dialog = rfd::FileDialog::new().add_filter("PocketHLE backup", &["zip"]);
+            if restore {
+                let _ = tx.send(UiEvent::BackupSelected(dialog.set_title("Restore PocketHLE backup").pick_file()));
+            } else {
+                let path = dialog.set_title("Save PocketHLE backup")
+                    .set_file_name(pocket_library::backup::suggested_filename()).save_file();
+                let result = match path {
+                    Some(path) => pocket_library::backup::save(&root, &path)
+                        .map(|()| format!("Backup saved: {}", path.display())).map_err(|e| format!("{e:#}")),
+                    None => Ok("Backup cancelled.".into()),
+                };
+                let _ = tx.send(UiEvent::BackupFinished(result));
+            }
+        });
+    }
+
+    fn ui_restore_backup(&mut self, ctx: &egui::Context) {
+        use pocket_library::backup::RestoreMode;
+        let mut chosen = None;
+        let mut cancel = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        egui::Window::new("Restore library backup")
+            .collapsible(false).resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                crate::controller_ui::page_scope(ui, "restore_backup", |ui| {
+                    ui.label("Choose how to restore files already present in the library.");
+                    ui.label("Replace removes existing files absent from the backup.");
+                    for (label, mode) in [
+                        ("Merge (no overwrite)", RestoreMode::MergeNoOverwrite),
+                        ("Merge (overwrite)", RestoreMode::MergeOverwrite),
+                        ("Replace", RestoreMode::Replace),
+                    ] {
+                        if crate::controller_ui::button(ui, label).clicked() { chosen = Some(mode); }
+                    }
+                    if crate::controller_ui::button(ui, "Cancel").clicked() { cancel = true; }
+                });
+            });
+        if cancel { self.restore_archive = None; self.library_busy = false; self.status = "Restore cancelled.".into(); }
+        else if let Some(mode) = chosen {
+            let archive = self.restore_archive.take().unwrap();
+            let root = self.library.root().to_path_buf();
+            let tx = self.events_tx.clone();
+            self.status = "Validating and restoring backup…".into();
+            std::thread::spawn(move || {
+                let result = pocket_library::backup::restore(&root, &archive, mode)
+                    .map(|()| "Library restored.".into()).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(UiEvent::BackupFinished(result));
+            });
+        }
+    }
+
     fn spawn_import_dialog(&mut self) {
         if self.library_busy || self.demo_import.is_some() || self.colors_startup_prompt.is_some() {
             return;
@@ -4993,6 +5078,12 @@ impl eframe::App for PocketLauncher {
             self.recordings_gallery.close_player();
         }
         self.drain_events(ctx);
+        if self.restore_archive.is_some() {
+            egui::CentralPanel::default().show(ctx, |_| {});
+            self.ui_restore_backup(ctx);
+            self.controller_ui.show(ctx);
+            return;
+        }
         if let Some(id) = self.game_id_popup.clone() {
             self.handle_gamepads(ctx);
             egui::CentralPanel::default().show(ctx, |_| {});

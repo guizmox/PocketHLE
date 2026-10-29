@@ -14,9 +14,24 @@ if [[ ! -x "$android_gradle_dir/bin/gradle" ]]; then
     unzip -q -o "$android_download" -d "$android_root/target/tools"
 fi
 python3 "$android_root/tools/check-android-native.py"
-"$android_gradle_dir/bin/gradle" -p "$android_root/frontends/pocket-android" --no-daemon testDebugUnitTest assembleDebug
-android_apk="$android_root/frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk"
+"$android_gradle_dir/bin/gradle" -p "$android_root/frontends/pocket-android" --no-daemon testDebugUnitTest assembleRelease
+android_release_dir="$android_root/frontends/pocket-android/app/build/outputs/apk/release"
+android_version="$(python3 - "$android_root/Cargo.toml" <<'PYVERSION'
+import pathlib, re, sys
+print(re.search(r'^version\s*=\s*"([^"]+)"', pathlib.Path(sys.argv[1]).read_text(), re.M)[1])
+PYVERSION
+)"
+mkdir -p "$android_root/dist/android"
+if [[ -n "${POCKETHLE_KEYSTORE:-}" ]]; then
+    android_apk="$android_release_dir/app-release.apk"
+    android_output="$android_root/dist/android/PocketHLE-$android_version-android-universal.apk"
+    "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$android_apk"
+else
+    android_apk="$android_release_dir/app-release-unsigned.apk"
+    android_output="$android_root/dist/android/PocketHLE-$android_version-android-universal-unsigned.apk"
+    echo "No signing secrets: producing an explicitly unsigned APK. No temporary debug key is used."
+fi
 LD_LIBRARY_PATH="$ANDROID_HOME/build-tools/35.0.0/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$android_apk"
-"$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$android_apk"
-echo "APK: $android_apk"
+cp "$android_apk" "$android_output"
+echo "APK: $android_output"
