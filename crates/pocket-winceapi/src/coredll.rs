@@ -770,6 +770,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "Escape", ext_escape);
     d.register_handler(dll, "GetDeviceCaps", get_device_caps);
     // ---- Display mode enumeration (SDL 1.2 needs a non-empty list) ----
+    d.register_handler(dll, "EnumDisplayDevices", enum_display_devices);
+    d.register_handler(dll, "EnumDisplayDevicesW", enum_display_devices);
     d.register_handler(dll, "EnumDisplaySettings", enum_display_settings);
     d.register_handler(dll, "EnumDisplaySettingsW", enum_display_settings);
     d.register_handler(dll, "EnumDisplaySettingsExW", enum_display_settings);
@@ -886,12 +888,12 @@ pub fn register(d: &mut WinCeDispatcher) {
     // and every one of those was a host round-trip plus a logged
     // "unimplemented call" warning.
     d.register_constant(dll, "SystemIdleTimerReset", 0, zero_returning);
-    // The IME is a text-entry service. No emulated guest has an input
-    // method open, so the correct answer to "give me the input context
-    // for this window" is NULL, and positioning a composition window
-    // that does not exist is a no-op. Toy Golf asks once at startup.
-    d.register_constant(dll, "ImmGetContext", 0, zero_returning);
-    d.register_constant(dll, "ImmReleaseContext", 1, one_returning);
+    // CE associates the owning thread's default input context at creation.
+    // Keep a detached window distinct from one still using that default;
+    // applications save the old HIMC and restore it after their game UI.
+    d.register_handler(dll, "ImmAssociateContext", imm_associate_context);
+    d.register_handler(dll, "ImmGetContext", imm_get_context);
+    d.register_handler(dll, "ImmReleaseContext", imm_release_context);
     d.register_constant(dll, "ImmSetCompositionWindow", 1, one_returning);
     d.register_handler(dll, "SystemParametersInfoW", system_parameters_info_w);
     d.register_handler(dll, "GetSystemPowerStatusEx", get_system_power_status_ex);
@@ -10479,18 +10481,18 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
                     CreateStage::Size | CreateStage::InitialCreate
                 ) {
                     let hwnd = ctx.kernel.create_frame_hwnd;
-                    // WS_VISIBLE takes effect during creation, not on a later
-                    // message-pump tick or redundant ShowWindow. Springer
-                    // initializes its running clock after CreateWindowExW;
-                    // a delayed first focus gain falsely resumes that clock
-                    // from an uninitialized pause timestamp.
+                    // Send visibility and focus before returning, so a later
+                    // synthetic focus gain cannot resume an uninitialized clock.
+                    // Keep activation on the startup queue: entering an activation
+                    // handler while CreateWindowExW is still constructing the
+                    // window can reach application state initialized by its caller.
                     if hwnd == FAKE_HWND
                         && ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
                         && window_is_visible(ctx.kernel, hwnd)
                     {
                         if let Some(index) =
                             ctx.kernel.pending_startup.iter().position(|m| {
-                                matches!(m.0, WM_SHOWWINDOW | WM_ACTIVATE | WM_SETFOCUS)
+                                matches!(m.0, WM_SHOWWINDOW | WM_SETFOCUS)
                             })
                         {
                             if let Some(proc) = ctx
@@ -10626,6 +10628,8 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             .kernel
             .controls
             .create(parent, class, id, text.clone(), style, x, y, cx, cy);
+        ctx.kernel.window_threads.insert(hwnd, ctx.kernel.current_thread);
+        ctx.kernel.window_input_contexts.remove(&hwnd);
         log::debug!(
             "CreateWindowExW(class={class_name:?}, id={id}, text={text:?}) -> child hwnd=0x{hwnd:08x}"
         );
@@ -10688,6 +10692,7 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     ctx.kernel
         .window_threads
         .insert(hwnd, ctx.kernel.current_thread);
+    ctx.kernel.window_input_contexts.remove(&hwnd);
     ctx.kernel.window_rects.insert(hwnd, rect);
     log::debug!("window geometry hwnd=0x{hwnd:08x} class={class_name:?} parent=0x{parent:08x} id={} style=0x{style:08x} rect={rect:?}",ctx.arg_u32(9)?);
     ctx.kernel.window_styles.insert(hwnd, (style, ex_style));
@@ -16224,6 +16229,11 @@ fn bit_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         "BitBlt(dst=0x{hdc_dst:08x} dst=({x},{y},{cx}x{cy}) src=0x{hdc_src:08x} src=({x1},{y1}) rop=0x{rop:08x})"
     );
     bit_blt_inner(ctx, hdc_dst, x, y, cx, cy, hdc_src, x1, y1, rop)?;
+    // GetDC drawings are immediately visible, even when the application keeps
+    // its DC across frames and never calls ReleaseDC or BeginPaint/EndPaint.
+    if ctx.kernel.window_dcs.values().any(|&dc| dc == hdc_dst) {
+        ctx.kernel.present_window_surfaces();
+    }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -17722,7 +17732,7 @@ fn get_monitor_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
     }
     if size == 104 {
-        for (i, unit) in "DISPLAY1".encode_utf16().enumerate() {
+        for (i, unit) in PRIMARY_DISPLAY_NAME.encode_utf16().enumerate() {
             bytes[40 + i * 2..42 + i * 2].copy_from_slice(&unit.to_le_bytes());
         }
     }
@@ -17991,6 +18001,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.window_extra.retain(|(h, _), _| h != hwnd);
     ctx.kernel.window_styles.remove(hwnd);
     ctx.kernel.window_threads.remove(hwnd);
+    ctx.kernel.window_input_contexts.remove(hwnd);
     ctx.kernel.window_parents.remove(hwnd);
     ctx.kernel.window_visibility.remove(hwnd);
     ctx.kernel.window_procs.remove(hwnd);
@@ -20509,6 +20520,78 @@ fn ext_escape(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
 }
 
+const PRIMARY_DISPLAY_NAME: &str = "DISPLAY1";
+
+/// CE 4.2+ EnumDisplayDevices (coredll ordinal 1778), Unicode ABI.
+/// https://learn.microsoft.com/en-us/previous-versions/windows/embedded/aa453048(v=msdn.10)
+/// NULL enumerates adapters; the returned adapter name enumerates its monitor.
+/// The virtual framebuffer has one attached primary adapter and one panel.
+/// CE reserves dwFlags (must be zero), unlike newer desktop interface-name flags.
+fn enum_display_devices(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const SIZE: u32 = 840; // DWORD, WCHAR[32], WCHAR[128], DWORD, WCHAR[128], WCHAR[128]
+    let device = ctx.arg_u32(0)?;
+    let index = ctx.arg_u32(1)?;
+    let output = ctx.arg_u32(2)?;
+    let flags = ctx.arg_u32(3)?;
+    if flags != 0
+        || output == 0
+        || output.checked_add(SIZE).is_none()
+        || ctx.cpu.read_u32_le(output).ok() != Some(SIZE)
+    {
+        set_thread_error(ctx, 87); // ERROR_INVALID_PARAMETER
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if index != 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let monitor = if device == 0 {
+        false
+    } else {
+        if device.checked_add(64).is_none() {
+            set_thread_error(ctx, 87);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let name = match read_wstr(ctx, device, 32) {
+            Ok(name) => String::from_utf16_lossy(&name),
+            Err(_) => {
+                set_thread_error(ctx, 87);
+                return Ok(DispatchOutcome::ReturnedR0(0));
+            }
+        };
+        if !name.eq_ignore_ascii_case(PRIMARY_DISPLAY_NAME) {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        true
+    };
+    // Preflight the entire structure before writing, so unmapped tails cannot
+    // cause a partial structure write. Build locally to support aliased input.
+    if ctx.cpu.check_guest_access(output, SIZE, Prot::WRITE).is_err() {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let mut bytes = [0u8; SIZE as usize];
+    bytes[..4].copy_from_slice(&SIZE.to_le_bytes());
+    let (name, description, state) = if monitor {
+        ("DISPLAY1\\Monitor0", "PocketHLE display panel", 1u32)
+    } else {
+        (PRIMARY_DISPLAY_NAME, "PocketHLE display adapter", 1u32 | 4)
+    };
+    for (offset, capacity, value) in [(4, 32, name), (68, 128, description)] {
+        for (index, unit) in value.encode_utf16().take(capacity - 1).enumerate() {
+            bytes[offset + index * 2..offset + index * 2 + 2]
+                .copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+    bytes[324..328].copy_from_slice(&state.to_le_bytes());
+    // There is no physical PnP identifier in this virtual display. DeviceID
+    // remains empty and the reserved DeviceKey remains zero-filled.
+    if ctx.cpu.write_mem(output, &bytes).is_err() {
+        set_thread_error(ctx, 87);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 /// `BOOL EnumDisplaySettings(LPCTSTR device, DWORD iModeNum, DEVMODE *dm)`
 ///
 /// SDL 1.2 (which every Gameloft Windows Mobile title links against)
@@ -22897,6 +22980,67 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
     ctx.kernel.dialog_frame = Some(frame);
     log::debug!("CreateDialogIndirectParamW -> WM_INITDIALOG trampoline at 0x{dialog_proc:08x}");
     Ok(DispatchOutcome::JumpTo(dialog_proc))
+}
+
+/// CE supports only the window thread's default HIMC or NULL, not arbitrary
+/// application-created contexts. HIMCs are opaque tokens, never guest pointers.
+/// https://learn.microsoft.com/en-us/previous-versions/windows/embedded/ms905984(v=msdn.10)
+fn imm_default_context(kernel: &KernelState, hwnd: u32) -> Option<u32> {
+    if !kernel.window_classes.contains_key(&hwnd)
+        && !kernel.window_procs.contains_key(&hwnd)
+        && kernel.controls.get(hwnd).is_none()
+    {
+        return None;
+    }
+    let mut owner = hwnd;
+    // Controls constructed from dialog templates inherit their parent's thread.
+    for _ in 0..64 {
+        if let Some(thread) = kernel.window_threads.get(&owner) {
+            return u32::try_from(*thread).ok()?.checked_add(0x494d_0001);
+        }
+        let parent = kernel.controls.get(owner).map(|c| c.parent)
+            .or_else(|| kernel.window_parents.get(&owner).copied());
+        match parent {
+            Some(parent) if parent != 0 && parent != owner => owner = parent,
+            _ => break,
+        }
+    }
+    Some(0x494d_0001) // legacy main-thread dialogs
+}
+
+fn imm_get_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let Some(default) = imm_default_context(ctx.kernel, hwnd) else {
+        set_thread_error(ctx, 1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let context = ctx.kernel.window_input_contexts.get(&hwnd).copied().unwrap_or(default);
+    Ok(DispatchOutcome::ReturnedR0(context))
+}
+
+fn imm_associate_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let context = ctx.arg_u32(1)?;
+    let Some(default) = imm_default_context(ctx.kernel, hwnd) else {
+        set_thread_error(ctx, 1400);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if context != 0 && context != default {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let previous = ctx.kernel.window_input_contexts.insert(hwnd, context).unwrap_or(default);
+    Ok(DispatchOutcome::ReturnedR0(previous))
+}
+
+fn imm_release_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let context = ctx.arg_u32(1)?;
+    // Releasing an acquired default context does not destroy it or detach it.
+    let valid = imm_default_context(ctx.kernel, hwnd).is_some_and(|default| {
+        context != 0 && context == default
+    });
+    Ok(DispatchOutcome::ReturnedR0(u32::from(valid)))
 }
 
 fn is_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -30258,7 +30402,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_pocket_pc_creation_sends_initial_notifications_before_return_once() {
+    fn visible_pocket_pc_creation_sends_focus_but_defers_activation_until_message_pump() {
         for (action, visible) in [
             (pocket_kernel::gapi::VK_RETURN, true),
             (pocket_kernel::gapi::VK_RETURN, false),
@@ -30293,7 +30437,7 @@ mod tests {
             };
             let sent = action == pocket_kernel::gapi::VK_RETURN && visible;
             if sent {
-                for (msg, wp, lp) in sequence {
+                for (msg, wp, lp) in sequence.into_iter().filter(|m| m.0 != WM_ACTIVATE) {
                     ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
                     assert_eq!(
                         create_window_ex_w(&mut ctx).unwrap(),
@@ -30314,7 +30458,10 @@ mod tests {
             assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), frame.args[1]);
             assert_eq!(ctx.cpu.read_reg(ArmReg::R2).unwrap(), frame.args[2]);
             assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), frame.args[3]);
-            assert_eq!(ctx.kernel.pending_startup.len(), if sent { 0 } else { 3 });
+            assert_eq!(ctx.kernel.pending_startup.len(), if sent { 1 } else { 3 });
+            if sent {
+                assert_eq!(ctx.kernel.pending_startup.front(), Some(&(WM_ACTIVATE, 1, 0)));
+            }
             if sent {
                 // The caller can initialize its running clock here. A later
                 // redundant ShowWindow must not send another initial focus.
@@ -30330,7 +30477,8 @@ mod tests {
                     show_window(&mut ctx).unwrap(),
                     DispatchOutcome::ReturnedR0(1)
                 );
-                assert!(ctx.kernel.pending_startup.is_empty());
+                assert_eq!(ctx.kernel.pending_startup.front(), Some(&(WM_ACTIVATE, 1, 0)));
+                assert_eq!(ctx.kernel.pending_startup.len(), 1);
             }
         }
     }
@@ -30462,6 +30610,7 @@ mod tests {
             window_styles: std::collections::HashMap::new(),
             window_parents: std::collections::HashMap::new(),
             window_threads: std::collections::HashMap::new(),
+            window_input_contexts: std::collections::HashMap::new(),
             window_rects: std::collections::HashMap::new(),
             window_dcs: std::collections::HashMap::new(),
             window_visibility: std::collections::HashMap::new(),
@@ -40267,5 +40416,221 @@ mod async_press_history_tests {
             ),
             DispatchOutcome::ReturnedR0(0x8000)
         ));
+    }
+}
+
+#[cfg(test)]
+mod display_device_enumeration_tests {
+    use super::*;
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
+    use pocket_kernel::Dispatcher;
+    use pocket_pe::ImportBinding;
+
+    fn wide(bytes: &[u8]) -> String {
+        let units: Vec<_> = bytes.chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .take_while(|u| *u != 0).collect();
+        String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn ce_display_adapter_monitor_layout_alias_and_enumeration_end() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.write_mem(0x2000, &[0xa5; 848]).unwrap();
+        cpu.write_mem(0x2000, &840u32.to_le_bytes()).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "COREDLL.dll", "EnumDisplayDevices", &[0, 0, 0x2000, 0]),
+            DispatchOutcome::ReturnedR0(1));
+        let adapter = cpu.read_mem(0x2000, 840).unwrap();
+        assert_eq!(&adapter[..4], &840u32.to_le_bytes());
+        assert_eq!(wide(&adapter[4..68]), PRIMARY_DISPLAY_NAME);
+        assert_eq!(wide(&adapter[68..324]), "PocketHLE display adapter");
+        assert_eq!(&adapter[324..328], &5u32.to_le_bytes());
+        assert!(adapter[328..].iter().all(|b| *b == 0));
+        assert_eq!(cpu.read_mem(0x2000 + 840, 8).unwrap(), vec![0xa5; 8]);
+        // End of adapter enumeration must not overwrite the last valid result.
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "coredll.dll", "EnumDisplayDevices", &[0, 1, 0x2000, 0]),
+            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), adapter);
+        // The returned name is valid input, including when input aliases output.
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "coredll.dll", "EnumDisplayDevicesW", &[0x2004, 0, 0x2000, 0]),
+            DispatchOutcome::ReturnedR0(1));
+        let monitor = cpu.read_mem(0x2000, 840).unwrap();
+        assert_eq!(wide(&monitor[4..68]), "DISPLAY1\\Monitor0");
+        assert_eq!(wide(&monitor[68..324]), "PocketHLE display panel");
+        assert_eq!(&monitor[324..328], &1u32.to_le_bytes());
+        cpu.write_mem(0x1100, &adapter[4..68]).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "coredll.dll", "EnumDisplayDevices", &[0x1100, 1, 0x2000, 0]),
+            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), monitor);
+        // Monitor names do not recursively enumerate another adapter.
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "coredll.dll", "EnumDisplayDevices", &[0x2004, 0, 0x2000, 0]),
+            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), monitor);
+        // The adapter name works with the existing mode API.
+        cpu.write_mem(0x3000, &[0; 188]).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "coredll.dll", "EnumDisplaySettings", &[0x1100, u32::MAX, 0x3000]),
+            DispatchOutcome::ReturnedR0(1));
+        assert_eq!(cpu.read_u32_le(0x3000 + 172).unwrap(), kernel.framebuffer.width);
+        assert_eq!(cpu.read_u32_le(0x3000 + 176).unwrap(), kernel.framebuffer.height);
+    }
+
+    #[test]
+    fn ce_display_enumeration_rejects_invalid_arguments_without_partial_output() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (device, index, output, flags, cb) in [
+            (0, 0, 0x2000, 0, 0),
+            (0, 0, 0x2000, 0, 328),
+            (0, 0, 0x2000, 0, 844),
+            (0, 0, 0x2000, 1, 840),
+            (0, 0, 0, 0, 840),
+            (0, 0, u32::MAX - 4, 0, 840),
+            (0, 0, 0x4ff0, 0, 840),
+            (0x9000, 0, 0x2000, 0, 840),
+            (u32::MAX, 0, 0x2000, 0, 840),
+        ] {
+            cpu.write_mem(0x2000, &[0xa5; 848]).unwrap();
+            cpu.write_mem(0x2000, &(cb as u32).to_le_bytes()).unwrap();
+            cpu.write_mem(0x4ff0, &[0xa5; 16]).unwrap();
+            cpu.write_mem(0x4ff0, &840u32.to_le_bytes()).unwrap();
+            let before = cpu.read_mem(0x2000, 848).unwrap();
+            let tail = cpu.read_mem(0x4ff0, 16).unwrap();
+            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+                "coredll.dll", "EnumDisplayDevices", &[device, index, output, flags]),
+                DispatchOutcome::ReturnedR0(0));
+            assert_eq!(cpu.read_mem(0x2000, 848).unwrap(), before);
+            assert_eq!(cpu.read_mem(0x4ff0, 16).unwrap(), tail);
+            assert_eq!(kernel.thread_last_errors.get(&kernel.current_thread), Some(&87));
+        }
+        cpu.write_mem(0x2000, &840u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1100, &[b'X', 0, 0, 0]).unwrap();
+        let before = cpu.read_mem(0x2000, 840).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
+            "coredll.dll", "EnumDisplayDevices", &[0x1100, 0, 0x2000, 0]),
+            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), before);
+    }
+
+    #[test]
+    fn ce_display_devices_is_resolved_by_coredll_ordinal_1778() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.write_mem(0x2000, &840u32.to_le_bytes()).unwrap();
+        for (reg, value) in [(ArmReg::R0, 0), (ArmReg::R1, 0),
+            (ArmReg::R2, 0x2000), (ArmReg::R3, 0)] {
+            cpu.write_reg(reg, value).unwrap();
+        }
+        let thunk = pocket_kernel::Thunk {
+            thunk_va: 0x70000000, iat_va: 0, dll: "COREDLL.dll".into(),
+            binding: ImportBinding::Ordinal(1778), friendly_name: None,
+        };
+        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(1));
+        assert_eq!(wide(&cpu.read_mem(0x2004, 64).unwrap()), PRIMARY_DISPLAY_NAME);
+    }
+}
+
+#[cfg(test)]
+mod imm_context_tests {
+    use super::*;
+    use super::tests::{dummy_thunk, fresh_kernel};
+    use pocket_cpu::stub::StubCpu;
+
+    #[test]
+    fn detach_restore_is_per_window_and_context_is_per_thread() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        for (hwnd, owner) in [(FAKE_HWND, 0), (FAKE_DIALOG_HWND, 0), (0xdead0010, 1)] {
+            kernel.window_procs.insert(hwnd, 0x10000);
+            kernel.window_threads.insert(hwnd, owner);
+        }
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let default = imm_default_context(ctx.kernel, FAKE_HWND).unwrap();
+        assert_eq!(imm_default_context(ctx.kernel, FAKE_DIALOG_HWND), Some(default));
+        assert_ne!(imm_default_context(ctx.kernel, 0xdead0010), Some(default));
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_DIALOG_HWND).unwrap();
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, default).unwrap();
+        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(imm_release_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        // CE rejects arbitrary HIMCs; failure must not alter the association.
+        ctx.cpu.write_reg(ArmReg::R1, default + 1).unwrap();
+        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert!(!ctx.kernel.window_input_contexts.contains_key(&0));
+        discard_window_metadata(&mut ctx, &FAKE_HWND);
+        assert!(!ctx.kernel.window_input_contexts.contains_key(&FAKE_HWND));
+        assert_eq!(imm_default_context(ctx.kernel, FAKE_HWND), None);
+        ctx.kernel.window_procs.insert(FAKE_HWND, 0x10000);
+        ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+    }
+}
+
+#[cfg(test)]
+mod retained_window_dc_tests {
+    use super::*;
+    use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
+
+    #[test]
+    fn bitblt_to_retained_window_dc_is_visible_without_release_or_endpaint() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let destination = window_dc(&mut ctx, FAKE_HWND);
+        let source = ctx.kernel.gdi.create_memory_dc();
+        let bitmap = ctx.kernel.gdi.create_compatible_bitmap(240, 320);
+        ctx.kernel.gdi.dc_mut(source).unwrap().selected_bitmap = Some(bitmap);
+        pocket_kernel::gdi::Surface::Bitmap(ctx.kernel.gdi.bitmap_mut(bitmap).unwrap())
+            .fill_rect(0, 0, 240, 320, 0x07e0);
+        let offset = (100 * 240 + 50) * 2;
+        assert_ne!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x07e0u16.to_le_bytes());
+        for (reg, value) in [(ArmReg::R0, destination), (ArmReg::R1, 0),
+            (ArmReg::R2, 0), (ArmReg::R3, 240)] {
+            ctx.cpu.write_reg(reg, value).unwrap();
+        }
+        let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
+        for (index, value) in [320u32, source, 0, 0, 0x00cc0020].into_iter().enumerate() {
+            ctx.cpu.write_mem(sp + index as u32 * 4, &value.to_le_bytes()).unwrap();
+        }
+        assert_eq!(bit_blt(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x07e0u16.to_le_bytes());
+        assert_eq!(window_dc(&mut ctx, FAKE_HWND), destination);
+        // A later direct frame must survive an ordinary offscreen blit and
+        // an empty EndPaint; do not replay the now-unchanged window backing.
+        ctx.kernel.framebuffer.fill(0x001f);
+        let direct_frame = ctx.kernel.framebuffer.frame_counter;
+        ctx.cpu.write_reg(ArmReg::R0, source).unwrap();
+        bit_blt(&mut ctx).unwrap();
+        ctx.kernel.present_window_surfaces();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, direct_frame);
+        assert_eq!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x001fu16.to_le_bytes());
+        // Painting a hidden window changes its backing, not the visible frame.
+        ctx.kernel.window_visibility.insert(FAKE_HWND, false);
+        ctx.cpu.write_reg(ArmReg::R0, destination).unwrap();
+        bit_blt(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, direct_frame);
+        assert_eq!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x001fu16.to_le_bytes());
     }
 }

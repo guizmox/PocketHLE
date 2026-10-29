@@ -1,6 +1,3 @@
-crates\pocket-core\src\lib.rs
 crates\pocket-kernel\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
-frontends\pocket-android-jni\src\runner.rs
-frontends\pocket-cli\src\main.rs
-frontends\pocket-desktop\src\runner.rs
+crates\pocket-winceapi\src\gx.rs

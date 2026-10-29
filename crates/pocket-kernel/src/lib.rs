@@ -1298,6 +1298,9 @@ pub struct KernelState {
     pub window_parents: HashMap<u32, u32>,
     /// Guest thread which created each window (zero is the main thread).
     pub window_threads: HashMap<u32, usize>,
+    /// Explicit IMM associations; absent means the owning thread's default context.
+    /// A stored zero means ImmAssociateContext detached the window.
+    pub window_input_contexts: HashMap<u32, u32>,
     pub window_rects: HashMap<u32, (i32, i32, i32, i32)>,
     pub window_dcs: HashMap<u32, u32>,
     /// Visibility of real top-level window instances.
@@ -4015,6 +4018,7 @@ impl Process {
                 window_styles: HashMap::new(),
                 window_parents: HashMap::new(),
                 window_threads: HashMap::new(),
+                window_input_contexts: HashMap::new(),
                 window_rects: HashMap::new(),
                 window_dcs: HashMap::new(),
                 window_visibility: HashMap::new(),
