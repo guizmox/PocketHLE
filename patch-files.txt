@@ -1,2 +1,1 @@
-crates\pocket-winceapi\src\coredll.rs
-frontends\pocket-android-jni\src\lib.rs
+tools\setup-android-signing.ps1

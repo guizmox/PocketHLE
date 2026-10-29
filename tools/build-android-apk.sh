@@ -20,6 +20,16 @@ if [[ $# -gt 1 ]]; then
     echo 'Usage: bash tools/build-android-apk.sh [debug|release]' >&2
     exit 2
 fi
+# Public CI releases must be installable. PRs may still compile without secrets.
+if [[ "${GITHUB_ACTIONS:-false}" == true && "$android_build_type" == release \
+      && "${GITHUB_EVENT_NAME:-}" != pull_request ]]; then
+    for android_secret in POCKETHLE_KEYSTORE POCKETHLE_KEYSTORE_PASSWORD POCKETHLE_KEY_ALIAS POCKETHLE_KEY_PASSWORD; do
+        if [[ -z "${!android_secret:-}" ]]; then
+            echo 'Missing Android signing secrets: refusing to produce an unsigned public APK. Run tools/setup-android-signing.bat and configure GitHub Actions secrets.' >&2
+            exit 1
+        fi
+    done
+fi
 : "${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK installed in Linux/WSL2 or macOS}"
 python3 "$android_root/tools/android-native-freshness.py" check
 android_gradle_version=8.10.2

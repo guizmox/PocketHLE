@@ -9,8 +9,12 @@ for android_signing_var in POCKETHLE_KEYSTORE_BASE64 POCKETHLE_KEYSTORE_PASSWORD
     fi
 done
 if [[ "$android_signing_count" == 0 ]]; then
-    echo 'Signing secrets absent: unsigned release APK only.'
-    exit 0
+    if [[ "${GITHUB_EVENT_NAME:-}" == pull_request ]]; then
+        echo 'Pull request without secrets: unsigned APK for build checks only; not for public installation.'
+        exit 0
+    fi
+    echo 'Public Android builds require all four POCKETHLE signing secrets. Run tools/setup-android-signing.bat once and configure repository Actions secrets. No unsigned public APK will be published.' >&2
+    exit 1
 fi
 if [[ "$android_signing_count" != 4 ]]; then
     echo 'Configure all four POCKETHLE signing secrets.' >&2
