@@ -1,4 +1,4 @@
-//! InstallShield 5–13 cabinet sets, including length-prefixed Deflate blocks.
+//! InstallShield legacy embedded-header and 5–13 cabinet sets with Deflate blocks.
 //! Layout reference: Unshield (MIT); see the bundled third-party notice.
 use super::{charge, inflate, u16_at, u32_at, Cabinet, Result};
 
@@ -40,7 +40,25 @@ fn extract_files(
     let mut out = Vec::new();
     let headers: Vec<_> = entries
         .iter()
-        .filter(|(n, b)| n.to_ascii_lowercase().ends_with(".hdr") && b.starts_with(b"ISc("))
+        .filter(|(n, b)| {
+            if !b.starts_with(b"ISc(") {
+                return false;
+            }
+            if n.to_ascii_lowercase().ends_with(".hdr") {
+                return true;
+            }
+            // Early InstallShield stores the descriptor and table in the CAB.
+            // A real .hdr always wins; do not decode a volume twice.
+            n.to_ascii_lowercase().ends_with(".cab")
+                && u32_at(b, 4) == Some(0x0100_0004)
+                && !entries.iter().any(|(other, _)| {
+                    n.rsplit_once('.').zip(other.rsplit_once('.')).is_some_and(
+                        |((stem, _), (other_stem, ext))| {
+                            stem.eq_ignore_ascii_case(other_stem) && ext.eq_ignore_ascii_case("hdr")
+                        },
+                    )
+                })
+        })
         .collect();
     if headers.is_empty() {
         return Err("InstallShield cabinet set is missing its .hdr file".into());
@@ -52,7 +70,7 @@ fn extract_files(
         } else {
             (version & 0xffff) / 100
         };
-        if !(5..=13).contains(&major) {
+        if !(5..=13).contains(&major) && version != 0x0100_0004 {
             return Err(format!("Unsupported InstallShield cabinet version {major}"));
         }
         let base = number(header, 12)?;
@@ -66,7 +84,7 @@ fn extract_files(
             .checked_add(number(header, base + 12)?)
             .ok_or("InstallShield table overflow")?;
         let count = number(header, base + 40)?;
-        let descriptors = if major == 5 {
+        let descriptors = if major <= 5 {
             let directories = number(header, base + 28)?;
             if directories > 4096 {
                 return Err("Too many InstallShield directories".into());
@@ -85,7 +103,7 @@ fn extract_files(
             .0;
         let prefix = prefix.trim_end_matches(|c: char| c.is_ascii_digit());
         for i in 0..count {
-            let (descriptor, flags, name_offset) = if major == 5 {
+            let (descriptor, flags, name_offset) = if major <= 5 {
                 let index = descriptors
                     .checked_add(i * 4)
                     .ok_or("InstallShield index overflow")?;
@@ -94,7 +112,7 @@ fn extract_files(
                     .ok_or("InstallShield descriptor overflow")?;
                 let d = header
                     .get(
-                        p..p.checked_add(58)
+                        p..p.checked_add(if major == 0 { 42 } else { 58 })
                             .ok_or("InstallShield descriptor overflow")?,
                     )
                     .ok_or("Truncated InstallShield 5 descriptor")?;
@@ -111,7 +129,7 @@ fn extract_files(
                     .ok_or("Truncated InstallShield descriptor")?;
                 (d, u16_at(d, 0).unwrap(), number(d, 58)?)
             };
-            let data_offset = if major == 5 {
+            let data_offset = if major <= 5 {
                 number(descriptor, 38)?
             } else {
                 wide(descriptor, 18)?
@@ -137,12 +155,14 @@ fn extract_files(
                 continue;
             }
             if assets {
-                if major != 5 {
+                if major > 5 {
                     return Err(
                         "Raw CabWiz payloads require InstallShield 5 directory metadata".into(),
                     );
                 }
-                let directory = number(descriptor, 4)?;
+                let directory = u16_at(descriptor, 4)
+                    .ok_or("Truncated InstallShield directory index")?
+                    as usize;
                 let directories = number(header, base + 28)?;
                 if directory >= directories {
                     return Err("Invalid InstallShield source directory".into());
@@ -164,15 +184,15 @@ fn extract_files(
             }
             // Split/obfuscated/linked payloads need different decoding. Never
             // silently concatenate volumes or substitute a neighbouring file.
-            if flags & !4 != 0 || (major != 5 && descriptor[84] != 0) {
+            if flags & !4 != 0 || (major > 5 && descriptor[84] != 0) {
                 return Err("Unsupported split, obfuscated or linked InstallShield cabinet".into());
             }
-            let expanded = if major == 5 {
+            let expanded = if major <= 5 {
                 number(descriptor, 10)?
             } else {
                 wide(descriptor, 2)?
             };
-            let compressed = if major == 5 {
+            let compressed = if major <= 5 {
                 number(descriptor, 14)?
             } else {
                 wide(descriptor, 10)?
@@ -180,7 +200,7 @@ fn extract_files(
             if expanded > *budget {
                 return Err("InstallShield payload exceeds size limit".into());
             }
-            let volume_name = if major == 5 {
+            let volume_name = if major <= 5 {
                 format!("{}.cab", header_name.rsplit_once('.').unwrap().0)
             } else {
                 let volume = u16_at(descriptor, 85).unwrap();
@@ -193,7 +213,7 @@ fn extract_files(
             if number(data, 4)? != version {
                 return Err("InstallShield volume version mismatch".into());
             }
-            if major == 5 {
+            if major <= 5 {
                 let first = number(data, 28)?;
                 let last = number(data, 32)?;
                 if i < first
@@ -238,13 +258,20 @@ fn extract_files(
                 }
                 result
             };
-            let expected_md5 = if major == 5 {
-                &descriptor[42..58]
-            } else {
-                &descriptor[26..42]
-            };
-            if decoded.len() != expanded || md5::compute(&decoded).0 != expected_md5 {
-                return Err("InstallShield payload size or MD5 mismatch".into());
+            if decoded.len() != expanded {
+                return Err("InstallShield payload size mismatch".into());
+            }
+            // Legacy 42-byte descriptors have no MD5 field. The enclosing
+            // archive and the nested CE cabinet keep their own integrity checks.
+            if major != 0 {
+                let expected_md5 = if major == 5 {
+                    &descriptor[42..58]
+                } else {
+                    &descriptor[26..42]
+                };
+                if md5::compute(&decoded).0 != expected_md5 {
+                    return Err("InstallShield payload MD5 mismatch".into());
+                }
             }
             out.push(Cabinet {
                 name,
@@ -365,6 +392,50 @@ mod tests {
         put32(&mut bad[0].1, 12, u32::MAX);
         assert!(extract(&bad, &mut 65536).is_err());
     }
+    fn fixture_legacy(compressed: bool) -> Vec<(String, Vec<u8>)> {
+        let original = fixture5(compressed);
+        let mut cabinet = original[0].1[..130].to_vec();
+        put32(&mut cabinet, 4, 0x0100_0004);
+        put32(&mut cabinet, 88, 50); // filename immediately after the 42-byte descriptor
+        put32(&mut cabinet, 126, 256);
+        cabinet.extend_from_slice(b"x.cab\0");
+        cabinet.resize(256, 0);
+        cabinet.extend_from_slice(&original[1].1[128..]);
+        vec![("data1.cab".into(), cabinet)]
+    }
+
+    #[test]
+    fn legacy_embedded_headers_decode_without_md5_or_external_hdr() {
+        for compressed in [false, true] {
+            let entries = fixture_legacy(compressed);
+            let result = extract(&entries, &mut 65536).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].name, "x.cab");
+            assert_eq!(result[0].bytes, b"MSCF synthetic cabinet bytes");
+            // An external header must not cause a second copy of the same CAB.
+            let with_header = vec![
+                ("data1.hdr".into(), entries[0].1[..136].to_vec()),
+                entries[0].clone(),
+            ];
+            assert_eq!(extract(&with_header, &mut 65536).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn legacy_embedded_headers_enforce_budget_bounds_and_expanded_size() {
+        let original = fixture_legacy(true);
+        assert!(extract(&original, &mut 1).is_err());
+        let mut bad = original.clone();
+        bad[0].1.truncate(260);
+        assert!(extract(&bad, &mut 65536).is_err());
+        let mut bad = original.clone();
+        put32(&mut bad[0].1, 126, u32::MAX);
+        assert!(extract(&bad, &mut 65536).is_err());
+        let mut bad = original;
+        put32(&mut bad[0].1, 98, 1);
+        assert!(extract(&bad, &mut 65536).is_err());
+    }
+
     fn stored_cab(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
         let table_len: usize = entries.iter().map(|(n, _)| 17 + n.len()).sum();
         let data_len: usize = entries.iter().map(|(_, b)| b.len()).sum();
