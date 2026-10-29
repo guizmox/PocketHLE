@@ -316,6 +316,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "sprintf", sprintf);
     d.register_handler(dll, "printf", printf);
     d.register_handler(dll, "fprintf", crt_fprintf);
+    d.register_handler(dll, "fwprintf", crt_fwprintf);
     d.register_handler(dll, "vfprintf", crt_vfprintf);
     d.register_handler(dll, "_getstdfilex", get_std_file);
     d.register_handler(dll, "_wfreopen", wfreopen);
@@ -7448,6 +7449,27 @@ fn crt_fprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     emit_stream_text(ctx, stream, &s)?;
     Ok(DispatchOutcome::ReturnedR0(
         crate::crt_ansi::encode(&s).len() as u32,
+    ))
+}
+
+/// `int fwprintf(FILE *stream, const wchar_t *fmt, ...)`.
+fn crt_fwprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let stream = ctx.arg_u32(0)?;
+    let fmt_ptr = ctx.arg_u32(1)?;
+    if fmt_ptr == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    let fmt = String::from_utf16_lossy(&read_wstr(ctx, fmt_ptr, 0x4000)?);
+    let text = render_printf(ctx, &fmt, true, 2)?;
+    if std_file_label(stream).is_some() {
+        emit_stream_text(ctx, stream, &text)?;
+    } else if !ctx.kernel.vfs.is_open(stream)
+        || write_stdio_raw(ctx, stream, text.as_bytes()) != Some(text.len())
+    {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    Ok(DispatchOutcome::ReturnedR0(
+        text.encode_utf16().count() as u32
     ))
 }
 
@@ -31392,6 +31414,54 @@ mod tests {
         let after = ctx.cpu.read_mem(BITS, stride * height).unwrap();
         assert_eq!(&after[far_pixel..far_pixel + 2], &0x07e0u16.to_le_bytes());
         assert_ne!(&after[..32], &initial[..32]);
+    }
+
+    #[test]
+    fn fwprintf_formats_wide_arguments_and_reports_stream_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("wide.log");
+        std::fs::write(&path, []).unwrap();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        for (addr, text) in [(0x1100, "%s:%d"), (0x1200, "é")] {
+            let bytes: Vec<_> = text
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            cpu.write_mem(addr, &bytes).unwrap();
+        }
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount(r"\Program Files\Game\", root.path());
+        let stream = kernel
+            .vfs
+            .open(r"\Program Files\Game\wide.log", Access::Write, false)
+            .unwrap();
+        for (reg, value) in [
+            (ArmReg::R0, stream),
+            (ArmReg::R1, 0x1100),
+            (ArmReg::R2, 0x1200),
+            (ArmReg::R3, 42),
+        ] {
+            cpu.write_reg(reg, value).unwrap();
+        }
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            crt_fwprintf(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(4)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), "é:42".as_bytes());
+        ctx.cpu.write_reg(ArmReg::R0, 0xdeadbeef).unwrap();
+        assert_eq!(
+            crt_fwprintf(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(u32::MAX)
+        );
     }
 
     #[test]
