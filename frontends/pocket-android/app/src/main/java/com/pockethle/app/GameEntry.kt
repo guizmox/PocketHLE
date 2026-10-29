@@ -73,6 +73,7 @@ data class GameSettings(
     val pocketpcOwnerName: String = "",
     val pocketpcDeviceName: String = "",
     val pocketpcDeviceId: String = "",
+    val pocketpcPresetId: String = "",
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
@@ -92,6 +93,7 @@ data class GameSettings(
         put("pocketpc_owner_name", pocketpcOwnerName)
         put("pocketpc_device_name", pocketpcDeviceName)
         put("pocketpc_device_id", pocketpcDeviceId)
+        put("pocketpc_preset_id", pocketpcPresetId)
     }
 
     fun controlsMode() = pocketpcControls ?: if(pocketpcTouchSteering) "zones" else "normal"
@@ -126,6 +128,7 @@ data class GameSettings(
             pocketpcOwnerName = obj.optString("pocketpc_owner_name", ""),
             pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),
             pocketpcDeviceId = obj.optString("pocketpc_device_id", ""),
+            pocketpcPresetId = obj.optString("pocketpc_preset_id", ""),
             originalJson = obj.toString(),
         )
     }

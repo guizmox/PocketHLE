@@ -410,6 +410,31 @@ impl Emulator {
             p.state.registry.set_value(key, name, value);
         }
     }
+    /// Override only this process's raw Preset ID, without changing the device name
+    /// or persisting an identity change for other applications.
+    pub fn set_pocketpc_preset_hex(&mut self, preset: &str) -> Result<()> {
+        if preset.is_empty() {
+            return Ok(());
+        }
+        use pocket_kernel::{
+            device_identity::{DeviceIdentity, REGISTRY_KEY, REGISTRY_VALUE},
+            registry::RegistryValue,
+        };
+        // Validate before touching the process registry.
+        let decoded = DeviceIdentity::from_hex(preset, "00").map_err(anyhow::Error::msg)?;
+        let process = self.process.as_mut().context("no PE loaded")?;
+        let mut id = DeviceIdentity::load_or_create(&mut process.state.registry)
+            .map_err(anyhow::Error::msg)?;
+        id.preset = decoded.preset;
+        let encoded = id.encode().map_err(anyhow::Error::msg)?;
+        process.state.registry.set_volatile_value(
+            REGISTRY_KEY,
+            REGISTRY_VALUE,
+            RegistryValue::Binary(encoded),
+        );
+        Ok(())
+    }
+
     /// Apply one game's PocketPC identity without changing the persisted device.
     pub fn set_pocketpc_identity(
         &mut self,

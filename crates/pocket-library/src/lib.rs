@@ -585,6 +585,9 @@ pub struct GameSettings {
     pub pocketpc_device_name: String,
     #[serde(default)]
     pub pocketpc_device_id: String,
+    /// Optional raw Preset ID override, hexadecimal; takes precedence over the ASCII name.
+    #[serde(default)]
+    pub pocketpc_preset_id: String,
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
@@ -691,6 +694,13 @@ impl GameSettings {
                 "PocketPC device name must use ASCII without NUL (maximum 4096 bytes)".into(),
             );
         }
+        let preset = &self.pocketpc_preset_id;
+        if preset.len() > 8192
+            || preset.len() % 2 != 0
+            || !preset.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("Preset ID must use hexadecimal byte pairs (maximum 4096 bytes)".into());
+        }
         let id = &self.pocketpc_device_id;
         if id.len() > 8192 || id.len() % 2 != 0 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("PocketPC ID must use hexadecimal byte pairs (maximum 4096 bytes)".into());
@@ -709,6 +719,7 @@ impl Default for GameSettings {
             pocketpc_owner_name: String::new(),
             pocketpc_device_name: String::new(),
             pocketpc_device_id: String::new(),
+            pocketpc_preset_id: String::new(),
             gpu_renderer: None,
             anisotropic_filtering: None,
             cpu_backend: CpuBackendPref::default(),
@@ -6545,5 +6556,21 @@ mod resource_destination_tests {
         assert!(!matches(r"\Games\Example", r"\Games\Example\..\Other"));
         assert!(!matches(r"\Games\Example", r"Games\Example"));
         assert!(!matches(r"\", r"\Games\Example"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn raw_pocketpc_preset_override_validates_and_round_trips() {
+    let mut settings: GameSettings = serde_json::from_str("{}").unwrap();
+    assert!(settings.pocketpc_preset_id.is_empty());
+    settings.pocketpc_preset_id = "00112233445566778899".into();
+    assert!(settings.validate_pocketpc_identity().is_ok());
+    let restored: GameSettings =
+        serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+    assert_eq!(restored.pocketpc_preset_id, settings.pocketpc_preset_id);
+    for invalid in ["0", "GG", "AA BB"] {
+        settings.pocketpc_preset_id = invalid.into();
+        assert!(settings.validate_pocketpc_identity().is_err());
     }
 }

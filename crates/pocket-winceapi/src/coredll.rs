@@ -13349,6 +13349,7 @@ fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         if returned != 0 {
             ctx.cpu.write_mem(returned, &16u32.to_le_bytes())?;
         }
+        set_thread_error(ctx, 0);
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     let data = match identity.encode() {
@@ -13356,8 +13357,10 @@ fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         Err(_) => return vfs_api_bool(ctx, Err(31)),
     };
     let required = data.len() as u32;
-    if supplied_size == 0 {
-        // WinCE's documented size query updates dwSize, not lpBytesReturned.
+    if supplied_size == 0 || (supplied_size == 20 && capacity == 20) {
+        // The documented zero-size query updates dwSize, not lpBytesReturned.
+        // Also accept a header-only DEVICE_ID probe used by CE applications;
+        // preserve all payload bytes until they retry with an allocated buffer.
         ctx.cpu.write_mem(out, &required.to_le_bytes())?;
         return vfs_api_bool(ctx, Err(122));
     }
@@ -13375,6 +13378,8 @@ fn kernel_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     if returned != 0 {
         ctx.cpu.write_mem(returned, &required.to_le_bytes())?;
     }
+    // Do not leave the size probe's insufficient-buffer status after success.
+    set_thread_error(ctx, 0);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -27693,6 +27698,10 @@ mod tests {
             DispatchOutcome::ReturnedR0(1)
         );
         assert_eq!(
+            get_last_error(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
             ctx.cpu.read_mem(0x2000, expected.len() as u32).unwrap(),
             expected
         );
@@ -27700,6 +27709,22 @@ mod tests {
         assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), 20);
         assert_eq!(ctx.cpu.read_u32_le(0x200c).unwrap(), 24);
         assert_eq!(ctx.cpu.read_mem(0x2000 + 40, 24).unwrap(), vec![0xcc; 24]);
+        // Header-only clients retry using the required size in dwSize.
+        ctx.cpu.write_mem(0x2000, &20u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x9000, &20u32.to_le_bytes()).unwrap();
+        ctx.cpu
+            .write_mem(0x3000, &0xdeadbeefu32.to_le_bytes())
+            .unwrap();
+        let payload = ctx.cpu.read_mem(0x2004, 60).unwrap();
+        assert_eq!(
+            kernel_io_control(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), expected.len() as u32);
+        assert_eq!(ctx.cpu.read_mem(0x2004, 60).unwrap(), payload);
+        assert_eq!(ctx.cpu.read_u32_le(0x3000).unwrap(), 0xdeadbeef);
+        ctx.cpu.write_mem(0x9000, &64u32.to_le_bytes()).unwrap();
+        ctx.cpu.write_mem(0x3000, &40u32.to_le_bytes()).unwrap();
         ctx.cpu.write_mem(0x2000, &20u32.to_le_bytes()).unwrap();
         let unchanged = ctx.cpu.read_mem(0x2004, 60).unwrap();
         assert_eq!(

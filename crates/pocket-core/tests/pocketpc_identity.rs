@@ -93,6 +93,18 @@ fn settings_override_owner_and_hal_identity_but_device_registry_stays_unchanged(
     assert_eq!(id.preset, b"MyPDA");
     assert_eq!(id.platform, [0xde, 0xad, 0xbe, 0xef]);
     r.flush().unwrap();
+    emu.set_pocketpc_preset_hex("00112233445566778899").unwrap();
+    let current =
+        DeviceIdentity::load_or_create(&mut emu.process_mut().unwrap().state.registry).unwrap();
+    assert_eq!(DeviceIdentity::hex(&current.preset), "00112233445566778899");
+    assert_eq!(current.platform, [0xde, 0xad, 0xbe, 0xef]);
+    assert!(emu.set_pocketpc_preset_hex("zz").is_err());
+    emu.set_pocketpc_preset_hex("").unwrap();
+    assert_eq!(
+        DeviceIdentity::load_or_create(&mut emu.process_mut().unwrap().state.registry).unwrap(),
+        current
+    );
+
     assert!(emu.set_pocketpc_identity("wrong", "é", "").is_err());
     assert!(emu.set_pocketpc_identity("wrong", "ok", "z").is_err());
     assert_eq!(

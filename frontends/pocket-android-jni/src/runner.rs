@@ -571,11 +571,14 @@ fn run_process(
         }
     }
     if !is_gizmondo {
-        if let Err(error) = emu.set_pocketpc_identity(
-            &entry.settings.pocketpc_owner_name,
-            &entry.settings.pocketpc_device_name,
-            &entry.settings.pocketpc_device_id,
-        ) {
+        if let Err(error) = emu
+            .set_pocketpc_identity(
+                &entry.settings.pocketpc_owner_name,
+                &entry.settings.pocketpc_device_name,
+                &entry.settings.pocketpc_device_id,
+            )
+            .and_then(|_| emu.set_pocketpc_preset_hex(&entry.settings.pocketpc_preset_id))
+        {
             summary_lines.push(format!("Invalid PocketPC identity: {error}"));
             return (summary_lines.join("\n"), 87);
         }

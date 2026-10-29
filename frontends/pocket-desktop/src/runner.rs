@@ -383,11 +383,14 @@ impl Runner {
             }
         }
         if !is_gizmondo {
-            if let Err(e) = emu.set_pocketpc_identity(
-                &game.settings.pocketpc_owner_name,
-                &game.settings.pocketpc_device_name,
-                &game.settings.pocketpc_device_id,
-            ) {
+            if let Err(e) = emu
+                .set_pocketpc_identity(
+                    &game.settings.pocketpc_owner_name,
+                    &game.settings.pocketpc_device_name,
+                    &game.settings.pocketpc_device_id,
+                )
+                .and_then(|_| emu.set_pocketpc_preset_hex(&game.settings.pocketpc_preset_id))
+            {
                 summary_lines.push(format!("Invalid PocketPC identity: {e}"));
                 return (
                     RunOutcome {
