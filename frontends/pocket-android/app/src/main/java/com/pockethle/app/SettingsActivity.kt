@@ -90,8 +90,12 @@ class SettingsActivity : AppCompatActivity() {
                 entries=arrayOf("Intel PXA270 (Dell Axim X51v)","Intel PXA255","StrongARM SA-1110","Generic ARM")
                 entryValues=arrayOf("pxa270","pxa255","sa1110","arm")
                 value=current.toJson().optString("pocketpc_processor","pxa270")
-                summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
-                dialogMessage="Identity reported to ARM PocketPC games. Applies next launch; does not change CPU speed or backend. MIPS games retain MIPS identity."
+                // AlertDialog displays its message instead of the single-choice
+                // list when both are supplied. Keep help on the settings row.
+                dialogTitle="Processor profile"
+                summaryProvider=Preference.SummaryProvider<ListPreference> { preference ->
+                    "${preference.entry ?: "Intel PXA270 (Dell Axim X51v)"}\nIdentity reported to ARM PocketPC games. Applies next launch; does not change CPU speed or backend. MIPS games retain MIPS identity."
+                }
                 setOnPreferenceChangeListener { _,v ->
                     current=current.copy(originalJson=current.toJson().put("pocketpc_processor",v.toString()).toString())
                     writeConfig();true
