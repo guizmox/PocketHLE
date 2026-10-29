@@ -4909,6 +4909,9 @@ mod tests {
                 ("GZGA900013/helper.cab", b"not an installer".as_slice()),
                 ("GZGA900013/multiboot.hog", b"WART3.00".as_slice()),
                 ("gzga900049/bin/game.exe", pe.as_slice()),
+                ("GZGA900018/autorun.exe", pe.as_slice()),
+                ("GZGA900018/GZGA200018", b"serial".as_slice()),
+                ("GZGA200018/autorun.exe", pe.as_slice()),
                 ("gzga900049/data.bin", b"game2".as_slice()),
             ] {
                 archive
@@ -4922,12 +4925,37 @@ mod tests {
             archive.finish().unwrap();
             let mut lib = Library::open(root.join("library")).unwrap();
             let entries = lib.import_zip_entries(&archive_path).unwrap();
-            assert_eq!(entries.len(), 2);
-            assert_eq!(lib.games().len(), 2);
+            assert_eq!(entries.len(), 4);
+            assert_eq!(lib.games().len(), 4);
             assert!(lib.get("collection").is_none());
             let names: Vec<_> = entries.iter().map(|e| e.display_name.as_str()).collect();
             assert!(names.contains(&"Richard Burns Rally (april 2005)"));
             assert!(names.contains(&"Hit & Myth (may 2005)"));
+            let standard = lib.get("GZGA200018").unwrap();
+            let variant = lib.get("GZGA900018").unwrap();
+            assert_eq!(standard.display_name, "Johnny Whatever");
+            assert_eq!(variant.display_name, "Johnny Whatever (august 2005)");
+            assert_ne!(standard.save_dir(lib.root()), variant.save_dir(lib.root()));
+            assert_ne!(
+                standard.gizmondo_flash_dir(lib.root()),
+                variant.gizmondo_flash_dir(lib.root())
+            );
+            let save = Path::new("MyGames/GZGA200018 JohnnyWhatever/Save/data.sav");
+            for game in [standard, variant] {
+                let path = game.gizmondo_flash_dir(lib.root()).join(save);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, game.id.as_bytes()).unwrap();
+            }
+            for game in [standard, variant] {
+                assert_eq!(
+                    fs::read(game.gizmondo_flash_dir(lib.root()).join(save)).unwrap(),
+                    game.id.as_bytes()
+                );
+            }
+            assert!(variant
+                .install_mounts(lib.root())
+                .iter()
+                .any(|(p, _)| p == "\\SD Card\\GZGA200018\\"));
             for entry in &entries {
                 assert!(is_gizmondo_game(entry, lib.root()));
                 assert!(!lib.is_demo_card(&entry.id));
@@ -5441,6 +5469,7 @@ mod tests {
             ("GZAP200001", "Gizmondo Navigator (UK)"),
             ("GZAP250006", "Gizmondo Navigator (USA West Coast)"),
             ("GZGA200096", "Skystriker"),
+            ("GZGA900018", "Johnny Whatever (august 2005)"),
         ] {
             let path = root.join(format!("{}.zip", id.to_ascii_lowercase()));
             let mut archive = zip::ZipWriter::new(fs::File::create(&path).unwrap());
@@ -5541,7 +5570,7 @@ mod tests {
             })
             .map(String::as_str)
             .collect();
-        assert_eq!(ids.len(), 11);
+        assert_eq!(ids.len(), 12);
         ids.extend(["GZGA900123", "GZGA600123"]);
         for id in ids {
             let original = format!("GZGA2{}", &id[5..]);

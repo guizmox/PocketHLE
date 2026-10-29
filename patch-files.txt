@@ -1,1 +1,2 @@
-frontends\pocket-desktop\src\file_dialog.rs
+crates\pocket-library\data\gizmondo-titles.json
+crates\pocket-library\src\lib.rs
