@@ -74,6 +74,9 @@ data class GameSettings(
     val pocketpcDeviceName: String = "",
     val pocketpcDeviceId: String = "",
     val pocketpcPresetId: String = "",
+    val pocketpcOemInfo: String = "",
+    val pocketpcPlatformType: String = "",
+    val pocketpcGapiColumns: Boolean = false,
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
@@ -94,6 +97,9 @@ data class GameSettings(
         put("pocketpc_device_name", pocketpcDeviceName)
         put("pocketpc_device_id", pocketpcDeviceId)
         put("pocketpc_preset_id", pocketpcPresetId)
+        put("pocketpc_oem_info", pocketpcOemInfo)
+        put("pocketpc_platform_type", pocketpcPlatformType)
+        put("pocketpc_gapi_columns", pocketpcGapiColumns)
     }
 
     fun controlsMode() = pocketpcControls ?: if(pocketpcTouchSteering) "zones" else "normal"
@@ -129,6 +135,9 @@ data class GameSettings(
             pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),
             pocketpcDeviceId = obj.optString("pocketpc_device_id", ""),
             pocketpcPresetId = obj.optString("pocketpc_preset_id", ""),
+            pocketpcOemInfo = obj.optString("pocketpc_oem_info", ""),
+            pocketpcPlatformType = obj.optString("pocketpc_platform_type", ""),
+            pocketpcGapiColumns = obj.optBoolean("pocketpc_gapi_columns", false),
             originalJson = obj.toString(),
         )
     }

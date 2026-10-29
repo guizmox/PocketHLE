@@ -88,6 +88,9 @@ fn guest_pitch_bytes(ctx: &CallCtx<'_>) -> u32 {
 }
 
 fn initial_guest_pitch(ctx: &CallCtx<'_>) -> u32 {
+    if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+        return ctx.kernel.framebuffer.stride_bytes();
+    }
     if ctx
         .kernel
         .module_path
@@ -100,7 +103,7 @@ fn initial_guest_pitch(ctx: &CallCtx<'_>) -> u32 {
     }
 }
 
-fn ensure_fb_mapped(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+pub(crate) fn ensure_fb_mapped(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     if ctx.kernel.fb_mapped {
         return Ok(());
     }
@@ -114,11 +117,15 @@ fn ensure_fb_mapped(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     ctx.cpu
         .map_region(SYNTHETIC_FB_BASE, bytes, Prot::READ | Prot::WRITE)?;
     let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
-    for row in 0..ctx.kernel.framebuffer.height as usize {
-        let src = row * row_bytes;
-        let dst = SYNTHETIC_FB_BASE + (row * pitch as usize) as u32;
-        ctx.cpu
-            .write_mem(dst, &ctx.kernel.framebuffer.pixels[src..src + row_bytes])?;
+    if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+        push_column_framebuffer(ctx)?;
+    } else {
+        for row in 0..ctx.kernel.framebuffer.height as usize {
+            let src = row * row_bytes;
+            let dst = SYNTHETIC_FB_BASE + (row * pitch as usize) as u32;
+            ctx.cpu
+                .write_mem(dst, &ctx.kernel.framebuffer.pixels[src..src + row_bytes])?;
+        }
     }
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     ctx.kernel.fb_mapped = true;
@@ -171,6 +178,22 @@ fn gx_close_display(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+fn push_column_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+    ctx.kernel
+        .gx_layout_scratch
+        .resize(ctx.kernel.framebuffer.pixels.len(), 0);
+    pocket_kernel::gapi_copy_columns(
+        ctx.kernel.framebuffer.width as usize,
+        ctx.kernel.framebuffer.height as usize,
+        &ctx.kernel.framebuffer.pixels,
+        &mut ctx.kernel.gx_layout_scratch,
+        true,
+    );
+    ctx.cpu
+        .write_mem(SYNTHETIC_FB_BASE, &ctx.kernel.gx_layout_scratch)?;
+    Ok(())
+}
+
 fn gx_begin_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ensure_fb_mapped(ctx)?;
     // Push the current host framebuffer state into the guest mapping
@@ -188,7 +211,9 @@ fn gx_begin_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     {
         let pitch = guest_pitch_bytes(ctx) as usize;
         let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
-        if pitch == row_bytes {
+        if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+            push_column_framebuffer(ctx)?;
+        } else if pitch == row_bytes {
             ctx.cpu
                 .write_mem(SYNTHETIC_FB_BASE, &ctx.kernel.framebuffer.pixels)?;
         } else {
@@ -202,8 +227,13 @@ fn gx_begin_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
     ctx.kernel.gx_draw_active = true;
-    log::trace!("GXBeginDraw() -> 0x{:08x}", SYNTHETIC_FB_BASE);
-    Ok(DispatchOutcome::ReturnedR0(SYNTHETIC_FB_BASE))
+    let origin = if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+        SYNTHETIC_FB_BASE + ctx.kernel.framebuffer.height.saturating_sub(1) * 2
+    } else {
+        SYNTHETIC_FB_BASE
+    };
+    log::trace!("GXBeginDraw() -> 0x{:08x}", origin);
+    Ok(DispatchOutcome::ReturnedR0(origin))
 }
 
 fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -277,14 +307,25 @@ fn readback_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     Ok(())
 }
 
-fn read_guest_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+pub(crate) fn read_guest_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     let pitch = guest_pitch_bytes(ctx) as usize;
     let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
     let fb_len = ctx.kernel.framebuffer.pixels.len();
     if ctx.kernel.gx_readback_scratch.len() != fb_len {
         ctx.kernel.gx_readback_scratch.resize(fb_len, 0);
     }
-    if pitch == row_bytes {
+    if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+        ctx.kernel.gx_layout_scratch.resize(fb_len, 0);
+        ctx.cpu
+            .read_mem_into(SYNTHETIC_FB_BASE, &mut ctx.kernel.gx_layout_scratch)?;
+        pocket_kernel::gapi_copy_columns(
+            ctx.kernel.framebuffer.width as usize,
+            ctx.kernel.framebuffer.height as usize,
+            &ctx.kernel.gx_layout_scratch,
+            &mut ctx.kernel.gx_readback_scratch,
+            false,
+        );
+    } else if pitch == row_bytes {
         ctx.cpu
             .read_mem_into(SYNTHETIC_FB_BASE, &mut ctx.kernel.gx_readback_scratch)?;
     } else {
@@ -401,7 +442,8 @@ fn gx_get_display_properties(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     // caller reserves the result at r0 and passes unrelated register
     // values in r1-r3. Treating r0 as an ordinary argument is correct,
     // but keep the pitch fields in the documented units: cbxPitch is
-    // bytes per pixel and cbyPitch is bytes per scanline.
+    // bytes to move one logical pixel in X and Y, respectively. Both
+    // are signed: early portrait LCDs can use columns and negative Y.
     let sret = ctx.arg_u32(0)?;
     let width = ctx.kernel.framebuffer.width;
     let height = ctx.kernel.framebuffer.height;
@@ -409,8 +451,13 @@ fn gx_get_display_properties(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     let mut buf = Vec::with_capacity(24);
     buf.extend_from_slice(&width.to_le_bytes());
     buf.extend_from_slice(&height.to_le_bytes());
-    buf.extend_from_slice(&(bpp / 8).to_le_bytes());
-    buf.extend_from_slice(&guest_pitch_bytes(ctx).to_le_bytes());
+    let (x_pitch, y_pitch) = if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+        ((height * 2) as i32, -2i32)
+    } else {
+        ((bpp / 8) as i32, guest_pitch_bytes(ctx) as i32)
+    };
+    buf.extend_from_slice(&x_pitch.to_le_bytes());
+    buf.extend_from_slice(&y_pitch.to_le_bytes());
     buf.extend_from_slice(&bpp.to_le_bytes());
     // kfDirect565 is 0x80 in the WinCE GAPI header. The direct flag
     // is not a pixel-format bit and must not be ORed into ffFormat.
@@ -475,6 +522,8 @@ pub(crate) mod tests {
             guest_fb_pitch: 0,
             direct_fb_frames: 0,
             gx_readback_scratch: Vec::new(),
+            gx_layout_scratch: Vec::new(),
+            gapi_column_major: false,
             mem_op_scratch: Vec::new(),
             mem_op_scratch_b: Vec::new(),
             bit_blt_src_scratch: Vec::new(),
@@ -608,6 +657,57 @@ pub(crate) mod tests {
             binding: ImportBinding::Ordinal(0),
             friendly_name: None,
         }
+    }
+
+    #[test]
+    fn column_display_profile_roundtrips_pixels_and_advertises_physical_pitches() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = fresh_kernel();
+        // No executable-name recognition: this works for any guest.
+        kernel.gapi_column_major = true;
+        kernel.framebuffer = Framebuffer::new(3, 2);
+        kernel
+            .framebuffer
+            .pixels
+            .copy_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
+        cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        gx_get_display_properties(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.cpu.read_mem(0x1108, 8).unwrap(),
+            [4i32.to_le_bytes(), (-2i32).to_le_bytes()].concat()
+        );
+        assert_eq!(
+            gx_begin_draw(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(SYNTHETIC_FB_BASE + 2)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(SYNTHETIC_FB_BASE, 12).unwrap(),
+            [4, 0, 1, 0, 5, 0, 2, 0, 6, 0, 3, 0]
+        );
+        ctx.cpu
+            .write_mem(SYNTHETIC_FB_BASE + 8, &9u16.to_le_bytes())
+            .unwrap();
+        readback_framebuffer(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.kernel.framebuffer.pixels,
+            [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 9, 0]
+        );
+        // Both directions must also handle GDI repaint followed by BeginDraw.
+        ctx.kernel.framebuffer.pixels[0..2].copy_from_slice(&7u16.to_le_bytes());
+        ctx.kernel.framebuffer.mark_dirty();
+        gx_begin_draw(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.cpu.read_mem(SYNTHETIC_FB_BASE + 2, 2).unwrap(),
+            7u16.to_le_bytes()
+        );
     }
 
     #[test]

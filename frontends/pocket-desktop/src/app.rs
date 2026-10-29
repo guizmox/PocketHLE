@@ -2854,12 +2854,31 @@ impl PocketLauncher {
                 }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
                 ui.end_row();
 
+                if !is_gizmondo {
+                    ui.label("GAPI display compatibility");
+                    crate::controller_ui::ComboBox::from_id_source("pocketpc_gapi_layout")
+                        .selected_text(if draft.pocketpc_gapi_columns { "Columns (early portrait LCD)" } else { "Linear scanlines (default)" })
+                        .show_ui(ui, |ui| {
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, false, "Linear scanlines (default)");
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, true, "Columns (early portrait LCD)");
+                        }).response.on_hover_text("Compatibility setting: emulate the physical memory layout of an early PocketPC LCD. Use columns for software that assumes this layout. Applies on next launch.");
+                    ui.end_row();
+                    ui.label("");
+                    ui.small("Use Columns if a PocketPC game's image or text wraps around the screen or appears shifted. Restart the game after changing this compatibility setting.");
+                    ui.end_row();
+                }
                 ui.heading("Sound");
                 ui.label("No per-game sound options yet.");
                 ui.end_row();
                 if !is_gizmondo {
                     ui.heading("Device Identity");
                     ui.label("");
+                    ui.end_row();
+                    ui.label("OEM model (readable text)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_oem_info, "PocketHLE");
+                    ui.end_row();
+                    ui.label("Platform type (readable text)");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_platform_type, "PocketPC");
                     ui.end_row();
                     ui.label("Owner name (PocketPC)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");

@@ -578,6 +578,13 @@ fn run_process(
                 &entry.settings.pocketpc_device_id,
             )
             .and_then(|_| emu.set_pocketpc_preset_hex(&entry.settings.pocketpc_preset_id))
+            .and_then(|_| {
+                emu.set_pocketpc_oem_identity(
+                    &entry.settings.pocketpc_oem_info,
+                    &entry.settings.pocketpc_platform_type,
+                )
+            })
+            .map(|_| emu.set_pocketpc_gapi_columns(entry.settings.pocketpc_gapi_columns))
         {
             summary_lines.push(format!("Invalid PocketPC identity: {error}"));
             return (summary_lines.join("\n"), 87);

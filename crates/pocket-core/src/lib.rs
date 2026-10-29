@@ -435,6 +435,34 @@ impl Emulator {
         Ok(())
     }
 
+    /// Select the physical GAPI LCD layout. Host pixels remain ordinary scanlines.
+    pub fn set_pocketpc_gapi_columns(&mut self, enabled: bool) {
+        if let Some(process) = self.process.as_mut() {
+            process.state.gapi_column_major = enabled;
+        }
+    }
+
+    /// Override readable OEM/platform identity for this process only.
+    pub fn set_pocketpc_oem_identity(&mut self, oem: &str, platform: &str) -> Result<()> {
+        for text in [oem, platform] {
+            anyhow::ensure!(
+                !text.contains('\0') && text.encode_utf16().count() <= 255,
+                "OEM model and platform type must contain at most 255 UTF-16 characters and no NUL"
+            );
+        }
+        let process = self.process.as_mut().context("no PE loaded")?;
+        for (name, text) in [("OEMInfo", oem), ("PlatformType", platform)] {
+            if !text.is_empty() {
+                process.state.registry.set_volatile_value(
+                    r"HKLM\System\Platform",
+                    name,
+                    pocket_kernel::registry::RegistryValue::Sz(text.into()),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Apply one game's PocketPC identity without changing the persisted device.
     pub fn set_pocketpc_identity(
         &mut self,

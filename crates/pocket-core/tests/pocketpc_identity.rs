@@ -115,6 +115,21 @@ fn settings_override_owner_and_hal_identity_but_device_registry_stays_unchanged(
             .value(r"HKCU\ControlPanel\Owner", "Owner"),
         Some(RegistryValue::Sz("Élodie".into()))
     );
+    emu.set_pocketpc_oem_identity("Legacy PDA", "PocketPC")
+        .unwrap();
+    emu.set_pocketpc_gapi_columns(true);
+    assert!(emu.process().unwrap().state.gapi_column_major);
+    assert!(emu
+        .set_pocketpc_oem_identity("bad\0name", "invalid")
+        .is_err());
+    assert_eq!(
+        emu.process()
+            .unwrap()
+            .state
+            .registry
+            .value(r"HKLM\System\Platform", "OEMInfo"),
+        Some(RegistryValue::Sz("Legacy PDA".into()))
+    );
     let mut other = Registry::with_device_defaults();
     other.configure_persistence(&registry_path).unwrap();
     assert_eq!(
@@ -122,6 +137,7 @@ fn settings_override_owner_and_hal_identity_but_device_registry_stays_unchanged(
         original_owner
     );
     assert!(!other.contains_key(r"HKLM\Ident"));
+    assert_eq!(other.value(r"HKLM\System\Platform", "OEMInfo"), None);
     assert_eq!(
         DeviceIdentity::load_or_create(&mut other).unwrap(),
         original_id

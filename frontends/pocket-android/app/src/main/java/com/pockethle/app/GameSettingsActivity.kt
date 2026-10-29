@@ -89,7 +89,7 @@ class GameSettingsActivity : AppCompatActivity() {
                         setOnPreferenceChangeListener { _, value ->
                             val input = value.toString()
                             val valid = !input.contains('\u0000') && when (keyName) {
-                                "pocketpc_owner_name" -> input.length <= 255
+                                "pocketpc_oem_info", "pocketpc_platform_type", "pocketpc_owner_name" -> input.length <= 255
                                 "pocketpc_device_name" -> input.length <= 4096 && input.all { it.code <= 127 }
                                 else -> input.length <= 8192 && input.length % 2 == 0 && input.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
                             }
@@ -98,6 +98,18 @@ class GameSettingsActivity : AppCompatActivity() {
                         }
                     })
                 }
+                identityField("pocketpc_oem_info", "OEM model (readable text)", current.pocketpcOemInfo) {current=current.copy(pocketpcOemInfo=it)}
+                identityField("pocketpc_platform_type", "Platform type (readable text)", current.pocketpcPlatformType) {current=current.copy(pocketpcPlatformType=it)}
+                findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!.addPreference(ListPreference(requireContext()).apply {
+                    key="pocketpc_gapi_columns";title="GAPI display compatibility";isPersistent=false
+                    entries=arrayOf("Linear scanlines (default)","Columns (early portrait LCD)")
+                    entryValues=arrayOf("false","true");value=current.pocketpcGapiColumns.toString()
+                    summaryProvider=androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nUse Columns if a PocketPC game's image or text wraps around the screen or appears shifted. Restart the game after changing this compatibility setting." }
+                    dialogMessage="Compatibility setting: emulate the physical memory layout of an early PocketPC LCD. Use columns for software that assumes this layout. Applies on next launch."
+                    setOnPreferenceChangeListener { _, value ->
+                        current=current.copy(pocketpcGapiColumns=value.toString()=="true");writeGameSettings();true
+                    }
+                })
                 identityField("pocketpc_owner_name", "Owner name (PocketPC)", current.pocketpcOwnerName) {current=current.copy(pocketpcOwnerName=it)}
                 identityField("pocketpc_device_name", "Device name (Preset ID — ASCII)", current.pocketpcDeviceName) {current=current.copy(pocketpcDeviceName=it)}
                 identityField("pocketpc_preset_id", "Preset ID override (hexadecimal)", current.pocketpcPresetId) {current=current.copy(pocketpcPresetId=it)}

@@ -1190,6 +1190,10 @@ pub struct KernelState {
     /// allocation per `GXEndDraw` (which can fire 60+ times a
     /// second).
     pub gx_readback_scratch: Vec<u8>,
+    /// Raw column-major GAPI display memory for legacy PocketPC panels.
+    pub gx_layout_scratch: Vec<u8>,
+    /// Physical GAPI panel layout; false preserves the linear display profile.
+    pub gapi_column_major: bool,
     /// Reusable scratch buffer for guest-side bulk-memory ops
     /// (`memcpy`, `memmove`, `memcmp`, `memset`). Derby and similar
     /// games drive blits row-by-row through guest `memcpy`, hitting
@@ -3987,6 +3991,8 @@ impl Process {
                 guest_fb_pitch: 0,
                 direct_fb_frames: 0,
                 gx_readback_scratch: Vec::new(),
+                gx_layout_scratch: Vec::new(),
+                gapi_column_major: false,
                 mem_op_scratch: Vec::new(),
                 mem_op_scratch_b: Vec::new(),
                 bit_blt_src_scratch: Vec::new(),
@@ -4176,6 +4182,27 @@ impl<F: FnMut(&mut KernelState) -> FrameAction> FrameHook for F {
     }
 }
 
+/// Whether the selected emulated display uses physical columns rather than scanlines.
+pub fn gapi_uses_columns(state: &KernelState) -> bool {
+    state.gapi_column_major && state.framebuffer.bpp == 16
+}
+
+/// Convert physical columns (positive X, negative Y) to/from host scanlines.
+pub fn gapi_copy_columns(width: usize, height: usize, src: &[u8], dst: &mut [u8], to_guest: bool) {
+    for x in 0..width {
+        for y in 0..height {
+            let linear = (y * width + x) * 2;
+            let column = (x * height + height - 1 - y) * 2;
+            let (from, to) = if to_guest {
+                (linear, column)
+            } else {
+                (column, linear)
+            };
+            dst[to..to + 2].copy_from_slice(&src[from..from + 2]);
+        }
+    }
+}
+
 fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
     if !state.fb_mapped
         || state.gx_draw_active
@@ -4190,7 +4217,22 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
     if state.gx_readback_scratch.len() != len {
         state.gx_readback_scratch.resize(len, 0);
     }
-    if pitch == row_bytes {
+    if gapi_uses_columns(state) {
+        state.gx_layout_scratch.resize(len, 0);
+        if let Err(error) =
+            cpu.read_mem_into(SYNTHETIC_FRAMEBUFFER_BASE, &mut state.gx_layout_scratch)
+        {
+            log::warn!("unable to read column-major GAPI framebuffer: {error}");
+            return;
+        }
+        gapi_copy_columns(
+            state.framebuffer.width as usize,
+            state.framebuffer.height as usize,
+            &state.gx_layout_scratch,
+            &mut state.gx_readback_scratch,
+            false,
+        );
+    } else if pitch == row_bytes {
         if let Err(error) =
             cpu.read_mem_into(SYNTHETIC_FRAMEBUFFER_BASE, &mut state.gx_readback_scratch)
         {
@@ -4904,6 +4946,32 @@ mod tests {
     use super::*;
     use pocket_cpu::stub::StubCpu;
     use pocket_pe::{LoadedImage, LoadedSection};
+
+    #[test]
+    fn physical_columns_are_decoded_when_a_guest_retains_its_framebuffer_pointer() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let k = &mut process.state;
+        k.framebuffer.resize(3, 2);
+        k.gapi_column_major = true;
+        k.fb_mapped = true;
+        k.gx_last_pushed_counter = k.framebuffer.frame_counter;
+        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(
+            SYNTHETIC_FRAMEBUFFER_BASE,
+            &[4, 0, 1, 0, 5, 0, 2, 0, 6, 0, 3, 0],
+        )
+        .unwrap();
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(k.framebuffer.pixels, [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
+    }
 
     #[test]
     fn presentation_changes_keep_raw_framebuffer_polling_live() {

@@ -588,6 +588,14 @@ pub struct GameSettings {
     /// Optional raw Preset ID override, hexadecimal; takes precedence over the ASCII name.
     #[serde(default)]
     pub pocketpc_preset_id: String,
+    /// Readable OEM model and OS family returned by SystemParametersInfoW.
+    #[serde(default)]
+    pub pocketpc_oem_info: String,
+    #[serde(default)]
+    pub pocketpc_platform_type: String,
+    /// Emulate a portrait LCD with positive column pitch and negative vertical pitch.
+    #[serde(default)]
+    pub pocketpc_gapi_columns: bool,
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
@@ -694,6 +702,11 @@ impl GameSettings {
                 "PocketPC device name must use ASCII without NUL (maximum 4096 bytes)".into(),
             );
         }
+        for text in [&self.pocketpc_oem_info, &self.pocketpc_platform_type] {
+            if text.contains('\0') || text.encode_utf16().count() > 255 {
+                return Err("OEM model and platform type must contain at most 255 UTF-16 characters and no NUL".into());
+            }
+        }
         let preset = &self.pocketpc_preset_id;
         if preset.len() > 8192
             || preset.len() % 2 != 0
@@ -720,6 +733,9 @@ impl Default for GameSettings {
             pocketpc_device_name: String::new(),
             pocketpc_device_id: String::new(),
             pocketpc_preset_id: String::new(),
+            pocketpc_oem_info: String::new(),
+            pocketpc_platform_type: String::new(),
+            pocketpc_gapi_columns: false,
             gpu_renderer: None,
             anisotropic_filtering: None,
             cpu_backend: CpuBackendPref::default(),
@@ -6564,11 +6580,25 @@ mod resource_destination_tests {
 fn raw_pocketpc_preset_override_validates_and_round_trips() {
     let mut settings: GameSettings = serde_json::from_str("{}").unwrap();
     assert!(settings.pocketpc_preset_id.is_empty());
+    assert!(!settings.pocketpc_gapi_columns);
+    assert!(settings.pocketpc_oem_info.is_empty());
+    settings.pocketpc_oem_info = "PDA é".into();
+    settings.pocketpc_platform_type = "PocketPC".into();
+    settings.pocketpc_gapi_columns = true;
     settings.pocketpc_preset_id = "00112233445566778899".into();
     assert!(settings.validate_pocketpc_identity().is_ok());
     let restored: GameSettings =
         serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
     assert_eq!(restored.pocketpc_preset_id, settings.pocketpc_preset_id);
+    assert_eq!(restored.pocketpc_oem_info, settings.pocketpc_oem_info);
+    assert_eq!(
+        restored.pocketpc_platform_type,
+        settings.pocketpc_platform_type
+    );
+    assert!(restored.pocketpc_gapi_columns);
+    settings.pocketpc_oem_info = "bad\0name".into();
+    assert!(settings.validate_pocketpc_identity().is_err());
+    settings.pocketpc_oem_info = "ok".into();
     for invalid in ["0", "GG", "AA BB"] {
         settings.pocketpc_preset_id = invalid.into();
         assert!(settings.validate_pocketpc_identity().is_err());

@@ -5836,7 +5836,7 @@ fn memcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if complete_gapi_transfer(ctx, dst, len)
         && ctx.kernel.framebuffer.directdraw.primary_locks.is_empty()
         && ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some()
-        && ctx.kernel.mem_op_scratch[..len] != ctx.kernel.framebuffer.pixels
+        && gapi_transfer_changes(ctx, len)
     {
         if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
             return Ok(outcome);
@@ -5845,6 +5845,22 @@ fn memcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.cpu.write_mem(dst, &ctx.kernel.mem_op_scratch[..len])?;
     sync_direct_framebuffer_write(ctx, dst, len)?;
     Ok(DispatchOutcome::ReturnedR0(dst))
+}
+
+fn gapi_transfer_changes(ctx: &mut CallCtx<'_>, len: usize) -> bool {
+    if pocket_kernel::gapi_uses_columns(ctx.kernel) {
+        ctx.kernel.gx_layout_scratch.resize(len, 0);
+        pocket_kernel::gapi_copy_columns(
+            ctx.kernel.framebuffer.width as usize,
+            ctx.kernel.framebuffer.height as usize,
+            &ctx.kernel.mem_op_scratch[..len],
+            &mut ctx.kernel.gx_layout_scratch,
+            false,
+        );
+        ctx.kernel.gx_layout_scratch != ctx.kernel.framebuffer.pixels
+    } else {
+        ctx.kernel.mem_op_scratch[..len] != ctx.kernel.framebuffer.pixels
+    }
 }
 
 fn complete_gapi_transfer(ctx: &CallCtx<'_>, dst: u32, len: usize) -> bool {
@@ -5887,8 +5903,7 @@ fn sync_direct_framebuffer_write(
     if ctx.kernel.gx_readback_scratch.len() != fb_len {
         ctx.kernel.gx_readback_scratch.resize(fb_len, 0);
     }
-    ctx.cpu
-        .read_mem_into(base, &mut ctx.kernel.gx_readback_scratch)?;
+    crate::gx::read_guest_framebuffer(ctx)?;
     if complete_gapi_transfer {
         ctx.kernel.framebuffer.presentation_stats.record_present();
     }
@@ -14953,6 +14968,33 @@ fn wait_for_multiple_objects(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
 /// Work area in guest coordinates, excluding the visible PocketPC shell.
 /// Physical screen metrics remain unchanged.
 fn system_parameters_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let action = ctx.arg_u32(0)?;
+    if matches!(action, 0x101 | 0x102) {
+        // CE: uiParam is the capacity in WCHARs, pvParam receives a terminated
+        // Unicode string. Never report success with an uninitialised buffer.
+        let capacity = ctx.arg_u32(1)?;
+        let out = ctx.arg_u32(2)?;
+        let (name, fallback) = if action == 0x102 {
+            ("OEMInfo", "PocketHLE")
+        } else {
+            ("PlatformType", "PocketPC")
+        };
+        let text = match ctx.kernel.registry.value(r"HKLM\System\Platform", name) {
+            Some(pocket_kernel::registry::RegistryValue::Sz(value)) => value,
+            _ => fallback.to_string(),
+        };
+        let data: Vec<u8> = text
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        if capacity < (data.len() / 2) as u32 || !vfs_probe_output(ctx, out, data.len() as u32) {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        ctx.cpu.write_mem(out, &data)?;
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
     if ctx.arg_u32(0)? == 0x30 {
         // SPI_GETWORKAREA
         let out = ctx.arg_u32(2)?;
@@ -20478,6 +20520,15 @@ fn ext_escape(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if out_data == 0 || out_count == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
+    let columns = pocket_kernel::gapi_uses_columns(ctx.kernel);
+    if columns && escape == GETGXINFO {
+        // GXDeviceInfo's single scanline stride cannot describe a column panel.
+        // Let callers fall back to GXDisplayProperties or RawFrameBufferInfo.
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if columns && escape == GETRAWFRAMEBUFFER {
+        crate::gx::ensure_fb_mapped(ctx)?;
+    }
     if matches!(escape, GETRAWFRAMEBUFFER | GETGXINFO) && !ctx.kernel.fb_mapped {
         let pitch = if ctx
             .kernel
@@ -20524,6 +20575,13 @@ fn ext_escape(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
                     .max(ctx.kernel.framebuffer.stride_bytes())
                     .to_le_bytes(),
             );
+            if columns {
+                let origin = SYNTHETIC_FRAMEBUFFER_BASE
+                    + ctx.kernel.framebuffer.height.saturating_sub(1) * 2;
+                raw[4..8].copy_from_slice(&origin.to_le_bytes());
+                raw[8..12].copy_from_slice(&(ctx.kernel.framebuffer.height * 2).to_le_bytes());
+                raw[12..16].copy_from_slice(&(-2i32).to_le_bytes());
+            }
             raw[16..20].copy_from_slice(&ctx.kernel.framebuffer.width.to_le_bytes());
             raw[20..24].copy_from_slice(&ctx.kernel.framebuffer.height.to_le_bytes());
             ctx.cpu.write_mem(out_data, &raw)?;
@@ -30653,6 +30711,8 @@ mod tests {
             guest_fb_pitch: 0,
             direct_fb_frames: 0,
             gx_readback_scratch: Vec::new(),
+            gx_layout_scratch: Vec::new(),
+            gapi_column_major: false,
             mem_op_scratch: Vec::new(),
             mem_op_scratch_b: Vec::new(),
             bit_blt_src_scratch: Vec::new(),
@@ -31414,6 +31474,57 @@ mod tests {
         let after = ctx.cpu.read_mem(BITS, stride * height).unwrap();
         assert_eq!(&after[far_pixel..far_pixel + 2], &0x07e0u16.to_le_bytes());
         assert_ne!(&after[..32], &initial[..32]);
+    }
+
+    #[test]
+    fn spi_identity_writes_unicode_and_rejects_short_or_invalid_outputs() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.registry.set_volatile_value(
+            r"HKLM\System\Platform",
+            "OEMInfo",
+            pocket_kernel::registry::RegistryValue::Sz("PDA é".into()),
+        );
+        for (action, text) in [(0x102, "PDA é"), (0x101, "PocketPC")] {
+            let expected: Vec<_> = text
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            for (capacity, ptr, result) in [
+                ((expected.len() / 2) as u32, 0x1100, 1),
+                (1, 0x1100, 0),
+                (64, 0, 0),
+            ] {
+                cpu.write_mem(0x1100, &[0xcc; 64]).unwrap();
+                for (reg, value) in [
+                    (ArmReg::R0, action),
+                    (ArmReg::R1, capacity),
+                    (ArmReg::R2, ptr),
+                    (ArmReg::R3, 0),
+                ] {
+                    cpu.write_reg(reg, value).unwrap();
+                }
+                let thunk = dummy_thunk();
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &thunk,
+                };
+                assert_eq!(
+                    system_parameters_info_w(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(result)
+                );
+                let bytes = ctx.cpu.read_mem(0x1100, expected.len() as u32).unwrap();
+                if result == 1 {
+                    assert_eq!(bytes, expected);
+                } else {
+                    assert!(bytes.iter().all(|b| *b == 0xcc));
+                }
+            }
+        }
     }
 
     #[test]
@@ -35917,6 +36028,56 @@ mod tests {
             .unwrap();
         assert!(!kernel.gx_explicit_present);
         assert!(!kernel.gx_draw_active);
+    }
+
+    #[test]
+    fn column_gapi_bulk_copy_and_raw_escape_share_the_same_physical_layout() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        kernel.framebuffer.resize(3, 2);
+        kernel.gapi_column_major = true;
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+        cpu.write_mem(0x1800, &24u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1804, &0x1100u32.to_le_bytes()).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x20001).unwrap();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            ext_escape(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(24)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x1104, 12).unwrap(),
+            [
+                (SYNTHETIC_FRAMEBUFFER_BASE + 2).to_le_bytes(),
+                4u32.to_le_bytes(),
+                (-2i32).to_le_bytes()
+            ]
+            .concat()
+        );
+        ctx.kernel.gx_draw_active = true;
+        ctx.cpu
+            .write_mem(0x1200, &[4, 0, 1, 0, 5, 0, 2, 0, 6, 0, 3, 0])
+            .unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R0, SYNTHETIC_FRAMEBUFFER_BASE)
+            .unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x1200).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 12).unwrap();
+        memcpy(&mut ctx).unwrap();
+        assert_eq!(
+            ctx.kernel.framebuffer.pixels,
+            [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]
+        );
+        let before = ctx.kernel.framebuffer.frame_counter;
+        memcpy(&mut ctx).unwrap();
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
     }
 
     #[test]
