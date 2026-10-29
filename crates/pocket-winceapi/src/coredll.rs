@@ -10490,10 +10490,11 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
                         && ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
                         && window_is_visible(ctx.kernel, hwnd)
                     {
-                        if let Some(index) =
-                            ctx.kernel.pending_startup.iter().position(|m| {
-                                matches!(m.0, WM_SHOWWINDOW | WM_SETFOCUS)
-                            })
+                        if let Some(index) = ctx
+                            .kernel
+                            .pending_startup
+                            .iter()
+                            .position(|m| matches!(m.0, WM_SHOWWINDOW | WM_SETFOCUS))
                         {
                             if let Some(proc) = ctx
                                 .kernel
@@ -10628,7 +10629,9 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             .kernel
             .controls
             .create(parent, class, id, text.clone(), style, x, y, cx, cy);
-        ctx.kernel.window_threads.insert(hwnd, ctx.kernel.current_thread);
+        ctx.kernel
+            .window_threads
+            .insert(hwnd, ctx.kernel.current_thread);
         ctx.kernel.window_input_contexts.remove(&hwnd);
         log::debug!(
             "CreateWindowExW(class={class_name:?}, id={id}, text={text:?}) -> child hwnd=0x{hwnd:08x}"
@@ -20565,7 +20568,11 @@ fn enum_display_devices(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     };
     // Preflight the entire structure before writing, so unmapped tails cannot
     // cause a partial structure write. Build locally to support aliased input.
-    if ctx.cpu.check_guest_access(output, SIZE, Prot::WRITE).is_err() {
+    if ctx
+        .cpu
+        .check_guest_access(output, SIZE, Prot::WRITE)
+        .is_err()
+    {
         set_thread_error(ctx, 87);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -20578,8 +20585,7 @@ fn enum_display_devices(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     };
     for (offset, capacity, value) in [(4, 32, name), (68, 128, description)] {
         for (index, unit) in value.encode_utf16().take(capacity - 1).enumerate() {
-            bytes[offset + index * 2..offset + index * 2 + 2]
-                .copy_from_slice(&unit.to_le_bytes());
+            bytes[offset + index * 2..offset + index * 2 + 2].copy_from_slice(&unit.to_le_bytes());
         }
     }
     bytes[324..328].copy_from_slice(&state.to_le_bytes());
@@ -22998,7 +23004,10 @@ fn imm_default_context(kernel: &KernelState, hwnd: u32) -> Option<u32> {
         if let Some(thread) = kernel.window_threads.get(&owner) {
             return u32::try_from(*thread).ok()?.checked_add(0x494d_0001);
         }
-        let parent = kernel.controls.get(owner).map(|c| c.parent)
+        let parent = kernel
+            .controls
+            .get(owner)
+            .map(|c| c.parent)
             .or_else(|| kernel.window_parents.get(&owner).copied());
         match parent {
             Some(parent) if parent != 0 && parent != owner => owner = parent,
@@ -23014,7 +23023,12 @@ fn imm_get_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         set_thread_error(ctx, 1400); // ERROR_INVALID_WINDOW_HANDLE
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let context = ctx.kernel.window_input_contexts.get(&hwnd).copied().unwrap_or(default);
+    let context = ctx
+        .kernel
+        .window_input_contexts
+        .get(&hwnd)
+        .copied()
+        .unwrap_or(default);
     Ok(DispatchOutcome::ReturnedR0(context))
 }
 
@@ -23029,7 +23043,11 @@ fn imm_associate_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let previous = ctx.kernel.window_input_contexts.insert(hwnd, context).unwrap_or(default);
+    let previous = ctx
+        .kernel
+        .window_input_contexts
+        .insert(hwnd, context)
+        .unwrap_or(default);
     Ok(DispatchOutcome::ReturnedR0(previous))
 }
 
@@ -23037,9 +23055,8 @@ fn imm_release_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     let hwnd = ctx.arg_u32(0)?;
     let context = ctx.arg_u32(1)?;
     // Releasing an acquired default context does not destroy it or detach it.
-    let valid = imm_default_context(ctx.kernel, hwnd).is_some_and(|default| {
-        context != 0 && context == default
-    });
+    let valid = imm_default_context(ctx.kernel, hwnd)
+        .is_some_and(|default| context != 0 && context == default);
     Ok(DispatchOutcome::ReturnedR0(u32::from(valid)))
 }
 
@@ -30460,7 +30477,10 @@ mod tests {
             assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), frame.args[3]);
             assert_eq!(ctx.kernel.pending_startup.len(), if sent { 1 } else { 3 });
             if sent {
-                assert_eq!(ctx.kernel.pending_startup.front(), Some(&(WM_ACTIVATE, 1, 0)));
+                assert_eq!(
+                    ctx.kernel.pending_startup.front(),
+                    Some(&(WM_ACTIVATE, 1, 0))
+                );
             }
             if sent {
                 // The caller can initialize its running clock here. A later
@@ -30477,7 +30497,10 @@ mod tests {
                     show_window(&mut ctx).unwrap(),
                     DispatchOutcome::ReturnedR0(1)
                 );
-                assert_eq!(ctx.kernel.pending_startup.front(), Some(&(WM_ACTIVATE, 1, 0)));
+                assert_eq!(
+                    ctx.kernel.pending_startup.front(),
+                    Some(&(WM_ACTIVATE, 1, 0))
+                );
                 assert_eq!(ctx.kernel.pending_startup.len(), 1);
             }
         }
@@ -39897,11 +39920,11 @@ mod wave_open_capacity_tests {
         cpu.write_mem(0x1100, &0x12345678u32.to_le_bytes()).unwrap();
         assert_eq!(
             wave_out_open(&mut CallCtx {
-                    cpu: &mut cpu,
-                    kernel: &mut kernel,
-                    thunk: &thunk,
-                })
-                .unwrap(),
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
             DispatchOutcome::ReturnedR0(4)
         );
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0x12345678);
@@ -39912,11 +39935,11 @@ mod wave_open_capacity_tests {
         cpu.write_mem(0x1804, &1u32.to_le_bytes()).unwrap();
         assert_eq!(
             wave_out_open(&mut CallCtx {
-                    cpu: &mut cpu,
-                    kernel: &mut kernel,
-                    thunk: &thunk,
-                })
-                .unwrap(),
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0x12345678);
@@ -39937,11 +39960,11 @@ mod wave_open_capacity_tests {
         cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
         assert_eq!(
             wave_out_open(&mut CallCtx {
-                    cpu: &mut cpu,
-                    kernel: &mut kernel,
-                    thunk: &thunk,
-                })
-                .unwrap(),
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            })
+            .unwrap(),
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(kernel.wave_out.devices.len(), 32);
@@ -40428,9 +40451,11 @@ mod display_device_enumeration_tests {
     use pocket_pe::ImportBinding;
 
     fn wide(bytes: &[u8]) -> String {
-        let units: Vec<_> = bytes.chunks_exact(2)
+        let units: Vec<_> = bytes
+            .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
-            .take_while(|u| *u != 0).collect();
+            .take_while(|u| *u != 0)
+            .collect();
         String::from_utf16(&units).unwrap()
     }
 
@@ -40439,9 +40464,17 @@ mod display_device_enumeration_tests {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
         cpu.write_mem(0x2000, &[0xa5; 848]).unwrap();
         cpu.write_mem(0x2000, &840u32.to_le_bytes()).unwrap();
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "COREDLL.dll", "EnumDisplayDevices", &[0, 0, 0x2000, 0]),
-            DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "COREDLL.dll",
+                "EnumDisplayDevices",
+                &[0, 0, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
         let adapter = cpu.read_mem(0x2000, 840).unwrap();
         assert_eq!(&adapter[..4], &840u32.to_le_bytes());
         assert_eq!(wide(&adapter[4..68]), PRIMARY_DISPLAY_NAME);
@@ -40450,35 +40483,81 @@ mod display_device_enumeration_tests {
         assert!(adapter[328..].iter().all(|b| *b == 0));
         assert_eq!(cpu.read_mem(0x2000 + 840, 8).unwrap(), vec![0xa5; 8]);
         // End of adapter enumeration must not overwrite the last valid result.
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "coredll.dll", "EnumDisplayDevices", &[0, 1, 0x2000, 0]),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "EnumDisplayDevices",
+                &[0, 1, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), adapter);
         // The returned name is valid input, including when input aliases output.
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "coredll.dll", "EnumDisplayDevicesW", &[0x2004, 0, 0x2000, 0]),
-            DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "EnumDisplayDevicesW",
+                &[0x2004, 0, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
         let monitor = cpu.read_mem(0x2000, 840).unwrap();
         assert_eq!(wide(&monitor[4..68]), "DISPLAY1\\Monitor0");
         assert_eq!(wide(&monitor[68..324]), "PocketHLE display panel");
         assert_eq!(&monitor[324..328], &1u32.to_le_bytes());
         cpu.write_mem(0x1100, &adapter[4..68]).unwrap();
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "coredll.dll", "EnumDisplayDevices", &[0x1100, 1, 0x2000, 0]),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "EnumDisplayDevices",
+                &[0x1100, 1, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), monitor);
         // Monitor names do not recursively enumerate another adapter.
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "coredll.dll", "EnumDisplayDevices", &[0x2004, 0, 0x2000, 0]),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "EnumDisplayDevices",
+                &[0x2004, 0, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), monitor);
         // The adapter name works with the existing mode API.
         cpu.write_mem(0x3000, &[0; 188]).unwrap();
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "coredll.dll", "EnumDisplaySettings", &[0x1100, u32::MAX, 0x3000]),
-            DispatchOutcome::ReturnedR0(1));
-        assert_eq!(cpu.read_u32_le(0x3000 + 172).unwrap(), kernel.framebuffer.width);
-        assert_eq!(cpu.read_u32_le(0x3000 + 176).unwrap(), kernel.framebuffer.height);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "EnumDisplaySettings",
+                &[0x1100, u32::MAX, 0x3000]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            cpu.read_u32_le(0x3000 + 172).unwrap(),
+            kernel.framebuffer.width
+        );
+        assert_eq!(
+            cpu.read_u32_le(0x3000 + 176).unwrap(),
+            kernel.framebuffer.height
+        );
     }
 
     #[test]
@@ -40501,19 +40580,38 @@ mod display_device_enumeration_tests {
             cpu.write_mem(0x4ff0, &840u32.to_le_bytes()).unwrap();
             let before = cpu.read_mem(0x2000, 848).unwrap();
             let tail = cpu.read_mem(0x4ff0, 16).unwrap();
-            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-                "coredll.dll", "EnumDisplayDevices", &[device, index, output, flags]),
-                DispatchOutcome::ReturnedR0(0));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "EnumDisplayDevices",
+                    &[device, index, output, flags]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
             assert_eq!(cpu.read_mem(0x2000, 848).unwrap(), before);
             assert_eq!(cpu.read_mem(0x4ff0, 16).unwrap(), tail);
-            assert_eq!(kernel.thread_last_errors.get(&kernel.current_thread), Some(&87));
+            assert_eq!(
+                kernel.thread_last_errors.get(&kernel.current_thread),
+                Some(&87)
+            );
         }
         cpu.write_mem(0x2000, &840u32.to_le_bytes()).unwrap();
         cpu.write_mem(0x1100, &[b'X', 0, 0, 0]).unwrap();
         let before = cpu.read_mem(0x2000, 840).unwrap();
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher,
-            "coredll.dll", "EnumDisplayDevices", &[0x1100, 0, 0x2000, 0]),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "EnumDisplayDevices",
+                &[0x1100, 0, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(cpu.read_mem(0x2000, 840).unwrap(), before);
     }
 
@@ -40521,24 +40619,36 @@ mod display_device_enumeration_tests {
     fn ce_display_devices_is_resolved_by_coredll_ordinal_1778() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
         cpu.write_mem(0x2000, &840u32.to_le_bytes()).unwrap();
-        for (reg, value) in [(ArmReg::R0, 0), (ArmReg::R1, 0),
-            (ArmReg::R2, 0x2000), (ArmReg::R3, 0)] {
+        for (reg, value) in [
+            (ArmReg::R0, 0),
+            (ArmReg::R1, 0),
+            (ArmReg::R2, 0x2000),
+            (ArmReg::R3, 0),
+        ] {
             cpu.write_reg(reg, value).unwrap();
         }
         let thunk = pocket_kernel::Thunk {
-            thunk_va: 0x70000000, iat_va: 0, dll: "COREDLL.dll".into(),
-            binding: ImportBinding::Ordinal(1778), friendly_name: None,
+            thunk_va: 0x70000000,
+            iat_va: 0,
+            dll: "COREDLL.dll".into(),
+            binding: ImportBinding::Ordinal(1778),
+            friendly_name: None,
         };
-        assert_eq!(dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
-            DispatchOutcome::ReturnedR0(1));
-        assert_eq!(wide(&cpu.read_mem(0x2004, 64).unwrap()), PRIMARY_DISPLAY_NAME);
+        assert_eq!(
+            dispatcher.dispatch(&mut cpu, &thunk, &mut kernel).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            wide(&cpu.read_mem(0x2004, 64).unwrap()),
+            PRIMARY_DISPLAY_NAME
+        );
     }
 }
 
 #[cfg(test)]
 mod imm_context_tests {
-    use super::*;
     use super::tests::{dummy_thunk, fresh_kernel};
+    use super::*;
     use pocket_cpu::stub::StubCpu;
 
     #[test]
@@ -40550,44 +40660,90 @@ mod imm_context_tests {
             kernel.window_threads.insert(hwnd, owner);
         }
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let default = imm_default_context(ctx.kernel, FAKE_HWND).unwrap();
-        assert_eq!(imm_default_context(ctx.kernel, FAKE_DIALOG_HWND), Some(default));
+        assert_eq!(
+            imm_default_context(ctx.kernel, FAKE_DIALOG_HWND),
+            Some(default)
+        );
         assert_ne!(imm_default_context(ctx.kernel, 0xdead0010), Some(default));
         ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
-        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            imm_associate_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            imm_associate_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         ctx.cpu.write_reg(ArmReg::R0, FAKE_DIALOG_HWND).unwrap();
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
         ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
         ctx.cpu.write_reg(ArmReg::R1, default).unwrap();
-        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
-        assert_eq!(imm_release_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(
+            imm_associate_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
+        assert_eq!(
+            imm_release_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
         // CE rejects arbitrary HIMCs; failure must not alter the association.
         ctx.cpu.write_reg(ArmReg::R1, default + 1).unwrap();
-        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(
+            imm_associate_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
-        assert_eq!(imm_associate_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            imm_associate_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert!(!ctx.kernel.window_input_contexts.contains_key(&0));
         discard_window_metadata(&mut ctx, &FAKE_HWND);
         assert!(!ctx.kernel.window_input_contexts.contains_key(&FAKE_HWND));
         assert_eq!(imm_default_context(ctx.kernel, FAKE_HWND), None);
         ctx.kernel.window_procs.insert(FAKE_HWND, 0x10000);
         ctx.cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
-        assert_eq!(imm_get_context(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(default));
+        assert_eq!(
+            imm_get_context(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(default)
+        );
     }
 }
 
 #[cfg(test)]
 mod retained_window_dc_tests {
-    use super::*;
     use super::tests::{dummy_thunk, fresh_kernel, scanf_cpu};
+    use super::*;
 
     #[test]
     fn bitblt_to_retained_window_dc_is_visible_without_release_or_endpaint() {
@@ -40597,7 +40753,11 @@ mod retained_window_dc_tests {
         kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
         kernel.window_visibility.insert(FAKE_HWND, true);
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
         let destination = window_dc(&mut ctx, FAKE_HWND);
         let source = ctx.kernel.gdi.create_memory_dc();
         let bitmap = ctx.kernel.gdi.create_compatible_bitmap(240, 320);
@@ -40605,17 +40765,29 @@ mod retained_window_dc_tests {
         pocket_kernel::gdi::Surface::Bitmap(ctx.kernel.gdi.bitmap_mut(bitmap).unwrap())
             .fill_rect(0, 0, 240, 320, 0x07e0);
         let offset = (100 * 240 + 50) * 2;
-        assert_ne!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x07e0u16.to_le_bytes());
-        for (reg, value) in [(ArmReg::R0, destination), (ArmReg::R1, 0),
-            (ArmReg::R2, 0), (ArmReg::R3, 240)] {
+        assert_ne!(
+            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &0x07e0u16.to_le_bytes()
+        );
+        for (reg, value) in [
+            (ArmReg::R0, destination),
+            (ArmReg::R1, 0),
+            (ArmReg::R2, 0),
+            (ArmReg::R3, 240),
+        ] {
             ctx.cpu.write_reg(reg, value).unwrap();
         }
         let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
         for (index, value) in [320u32, source, 0, 0, 0x00cc0020].into_iter().enumerate() {
-            ctx.cpu.write_mem(sp + index as u32 * 4, &value.to_le_bytes()).unwrap();
+            ctx.cpu
+                .write_mem(sp + index as u32 * 4, &value.to_le_bytes())
+                .unwrap();
         }
         assert_eq!(bit_blt(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
-        assert_eq!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x07e0u16.to_le_bytes());
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &0x07e0u16.to_le_bytes()
+        );
         assert_eq!(window_dc(&mut ctx, FAKE_HWND), destination);
         // A later direct frame must survive an ordinary offscreen blit and
         // an empty EndPaint; do not replay the now-unchanged window backing.
@@ -40625,12 +40797,18 @@ mod retained_window_dc_tests {
         bit_blt(&mut ctx).unwrap();
         ctx.kernel.present_window_surfaces();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, direct_frame);
-        assert_eq!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x001fu16.to_le_bytes());
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &0x001fu16.to_le_bytes()
+        );
         // Painting a hidden window changes its backing, not the visible frame.
         ctx.kernel.window_visibility.insert(FAKE_HWND, false);
         ctx.cpu.write_reg(ArmReg::R0, destination).unwrap();
         bit_blt(&mut ctx).unwrap();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, direct_frame);
-        assert_eq!(&ctx.kernel.framebuffer.pixels[offset..offset + 2], &0x001fu16.to_le_bytes());
+        assert_eq!(
+            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &0x001fu16.to_le_bytes()
+        );
     }
 }

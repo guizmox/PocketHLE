@@ -56,12 +56,20 @@ static LIBRARY_SESSIONS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
 
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_libraryBackup<'local>(
-    mut env: JNIEnv<'local>, _class: JClass<'local>,
-    library_root: JString<'local>, archive: JString<'local>, mode: jint,
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    archive: JString<'local>,
+    mode: jint,
 ) -> jstring {
     let result = (|| -> anyhow::Result<()> {
-        let sessions = LIBRARY_SESSIONS.lock().map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
-        anyhow::ensure!(*sessions == 0, "Stop the running game before backup/restore");
+        let sessions = LIBRARY_SESSIONS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
+        anyhow::ensure!(
+            *sessions == 0,
+            "Stop the running game before backup/restore"
+        );
         let root = jstring_to_path(&mut env, library_root).context("Missing library root")?;
         let archive = jstring_to_path(&mut env, archive).context("Missing ZIP path")?;
         use pocket_library::backup::{self, RestoreMode};
@@ -73,10 +81,13 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_libraryBackup<'local>
             _ => anyhow::bail!("Unknown restore mode"),
         }
     })();
-    new_jstring(&env, match result {
-        Ok(()) => serde_json::json!({"ok": true}).to_string(),
-        Err(error) => error_json(&format!("{error:#}")),
-    })
+    new_jstring(
+        &env,
+        match result {
+            Ok(()) => serde_json::json!({"ok": true}).to_string(),
+            Err(error) => error_json(&format!("{error:#}")),
+        },
+    )
 }
 
 #[no_mangle]
@@ -907,7 +918,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     };
     let mut sessions = LIBRARY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     match runner::start(root, id) {
-        Ok(session) => { *sessions += 1; Box::into_raw(Box::new(session)) as jlong },
+        Ok(session) => {
+            *sessions += 1;
+            Box::into_raw(Box::new(session)) as jlong
+        }
         Err(e) => {
             log::error!("nativeStartGame: {e:#}");
             0
