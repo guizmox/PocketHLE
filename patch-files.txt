@@ -1,2 +1,1 @@
-frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\title_scroll.rs
+crates\pocket-winceapi\src\gles.rs

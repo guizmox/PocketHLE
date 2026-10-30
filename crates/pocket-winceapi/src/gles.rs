@@ -1427,7 +1427,13 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let name = ctx.arg_u32(0)?;
     let text = match name {
         pocket_gles::GL_VENDOR => "PocketHLE",
-        pocket_gles::GL_RENDERER => "PocketHLE Software Rasterizer",
+        pocket_gles::GL_RENDERER => with_ctx(|c| {
+            if c.gpu_active() {
+                "PocketHLE GPU rasterizer"
+            } else {
+                "PocketHLE Software Rasterizer"
+            }
+        }),
         pocket_gles::GL_VERSION => "OpenGL ES-CL 1.1",
         pocket_gles::GL_EXTENSIONS => {
             "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix"
@@ -3913,6 +3919,20 @@ mod tests {
     }
 
     #[test]
+    fn renderer_reports_software_when_no_gpu_is_active() {
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
+        let pointer = call(&mut cpu, &mut kernel, gl_get_string, &[pocket_gles::GL_RENDERER]);
+        assert_ne!(pointer, 0);
+        assert_eq!(cpu.read_mem(pointer, b"PocketHLE Software Rasterizer\0".len() as u32).unwrap(),
+            b"PocketHLE Software Rasterizer\0".to_vec());
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_string, &[pocket_gles::GL_RENDERER]), pointer);
+    }
+
+    #[test]
     fn gen_textures_writes_distinct_non_zero_names() {
         let _g = guard();
         reset_for_test(16, 16);
@@ -4169,6 +4189,12 @@ mod tests {
         kernel.fb_mapped = true;
         set_gpu_renderer(true);
         assert!(with_ctx(|c| c.gpu_active()));
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
+        let renderer = call(&mut cpu, &mut kernel, gl_get_string, &[pocket_gles::GL_RENDERER]);
+        assert_ne!(renderer, 0);
+        assert_eq!(cpu.read_mem(renderer, b"PocketHLE GPU rasterizer\0".len() as u32).unwrap(),
+            b"PocketHLE GPU rasterizer\0".to_vec());
+
         let vertices: [f32; 9] = [-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.];
         let bytes: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();
         cpu.write_mem(SCRATCH, &bytes).unwrap();
