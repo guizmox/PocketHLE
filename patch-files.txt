@@ -1,3 +1,1 @@
-crates\pocket-winceapi\data\aygshell-ordinals.json
-crates\pocket-winceapi\src\aygshell.rs
-crates\pocket-winceapi\src\coredll.rs
+crates\pocket-library\src\installer\pocketsetup.rs
