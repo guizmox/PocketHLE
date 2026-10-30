@@ -1,5 +1,2 @@
-docs\CONTROLLER_NAVIGATION.md
 frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\controller_ui.rs
-frontends\pocket-desktop\src\deck_navigation.rs
-frontends\pocket-desktop\src\file_dialog.rs
+frontends\pocket-desktop\src\title_scroll.rs

@@ -2,6 +2,8 @@
 
 #[path = "stylus_controls_ui.rs"]
 mod stylus_controls_ui;
+#[path = "title_scroll.rs"]
+mod title_scroll;
 use pocket_library::stylus_grid::{ControlsMode, GridRouter, HostInput};
 use pocket_library::{analyze_game, game_gizmondo_title_id, GameAnalysis};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -18,6 +20,47 @@ use pocket_library::{
 };
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
+
+#[derive(Clone)]
+struct TitleMarquee {
+    title: String,
+    width: f32,
+    started: f64,
+}
+
+/// Clip the full laid-out title rather than truncating or splitting its text.
+fn library_title(ui: &mut egui::Ui, game_id: &str, title: &str) {
+    let text = egui::WidgetText::from(RichText::new(title).strong().size(16.0));
+    let galley = text.into_galley(ui, Some(false), f32::INFINITY, egui::TextStyle::Body);
+    let width = ui.available_width().max(0.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, galley.size().y), Sense::hover());
+    response.on_hover_text(title);
+    if !ui.is_rect_visible(rect) { return; }
+    let overflow = galley.size().x - width;
+    let id = egui::Id::new(("library_title_marquee", game_id));
+    let mut offset = 0.0;
+    if overflow > 0.5 {
+        let now = ui.input(|i| i.time);
+        let elapsed = ui.ctx().data_mut(|data| {
+            let mut state = data.get_temp::<TitleMarquee>(id).unwrap_or_else(|| TitleMarquee {
+                title: title.to_owned(), width, started: now,
+            });
+            if state.title != title || (state.width - width).abs() > 0.5 {
+                state = TitleMarquee { title: title.to_owned(), width, started: now };
+            }
+            let elapsed = now - state.started;
+            data.insert_temp(id,state);
+            elapsed
+        });
+        let frame = title_scroll::frame(elapsed,overflow);
+        offset = frame.offset;
+        if let Some(delay) = frame.repaint_after { ui.ctx().request_repaint_after(delay); }
+    } else {
+        ui.ctx().data_mut(|data| data.remove::<TitleMarquee>(id));
+    }
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    painter.galley(rect.min - Vec2::new(offset,0.0), galley, ui.visuals().strong_text_color());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpscaleFilter {
@@ -1873,9 +1916,7 @@ impl PocketLauncher {
             label_rect.shrink2(Vec2::new(10.0, 7.0)),
             egui::Layout::top_down(egui::Align::Min),
         );
-        text_ui.add(
-            egui::Label::new(RichText::new(&game.display_name).strong().size(16.0)).truncate(true),
-        );
+        library_title(&mut text_ui, &game.id, &game.display_name);
         let (width, height) = match self.screen_cache.get(&game.id) {
             Some((pref, size)) if *pref == game.settings.screen => *size,
             _ => {
