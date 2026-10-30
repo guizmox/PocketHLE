@@ -136,43 +136,26 @@ impl UnicornCpu {
     }
 
     pub fn new_for_arch(arch: Arch) -> Result<Self, CpuError> {
-        Self::new_for_arch_with_optimizations(arch, crate::Optimizations::default())
-    }
-
-    pub fn new_for_arch_with_optimizations(
-        arch: Arch,
-        options: crate::Optimizations,
-    ) -> Result<Self, CpuError> {
         let (uc_arch, mode) = match arch {
             Arch::Arm => (UcArch::ARM, Mode::LITTLE_ENDIAN),
             Arch::Mips => (UcArch::MIPS, Mode::MIPS32 | Mode::LITTLE_ENDIAN),
         };
         let mut uc = Unicorn::new(uc_arch, mode)
             .map_err(|e| CpuError::Backend(format!("Unicorn::new failed: {e:?}")))?;
-        let flags = u32::from(options.fast_memory_access)
-            | (u32::from(options.extended_tlb_cache) << 1)
-            | (u32::from(options.extended_jump_cache) << 2);
-        // Private fork control, before the first register/memory API triggers
-        // Unicorn's lazy CPU initialization. No per-access option is installed.
-        let result = unsafe {
-            ::unicorn_engine::uc_ctl(
-                uc.get_handle(),
-                ::unicorn_engine::ControlType(0x4000_0000 | (1 << 26) | 0x5048),
-                flags,
-            )
-        };
-        if result != ::unicorn_engine::uc_error::OK {
-            return Err(CpuError::Backend(format!(
-                "Unicorn optimization configuration requires the bundled engine: {result:?}"
-            )));
-        }
         if arch == Arch::Arm {
             let _ = uc.reg_write(RegisterARM::FPEXC, 0x4000_0000);
             let _ = uc.reg_write(RegisterARM::C1_C0_2, 0x00F0_0000);
         }
         let last_fault: Rc<RefCell<Option<(String, u64)>>> = Rc::new(RefCell::new(None));
         let images = Rc::new(RefCell::new(crate::image_pages::ImagePages::default()));
-        let guest_map = install_virtual_tlb(&mut uc, &last_fault, &images);
+        // Unicorn's virtual TLB can restore MIPS delay-slot branch state during
+        // a store refill and raise an exception on the following branch. Keep
+        // the architectural TLB for MIPS; the flat-memory fast path is ARM-only.
+        let guest_map = if arch == Arch::Arm {
+            install_virtual_tlb(&mut uc, &last_fault, &images)
+        } else {
+            None
+        };
         if guest_map.is_none() {
             // Architectural TLB: Unicorn resolves pages itself, so the
             // only way to learn the faulting address is the
@@ -1016,23 +999,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn optimization_combinations_execute_with_the_virtual_tlb() {
-        for flags in 0..8 {
-            let options = crate::Optimizations {
-                fast_memory_access: flags & 1 != 0,
-                extended_tlb_cache: flags & 2 != 0,
-                extended_jump_cache: flags & 4 != 0,
-            };
-            let mut cpu = UnicornCpu::new_for_arch_with_optimizations(Arch::Arm, options).unwrap();
-            cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
-            // mov r0,#42; bx lr, with the normal PocketHLE virtual-TLB hook.
-            cpu.write_mem(0x1000, &[42, 0, 160, 227, 30, 255, 47, 225])
-                .unwrap();
-            cpu.write_reg(ArmReg::Lr, 0x1008).unwrap();
-            cpu.add_code_hook(0x1008).unwrap();
-            cpu.run_until_hook(0x1000, 100).unwrap();
-            assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 42, "flags={flags}");
-        }
+    fn mips_delay_slot_store_preserves_the_following_call() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Mips).unwrap();
+        cpu.map_region(0x1000, 0x2000, Prot::ALL).unwrap();
+        // A store in a branch delay slot refills a previously untouched page.
+        // The next instruction is a call, which must not inherit delay-slot state.
+        let words = [
+            0x24012000u32, // addiu at,zero,0x2000
+            0x10400009,    // beq v0,zero,0x102c (not taken)
+            0xac220000,    // sw v0,0(at), in the delay slot
+            0x0c000440,    // jal 0x1100
+            0x00000000,    // nop
+        ];
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        cpu.write_mem(0x1000, &bytes).unwrap();
+        cpu.write_mem(0x1100, &0x0000000du32.to_le_bytes()).unwrap();
+        cpu.write_return(0x40000001).unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 0).unwrap(),
+            StopReason::Hook(0x1100)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x1014);
+        assert_eq!(cpu.read_return().unwrap(), 0x40000001);
+        assert_eq!(cpu.read_mem(0x2000, 4).unwrap(), 0x40000001u32.to_le_bytes());
     }
 
     #[test]
