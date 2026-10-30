@@ -20,6 +20,32 @@ use crate::raster::{
 use crate::texture::{self, Texture};
 use std::collections::HashMap;
 
+type SoftwareMipLevels = Vec<(u32,u32,Vec<u8>)>;
+struct SoftwareSampler<'a> {
+    textures: [Option<&'a Texture>; raster::MAX_TEXTURE_STAGES],
+    cache: &'a HashMap<u32,(u64,bool,SoftwareMipLevels)>,
+    names: [u32;raster::MAX_TEXTURE_STAGES],
+}
+impl raster::TextureSampler for SoftwareSampler<'_> {
+    fn sample(&self,unit:usize,s:f32,t:f32)->Option<[u8;4]> {
+        let tex=self.textures[unit]?;
+        let levels=self.cache.get(&self.names[unit]).map_or(&[][..],|c|c.2.as_slice());
+        Some(tex.sample_lod(levels,s,t,0.))
+    }
+    fn needs_gradients(&self)->bool {
+        self.textures.iter().flatten().any(|t|t.min_filter.uses_mipmaps() || t.min_filter!=t.mag_filter)
+    }
+    fn sample_grad(&self,unit:usize,s:f32,t:f32,g:[f32;4],bias:f32)->Option<[u8;4]> {
+        let tex=self.textures[unit]?;
+        if !tex.min_filter.uses_mipmaps() && tex.min_filter==tex.mag_filter { return self.sample(unit,s,t); }
+        let x=(g[0]*tex.width as f32).powi(2)+(g[1]*tex.height as f32).powi(2);
+        let y=(g[2]*tex.width as f32).powi(2)+(g[3]*tex.height as f32).powi(2);
+        let lod=0.5*x.max(y).max(1e-30).log2()+bias.clamp(-4.,4.);
+        let levels=self.cache.get(&self.names[unit]).map_or(&[][..],|c|c.2.as_slice());
+        Some(tex.sample_lod(levels,s,t,lod))
+    }
+}
+
 /// Read access to the guest's address space.
 pub trait GuestMemory {
     /// Copy `len` bytes starting at `addr` into `out`. Returns `false`
@@ -268,6 +294,7 @@ pub struct Context {
 
     // ---- textures ----
     pub textures: HashMap<u32, Texture>,
+    software_mips: HashMap<u32,(u64,bool,SoftwareMipLevels)>,
     pub texture_units: [TextureUnitState; MAX_TEXTURE_UNITS],
     pub bound_texture: u32,
     next_texture_name: u32,
@@ -340,6 +367,7 @@ impl Context {
             client_active_texture: 0,
             active_texture: 0,
             textures: HashMap::new(),
+            software_mips: HashMap::new(),
             texture_units: [TextureUnitState::default(); MAX_TEXTURE_UNITS],
             bound_texture: 0,
             next_texture_name: 1,
@@ -855,6 +883,7 @@ impl Context {
                 continue;
             }
             self.textures.remove(&name);
+            self.software_mips.remove(&name);
             for (unit, state) in self.texture_units.iter_mut().enumerate() {
                 if state.bound_texture == name {
                     state.bound_texture = 0;
@@ -1312,6 +1341,11 @@ impl Context {
             self.state.line_width = width;
         }
     }
+    /// Software implementation limit, not a hardware RAM/display claim.
+    pub fn max_viewport_dims(&self)->[i32;2] {
+        self.gpu.as_ref().map_or([16384;2],|g|g.max_viewport)
+    }
+    pub fn subpixel_bits(&self)->i32 { self.gpu.as_ref().map_or(4,|g|g.subpixel_bits) }
     pub fn primitive_size_range(&self, point: bool) -> [f32; 2] {
         self.gpu.as_ref().map_or(
             [1., 64.],
@@ -1424,7 +1458,8 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        self.state.viewport = (x, y, w, h);
+        let limit=self.max_viewport_dims();
+        self.state.viewport = (x, y, w.min(limit[0]), h.min(limit[1]));
     }
 
     pub fn set_scissor(&mut self, x: i32, y: i32, w: i32, h: i32) {
@@ -2234,6 +2269,26 @@ impl Context {
             }
             return;
         }
+        // Decode/generate only once per texture revision, and only in software.
+        for stage in stages {
+            let name=self.texture_units[stage.unit].bound_texture;
+            if let Some(tex)=self.textures.get(&name) {
+                let mips=tex.min_filter.uses_mipmaps();
+                if mips || tex.rgba.is_empty() {
+                    if !self.software_mips.get(&name).is_some_and(|c|c.0==tex.revision && c.1==mips) {
+                        let mut levels=if mips { tex.upload_levels() } else {
+                            tex.rgba_level(0).map(|p|vec![(tex.width,tex.height,p.into_owned())]).unwrap_or_default()
+                        };
+                        // Base RGBA already belongs to Texture; retain only
+                        // derived levels, except for deferred compressed bases.
+                        if !tex.rgba.is_empty() {
+                            if let Some(base) = levels.first_mut() { base.2 = Vec::new(); }
+                        }
+                        self.software_mips.insert(name,(tex.revision,mips,levels));
+                    }
+                } else { self.software_mips.remove(&name); }
+            }
+        }
         // Resolve the bound textures once per draw, not per fragment.
         let mut texs: [Option<&Texture>; raster::MAX_TEXTURE_STAGES] = [None; _];
         for stage in stages {
@@ -2257,7 +2312,8 @@ impl Context {
             self.state.alpha_func,
             self.state.alpha_ref,
         );
-        let sample = |unit: usize, s: f32, t: f32| texs[unit].map(|tx| tx.sample(s, t));
+        let sample = SoftwareSampler { textures:texs,cache:&self.software_mips,
+            names:std::array::from_fn(|i|self.texture_units[i].bound_texture) };
 
         match mode {
             GL_POINTS => {
@@ -3023,6 +3079,27 @@ mod tests {
             1.0, 1.0, 0.0, //
             -1.0, 1.0, 0.0,
         ])
+    }
+
+    #[test]
+    fn mipmapped_triangle_rendering_refreshes_cache_on_level_updates() {
+        let mut c=Context::new(8,8);
+        let mut m=FakeMem{base:BASE,bytes:quad_floats()};
+        c.vertex_array=ArrayPointer{enabled:true,size:3,ty:GL_FLOAT,stride:0,pointer:BASE,buffer:0};
+        let uv=[[0.,0.],[4.,0.],[4.,4.],[0.,4.]];
+        let uv_bytes:Vec<u8>=uv.iter().flatten().flat_map(|v:&f32|v.to_le_bytes()).collect();
+        let uv_ptr=BASE+m.bytes.len() as u32;m.bytes.extend(uv_bytes);
+        c.texture_units[0].texcoord_array=ArrayPointer{enabled:true,size:2,ty:GL_FLOAT,stride:0,pointer:uv_ptr,buffer:0};
+        c.texture_units[0].texture_enabled=true;c.texture_units[0].bound_texture=1;
+        let mut t=Texture::default();
+        t.set_level(0,4,4,[255,0,0,255].repeat(16));t.set_level(1,2,2,[0,255,0,255].repeat(4));t.set_level(2,1,1,vec![0,0,255,255]);
+        t.min_filter=texture::Filter::LinearMipmapLinear;c.textures.insert(1,t);
+        c.draw_arrays(&mut m,GL_TRIANGLE_FAN,0,4);
+        assert_eq!(&c.target.color[(4*8+4)*4..(4*8+4)*4+4],&[0,255,0,255]);
+        c.textures.get_mut(&1).unwrap().set_level(1,2,2,[255,255,0,255].repeat(4));
+        c.draw_arrays(&mut m,GL_TRIANGLE_FAN,0,4);
+        assert_eq!(&c.target.color[(4*8+4)*4..(4*8+4)*4+4],&[255,255,0,255]);
+        c.delete_textures(&[1]);assert!(!c.software_mips.contains_key(&1));
     }
 
     #[test]
@@ -4119,4 +4196,15 @@ mod pvrtc_upload_tests {
         assert_eq!(c.take_error(), GL_INVALID_VALUE);
         assert_eq!(c.textures[&7].revision, revision);
     }
+    #[test]
+    fn software_viewport_limits_are_reported_and_enforced() {
+        let mut c=Context::new(8,8);
+        let dims=c.max_viewport_dims();assert!(dims[0]>0 && dims[1]>0);
+        c.set_viewport(3,4,i32::MAX,i32::MAX);
+        assert_eq!(c.state.viewport,(3,4,dims[0],dims[1]));
+        assert!(c.subpixel_bits()>0);
+    }
+
+
+
 }

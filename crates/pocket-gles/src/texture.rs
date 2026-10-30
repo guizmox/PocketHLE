@@ -54,7 +54,7 @@ pub struct Texture {
     /// Decoded RGBA8888 texels, row-major, `width * height * 4` bytes.
     /// Empty before upload or while a compressed native upload is deferred.
     pub rgba: Vec<u8>,
-    /// Explicit guest levels; absent levels are derived at native upload time.
+    /// Explicit guest levels; missing levels use the shared GPU/software generation policy.
     pub mipmaps: std::collections::BTreeMap<u32, (u32, u32, Vec<u8>)>,
     pub compressed: std::collections::BTreeMap<u32, CompressedLevel>,
     pub max_level: u32,
@@ -284,18 +284,59 @@ impl Texture {
         out
     }
 
-    /// Sample with whichever filter the guest asked for.
-    ///
-    /// The rasterizer has no derivatives, so it cannot tell
-    /// magnification from minification; we always honour `mag_filter`.
-    /// Games set both to the same value in practice, and the case that
-    /// matters visually — a HUD or font quad drawn at roughly 1:1 — is
-    /// magnification anyway.
+    /// Legacy base-level adapter. Rendering with a known footprint uses
+    /// sample_lod so minification and magnification remain distinct.
     pub fn sample(&self, s: f32, t: f32) -> [u8; 4] {
         match self.mag_filter {
             Filter::Nearest => self.sample_nearest(s, t),
             _ => self.sample_linear(s, t),
         }
+    }
+
+    /// Select minification/magnification and explicit/generated mip levels.
+    /// `levels` is prepared once per revision, never generated per fragment.
+    pub fn sample_lod(&self, levels: &[(u32,u32,Vec<u8>)], s: f32, t: f32, lambda: f32) -> [u8;4] {
+        if !self.is_complete() { return [255;4]; }
+        let threshold = if self.mag_filter == Filter::Linear && self.min_filter == Filter::NearestMipmapNearest { 0.5 } else { 0.0 };
+        let lambda = if lambda.is_nan() { 0.0 } else { lambda };
+        let filter = if lambda <= threshold { self.mag_filter } else { self.min_filter };
+        let linear = matches!(filter,Filter::Linear|Filter::LinearMipmapNearest|Filter::LinearMipmapLinear);
+        let max_level = if filter.uses_mipmaps() { levels.len().saturating_sub(1).min(self.max_level as usize) } else { 0 };
+        let lod=lambda.max(0.0).min(max_level as f32);
+        let mip_linear=matches!(filter,Filter::NearestMipmapLinear|Filter::LinearMipmapLinear);
+        let low=if mip_linear { lod.floor() as usize } else { (lod+0.5).floor() as usize };
+        let at=|level:usize| {
+            if level == 0 && !self.rgba.is_empty() {
+                Self::sample_pixels(&self.rgba,self.width,self.height,self.wrap_s,self.wrap_t,s,t,linear)
+            } else if let Some((w,h,pixels))=levels.get(level) {
+                Self::sample_pixels(pixels,*w,*h,self.wrap_s,self.wrap_t,s,t,linear)
+            } else {
+                Self::sample_pixels(&self.rgba,self.width,self.height,self.wrap_s,self.wrap_t,s,t,linear)
+            }
+        };
+        let a=at(low);
+        if !mip_linear || low>=max_level { return a; }
+        let b=at(low+1);let weight=lod-low as f32;
+        std::array::from_fn(|i| (a[i] as f32+(b[i] as f32-a[i] as f32)*weight).round().clamp(0.,255.) as u8)
+    }
+
+    fn sample_pixels(pixels:&[u8],w:u32,h:u32,ws:Wrap,wt:Wrap,s:f32,t:f32,linear:bool)->[u8;4] {
+        if w==0 || h==0 || pixels.len()<(w as usize).saturating_mul(h as usize).saturating_mul(4) { return [255;4]; }
+        let texel=|x:i64,y:i64| {
+            let x=Self::wrap_texel(x,w,ws);let y=Self::wrap_texel(y,h,wt);
+            let i=((y*w+x)*4) as usize;
+            [pixels[i],pixels[i+1],pixels[i+2],pixels[i+3]]
+        };
+        if !linear { return texel((s*w as f32).floor() as i64,(t*h as f32).floor() as i64); }
+        let x=s*w as f32-0.5;let y=t*h as f32-0.5;
+        let (ix,iy)=(x.floor(),y.floor());let (fx,fy)=(x-ix,y-iy);
+        let a=texel(ix as i64,iy as i64);let b=texel(ix as i64+1,iy as i64);
+        let c=texel(ix as i64,iy as i64+1);let d=texel(ix as i64+1,iy as i64+1);
+        std::array::from_fn(|i| {
+            let top=a[i] as f32+(b[i] as f32-a[i] as f32)*fx;
+            let bottom=c[i] as f32+(d[i] as f32-c[i] as f32)*fx;
+            (top+(bottom-top)*fy).round().clamp(0.,255.) as u8
+        })
     }
 
     /// Resolve an integer texel coordinate through a wrap mode.
@@ -1247,4 +1288,36 @@ mod pvrtc_tests {
             );
         }
     }
+    #[test]
+    fn mip_filters_select_levels_blend_and_respect_max_level() {
+        let mut tex=Texture::default();
+        tex.set_level(0,4,4,[255,0,0,255].repeat(16));
+        tex.set_level(1,2,2,[0,255,0,255].repeat(4));
+        tex.set_level(2,1,1,vec![0,0,255,255]);
+        let levels=tex.upload_levels();
+        for filter in [Filter::NearestMipmapNearest,Filter::LinearMipmapNearest] {
+            tex.min_filter=filter;
+            assert_eq!(tex.sample_lod(&levels,0.5,0.5,1.),[0,255,0,255]);
+            assert_eq!(tex.sample_lod(&levels,0.5,0.5,2.),[0,0,255,255]);
+        }
+        for filter in [Filter::NearestMipmapLinear,Filter::LinearMipmapLinear] {
+            tex.min_filter=filter;
+            assert_eq!(tex.sample_lod(&levels,0.5,0.5,1.5),[0,128,128,255]);
+        }
+        tex.max_level=1;
+        assert_eq!(tex.sample_lod(&levels,0.5,0.5,8.),[0,255,0,255]);
+        assert_eq!(tex.sample_lod(&levels,0.5,0.5,-2.),[255,0,0,255]);
+    }
+    #[test]
+    fn min_and_mag_filters_remain_distinct_and_base_only_assets_generate_levels() {
+        let mut tex=Texture::default();tex.set_level(0,2,2,vec![255,0,0,255,0,0,255,255,255,0,0,255,0,0,255,255]);
+        tex.mag_filter=Filter::Nearest;tex.min_filter=Filter::Linear;
+        assert_eq!(tex.sample_lod(&[],0.5,0.5,-1.),[0,0,255,255]);
+        assert_eq!(tex.sample_lod(&[],0.5,0.5,1.),[128,0,128,255]);
+        tex.min_filter=Filter::LinearMipmapLinear;
+        let levels=tex.upload_levels();
+        assert_eq!(levels.len(),2);
+        assert_eq!(tex.sample_lod(&levels,0.5,0.5,1.),[128,0,128,255]);
+    }
+
 }

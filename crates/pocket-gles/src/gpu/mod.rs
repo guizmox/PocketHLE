@@ -1076,6 +1076,8 @@ pub struct Renderer {
     native_fixed: bool,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
+    pub max_viewport: [i32;2],
+    pub subpixel_bits: i32,
 }
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
@@ -1095,6 +1097,10 @@ impl Renderer {
             if units < 4 || attributes < 8 {
                 return Err("OpenGL driver lacks required texture/attribute units".into());
             }
+            let mut max_viewport=[0;2];let mut subpixel_bits=0;
+            (gl.GetIntegerv)(0x0d3a,max_viewport.as_mut_ptr());
+            (gl.GetIntegerv)(0x0d50,&mut subpixel_bits);
+            max_viewport=max_viewport.map(|v|v.max(1));
             let mut point_range = [1.; 2];
             let mut line_range = [1.; 2];
             (gl.GetFloatv)(0x846d, point_range.as_mut_ptr());
@@ -1218,6 +1224,8 @@ impl Renderer {
                 native_fixed,
                 point_range,
                 line_range,
+                max_viewport,
+                subpixel_bits,
             };
             r.program = (r.gl.CreateProgram)();
             if r.program == 0 {

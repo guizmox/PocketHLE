@@ -1303,14 +1303,40 @@ fn gl_get_error(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(e))
 }
 
-/// `glGetIntegerv`. Only the queries a renderer actually branches on
-/// are answered; anything else writes zero, which is what a
-/// conformant-but-minimal implementation reports for an unsupported
-/// feature anyway.
+/// Capabilities shared by integer/float getters, with the correct arity.
+fn gl_capability(pname:u32)->Option<Vec<f32>> {
+    Some(match pname {
+        0x0d3a => with_ctx(|c|c.max_viewport_dims()).map(|v|v as f32).to_vec(),
+        0x0d50 => vec![with_ctx(|c|c.subpixel_bits()) as f32],
+        0x846d | 0x0b12 => with_ctx(|c|c.primitive_size_range(true)).to_vec(),
+        0x846e | 0x0b22 => with_ctx(|c|c.primitive_size_range(false)).to_vec(),
+        // glReadPixels supports this pair in both rendering backends.
+        0x8b9a => vec![pocket_gles::GL_UNSIGNED_BYTE as f32],
+        0x8b9b => vec![pocket_gles::GL_RGBA as f32],
+        pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024.],
+        pocket_gles::GL_MAX_LIGHTS => vec![8.],
+        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as f32],
+        pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH | pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH | pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16.],
+        pocket_gles::GL_DEPTH_BITS => vec![16.],
+        pocket_gles::GL_STENCIL_BITS | pocket_gles::GL_ALPHA_BITS => vec![0.],
+        pocket_gles::GL_RED_BITS | pocket_gles::GL_BLUE_BITS => vec![5.],
+        pocket_gles::GL_GREEN_BITS => vec![6.],
+        pocket_gles::GL_MAX_TEXTURE_LOD_BIAS_EXT => vec![4.],
+        pocket_gles::GL_NUM_COMPRESSED_TEXTURE_FORMATS => vec![COMPRESSED_FORMATS.len() as f32],
+        pocket_gles::GL_COMPRESSED_TEXTURE_FORMATS => COMPRESSED_FORMATS.iter().map(|v|*v as f32).collect(),
+        _ => return None,
+    })
+}
+
 fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pname = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
     if out == 0 {
+        return Ok(VOID);
+    }
+    if let Some(values)=gl_capability(pname) {
+        let bytes:Vec<u8>=values.iter().flat_map(|v|(v.round() as i32).to_le_bytes()).collect();
+        ctx.cpu.write_mem(out,&bytes)?;
         return Ok(VOID);
     }
     let values: Vec<i32> = match pname {
@@ -1319,11 +1345,6 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         0x2a00 => vec![with_ctx(|c| c.state.polygon_units).round() as i32],
         0x0b11 => vec![with_ctx(|c| c.state.point_size).round() as i32],
         0x0b21 => vec![with_ctx(|c| c.state.line_width).round() as i32],
-        0x846d | 0x846e => with_ctx(|c| c.primitive_size_range(pname == 0x846d))
-            .map(|x| x.round() as i32)
-            .to_vec(),
-        pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024],
-        pocket_gles::GL_MAX_LIGHTS => vec![8],
         pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as i32],
         pocket_gles::GL_NORMALIZE => vec![with_ctx(|c| c.lighting.normalize) as i32],
         pocket_gles::GL_COLOR_MATERIAL => vec![with_ctx(|c| c.lighting.color_material) as i32],
@@ -1332,23 +1353,8 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         0x4000..=0x4007 => {
             vec![with_ctx(|c| c.lighting.lights[(pname - 0x4000) as usize].enabled) as i32]
         }
-        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as i32],
-        pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH => vec![16],
-        pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH => vec![16],
-        pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16],
-        pocket_gles::GL_DEPTH_BITS => vec![16],
-        pocket_gles::GL_STENCIL_BITS => vec![0],
-        pocket_gles::GL_RED_BITS => vec![5],
-        pocket_gles::GL_GREEN_BITS => vec![6],
-        pocket_gles::GL_BLUE_BITS => vec![5],
-        pocket_gles::GL_ALPHA_BITS => vec![0],
         pocket_gles::GL_PACK_ALIGNMENT => vec![PACK_ALIGNMENT.with(Cell::get) as i32],
         pocket_gles::GL_UNPACK_ALIGNMENT => vec![UNPACK_ALIGNMENT.with(Cell::get) as i32],
-        pocket_gles::GL_MAX_TEXTURE_LOD_BIAS_EXT => vec![4],
-        pocket_gles::GL_NUM_COMPRESSED_TEXTURE_FORMATS => vec![COMPRESSED_FORMATS.len() as i32],
-        pocket_gles::GL_COMPRESSED_TEXTURE_FORMATS => {
-            COMPRESSED_FORMATS.iter().map(|&f| f as i32).collect()
-        }
         pocket_gles::GL_VIEWPORT => {
             let vp = with_ctx(|c| c.state.viewport);
             vec![vp.0, vp.1, vp.2, vp.3]
@@ -1378,13 +1384,17 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if out == 0 {
         return Ok(VOID);
     }
+    if let Some(values)=gl_capability(pname) {
+        let bytes:Vec<u8>=values.iter().flat_map(|v|(*v).to_le_bytes()).collect();
+        ctx.cpu.write_mem(out,&bytes)?;
+        return Ok(VOID);
+    }
     let values: Vec<f32> = match pname {
         0x8037 => vec![with_ctx(|c| c.state.polygon_offset) as u8 as f32],
         0x8038 => vec![with_ctx(|c| c.state.polygon_factor)],
         0x2a00 => vec![with_ctx(|c| c.state.polygon_units)],
         0x0b11 => vec![with_ctx(|c| c.state.point_size)],
         0x0b21 => vec![with_ctx(|c| c.state.line_width)],
-        0x846d | 0x846e => with_ctx(|c| c.primitive_size_range(pname == 0x846d)).to_vec(),
         pocket_gles::GL_MODELVIEW_MATRIX => with_ctx(|c| c.modelview.current().to_vec()),
         pocket_gles::GL_PROJECTION_MATRIX => with_ctx(|c| c.projection.current().to_vec()),
         pocket_gles::GL_TEXTURE_MATRIX => with_ctx(|c| {
@@ -1399,14 +1409,11 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }
         // Integer-valued queries are legal through glGetFloatv as well;
         // GL converts. Only the few games actually ask for are listed.
-        pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024.0],
-        pocket_gles::GL_MAX_LIGHTS => vec![8.0],
         pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as u8 as f32],
         pocket_gles::lighting::MODEL_AMBIENT => with_ctx(|c| c.lighting.model_ambient.to_vec()),
         pocket_gles::lighting::MODEL_TWO_SIDE => {
             vec![with_ctx(|c| c.lighting.two_sided) as u8 as f32]
         }
-        pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as f32],
         pocket_gles::GL_VIEWPORT => {
             let vp = with_ctx(|c| c.state.viewport);
             vec![vp.0 as f32, vp.1 as f32, vp.2 as f32, vp.3 as f32]
@@ -3889,6 +3896,28 @@ mod tests {
             0,
             "corner should still be black"
         );
+    }
+
+    #[test]
+    fn capability_vectors_fill_both_words_and_keep_following_memory_intact() {
+        let _g=guard();reset_for_test(16,16);
+        let mut cpu=fresh_cpu();let mut kernel=fresh_kernel();
+        for pname in [0x0d3a,0x0b12,0x0b22,0x846d,0x846e] {
+            cpu.write_mem(SCRATCH,&[0xa5;16]).unwrap();
+            call(&mut cpu,&mut kernel,gl_get_integerv,&[pname,SCRATCH]);
+            assert!(cpu.read_u32_le(SCRATCH).unwrap()>0);
+            assert!(cpu.read_u32_le(SCRATCH+4).unwrap()>0);
+            assert_eq!(cpu.read_u32_le(SCRATCH+8).unwrap(),0xa5a5a5a5);
+            cpu.write_mem(SCRATCH,&[0xa5;16]).unwrap();
+            call(&mut cpu,&mut kernel,gl_get_floatv,&[pname,SCRATCH]);
+            assert!(f32::from_bits(cpu.read_u32_le(SCRATCH).unwrap())>0.);
+            assert!(f32::from_bits(cpu.read_u32_le(SCRATCH+4).unwrap())>0.);
+            assert_eq!(cpu.read_u32_le(SCRATCH+8).unwrap(),0xa5a5a5a5);
+        }
+        for (pname,value) in [(0x8b9a,pocket_gles::GL_UNSIGNED_BYTE),(0x8b9b,pocket_gles::GL_RGBA)] {
+            call(&mut cpu,&mut kernel,gl_get_integerv,&[pname,SCRATCH]);
+            assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(),value);
+        }
     }
 
     #[test]

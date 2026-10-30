@@ -376,7 +376,15 @@ impl RenderTarget {
 /// Texture sampling callback, called with the texture unit a stage
 /// draws from. Returning `None` means that unit has no usable texture,
 /// in which case the stage leaves the fragment colour alone.
-pub type SampleFn<'a> = &'a dyn Fn(usize, f32, f32) -> Option<[u8; 4]>;
+pub trait TextureSampler {
+    fn sample(&self,unit:usize,s:f32,t:f32)->Option<[u8;4]>;
+    fn needs_gradients(&self)->bool { false }
+    fn sample_grad(&self,unit:usize,s:f32,t:f32,_grad:[f32;4],_bias:f32)->Option<[u8;4]> { self.sample(unit,s,t) }
+}
+impl<F: Fn(usize,f32,f32)->Option<[u8;4]>> TextureSampler for F {
+    fn sample(&self,unit:usize,s:f32,t:f32)->Option<[u8;4]> { self(unit,s,t) }
+}
+pub type SampleFn<'a> = &'a dyn TextureSampler;
 
 /// One enabled texture unit, as the rasterizer sees it.
 ///
@@ -650,6 +658,22 @@ fn raster_clipped(
         0.
     };
     let inv_area = 1.0 / area;
+    let gradients=sample.needs_gradients();
+    let (qx,qy,uv_grad)=if gradients {
+    let dx=[-(sv[2].y-sv[1].y)*inv_area,-(sv[0].y-sv[2].y)*inv_area,(sv[0].y-sv[1].y)*inv_area];
+    let dy=[(sv[2].x-sv[1].x)*inv_area,(sv[0].x-sv[2].x)*inv_area,(sv[1].x-sv[0].x)*inv_area];
+    let qx=(0..3).map(|i|dx[i]*sv[i].inv_w).sum::<f32>();
+    let qy=(0..3).map(|i|dy[i]*sv[i].inv_w).sum::<f32>();
+    let mut uv_grad=[[0.;4];MAX_TEXTURE_STAGES];
+        for stage in stages {
+            for (axis,weights) in [dx,dy].iter().enumerate() {
+                for c in 0..2 {
+                    uv_grad[stage.unit][axis*2+c]=(0..3).map(|i|weights[i]*sv[i].inv_w*sv[i].texcoord[stage.unit][c]).sum();
+                }
+            }
+        }
+        (qx,qy,uv_grad)
+    } else { (0.,0.,[[0.;4];MAX_TEXTURE_STAGES]) };
     // Flat shading takes the provoking vertex, which for a triangle is
     // the last one.
     let flat_color = sv[2].color;
@@ -722,7 +746,12 @@ fn raster_clipped(
                         + p1 * sv[1].texcoord[stage.unit][c]
                         + p2 * sv[2].texcoord[stage.unit][c]
                 };
-                if let Some(texel) = sample(stage.unit, uv(0), uv(1)) {
+                let (u,v)=(uv(0),uv(1));
+                let texel=if gradients {
+                    let g=uv_grad[stage.unit];
+                    sample.sample_grad(stage.unit,u,v,[(g[0]-u*qx)*rec,(g[1]-v*qx)*rec,(g[2]-u*qy)*rec,(g[3]-v*qy)*rec],stage.lod_bias)
+                } else { sample.sample(stage.unit,u,v) };
+                if let Some(texel) = texel {
                     let tc = [
                         to_unit(texel[0]),
                         to_unit(texel[1]),
@@ -815,6 +844,7 @@ fn primitive_fragment(
     y: i32,
     z: f32,
     v: &Vertex,
+    gradients: &[[f32;4];MAX_TEXTURE_STAGES],
 ) -> bool {
     let idx = y as usize * target.width as usize + x as usize;
     if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
@@ -823,7 +853,7 @@ fn primitive_fragment(
     let mut color = v.color;
     for stage in stages {
         let uv = v.texcoord[stage.unit];
-        if let Some(texel) = sample(stage.unit, uv[0], uv[1]) {
+        if let Some(texel) = sample.sample_grad(stage.unit, uv[0], uv[1],gradients[stage.unit],stage.lod_bias) {
             color = apply_tex_env(stage, color, texel.map(to_unit));
         }
     }
@@ -880,7 +910,7 @@ pub fn draw_point(
     for y in top.max(y0)..top.saturating_add(size).min(y1) {
         for x in left.max(x0)..left.saturating_add(size).min(x1) {
             written +=
-                primitive_fragment(target, state, sample, stages, x, y, pos[2] as f32, &v) as usize;
+                primitive_fragment(target, state, sample, stages, x, y, pos[2] as f32, &v, &[[0.;4];MAX_TEXTURE_STAGES]) as usize;
         }
     }
     written
@@ -973,6 +1003,7 @@ pub fn draw_line(
     let hi = (start[major].max(end[major]).ceil() as i32)
         .saturating_add(1)
         .min(bounds.1);
+    let needs_gradients=sample.needs_gradients();
     let mut written = 0;
     for j in lo..hi {
         let t = (f64::from(j) + 0.5 - start[major]) / (end[major] - start[major]);
@@ -1003,9 +1034,19 @@ pub fn draw_line(
                 if !state.smooth_shading {
                     v.color = flat;
                 }
+                let mut grad=[[0.;4];MAX_TEXTURE_STAGES];
+                if needs_gradients {
+                    let dpdt=1./(ends[0].pos[3]*ends[1].pos[3]*iw*iw);
+                    for stage in stages {
+                        let unit=stage.unit;
+                        for axis in 0..2 { for c in 0..2 {
+                            grad[unit][axis*2+c]=(ends[1].texcoord[unit][c]-ends[0].texcoord[unit][c])*dpdt*(delta[axis]/length) as f32;
+                        } }
+                    }
+                }
                 let z = a[2] + f64::from(t) * (b[2] - a[2]);
                 written +=
-                    primitive_fragment(target, state, sample, stages, x, y, z as f32, &v) as usize;
+                    primitive_fragment(target, state, sample, stages, x, y, z as f32, &v, &grad) as usize;
             }
         }
     }
@@ -1941,4 +1982,52 @@ mod tests {
             "GL_DEPTH_TEST disabled must leave the depth buffer untouched"
         );
     }
+    #[test]
+    fn texture_gradients_follow_screen_axes_and_stage_bias() {
+        use std::cell::RefCell;
+        struct Probe(RefCell<Vec<([f32;4],f32)>>);
+        impl TextureSampler for Probe {
+            fn sample(&self,_:usize,_:f32,_:f32)->Option<[u8;4]>{None}
+            fn needs_gradients(&self)->bool{true}
+            fn sample_grad(&self,_:usize,_:f32,_:f32,g:[f32;4],b:f32)->Option<[u8;4]>{self.0.borrow_mut().push((g,b));None}
+        }
+        let mut target=RenderTarget::new(8,8);
+        let state=PipelineState{viewport:(0,0,8,8),..Default::default()};
+        let positions=[[-1.,-1.,0.,1.],[1.,-1.,0.,1.],[-1.,1.,0.,1.]];
+        let uv=[[0.,0.],[8.,0.],[0.,8.]];
+        let vertices=std::array::from_fn(|i|Vertex{pos:positions[i],texcoord:[uv[i];4],..Default::default()});
+        let stage=TextureStage{unit:0,env:TexEnvMode::Modulate,env_color:[0.;4],lod_bias:1.25};
+        let probe=Probe(RefCell::new(Vec::new()));
+        assert!(draw_triangle(&mut target,&state,&probe,&[stage],vertices)>0);
+        assert!(!probe.0.borrow().is_empty());
+        for (g,b) in probe.0.borrow().iter(){
+            for (actual,expected) in g.iter().zip([1.,0.,0.,-1.]){assert!((actual-expected).abs()<1e-5,"gradient {g:?}");}
+            assert_eq!(*b,1.25);
+        }
+    }
+
+    #[test]
+    fn perspective_texture_gradients_use_the_quotient_rule() {
+        use std::cell::RefCell;
+        struct Probe(RefCell<Vec<(f32,f32,[f32;4])>>);
+        impl TextureSampler for Probe {
+            fn sample(&self,_:usize,_:f32,_:f32)->Option<[u8;4]>{None}
+            fn needs_gradients(&self)->bool{true}
+            fn sample_grad(&self,_:usize,u:f32,v:f32,g:[f32;4],_:f32)->Option<[u8;4]>{self.0.borrow_mut().push((u,v,g));None}
+        }
+        let mut target=RenderTarget::new(8,8);let state=PipelineState{viewport:(0,0,8,8),..Default::default()};
+        let positions=[[-1.,-1.,0.,1.],[2.,-2.,0.,2.],[-4.,4.,0.,4.]];
+        let uv=[[0.,0.],[8.,0.],[0.,8.]];
+        let vertices=std::array::from_fn(|i|Vertex{pos:positions[i],texcoord:[uv[i];4],..Default::default()});
+        let stage=TextureStage{unit:0,env:TexEnvMode::Modulate,env_color:[0.;4],lod_bias:0.};
+        let probe=Probe(RefCell::new(Vec::new()));
+        draw_triangle(&mut target,&state,&probe,&[stage],vertices);
+        // Pixel centre (0.5,1.5): barycentrics (0.125,0.0625,0.8125).
+        let q=0.359375;let u=0.25/q;let v=1.625/q;
+        let expected=[(0.5+u*0.0625)/q,v*0.0625/q,-u*0.09375/q,(-0.25-v*0.09375)/q];
+        let values=probe.0.borrow();
+        let (_,_,g)=values.iter().find(|(s,t,_)|(*s-u).abs()<1e-5&&(*t-v).abs()<1e-5).expect("known covered pixel");
+        for (actual,reference) in g.iter().zip(expected){assert!((actual-reference).abs()<1e-4,"{g:?} != {expected:?}");}
+    }
+
 }
