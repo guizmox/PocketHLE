@@ -20,6 +20,11 @@ struct Widgets {
     page_items: Vec<Id>,
     page_collecting: bool,
     page_seen: bool,
+    toolbar_items: Vec<Id>,
+    toolbar_collecting: bool,
+    toolbar_seen: bool,
+    last_toolbar: Option<Id>,
+    last_page: Option<Id>,
 }
 #[derive(Clone)]
 struct Popup {
@@ -113,6 +118,26 @@ impl Navigation {
         }
         false
     }
+    fn switch_section(&mut self, ctx: &egui::Context) -> bool {
+        if self.keyboard.is_some() { return false; }
+        let state = widgets(ctx);
+        let focused = ctx.memory(|m| m.focused());
+        // A menu belongs to its owner in the toolbar/page behind it.
+        let owner = state.popup.as_ref().filter(|_| ctx.memory(|m| m.any_popup_open()))
+            .map(|p| p.owner).or(focused);
+        let Some(target) = crate::deck_navigation::section_target(
+            owner, &state.toolbar_items, &state.page_items, state.last_toolbar, state.last_page,
+        ) else { return false; };
+        edit_widgets(ctx, |w| {
+            if owner.is_some_and(|id| w.toolbar_items.contains(&id)) { w.last_toolbar = owner; }
+            if owner.is_some_and(|id| w.page_items.contains(&id)) { w.last_page = owner; }
+            w.popup = None;
+        });
+        ctx.memory_mut(|m| { m.close_popup(); m.request_focus(target); });
+        self.held = None;
+        self.used = true;
+        true
+    }
     pub fn prepare_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, enabled: bool) {
         if !enabled || !raw.focused {
             self.pending.clear();
@@ -121,6 +146,11 @@ impl Navigation {
                 self.keyboard = None;
             }
             return;
+        }
+        let f6 = raw.events.iter().any(|event| matches!(event,
+            Event::Key { key: Key::F6, pressed: true, repeat: false, .. }));
+        if f6 && self.switch_section(ctx) {
+            raw.events.retain(|event| !matches!(event, Event::Key { key: Key::F6, .. }));
         }
         if let Some((control, next)) = &mut self.held {
             if Instant::now() >= *next {
@@ -132,6 +162,10 @@ impl Navigation {
         for control in std::mem::take(&mut self.pending) {
             if self.keyboard.is_some() {
                 self.keyboard_control(&control, ctx);
+                continue;
+            }
+            if control == "LeftThumb" {
+                self.switch_section(ctx);
                 continue;
             }
             let w = widgets(ctx);
@@ -148,15 +182,21 @@ impl Navigation {
                     continue;
                 }
             }
-            if w.page.is_some() && !ctx.memory(|m| m.any_popup_open()) {
+            if !ctx.memory(|m| m.any_popup_open()) {
+                let in_toolbar = focused.is_some_and(|id| w.toolbar_items.contains(&id));
+                let items = if in_toolbar { &w.toolbar_items } else { &w.page_items };
+                let direction = if in_toolbar {
+                    match control.as_str() {
+                        "DPadLeft" | "LeftStickLeft" => "DPadUp",
+                        "DPadRight" | "LeftStickRight" => "DPadDown",
+                        other => other,
+                    }
+                } else { control.as_str() };
                 if let Some(next) = crate::deck_navigation::menu_index(
-                    focused
-                        .and_then(|id| w.page_items.iter().position(|item| *item == id))
-                        .unwrap_or(0),
-                    &control,
-                    w.page_items.len(),
+                    focused.and_then(|id| items.iter().position(|item| *item == id)).unwrap_or(0),
+                    direction, items.len(),
                 ) {
-                    ctx.memory_mut(|m| m.request_focus(w.page_items[next]));
+                    ctx.memory_mut(|m| m.request_focus(items[next]));
                     continue;
                 }
             }
@@ -234,6 +274,7 @@ impl Navigation {
                 w.page = None;
                 w.page_items.clear();
             }
+            if !w.toolbar_seen { w.toolbar_items.clear(); w.last_toolbar = None; }
         });
         if self.used {
             if let Some(response) = ctx
@@ -456,6 +497,7 @@ pub fn selectable_value<T: PartialEq>(
 ) -> Response {
     let selected = *current == value;
     let response = ui.selectable_value(current, value, text);
+    register_page_widget(ui, &response);
     let collecting = widgets(ui.ctx()).collecting.is_some();
     if collecting && response.enabled() {
         edit_widgets(ui.ctx(), |w| {
@@ -484,10 +526,29 @@ pub fn begin_frame(ctx: &egui::Context) {
     edit_widgets(ctx, |w| {
         w.text.clear();
         w.page_seen = false;
+        w.toolbar_seen = false;
         if !open {
             w.popup = None;
         }
     });
+}
+
+/// A separate focus section for the existing launcher toolbar.
+pub fn toolbar_scope<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    edit_widgets(ui.ctx(), |w| {
+        w.toolbar_seen = true; w.toolbar_collecting = true; w.toolbar_items.clear();
+    });
+    let result = contents(ui);
+    let focused = ui.memory(|m| m.focused());
+    edit_widgets(ui.ctx(), |w| {
+        w.toolbar_collecting = false;
+        if focused.is_some_and(|id| w.toolbar_items.contains(&id)) { w.last_toolbar = focused; }
+    });
+    result
+}
+/// Used only by launcher event routing, never by emulated game input.
+pub fn toolbar_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.focused()).is_some_and(|id| widgets(ctx).toolbar_items.contains(&id))
 }
 
 /// Page navigation excludes the launcher toolbar while popup controls retain
@@ -505,6 +566,7 @@ pub fn page_scope<R>(ui: &mut Ui, id: impl Hash, contents: impl FnOnce(&mut Ui) 
         w.page_items.clear();
         if entering {
             w.popup = None;
+            w.last_page = None;
         }
     });
     let result = contents(ui);
@@ -512,18 +574,26 @@ pub fn page_scope<R>(ui: &mut Ui, id: impl Hash, contents: impl FnOnce(&mut Ui) 
     let state = widgets(ui.ctx());
     let focused = ui.memory(|m| m.focused());
     if !ui.memory(|m| m.any_popup_open())
-        && (entering || !focused.is_some_and(|id| state.page_items.contains(&id)))
+        && (entering || !focused.is_some_and(|id|
+            state.page_items.contains(&id) || state.toolbar_items.contains(&id)))
     {
         if let Some(first) = state.page_items.first() {
             ui.memory_mut(|m| m.request_focus(*first));
         }
     }
+    let focused = ui.memory(|m| m.focused());
+    edit_widgets(ui.ctx(), |w| {
+        if focused.is_some_and(|id| w.page_items.contains(&id)) { w.last_page = focused; }
+    });
     result
 }
 
 fn register_page_widget(ui: &Ui, response: &Response) {
     if response.enabled() {
         edit_widgets(ui.ctx(), |w| {
+            if w.toolbar_collecting && w.collecting.is_none() && !w.toolbar_items.contains(&response.id) {
+                w.toolbar_items.push(response.id);
+            }
             if w.page_collecting && w.collecting.is_none() && !w.page_items.contains(&response.id) {
                 w.page_items.push(response.id);
             }
@@ -563,6 +633,50 @@ mod tests {
             egui::CentralPanel::default().show(ctx, ui);
         });
     }
+    fn sections(ui: &mut Ui) -> ([Id;2],[Id;2]) {
+        let toolbar=toolbar_scope(ui, |ui| [button(ui,"Library").id,button(ui,"Settings").id]);
+        let page=page_scope(ui,"sections_test",|ui| [button(ui,"First").id,button(ui,"Save").id]);
+        (toolbar,page)
+    }
+    #[test]
+    fn l3_switches_sections_restores_focus_and_keeps_toolbar_navigation_separate() {
+        let ctx=egui::Context::default();let mut nav=Navigation::default();
+        let mut ids=([Id::NULL;2],[Id::NULL;2]);
+        frame(&ctx,&mut nav,|ui|{ids=sections(ui);});
+        ctx.memory_mut(|m|m.request_focus(ids.1[1]));
+        frame(&ctx,&mut nav,|ui|{sections(ui);});
+        nav.press("LeftThumb");frame(&ctx,&mut nav,|ui|{sections(ui);});
+        assert_eq!(ctx.memory(|m|m.focused()),Some(ids.0[0]));
+        nav.press("DPadRight");frame(&ctx,&mut nav,|ui|{sections(ui);});
+        assert_eq!(ctx.memory(|m|m.focused()),Some(ids.0[1]));
+        nav.release("DPadRight");
+        nav.press("LeftThumb");frame(&ctx,&mut nav,|ui|{sections(ui);});
+        assert_eq!(ctx.memory(|m|m.focused()),Some(ids.1[1]));
+        nav.press("LeftThumb");frame(&ctx,&mut nav,|ui|{sections(ui);});
+        assert_eq!(ctx.memory(|m|m.focused()),Some(ids.0[1]));
+    }
+    #[test]
+    fn section_switch_closes_popup_and_uses_its_owner_section() {
+        let ctx=egui::Context::default();let mut nav=Navigation::default();
+        let mut ids=([Id::NULL;2],[Id::NULL;2]);
+        frame(&ctx,&mut nav,|ui|{ids=sections(ui);});
+        let popup=Id::new("section_popup");let item=Id::new("popup_item");
+        ctx.memory_mut(|m|{m.open_popup(popup);m.request_focus(item);});
+        edit_widgets(&ctx,|w| w.popup=Some(Popup{owner:ids.0[1],items:vec![item]}));
+        assert!(nav.switch_section(&ctx));
+        assert!(!ctx.memory(|m|m.any_popup_open()));
+        assert_eq!(ctx.memory(|m|m.focused()),Some(ids.1[0]));
+    }
+    #[test]
+    fn virtual_keyboard_blocks_section_switch() {
+        let ctx=egui::Context::default();let mut nav=Navigation::default();
+        frame(&ctx,&mut nav,|ui|{sections(ui);});
+        let focused=ctx.memory(|m|m.focused()).unwrap();
+        nav.keyboard=Some(Keyboard{field:focused,value:String::new(),index:0,upper:false,symbols:false});
+        assert!(!nav.switch_section(&ctx));
+        assert!(nav.keyboard_open());assert_eq!(ctx.memory(|m|m.focused()),Some(focused));
+    }
+
     #[test]
     fn settings_page_takes_focus_from_toolbar_and_keeps_controller_navigation_inside() {
         fn settings(ui: &mut Ui, checked: &mut bool, selected: &mut u8) -> (Id, Id, Id) {
@@ -902,6 +1016,16 @@ pub fn button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
     let r = ui.button(text);
     register(ui, &r, true);
     r
+}
+/// Register custom focusable widgets without changing their appearance/behavior.
+pub fn track_focus(ui: &Ui, response: &Response) {
+    register_page_widget(ui, response);
+    if response.gained_focus() { response.scroll_to_me(Some(egui::Align::Center)); }
+}
+pub fn small_button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
+    let response = ui.small_button(text);
+    register(ui, &response, true);
+    response
 }
 pub fn sized_button(ui: &mut Ui, size: egui::Vec2, text: impl Into<WidgetText>) -> Response {
     let r = ui.add_sized(size, egui::Button::new(text).wrap(true));

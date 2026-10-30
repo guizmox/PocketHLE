@@ -245,3 +245,38 @@ mod game_menu_tests {
         assert_eq!(menu_index(0, "DPadDown", 0), None);
     }
 }
+
+/// Toggle between two live focus scopes, restoring valid remembered items.
+/// Missing scopes make the shortcut inert (for example, a modal dialog).
+pub fn section_target<T: Copy + Eq>(
+    focused: Option<T>, toolbar: &[T], page: &[T],
+    last_toolbar: Option<T>, last_page: Option<T>,
+) -> Option<T> {
+    if toolbar.is_empty() || page.is_empty() { return None; }
+    let (items, remembered) = if focused.is_some_and(|id| toolbar.contains(&id)) {
+        (page,last_page)
+    } else { (toolbar,last_toolbar) };
+    remembered.filter(|id| items.contains(id)).or_else(|| items.first().copied())
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::section_target;
+    #[test] fn toolbar_to_page_restores_selection() {
+        assert_eq!(section_target(Some(2),&[1,2],&[3,4],Some(1),Some(4)),Some(4));
+    }
+    #[test] fn page_to_toolbar_restores_selection() {
+        assert_eq!(section_target(Some(3),&[1,2],&[3,4],Some(2),Some(4)),Some(2));
+    }
+    #[test] fn stale_or_disabled_remembered_controls_fall_back_to_first_live_item() {
+        assert_eq!(section_target(Some(2),&[1,2],&[3,4],None,Some(99)),Some(3));
+        assert_eq!(section_target(Some(3),&[1,2],&[3,4],Some(99),None),Some(1));
+    }
+    #[test] fn missing_scope_never_escapes_a_modal() {
+        assert_eq!(section_target(Some(1),&[1],&[],None,None),None);
+        assert_eq!(section_target(Some(3),&[],&[3],None,None),None);
+    }
+    #[test] fn absent_focus_starts_in_toolbar() {
+        assert_eq!(section_target(None,&[1,2],&[3,4],None,None),Some(1));
+    }
+}

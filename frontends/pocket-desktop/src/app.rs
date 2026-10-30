@@ -1257,7 +1257,7 @@ impl PocketLauncher {
 
     fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("PocketHLE");
+            ui.heading("PocketHLE").on_hover_text("L3 (left-stick click) / F6: switch between toolbar and page");
             ui.label(
                 RichText::new("Pocket PC / Windows Mobile launcher")
                     .small()
@@ -2296,7 +2296,8 @@ impl PocketLauncher {
         ui.heading("Diagnostics");
         egui::Grid::new("emulator_diagnostics").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
                 ui.label("Verbosity (0..3)");
-                ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
+                let slider = ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
+                crate::controller_ui::track_focus(ui, &slider);
                 ui.end_row();
 
                 ui.label("Log unimplemented APIs");
@@ -2578,8 +2579,7 @@ impl PocketLauncher {
                                             egui::Label::new(RichText::new(key).monospace())
                                                 .wrap(false),
                                         );
-                                        if ui
-                                            .small_button("✕")
+                                        if crate::controller_ui::small_button(ui, "✕")
                                             .on_hover_text(format!("Remove {key}"))
                                             .clicked()
                                         {
@@ -2598,7 +2598,7 @@ impl PocketLauncher {
                                     )
                                     .wrap(false),
                                 );
-                                if ui.small_button("Cancel").clicked() {
+                                if crate::controller_ui::small_button(ui, "Cancel").clicked() {
                                     capture = None;
                                 }
                             });
@@ -2631,8 +2631,7 @@ impl PocketLauncher {
                                     for control in controls {
                                         let label = crate::gamepad::label(&control);
                                         ui.add(egui::Label::new(&label).wrap(false));
-                                        if ui
-                                            .small_button("✕")
+                                        if crate::controller_ui::small_button(ui, "✕")
                                             .on_hover_text(format!("Remove {label}"))
                                             .clicked()
                                         {
@@ -2643,7 +2642,7 @@ impl PocketLauncher {
                             });
                         if self.gamepad_capture == Some(ControllerCapture::Guest(button)) {
                             ui.add(egui::Label::new("Press a controller input…").wrap(false));
-                            if ui.small_button("Cancel controller").clicked() {
+                            if crate::controller_ui::small_button(ui, "Cancel controller").clicked() {
                                 self.gamepad_capture = None;
                             }
                         } else if crate::controller_ui::button(ui, "Add controller input").clicked()
@@ -2705,10 +2704,11 @@ impl PocketLauncher {
             "Enable stylus stick (right stick by default)",
         );
         ui.label("Emulates held-stylus drags; lifts and recentres at screen edges. Physical touch takes priority.");
-        ui.add(
+        let slider = ui.add(
             egui::Slider::new(&mut draft.stylus_stick.speed, 30..=1200)
                 .text("Stylus speed (pixels/s)"),
         );
+        crate::controller_ui::track_focus(ui, &slider);
         if let Some(direction) = self.stylus_capture {
             if let Some(key) = ui.ctx().input(|i| {
                 i.events.iter().find_map(|e| match e {
@@ -2750,7 +2750,7 @@ impl PocketLauncher {
                     capture = None;
                     self.gamepad_capture = None;
                 }
-                if ui.small_button("Clear key").clicked() {
+                if crate::controller_ui::small_button(ui, "Clear key").clicked() {
                     draft.stylus_stick.keyboard[i].clear();
                     self.stylus_capture = None;
                 }
@@ -2774,7 +2774,7 @@ impl PocketLauncher {
                     self.stylus_capture = None;
                     capture = None;
                 }
-                if ui.small_button("Clear controller").clicked() {
+                if crate::controller_ui::small_button(ui, "Clear controller").clicked() {
                     draft.stylus_stick.controller[i].clear();
                     self.gamepad_capture = None;
                 }
@@ -4315,6 +4315,13 @@ impl PocketLauncher {
                         continue;
                     }
                     if self.screen != Screen::Run {
+                        if control == "LeftThumb" {
+                            self.deck_library_actions.clear();
+                            self.deck_nav_repeat = None;
+                            self.controller_ui.press(&control);
+                            ctx.request_repaint();
+                            continue;
+                        }
                         if self.game_id_popup.is_some() {
                             if control == "East" {
                                 self.game_id_popup = None;
@@ -4333,6 +4340,7 @@ impl PocketLauncher {
                             && self.pending_import.is_none()
                             && self.demo_import.is_none()
                             && self.colors_startup_prompt.is_none()
+                            && !crate::controller_ui::toolbar_focused(ctx)
                             && (!crate::controller_ui::menu_open(ctx) || self.game_menu.is_some());
                         if self.game_menu.is_none()
                             && control == "East"
@@ -5532,7 +5540,7 @@ impl eframe::App for PocketLauncher {
                     self.information_game.is_none()
                         && self.rename_draft.is_none()
                         && !self.controller_ui.keyboard_open(),
-                    |ui| self.ui_top_bar(ui),
+                    |ui| crate::controller_ui::toolbar_scope(ui, |ui| self.ui_top_bar(ui)),
                 );
             });
             egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -5609,13 +5617,21 @@ impl eframe::App for PocketLauncher {
                 Screen::Library => {
                     ui.add_enabled_ui(
                         self.information_game.is_none() && self.rename_draft.is_none(),
-                        |ui| self.ui_library(ui),
+                        |ui| crate::controller_ui::page_scope(ui, "library", |ui| self.ui_library(ui)),
                     );
                 }
                 Screen::Settings
                 | Screen::GizmondoOptions
                 | Screen::PocketPcOptions
-                | Screen::InputSettings => self.ui_settings(ui),
+                | Screen::InputSettings => {
+                    let page = match self.screen {
+                        Screen::GizmondoOptions => "gizmondo_options",
+                        Screen::PocketPcOptions => "pocketpc_options",
+                        Screen::InputSettings => "input_settings",
+                        _ => "emulator_settings",
+                    };
+                    crate::controller_ui::page_scope(ui, page, |ui| self.ui_settings(ui));
+                },
                 Screen::GameSettings if self.stylus_editor.is_some() => {
                     if let Some((id, mut draft)) = self.game_settings_draft.take() {
                         ui.heading("PocketPC controls");

@@ -425,11 +425,11 @@ impl FileDialog {
     /// SDL's left shoulder is named LeftTrigger in the launcher's existing map.
     pub fn controller(&mut self, control: &str) -> bool {
         match control {
-            "RightTrigger" | "RightShoulder" if self.overwrite.is_none() => {
+            "RightTrigger" | "RightShoulder" | "LeftThumb" if self.overwrite.is_none() => {
                 self.zone_jump = Some(ZoneJump::Next)
             }
             "West" if self.overwrite.is_none() => self.zone_jump = Some(ZoneJump::Files),
-            "RightTrigger" | "RightShoulder" | "West" => (),
+            "RightTrigger" | "RightShoulder" | "LeftThumb" | "West" => (),
             "East" => self.cancel(),
             "LeftTrigger" | "LeftShoulder" => self.parent(),
             "North" => self.refresh(),

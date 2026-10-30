@@ -1,4 +1,5 @@
-crates\pocket-kernel\src\heap_virtual_tests.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-winceapi\src\coredll.rs
-docs\VIRTUAL_MEMORY.md
+docs\CONTROLLER_NAVIGATION.md
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\controller_ui.rs
+frontends\pocket-desktop\src\deck_navigation.rs
+frontends\pocket-desktop\src\file_dialog.rs
