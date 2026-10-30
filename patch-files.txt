@@ -1,6 +1,5 @@
+crates\pocket-gles\src\lib.rs
 crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\raster.rs
-crates\pocket-gles\src\texture.rs
 crates\pocket-gles\src\gpu\mod.rs
-crates\pocket-winceapi\src\gles.rs
-docs\GL_CAPABILITIES_AND_MIPMAPS.md
+crates\pocket-gles\src\profiling.rs
+docs\GPU_VERTEX_PROFILING.md

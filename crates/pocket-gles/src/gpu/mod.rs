@@ -38,6 +38,71 @@ pub(crate) struct VertexStream {
     pub count: usize,
     pub indices: Vec<u16>,
     pub coverage: Vec<u8>,
+    /// Only set after per-primitive provoking attributes have been expanded.
+    pub flat_triangles: bool,
+}
+
+impl VertexStream {
+    /// Preserve typed snapshots and expand only attributes needed by GL_FLAT.
+    /// Geometry/UVs use each corner; colour and lighting data use corner 3.
+    /// No guest addresses or live guest buffers reach the driver.
+    pub(crate) fn expand_flat_triangles(&self, out: &mut Self) -> bool {
+        out.bytes.clear();
+        out.indices.clear();
+        out.attributes.fill(None);
+        out.flat_triangles = false;
+        out.count = 0;
+        if self.flat_triangles || self.count == 0 || self.count > 65536 || self.attributes[0].is_none() {
+            return false;
+        }
+        if self.indices.iter().any(|&i| i as usize >= self.count) { return false; }
+        let references = if self.indices.is_empty() { self.count } else { self.indices.len() };
+        let count = references / 3 * 3;
+        if count == 0 || count > 65536 { return false; }
+        let mut fields = [None;8];
+        let mut stride = 0usize;
+        for (slot, attribute) in self.attributes.iter().enumerate() {
+            let Some(attribute) = attribute else { continue; };
+            let width = match attribute.ty {
+                GL_BYTE | GL_UNSIGNED_BYTE => 1,
+                GL_SHORT => 2,
+                GL_FLOAT | GL_FIXED => 4,
+                _ => return false,
+            };
+            if !(1..=4).contains(&attribute.size) || attribute.stride <= 0 || attribute.normalized > 1
+                || attribute.offset % width != 0 || attribute.stride as usize % width != 0 {
+                return false;
+            }
+            let bytes = attribute.size as usize * width;
+            let end = (self.count-1).checked_mul(attribute.stride as usize)
+                .and_then(|n|n.checked_add(attribute.offset)).and_then(|n|n.checked_add(bytes));
+            if end.is_none_or(|n|n>self.bytes.len()) { return false; }
+            stride = (stride + width-1) & !(width-1);
+            fields[slot] = Some((*attribute, stride, bytes, matches!(slot,1|6|7)));
+            stride += bytes;
+        }
+        stride = (stride+3)&!3;
+        let Some(length) = count.checked_mul(stride) else { return false; };
+        out.bytes.resize(length,0);
+        out.constants = self.constants;
+        for (slot, field) in fields.iter().enumerate() {
+            if let Some((attribute,offset,_,_)) = field {
+                out.attributes[slot] = Some(StreamAttribute {offset:*offset,stride:stride as i32,..*attribute});
+            }
+        }
+        let index = |corner:usize| if self.indices.is_empty() { corner } else { self.indices[corner] as usize };
+        for (corner, record) in out.bytes.chunks_exact_mut(stride).enumerate() {
+            let geometry = index(corner);
+            let provoking = index(corner/3*3+2);
+            for (attribute,offset,bytes,flat) in fields.iter().flatten() {
+                let source = attribute.offset + if *flat {provoking}else{geometry} * attribute.stride as usize;
+                record[*offset..*offset+*bytes].copy_from_slice(&self.bytes[source..source+*bytes]);
+            }
+        }
+        out.count = count;
+        out.flat_triangles = true;
+        true
+    }
 }
 
 /// Per-draw attribute layout. Disabled stages carry no payload. Smooth
@@ -1733,7 +1798,9 @@ impl Renderer {
         names: [u32; 4],
         transforms: &VertexTransforms,
     ) -> Result<(), String> {
-        if !state.smooth_shading
+        if (state.smooth_shading && stream.flat_triangles)
+            || (!state.smooth_shading && (!stream.flat_triangles || mode != GL_TRIANGLES
+                || !stream.indices.is_empty() || stream.count % 3 != 0))
             || stream.count == 0
             || stream.count > 65536
             || stream.indices.len() > i32::MAX as usize
@@ -2921,6 +2988,65 @@ mod tests {
                 )
                 .is_err());
         }
+    }
+
+    fn typed_flat_source() -> VertexStream {
+        let mut stream=VertexStream::default();stream.count=4;
+        for i in 0..4 { for v in [i as f32,1.,2.] {stream.bytes.extend(v.to_le_bytes());} }
+        stream.attributes[0]=Some(StreamAttribute{size:3,ty:GL_FLOAT,normalized:0,stride:12,offset:0});
+        for i in 0..4 {stream.bytes.extend([i,10+i,20+i,255]);}
+        stream.attributes[1]=Some(StreamAttribute{size:4,ty:GL_UNSIGNED_BYTE,normalized:1,stride:4,offset:48});
+        for i in 0..4i16 {for v in [i,-i] {stream.bytes.extend(v.to_le_bytes());}}
+        stream.attributes[2]=Some(StreamAttribute{size:2,ty:GL_SHORT,normalized:0,stride:4,offset:64});
+        for i in 0..4 {stream.bytes.extend([i,0,127]);}
+        stream.attributes[6]=Some(StreamAttribute{size:3,ty:GL_BYTE,normalized:1,stride:3,offset:80});
+        stream.attributes[7]=stream.attributes[0];
+        stream.indices=vec![0,1,2,2,1,3];
+        stream
+    }
+
+    #[test]
+    fn flat_stream_preserves_typed_geometry_uv_and_provoking_lighting_data() {
+        let source=typed_flat_source();let mut out=VertexStream::default();
+        assert!(source.expand_flat_triangles(&mut out));
+        assert!(out.flat_triangles);assert!(out.indices.is_empty());assert_eq!(out.count,6);
+        assert_eq!(out.bytes.len(),216);
+        for (corner,&index) in source.indices.iter().enumerate() {
+            let provoking=source.indices[corner/3*3+2] as usize;
+            for slot in [0,1,2,6,7] {
+                let before=source.attributes[slot].unwrap();let after=out.attributes[slot].unwrap();
+                assert_eq!((before.ty,before.size,before.normalized),(after.ty,after.size,after.normalized));
+                let index=if matches!(slot,1|6|7){provoking}else{index as usize};
+                let width=match before.ty {GL_BYTE|GL_UNSIGNED_BYTE=>1,GL_SHORT=>2,_=>4};
+                let len=before.size as usize*width;
+                let start=before.offset+index*before.stride as usize;
+                let dst=after.offset+corner*after.stride as usize;
+                assert_eq!(&out.bytes[dst..dst+len],&source.bytes[start..start+len]);
+            }
+        }
+    }
+    #[test]
+    fn flat_stream_keeps_constant_attributes_and_ignores_incomplete_triangle() {
+        let mut source=typed_flat_source();source.indices=vec![0,1,2,3];
+        source.attributes[1]=None;source.attributes[6]=None;source.attributes[7]=None;
+        source.constants[1]=[0.25,0.5,0.75,1.];
+        let mut out=VertexStream::default();
+        assert!(source.expand_flat_triangles(&mut out));
+        assert_eq!(out.count,3);assert_eq!(out.constants,source.constants);
+        assert!(out.attributes[1].is_none());assert!(out.attributes[6].is_none());
+        source.indices.clear();assert!(source.expand_flat_triangles(&mut out));
+        assert_eq!(out.count,3);
+    }
+    #[test]
+    fn flat_stream_rejects_invalid_snapshots_and_overlarge_expansion() {
+        let source=typed_flat_source();let mut out=VertexStream::default();
+        assert!(source.expand_flat_triangles(&mut out));
+        let mut bad=typed_flat_source();bad.indices[0]=99;
+        assert!(!bad.expand_flat_triangles(&mut out));assert!(!out.flat_triangles);assert!(out.bytes.is_empty());
+        bad=typed_flat_source();bad.bytes.truncate(80);assert!(!bad.expand_flat_triangles(&mut out));
+        bad=typed_flat_source();bad.attributes[2].as_mut().unwrap().stride=0;assert!(!bad.expand_flat_triangles(&mut out));
+        bad=typed_flat_source();bad.indices=vec![0;65538];assert!(!bad.expand_flat_triangles(&mut out));
+        bad=typed_flat_source();bad.flat_triangles=true;assert!(!bad.expand_flat_triangles(&mut out));
     }
 
     #[test]

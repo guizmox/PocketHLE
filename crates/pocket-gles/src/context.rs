@@ -333,6 +333,7 @@ pub struct Context {
     prepared_arrays: Vec<(u32, Vec<u8>)>,
     array_read_pool: Vec<Vec<u8>>,
     vertex_stream: crate::gpu::VertexStream,
+    flat_vertex_stream: crate::gpu::VertexStream,
     decoded_indices: Vec<u32>,
     scratch: Vec<u8>,
     /// Scratch for index buffer reads.
@@ -387,6 +388,7 @@ impl Context {
             prepared_arrays: Vec::new(),
             array_read_pool: Vec::new(),
             vertex_stream: Default::default(),
+            flat_vertex_stream: Default::default(),
             decoded_indices: Vec::new(),
             scratch: Vec::new(),
             index_scratch: Vec::new(),
@@ -1923,6 +1925,7 @@ impl Context {
         sequential: bool,
         stages: &[raster::TextureStage],
     ) -> bool {
+        stream.flat_triangles = false;
         stream.bytes.clear();
         stream.indices.clear();
         stream.attributes.fill(None);
@@ -2148,35 +2151,30 @@ impl Context {
             }),
         };
         if self.gpu.is_some()
-            && self.state.smooth_shading
-            && matches!(
-                mode,
-                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
-            )
+            && ((self.state.smooth_shading && matches!(mode,
+                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES))
+                || (!self.state.smooth_shading && mode == GL_TRIANGLES))
         {
             let mut stream = std::mem::take(&mut self.vertex_stream);
-            let ready =
-                self.prepare_vertex_stream(&mut stream, indices.clone(), count, sequential, stages);
+            let mut flat = std::mem::take(&mut self.flat_vertex_stream);
+            let mut ready = self.prepare_vertex_stream(&mut stream, indices.clone(), count, sequential, stages);
+            if ready && !self.state.smooth_shading {
+                ready = stream.expand_flat_triangles(&mut flat);
+            }
             if ready {
+                let prepared = if self.state.smooth_shading { &stream } else { &flat };
                 let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
                 let result = self.gpu.as_mut().unwrap().draw_stream_object_space(
-                    &self.target,
-                    &self.state,
-                    mode,
-                    &stream,
-                    stages,
-                    &self.textures,
-                    names,
-                    &transforms,
+                    &self.target, &self.state, mode, prepared, stages, &self.textures, names, &transforms,
                 );
                 self.vertex_stream = stream;
+                self.flat_vertex_stream = flat;
                 self.recycle_prepared_arrays();
-                if let Err(e) = result {
-                    self.gpu_failure("vertex stream", e);
-                }
+                if let Err(e) = result { self.gpu_failure("vertex stream", e); }
                 return;
             }
             self.vertex_stream = stream;
+            self.flat_vertex_stream = flat;
         }
         // Native smooth draws retain the topology and prepare each unique
         // guest vertex directly, instead of expanding then hashing float records.
@@ -3100,6 +3098,28 @@ mod tests {
         c.draw_arrays(&mut m,GL_TRIANGLE_FAN,0,4);
         assert_eq!(&c.target.color[(4*8+4)*4..(4*8+4)*4+4],&[255,255,0,255]);
         c.delete_textures(&[1]);assert!(!c.software_mips.contains_key(&1));
+    }
+
+    #[test]
+    fn flat_stream_uses_fresh_host_snapshots_and_sparse_indices_fall_back() {
+        let mut c=Context::new(8,8);
+        let mut bytes=Vec::new();
+        for i in 0..4 {for v in [i as f32,0.,0.] {bytes.extend(v.to_le_bytes());}}
+        let colors=bytes.len();for i in 0..4 {bytes.extend([i,10,20,255]);}
+        c.prepared_arrays.push((BASE,bytes));
+        c.vertex_array=ArrayPointer{enabled:true,size:3,ty:GL_FLOAT,stride:0,pointer:BASE,buffer:0};
+        c.color_array=ArrayPointer{enabled:true,size:4,ty:GL_UNSIGNED_BYTE,stride:0,pointer:BASE+colors as u32,buffer:0};
+        let indices=[2,0,3,3,0,1];
+        let mut source=crate::gpu::VertexStream::default();let mut out=crate::gpu::VertexStream::default();
+        assert!(c.prepare_vertex_stream(&mut source,indices.into_iter(),6,false,&[]));
+        assert!(source.expand_flat_triangles(&mut out));
+        let offset=out.attributes[1].unwrap().offset;
+        assert_eq!(out.bytes[offset],3);
+        c.prepared_arrays[0].1[colors+3*4]=42;
+        assert!(c.prepare_vertex_stream(&mut source,indices.into_iter(),6,false,&[]));
+        assert!(source.expand_flat_triangles(&mut out));assert_eq!(out.bytes[offset],42);
+        assert!(!c.prepare_vertex_stream(&mut source,[0,0,3].into_iter(),3,false,&[]));
+        assert!(!source.flat_triangles);
     }
 
     #[test]
