@@ -4246,7 +4246,7 @@ fn global_memory_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     // arenas. Report that actual capacity, not a fixed 24 MiB free estimate.
     // Quota-managed profiles above retain their separate device accounting.
     let total = ctx.kernel.heap.capacity_bytes();
-    let available = ctx.kernel.heap.free_bytes().min(total);
+    let available = ctx.kernel.heap.physical_free_bytes().min(total);
     let load = if total == 0 {
         0
     } else {
@@ -9986,84 +9986,81 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let addr = ctx.arg_u32(0)?;
     let size = ctx.arg_u32(1)?;
 
-    if ctx.kernel.memory_division.is_some() {
-        let kind = ctx.arg_u32(2)?;
-        let protect = ctx.arg_u32(3)?;
-        let prot = match protect {
-            1 => Prot::NONE,
-            2 => Prot::READ,
-            4 => Prot::READ | Prot::WRITE,
-            0x10 => Prot::EXEC,
-            0x20 => Prot::EXEC | Prot::READ,
-            0x40 => Prot::EXEC | Prot::READ | Prot::WRITE,
-            _ => {
-                set_thread_error(ctx, ERROR_INVALID_PARAMETER);
-                return Ok(DispatchOutcome::ReturnedR0(0));
-            }
-        };
-        if kind & !0x3000 != 0 || kind & 0x3000 == 0 {
+    let kind = ctx.arg_u32(2)?;
+    let protect = ctx.arg_u32(3)?;
+    let prot = match protect {
+        1 => Prot::NONE,
+        2 => Prot::READ,
+        4 => Prot::READ | Prot::WRITE,
+        0x10 => Prot::EXEC,
+        0x20 => Prot::EXEC | Prot::READ,
+        0x40 => Prot::EXEC | Prot::READ | Prot::WRITE,
+        _ => {
             set_thread_error(ctx, ERROR_INVALID_PARAMETER);
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
-        let old_block = ctx.kernel.heap.virtual_block(addr);
-        let old = old_block.as_ref().map(|b| b.2.clone()).unwrap_or_default();
-        let Some(base) =
-            ctx.kernel
-                .heap
-                .virtual_alloc(addr, size, kind & 0x2000 != 0, kind & 0x1000 != 0)
-        else {
-            set_thread_error(ctx, 8);
-            return Ok(DispatchOutcome::ReturnedR0(0));
-        };
-        let (block_base, block_size, committed) = ctx.kernel.heap.virtual_block(base).unwrap();
-        let new_reservation = old_block.is_none();
-        let new_ranges = virtual_commit_ranges(committed.difference(&old).copied());
-        let result = (|| -> Result<(), pocket_cpu::CpuError> {
-            if new_reservation {
+    };
+    if kind & !0x3000 != 0 || kind & 0x3000 == 0 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let old_block = ctx.kernel.heap.virtual_block(addr);
+    let old = old_block.as_ref().map(|b| b.2.clone()).unwrap_or_default();
+    let Some(base) =
+        ctx.kernel
+            .heap
+            .virtual_alloc(addr, size, kind & 0x2000 != 0, kind & 0x1000 != 0)
+    else {
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let (block_base, block_size, committed) = ctx.kernel.heap.virtual_block(base).unwrap();
+    let new_reservation = old_block.is_none();
+    let new_ranges = virtual_commit_ranges(committed.difference(&old).copied());
+    let mut mapped_new = false;
+    let result = (|| -> Result<(), pocket_cpu::CpuError> {
+        if new_reservation {
+            if ctx.kernel.heap.external_virtual_block(base) {
+                ctx.cpu.map_region(block_base, block_size, Prot::NONE)?;
+                mapped_new = true;
+            } else {
                 ctx.cpu.protect_region(block_base, block_size, Prot::NONE)?;
             }
-            // Unicorn protection changes flush its TLB. Apply one change per
-            // contiguous range, rather than one flush for each 4 KiB page.
-            for &(start, bytes) in &new_ranges {
-                ctx.cpu.write_mem(start, &vec![0; bytes as usize])?;
-                ctx.cpu.protect_region(start, bytes, prot)?;
-            }
-            Ok(())
-        })();
-        if result.is_err() {
-            if new_reservation {
-                ctx.cpu.protect_region(block_base, block_size, Prot::ALL)?;
-                ctx.kernel.heap.virtual_free(block_base, 0, true);
+        }
+        // Unicorn protection changes flush its TLB. Apply one change per
+        // contiguous range, rather than one flush for each 4 KiB page.
+        for &(start, bytes) in &new_ranges {
+            ctx.cpu.write_mem(start, &vec![0; bytes as usize])?;
+            ctx.cpu.protect_region(start, bytes, prot)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        if new_reservation {
+            if ctx.kernel.heap.external_virtual_block(base) {
+                if mapped_new { ctx.cpu.unmap_region(block_base, block_size)?; }
             } else {
-                for &(start, bytes) in &new_ranges {
-                    ctx.cpu.protect_region(start, bytes, Prot::NONE)?;
-                    ctx.kernel.heap.virtual_free(start, bytes, false);
-                }
+                ctx.cpu.protect_region(block_base, block_size, Prot::ALL)?;
             }
-            set_thread_error(ctx, ERROR_NOT_SUPPORTED);
-            return Ok(DispatchOutcome::ReturnedR0(0));
+            ctx.kernel.heap.virtual_free(block_base, 0, true);
+        } else {
+            for &(start, bytes) in &new_ranges {
+                ctx.cpu.protect_region(start, bytes, Prot::NONE)?;
+                ctx.kernel.heap.virtual_free(start, bytes, false);
+            }
         }
-        log::debug!(
-            "VirtualAlloc addr=0x{addr:08x} size=0x{size:x} type=0x{kind:x} protect=0x{protect:x} -> 0x{base:08x}, reservation=0x{block_base:08x}+0x{block_size:x}, committed_pages={}",
-            committed.len()
-        );
-        return Ok(DispatchOutcome::ReturnedR0(base));
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     }
-
-    // The reserve/commit split does not exist here: a reservation is
-    // already backed by real heap memory. So a commit naming an address
-    // inside a live reservation has nothing left to do and must hand
-    // that same address back. Allocating a second block instead would
-    // double the guest's footprint — a game that reserves 29 MB and
-    // then commits it would consume 58 MB and exhaust the heap on its
-    // next request.
-    if addr != 0 {
-        let fits = ctx.kernel.heap.contains_range(addr, size);
-        if fits {
-            return Ok(DispatchOutcome::ReturnedR0(addr));
-        }
+    if new_reservation { ctx.kernel.heap.set_virtual_allocation_protect(block_base, protect); }
+    for &(start, bytes) in &new_ranges {
+        ctx.kernel.heap.set_virtual_page_protect(start, bytes, protect);
     }
-    do_alloc(ctx, size)
+    log::debug!(
+        "VirtualAlloc addr=0x{addr:08x} size=0x{size:x} type=0x{kind:x} protect=0x{protect:x} -> 0x{base:08x}, reservation=0x{block_base:08x}+0x{block_size:x}, committed_pages={}",
+        committed.len()
+    );
+    Ok(DispatchOutcome::ReturnedR0(base))
 }
 
 fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -10074,9 +10071,6 @@ fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     let size = ctx.arg_u32(1)?;
     let kind = ctx.arg_u32(2)?;
-    if ctx.kernel.memory_division.is_none() {
-        return Ok(DispatchOutcome::ReturnedR0(1));
-    }
     let Some((base, block_size, _)) = ctx.kernel.heap.virtual_block(address) else {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -10096,7 +10090,11 @@ fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    ctx.cpu.protect_region(start, bytes, prot)?;
+    if kind == 0x8000 && ctx.kernel.heap.external_virtual_block(address) {
+        ctx.cpu.unmap_region(start, bytes)?;
+    } else {
+        ctx.cpu.protect_region(start, bytes, prot)?;
+    }
     if !ctx.kernel.heap.virtual_free(address, size, kind == 0x8000) {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -22337,6 +22335,15 @@ fn virtual_query(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if info == 0 || size < 16 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
+    if let Some(words) = ctx.kernel.heap.query_virtual(address) {
+        if size < 28 || ctx.cpu.check_guest_access(info, 28, Prot::WRITE).is_err() {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        ctx.cpu.write_mem(info, &bytes)?;
+        return Ok(DispatchOutcome::ReturnedR0(28));
+    }
     if let Some((base, view)) = ctx.kernel.mapped_views.containing(address) {
         if size < 28 || ctx.cpu.check_guest_access(info, 28, Prot::WRITE).is_err() {
             set_thread_error(ctx, ERROR_INVALID_PARAMETER);
@@ -32598,6 +32605,46 @@ mod tests {
             DispatchOutcome::ReturnedR0(1)
         );
         assert!(!dir.path().join("nested").join("new.dat").exists());
+    }
+
+    #[test]
+    fn host_virtual_reservation_commit_query_and_release() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
+        fn args(ctx: &mut CallCtx<'_>, values: [u32;4]) {
+            for (reg,value) in [ArmReg::R0,ArmReg::R1,ArmReg::R2,ArmReg::R3].into_iter().zip(values) {
+                ctx.cpu.write_reg(reg,value).unwrap();
+            }
+        }
+        let initial = ctx.kernel.heap.physical_free_bytes();
+        args(&mut ctx,[0,0x20000,0x2000,1]);
+        let DispatchOutcome::ReturnedR0(base) = virtual_alloc(&mut ctx).unwrap() else { panic!("reserve"); };
+        assert_ne!(base,0);
+        assert_eq!(ctx.kernel.heap.physical_free_bytes(),initial);
+        assert!(ctx.cpu.check_guest_access(base,1,Prot::READ).is_err());
+        args(&mut ctx,[base,0x1100,28,0]);
+        assert_eq!(virtual_query(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(28));
+        assert_eq!(ctx.cpu.read_u32_le(0x1110).unwrap(),0x2000);
+        args(&mut ctx,[base,4096,0x1000,4]);
+        assert_eq!(virtual_alloc(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(base));
+        assert_eq!(ctx.kernel.heap.physical_free_bytes(),initial-4096);
+        assert!(ctx.cpu.check_guest_access(base,4096,Prot::READ|Prot::WRITE).is_ok());
+        assert!(ctx.cpu.check_guest_access(base+4096,1,Prot::READ).is_err());
+        ctx.cpu.write_mem(base,b"data").unwrap();
+        assert_eq!(virtual_alloc(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(base));
+        assert_eq!(ctx.cpu.read_mem(base,4).unwrap(),b"data".to_vec());
+        args(&mut ctx,[base,4096,0x4000,0]);
+        assert_eq!(virtual_free(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
+        assert!(ctx.cpu.check_guest_access(base,1,Prot::READ).is_err());
+        args(&mut ctx,[base,4096,0x1000,4]);
+        virtual_alloc(&mut ctx).unwrap();
+        assert_eq!(ctx.cpu.read_mem(base,4).unwrap(),vec![0;4]);
+        args(&mut ctx,[base,0,0x8000,0]);
+        assert_eq!(virtual_free(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
+        assert_eq!(ctx.kernel.heap.physical_free_bytes(),initial);
+        assert!(ctx.cpu.read_mem(base,1).is_err());
     }
 
     #[test]

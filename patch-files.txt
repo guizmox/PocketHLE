@@ -1,9 +1,4 @@
-crates\pocket-library\src\lib.rs
-frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcButtonOrder.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControls.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\StylusControlsDialog.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcButtonOrderTest.kt
-frontends\pocket-desktop\src\app.rs
+crates\pocket-kernel\src\heap_virtual_tests.rs
+crates\pocket-kernel\src\lib.rs
+crates\pocket-winceapi\src\coredll.rs
+docs\VIRTUAL_MEMORY.md

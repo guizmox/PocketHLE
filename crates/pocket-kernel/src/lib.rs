@@ -56,6 +56,8 @@ pub mod image_memory;
 pub mod imaging;
 pub mod internet;
 pub mod memory_division;
+#[cfg(test)]
+mod heap_virtual_tests;
 pub mod msgbox;
 pub mod native_thunks;
 pub mod power;
@@ -2835,6 +2837,11 @@ pub struct Heap {
 struct VirtualBlock {
     size: u32,
     committed: std::collections::HashSet<u32>,
+    // For independent VA reservations, virtual page -> charged arena page.
+    // These are accounting tokens; their arena addresses are never exposed.
+    backing: Option<HashMap<u32, u32>>,
+    allocation_protect: u32,
+    protection: HashMap<u32, u32>,
 }
 
 impl Drop for Heap {
@@ -2847,6 +2854,11 @@ impl Drop for Heap {
 
 const HEAP_HEADER_BYTES: u32 = 8;
 const HEAP_ALIGN: u32 = 8;
+// HLE shared allocation VA, above the original heap and below the legacy
+// stack. File views start at 0x60000000; runtime modules end at 0x50000000.
+// This is address space, not additional emulated physical RAM.
+const HOST_VIRTUAL_BASE: u32 = 0x5400_0000;
+const HOST_VIRTUAL_END: u32 = 0x5f00_0000;
 
 impl Heap {
     pub fn new(base: u32, size: u32) -> Self {
@@ -3191,19 +3203,22 @@ impl Heap {
             let needed: Vec<u32> = (start / 4096..end / 4096)
                 .filter(|p| !block.committed.contains(p))
                 .collect();
-            // One reservation cannot overlap another block, so all these
-            // physical pages are new. Validate before changing any state.
-            if self
-                .ram
-                .as_ref()
-                .is_some_and(|ram| !ram.acquire_program(needed.len() as u32))
-            {
-                return None;
-            }
-            let block = self.virtual_blocks.get_mut(&base)?;
-            for page in needed {
-                block.committed.insert(page);
-                self.page_refs.insert(page, 1);
+            if block.backing.is_some() {
+                let pages = self.take_virtual_backing(needed.len())?;
+                let block = self.virtual_blocks.get_mut(&base)?;
+                for (page, backing) in needed.into_iter().zip(pages) {
+                    block.committed.insert(page);
+                    block.backing.as_mut().unwrap().insert(page, backing);
+                }
+            } else {
+                if self.ram.as_ref().is_some_and(|ram| !ram.acquire_program(needed.len() as u32)) {
+                    return None;
+                }
+                let block = self.virtual_blocks.get_mut(&base)?;
+                for page in needed {
+                    block.committed.insert(page);
+                    self.page_refs.insert(page, 1);
+                }
             }
             return Some(start);
         }
@@ -3215,6 +3230,33 @@ impl Heap {
         };
         let commit_size = size.checked_add(address & 0xfff)?.checked_add(4095)? & !0xfff;
         let size = size.checked_add(offset)?.checked_add(0xffff)? & !0xffff;
+        // Host-backed processes have a separate VA window. Reserving it
+        // consumes no arena pages; only a later commit consumes backing.
+        if self.ram.is_none() && (address == 0 || (HOST_VIRTUAL_BASE..HOST_VIRTUAL_END).contains(&base_requested)) {
+            let mut base = if address == 0 { HOST_VIRTUAL_BASE } else { base_requested };
+            let mut blocks: Vec<_> = self.virtual_blocks.iter().map(|(&b,v)| (b,v.size)).collect();
+            blocks.sort_unstable();
+            for (other, len) in blocks {
+                if base.checked_add(size)? <= other { break; }
+                if base < other.checked_add(len)? && base.checked_add(size)? > other {
+                    if address != 0 { return None; }
+                    base = other.checked_add(len)?;
+                }
+            }
+            if base.checked_add(size)? > HOST_VIRTUAL_END { return None; }
+            self.virtual_blocks.insert(base, VirtualBlock {
+                size, committed: Default::default(), backing: Some(HashMap::new()),
+                allocation_protect: 0, protection: HashMap::new(),
+            });
+            if commit {
+                let start = if address == 0 { base } else { address & !0xfff };
+                if self.virtual_alloc(start, commit_size, false, true).is_none() {
+                    self.virtual_blocks.remove(&base);
+                    return None;
+                }
+            }
+            return Some(base);
+        }
         for i in 0..self.free.len() {
             let (start, len) = self.free[i];
             let base = if address == 0 {
@@ -3242,6 +3284,8 @@ impl Heap {
                 base,
                 VirtualBlock {
                     size,
+                    backing: None,
+                    allocation_protect: 0, protection: HashMap::new(),
                     committed: if commit {
                         (commit_start / 4096..(commit_start + commit_size) / 4096).collect()
                     } else {
@@ -3270,10 +3314,14 @@ impl Heap {
             let Some(block) = self.virtual_blocks.remove(&address) else {
                 return false;
             };
-            for page in block.committed {
-                self.release_pages(page * 4096, 4096);
+            if let Some(backing) = block.backing {
+                self.return_virtual_backing(backing.into_values().collect());
+            } else {
+                for page in block.committed {
+                    self.release_pages(page * 4096, 4096);
+                }
+                self.free.push((address, block.size));
             }
-            self.free.push((address, block.size));
             self.free.sort_unstable_by_key(|r| r.0);
             let mut merged: Vec<(u32, u32)> = Vec::new();
             for (start, len) in self.free.drain(..) {
@@ -3315,15 +3363,112 @@ impl Heap {
         let removed: Vec<u32> = (start / 4096..end / 4096)
             .filter(|p| block.committed.contains(p))
             .collect();
+        let mut backing_pages = Vec::new();
         for page in removed {
-            self.virtual_blocks
-                .get_mut(&base)
-                .unwrap()
-                .committed
-                .remove(&page);
-            self.release_pages(page * 4096, 4096);
+            let block = self.virtual_blocks.get_mut(&base).unwrap();
+            block.committed.remove(&page);
+            block.protection.remove(&page);
+            if let Some(backing) = &mut block.backing {
+                backing_pages.push(backing.remove(&page).unwrap());
+            } else {
+                self.release_pages(page * 4096, 4096);
+            }
         }
+        self.return_virtual_backing(backing_pages);
         true
+    }
+
+    pub fn set_virtual_allocation_protect(&mut self, base: u32, protect: u32) {
+        if let Some(block) = self.virtual_blocks.get_mut(&base) { block.allocation_protect = protect; }
+    }
+    pub fn set_virtual_page_protect(&mut self, address: u32, size: u32, protect: u32) {
+        if let Some((_, block)) = self.virtual_blocks.iter_mut().find(|(base, block)|
+            address >= **base && address < **base + block.size) {
+            for page in address/4096..(address+size)/4096 {
+                if block.committed.contains(&page) { block.protection.insert(page, protect); }
+            }
+        }
+    }
+    /// MEMORY_BASIC_INFORMATION, ending at the next state/protection transition.
+    pub fn query_virtual(&self, address: u32) -> Option<[u32;7]> {
+        let (&base, block) = self.virtual_blocks.iter().find(|&(base, block)|
+            address >= *base && address < *base + block.size)?;
+        let first = address/4096;
+        let committed = block.committed.contains(&first);
+        let protect = if committed { *block.protection.get(&first).unwrap_or(&4) } else { 0 };
+        let mut end = first + 1;
+        while end < (base+block.size)/4096 {
+            if block.committed.contains(&end) != committed { break; }
+            if committed && *block.protection.get(&end).unwrap_or(&4) != protect { break; }
+            end += 1;
+        }
+        Some([first*4096,base,block.allocation_protect,(end-first)*4096,
+            if committed {0x1000} else {0x2000},protect,0x20000])
+    }
+
+    /// Independent VA mappings must be created/unmapped by the CPU backend.
+    pub fn external_virtual_block(&self, address: u32) -> bool {
+        self.virtual_blocks.iter().any(|(&base, block)| {
+            address >= base && address < base + block.size && block.backing.is_some()
+        })
+    }
+
+    /// Free RAM includes uncommitted reservations in the original arenas.
+    /// Independent VA reservations never enter the arena free list at all.
+    pub fn physical_free_bytes(&self) -> u32 {
+        let reserved: u64 = self.virtual_blocks.values().filter(|b| b.backing.is_none())
+            .map(|b| u64::from(b.size) - b.committed.len() as u64 * 4096).sum();
+        (u64::from(self.free_bytes()) + reserved).min(u64::from(self.capacity_bytes())) as u32
+    }
+
+    // Reserve page-aligned accounting tokens from any number of free arena
+    // extents. Build a complete plan before changing state (commit is atomic).
+    fn take_virtual_backing(&mut self, count: usize) -> Option<Vec<u32>> {
+        let mut remaining = count;
+        let mut plan = Vec::new();
+        for &(start, len) in &self.free {
+            let first = start.checked_add(4095)? & !4095;
+            let end = (start + len) & !4095;
+            let available = end.saturating_sub(first) as usize / 4096;
+            let take = remaining.min(available);
+            if take > 0 { plan.push((first, take as u32 * 4096)); remaining -= take; }
+            if remaining == 0 { break; }
+        }
+        if remaining != 0 { return None; }
+        let mut acquired = Vec::new();
+        for &(start, len) in &plan {
+            if !self.retain_pages(start, len) {
+                for (start,len) in acquired { self.release_pages(start,len); }
+                return None;
+            }
+            acquired.push((start,len));
+        }
+        let mut pages = Vec::with_capacity(count);
+        for (start,len) in plan {
+            let index = self.free.iter().position(|&(s,n)| start >= s && start + len <= s + n).unwrap();
+            let (old, old_len) = self.free.remove(index);
+            if old < start { self.free.push((old,start-old)); }
+            if start + len < old + old_len { self.free.push((start+len, old+old_len-start-len)); }
+            pages.extend(start/4096..(start+len)/4096);
+        }
+        self.free.sort_unstable_by_key(|r|r.0);
+        Some(pages)
+    }
+
+    fn return_virtual_backing(&mut self, pages: Vec<u32>) {
+        for page in pages {
+            self.release_pages(page*4096,4096);
+            self.free.push((page*4096,4096));
+        }
+        self.free.sort_unstable_by_key(|r|r.0);
+        let mut merged: Vec<(u32,u32)> = Vec::new();
+        for (start,len) in self.free.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if last.0 + last.1 == start { last.1 += len; continue; }
+            }
+            merged.push((start,len));
+        }
+        self.free=merged;
     }
 
     pub fn has_private_arena(&self) -> bool {
