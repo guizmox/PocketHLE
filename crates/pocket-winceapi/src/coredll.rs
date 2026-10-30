@@ -237,6 +237,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "__ull_to_d", soft_u64tod);
     // MIPS CE uses the dividend-first 64-bit helper and returns v0:v1.
     d.register_handler(dll, "__ull_div", rt_udiv64by64);
+    d.register_handler(dll, "__ll_div", rt_sdiv64by64);
+    d.register_handler(dll, "__ll_mul", mips_ll_mul);
     d.register_handler(dll, "__f_to_ll", soft_stoi64);
     d.register_handler(dll, "__d_to_ll", soft_dtoi64);
     d.register_handler(dll, "__f_to_ull", soft_stou64);
@@ -2861,18 +2863,23 @@ fn get_system_power_status_ex2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     Ok(DispatchOutcome::ReturnedR0(if success { 56 } else { 0 }))
 }
 
-
 /// Read a bounded, terminated CE device/system-state name. Invalid guest
 /// pointers are API failures, rather than fatal CPU memory faults.
 fn power_requirement_name(ctx: &mut CallCtx<'_>, pointer: u32) -> Option<String> {
-    if pointer == 0 { return None; }
+    if pointer == 0 {
+        return None;
+    }
     let mut units = Vec::new();
     for offset in 0..1024u32 {
         let address = pointer.checked_add(offset * 2)?;
         let bytes = ctx.cpu.read_mem(address, 2).ok()?;
         let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
         if unit == 0 {
-            return if units.is_empty() { None } else { String::from_utf16(&units).ok() };
+            return if units.is_empty() {
+                None
+            } else {
+                String::from_utf16(&units).ok()
+            };
         }
         units.push(unit);
     }
@@ -2893,18 +2900,32 @@ fn set_power_requirement(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let system_state = if system_pointer == 0 { None } else {
+    let system_state = if system_pointer == 0 {
+        None
+    } else {
         let Some(name) = power_requirement_name(ctx, system_pointer) else {
             set_thread_error(ctx, ERROR_INVALID_PARAMETER);
             return Ok(DispatchOutcome::ReturnedR0(0));
         };
         Some(name)
     };
-    let result = ctx.kernel.power_notifications.requirements.acquire(
-        pocket_kernel::power::Requirement { device, state, device_flags, system_state, state_flags });
+    let result =
+        ctx.kernel
+            .power_notifications
+            .requirements
+            .acquire(pocket_kernel::power::Requirement {
+                device,
+                state,
+                device_flags,
+                system_state,
+                state_flags,
+            });
     Ok(DispatchOutcome::ReturnedR0(match result {
         Ok(handle) => handle,
-        Err(error) => { set_thread_error(ctx, error); 0 }
+        Err(error) => {
+            set_thread_error(ctx, error);
+            0
+        }
     }))
 }
 
@@ -9850,6 +9871,17 @@ fn rt_udiv64by64(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0R1(q as u32, (q >> 32) as u32))
 }
 
+/// Low 64 bits of the product; signed and unsigned multiplication agree here.
+fn mips_ll_mul(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let a = u64::from(ctx.arg_u32(0)?) | (u64::from(ctx.arg_u32(1)?) << 32);
+    let b = u64::from(ctx.arg_u32(2)?) | (u64::from(ctx.arg_u32(3)?) << 32);
+    let product = a.wrapping_mul(b);
+    Ok(DispatchOutcome::ReturnedR0R1(
+        product as u32,
+        (product >> 32) as u32,
+    ))
+}
+
 /// `__rt_sdiv64by64(int64 dividend, int64 divisor)` — quotient in `r0:r1`.
 fn rt_sdiv64by64(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let n = ((ctx.arg_u32(1)? as u64) << 32 | ctx.arg_u32(0)? as u64) as i64;
@@ -10095,7 +10127,9 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if result.is_err() {
         if new_reservation {
             if ctx.kernel.heap.external_virtual_block(base) {
-                if mapped_new { ctx.cpu.unmap_region(block_base, block_size)?; }
+                if mapped_new {
+                    ctx.cpu.unmap_region(block_base, block_size)?;
+                }
             } else {
                 ctx.cpu.protect_region(block_base, block_size, Prot::ALL)?;
             }
@@ -10109,9 +10143,15 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         set_thread_error(ctx, ERROR_NOT_SUPPORTED);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if new_reservation { ctx.kernel.heap.set_virtual_allocation_protect(block_base, protect); }
+    if new_reservation {
+        ctx.kernel
+            .heap
+            .set_virtual_allocation_protect(block_base, protect);
+    }
     for &(start, bytes) in &new_ranges {
-        ctx.kernel.heap.set_virtual_page_protect(start, bytes, protect);
+        ctx.kernel
+            .heap
+            .set_virtual_page_protect(start, bytes, protect);
     }
     log::debug!(
         "VirtualAlloc addr=0x{addr:08x} size=0x{size:x} type=0x{kind:x} protect=0x{protect:x} -> 0x{base:08x}, reservation=0x{block_base:08x}+0x{block_size:x}, committed_pages={}",
@@ -12330,7 +12370,9 @@ fn control_message(
 /// AYGSHELL's void SHSendBackToFocusWindow(UINT, WPARAM, LPARAM).
 /// Tail-call the normal synchronous SendMessage path, including native child
 /// procedures. The guest caller's LR remains the return address.
-pub(crate) fn send_back_to_focus_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn send_back_to_focus_window(
+    ctx: &mut CallCtx<'_>,
+) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = finish_control_notify(ctx)? {
         return Ok(outcome);
     }
@@ -32686,39 +32728,69 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        let mut ctx = CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk };
-        fn args(ctx: &mut CallCtx<'_>, values: [u32;4]) {
-            for (reg,value) in [ArmReg::R0,ArmReg::R1,ArmReg::R2,ArmReg::R3].into_iter().zip(values) {
-                ctx.cpu.write_reg(reg,value).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        fn args(ctx: &mut CallCtx<'_>, values: [u32; 4]) {
+            for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+                .into_iter()
+                .zip(values)
+            {
+                ctx.cpu.write_reg(reg, value).unwrap();
             }
         }
         let initial = ctx.kernel.heap.physical_free_bytes();
-        args(&mut ctx,[0,0x20000,0x2000,1]);
-        let DispatchOutcome::ReturnedR0(base) = virtual_alloc(&mut ctx).unwrap() else { panic!("reserve"); };
-        assert_ne!(base,0);
-        assert_eq!(ctx.kernel.heap.physical_free_bytes(),initial);
-        assert!(ctx.cpu.check_guest_access(base,1,Prot::READ).is_err());
-        args(&mut ctx,[base,0x1100,28,0]);
-        assert_eq!(virtual_query(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(28));
-        assert_eq!(ctx.cpu.read_u32_le(0x1110).unwrap(),0x2000);
-        args(&mut ctx,[base,4096,0x1000,4]);
-        assert_eq!(virtual_alloc(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(base));
-        assert_eq!(ctx.kernel.heap.physical_free_bytes(),initial-4096);
-        assert!(ctx.cpu.check_guest_access(base,4096,Prot::READ|Prot::WRITE).is_ok());
-        assert!(ctx.cpu.check_guest_access(base+4096,1,Prot::READ).is_err());
-        ctx.cpu.write_mem(base,b"data").unwrap();
-        assert_eq!(virtual_alloc(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(base));
-        assert_eq!(ctx.cpu.read_mem(base,4).unwrap(),b"data".to_vec());
-        args(&mut ctx,[base,4096,0x4000,0]);
-        assert_eq!(virtual_free(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
-        assert!(ctx.cpu.check_guest_access(base,1,Prot::READ).is_err());
-        args(&mut ctx,[base,4096,0x1000,4]);
+        args(&mut ctx, [0, 0x20000, 0x2000, 1]);
+        let DispatchOutcome::ReturnedR0(base) = virtual_alloc(&mut ctx).unwrap() else {
+            panic!("reserve");
+        };
+        assert_ne!(base, 0);
+        assert_eq!(ctx.kernel.heap.physical_free_bytes(), initial);
+        assert!(ctx.cpu.check_guest_access(base, 1, Prot::READ).is_err());
+        args(&mut ctx, [base, 0x1100, 28, 0]);
+        assert_eq!(
+            virtual_query(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(28)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1110).unwrap(), 0x2000);
+        args(&mut ctx, [base, 4096, 0x1000, 4]);
+        assert_eq!(
+            virtual_alloc(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(base)
+        );
+        assert_eq!(ctx.kernel.heap.physical_free_bytes(), initial - 4096);
+        assert!(ctx
+            .cpu
+            .check_guest_access(base, 4096, Prot::READ | Prot::WRITE)
+            .is_ok());
+        assert!(ctx
+            .cpu
+            .check_guest_access(base + 4096, 1, Prot::READ)
+            .is_err());
+        ctx.cpu.write_mem(base, b"data").unwrap();
+        assert_eq!(
+            virtual_alloc(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(base)
+        );
+        assert_eq!(ctx.cpu.read_mem(base, 4).unwrap(), b"data".to_vec());
+        args(&mut ctx, [base, 4096, 0x4000, 0]);
+        assert_eq!(
+            virtual_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(ctx.cpu.check_guest_access(base, 1, Prot::READ).is_err());
+        args(&mut ctx, [base, 4096, 0x1000, 4]);
         virtual_alloc(&mut ctx).unwrap();
-        assert_eq!(ctx.cpu.read_mem(base,4).unwrap(),vec![0;4]);
-        args(&mut ctx,[base,0,0x8000,0]);
-        assert_eq!(virtual_free(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(1));
-        assert_eq!(ctx.kernel.heap.physical_free_bytes(),initial);
-        assert!(ctx.cpu.read_mem(base,1).is_err());
+        assert_eq!(ctx.cpu.read_mem(base, 4).unwrap(), vec![0; 4]);
+        args(&mut ctx, [base, 0, 0x8000, 0]);
+        assert_eq!(
+            virtual_free(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.kernel.heap.physical_free_bytes(), initial);
+        assert!(ctx.cpu.read_mem(base, 1).is_err());
     }
 
     #[test]
@@ -41260,18 +41332,58 @@ mod power_requirement_api_tests {
     #[test]
     fn requirements_use_the_ce_abi_and_release_returns_a_status() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
-        cpu.write_mem(0x2000, &"LCD1:\0".encode_utf16()
-            .flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();
-        let DispatchOutcome::ReturnedR0(handle) = call(&mut cpu, &mut kernel,
-            &mut dispatcher, "coredll.dll", "SetPowerRequirement", &[0x2000, 0, 1, 0, 0])
-            else { panic!("expected a handle"); };
+        cpu.write_mem(
+            0x2000,
+            &"LCD1:\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let DispatchOutcome::ReturnedR0(handle) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "SetPowerRequirement",
+            &[0x2000, 0, 1, 0, 0],
+        ) else {
+            panic!("expected a handle");
+        };
         assert_ne!(handle, 0);
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll",
-            "ReleasePowerRequirement", &[handle]), DispatchOutcome::ReturnedR0(0));
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll",
-            "ReleasePowerRequirement", &[handle]), DispatchOutcome::ReturnedR0(6));
-        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll",
-            "SetPowerRequirement", &[0xfffffff0, 0, 1, 0, 0]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "ReleasePowerRequirement",
+                &[handle]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "ReleasePowerRequirement",
+                &[handle]
+            ),
+            DispatchOutcome::ReturnedR0(6)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "SetPowerRequirement",
+                &[0xfffffff0, 0, 1, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(kernel.thread_last_errors[&kernel.current_thread], 87);
     }
 }
@@ -41279,32 +41391,53 @@ mod power_requirement_api_tests {
 #[cfg(test)]
 mod variadic_abi_tests {
     use super::*;
-    use pocket_cpu::{stub::StubCpu, Arch, Cpu, CpuError, StopReason};
     use pocket_cpu::regs::ArmReg;
+    use pocket_cpu::{stub::StubCpu, Arch, Cpu, CpuError, StopReason};
 
     // Keep the same deterministic memory/register fixture for both ABIs.
     // Only the architecture (and thus the stack home area) changes.
     struct AbiCpu(StubCpu, Arch);
     impl Cpu for AbiCpu {
-        fn arch(&self) -> Arch { self.1 }
+        fn arch(&self) -> Arch {
+            self.1
+        }
         fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError> {
             self.0.map_region(va, size, prot)
         }
-        fn write_mem(&mut self, va: u32, bytes: &[u8]) -> Result<(), CpuError> { self.0.write_mem(va, bytes) }
-        fn read_mem(&mut self, va: u32, size: u32) -> Result<Vec<u8>, CpuError> { self.0.read_mem(va, size) }
-        fn read_reg(&mut self, reg: ArmReg) -> Result<u32, CpuError> { self.0.read_reg(reg) }
-        fn write_reg(&mut self, reg: ArmReg, value: u32) -> Result<(), CpuError> { self.0.write_reg(reg, value) }
-        fn add_code_hook(&mut self, va: u32) -> Result<(), CpuError> { self.0.add_code_hook(va) }
-        fn add_instruction_hook(&mut self, va: u32) -> Result<(), CpuError> { self.0.add_instruction_hook(va) }
-        fn add_code_hook_range(&mut self, lo: u32, hi: u32) -> Result<(), CpuError> { self.0.add_code_hook_range(lo, hi) }
-        fn run_until_hook(&mut self, va: u32, limit: u64) -> Result<StopReason, CpuError> { self.0.run_until_hook(va, limit) }
-        fn request_stop(&mut self) { self.0.request_stop(); }
+        fn write_mem(&mut self, va: u32, bytes: &[u8]) -> Result<(), CpuError> {
+            self.0.write_mem(va, bytes)
+        }
+        fn read_mem(&mut self, va: u32, size: u32) -> Result<Vec<u8>, CpuError> {
+            self.0.read_mem(va, size)
+        }
+        fn read_reg(&mut self, reg: ArmReg) -> Result<u32, CpuError> {
+            self.0.read_reg(reg)
+        }
+        fn write_reg(&mut self, reg: ArmReg, value: u32) -> Result<(), CpuError> {
+            self.0.write_reg(reg, value)
+        }
+        fn add_code_hook(&mut self, va: u32) -> Result<(), CpuError> {
+            self.0.add_code_hook(va)
+        }
+        fn add_instruction_hook(&mut self, va: u32) -> Result<(), CpuError> {
+            self.0.add_instruction_hook(va)
+        }
+        fn add_code_hook_range(&mut self, lo: u32, hi: u32) -> Result<(), CpuError> {
+            self.0.add_code_hook_range(lo, hi)
+        }
+        fn run_until_hook(&mut self, va: u32, limit: u64) -> Result<StopReason, CpuError> {
+            self.0.run_until_hook(va, limit)
+        }
+        fn request_stop(&mut self) {
+            self.0.request_stop();
+        }
     }
     #[test]
     fn printf_reads_stack_arguments_after_the_architecture_home_area() {
         for arch in [Arch::Arm, Arch::Mips] {
             let mut cpu = AbiCpu(StubCpu::new(), arch);
-            cpu.map_region(0x1000, 0x3000, Prot::READ | Prot::WRITE).unwrap();
+            cpu.map_region(0x1000, 0x3000, Prot::READ | Prot::WRITE)
+                .unwrap();
             cpu.write_reg(ArmReg::Sp, 0x3000).unwrap();
             // Poison MIPS's a0-a3 home area: it contains no extra arguments.
             cpu.write_mem(0x3000, &[0xa5; 32]).unwrap();
@@ -41317,11 +41450,21 @@ mod variadic_abi_tests {
             cpu.write_reg(ArmReg::R3, 0x1300).unwrap();
             let mut kernel = crate::gx::tests::fresh_kernel();
             let thunk = pocket_kernel::Thunk {
-                thunk_va: 0, iat_va: 0, dll: "coredll.dll".into(),
-                binding: pocket_pe::ImportBinding::Name("sprintf".into()), friendly_name: None,
+                thunk_va: 0,
+                iat_va: 0,
+                dll: "coredll.dll".into(),
+                binding: pocket_pe::ImportBinding::Name("sprintf".into()),
+                friendly_name: None,
             };
-            let mut ctx = CallCtx {cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk};
-            assert_eq!(render_printf(&mut ctx, "%s%s%04u-%u", false, 2).unwrap(), "images/loading_0007-9");
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                render_printf(&mut ctx, "%s%s%04u-%u", false, 2).unwrap(),
+                "images/loading_0007-9"
+            );
             assert_eq!(read_vararg_u32(&mut ctx, 4).unwrap(), 7);
             assert_eq!(read_vararg_u32(&mut ctx, 5).unwrap(), 9);
         }
@@ -41344,9 +41487,60 @@ mod unsigned_division_helper_tests {
             (0x1234_5678_9abc_def0, 0x1_0000_0001, 0x1234_5678),
             (0, 17, 0),
         ] {
-            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "__ull_div",
-                &[dividend as u32, (dividend >> 32) as u32, divisor as u32, (divisor >> 32) as u32]),
-                DispatchOutcome::ReturnedR0R1(quotient as u32, (quotient >> 32) as u32));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "__ull_div",
+                    &[
+                        dividend as u32,
+                        (dividend >> 32) as u32,
+                        divisor as u32,
+                        (divisor >> 32) as u32
+                    ]
+                ),
+                DispatchOutcome::ReturnedR0R1(quotient as u32, (quotient >> 32) as u32)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod signed_long_long_helper_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_kernel::DispatchOutcome;
+
+    #[test]
+    fn signed_division_and_wrapping_multiplication_preserve_both_words() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (name, a, b, expected) in [
+            ("__ll_div", 180i64 << 32, 0xb40000i64, 65536i64),
+            ("__ll_div", 300i64 << 32, 0xf00000, 81920),
+            ("__ll_div", i64::MIN, -1, i64::MIN),
+            ("__ll_div", -9223372036854775807, 3, -3074457345618258602),
+            ("__ll_div", 55, -7, -7),
+            ("__ll_mul", -255, 65536, -16711680),
+            ("__ll_mul", i64::MAX, 2, -2),
+            ("__ll_mul", 0x100000001, 0x100000001, 0x200000001),
+        ] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    name,
+                    &[
+                        a as u32,
+                        (a as u64 >> 32) as u32,
+                        b as u32,
+                        (b as u64 >> 32) as u32
+                    ]
+                ),
+                DispatchOutcome::ReturnedR0R1(expected as u32, (expected as u64 >> 32) as u32)
+            );
         }
     }
 }

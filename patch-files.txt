@@ -1,1 +1,5 @@
-crates\pocket-cpu\src\unicorn.rs
+crates\pocket-kernel\src\audio.rs
+crates\pocket-kernel\src\audio_conversion.rs
+crates\pocket-winceapi\src\lib.rs
+crates\pocket-winceapi\src\acm.rs
+crates\pocket-winceapi\src\coredll.rs

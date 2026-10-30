@@ -14,6 +14,9 @@
 //! mixed PCM through AudioTap (Android); headless completion uses a wall
 //! clock when no output device consumes samples.
 
+#[path = "audio_conversion.rs"]
+pub mod conversion;
+
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -676,6 +679,7 @@ impl WavCapture {
 /// [`AudioEngine::start`] / [`AudioEngine::stop`] hand additional
 /// clones to the cpal callback.
 pub struct AudioEngine {
+    pub conversions: conversion::Streams,
     shared: Arc<Mutex<Shared>>,
     /// Whether the audio worker thread is alive. The thread itself
     /// owns the cpal `Stream` (which is `!Send` on some platforms),
@@ -713,6 +717,7 @@ impl std::fmt::Debug for AudioEngine {
 impl AudioEngine {
     pub fn new() -> Self {
         Self {
+            conversions: conversion::Streams::default(),
             shared: Arc::new(Mutex::new(Shared::new())),
             worker: None,
             #[cfg(feature = "audio-cpal")]

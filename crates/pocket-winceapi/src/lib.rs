@@ -20,6 +20,7 @@
 //! is absent, for compatibility with incomplete distributions.
 
 mod accelerators;
+mod acm;
 pub mod aygshell;
 #[cfg(test)]
 mod backlight_tests;
@@ -279,6 +280,7 @@ impl WinCeDispatcher {
             dependency_reported: Default::default(),
         };
         coredll::register(&mut d);
+        acm::register(&mut d);
         mfc::register(&mut d);
         bluetooth::register(&mut d);
         vibration::register(&mut d);
