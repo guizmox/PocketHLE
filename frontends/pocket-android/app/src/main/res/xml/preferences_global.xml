@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
  <PreferenceScreen android:key="emulator_options" android:title="Emulator Settings">
+  <PreferenceCategory android:key="graphics_options" android:title="Graphics" android:order="10"/>
+  <PreferenceCategory android:key="diagnostic_options" android:title="Diagnostics" android:order="20">
   <SeekBarPreference android:key="verbosity" android:title="Log verbosity" android:max="3" app:min="0" app:showSeekBarValue="true"/>
+  </PreferenceCategory>
+  <PreferenceCategory android:key="misc_options" android:title="Misc" android:order="30">
   <Preference android:key="library_root" android:title="Game library folder" android:selectable="false"/>
+  </PreferenceCategory>
  </PreferenceScreen>
  <PreferenceScreen android:key="display_options" android:title="Display and controls">
   <SeekBarPreference android:key="controls_opacity" android:title="Control opacity" android:max="100" app:min="10" app:showSeekBarValue="true"/>

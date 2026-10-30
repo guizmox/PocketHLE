@@ -1096,6 +1096,9 @@ pub struct LauncherConfig {
     /// Android-wide size of the PocketPC D-pad and stylus stick only.
     #[serde(default)]
     pub android_pocketpc_controls_size: PocketPcControlsSize,
+    /// Android-wide size of the Gizmondo D-pad (there is no stylus stick).
+    #[serde(default)]
+    pub android_gizmondo_controls_size: PocketPcControlsSize,
     #[serde(default)]
     pub optimizations: OptimizationSettings,
 }
@@ -1296,6 +1299,7 @@ impl Default for LauncherConfig {
             show_backend_log: default_show_backend_log(),
             controls_opacity: default_controls_opacity(),
             android_pocketpc_controls_size: PocketPcControlsSize::Normal,
+            android_gizmondo_controls_size: PocketPcControlsSize::Normal,
             optimizations: OptimizationSettings::default(),
         }
     }
@@ -4076,6 +4080,32 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gizmondo_control_size_is_global_independent_and_backward_compatible() {
+        use super::*;
+        let mut old = serde_json::to_value(LauncherConfig::default()).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("android_gizmondo_controls_size");
+        let mut config: LauncherConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            config.android_gizmondo_controls_size,
+            PocketPcControlsSize::Normal
+        );
+        config.android_gizmondo_controls_size = PocketPcControlsSize::Big;
+        let saved = serde_json::to_string(&config).unwrap();
+        let restored: LauncherConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.android_gizmondo_controls_size,
+            PocketPcControlsSize::Big
+        );
+        assert_eq!(
+            restored.android_pocketpc_controls_size,
+            PocketPcControlsSize::Normal
+        );
+        assert_eq!(restored.optimizations, OptimizationSettings::default());
+    }
+
     #[test]
     fn optimization_defaults_and_independent_roundtrip() {
         use super::*;

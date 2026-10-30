@@ -41,6 +41,10 @@ class SettingsActivity : AppCompatActivity() {
                 key = "gizmondo_options"; title = "Gizmondo options"
             }
             preferenceScreen.addPreference(giz)
+            val ppc = androidx.preference.PreferenceScreen(requireContext(), null).apply {
+                key = "pocketpc_options"; title = "PocketPC options"
+            }
+            preferenceScreen.addPreference(ppc)
             fun identityField(screen: androidx.preference.PreferenceScreen, name: String, label: String) {
                 screen.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                     key = name; title = label; isPersistent = false
@@ -84,6 +88,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             val emulator = findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!
             val optimizations=androidx.preference.PreferenceCategory(requireContext()).apply { title="Optimizations" }
+            optimizations.order = 10000
             emulator.addPreference(optimizations)
             fun optimization(name: String, label: String, help: String) {
                 optimizations.addPreference(SwitchPreferenceCompat(requireContext()).apply {
@@ -103,8 +108,8 @@ class SettingsActivity : AppCompatActivity() {
             optimization("extended_tlb_cache","Extended memory translation cache","Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.")
             optimization("responsive_scheduling","Responsive thread scheduling","Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.")
             optimization("extended_jump_cache","Extended jump cache","Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.")
-            val pocketpc=androidx.preference.PreferenceCategory(requireContext()).apply { title="PocketPC" }
-            emulator.addPreference(pocketpc)
+            val pocketpc=androidx.preference.PreferenceCategory(requireContext()).apply { title="Device profile" }
+            ppc.addPreference(pocketpc)
             pocketpc.addPreference(ListPreference(requireContext()).apply {
                 key="pocketpc_processor"; title="Processor profile"; isPersistent=false
                 entries=arrayOf("Intel PXA270 (Dell Axim X51v)","Intel PXA255","StrongARM SA-1110","Generic ARM")
@@ -121,8 +126,8 @@ class SettingsActivity : AppCompatActivity() {
                     writeConfig();true
                 }
             })
-            identityField(emulator, "device_preset_id", "Device name (Preset ID — WinCE)")
-            identityField(emulator, "device_platform_id", "Console identifier (Platform ID — hexadecimal, WinCE)")
+            identityField(ppc, "device_preset_id", "Device name (Preset ID — WinCE)")
+            identityField(ppc, "device_platform_id", "Console identifier (Platform ID — hexadecimal, WinCE)")
             identityField(giz, "gizmondo_preset_id", "Device name (Preset ID — Gizmondo)")
             identityField(giz, "gizmondo_platform_id", "Console identifier (Platform ID — hexadecimal, Gizmondo)")
             fun toggle(keyName: String, label: String, checked: Boolean, update: (Boolean) -> Unit) {
@@ -184,18 +189,24 @@ class SettingsActivity : AppCompatActivity() {
             })
             val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Controls" }
             preferenceScreen.addPreference(input)
-            input.addPreference(ListPreference(requireContext()).apply {
-                key="android_pocketpc_controls_size";title="PocketPC arrows and stick size";isPersistent=false
-                entries=arrayOf("Normal", "Big");entryValues=arrayOf("normal", "big")
-                value=current.pocketpcControlsSize
-                dialogTitle="PocketPC arrows and stick size"
-                summaryProvider=Preference.SummaryProvider<ListPreference> { pref ->
-                    "${pref.entry ?: "Normal"}\nGlobal setting for PocketPC touch controls. Enlarges the arrows and stylus stick only by about one third. Big adapts to the available space. Applies next launch."
-                }
-                setOnPreferenceChangeListener { _, value ->
-                    current=current.copy(pocketpcControlsSize=value.toString());writeConfig();true
-                }
-            })
+            fun directionalSize(gizmondo: Boolean) {
+                val name = if (gizmondo) "Gizmondo arrows size" else "PocketPC arrows and stick size"
+                display.addPreference(ListPreference(requireContext()).apply {
+                    key = if (gizmondo) "android_gizmondo_controls_size" else "android_pocketpc_controls_size"
+                    title = name; dialogTitle = name; isPersistent = false
+                    entries = arrayOf("Normal", "Big"); entryValues = arrayOf("normal", "big")
+                    value = if (gizmondo) current.gizmondoControlsSize else current.pocketpcControlsSize
+                    summaryProvider = Preference.SummaryProvider<ListPreference> { pref ->
+                        "${pref.entry ?: "Normal"}\nGlobal setting. Big enlarges directional controls by about one third, limited by available space. The game keeps its aspect ratio; its display scale may decrease. Applies next launch."
+                    }
+                    setOnPreferenceChangeListener { _, value ->
+                        current = if (gizmondo) current.copy(gizmondoControlsSize = value.toString())
+                            else current.copy(pocketpcControlsSize = value.toString())
+                        writeConfig(); true
+                    }
+                })
+            }
+            directionalSize(false); directionalSize(true)
             val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Physical keyboard" }
             val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Physical controller" }
             input.addPreference(keyboard);input.addPreference(gamepad)
@@ -216,7 +227,7 @@ class SettingsActivity : AppCompatActivity() {
             val stylusScreen=androidx.preference.PreferenceScreen(requireContext(),null).apply {
                 title="Pocket PC only — stylus stick";key="stylus_options"
             }
-            input.addPreference(stylusScreen)
+            ppc.addPreference(stylusScreen)
             fun stylusJson()=current.toJson().optJSONObject("stylus_stick") ?: org.json.JSONObject().apply {
                 put("enabled",true);put("speed",240)
                 put("keyboard",org.json.JSONArray().apply { listOf("O","L","K","M").forEach { put(org.json.JSONArray().put(it)) } })
@@ -311,24 +322,24 @@ class SettingsActivity : AppCompatActivity() {
                     }
                 })
             }
-            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+            findPreference<androidx.preference.PreferenceCategory>("diagnostic_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="log_unimplemented_apis";title="Unimplemented API report";isPersistent=false;isChecked=current.logUnimplementedApis
                 summary="Writes pockethle-unimplemented.log in the library folder."
                 setOnPreferenceChangeListener { _,v -> current=current.copy(logUnimplementedApis=v as Boolean);writeConfig();true }
             })
-            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+            findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="gpu_renderer"; title="GPU rendering"; isPersistent=false; isChecked=current.gpuRenderer
                 summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
                 setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("anisotropic_filtering")?.isEnabled=current.gpuRenderer;writeConfig();true }
             })
-            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(ListPreference(requireContext()).apply {
+            findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="anisotropic_filtering"; title="Anisotropic filtering (GPU only)"; isPersistent=false
                 entries=arrayOf("Off", "2×", "4×", "8×"); entryValues=arrayOf("0", "2", "4", "8")
                 value=current.anisotropicFiltering.toString(); isEnabled=current.gpuRenderer
                 summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, v -> current=current.copy(anisotropicFiltering=v.toString().toInt());writeConfig();true }
             })
-            findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+            findPreference<androidx.preference.PreferenceCategory>("misc_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "show_fps"; title = "Show FPS"; isPersistent = false; isChecked = current.showFps
                 summary = "Shows a small counter of rendered frames on the game screen. Applies on the next launch."
                 setOnPreferenceChangeListener { _, value ->
@@ -410,6 +421,9 @@ class SettingsActivity : AppCompatActivity() {
                 }) android.widget.Toast.makeText(context,"Optimization settings were not saved. Rebuild the native libraries and APK together.",android.widget.Toast.LENGTH_LONG).show()
             }
             val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering
+            if (result?.optBoolean("ok", false) == true && saved?.optString("android_gizmondo_controls_size", "") != current.gizmondoControlsSize) {
+                android.widget.Toast.makeText(context, "Control size could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
+            }
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_controls_size", "") != current.pocketpcControlsSize) {
                 android.widget.Toast.makeText(context, "Control size was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }

@@ -479,6 +479,7 @@ enum Screen {
     Library,
     Settings,
     GizmondoOptions,
+    PocketPcOptions,
     InputSettings,
     GameSettings,
     Run,
@@ -1424,6 +1425,12 @@ impl PocketLauncher {
             self.screen = Screen::InputSettings;
             ui.close_menu();
         }
+        if crate::controller_ui::button(ui, "PocketPC options").clicked() {
+            self.release_all_keys();
+            self.config_draft = Some(self.settings_draft());
+            self.screen = Screen::PocketPcOptions;
+            ui.close_menu();
+        }
         if crate::controller_ui::button(ui, "Gizmondo options").clicked() {
             self.release_all_keys();
             self.gamepad_capture = None;
@@ -2172,14 +2179,17 @@ impl PocketLauncher {
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         let gizmondo = self.screen == Screen::GizmondoOptions;
+        let pocketpc = self.screen == Screen::PocketPcOptions;
         let input = self.screen == Screen::InputSettings;
         let scroll_id = if gizmondo {
             "gizmondo_options_scroll"
+        } else if pocketpc {
+            "pocketpc_options_scroll"
         } else {
             "emulator_options_scroll"
         };
         ScrollArea::vertical().id_source(scroll_id).auto_shrink([false,false]).show(ui,|ui| {
-        ui.heading(if input { "Keyboard & Controller" } else if gizmondo { "Gizmondo options" } else { "Emulator Settings" });
+        ui.heading(if input { "Keyboard & Controller" } else if gizmondo { "Gizmondo options" } else if pocketpc { "PocketPC options" } else { "Emulator Settings" });
         if input { self.ui_keybindings(ui, &mut draft); } else {
         if gizmondo {
         crate::controller_ui::checkbox(ui, &mut draft.gps_enabled, "GPS / host location (GPS1)")
@@ -2189,23 +2199,8 @@ impl PocketLauncher {
         crate::controller_ui::checkbox(ui, &mut draft.bluetooth_enabled, "Bluetooth hardware (Classic / RFCOMM)");
         crate::controller_ui::checkbox(ui, &mut draft.camera_enabled, "Camera hardware (CAM1)")
             .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
-        } else {
-        ui.heading("Optimizations");
-        ui.small("Enabled by default. Changes apply on the next game launch. These settings do not change the emulated CPU speed or FPS limit.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.fast_memory_access, "Fast memory access");
-        ui.small("Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_tlb_cache, "Extended memory translation cache");
-        ui.small("Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.responsive_scheduling, "Responsive thread scheduling");
-        ui.small("Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_jump_cache, "Extended jump cache");
-        ui.small("Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.");
-        ui.separator();
-        let library_root = self.library.root().display().to_string();
-        egui::Grid::new("settings_grid")
-            .num_columns(2)
-            .spacing(Vec2::new(12.0, 8.0))
-            .show(ui, |ui| {
+        } else if pocketpc {
+        egui::Grid::new("pocketpc_options_grid").num_columns(2).show(ui, |ui| {
                 ui.label("PocketPC");
                 ui.label("Global device profile (all PocketPC games)");
                 ui.end_row();
@@ -2222,6 +2217,13 @@ impl PocketLauncher {
                 ui.label("");
                 ui.small("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.");
                 ui.end_row();
+        });
+        } else {
+        let library_root = self.library.root().display().to_string();
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Graphics");
+        egui::Grid::new("emulator_graphics").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
                 ui.label("GPU rendering");
                 crate::controller_ui::checkbox(ui, &mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
                 ui.end_row();
@@ -2248,15 +2250,13 @@ impl PocketLauncher {
                         });
                 }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
                 ui.end_row();
-                ui.label("Verbosity (0..3)");
-                ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
-                ui.end_row();
 
-                ui.label("Log unimplemented APIs");
-                crate::controller_ui::checkbox(ui, &mut draft.log_unimplemented_apis,"")
-                    .on_hover_text("Write game, process and missing API details to pockethle-unimplemented-apis.log next to the main log. Changes apply after Save, including a running game.");
-                ui.end_row();
 
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Video Recording");
+        egui::Grid::new("emulator_recording").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
                 ui.label("Recording format");
                 crate::controller_ui::ComboBox::from_id_source("recording_format").selected_text(if draft.recording_format=="avi"{"AVI (MJPEG + PCM)"}else{"MP4 (H.264 + AAC)"}).show_ui(ui,|ui|{
                     crate::controller_ui::selectable_value(ui, &mut draft.recording_format,"avi".into(),"AVI (MJPEG + PCM)");
@@ -2275,24 +2275,44 @@ impl PocketLauncher {
                 });
                 ui.end_row();
 
-                ui.label("Show FPS in status bar");
-                crate::controller_ui::checkbox(ui, &mut draft.show_fps, "");
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Diagnostics");
+        egui::Grid::new("emulator_diagnostics").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
+                ui.label("Verbosity (0..3)");
+                ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
                 ui.end_row();
 
+                ui.label("Log unimplemented APIs");
+                crate::controller_ui::checkbox(ui, &mut draft.log_unimplemented_apis,"")
+                    .on_hover_text("Write game, process and missing API details to pockethle-unimplemented-apis.log next to the main log. Changes apply after Save, including a running game.");
+                ui.end_row();
+
+
+
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Misc");
+        egui::Grid::new("emulator_misc").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
                 ui.label("Borderless fullscreen");
                 if crate::controller_ui::checkbox(ui, &mut draft.fullscreen, "").changed() {
                     self.set_fullscreen(ui.ctx(), draft.fullscreen);
                 }
                 ui.end_row();
-
+                ui.label("Show FPS in status bar");
+                crate::controller_ui::checkbox(ui, &mut draft.show_fps, "");
+                ui.end_row();
                 ui.label("Library root");
                 ui.label(library_root);
                 ui.end_row();
-            });
+        });
 
         ui.add_space(12.0);
         }
 
+        if gizmondo || pocketpc {
         ui.separator();
         ui.label("Device identity");
         ui.label(if gizmondo { "Used instead of the WinCE identity for Gizmondo titles." } else { "Used by WinCE applications outside the Gizmondo profile." });
@@ -2310,6 +2330,22 @@ impl PocketLauncher {
         crate::controller_ui::text_edit(ui, platform, "");
         ui.label("Device names are encoded automatically. Changes apply at the next launch.");
         }
+        if !gizmondo && !pocketpc {
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Optimizations");
+        ui.small("Enabled by default. Changes apply on the next game launch. These settings do not change the emulated CPU speed or FPS limit.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.fast_memory_access, "Fast memory access");
+        ui.small("Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_tlb_cache, "Extended memory translation cache");
+        ui.small("Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.responsive_scheduling, "Responsive thread scheduling");
+        ui.small("Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_jump_cache, "Extended jump cache");
+        ui.small("Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.");
+        ui.separator();
+        }
+        }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if crate::controller_ui::button(ui, "Save").clicked() {
@@ -2321,7 +2357,7 @@ impl PocketLauncher {
         });
         crate::controller_ui::scroll_focus(ui);
         });
-        if save_clicked && !input {
+        if save_clicked && (gizmondo || pocketpc) {
             if draft
                 .preset_text(gizmondo)
                 .map(|s| s.is_empty())
@@ -5542,9 +5578,10 @@ impl eframe::App for PocketLauncher {
                         |ui| self.ui_library(ui),
                     );
                 }
-                Screen::Settings | Screen::GizmondoOptions | Screen::InputSettings => {
-                    self.ui_settings(ui)
-                }
+                Screen::Settings
+                | Screen::GizmondoOptions
+                | Screen::PocketPcOptions
+                | Screen::InputSettings => self.ui_settings(ui),
                 Screen::GameSettings if self.stylus_editor.is_some() => {
                     if let Some((id, mut draft)) = self.game_settings_draft.take() {
                         ui.heading("PocketPC controls");

@@ -48,6 +48,13 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             background = controlStyle.backgroundShape(emulatorAction = true)
         }
     }
+    var bigDirectionalControls: Boolean = false
+        set(value) {
+            if (field == value) return
+            clearPressedControls(); field = value
+            requestLayout()
+        }
+    private var geometry = GizmondoGeometry.calculate(1, 1, dp)
     fun clearPressedControls() {
         keys.values.forEach { it.isPressed = false }
         dpad.clearInput()
@@ -56,12 +63,13 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec); val h = MeasureSpec.getSize(heightMeasureSpec)
         setMeasuredDimension(w,h)
-        val padSize = (140 * dp).toInt()
+        geometry = GizmondoGeometry.calculate(w, h, dp, bigDirectionalControls)
+        val padSize = geometry.dpad.w
         dpad.measure(MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY))
         keys.forEach { (id,v) ->
             val shoulder = id == R.id.btn_soft1 || id == R.id.btn_soft2
-            val toolbarScale = ((w / dp - 296f) / 416f).coerceIn(0.1f, 1f)
+            val toolbarScale = geometry.toolbarScale
             val function = id in listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3,
                 R.id.btn_piano4, R.id.btn_piano5, R.id.btn_stop_emulation, R.id.btn_fullscreen)
             val bw = if (shoulder) 124f else if (id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen) 64f else 44f
@@ -74,20 +82,20 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         fun place(id: Int, x: Float, y: Float) { val v = keys.getValue(id); val left=(x-v.measuredWidth/2).toInt(); val top=(y-v.measuredHeight/2).toInt(); v.layout(left,top,left+v.measuredWidth,top+v.measuredHeight) }
         // Physical sides stay fixed in both landscape orientations and every locale.
-        val dpadCenter = 74*dp; val actionPadCenter = width-74*dp
+        val dpadCenter = geometry.dpad.x + geometry.dpad.w / 2f; val actionPadCenter = width-74*dp
         // Bottom edge padding is shared by the 140dp pad and the action diamond.
         val middle = height - 78 * dp
         place(R.id.btn_soft1, dpadCenter, 74 * dp)
         place(R.id.btn_soft2, actionPadCenter, 74 * dp)
         listOf(R.id.btn_a,R.id.btn_c,R.id.btn_b,R.id.btn_action).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,actionPadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
         val padLeft = (dpadCenter - dpad.measuredWidth / 2f).toInt()
-        val padTop = (middle - dpad.measuredHeight / 2f).toInt()
+        val padTop = geometry.dpad.y
         dpad.layout(padLeft, padTop, padLeft + dpad.measuredWidth, padTop + dpad.measuredHeight)
         // Centre the complete toolbar, so the hardware group itself shifts left.
         // Exit has a 28dp gap after Power instead of the hardware buttons' 8dp gaps.
-        val toolbarScale = ((width / dp - 296f) / 416f).coerceIn(0.1f, 1f)
+        val toolbarScale = geometry.toolbarScale
         val unit = dp * toolbarScale
-        val start = (width - 416 * unit) / 2f
+        val start = geometry.screen.x + (geometry.screen.w - 416 * unit) / 2f
         val topCenter = 8 * dp + 22 * unit
         listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5)
             .forEachIndexed { i,id -> place(id, start + (22 + i * 52) * unit, topCenter) }
