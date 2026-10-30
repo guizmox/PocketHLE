@@ -200,7 +200,9 @@ class GameActivity : AppCompatActivity() {
         content.addView(controllerFullscreenHost)
         gameControls = findViewById(R.id.game_controls)
         gameControls.alpha = controlsOpacity
-        (gameControls as? PocketPcControls)?.configure(config)
+        (gameControls as? PocketPcControls)?.configure(config, runCatching {
+            GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(gameRoot, gameId)))
+        }.getOrDefault(GameSettings.default()))
         (gameControls as? GizmondoControls)?.bigDirectionalControls = config.gizmondoControlsSize == "big"
         if (gizmondoGame) {
             androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)
@@ -745,12 +747,13 @@ class GameActivity : AppCompatActivity() {
         }
         val vk = (if (isController) InputBindings.controllerName(event.keyCode)?.let { bindings.controllerKey(it) }
             else if (InputBindings.keyName(event) != null) bindings.keyboardKey(event) else virtualKeyFor(event.keyCode)) ?: return super.dispatchKeyEvent(event)
+        val physicalVk = mappedPhysicalKey(vk)
         val handle = session
         if (handle == 0L) return super.dispatchKeyEvent(event)
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount == 0 && heldPhysicalKeys.putIfAbsent(event.keyCode, vk) == null) {
-                    acquireGuestKey(handle, vk)
+                if (event.repeatCount == 0 && heldPhysicalKeys.putIfAbsent(event.keyCode, physicalVk) == null) {
+                    acquireGuestKey(handle, physicalVk)
                 }
             }
             KeyEvent.ACTION_UP -> {
@@ -758,6 +761,11 @@ class GameActivity : AppCompatActivity() {
             }
         }
         return true
+    }
+
+    private fun mappedPhysicalKey(vk: Int): Int {
+        val controls=gameControls as? PocketPcControls ?: return vk
+        return pocketPcPhysicalKey(vk, controls.swapButtonGroups, controls.controllerLayout)
     }
 
     private fun virtualKeyFor(keyCode: Int): Int? = when (keyCode) {
@@ -859,7 +867,10 @@ class GameActivity : AppCompatActivity() {
         aimDesired.forEach { (name,value) -> stylusAxes[event.deviceId to name]=value }
         updateStylusAim()
         heldAxisKeys.keys.toList().filter { it !in desired }.forEach { name -> heldAxisKeys.remove(name)?.let { releaseGuestKey(handle,it) } }
-        desired.forEach { (name,vk) -> if (heldAxisKeys.putIfAbsent(name,vk)==null) acquireGuestKey(handle,vk) }
+        desired.forEach { (name,vk) ->
+            val mapped=mappedPhysicalKey(vk)
+            if (heldAxisKeys.putIfAbsent(name,mapped)==null) acquireGuestKey(handle,mapped)
+        }
         return true
     }
 

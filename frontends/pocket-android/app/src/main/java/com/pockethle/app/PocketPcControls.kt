@@ -22,8 +22,16 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
     }
     val dpad=TouchDpad(context)
     private val keys=linkedMapOf<Int,Button>()
-    private val actions=listOf(R.id.btn_a,R.id.btn_ppc_app2,R.id.btn_action,R.id.btn_ppc_app1,
+    private val originalActions=listOf(R.id.btn_a,R.id.btn_ppc_app2,R.id.btn_action,R.id.btn_ppc_app1,
         R.id.btn_ppc_app4,R.id.btn_c,R.id.btn_ppc_app3,R.id.btn_b)
+    private val actions: List<Int>
+        get() = pocketPcButtonOrder(swapButtonGroups, controllerLayout).map { originalActions[it] }
+    private fun isDiamond(id: Int) = actions.indexOf(id) in listOf(0, 2, 5, 7)
+    var swapButtonGroups: Boolean = false
+        set(value) {
+            if (field == value) return
+            clearPressedControls(); field=value; updateButtonShapes(); requestLayout()
+        }
     private val auxiliary=listOf(R.id.btn_soft1,R.id.btn_soft2,R.id.btn_turbo,R.id.btn_stop_emulation,R.id.btn_fullscreen,R.id.btn_rotate_game)
     internal var geometry=PocketPcGeometry.calculate(1,1,dp)
     init {
@@ -35,7 +43,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
                     // Reject empty oval corners before OnTouchListener consumes
                     // DOWN. ViewGroup can then try the adjacent action button.
                     // Once accepted, MOVE/UP/CANCEL keep their existing owner.
-                    if (controllerLayout && id in listOf(R.id.btn_a, R.id.btn_action, R.id.btn_c, R.id.btn_b)
+                    if (controllerLayout && isDiamond(id)
                         && event.actionMasked == MotionEvent.ACTION_DOWN
                         && !ovalTouchContains(event.x, event.y, width, height)) return false
                     return super.dispatchTouchEvent(event)
@@ -48,7 +56,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
             }
             keys[id]=b;addView(b)
         }
-        actions.zip(listOf("A","P2","Action","P1","P4","C","P3","B")).forEach { (id,label)->button(id,label) }
+        originalActions.zip(listOf("A","P2","Action","P1","P4","C","P3","B")).forEach { (id,label)->button(id,label) }
         auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","Full","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
         keys.getValue(R.id.btn_rotate_game).contentDescription="Rotate game screen"
         keys.getValue(R.id.btn_rotate_game).textSize=24f
@@ -58,8 +66,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         set(value) {
             if (field == value) return
             clearPressedControls(); field = value
-            val diamond = setOf(R.id.btn_a, R.id.btn_action, R.id.btn_c, R.id.btn_b)
-            actions.forEach { id -> keys.getValue(id).apply { background = style.backgroundShape(oval = value && id in diamond); textSize = 16f } }
+            updateButtonShapes()
             keys.getValue(R.id.btn_action).text = if (value) "Act." else "Action"
             auxiliary.forEach { id -> keys.getValue(id).textSize = if (value) 11f else if (id == R.id.btn_rotate_game) 24f else 13f }
             requestLayout()
@@ -71,7 +78,13 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
             field = value
             requestLayout()
         }
-    fun configure(config: LauncherConfig) {
+    private fun updateButtonShapes() {
+        actions.forEach { id -> keys.getValue(id).apply {
+            background=style.backgroundShape(oval=controllerLayout && isDiamond(id)); textSize=16f
+        } }
+    }
+    fun configure(config: LauncherConfig, settings: GameSettings = GameSettings.default()) {
+        swapButtonGroups = settings.pocketpcSwapButtonGroups
         controllerLayout = config.pocketpcTouchLayout == "controller"
         bigDirectionalControls = config.pocketpcControlsSize == "big"
     }

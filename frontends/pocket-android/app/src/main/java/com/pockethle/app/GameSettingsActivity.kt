@@ -80,6 +80,15 @@ class GameSettingsActivity : AppCompatActivity() {
                         writeGameSettings();updateEditor();true
                     }
                 })
+                controlsCategory.addPreference(androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
+                    key="pocketpc_swap_button_groups"; title="Swap action / P buttons"; isPersistent=false
+                    isChecked=current.pocketpcSwapButtonGroups
+                    summary="Exchange A/B/C/Action with P1–P4 on screen and for keyboard/gamepad inputs. Applies to Classic and Controller layouts, Normal and Big. Restart the game to apply."
+                    setOnPreferenceChangeListener { _, value ->
+                        current=current.copy(pocketpcSwapButtonGroups=value as Boolean)
+                        writeGameSettings();true
+                    }
+                })
                 controlsCategory.addPreference(editor);updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
                     identityCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {

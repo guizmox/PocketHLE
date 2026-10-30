@@ -118,7 +118,7 @@ internal class StylusControlsDialog(
         virtualDialog=dialog
         val root=PocketPcLayout(context)
         val screen=FrameLayout(context).apply{id=R.id.content_column}
-        val bank=PocketPcControls(context).apply{id=R.id.game_controls;configure(config)}
+        val bank=PocketPcControls(context).apply{id=R.id.game_controls;configure(config, settings)}
         root.addView(screen);root.addView(bank)
         root.setDisplaySize(if(portrait)240 else 320,if(portrait)320 else 240,4)
         val test=if(testing)TestSurface(context) else null

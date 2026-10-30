@@ -576,6 +576,9 @@ pub struct GameSettings {
     /// None migrates the legacy touch-steering checkbox without changing old games.
     #[serde(default)]
     pub pocketpc_controls: Option<stylus_grid::ControlsMode>,
+    /// Exchange action/application button slots and the corresponding physical input bindings.
+    #[serde(default)]
+    pub pocketpc_swap_button_groups: bool,
     #[serde(default)]
     pub pocketpc_stylus_grid: stylus_grid::StylusGrid,
     /// Empty strings inherit the emulated PocketPC device identity. Ignored on Gizmondo.
@@ -743,6 +746,7 @@ impl Default for GameSettings {
             frame_rate_limit: FrameRateLimit::default(),
             pocketpc_touch_steering: false,
             pocketpc_controls: None,
+            pocketpc_swap_button_groups: false,
             pocketpc_stylus_grid: Default::default(),
             pocketpc_owner_name: String::new(),
             pocketpc_device_name: String::new(),

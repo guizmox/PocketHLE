@@ -1,5 +1,9 @@
-docs\ANDROID_CONTROLS.md
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControllerGeometry.kt
+crates\pocket-library\src\lib.rs
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcButtonOrder.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControls.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\TouchTargetGeometry.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcControllerGeometryTest.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\StylusControlsDialog.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcButtonOrderTest.kt
+frontends\pocket-desktop\src\app.rs

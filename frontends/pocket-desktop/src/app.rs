@@ -242,6 +242,7 @@ pub struct PocketLauncher {
     stylus_grid_router: GridRouter,
     grid_modifiers: [bool; 4],
     running_controls_mode: ControlsMode,
+    running_swap_button_groups: bool,
     running_stylus_grid: pocket_library::stylus_grid::StylusGrid,
 }
 
@@ -266,6 +267,19 @@ fn rotate_direction_button(button: GuestButton, turns: u8) -> GuestButton {
         .map(|i| directions[(i + turns as usize) % 4])
         .unwrap_or(button)
 }
+// Desktop uses the Classic control banks. Remap only physical input paths;
+// virtual buttons already carry the destination identity after their layout swap.
+fn swapped_pocketpc_physical_vk(vk: u16, enabled: bool) -> u16 {
+    if !enabled { return vk; }
+    match vk {
+        0x11 => 0xc4, 0xc4 => 0x11, // A / P4
+        0x20 => 0xc1, 0xc1 => 0x20, // B / P1
+        0x10 => 0xc2, 0xc2 => 0x10, // C / P2
+        0x0d => 0xc3, 0xc3 => 0x0d, // Action / P3
+        _ => vk,
+    }
+}
+
 fn rotate_direction_vk(vk: u16, turns: u8) -> u16 {
     let directions = [
         GuestButton::DpadUp,
@@ -799,6 +813,7 @@ impl PocketLauncher {
             stylus_grid_router: Default::default(),
             grid_modifiers: [false; 4],
             running_controls_mode: ControlsMode::Normal,
+            running_swap_button_groups: false,
             running_stylus_grid: Default::default(),
         }
     }
@@ -2803,6 +2818,10 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 if !is_gizmondo {
+                    ui.label("Swap action / P buttons");
+                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_swap_button_groups, "Enabled")
+                        .on_hover_text("Exchange A/B/C/Action with P1–P4 on the on-screen controls. Also swaps configured keyboard and gamepad inputs. Applies on the next launch.");
+                    ui.end_row();
                     ui.label("Control mode");
                     let mut mode=draft.controls_mode();
                     crate::controller_ui::ComboBox::from_id_source("ppc_controls_mode")
@@ -3319,6 +3338,19 @@ impl PocketLauncher {
         ];
         for (x, buttons) in banks {
             for (i, (label, guest)) in buttons.into_iter().enumerate() {
+                let (label, guest) = if self.running_swap_button_groups {
+                    match guest {
+                        GuestButton::ButtonA => ("P4", GuestButton::PocketPcApp4),
+                        GuestButton::ButtonB => ("P1", GuestButton::PocketPcApp1),
+                        GuestButton::ButtonC => ("P2", GuestButton::PocketPcApp2),
+                        GuestButton::Action => ("P3", GuestButton::PocketPcApp3),
+                        GuestButton::PocketPcApp1 => ("B", GuestButton::ButtonB),
+                        GuestButton::PocketPcApp2 => ("C", GuestButton::ButtonC),
+                        GuestButton::PocketPcApp3 => ("Action", GuestButton::Action),
+                        GuestButton::PocketPcApp4 => ("A", GuestButton::ButtonA),
+                        _ => (label, guest),
+                    }
+                } else { (label, guest) };
                 let rect = Rect::from_min_size(
                     Pos2::new(
                         x + (i % 2) as f32 * (cell_w + gap),
@@ -4485,7 +4517,7 @@ impl PocketLauncher {
                     }) else {
                         continue;
                     };
-                    let vk = button.vk();
+                    let vk = swapped_pocketpc_physical_vk(button.vk(), self.running_swap_button_groups);
                     let vk = if self.running_is_gizmondo {
                         vk
                     } else {
@@ -4708,11 +4740,12 @@ impl PocketLauncher {
                 continue;
             }
             // Both PocketPC and Gizmondo use the same configurable host-key map.
-            // PocketPC directions follow the displayed image; action bindings stay fixed.
+            // PocketPC directions follow the displayed image; action bindings follow the per-game swap.
             let vk = self.library.config().keybindings.vk_for_key(key.name());
             let Some(vk) = vk else {
                 continue;
             };
+            let vk = swapped_pocketpc_physical_vk(vk, self.running_swap_button_groups);
             let vk = if self.running_is_gizmondo {
                 vk
             } else {
@@ -5139,6 +5172,7 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
+        self.running_swap_button_groups = !self.running_is_gizmondo && game.settings.pocketpc_swap_button_groups;
         self.running_controls_mode = if self.running_is_gizmondo {
             ControlsMode::Normal
         } else {
@@ -5666,6 +5700,21 @@ impl eframe::App for PocketLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_swap_matches_classic_slots_and_leaves_other_keys_unchanged() {
+        for (source, destination) in [(0x11,0xc4),(0xc2,0x10),(0x0d,0xc3),(0xc1,0x20),
+                                     (0xc4,0x11),(0x10,0xc2),(0xc3,0x0d),(0x20,0xc1)] {
+            assert_eq!(swapped_pocketpc_physical_vk(source,true),destination);
+            assert_eq!(swapped_pocketpc_physical_vk(source,false),source);
+            assert_eq!(swapped_pocketpc_physical_vk(destination,true),source);
+        }
+        for vk in [0x25,0x26,0x27,0x28,0x09,0x1b,0x72,0x70] {
+            assert_eq!(swapped_pocketpc_physical_vk(vk,true),vk);
+        }
+    }
+
+
 
     #[test]
     fn deck_filter_steps_wrap_and_reverse_without_skipping_a_filter() {

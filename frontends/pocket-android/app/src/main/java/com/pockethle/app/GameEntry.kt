@@ -69,6 +69,7 @@ data class GameSettings(
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
     val pocketpcControls: String? = null,
+    val pocketpcSwapButtonGroups: Boolean = false,
     val pocketpcStylusGridJson: String = "{}",
     val pocketpcOwnerName: String = "",
     val pocketpcDeviceName: String = "",
@@ -93,6 +94,7 @@ data class GameSettings(
         put("rotation", rotation)
         put("pocketpc_touch_steering", pocketpcTouchSteering)
         put("pocketpc_controls", pocketpcControls ?: JSONObject.NULL)
+        put("pocketpc_swap_button_groups", pocketpcSwapButtonGroups)
         put("pocketpc_stylus_grid", JSONObject(pocketpcStylusGridJson))
         put("pocketpc_owner_name", pocketpcOwnerName)
         put("pocketpc_device_name", pocketpcDeviceName)
@@ -132,6 +134,7 @@ data class GameSettings(
             anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
+            pocketpcSwapButtonGroups = obj.optBoolean("pocketpc_swap_button_groups", false),
             pocketpcStylusGridJson = obj.optJSONObject("pocketpc_stylus_grid")?.toString() ?: "{}",
             pocketpcOwnerName = obj.optString("pocketpc_owner_name", ""),
             pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),
