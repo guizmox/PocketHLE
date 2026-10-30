@@ -15,7 +15,12 @@ static U32 write_data(U32 *data){U32 n=0,h=CreateFileW(L"\\Flash Disk\\PROCDATA.
 static U32 publish_orphan(U32 orphan) {
     U32 host_pid=0,alias=0,n=0,host=0;
     U32 file=CreateFileW(L"\\Flash Disk\\PROCHOST.BIN",0x80000000,3,0,3,0,0);
-    if(file==0xFFFFFFFF)return 0;
+    if(file==0xFFFFFFFF) {
+        /* The desktop runner also launches this diagnostic standalone, without
+           a RAM-test host. Only an absent handshake file is optional. */
+        U32 error=GetLastError();
+        return error==2||error==3;
+    }
     ReadFile(file,&host_pid,sizeof(host_pid),&n,0);CloseHandle(file);
     if(n!=sizeof(host_pid)||!host_pid)return 0;
     host=OpenProcess(0,0,host_pid);
