@@ -103,6 +103,22 @@ impl VertexLayout {
         }
     }
 }
+// Context has already expanded guest-indexed flat primitives before reaching
+// the non-indexed submission path. Independent triangles can be sent directly
+// after copying their provoking attributes, just like smooth array draws.
+fn direct_flat_triangles(mode: u32, smooth: bool, has_guest_indices: bool) -> bool {
+    mode == GL_TRIANGLES && !smooth && !has_guest_indices
+}
+
+fn pack_flat_triangles(layout: &VertexLayout, out: &mut Vec<f32>, vertices: &[Vertex]) {
+    for triangle in vertices.chunks_exact(3) {
+        let provoking = triangle[2];
+        for &vertex in triangle {
+            layout.pack(out, vertex, provoking, false);
+        }
+    }
+}
+
 const TEXTURE_MATRICES: [&str; 4] = [
     "textureMatrix0",
     "textureMatrix1",
@@ -1777,12 +1793,13 @@ impl Renderer {
         self.host.make_current()?;
         self.scratch.clear();
         let layout = VertexLayout::new(state, stages, transforms);
-        let direct = sequential
+        let flat_direct = direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
+        let direct = flat_direct || (sequential
             && state.smooth_shading
             && matches!(
                 mode,
                 GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
-            );
+            ));
         let draw_mode = if direct {
             mode
         } else {
@@ -1800,7 +1817,9 @@ impl Renderer {
                     layout.pack(&mut self.scratch, vertex, provoking, state.smooth_shading);
                 }
             };
-            if direct {
+            if flat_direct {
+                pack_flat_triangles(&layout, &mut self.scratch, vertices);
+            } else if direct {
                 for vertex in vertices {
                     primitive(&[*vertex]);
                 }
@@ -2897,6 +2916,61 @@ mod tests {
     }
 
     #[test]
+    fn flat_direct_submission_excludes_smooth_shared_topologies_and_native_indices() {
+        assert!(direct_flat_triangles(GL_TRIANGLES, false, false));
+        assert!(!direct_flat_triangles(GL_TRIANGLES, true, false));
+        assert!(!direct_flat_triangles(GL_TRIANGLES, false, true));
+        for mode in [GL_TRIANGLE_STRIP,GL_TRIANGLE_FAN,GL_LINES,GL_LINE_STRIP,GL_LINE_LOOP,GL_POINTS] {
+            assert!(!direct_flat_triangles(mode,false,false));
+        }
+    }
+
+    #[test]
+    fn direct_flat_triangles_preserve_all_provoking_and_interpolated_attributes() {
+        let mut state=PipelineState::default();
+        state.smooth_shading=false;
+        let mut transforms=identity_transforms();
+        transforms.lighting.enabled=true;
+        let stages: Vec<_>=(0..4).map(|unit| TextureStage {
+            unit,env:TexEnvMode::Modulate,env_color:[0.;4],lod_bias:0.,
+        }).collect();
+        let layout=VertexLayout::new(&state,&stages,Some(&transforms));
+        let vertices: Vec<_>=(0..6).map(|i| Vertex {
+            pos:[i as f32,1.,2.,1.], color:[i as f32/6.,0.5,0.25,1.],
+            normal:[i as f32,0.,1.], texcoord:[[i as f32,0.5];4],
+            fog_depth:i as f32+0.25, ..Default::default()
+        }).collect();
+        let mut packed=Vec::new();
+        pack_flat_triangles(&layout,&mut packed,&vertices);
+        assert_eq!(packed.len(),6*layout.floats);
+        for (i,record) in packed.chunks_exact(layout.floats).enumerate() {
+            let provoking=&vertices[i/3*3+2];
+            assert_eq!(&record[..4],&vertices[i].pos);
+            assert_eq!(&record[4..8],&provoking.color);
+            for unit in 0..4 {
+                let (_,offset)=layout.attributes[unit+2].unwrap();
+                assert_eq!(&record[offset..offset+2],&vertices[i].texcoord[unit]);
+            }
+            let (_,offset)=layout.attributes[6].unwrap();
+            assert_eq!(&record[offset..offset+3],&provoking.normal);
+            assert_eq!(record[offset+3],vertices[i].fog_depth);
+            let (_,offset)=layout.attributes[7].unwrap();
+            assert_eq!(&record[offset..offset+4],&provoking.pos);
+        }
+    }
+
+    #[test]
+    fn direct_flat_triangles_ignore_incomplete_primitives_and_reuse_output() {
+        let mut state=PipelineState::default();state.smooth_shading=false;
+        let layout=VertexLayout::new(&state,&[],None);
+        let v=Vertex::default();let mut out=Vec::new();
+        for count in 0..10 {
+            out.clear();pack_flat_triangles(&layout,&mut out,&vec![v;count]);
+            assert_eq!(out.len(),count/3*3*layout.floats);
+        }
+    }
+
+    #[test]
     fn compact_layout_keeps_only_active_attributes_and_flat_lighting_data() {
         let mut state = PipelineState::default();
         let mut transforms = identity_transforms();
@@ -3754,6 +3828,9 @@ mod tests {
                     t,
                 )
                 .unwrap();
+                if !state.smooth_shading {
+                    assert!(gpu.indices.is_empty(), "flat triangle lists use direct submission");
+                }
                 gpu.read(&mut target).unwrap();
                 center(&target)
             };
