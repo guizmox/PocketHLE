@@ -3,6 +3,7 @@ package com.pockethle.app
 import android.content.Context
 import android.util.AttributeSet
 import android.view.View
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.Button
 
@@ -11,6 +12,14 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
     private val dp=resources.displayMetrics.density
     private val style=ConsoleControlStyle(dp)
     internal val aim=StylusStickView(context)
+    private val aimTouchTarget = object : android.widget.FrameLayout(context) {
+        init { isMotionEventSplittingEnabled = true; addView(aim, LayoutParams(-1, -1)) }
+        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+            if (controllerLayout && event.actionMasked == MotionEvent.ACTION_DOWN
+                && !ovalTouchContains(event.x, event.y, width, height)) return false
+            return super.dispatchTouchEvent(event)
+        }
+    }
     val dpad=TouchDpad(context)
     private val keys=linkedMapOf<Int,Button>()
     private val actions=listOf(R.id.btn_a,R.id.btn_ppc_app2,R.id.btn_action,R.id.btn_ppc_app1,
@@ -21,7 +30,17 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         layoutDirection=View.LAYOUT_DIRECTION_LTR
         isMotionEventSplittingEnabled=true
         fun button(id: Int,label: String,host: Boolean=false) {
-            val b=Button(context).apply {
+            val b=object : Button(context) {
+                override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                    // Reject empty oval corners before OnTouchListener consumes
+                    // DOWN. ViewGroup can then try the adjacent action button.
+                    // Once accepted, MOVE/UP/CANCEL keep their existing owner.
+                    if (controllerLayout && id in listOf(R.id.btn_a, R.id.btn_action, R.id.btn_c, R.id.btn_b)
+                        && event.actionMasked == MotionEvent.ACTION_DOWN
+                        && !ovalTouchContains(event.x, event.y, width, height)) return false
+                    return super.dispatchTouchEvent(event)
+                }
+            }.apply {
                 this.id=id; text=label; textSize=if(host) 13f else 16f; contentDescription=label
                 minWidth=0; minimumWidth=0; minHeight=0; minimumHeight=0; setPadding(0,0,0,0)
                 setTextColor(0xffffffff.toInt()); background=style.backgroundShape(host)
@@ -33,7 +52,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","Full","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
         keys.getValue(R.id.btn_rotate_game).contentDescription="Rotate game screen"
         keys.getValue(R.id.btn_rotate_game).textSize=24f
-        addView(dpad);addView(aim)
+        addView(dpad);addView(aimTouchTarget)
     }
     var controllerLayout: Boolean = false
         set(value) {
@@ -72,12 +91,12 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         }
         actions.forEachIndexed { i,id->measure(keys.getValue(id),geometry.actions[i]) }
         auxiliary.forEachIndexed { i,id->measure(keys.getValue(id),geometry.auxiliary[i]) }
-        measure(dpad,geometry.dpad);measure(aim,geometry.stick)
+        measure(dpad,geometry.dpad);measure(aimTouchTarget,geometry.stick)
     }
     override fun onLayout(changed:Boolean,l:Int,t:Int,r:Int,b:Int) {
         fun place(view: View,rect: ControlRect) { view.layout(rect.x,rect.y,rect.x+rect.w,rect.y+rect.h) }
         actions.forEachIndexed { i,id->place(keys.getValue(id),geometry.actions[i]) }
         auxiliary.forEachIndexed { i,id->place(keys.getValue(id),geometry.auxiliary[i]) }
-        place(dpad,geometry.dpad);place(aim,geometry.stick)
+        place(dpad,geometry.dpad);place(aimTouchTarget,geometry.stick)
     }
 }

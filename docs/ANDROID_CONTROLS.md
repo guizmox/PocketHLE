@@ -49,8 +49,9 @@ Controller uses the existing input IDs and functions with this arrangement:
   D-pad and diamond in Big mode. Action targets are larger than the early mockup,
   and retain their dimensions between Normal and Big.
 * The stylus stick is smaller than the D-pad and sits diagonally below and to
-  the left of the action diamond, with a gap between actual rectangular hit
-  targets. Circular backgrounds alone would not prevent Android touch overlap.
+  the left of the action diamond, with a gap between active circular hit
+  targets. Transparent oval corners reject a new DOWN before input listeners
+  run; accepted touches retain ownership through release or cancellation.
 * The auxiliary toolbar stays separate, with smaller targets and fitted text.
 
 Control dimensions and safety gaps use Android density units rather than
@@ -85,3 +86,18 @@ Phone snapshots verify unchanged Classic rectangles. Existing display scaling,
 fullscreen input and multitouch-routing tests are retained. Rust and Android
 configuration tests cover old files and independent layout/size persistence.
 No full Android APK build or physical device validation is claimed.
+
+## Compact Controller landscape banks
+
+The landscape action diamond uses shorter offsets and the stylus stick moves
+closer to it. Target diameters and P-key sizes remain unchanged on the reference
+viewport. Outer margins and the game/control gutter are smaller, and the P row
+can sit beside the central toolbar. Toolbar width is bounded by the gap between
+the P banks. Portrait and Classic geometry are unchanged.
+
+The reference viewport regression checks the same integer game-image scale as
+Classic in Normal and Big. Automatic integer fitting remains unchanged on
+smaller screens; no device-name or game-specific sizing path was introduced.
+Oval action buttons and the stylus wrapper reject only new touches outside their
+oval; ongoing MOVE/UP/CANCEL and split multitouch dispatch keep their existing
+behavior. Mapping/steering previews use the same control view and geometry.

@@ -8,6 +8,15 @@ import org.junit.Test
 class PocketPcControllerGeometryTest {
     private fun overlaps(a: ControlRect, b: ControlRect) =
         a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+    private fun targetOverlap(a: ControlRect, ovalA: Boolean, b: ControlRect, ovalB: Boolean): Boolean {
+        if (!ovalA && !ovalB) return overlaps(a, b)
+        if (ovalA && ovalB) return hypot((a.x + a.w / 2.0) - (b.x + b.w / 2.0),
+            (a.y + a.h / 2.0) - (b.y + b.h / 2.0)) < (a.w + b.w) / 2.0
+        val oval = if (ovalA) a else b; val box = if (ovalA) b else a
+        val x = oval.x + oval.w / 2.0; val y = oval.y + oval.h / 2.0
+        return hypot(x - x.coerceIn(box.x.toDouble(), (box.x + box.w).toDouble()),
+            y - y.coerceIn(box.y.toDouble(), (box.y + box.h).toDouble())) < oval.w / 2.0
+    }
     private fun centreY2(r: ControlRect) = 2 * r.y + r.h
 
     @Test fun allOrientationsDensitiesAndSizeModesKeepAlignedSeparateTouchTargets() {
@@ -24,7 +33,7 @@ class PocketPcControllerGeometryTest {
                     assertTrue("bounds $context $r", r.x >= 0 && r.y >= 0 && r.x + r.w <= w && r.y + r.h <= h)
                 }
                 for (i in zones.indices) for (j in i + 1 until zones.size)
-                    assertFalse("overlap $i/$j $context", overlaps(zones[i], zones[j]))
+                    assertFalse("overlap $i/$j $context", targetOverlap(zones[i], i in listOf(0,2,5,7,15), zones[j], j in listOf(0,2,5,7,15)))
                 val p = listOf(3, 1, 6, 4).map { g.actions[it] }
                 assertEquals("P1-P4 line $context", 1, p.map { it.y }.distinct().size)
                 assertEquals(1, p.map { it.h }.distinct().size)
@@ -36,9 +45,9 @@ class PocketPcControllerGeometryTest {
                 assertTrue(g.stick.x + g.stick.w / 2 < g.actions[0].x + g.actions[0].w / 2)
                 for (index in listOf(0, 2, 5, 7)) {
                     val r = g.actions[index]
-                    val dx = maxOf(0, r.x - (g.stick.x + g.stick.w), g.stick.x - (r.x + r.w))
-                    val dy = maxOf(0, r.y - (g.stick.y + g.stick.h), g.stick.y - (r.y + r.h))
-                    assertTrue("stick safety $context", hypot(dx.toDouble(), dy.toDouble()) >= p[0].h * .1)
+                    val distance = hypot((r.x + r.w / 2.0) - (g.stick.x + g.stick.w / 2.0),
+                        (r.y + r.h / 2.0) - (g.stick.y + g.stick.h / 2.0)) - (r.w + g.stick.w) / 2.0
+                    assertTrue("stick safety $context", distance >= p[0].h * .1)
                 }
             }
             val normal = PocketPcGeometry.calculate(w, h, density, false, true)
@@ -49,6 +58,26 @@ class PocketPcControllerGeometryTest {
             assertTrue(abs(big.stick.w - normal.stick.w * 4f / 3f) <= 2)
             normal.actions.zip(big.actions).forEach { (a, b) -> assertEquals(a.w, b.w); assertEquals(a.h, b.h) }
         }
+    }
+
+    @Test fun referenceViewportKeepsClassicScaleInNormalAndBig() {
+        // Safe viewport corresponding to the supplied landscape captures, plus
+        // nearby widths: no device-name or game-specific geometry path.
+        for (width in listOf(2480, 2486, 2490)) for (big in listOf(false, true)) {
+            val classic = PocketPcGeometry.calculate(width, 1200, 3.5f, big)
+            val controller = PocketPcGeometry.calculate(width, 1200, 3.5f, big, true)
+            fun scale(g: PocketPcGeometry) = minOf(g.screen.w / 320, g.screen.h / 240, 4)
+            assertEquals(4, scale(classic))
+            assertEquals("width=$width / Big=$big", scale(classic), scale(controller))
+        }
+    }
+
+    @Test fun ovalTouchTargetsRejectTransparentCorners() {
+        assertTrue(ovalTouchContains(32f, 32f, 64, 64))
+        assertFalse(ovalTouchContains(0f, 0f, 64, 64))
+        assertFalse(ovalTouchContains(63f, 63f, 64, 64))
+        assertTrue(ovalTouchContains(32f, 1f, 64, 64))
+        assertFalse(ovalTouchContains(0f, 0f, 0, 64))
     }
 
     private data class PhoneSnapshot(val w: Int, val h: Int, val density: Float, val big: Boolean, val rectangles: String)
