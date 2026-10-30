@@ -1,4 +1,1 @@
-crates\pocket-core\src\cab_files.rs
-crates\pocket-core\src\cab_setup.rs
-crates\pocket-winceapi\src\coredll.rs
-docs\LEGACY_CAB_FILES_AND_MIPS_VARARGS.md
+crates\pocket-winceapi\src\imgdecmp.rs
