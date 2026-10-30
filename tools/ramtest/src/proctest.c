@@ -10,6 +10,24 @@ static void check(const char *name,U32 good){char b[180];U32 n=0;checks++;if(!go
 static U32 launch(Info *i,const W16 *mode,U32 flags){ResetEvent(ready);ResetEvent(tick);return CreateProcessW(L"\\SD Card\\GZRT999999\\procworker.exe",mode,0,0,0,flags,0,0,0,i);}
 static void close_info(Info *i){CloseHandle(i->thread);CloseHandle(i->process);}
 static U32 write_data(U32 *data){U32 n=0,h=CreateFileW(L"\\Flash Disk\\PROCDATA.BIN",0x40000000,3,0,2,0,0);if(h==0xFFFFFFFF)return 0;WriteFile(h,data,24,&n,0);CloseHandle(h);return n==24;}
+/* Give the RAM-test process a live handle to the orphan before resuming it.
+   An event from the child's entry point cannot certify process teardown. */
+static U32 publish_orphan(U32 orphan) {
+    U32 host_pid=0,alias=0,n=0,host=0;
+    U32 file=CreateFileW(L"\\Flash Disk\\PROCHOST.BIN",0x80000000,3,0,3,0,0);
+    if(file==0xFFFFFFFF)return 0;
+    ReadFile(file,&host_pid,sizeof(host_pid),&n,0);CloseHandle(file);
+    if(n!=sizeof(host_pid)||!host_pid)return 0;
+    host=OpenProcess(0,0,host_pid);
+    if(!host)return 0;
+    if(!DuplicateHandle(GetCurrentProcess(),orphan,host,&alias,0,0,2))alias=0;
+    CloseHandle(host);
+    if(!alias)return 0;
+    file=CreateFileW(L"\\Flash Disk\\PROCHOST.BIN",0x40000000,3,0,2,0,0);n=0;
+    if(file==0xFFFFFFFF)return 0;
+    WriteFile(file,&alias,sizeof(alias),&n,0);CloseHandle(file);
+    return n==sizeof(alias);
+}
 static U32 parent_worker(void *arg){(void)arg;return 88;}
 static U32 waited_code(Info *i,U32 expected){U32 code=0;return WaitForSingleObject(i->process,5000)==0&&GetExitCodeProcess(i->process,&code)&&code==expected;}
 __attribute__((section(".text.entry"))) U32 entry(void){
@@ -59,7 +77,9 @@ __attribute__((section(".text.entry"))) U32 entry(void){
     ResumeThread(i.thread);check("process.child_resumes_and_waits_for_parent_worker",waited_code(&i,77)&&GetExitCodeThread(h,&code)&&code==88);CloseHandle(h);close_info(&i);
     check("process.two_live_children",launch(&i,L"l",4)&&launch(&j,L"l",4));
     check("process.siblings_resume_and_terminate_independently",ResumeThread(i.thread)==1&&ResumeThread(j.thread)==1&&TerminateProcess(i.process,71)&&waited_code(&i,71)&&GetExitCodeProcess(j.process,&code)&&code==259&&TerminateProcess(j.process,72)&&waited_code(&j,72));close_info(&i);close_info(&j);
-    check("process.create_child_that_outlives_parent",launch(&i,L"o",4));data[2]=GetCurrentProcessId();write_data(data);ResumeThread(i.thread);check("process.orphan_retains_parent_handle_before_exit",WaitForSingleObject(ready,5000)==0);close_info(&i);
+    check("process.create_child_that_outlives_parent",launch(&i,L"o",4));data[2]=GetCurrentProcessId();write_data(data);
+    alias=publish_orphan(i.process);ResumeThread(i.thread);
+    check("process.orphan_retains_parent_handle_before_exit",alias&&WaitForSingleObject(ready,5000)==0);close_info(&i);
     TlsFree(slot);CloseHandle(ready);CloseHandle(tick);line(failures?"PROCTEST_RESULT FAIL\r\n":"PROCTEST_RESULT PASS\r\n");CloseHandle(report);
     return failures?1:77;
 }

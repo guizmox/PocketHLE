@@ -190,10 +190,20 @@ static void test_threads(void) {
 }
 static void test_processes(void) {
     U32 info[4]={0},code=0,event=CreateEventW(0,1,0,L"PocketHLE.PROC.ORPHAN_DONE"),i;
+    U32 host=GetCurrentProcessId(),orphan=0,n=0;
+    U32 file=CreateFileW(L"\\Flash Disk\\PROCHOST.BIN",0x40000000,3,0,2,0,0);
+    if(file!=0xFFFFFFFF){WriteFile(file,&host,sizeof(host),&n,0);CloseHandle(file);}
     MemStatus before=status("processes.before"),after;
-    check("processes.suite_launch",CreateProcessW(L"\\SD Card\\GZRT999999\\proctest.exe",L"suite",0,0,0,0,0,0,0,info)!=0);
+    check("processes.suite_launch",n==sizeof(host)&&CreateProcessW(L"\\SD Card\\GZRT999999\\proctest.exe",L"suite",0,0,0,0,0,0,0,info)!=0);
     check("processes.suite_exit_and_report",info[0]&&WaitForSingleObject(info[0],15000)==0&&GetExitCodeProcess(info[0],&code)&&code==77);
-    check("processes.orphan_completed",event&&WaitForSingleObject(event,5000)==0);
+    /* The event is sent before the orphan returns. Retain its process handle
+       in this namespace and wait for actual termination before measuring RAM. */
+    file=CreateFileW(L"\\Flash Disk\\PROCHOST.BIN",0x80000000,3,0,3,0,0);n=0;
+    if(file!=0xFFFFFFFF){ReadFile(file,&orphan,sizeof(orphan),&n,0);CloseHandle(file);}
+    check("processes.orphan_completed",event&&WaitForSingleObject(event,5000)==0&&
+        n==sizeof(orphan)&&orphan&&WaitForSingleObject(orphan,5000)==0&&
+        GetExitCodeProcess(orphan,&code)&&code==77);
+    if(orphan)CloseHandle(orphan);
     if(info[0])CloseHandle(info[0]);if(info[1])CloseHandle(info[1]);if(event)CloseHandle(event);
     for(i=0;i<200;i++){after.length=sizeof(after);GlobalMemoryStatus(&after);if(after.avail==before.avail)break;Sleep(10);}
     after=status("processes.after");check("processes.all_children_ram_refunded",after.avail==before.avail);

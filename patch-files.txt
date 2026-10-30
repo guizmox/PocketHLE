@@ -1,2 +1,2 @@
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControllerGeometry.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcControllerGeometryTest.kt
+tools\ramtest\src\ramtest.c
+tools\ramtest\src\proctest.c
