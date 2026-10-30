@@ -110,7 +110,9 @@ class GameSettingsActivity : AppCompatActivity() {
                     entries=arrayOf("Linear scanlines (default)","Columns (early portrait LCD)")
                     entryValues=arrayOf("false","true");value=current.pocketpcGapiColumns.toString()
                     summaryProvider=androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nUse Columns if a PocketPC game's image or text wraps around the screen or appears shifted. Restart the game after changing this compatibility setting." }
-                    dialogMessage="Compatibility setting: emulate the physical memory layout of an early PocketPC LCD. Use columns for software that assumes this layout. Applies on next launch."
+                    // AlertDialog's message hides its single-choice list.
+                    // The settings-row summary already contains the help text.
+                    dialogTitle="GAPI display compatibility"
                     setOnPreferenceChangeListener { _, value ->
                         current=current.copy(pocketpcGapiColumns=value.toString()=="true");writeGameSettings();true
                     }

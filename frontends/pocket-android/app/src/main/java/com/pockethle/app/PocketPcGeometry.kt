@@ -12,20 +12,21 @@ internal data class PocketPcGeometry(
     companion object {
         // Action order: A, P2, Action, P1, P4, C, P3, B.
         // Auxiliary order: Tab, Esc, Turbo, Exit, Fullscreen, Rotate.
-        fun calculate(width: Int, height: Int, density: Float): PocketPcGeometry {
+        fun calculate(width: Int, height: Int, density: Float, bigDirectionalControls: Boolean = false): PocketPcGeometry {
             val w=width.coerceAtLeast(1); val h=height.coerceAtLeast(1)
             fun dp(n: Float)=(n*density).toInt().coerceAtLeast(1)
             val gap=dp(6f); val safety=dp(18f)
             if(w>h) {
                 val side=minOf(dp(140f),w/5,h/2).coerceAtLeast(1)
-                val pad=minOf(side,h/3).coerceAtLeast(1)
+                val normalPad=minOf(side,h/3).coerceAtLeast(1)
+                val pad=if(bigDirectionalControls) minOf(normalPad*4/3,(w-6*gap)/4,(h*.44f).toInt()).coerceAtLeast(normalPad) else normalPad
                 val padY=h-gap-pad
                 val actionBottom=(padY-safety).coerceAtLeast(gap+2)
                 val cellW=((side-gap)/2).coerceAtLeast(1)
                 val cellH=((actionBottom-2*gap)/2).coerceAtLeast(1)
                 fun bank(x: Int)=listOf(ControlRect(x,gap,cellW,cellH),ControlRect(x+cellW+gap,gap,cellW,cellH),
                     ControlRect(x,gap+cellH+gap,cellW,cellH),ControlRect(x+cellW+gap,gap+cellH+gap,cellW,cellH))
-                val left=side+2*gap; val room=(w-2*left).coerceAtLeast(1)
+                val left=maxOf(side,pad)+2*gap; val room=(w-2*left).coerceAtLeast(1)
                 val toolbarH=minOf(dp(32f),h/9).coerceAtLeast(1)
                 // Wider guest keys, with a distinct gap before the orange host actions.
                 val bw=minOf(dp(64f),((room-6*gap)/6).coerceAtLeast(1))
@@ -37,7 +38,9 @@ internal data class PocketPcGeometry(
             // Match the landscape calculation after exchanging the screen
             // axes: min(140dp, landscape width/5, landscape height/3).
             // The taller thumb bank also lifts the action rows above it.
-            val pad=minOf(dp(140f),h/5,w/3).coerceAtLeast(1)
+            val normalPad=minOf(dp(140f),h/5,w/3).coerceAtLeast(1)
+            // Exchange axes so the thumb size remains stable after rotation.
+            val pad=if(bigDirectionalControls) minOf(normalPad*4/3,(h-6*gap)/4,(w*.44f).toInt()).coerceAtLeast(normalPad) else normalPad
             val deckH=maxOf(pad,dp(108f))
             val deckY=h-gap-deckH
             val rowH=minOf(dp(44f),h/14).coerceAtLeast(1)

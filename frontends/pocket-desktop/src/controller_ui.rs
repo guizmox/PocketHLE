@@ -44,6 +44,29 @@ pub struct Navigation {
     keyboard: Option<Keyboard>,
     used: bool,
 }
+#[derive(Clone, Copy)]
+struct KeyboardLayout {
+    key: egui::Vec2,
+    gap: f32,
+    font_size: f32,
+}
+impl KeyboardLayout {
+    fn for_viewport(size: egui::Vec2) -> Self {
+        let width = (size.x - 48.0).max(100.0);
+        let gap = if width >= 600.0 { 6.0 } else { 4.0 };
+        let key_width = ((width - 9.0 * gap) / 10.0).clamp(6.0, 64.0);
+        let key_height = ((size.y - 152.0 - 4.0 * gap) / 5.0).clamp(16.0, 40.0);
+        Self {
+            key: egui::vec2(key_width, key_height),
+            gap,
+            font_size: (key_height * 0.44).min(18.0).min(key_width * 0.48),
+        }
+    }
+    fn width(self) -> f32 {
+        self.key.x * 10.0 + self.gap * 9.0
+    }
+}
+
 struct Keyboard {
     field: Id,
     value: String,
@@ -233,19 +256,40 @@ impl Navigation {
         }
         let mut open = true;
         let mut clicked = None;
-        egui::Window::new("Keyboard — A: select · B: cancel · Y: symbols")
+        let layout = KeyboardLayout::for_viewport(ctx.screen_rect().size());
+        egui::Window::new("Keyboard")
             .id(Id::new("controller_keyboard"))
+            .default_width(layout.width())
+            .min_width(layout.width())
+            .max_width(layout.width())
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
                 let k = self.keyboard.as_ref().unwrap();
-                ui.label(&k.value);
+                ui.label("A: select · B: cancel · Y: symbols");
+                egui::ScrollArea::horizontal()
+                    .id_source("controller_keyboard_value")
+                    .stick_to_right(true)
+                    .max_height(layout.font_size + 10.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&k.value)
+                                    .monospace()
+                                    .size(layout.font_size),
+                            )
+                            .wrap(false),
+                        );
+                    });
                 ui.separator();
                 egui::Grid::new("controller_keys")
-                    .spacing(egui::Vec2::splat(5.0))
+                    .min_col_width(layout.key.x)
+                    .max_col_width(layout.key.x)
+                    .spacing(egui::Vec2::splat(layout.gap))
                     .show(ui, |ui| {
+                        ui.spacing_mut().button_padding.x = 2.0;
                         for index in 0..46 {
                             let label = if index < 40 {
                                 let c = (if k.symbols { SYMBOLS } else { KEYS }).as_bytes()[index]
@@ -259,11 +303,25 @@ impl Navigation {
                                 ["Shift", "Space", "⌫", "Clear", "Apply", "Cancel"][index - 40]
                                     .into()
                             };
+                            let tooltip = label.clone();
+                            let label = if index >= 40 && layout.key.x < 44.0 {
+                                ["⇧", "␣", "⌫", "×", "✓", "✕"][index - 40].to_owned()
+                            } else {
+                                label
+                            };
                             if ui
                                 .add_sized(
-                                    [48.0, 30.0],
-                                    egui::SelectableLabel::new(k.index == index, label),
+                                    layout.key,
+                                    egui::SelectableLabel::new(
+                                        k.index == index,
+                                        egui::RichText::new(label).size(if index < 40 {
+                                            layout.font_size
+                                        } else {
+                                            layout.font_size.min((layout.key.x * 0.26).max(10.0))
+                                        }),
+                                    ),
                                 )
+                                .on_hover_text(tooltip)
                                 .clicked()
                             {
                                 clicked = Some(index);
@@ -691,6 +749,59 @@ mod tests {
         assert!(!menu_open(&ctx));
         assert!(!nav.back(&ctx));
     }
+    #[test]
+    fn keyboard_is_one_third_larger_and_adapts_to_small_viewports() {
+        let deck = KeyboardLayout::for_viewport(egui::vec2(1280.0, 800.0));
+        assert_eq!(deck.key, egui::vec2(64.0, 40.0));
+        assert!(deck.font_size > 14.0);
+        for size in [
+            egui::vec2(320.0, 480.0),
+            egui::vec2(640.0, 360.0),
+            egui::vec2(800.0, 480.0),
+            egui::vec2(1280.0, 800.0),
+        ] {
+            let layout = KeyboardLayout::for_viewport(size);
+            assert!(layout.width() <= size.x - 48.0 + 0.01);
+            assert!(layout.key.y * 5.0 + layout.gap * 4.0 + 152.0 <= size.y + 0.01);
+        }
+    }
+
+    #[test]
+    fn keyboard_window_keeps_apply_and_cancel_inside_small_screens() {
+        for size in [
+            egui::vec2(320.0, 480.0),
+            egui::vec2(640.0, 360.0),
+            egui::vec2(1280.0, 800.0),
+        ] {
+            let ctx = egui::Context::default();
+            let mut nav = Navigation::default();
+            nav.keyboard = Some(Keyboard {
+                field: Id::new("value"),
+                value: "A long folder name for import".repeat(4),
+                index: 44,
+                upper: false,
+                symbols: false,
+            });
+            for _ in 0..3 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                let _ = ctx.run(raw, |ctx| nav.show(ctx));
+            }
+            let rect = ctx
+                .memory(|m| m.area_rect(Id::new("controller_keyboard")))
+                .unwrap();
+            assert!(
+                rect.left() >= 0.0
+                    && rect.top() >= 0.0
+                    && rect.right() <= size.x
+                    && rect.bottom() <= size.y,
+                "keyboard {rect:?} outside {size:?}"
+            );
+        }
+    }
+
     #[test]
     fn virtual_keyboard_commits_only_on_apply_and_cancels_with_b() {
         assert_eq!(KEYS.len(), 40);

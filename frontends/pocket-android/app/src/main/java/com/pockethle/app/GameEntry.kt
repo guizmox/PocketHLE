@@ -177,6 +177,7 @@ data class LauncherConfig(
     val colorsLanguage: String = "english",
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
+    val pocketpcControlsSize: String = "normal",
     /**
      * The keybinding list exactly as it came out of `config.json`,
      * carried through untouched.
@@ -217,6 +218,7 @@ data class LauncherConfig(
         put("colors_terminal_id", colorsTerminalId)
         put("colors_language", colorsLanguage)
         put("controls_opacity", controlsOpacity.toDouble())
+        put("android_pocketpc_controls_size", pocketpcControlsSize)
         if (keybindingsJson != null) {
             runCatching { put("keybindings", JSONArray(keybindingsJson)) }
         }
@@ -264,6 +266,7 @@ data class LauncherConfig(
             colorsServerUrl = obj.optString("colors_server_url", "").ifBlank { "https://vps-50cdd0fc.vps.ovh.ca" },
             colorsTerminalId = obj.optString("colors_terminal_id", ""),
             colorsLanguage = obj.optString("colors_language", "english").takeIf { it in listOf("english", "french", "german", "italian", "spanish") } ?: "english",
+            pocketpcControlsSize = obj.optString("android_pocketpc_controls_size", "normal").takeIf { it == "normal" || it == "big" } ?: "normal",
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),
             keybindingsJson = obj.optJSONArray("keybindings")?.toString(),

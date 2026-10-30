@@ -39,6 +39,27 @@ class PocketPcGeometryTest {
             }
         }
     }
+    @Test fun bigEnlargesOnlyThumbTargetsWithoutOverlapsInEitherOrientation() {
+        for(density in listOf(1f,2f,2.625f,3f)) for(size in listOf(320 to 480,360 to 800,412 to 915,800 to 360,915 to 412,1280 to 800)) {
+            val w=(size.first*density).toInt(); val h=(size.second*density).toInt()
+            val normal=PocketPcGeometry.calculate(w,h,density)
+            val big=PocketPcGeometry.calculate(w,h,density,true)
+            assertTrue("larger arrows at $size",big.dpad.w>normal.dpad.w)
+            assertTrue(big.dpad.w<=normal.dpad.w*4/3)
+            assertEquals(big.dpad.w,big.stick.w)
+            assertEquals(PocketPcGeometry.calculate(h,w,density,true).dpad.w,big.dpad.w)
+            normal.actions.zip(big.actions).forEach { (a,b) ->
+                assertEquals("action width stays normal",a.w,b.w)
+                assertTrue("only thumb targets grow",b.h<=a.h)
+            }
+            if(w<=h) normal.actions.zip(big.actions).forEach { (a,b) -> assertEquals(a.h,b.h) }
+            val zones=big.actions+big.auxiliary+listOf(big.dpad,big.stick,big.screen)
+            zones.forEach { r -> assertTrue(r.w>0 && r.h>0);assertTrue("bounds $r",r.x>=0 && r.y>=0 && r.x+r.w<=w && r.y+r.h<=h) }
+            for(i in zones.indices) for(j in i+1 until zones.size) assertFalse("Big overlaps $i/$j at $size",overlaps(zones[i],zones[j]))
+            big.actions.forEach { assertTrue(it.y+it.h+16*density<=big.dpad.y) }
+        }
+    }
+
     @Test fun nativeIntegerScaleAndTouchMappingSurviveAllPresentationTurns() {
         for(native in listOf(240 to 320,480 to 640)) for(turn in listOf(0,90,180,270)) {
             val quarter=turn==90 || turn==270

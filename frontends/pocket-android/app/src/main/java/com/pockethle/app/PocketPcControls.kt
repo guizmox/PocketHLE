@@ -35,10 +35,17 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         keys.getValue(R.id.btn_rotate_game).textSize=24f
         addView(dpad);addView(aim)
     }
+    var bigDirectionalControls: Boolean = false
+        set(value) {
+            if (field == value) return
+            clearPressedControls()
+            field = value
+            requestLayout()
+        }
     fun clearPressedControls() { keys.values.forEach { it.isPressed=false }; dpad.clearInput(); aim.clearInput() }
     override fun onMeasure(widthMeasureSpec: Int,heightMeasureSpec: Int) {
         val w=MeasureSpec.getSize(widthMeasureSpec);val h=MeasureSpec.getSize(heightMeasureSpec)
-        setMeasuredDimension(w,h);geometry=PocketPcGeometry.calculate(w,h,dp)
+        setMeasuredDimension(w,h);geometry=PocketPcGeometry.calculate(w,h,dp,bigDirectionalControls)
         fun measure(view: View,rect: ControlRect) { view.measure(MeasureSpec.makeMeasureSpec(rect.w,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(rect.h,MeasureSpec.EXACTLY)) }
         actions.forEachIndexed { i,id->measure(keys.getValue(id),geometry.actions[i]) }
         auxiliary.forEachIndexed { i,id->measure(keys.getValue(id),geometry.auxiliary[i]) }

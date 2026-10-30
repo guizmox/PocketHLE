@@ -162,8 +162,20 @@ class SettingsActivity : AppCompatActivity() {
                     writeConfig(); true
                 }
             })
-            val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Keyboard and controllers" }
+            val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Controls" }
             preferenceScreen.addPreference(input)
+            input.addPreference(ListPreference(requireContext()).apply {
+                key="android_pocketpc_controls_size";title="PocketPC arrows and stick size";isPersistent=false
+                entries=arrayOf("Normal", "Big");entryValues=arrayOf("normal", "big")
+                value=current.pocketpcControlsSize
+                dialogTitle="PocketPC arrows and stick size"
+                summaryProvider=Preference.SummaryProvider<ListPreference> { pref ->
+                    "${pref.entry ?: "Normal"}\nGlobal setting for PocketPC touch controls. Enlarges the arrows and stylus stick only by about one third. Big adapts to the available space. Applies next launch."
+                }
+                setOnPreferenceChangeListener { _, value ->
+                    current=current.copy(pocketpcControlsSize=value.toString());writeConfig();true
+                }
+            })
             val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Physical keyboard" }
             val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Physical controller" }
             input.addPreference(keyboard);input.addPreference(gamepad)
@@ -371,6 +383,9 @@ class SettingsActivity : AppCompatActivity() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
             val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
             val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering
+            if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_controls_size", "") != current.pocketpcControlsSize) {
+                android.widget.Toast.makeText(context, "Control size was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
+            }
             if (!gpuSaved) android.widget.Toast.makeText(context, "GPU setting was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             if(result?.optBoolean("ok",false)!=true) android.widget.Toast.makeText(context,result?.optString("error") ?: "Could not save settings",android.widget.Toast.LENGTH_LONG).show()
         }

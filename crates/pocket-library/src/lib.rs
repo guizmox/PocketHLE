@@ -1093,6 +1093,9 @@ pub struct LauncherConfig {
     /// can fade it.
     #[serde(default = "default_controls_opacity")]
     pub controls_opacity: f32,
+    /// Android-wide size of the PocketPC D-pad and stylus stick only.
+    #[serde(default)]
+    pub android_pocketpc_controls_size: PocketPcControlsSize,
 }
 
 fn default_log_unimplemented_apis() -> bool {
@@ -1290,8 +1293,18 @@ impl Default for LauncherConfig {
             gamepad_fullscreen: keybindings::default_gamepad_fullscreen(),
             show_backend_log: default_show_backend_log(),
             controls_opacity: default_controls_opacity(),
+            android_pocketpc_controls_size: PocketPcControlsSize::Normal,
         }
     }
+}
+
+/// Android touch target sizes; guest display and input bindings are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PocketPcControlsSize {
+    #[default]
+    Normal,
+    Big,
 }
 
 /// Top-level handle to an on-disk PocketHLE library.
@@ -6627,4 +6640,26 @@ fn raw_pocketpc_preset_override_validates_and_round_trips() {
         settings.pocketpc_preset_id = invalid.into();
         assert!(settings.validate_pocketpc_identity().is_err());
     }
+}
+
+#[test]
+fn android_directional_control_size_is_global_and_round_trips() {
+    let mut config: LauncherConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        config.android_pocketpc_controls_size,
+        PocketPcControlsSize::Normal
+    );
+    config.android_pocketpc_controls_size = PocketPcControlsSize::Big;
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(json["android_pocketpc_controls_size"], "big");
+    let restored: LauncherConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        restored.android_pocketpc_controls_size,
+        PocketPcControlsSize::Big
+    );
+    assert!(!serde_json::to_value(GameSettings::default())
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("android_pocketpc_controls_size"));
 }

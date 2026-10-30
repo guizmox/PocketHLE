@@ -200,6 +200,7 @@ class GameActivity : AppCompatActivity() {
         content.addView(controllerFullscreenHost)
         gameControls = findViewById(R.id.game_controls)
         gameControls.alpha = controlsOpacity
+        (gameControls as? PocketPcControls)?.bigDirectionalControls = config.pocketpcControlsSize == "big"
         if (gizmondoGame) {
             androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)
             hideSystemBars()
