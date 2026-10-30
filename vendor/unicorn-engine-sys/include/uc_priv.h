@@ -432,6 +432,13 @@ struct uc_struct {
     bool thread_executable_entry;
     bool current_executable;
     bool skip_sync_pc_on_exit;
+    /* PocketHLE policy, selected before lazy CPU initialization. */
+    unsigned pockethle_tlb_initial_bits;
+    unsigned pockethle_tlb_floor_bits;
+    uint32_t pockethle_ram_policy;
+    unsigned pockethle_jump_bits;
+    void *pockethle_jump_helper;
+    uint32_t pockethle_optimization_flags;
 };
 
 // Metadata stub for the variable-size cpu context used with uc_context_*()

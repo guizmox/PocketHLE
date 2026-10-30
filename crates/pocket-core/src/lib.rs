@@ -64,7 +64,18 @@ impl Emulator {
 
     #[cfg(feature = "unicorn")]
     pub fn with_unicorn_cpu_for_arch(arch: pocket_cpu::Arch) -> Result<Self> {
-        let cpu = pocket_cpu::unicorn::UnicornCpu::new_for_arch(arch)
+        Self::with_unicorn_cpu_for_arch_and_optimizations(
+            arch,
+            pocket_cpu::Optimizations::default(),
+        )
+    }
+
+    #[cfg(feature = "unicorn")]
+    pub fn with_unicorn_cpu_for_arch_and_optimizations(
+        arch: pocket_cpu::Arch,
+        options: pocket_cpu::Optimizations,
+    ) -> Result<Self> {
+        let cpu = pocket_cpu::unicorn::UnicornCpu::new_for_arch_with_optimizations(arch, options)
             .context("creating unicorn-engine CPU instance")?;
         Ok(Self {
             cpu: Box::new(cpu),
@@ -75,6 +86,16 @@ impl Emulator {
             instruction_budget_per_slice: 1_000_000,
             max_slices: 1024,
         })
+    }
+
+    /// Launch-only policy: no mutable scheduling flag is checked during dispatch.
+    pub fn set_responsive_message_pump(&mut self, enabled: bool) -> Result<()> {
+        anyhow::ensure!(
+            self.process.is_none(),
+            "Message-pump optimization applies before loading a game"
+        );
+        self.dispatcher.set_responsive_message_pump(enabled);
+        Ok(())
     }
 
     /// Select the Pocket PC physical action key after loading a process.

@@ -605,6 +605,10 @@ typedef enum uc_control_type {
     // controle if context_save/restore should work with snapshots
     // Write: @args = (int)
     UC_CTL_CONTEXT_MODE,
+    /* PocketHLE fork: write uint32_t flags / read uint32_t*. Write only before
+     * CPU initialization. Bits: 1 fast private RAM writes, 2 large memory TLB,
+     * 4 large jump destination cache. All enabled by default. */
+    UC_CTL_POCKETHLE_OPTIMIZATIONS = 0x5048,
 } uc_control_type;
 
 /*

@@ -372,6 +372,7 @@ int cpu_memory_rw_debug(CPUState *cpu, target_ulong addr,
                         void *ptr, target_ulong len, bool is_write);
 
 int cpu_exec(struct uc_struct *uc, CPUState *cpu);
+int cpu_exec_legacy_jump(struct uc_struct *uc, CPUState *cpu);
 
 /**
  * cpu_set_cpustate_pointers(cpu)

@@ -2190,6 +2190,17 @@ impl PocketLauncher {
         crate::controller_ui::checkbox(ui, &mut draft.camera_enabled, "Camera hardware (CAM1)")
             .on_hover_text("Allow games to use the first Windows webcam. Takes effect on the next launch.");
         } else {
+        ui.heading("Optimizations");
+        ui.small("Enabled by default. Changes apply on the next game launch. These settings do not change the emulated CPU speed or FPS limit.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.fast_memory_access, "Fast memory access");
+        ui.small("Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_tlb_cache, "Extended memory translation cache");
+        ui.small("Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.responsive_scheduling, "Responsive thread scheduling");
+        ui.small("Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.");
+        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_jump_cache, "Extended jump cache");
+        ui.small("Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.");
+        ui.separator();
         let library_root = self.library.root().display().to_string();
         egui::Grid::new("settings_grid")
             .num_columns(2)

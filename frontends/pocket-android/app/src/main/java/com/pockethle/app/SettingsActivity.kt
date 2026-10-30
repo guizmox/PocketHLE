@@ -83,6 +83,26 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             val emulator = findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!
+            val optimizations=androidx.preference.PreferenceCategory(requireContext()).apply { title="Optimizations" }
+            emulator.addPreference(optimizations)
+            fun optimization(name: String, label: String, help: String) {
+                optimizations.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                    key="optimization_$name"; title=label; isPersistent=false
+                    isChecked=current.toJson().optJSONObject("optimizations")?.optBoolean(name,true) ?: true
+                    summary="$help Enabled by default; applies next launch."
+                    setOnPreferenceChangeListener { _, value ->
+                        val config=current.toJson()
+                        val settings=config.optJSONObject("optimizations") ?: JSONObject()
+                        settings.put(name,value as Boolean)
+                        current=current.copy(originalJson=config.put("optimizations",settings).toString())
+                        writeConfig();true
+                    }
+                })
+            }
+            optimization("fast_memory_access","Fast memory access","Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.")
+            optimization("extended_tlb_cache","Extended memory translation cache","Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.")
+            optimization("responsive_scheduling","Responsive thread scheduling","Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.")
+            optimization("extended_jump_cache","Extended jump cache","Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.")
             val pocketpc=androidx.preference.PreferenceCategory(requireContext()).apply { title="PocketPC" }
             emulator.addPreference(pocketpc)
             pocketpc.addPreference(ListPreference(requireContext()).apply {
@@ -382,6 +402,13 @@ class SettingsActivity : AppCompatActivity() {
         private fun writeConfig() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
             val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
+            val wantedOptimizations=current.toJson().optJSONObject("optimizations")
+            if (result?.optBoolean("ok", false) == true && wantedOptimizations != null) {
+                val actual=saved?.optJSONObject("optimizations")
+                if(listOf("fast_memory_access","extended_tlb_cache","responsive_scheduling","extended_jump_cache").any {
+                    actual == null || actual.optBoolean(it,true) != wantedOptimizations.optBoolean(it,true)
+                }) android.widget.Toast.makeText(context,"Optimization settings were not saved. Rebuild the native libraries and APK together.",android.widget.Toast.LENGTH_LONG).show()
+            }
             val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_controls_size", "") != current.pocketpcControlsSize) {
                 android.widget.Toast.makeText(context, "Control size was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()

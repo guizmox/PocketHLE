@@ -48,4 +48,36 @@ tb_lookup__cpu_state(CPUState *cpu, target_ulong *pc, target_ulong *cs_base,
     return tb;
 }
 
+/* Fixed 12-bit variant: no policy check in a guest jump. */
+static inline TranslationBlock *
+tb_lookup__cpu_state_legacy_jump(CPUState *cpu, target_ulong *pc, target_ulong *cs_base,
+                     uint32_t *flags, uint32_t cf_mask)
+{
+    CPUArchState *env = (CPUArchState *)cpu->env_ptr;
+    TranslationBlock *tb;
+    uint32_t hash;
+
+    cpu_get_tb_cpu_state(env, pc, cs_base, flags);
+    hash = tb_jmp_cache_hash_bits(env->uc, *pc, 12);
+    tb = cpu->tb_jmp_cache[hash];
+
+    cf_mask &= ~CF_CLUSTER_MASK;
+    cf_mask |= ((uint32_t)cpu->cluster_index) << CF_CLUSTER_SHIFT;
+
+    if (likely(tb &&
+               tb->pc == *pc &&
+               tb->cs_base == *cs_base &&
+               tb->flags == *flags &&
+               tb->trace_vcpu_dstate == *cpu->trace_dstate &&
+               (tb_cflags(tb) & (CF_HASH_MASK | CF_INVALID)) == cf_mask)) {
+        return tb;
+    }
+    tb = tb_htable_lookup(cpu, *pc, *cs_base, *flags, cf_mask);
+    if (tb == NULL) {
+        return NULL;
+    }
+    cpu->tb_jmp_cache[hash] = tb;
+    return tb;
+}
+
 #endif /* EXEC_TB_LOOKUP_H */

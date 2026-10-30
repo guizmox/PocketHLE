@@ -1127,6 +1127,7 @@ RAMBlock *qemu_ram_alloc_from_ptr(struct uc_struct *uc, ram_addr_t size, void *h
     assert(max_size >= size);
     new_block->page_size = uc->qemu_real_host_page_size;
     new_block->host = host;
+    new_block->flags |= uc->pockethle_ram_policy;
     if (host) {
         new_block->flags |= RAM_PREALLOC;
     }

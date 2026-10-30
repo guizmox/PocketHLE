@@ -374,31 +374,40 @@ fn run_process(
     // Same Stub→Unicorn promotion logic as `pocket_desktop::runner`:
     // a user who clicks "Run" wants the real ARM core regardless of
     // what is persisted in their library.json.
+    let launcher_config = pocket_library::Library::open(library_root)
+        .map(|l| l.config().clone())
+        .unwrap_or_default();
     let requested_backend = entry.settings.cpu_backend;
     let mut effective_backend = requested_backend;
     let mut emu = match requested_backend {
-        CpuBackendPref::Unicorn => match build_unicorn_for_machine(machine) {
-            Ok(emu) => emu,
-            Err(e) => {
-                summary_lines.push(format!("Unicorn unavailable: {e}"));
-                return (summary_lines.join("\n"), 0xc0000135);
+        CpuBackendPref::Unicorn => {
+            match build_unicorn_for_machine(machine, &launcher_config.optimizations) {
+                Ok(emu) => emu,
+                Err(e) => {
+                    summary_lines.push(format!("Unicorn unavailable: {e}"));
+                    return (summary_lines.join("\n"), 0xc0000135);
+                }
             }
-        },
-        CpuBackendPref::Stub => match build_unicorn_for_machine(machine) {
-            Ok(emu) => {
-                summary_lines.push(
-                    "Saved CPU backend was Stub (trace-only); promoting to \
+        }
+        CpuBackendPref::Stub => {
+            match build_unicorn_for_machine(machine, &launcher_config.optimizations) {
+                Ok(emu) => {
+                    summary_lines.push(
+                        "Saved CPU backend was Stub (trace-only); promoting to \
                      Unicorn so the game can actually execute."
-                        .to_string(),
-                );
-                effective_backend = CpuBackendPref::Unicorn;
-                emu
+                            .to_string(),
+                    );
+                    effective_backend = CpuBackendPref::Unicorn;
+                    emu
+                }
+                Err(e) => return (format!("Unicorn unavailable: {e}"), 0xc0000135),
             }
-            Err(e) => return (format!("Unicorn unavailable: {e}"), 0xc0000135),
-        },
+        }
     };
     summary_lines.push(format!("Effective backend: {}", effective_backend.label()));
 
+    emu.set_responsive_message_pump(launcher_config.optimizations.responsive_scheduling)
+        .expect("new emulator has no guest image");
     emu.set_frame_rate_limit(entry.settings.frame_rate_limit.fps());
     emu.max_slices = entry.settings.max_slices;
     emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
@@ -456,9 +465,7 @@ fn run_process(
     } else {
         "registry-pocketpc.json"
     });
-    let launcher_config = pocket_library::Library::open(library_root)
-        .map(|l| l.config().clone())
-        .unwrap_or_default();
+
     if !is_gizmondo {
         if let Err(error) = emu.set_pocketpc_processor(&launcher_config.pocketpc_processor) {
             log::warn!("{error}; using default PXA270 identity");
@@ -777,19 +784,37 @@ fn run_process(
 }
 
 #[cfg(feature = "unicorn")]
-fn build_unicorn_for_machine(machine: u16) -> anyhow::Result<Emulator> {
+fn build_unicorn_for_machine(
+    machine: u16,
+    options: &pocket_library::OptimizationSettings,
+) -> anyhow::Result<Emulator> {
+    let cpu_options = pocket_core::cpu::Optimizations {
+        fast_memory_access: options.fast_memory_access,
+        extended_tlb_cache: options.extended_tlb_cache,
+        extended_jump_cache: options.extended_jump_cache,
+    };
+
     if matches!(
         machine,
         pocket_core::pe::machine::MIPS_R3000 | pocket_core::pe::machine::MIPS_R4000
     ) {
-        Emulator::with_unicorn_cpu_for_arch(pocket_core::cpu::Arch::Mips)
+        Emulator::with_unicorn_cpu_for_arch_and_optimizations(
+            pocket_core::cpu::Arch::Mips,
+            cpu_options,
+        )
     } else {
-        Emulator::with_unicorn_cpu()
+        Emulator::with_unicorn_cpu_for_arch_and_optimizations(
+            pocket_core::cpu::Arch::Arm,
+            cpu_options,
+        )
     }
 }
 
 #[cfg(not(feature = "unicorn"))]
-fn build_unicorn_for_machine(_machine: u16) -> anyhow::Result<Emulator> {
+fn build_unicorn_for_machine(
+    _machine: u16,
+    _options: &pocket_library::OptimizationSettings,
+) -> anyhow::Result<Emulator> {
     Err(anyhow::anyhow!(
         "binary was not compiled with the `unicorn` feature"
     ))

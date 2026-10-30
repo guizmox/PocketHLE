@@ -323,6 +323,11 @@ uc_err uc_open(uc_arch arch, uc_mode mode, uc_engine **result)
         uc->errnum = UC_ERR_OK;
         uc->arch = arch;
         uc->mode = mode;
+        uc->pockethle_tlb_initial_bits = 12;
+        uc->pockethle_tlb_floor_bits = 12;
+        uc->pockethle_ram_policy = 0;
+        uc->pockethle_jump_bits = UNICORN_JUMP_CACHE_BITS;
+        uc->pockethle_optimization_flags = 7;
         uc->reg_read = default_reg_read;
         uc->reg_write = default_reg_write;
 
@@ -2632,6 +2637,25 @@ uc_err uc_ctl(uc_engine *uc, uc_control_type control, ...)
     va_start(args, control);
 
     switch (type) {
+    case UC_CTL_POCKETHLE_OPTIMIZATIONS: {
+        if (rw == UC_CTL_IO_WRITE) {
+            uint32_t flags = va_arg(args, uint32_t);
+            if (uc->init_done || (flags & ~7u)) {
+                err = UC_ERR_ARG;
+            } else {
+                uc->pockethle_optimization_flags = flags;
+                uc->pockethle_tlb_initial_bits = (flags & 2u) ? 12 : 8;
+                uc->pockethle_tlb_floor_bits = (flags & 2u) ? 12 : 6;
+                uc->pockethle_ram_policy = (flags & 1u) ? 0 : RAM_POCKETHLE_CONSERVATIVE;
+                uc->pockethle_jump_bits = (flags & 4u) ? UNICORN_JUMP_CACHE_BITS : 12;
+            }
+        } else if (rw == UC_CTL_IO_READ) {
+            uint32_t *flags = va_arg(args, uint32_t *);
+            if (!flags) { err = UC_ERR_ARG; }
+            else { *flags = uc->pockethle_optimization_flags; }
+        } else { err = UC_ERR_ARG; }
+        break;
+    }
     case UC_CTL_UC_MODE: {
         if (rw == UC_CTL_IO_READ) {
             int *pmode = va_arg(args, int *);

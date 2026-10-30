@@ -27,6 +27,14 @@
 #ifndef QEMU_OSDEP_H
 #define QEMU_OSDEP_H
 
+/* Expand the architecture alias before adding a private variant suffix. */
+#define UC_PH_JOIN_INNER(a, b) a##b
+#define UC_PH_JOIN(a, b) UC_PH_JOIN_INNER(a, b)
+#define cpu_exec_legacy_jump UC_PH_JOIN(cpu_exec, _legacy_jump)
+#define vm_start_legacy_jump UC_PH_JOIN(vm_start, _legacy_jump)
+#define resume_all_vcpus_legacy_jump UC_PH_JOIN(resume_all_vcpus, _legacy_jump)
+#define helper_lookup_tb_ptr_legacy_jump UC_PH_JOIN(helper_lookup_tb_ptr, _legacy_jump)
+
 #include "config-host.h"
 #ifdef NEED_CPU_H
 #include "config-target.h"

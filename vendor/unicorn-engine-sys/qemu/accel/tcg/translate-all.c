@@ -1166,7 +1166,7 @@ static uc_err uc_gen_tb(struct uc_struct *uc, uint64_t addr, uc_tb *out_tb)
     // Unicorn: Our hack here.
     pc = addr;
 
-    hash = tb_jmp_cache_hash_func(env->uc, pc);
+    hash = tb_jmp_cache_hash_bits(env->uc, pc, env->uc->pockethle_jump_bits);
     tb = cpu->tb_jmp_cache[hash];
 
     cflags &= ~CF_CLUSTER_MASK;
@@ -1523,7 +1523,7 @@ static void do_tb_phys_invalidate(TCGContext *tcg_ctx, TranslationBlock *tb, boo
     }
 
     /* remove the TB from the hash list */
-    h = tb_jmp_cache_hash_func(uc, tb->pc);
+    h = tb_jmp_cache_hash_bits(uc, tb->pc, uc->pockethle_jump_bits);
     if (cpu->tb_jmp_cache[h] == tb) {
         cpu->tb_jmp_cache[h] = NULL;
     }
@@ -2161,9 +2161,11 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
 
 static void tb_jmp_cache_clear_page(CPUState *cpu, target_ulong page_addr)
 {
-    unsigned int i, i0 = tb_jmp_cache_hash_page(cpu->uc, page_addr);
+    unsigned bits = cpu->uc->pockethle_jump_bits;
+    unsigned page_size = 1u << (bits / 2);
+    unsigned int i, i0 = tb_jmp_cache_hash_bits(cpu->uc, page_addr, bits) & ~((unsigned)page_size - 1);
 
-    for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
+    for (i = 0; i < page_size; i++) {
         cpu->tb_jmp_cache[i0 + i] = NULL;
     }
 }

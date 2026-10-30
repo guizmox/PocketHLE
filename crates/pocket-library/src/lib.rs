@@ -1096,6 +1096,8 @@ pub struct LauncherConfig {
     /// Android-wide size of the PocketPC D-pad and stylus stick only.
     #[serde(default)]
     pub android_pocketpc_controls_size: PocketPcControlsSize,
+    #[serde(default)]
+    pub optimizations: OptimizationSettings,
 }
 
 fn default_log_unimplemented_apis() -> bool {
@@ -1294,6 +1296,27 @@ impl Default for LauncherConfig {
             show_backend_log: default_show_backend_log(),
             controls_opacity: default_controls_opacity(),
             android_pocketpc_controls_size: PocketPcControlsSize::Normal,
+            optimizations: OptimizationSettings::default(),
+        }
+    }
+}
+
+/// Host performance policies. These are not emulated ARM hardware features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OptimizationSettings {
+    pub fast_memory_access: bool,
+    pub extended_tlb_cache: bool,
+    pub responsive_scheduling: bool,
+    pub extended_jump_cache: bool,
+}
+impl Default for OptimizationSettings {
+    fn default() -> Self {
+        Self {
+            fast_memory_access: true,
+            extended_tlb_cache: true,
+            responsive_scheduling: true,
+            extended_jump_cache: true,
         }
     }
 }
@@ -4053,6 +4076,46 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn optimization_defaults_and_independent_roundtrip() {
+        use super::*;
+        let defaults = OptimizationSettings::default();
+        let mut legacy = serde_json::to_value(LauncherConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("optimizations");
+        assert_eq!(
+            serde_json::from_value::<LauncherConfig>(legacy.clone())
+                .unwrap()
+                .optimizations,
+            defaults
+        );
+        legacy["optimizations"] = serde_json::json!({"fast_memory_access": false});
+        let partial = serde_json::from_value::<LauncherConfig>(legacy).unwrap();
+        assert_eq!(
+            partial.optimizations,
+            OptimizationSettings {
+                fast_memory_access: false,
+                ..defaults
+            }
+        );
+        for bits in 0..16 {
+            let settings = OptimizationSettings {
+                fast_memory_access: bits & 1 != 0,
+                extended_tlb_cache: bits & 2 != 0,
+                responsive_scheduling: bits & 4 != 0,
+                extended_jump_cache: bits & 8 != 0,
+            };
+            let mut config = LauncherConfig::default();
+            config.optimizations = settings;
+            let encoded = serde_json::to_string(&config).unwrap();
+            assert_eq!(
+                serde_json::from_str::<LauncherConfig>(&encoded)
+                    .unwrap()
+                    .optimizations,
+                settings
+            );
+        }
+    }
+
     #[test]
     fn deadzone_defaults_and_per_game_json_roundtrip() {
         use super::*;

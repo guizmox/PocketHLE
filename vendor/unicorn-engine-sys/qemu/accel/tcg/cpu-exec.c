@@ -629,3 +629,136 @@ int cpu_exec(struct uc_struct *uc, CPUState *cpu)
 
     return ret;
 }
+
+/* Preselected legacy cache specialization; default hot loop is unchanged. */
+static inline TranslationBlock *tb_find_legacy_jump(CPUState *cpu,
+                                        TranslationBlock *last_tb,
+                                        int tb_exit, uint32_t cf_mask)
+{
+    TranslationBlock *tb;
+    target_ulong cs_base, pc;
+    uint32_t flags;
+    uc_tb cur_tb, prev_tb;
+    uc_engine *uc = cpu->uc;
+    struct list_item *cur;
+    struct hook *hook;
+
+    tb = tb_lookup__cpu_state_legacy_jump(cpu, &pc, &cs_base, &flags, cf_mask);
+    if (tb == NULL) {
+        mmap_lock();
+        tb = tb_gen_code(cpu, pc, cs_base, flags, cf_mask);
+        mmap_unlock();
+        /* We add the TB in the virtual pc hash table for the fast lookup */
+        cpu->tb_jmp_cache[tb_jmp_cache_hash_bits(cpu->uc, pc, 12)] = tb;
+
+        if (uc->last_tb) {
+            UC_TB_COPY(&cur_tb, tb);
+            UC_TB_COPY(&prev_tb, uc->last_tb);
+            for (cur = uc->hook[UC_HOOK_EDGE_GENERATED_IDX].head;
+                cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
+                if (hook->to_delete) {
+                    continue;
+                }
+
+                if (HOOK_BOUND_CHECK(hook, (uint64_t)tb->pc)) {
+                    JIT_CALLBACK_GUARD(((uc_hook_edge_gen_t)hook->callback)(uc, &cur_tb, &prev_tb, hook->user_data));
+                }
+            }
+        }
+    }
+    /* We don't take care of direct jumps when address mapping changes in
+     * system emulation. So it's not safe to make a direct jump to a TB
+     * spanning two pages because the mapping for the second page can change.
+     */
+    if (tb->page_addr[1] != -1) {
+        last_tb = NULL;
+    }
+    /* See if we can patch the calling TB. */
+    if (last_tb) {
+        tb_exec_unlock(cpu->uc);
+        tb_add_jump(last_tb, tb_exit, tb);
+        tb_exec_lock(cpu->uc);
+    }
+
+    return tb;
+}
+
+int cpu_exec_legacy_jump(struct uc_struct *uc, CPUState *cpu)
+{
+    CPUClass *cc = CPU_GET_CLASS(cpu);
+    int ret;
+    // SyncClocks sc = { 0 };
+
+    if (cpu_handle_halt(cpu)) {
+        return EXCP_HALTED;
+    }
+
+    // rcu_read_lock();
+
+    cc->cpu_exec_enter(cpu);
+
+    /* Calculate difference between guest clock and host clock.
+     * This delay includes the delay of the last cycle, so
+     * what we have to do is sleep until it is 0. As for the
+     * advance/delay we gain here, we try to fix it next time.
+     */
+    // init_delay_params(&sc, cpu);
+
+    // Unicorn: We would like to support nested uc_emu_start calls.
+    /* prepare setjmp context for exception handling */
+    // if (sigsetjmp(cpu->jmp_env, 0) != 0) {
+    if (sigsetjmp(uc->jmp_bufs[uc->nested_level - 1], 0) != 0) {
+#if defined(__clang__) || !QEMU_GNUC_PREREQ(4, 6)
+        /* Some compilers wrongly smash all local variables after
+         * siglongjmp. There were bug reports for gcc 4.5.0 and clang.
+         * Reload essential local variables here for those compilers.
+         * Newer versions of gcc would complain about this code (-Wclobbered). */
+        cc = CPU_GET_CLASS(cpu);
+#else /* buggy compiler */
+        /* Assert that the compiler does not smash local variables. */
+        // g_assert(cpu == current_cpu);
+        g_assert(cc == CPU_GET_CLASS(cpu));
+#endif /* buggy compiler */
+
+        assert_no_pages_locked();
+    }
+
+    /* if an exception is pending, we execute it here */
+    while (!cpu_handle_exception(cpu, &ret)) {
+        TranslationBlock *last_tb = NULL;
+        int tb_exit = 0;
+
+        while (!cpu_handle_interrupt(cpu, &last_tb)) {
+            uint32_t cflags = cpu->cflags_next_tb;
+            TranslationBlock *tb;
+
+            /* When requested, use an exact setting for cflags for the next
+               execution.  This is used for icount, precise smc, and stop-
+               after-access watchpoints.  Since this request should never
+               have CF_INVALID set, -1 is a convenient invalid value that
+               does not require tcg headers for cpu_common_reset.  */
+            if (cflags == -1) {
+                cflags = curr_cflags();
+            } else {
+                cpu->cflags_next_tb = -1;
+            }
+
+            tb = tb_find_legacy_jump(cpu, last_tb, tb_exit, cflags);
+            if (unlikely(cpu->exit_request)) {
+                continue;
+            }
+            cpu_loop_exec_tb(cpu, tb, &last_tb, &tb_exit);
+            /* Try to align the host and virtual clocks
+               if the guest is in advance */
+            // align_clocks(&sc, cpu);
+        }
+    }
+
+    // Unicorn: Clear any TCG exit flag that might have been left set by exit requests
+    uc->cpu->tcg_exit_req = 0;
+
+    cc->cpu_exec_exit(cpu);
+    // rcu_read_unlock();
+
+    return ret;
+}

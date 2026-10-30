@@ -47,6 +47,16 @@ static inline unsigned int tb_jmp_cache_hash_func(struct uc_struct *uc, target_u
            | (tmp & TB_JMP_ADDR_MASK));
 }
 
+/* Used with constant 12 in the legacy execution routines; dynamic values are
+ * confined to cold code generation and invalidation. */
+static inline unsigned int tb_jmp_cache_hash_bits(struct uc_struct *uc, target_ulong pc, unsigned bits)
+{
+    unsigned page_bits = bits / 2;
+    target_ulong tmp = pc ^ (pc >> (TARGET_PAGE_BITS - page_bits));
+    return ((tmp >> (TARGET_PAGE_BITS - page_bits)) & ((1u << bits) - (1u << page_bits)))
+           | (tmp & ((1u << page_bits) - 1));
+}
+
 static inline
 uint32_t tb_hash_func(tb_page_addr_t phys_pc, target_ulong pc, uint32_t flags,
                       uint32_t cf_mask, uint32_t trace_vcpu_dstate)

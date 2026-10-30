@@ -186,3 +186,17 @@ void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
         }
     }
 }
+void *HELPER(lookup_tb_ptr_legacy_jump)(CPUArchState *env)
+{
+    CPUState *cpu = env_cpu(env);
+    TranslationBlock *tb;
+    target_ulong cs_base, pc;
+    uint32_t flags;
+    struct uc_struct *uc = (struct uc_struct *)cpu->uc;
+
+    tb = tb_lookup__cpu_state_legacy_jump(cpu, &pc, &cs_base, &flags, curr_cflags());
+    if (tb == NULL) {
+        return uc->tcg_ctx->code_gen_epilogue;
+    }
+    return tb->tc.ptr;
+}

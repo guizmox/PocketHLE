@@ -6,11 +6,13 @@
 #include "qemu-common.h"
 #include "exec/memory.h"
 #include "exec/cpu_ldst.h"
+#include "exec/helper-proto.h"
 
 // This header define common patterns/codes that will be included in all arch-sepcific
 // codes for unicorns purposes.
 
 void vm_start(struct uc_struct*);
+void vm_start_legacy_jump(struct uc_struct*);
 void tcg_exec_init(struct uc_struct *uc, uint32_t tb_size);
 bool unicorn_fill_tlb(CPUState *cs, vaddr address, int size,
                       MMUAccessType rw, int mmu_idx,
@@ -193,7 +195,9 @@ static inline void uc_common_init(struct uc_struct* uc)
     uc->virtual_to_physical = cpu_virtual_to_physical;
     uc->tcg_exec_init = tcg_exec_init;
     uc->cpu_exec_init_all = cpu_exec_init_all;
-    uc->vm_start = vm_start;
+    uc->vm_start = uc->pockethle_jump_bits == 12 ? vm_start_legacy_jump : vm_start;
+    uc->pockethle_jump_helper = uc->pockethle_jump_bits == 12
+        ? (void *)HELPER(lookup_tb_ptr_legacy_jump) : (void *)HELPER(lookup_tb_ptr);
     uc->memory_map = memory_map;
     uc->memory_map_ptr = memory_map_ptr;
     uc->memory_unmap = memory_unmap;

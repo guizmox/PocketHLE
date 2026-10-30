@@ -256,6 +256,11 @@ impl Default for WinCeDispatcher {
 }
 
 impl WinCeDispatcher {
+    /// Bind the selected message-pump implementation before mapping the guest.
+    pub fn set_responsive_message_pump(&mut self, enabled: bool) {
+        coredll::configure_message_pump(self, enabled);
+    }
+
     pub fn new() -> Self {
         gles::reset_for_session();
         Self::capability_registry()
