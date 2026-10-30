@@ -1,1 +1,4 @@
-crates\pocket-library\src\installer\pocketsetup.rs
+Cargo.toml
+Cargo.lock
+crates\pocket-winceapi\src\coredll.rs
+frontends\pocket-android\app\build.gradle.kts

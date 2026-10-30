@@ -235,6 +235,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "__ll_to_d", soft_i64tod);
     d.register_handler(dll, "__ull_to_f", soft_u64tos);
     d.register_handler(dll, "__ull_to_d", soft_u64tod);
+    // MIPS CE uses the dividend-first 64-bit helper and returns v0:v1.
+    d.register_handler(dll, "__ull_div", rt_udiv64by64);
     d.register_handler(dll, "__f_to_ll", soft_stoi64);
     d.register_handler(dll, "__d_to_ll", soft_dtoi64);
     d.register_handler(dll, "__f_to_ull", soft_stou64);
@@ -41322,6 +41324,29 @@ mod variadic_abi_tests {
             assert_eq!(render_printf(&mut ctx, "%s%s%04u-%u", false, 2).unwrap(), "images/loading_0007-9");
             assert_eq!(read_vararg_u32(&mut ctx, 4).unwrap(), 7);
             assert_eq!(read_vararg_u32(&mut ctx, 5).unwrap(), 9);
+        }
+    }
+}
+
+#[cfg(test)]
+mod unsigned_division_helper_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn unsigned_long_long_division_uses_dividend_first_and_preserves_both_result_words() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (dividend, divisor, quotient) in [
+            (0x01dd68ac_f12facc0u64, 10_000_000u64, 13_437_865_588u64),
+            (0x1_0000_0000, 60, 71_582_788),
+            (u64::MAX, 1, u64::MAX),
+            (u64::MAX, 3, 0x5555_5555_5555_5555),
+            (0x8000_0000_0000_0000, 2, 0x4000_0000_0000_0000),
+            (0x1234_5678_9abc_def0, 0x1_0000_0001, 0x1234_5678),
+            (0, 17, 0),
+        ] {
+            assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", "__ull_div",
+                &[dividend as u32, (dividend >> 32) as u32, divisor as u32, (divisor >> 32) as u32]),
+                DispatchOutcome::ReturnedR0R1(quotient as u32, (quotient >> 32) as u32));
         }
     }
 }

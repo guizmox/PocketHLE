@@ -28,7 +28,7 @@ android {
         applicationId = "com.pockethle.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 13
+        versionCode = 14
         versionName = pocketReleaseVersion
         buildConfigField("String", "UPDATE_VERSION", "\"$pocketReleaseVersion\"")
 
