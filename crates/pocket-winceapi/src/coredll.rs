@@ -12325,6 +12325,23 @@ fn control_message(
     }
 }
 
+/// AYGSHELL's void SHSendBackToFocusWindow(UINT, WPARAM, LPARAM).
+/// Tail-call the normal synchronous SendMessage path, including native child
+/// procedures. The guest caller's LR remains the return address.
+pub(crate) fn send_back_to_focus_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = finish_control_notify(ctx)? {
+        return Ok(outcome);
+    }
+    let message = ctx.arg_u32(0)?;
+    let wparam = ctx.arg_u32(1)?;
+    let lparam = ctx.arg_u32(2)?;
+    let target = input_window(ctx.kernel);
+    for (index, value) in [target, message, wparam, lparam].into_iter().enumerate() {
+        ctx.cpu.write_arg(index as u8, value)?;
+    }
+    send_message_w(ctx)
+}
+
 fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = finish_control_notify(ctx)? {
         return Ok(outcome);
@@ -17499,7 +17516,7 @@ fn sh_load_dibitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
-fn load_bitmap_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn load_bitmap_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hinst = ctx.arg_u32(0)?;
     let name_raw = ctx.arg_u32(1)?;
     let want_name = read_wide_resource_key(ctx, name_raw)?;

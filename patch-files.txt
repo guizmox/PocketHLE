@@ -1,1 +1,3 @@
-crates\pocket-winceapi\src\imgdecmp.rs
+crates\pocket-winceapi\data\aygshell-ordinals.json
+crates\pocket-winceapi\src\aygshell.rs
+crates\pocket-winceapi\src\coredll.rs

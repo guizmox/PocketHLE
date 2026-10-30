@@ -1,6 +1,7 @@
 {
   "dll": "aygshell.dll",
   "ordinals": {
+    "3": "SHSetAppKeyWndAssoc",
     "4": "SHSipInfo",
     "9": "SHInitExtraControls",
     "10": "SHCloseApps",
@@ -8,12 +9,14 @@
     "34": "SHCreateMenuBar",
     "40": "SHRecognizeGesture",
     "56": "SHInitDialog",
+    "64": "SHLoadImageResource",
     "65": "SHFullScreen",
     "69": "SHDoneButton",
     "74": "SHCreateMenuBarInternal",
     "75": "SHLoadImageFile",
     "83": "SHHandleWMSettingChange",
     "84": "SHHandleWMActivate",
+    "97": "SHSendBackToFocusWindow",
     "188": "SHFindMenuBar"
   }
 }
