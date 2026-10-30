@@ -3501,6 +3501,8 @@ pub const NOTE_PRJ_MODULE_HANDLE: u32 = 0x1000_000c;
 pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
 /// Fake `HMODULE` for `libGLES_CL.dll`, the Common-Lite profile.
 pub const GLES_CL_MODULE_HANDLE: u32 = 0x1000_0005;
+/// Standalone EGL library; shares the client libraries' EGL implementation.
+pub const EGL_MODULE_HANDLE: u32 = 0x1000_000d;
 /// Fake `HMODULE` for the Hekkus Sound System compatibility layer.
 pub const HSS_MODULE_HANDLE: u32 = 0x1000_0006;
 /// Fake HMODULE for the resident `aygshell.dll` compatibility module.
@@ -3520,6 +3522,7 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
     let mut aygshell = HashMap::new();
     let mut gles_cm = HashMap::new();
     let mut gles_cl = HashMap::new();
+    let mut egl = HashMap::new();
     for thunk in thunks {
         let name = match (&thunk.binding, &thunk.friendly_name) {
             (_, Some(name)) => name.clone(),
@@ -3581,6 +3584,8 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
                 .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("ole32.dll") {
             ole32.insert(name.clone(), thunk.thunk_va);
+        } else if thunk.dll.eq_ignore_ascii_case("libegl.dll") {
+            egl.insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("libgles_cm.dll")
             || thunk.dll.eq_ignore_ascii_case("libgles_cl.dll")
         {
@@ -3616,6 +3621,9 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
     }
     if !gles_cl.is_empty() {
         exports.insert(GLES_CL_MODULE_HANDLE, gles_cl);
+    }
+    if !egl.is_empty() {
+        exports.insert(EGL_MODULE_HANDLE, egl);
     }
     if !ole32.is_empty() {
         exports.insert(OLE32_MODULE_HANDLE, ole32);
@@ -3866,6 +3874,7 @@ impl Process {
             "ddraw.dll",
             "libgles_cm.dll",
             "libgles_cl.dll",
+            "libegl.dll",
             "hss.dll",
             "ole32.dll",
             "sdlaunch.dll",
@@ -6090,4 +6099,23 @@ pub struct DialogCallbackState {
     pub hwnd: u32,
     pub stack: Vec<(GuestCallFrame, u32)>,
     pub defaults: Vec<(usize, u32, GuestCallFrame)>,
+}
+
+#[cfg(test)]
+mod standalone_egl_tests {
+    use super::*;
+    #[test]
+    fn egl_dynamic_exports_have_their_own_module_identity() {
+        let thunk = Thunk {
+            dll: "libEGL.dll".into(),
+            binding: ImportBinding::Name("eglGetDisplay".into()),
+            friendly_name: Some("eglGetDisplay".into()),
+            thunk_va: 0x70000080,
+            iat_va: 0,
+        };
+        let exports = build_dynamic_exports(&[thunk]);
+        assert_eq!(exports[&EGL_MODULE_HANDLE]["eglGetDisplay"], 0x70000080);
+        assert!(!exports.contains_key(&GLES_CM_MODULE_HANDLE));
+        assert!(!exports.contains_key(&GLES_CL_MODULE_HANDLE));
+    }
 }

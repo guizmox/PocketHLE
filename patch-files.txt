@@ -1,5 +1,4 @@
-crates\pocket-gles\src\lib.rs
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\gpu\mod.rs
-crates\pocket-gles\src\profiling.rs
-docs\GPU_VERTEX_PROFILING.md
+crates\pocket-core\src\cab_files.rs
+crates\pocket-core\src\cab_setup.rs
+crates\pocket-winceapi\src\coredll.rs
+docs\LEGACY_CAB_FILES_AND_MIPS_VARARGS.md

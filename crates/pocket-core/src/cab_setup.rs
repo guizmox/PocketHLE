@@ -1,8 +1,12 @@
 //! Deferred CAB registry setup, executed by the cabinet's own ARM DLL.
-//! Only registry/time installers are supported here. Installers needing file
-//! mutation, GUI, services or child processes remain unsupported, rather than
+//! Declared shared CAB files are installed separately through the VFS. Only
+//! registry/time setup callbacks are supported; callbacks needing file mutation,
+//! GUI, services or child processes remain unsupported, rather than
 //! running partially against the read-only installed package (IonFx resources
 //! have their separate extraction path in pocket-cab).
+#[path = "cab_files.rs"]
+mod installed_files;
+
 use crate::Emulator;
 use anyhow::{ensure, Context, Result};
 use pocket_kernel::registry::RegistryValue;
@@ -76,6 +80,8 @@ impl Emulator {
     /// commit only after successful callbacks; the DLL hash + install directory
     /// marker lives in the same persistent device registry as those changes.
     pub fn complete_cab_registry_setup(&mut self, root: &Path, install_dir: &str) -> Result<usize> {
+        let state = &mut self.process.as_mut().context("No process loaded")?.state;
+        installed_files::complete(&mut state.vfs, root, install_dir)?;
         let mut completed = self.complete_cab_registry_setup_dir(root, install_dir)?;
         // The importer keeps add-on setup callbacks outside the guest mount.
         // Only its bounded, hash-named package directories are eligible here.

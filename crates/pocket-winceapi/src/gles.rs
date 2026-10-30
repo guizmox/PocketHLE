@@ -2220,6 +2220,7 @@ fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     let address = [
         pocket_kernel::GLES_CM_MODULE_HANDLE,
         pocket_kernel::GLES_CL_MODULE_HANDLE,
+        pocket_kernel::EGL_MODULE_HANDLE,
     ]
     .into_iter()
     .find_map(|module| {
@@ -2543,7 +2544,52 @@ const EXTRA_NAMED_EXPORTS: [&str; 17] = [
     "eglSwapIntervalNV",
 ];
 
+const EGL_NAMED_EXPORTS: &[&str] = &[
+    "eglGetDisplay",
+    "eglInitialize",
+    "eglTerminate",
+    "eglGetConfigs",
+    "eglChooseConfig",
+    "eglGetConfigAttrib",
+    "eglCreateWindowSurface",
+    "eglCreateContext",
+    "eglCreatePbufferSurface",
+    "eglCreatePixmapSurface",
+    "eglDestroySurface",
+    "eglDestroyContext",
+    "eglMakeCurrent",
+    "eglSwapBuffers",
+    "eglGetError",
+    "eglQueryString",
+    "eglQuerySurface",
+    "eglGetCurrentDisplay",
+    "eglGetCurrentContext",
+    "eglGetCurrentSurface",
+    "eglWaitGL",
+    "eglWaitNative",
+    "eglWaitClient",
+    "eglCopyBuffers",
+    "eglSwapInterval",
+    "eglSwapIntervalNV",
+    "eglSurfaceAttrib",
+    "eglBindAPI",
+    "eglReleaseThread",
+    "eglCreatePbufferFromClientBuffer",
+    "eglBindTexImage",
+    "eglReleaseTexImage",
+    "eglQueryContext",
+    "eglQueryAPI",
+    "eglGetProcAddress",
+];
+
 pub fn register(d: &mut WinCeDispatcher) {
+    // Standalone EGL exports by name. Its ordinal ABI is vendor-specific:
+    // do not reuse the Common/Common-Lite GL ordinal tables.
+    for name in EGL_NAMED_EXPORTS {
+        if let Some(handler) = handler_for(name) {
+            d.register_handler("libegl.dll", name, handler);
+        }
+    }
     for dll in GLES_DLLS {
         for name in gles_ord::names_for(dll) {
             let Some(handler) = handler_for(&name) else {
@@ -4140,6 +4186,22 @@ mod tests {
             &[pocket_gles::GL_FOG_COLOR, SCRATCH],
         );
         with_ctx(|c| assert_eq!(c.state.fog_color, [1.0, 0.0, 0.5, 1.0]));
+    }
+
+    #[test]
+    fn standalone_egl_exports_use_the_shared_handlers() {
+        let d = WinCeDispatcher::new();
+        let names: std::collections::HashSet<_> = d.registered_iter()
+            .filter(|(dll, _)| *dll == "libegl.dll")
+            .map(|(_, name)| name.to_string()).collect();
+        for name in EGL_NAMED_EXPORTS {
+            assert!(names.contains(*name), "missing EGL export: {name}");
+            assert!(handler_for(name).is_some());
+        }
+        assert!(!names.contains("glDrawElements"));
+        assert!(!names.contains("ord:29"));
+        assert_eq!(crate::coredll::gles_module_handle("\\Windows\\libEGL.dll"),
+            Some(pocket_kernel::EGL_MODULE_HANDLE));
     }
 
     #[test]

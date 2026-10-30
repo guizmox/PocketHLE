@@ -897,6 +897,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ImmReleaseContext", imm_release_context);
     d.register_constant(dll, "ImmSetCompositionWindow", 1, one_returning);
     d.register_handler(dll, "SystemParametersInfoW", system_parameters_info_w);
+    d.register_handler(dll, "SetPowerRequirement", set_power_requirement);
+    d.register_handler(dll, "ReleasePowerRequirement", release_power_requirement);
     d.register_handler(dll, "GetSystemPowerStatusEx", get_system_power_status_ex);
     d.register_handler(dll, "GetSystemPowerStatusEx2", get_system_power_status_ex2);
     d.register_handler(dll, "CreateEventW", create_event_w);
@@ -2857,6 +2859,59 @@ fn get_system_power_status_ex2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     Ok(DispatchOutcome::ReturnedR0(if success { 56 } else { 0 }))
 }
 
+
+/// Read a bounded, terminated CE device/system-state name. Invalid guest
+/// pointers are API failures, rather than fatal CPU memory faults.
+fn power_requirement_name(ctx: &mut CallCtx<'_>, pointer: u32) -> Option<String> {
+    if pointer == 0 { return None; }
+    let mut units = Vec::new();
+    for offset in 0..1024u32 {
+        let address = pointer.checked_add(offset * 2)?;
+        let bytes = ctx.cpu.read_mem(address, 2).ok()?;
+        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if unit == 0 {
+            return if units.is_empty() { None } else { String::from_utf16(&units).ok() };
+        }
+        units.push(unit);
+    }
+    None
+}
+
+fn set_power_requirement(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    let state = ctx.arg_u32(1)?;
+    let device_flags = ctx.arg_u32(2)?;
+    let system_pointer = ctx.arg_u32(3)?;
+    let state_flags = ctx.arg_u32(4)?; // fifth CE ARM argument is on the stack
+    if device_flags & 1 == 0 {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let Some(device) = power_requirement_name(ctx, pointer) else {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let system_state = if system_pointer == 0 { None } else {
+        let Some(name) = power_requirement_name(ctx, system_pointer) else {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        Some(name)
+    };
+    let result = ctx.kernel.power_notifications.requirements.acquire(
+        pocket_kernel::power::Requirement { device, state, device_flags, system_state, state_flags });
+    Ok(DispatchOutcome::ReturnedR0(match result {
+        Ok(handle) => handle,
+        Err(error) => { set_thread_error(ctx, error); 0 }
+    }))
+}
+
+fn release_power_requirement(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let result = ctx.kernel.power_notifications.requirements.release(handle);
+    Ok(DispatchOutcome::ReturnedR0(result))
+}
+
 fn get_last_error(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(
         *ctx.kernel
@@ -4303,8 +4358,7 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 
 /// Map a `libGLES_*` module name to the handle
 /// [`pocket_kernel::build_dynamic_exports`] filed its thunks under.
-/// Returns `None` for anything that is not one of the two client
-/// libraries we emulate.
+/// Returns `None` for anything other than our GL client/EGL libraries.
 pub(crate) fn gles_module_handle(name: &str) -> Option<u32> {
     let stem = name.rsplit(['\\', '/']).next().unwrap_or(name);
     // Guests spell these every which way — `libGLES_CM.dll`,
@@ -4316,6 +4370,7 @@ pub(crate) fn gles_module_handle(name: &str) -> Option<u32> {
     match stem {
         "libgles_cm" => Some(pocket_kernel::GLES_CM_MODULE_HANDLE),
         "libgles_cl" => Some(pocket_kernel::GLES_CL_MODULE_HANDLE),
+        "libegl" => Some(pocket_kernel::EGL_MODULE_HANDLE),
         _ => None,
     }
 }
@@ -7056,15 +7111,15 @@ fn mbstowcs(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(written))
 }
 
-/// Read a u32 argument from the variadic tail (slot index `idx`,
-/// where 0 is the first variadic argument). The first 4 args go in
-/// r0..r3, the rest are on the stack.
+/// Read a 32-bit printf/scanf argument by its absolute ABI slot, including
+/// the fixed parameters. MIPS reserves four stack home slots before the fifth
+/// argument; ARM puts the fifth argument directly at SP.
 fn read_vararg_u32(ctx: &mut CallCtx<'_>, idx: u32) -> Result<u32, KernelError> {
     if idx < 4 {
         ctx.arg_u32(idx as u8)
     } else {
         let sp = ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Sp)?;
-        let off = (idx - 4) * 4;
+        let off = ctx.cpu.stack_arg_offset() + (idx - 4) * 4;
         let bytes = ctx.cpu.read_mem(sp + off, 4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
@@ -41175,5 +41230,81 @@ mod retained_window_dc_tests {
             &ctx.kernel.framebuffer.pixels[offset..offset + 2],
             &0x001fu16.to_le_bytes()
         );
+    }
+}
+
+#[cfg(test)]
+mod power_requirement_api_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
+    use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn requirements_use_the_ce_abi_and_release_returns_a_status() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.write_mem(0x2000, &"LCD1:\0".encode_utf16()
+            .flat_map(u16::to_le_bytes).collect::<Vec<_>>()).unwrap();
+        let DispatchOutcome::ReturnedR0(handle) = call(&mut cpu, &mut kernel,
+            &mut dispatcher, "coredll.dll", "SetPowerRequirement", &[0x2000, 0, 1, 0, 0])
+            else { panic!("expected a handle"); };
+        assert_ne!(handle, 0);
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll",
+            "ReleasePowerRequirement", &[handle]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll",
+            "ReleasePowerRequirement", &[handle]), DispatchOutcome::ReturnedR0(6));
+        assert_eq!(call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll",
+            "SetPowerRequirement", &[0xfffffff0, 0, 1, 0, 0]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(kernel.thread_last_errors[&kernel.current_thread], 87);
+    }
+}
+
+#[cfg(test)]
+mod variadic_abi_tests {
+    use super::*;
+    use pocket_cpu::{stub::StubCpu, Arch, Cpu, CpuError, StopReason};
+    use pocket_cpu::regs::ArmReg;
+
+    // Keep the same deterministic memory/register fixture for both ABIs.
+    // Only the architecture (and thus the stack home area) changes.
+    struct AbiCpu(StubCpu, Arch);
+    impl Cpu for AbiCpu {
+        fn arch(&self) -> Arch { self.1 }
+        fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError> {
+            self.0.map_region(va, size, prot)
+        }
+        fn write_mem(&mut self, va: u32, bytes: &[u8]) -> Result<(), CpuError> { self.0.write_mem(va, bytes) }
+        fn read_mem(&mut self, va: u32, size: u32) -> Result<Vec<u8>, CpuError> { self.0.read_mem(va, size) }
+        fn read_reg(&mut self, reg: ArmReg) -> Result<u32, CpuError> { self.0.read_reg(reg) }
+        fn write_reg(&mut self, reg: ArmReg, value: u32) -> Result<(), CpuError> { self.0.write_reg(reg, value) }
+        fn add_code_hook(&mut self, va: u32) -> Result<(), CpuError> { self.0.add_code_hook(va) }
+        fn add_instruction_hook(&mut self, va: u32) -> Result<(), CpuError> { self.0.add_instruction_hook(va) }
+        fn add_code_hook_range(&mut self, lo: u32, hi: u32) -> Result<(), CpuError> { self.0.add_code_hook_range(lo, hi) }
+        fn run_until_hook(&mut self, va: u32, limit: u64) -> Result<StopReason, CpuError> { self.0.run_until_hook(va, limit) }
+        fn request_stop(&mut self) { self.0.request_stop(); }
+    }
+    #[test]
+    fn printf_reads_stack_arguments_after_the_architecture_home_area() {
+        for arch in [Arch::Arm, Arch::Mips] {
+            let mut cpu = AbiCpu(StubCpu::new(), arch);
+            cpu.map_region(0x1000, 0x3000, Prot::READ | Prot::WRITE).unwrap();
+            cpu.write_reg(ArmReg::Sp, 0x3000).unwrap();
+            // Poison MIPS's a0-a3 home area: it contains no extra arguments.
+            cpu.write_mem(0x3000, &[0xa5; 32]).unwrap();
+            let stack = 0x3000 + cpu.stack_arg_offset();
+            cpu.write_mem(stack, &7u32.to_le_bytes()).unwrap();
+            cpu.write_mem(stack + 4, &9u32.to_le_bytes()).unwrap();
+            cpu.write_mem(0x1200, b"images/\0").unwrap();
+            cpu.write_mem(0x1300, b"loading_\0").unwrap();
+            cpu.write_reg(ArmReg::R2, 0x1200).unwrap();
+            cpu.write_reg(ArmReg::R3, 0x1300).unwrap();
+            let mut kernel = crate::gx::tests::fresh_kernel();
+            let thunk = pocket_kernel::Thunk {
+                thunk_va: 0, iat_va: 0, dll: "coredll.dll".into(),
+                binding: pocket_pe::ImportBinding::Name("sprintf".into()), friendly_name: None,
+            };
+            let mut ctx = CallCtx {cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk};
+            assert_eq!(render_printf(&mut ctx, "%s%s%04u-%u", false, 2).unwrap(), "images/loading_0007-9");
+            assert_eq!(read_vararg_u32(&mut ctx, 4).unwrap(), 7);
+            assert_eq!(read_vararg_u32(&mut ctx, 5).unwrap(), 9);
+        }
     }
 }

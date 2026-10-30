@@ -21,6 +21,8 @@ const SPI_GETSIPINFO: u32 = 0xE1;
 pub fn register(d: &mut WinCeDispatcher) {
     let dll = "aygshell.dll";
     for f in [
+        "SHInitExtraControls",
+        "SHFindMenuBar",
         "SHFullScreen",
         "SHCreateMenuBar",
         "SHCreateMenuBarEx",
@@ -45,6 +47,8 @@ pub fn register(d: &mut WinCeDispatcher) {
             }
             "SHRecognizeGesture" => gesture::recognize,
             "SHInitDialog" => sh_init_dialog,
+            "SHInitExtraControls" => sh_init_extra_controls,
+            "SHFindMenuBar" => sh_find_menu_bar,
             "SHFullScreen" => sh_full_screen,
             "SHLoadImageFile" => sh_load_image_file,
             "SHSipInfo" => sh_sip_info,
@@ -72,6 +76,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     for ord in [12u16, 13, 14, 21, 49, 50, 65, 71, 72, 80, 84, 341, 344] {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
+    d.register_handler(dll, "ord:188", sh_find_menu_bar);
+    d.register_handler(dll, "#188", sh_find_menu_bar);
     d.register_handler(dll, "ord:65", sh_full_screen);
     d.register_handler(dll, "ord:40", gesture::recognize);
     d.register_handler(dll, "ord:75", sh_load_image_file);
@@ -112,7 +118,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     //                back +0x1c and stores it as the menu bar HWND, so
     //                we have to write a handle there.
     d.register_handler(dll, "ord:4", sh_sip_info);
-    d.register_handler(dll, "ord:9", ok);
+    d.register_handler(dll, "ord:9", sh_init_extra_controls);
     d.register_handler(dll, "ord:22", ok);
     d.register_handler(dll, "ord:32", sh_message_box_check);
     d.register_handler(dll, "ord:33", zero);
@@ -627,6 +633,13 @@ mod memory_tests {
         let handle = u32::from_le_bytes(cpu.read_mem(0x201c, 4).unwrap().try_into().unwrap());
         assert_eq!(k.window_rects[&handle], (0, 294, 240, 26));
         assert_eq!(k.active_shell_bar(), None);
+        for name in ["SHFindMenuBar", "ord:188", "#188"] {
+            assert_eq!(call(&mut cpu, &mut k, &mut d, "aygshell.dll", name, &[7]),
+                DispatchOutcome::ReturnedR0(handle));
+        }
+        assert_eq!(call(&mut cpu, &mut k, &mut d, "aygshell.dll", "SHFindMenuBar", &[8]),
+            DispatchOutcome::ReturnedR0(0));
+
         call(
             &mut cpu,
             &mut k,
@@ -677,6 +690,9 @@ mod memory_tests {
             &[handle],
         );
         assert!(!k.gdi.shell_menus.bars.contains_key(&handle));
+        assert_eq!(call(&mut cpu, &mut k, &mut d, "aygshell.dll", "SHFindMenuBar", &[7]),
+            DispatchOutcome::ReturnedR0(0));
+
         assert_eq!(k.active_shell_bar(), None);
     }
     #[test]
@@ -934,4 +950,23 @@ mod fullscreen_dialog_layout_tests {
             assert_eq!(k.controls.panel(7).unwrap().client_origin(), (0, 26));
         }
     }
+}
+
+/// Shell control creation is handled by the HLE window/control dispatcher,
+/// without a host DLL class-registration step. Initialization is idempotent.
+fn sh_init_extra_controls(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+/// CE SDK aygshell export #188: HWND SHFindMenuBar(HWND hwndParent).
+/// Hidden bars are still owned windows and must remain discoverable.
+fn sh_find_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let owner = ctx.arg_u32(0)?;
+    let handle = if owner == 0 { 0 } else {
+        ctx.kernel.gdi.shell_menus.bars.iter()
+            .filter(|(_, bar)| bar.owner == owner)
+            .map(|(&hwnd, _)| hwnd)
+            .min().unwrap_or(0)
+    };
+    Ok(DispatchOutcome::ReturnedR0(handle))
 }

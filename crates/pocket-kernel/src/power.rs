@@ -211,6 +211,8 @@ pub const PBT_POWERINFOCHANGE: u32 = 8;
 pub struct Notifications {
     subscriptions: std::collections::HashMap<u32, Subscription>,
     next: u32,
+    /// Guest device constraints; independent of notification subscriptions.
+    pub requirements: Requirements,
 }
 struct Subscription {
     queue: u32,
@@ -565,5 +567,93 @@ mod gizmondo_alert_tests {
         assert_eq!(q.pop_front(), Some((0xffff, 2, 0, 0)));
         a.deliver(&mut q, s(20, 0));
         assert!(q.is_empty()); // Recovery is not a new low alert.
+    }
+}
+
+/// Process-owned CE power requirements. Device drivers in PocketHLE remain
+/// powered (D0); these constraints never change host power policy.
+#[derive(Default)]
+pub struct Requirements {
+    entries: std::collections::HashMap<u32, Requirement>,
+    next: u32,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub struct Requirement {
+    pub device: String,
+    pub state: u32,
+    pub device_flags: u32,
+    pub system_state: Option<String>,
+    pub state_flags: u32,
+}
+impl Requirements {
+    pub fn acquire(&mut self, request: Requirement) -> Result<u32, u32> {
+        if request.device.is_empty() || request.state > 4 {
+            return Err(87); // ERROR_INVALID_PARAMETER
+        }
+        // POWER_NAME is required for a named-device request. Device-handle
+        // requests require a device-manager handle, which we do not expose.
+        if request.device_flags & 1 == 0 {
+            return Err(50); // ERROR_NOT_SUPPORTED
+        }
+        if request.device_flags & !(1 | 0x1000) != 0 {
+            return Err(87);
+        }
+        if self.entries.len() >= 1024 {
+            return Err(8); // ERROR_NOT_ENOUGH_MEMORY
+        }
+        let next = self.next.checked_add(1).filter(|n| *n < 0x100000).ok_or(8u32)?;
+        let handle = 0xda800000 + next;
+        self.next = next;
+        self.entries.insert(handle, request);
+        Ok(handle)
+    }
+    pub fn release(&mut self, handle: u32) -> u32 {
+        if self.entries.remove(&handle).is_some() { 0 } else { 6 }
+    }
+    /// Strongest active constraint for a named device in the supplied system
+    /// state (D0 is strongest). No requirement means no requested constraint.
+    pub fn required_state(&self, device: &str, system_state: Option<&str>, state_flags: u32) -> Option<u32> {
+        self.entries.values().filter(|r| {
+            r.device.eq_ignore_ascii_case(device)
+                && r.system_state.as_deref().map_or(true, |s| {
+                    system_state.map_or(false, |current| s.eq_ignore_ascii_case(current))
+                })
+                && (r.state_flags == 0 || r.state_flags == state_flags)
+        }).map(|r| r.state).min()
+    }
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+    fn request(state: u32) -> Requirement {
+        Requirement { device: "BKL1:".into(), state, device_flags: 1,
+            system_state: None, state_flags: 0 }
+    }
+    #[test]
+    fn handles_and_constraints_are_independent() {
+        let mut r = Requirements::default();
+        let first = r.acquire(request(3)).unwrap();
+        let second = r.acquire(request(0)).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(r.required_state("bkl1:", None, 0), Some(0));
+        assert_eq!(r.release(second), 0);
+        assert_eq!(r.required_state("BKL1:", None, 0), Some(3));
+        assert_eq!(r.release(second), 6);
+        assert_eq!(r.release(0), 6);
+        assert_eq!(r.release(first), 0);
+        assert_eq!(r.required_state("BKL1:", None, 0), None);
+    }
+    #[test]
+    fn invalid_requests_and_system_scopes() {
+        let mut r = Requirements::default();
+        assert_eq!(r.acquire(request(5)), Err(87));
+        let mut q = request(0); q.device_flags = 0;
+        assert_eq!(r.acquire(q), Err(50));
+        let mut q = request(1); q.system_state = Some("on".into());
+        r.acquire(q).unwrap();
+        assert_eq!(r.required_state("BKL1:", Some("ON"), 0), Some(1));
+        assert_eq!(r.required_state("BKL1:", Some("suspend"), 0), None);
+        assert_eq!(r.required_state("other:", Some("on"), 0), None);
     }
 }
