@@ -9,20 +9,25 @@ internal object PocketPcControllerGeometry {
         val w = width.coerceAtLeast(1); val h = height.coerceAtLeast(1)
         val portrait = w <= h
         val pWidth = if (portrait) 76f else 94f
-        val normalPad = if (portrait) 120f else 156f
-        val normalStick = if (portrait) 80f else 100f
+        val normalPad = 156f
+        val normalStick = if (portrait) 104f else 100f
         val maxPad = normalPad * 4f / 3f
         val maxStick = normalStick * 4f / 3f
         val diamondDiameter = 64f
         // Oval action buttons reject DOWN events outside their visible circle.
         // Their bounding rectangles can overlap at empty corners safely.
-        val diamondOffset = if (portrait) 70f else 50f
-        val stickDrop = if (portrait) 112f else 140f
+        val diamondOffset = 50f
+        val stickDrop = if (portrait) 124f else 140f
+        // Portrait needs lateral clearance for the larger stick below Act/C.
+        val stickSideGap = 50f
         val edge = if (portrait) 16f else 8f
         val gutter = if (portrait) 16f else 6f
         val groupWidth = pWidth * 2f + 12f
         val leftWidth = maxOf(groupWidth, maxPad)
-        val rightWidth = if (portrait) diamondOffset + diamondDiameter + maxStick + 35f
+        // Measure the actual right-bank envelope. The stick centre is already
+        // offset from the face-button centre, so only its radius belongs here.
+        val rightWidth = if (portrait) maxOf(2f * diamondOffset + diamondDiameter,
+            diamondOffset + diamondDiameter + stickSideGap + maxStick / 2f)
             else diamondOffset + diamondDiameter / 2f + maxStick
         val minWidth = 2f * edge + leftWidth + rightWidth + if (portrait) 20f else 160f
         // Landscape P keys can sit beside the central toolbar. Keeping this
@@ -39,7 +44,7 @@ internal object PocketPcControllerGeometry {
         val stick = px(normalStick * if (big) 4f / 3f else 1f)
         val diameter = px(diamondDiameter); val delta = px(diamondOffset)
         val faceX = w - margin - delta - diameter / 2
-        val stickX = if (portrait) faceX - stick / 2 - diameter / 2 - px(35f)
+        val stickX = if (portrait) faceX - diameter / 2 - px(stickSideGap)
             else faceX - stick / 2
         val stickY = h - px(16f) - stick / 2
         // One shared horizontal axis for the D-pad and all four action keys.

@@ -72,6 +72,27 @@ class PocketPcControllerGeometryTest {
         }
     }
 
+    @Test fun portraitControllerUsesLargerThumbControlsAndLandscapeActionSpacing() {
+        for (big in listOf(false, true)) {
+            val g = PocketPcGeometry.calculate(1200, 2488, 3.5f, big, true)
+            assertTrue("portrait arrows", g.dpad.w >= if (big) 480 else 360)
+            assertTrue("portrait stick", g.stick.w >= if (big) 324 else 240)
+            val a = g.actions[0]; val c = g.actions[5]
+            val offset = abs(centreY2(c) - centreY2(a)) / 4f
+            // Same compact diamond proportions as landscape, with air between
+            // the circular targets rather than the old stretched portrait bank.
+            assertTrue("action diamond spacing", offset / a.w in .75f.. .82f)
+        }
+    }
+
+    @Test fun portraitReferenceKeepsFourTimesGuestScaleInNormalAndBig() {
+        for (height in listOf(2480, 2488, 2496)) for (big in listOf(false, true)) {
+            val g = PocketPcGeometry.calculate(1200, height, 3.5f, big, true)
+            assertEquals("height=$height / Big=$big", 4,
+                minOf(g.screen.w / 240, g.screen.h / 320, 4))
+        }
+    }
+
     @Test fun ovalTouchTargetsRejectTransparentCorners() {
         assertTrue(ovalTouchContains(32f, 32f, 64, 64))
         assertFalse(ovalTouchContains(0f, 0f, 64, 64))

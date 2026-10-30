@@ -1,14 +1,2 @@
-crates\pocket-core\src\cab_files.rs
-crates\pocket-cpu\src\unicorn.rs
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\gpu\mod.rs
-crates\pocket-gles\src\raster.rs
-crates\pocket-gles\src\texture.rs
-crates\pocket-kernel\src\heap_virtual_tests.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-kernel\src\power.rs
-crates\pocket-library\src\installer\pocketsetup.rs
-crates\pocket-winceapi\src\aygshell.rs
-crates\pocket-winceapi\src\gles.rs
-crates\pocket-winceapi\src\imgdecmp.rs
-crates\pocket-core\src\cab_setup.rs
+frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControllerGeometry.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcControllerGeometryTest.kt
