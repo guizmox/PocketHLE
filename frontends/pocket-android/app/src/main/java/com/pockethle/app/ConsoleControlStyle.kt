@@ -5,11 +5,11 @@ import android.graphics.drawable.StateListDrawable
 
 /** One palette and shape for Gizmondo and Pocket PC; each view owns its drawable. */
 internal class ConsoleControlStyle(private val dp: Float) {
-    fun backgroundShape(emulatorAction: Boolean = false): StateListDrawable {
+    fun backgroundShape(emulatorAction: Boolean = false, oval: Boolean = false): StateListDrawable {
         fun shape(top: Int, bottom: Int, outline: Int) = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom)
         ).apply {
-            cornerRadius = 14 * dp
+            if (oval) this.shape = GradientDrawable.OVAL else cornerRadius = 14 * dp
             setStroke(dp.toInt().coerceAtLeast(1), outline)
         }
         // Keep a visible highlight for the entire hold, including simultaneous keys.

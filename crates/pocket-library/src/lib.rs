@@ -1096,6 +1096,9 @@ pub struct LauncherConfig {
     /// Android-wide size of the PocketPC D-pad and stylus stick only.
     #[serde(default)]
     pub android_pocketpc_controls_size: PocketPcControlsSize,
+    /// Global Android PocketPC touch arrangement, independent of target size.
+    #[serde(default)]
+    pub android_pocketpc_touch_layout: PocketPcTouchLayout,
     /// Android-wide size of the Gizmondo D-pad (there is no stylus stick).
     #[serde(default)]
     pub android_gizmondo_controls_size: PocketPcControlsSize,
@@ -1299,6 +1302,7 @@ impl Default for LauncherConfig {
             show_backend_log: default_show_backend_log(),
             controls_opacity: default_controls_opacity(),
             android_pocketpc_controls_size: PocketPcControlsSize::Normal,
+            android_pocketpc_touch_layout: PocketPcTouchLayout::Classic,
             android_gizmondo_controls_size: PocketPcControlsSize::Normal,
             optimizations: OptimizationSettings::default(),
         }
@@ -1323,6 +1327,15 @@ impl Default for OptimizationSettings {
             extended_jump_cache: true,
         }
     }
+}
+
+/// Android-only arrangement of the existing PocketPC inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PocketPcTouchLayout {
+    #[default]
+    Classic,
+    Controller,
 }
 
 /// Android touch target sizes; guest display and input bindings are unchanged.
@@ -4080,6 +4093,39 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_touch_layout_defaults_and_roundtrips_independently_of_size() {
+        use super::*;
+        let mut old = serde_json::to_value(LauncherConfig::default()).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("android_pocketpc_touch_layout");
+        let defaults: LauncherConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            defaults.android_pocketpc_touch_layout,
+            PocketPcTouchLayout::Classic
+        );
+        for layout in [
+            PocketPcTouchLayout::Classic,
+            PocketPcTouchLayout::Controller,
+        ] {
+            for size in [PocketPcControlsSize::Normal, PocketPcControlsSize::Big] {
+                let mut config = LauncherConfig::default();
+                config.android_pocketpc_touch_layout = layout;
+                config.android_pocketpc_controls_size = size;
+                let encoded = serde_json::to_string(&config).unwrap();
+                let loaded: LauncherConfig = serde_json::from_str(&encoded).unwrap();
+                assert_eq!(loaded.android_pocketpc_touch_layout, layout);
+                assert_eq!(loaded.android_pocketpc_controls_size, size);
+                assert_eq!(
+                    loaded.android_gizmondo_controls_size,
+                    PocketPcControlsSize::Normal
+                );
+                assert_eq!(loaded.optimizations, OptimizationSettings::default());
+            }
+        }
+    }
+
     #[test]
     fn gizmondo_control_size_is_global_independent_and_backward_compatible() {
         use super::*;

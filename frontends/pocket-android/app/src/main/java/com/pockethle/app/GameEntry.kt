@@ -178,6 +178,7 @@ data class LauncherConfig(
     /** Mirrors `LauncherConfig::controls_opacity`, 0.1..=1.0. */
     val controlsOpacity: Float,
     val pocketpcControlsSize: String = "normal",
+    val pocketpcTouchLayout: String = "classic",
     val gizmondoControlsSize: String = "normal",
     /**
      * The keybinding list exactly as it came out of `config.json`,
@@ -220,6 +221,7 @@ data class LauncherConfig(
         put("colors_language", colorsLanguage)
         put("controls_opacity", controlsOpacity.toDouble())
         put("android_pocketpc_controls_size", pocketpcControlsSize)
+        put("android_pocketpc_touch_layout", pocketpcTouchLayout)
         put("android_gizmondo_controls_size", gizmondoControlsSize)
         if (keybindingsJson != null) {
             runCatching { put("keybindings", JSONArray(keybindingsJson)) }
@@ -269,6 +271,7 @@ data class LauncherConfig(
             colorsTerminalId = obj.optString("colors_terminal_id", ""),
             colorsLanguage = obj.optString("colors_language", "english").takeIf { it in listOf("english", "french", "german", "italian", "spanish") } ?: "english",
             gizmondoControlsSize = obj.optString("android_gizmondo_controls_size", "normal").takeIf { it == "normal" || it == "big" } ?: "normal",
+            pocketpcTouchLayout = obj.optString("android_pocketpc_touch_layout", "classic").takeIf { it == "classic" || it == "controller" } ?: "classic",
             pocketpcControlsSize = obj.optString("android_pocketpc_controls_size", "normal").takeIf { it == "normal" || it == "big" } ?: "normal",
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()
                 .coerceIn(0.1f, 1.0f),

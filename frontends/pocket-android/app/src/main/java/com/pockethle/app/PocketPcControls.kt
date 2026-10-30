@@ -35,6 +35,16 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         keys.getValue(R.id.btn_rotate_game).textSize=24f
         addView(dpad);addView(aim)
     }
+    var controllerLayout: Boolean = false
+        set(value) {
+            if (field == value) return
+            clearPressedControls(); field = value
+            val diamond = setOf(R.id.btn_a, R.id.btn_action, R.id.btn_c, R.id.btn_b)
+            actions.forEach { id -> keys.getValue(id).apply { background = style.backgroundShape(oval = value && id in diamond); textSize = 16f } }
+            keys.getValue(R.id.btn_action).text = if (value) "Act." else "Action"
+            auxiliary.forEach { id -> keys.getValue(id).textSize = if (value) 11f else if (id == R.id.btn_rotate_game) 24f else 13f }
+            requestLayout()
+        }
     var bigDirectionalControls: Boolean = false
         set(value) {
             if (field == value) return
@@ -42,11 +52,24 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
             field = value
             requestLayout()
         }
+    fun configure(config: LauncherConfig) {
+        controllerLayout = config.pocketpcTouchLayout == "controller"
+        bigDirectionalControls = config.pocketpcControlsSize == "big"
+    }
     fun clearPressedControls() { keys.values.forEach { it.isPressed=false }; dpad.clearInput(); aim.clearInput() }
     override fun onMeasure(widthMeasureSpec: Int,heightMeasureSpec: Int) {
         val w=MeasureSpec.getSize(widthMeasureSpec);val h=MeasureSpec.getSize(heightMeasureSpec)
-        setMeasuredDimension(w,h);geometry=PocketPcGeometry.calculate(w,h,dp,bigDirectionalControls)
+        setMeasuredDimension(w,h);geometry=PocketPcGeometry.calculate(w,h,dp,bigDirectionalControls,controllerLayout)
         fun measure(view: View,rect: ControlRect) { view.measure(MeasureSpec.makeMeasureSpec(rect.w,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(rect.h,MeasureSpec.EXACTLY)) }
+        if (controllerLayout) {
+            (actions + auxiliary).forEach { id ->
+                val button = keys.getValue(id)
+                val rect = if (id in actions) geometry.actions[actions.indexOf(id)] else geometry.auxiliary[auxiliary.indexOf(id)]
+                val desired = (if (id in actions) 16f else 11f) * resources.displayMetrics.scaledDensity
+                val pixels = minOf(desired, rect.h * .32f, rect.w / (button.text.length.coerceAtLeast(1) * .65f))
+                button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, pixels.coerceAtLeast(1f))
+            }
+        }
         actions.forEachIndexed { i,id->measure(keys.getValue(id),geometry.actions[i]) }
         auxiliary.forEachIndexed { i,id->measure(keys.getValue(id),geometry.auxiliary[i]) }
         measure(dpad,geometry.dpad);measure(aim,geometry.stick)

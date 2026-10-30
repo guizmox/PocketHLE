@@ -200,7 +200,7 @@ class GameActivity : AppCompatActivity() {
         content.addView(controllerFullscreenHost)
         gameControls = findViewById(R.id.game_controls)
         gameControls.alpha = controlsOpacity
-        (gameControls as? PocketPcControls)?.bigDirectionalControls = config.pocketpcControlsSize == "big"
+        (gameControls as? PocketPcControls)?.configure(config)
         (gameControls as? GizmondoControls)?.bigDirectionalControls = config.gizmondoControlsSize == "big"
         if (gizmondoGame) {
             androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)

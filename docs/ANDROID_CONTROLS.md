@@ -33,15 +33,55 @@ of the native framebuffer. PocketPC Auto is capped at x4 of that grid. Gizmondo
 uses multiples of its native display. The separate controller fullscreen mode
 uses aspect fit and can scale fractionally.
 
-## Proposed alternative PocketPC layout
+## PocketPC touch layouts
 
-The separate visual proposal, **Controller**, reorganizes the existing controls
-into a conventional gamepad arrangement: D-pad on the left, four actions in a
-right-hand diamond, a distinct lower-right stylus stick and P1–P4 above. It keeps
-the existing button functions and separates guest keys from emulator tools.
-It is a proposal awaiting validation, not an implemented or selectable option.
-The current layout remains in use.
+**PocketPC options → Touch controls → Touch layout** selects **Classic** or
+**Controller** globally for Android. Classic remains the default for old and new
+configurations. Changes apply at the next launch. Size remains a separate
+Normal/Big choice in Display and controls; both layouts support it.
 
-Validation: library configuration tests, pure Kotlin geometry/configuration
-checks, display scaling and fullscreen input/geometry regression tests. No full
-Android APK or desktop build is claimed.
+Controller uses the existing input IDs and functions with this arrangement:
+
+* P1/P2 on the left and P3/P4 on the right share one top coordinate and height.
+* The D-pad centre and action-diamond centre share one horizontal axis. B and
+  Action lie on that axis; A and C lie equally above and below it.
+* P1–P4 are raised together when needed to preserve the safety gap above the
+  D-pad and diamond in Big mode. Action targets are larger than the early mockup,
+  and retain their dimensions between Normal and Big.
+* The stylus stick is smaller than the D-pad and sits diagonally below and to
+  the left of the action diamond, with a gap between actual rectangular hit
+  targets. Circular backgrounds alone would not prevent Android touch overlap.
+* The auxiliary toolbar stays separate, with smaller targets and fitted text.
+
+Control dimensions and safety gaps use Android density units rather than
+percentages of tablet height. Additional space goes to the game viewport rather
+than stretching the control groups. Constrained windows scale the complete group
+uniformly to fit; the fit scale is calculated for Big in both modes so changing
+size does not also shrink P keys/action targets. Portrait reserves a bottom bank
+and landscape reserves side banks, using the same game surface/input geometry.
+This changes host layout only, not guest framebuffer dimensions or button maps.
+
+Classic preserves the exact existing phone rectangles, including fractional
+density and Normal/Big. On viewports whose smaller dimension is at least 600dp,
+its landscape action banks have a bounded height and remain just above the thumb
+controls; portrait action cells have a bounded width and stay in two side groups.
+This avoids stretched tablet banks without changing the phone arrangement used
+as the reference. These are density-based dimensions, not device-specific rules;
+there is no Huawei model detection or workaround.
+
+## Mapping and steering previews
+
+Grid capture and touch-steering tests instantiate the real PocketPcControls and
+PocketPcLayout. Both previews and GameActivity call the same `configure(config)`
+method, which selects Classic/Controller and Normal/Big. No parallel preview
+layout or native session is introduced. Input ownership, mapping names,
+release behavior, and the single inverse game-image rotation remain unchanged.
+The preview reads the global configuration when the editor is opened.
+
+Validation covers all three landscape ratios, portrait, six display densities,
+both layouts and both size modes: target bounds, non-overlap of hit rectangles,
+P-row/action-axis alignment, safety gaps and bounded tablet group dimensions.
+Phone snapshots verify unchanged Classic rectangles. Existing display scaling,
+fullscreen input and multitouch-routing tests are retained. Rust and Android
+configuration tests cover old files and independent layout/size persistence.
+No full Android APK build or physical device validation is claimed.

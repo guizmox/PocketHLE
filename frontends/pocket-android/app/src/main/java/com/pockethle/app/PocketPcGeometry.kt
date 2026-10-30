@@ -12,10 +12,12 @@ internal data class PocketPcGeometry(
     companion object {
         // Action order: A, P2, Action, P1, P4, C, P3, B.
         // Auxiliary order: Tab, Esc, Turbo, Exit, Fullscreen, Rotate.
-        fun calculate(width: Int, height: Int, density: Float, bigDirectionalControls: Boolean = false): PocketPcGeometry {
+        fun calculate(width: Int, height: Int, density: Float, bigDirectionalControls: Boolean = false, controller: Boolean = false): PocketPcGeometry {
+            if (controller) return PocketPcControllerGeometry.calculate(width, height, density, bigDirectionalControls)
             val w=width.coerceAtLeast(1); val h=height.coerceAtLeast(1)
             fun dp(n: Float)=(n*density).toInt().coerceAtLeast(1)
             val gap=dp(6f); val safety=dp(18f)
+            val tablet = minOf(w, h) / density >= 600f
             if(w>h) {
                 val side=minOf(dp(140f),w/5,h/2).coerceAtLeast(1)
                 val normalPad=minOf(side,h/3).coerceAtLeast(1)
@@ -23,9 +25,12 @@ internal data class PocketPcGeometry(
                 val padY=h-gap-pad
                 val actionBottom=(padY-safety).coerceAtLeast(gap+2)
                 val cellW=((side-gap)/2).coerceAtLeast(1)
-                val cellH=((actionBottom-2*gap)/2).coerceAtLeast(1)
-                fun bank(x: Int)=listOf(ControlRect(x,gap,cellW,cellH),ControlRect(x+cellW+gap,gap,cellW,cellH),
-                    ControlRect(x,gap+cellH+gap,cellW,cellH),ControlRect(x+cellW+gap,gap+cellH+gap,cellW,cellH))
+                val fullHeight=((actionBottom-2*gap)/2).coerceAtLeast(1)
+                // Match a phone-sized bank rather than stretching it with tablet height.
+                val cellH=if(tablet) minOf(fullHeight,dp(if(bigDirectionalControls) 84f else 104f)) else fullHeight
+                val bankTop=if(tablet) actionBottom-2*cellH-gap else gap
+                fun bank(x: Int)=listOf(ControlRect(x,bankTop,cellW,cellH),ControlRect(x+cellW+gap,bankTop,cellW,cellH),
+                    ControlRect(x,bankTop+cellH+gap,cellW,cellH),ControlRect(x+cellW+gap,bankTop+cellH+gap,cellW,cellH))
                 val left=maxOf(side,pad)+2*gap; val room=(w-2*left).coerceAtLeast(1)
                 val toolbarH=minOf(dp(32f),h/9).coerceAtLeast(1)
                 // Wider guest keys, with a distinct gap before the orange host actions.
@@ -45,10 +50,15 @@ internal data class PocketPcGeometry(
             val deckY=h-gap-deckH
             val rowH=minOf(dp(44f),h/14).coerceAtLeast(1)
             val actionY=deckY-safety-2*rowH-gap
-            val cellW=((w-5*gap)/4).coerceAtLeast(1)
+            val fullWidth=((w-5*gap)/4).coerceAtLeast(1)
+            val cellW=if(tablet) minOf(fullWidth,dp(84f)) else fullWidth
             val rowOrder=listOf(0,1,4,5,2,3,6,7)
             val actions=MutableList(8) { ControlRect(0,0,1,1) }
-            rowOrder.forEachIndexed { i,index -> actions[index]=ControlRect(gap+(i%4)*(cellW+gap),actionY+(i/4)*(rowH+gap),cellW,rowH) }
+            rowOrder.forEachIndexed { i,index ->
+                val column=i%4
+                val x=if(tablet && column>=2) w-gap-(4-column)*cellW-(3-column)*gap else gap+column*(cellW+gap)
+                actions[index]=ControlRect(x,actionY+(i/4)*(rowH+gap),cellW,rowH)
+            }
             // Portrait tools stay above the display; separate host actions
             // from the three guest keys by at least three ordinary gaps.
             val toolbarH=rowH

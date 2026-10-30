@@ -4,6 +4,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LauncherControlsSizeTest {
+    @Test fun controllerLayoutAndSizeRoundTripWithoutDroppingOtherSettings() {
+        val old = LauncherConfig.fromJson(JSONObject("{\"untouched\":42}"))
+        assertEquals("classic", old.pocketpcTouchLayout)
+        for (layout in listOf("classic", "controller")) for (size in listOf("normal", "big")) {
+            val changed = old.copy(pocketpcTouchLayout = layout, pocketpcControlsSize = size)
+            val loaded = LauncherConfig.fromJson(changed.toJson())
+            assertEquals(layout, loaded.pocketpcTouchLayout)
+            assertEquals(size, loaded.pocketpcControlsSize)
+            assertEquals("normal", loaded.gizmondoControlsSize)
+            assertEquals(42, loaded.toJson().getInt("untouched"))
+        }
+        assertEquals("classic", LauncherConfig.fromJson(JSONObject("{\"android_pocketpc_touch_layout\":\"future\"}")).pocketpcTouchLayout)
+    }
+
     @Test fun oldConfigDefaultsAndSizeSettingsRemainIndependent() {
         val old = LauncherConfig.fromJson(JSONObject("{\"optimizations\":{\"fast_memory_access\":false},\"untouched\":42}"))
         assertEquals("normal", old.gizmondoControlsSize)

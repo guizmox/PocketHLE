@@ -108,6 +108,19 @@ class SettingsActivity : AppCompatActivity() {
             optimization("extended_tlb_cache","Extended memory translation cache","Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.")
             optimization("responsive_scheduling","Responsive thread scheduling","Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.")
             optimization("extended_jump_cache","Extended jump cache","Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.")
+            val touch = androidx.preference.PreferenceCategory(requireContext()).apply { title = "Touch controls" }
+            ppc.addPreference(touch)
+            touch.addPreference(ListPreference(requireContext()).apply {
+                key = "android_pocketpc_touch_layout"; title = "Touch layout"; dialogTitle = "Touch layout"; isPersistent = false
+                entries = arrayOf("Classic", "Controller"); entryValues = arrayOf("classic", "controller")
+                value = current.pocketpcTouchLayout
+                summaryProvider = Preference.SummaryProvider<ListPreference> { preference ->
+                    "${preference.entry ?: "Classic"}\nController aligns P1–P4 and the D-pad/action diamond, with a separate stylus stick. Works with Normal and Big sizes in Display and controls. Applies next launch."
+                }
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(pocketpcTouchLayout = value.toString()); writeConfig(); true
+                }
+            })
             val pocketpc=androidx.preference.PreferenceCategory(requireContext()).apply { title="Device profile" }
             ppc.addPreference(pocketpc)
             pocketpc.addPreference(ListPreference(requireContext()).apply {
@@ -413,6 +426,9 @@ class SettingsActivity : AppCompatActivity() {
         private fun writeConfig() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
             val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
+            if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_touch_layout", "") != current.pocketpcTouchLayout) {
+                android.widget.Toast.makeText(context, "Touch layout could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
+            }
             val wantedOptimizations=current.toJson().optJSONObject("optimizations")
             if (result?.optBoolean("ok", false) == true && wantedOptimizations != null) {
                 val actual=saved?.optJSONObject("optimizations")
