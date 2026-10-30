@@ -136,12 +136,36 @@ impl UnicornCpu {
     }
 
     pub fn new_for_arch(arch: Arch) -> Result<Self, CpuError> {
+        Self::new_for_arch_with_optimizations(arch, crate::Optimizations::default())
+    }
+
+    pub fn new_for_arch_with_optimizations(
+        arch: Arch,
+        options: crate::Optimizations,
+    ) -> Result<Self, CpuError> {
         let (uc_arch, mode) = match arch {
             Arch::Arm => (UcArch::ARM, Mode::LITTLE_ENDIAN),
             Arch::Mips => (UcArch::MIPS, Mode::MIPS32 | Mode::LITTLE_ENDIAN),
         };
         let mut uc = Unicorn::new(uc_arch, mode)
             .map_err(|e| CpuError::Backend(format!("Unicorn::new failed: {e:?}")))?;
+        let flags = u32::from(options.fast_memory_access)
+            | (u32::from(options.extended_tlb_cache) << 1)
+            | (u32::from(options.extended_jump_cache) << 2);
+        // Private fork control, before the first register/memory API triggers
+        // Unicorn's lazy CPU initialization. No per-access option is installed.
+        let result = unsafe {
+            ::unicorn_engine::uc_ctl(
+                uc.get_handle(),
+                ::unicorn_engine::ControlType(0x4000_0000 | (1 << 26) | 0x5048),
+                flags,
+            )
+        };
+        if result != ::unicorn_engine::uc_error::OK {
+            return Err(CpuError::Backend(format!(
+                "Unicorn optimization configuration requires the bundled engine: {result:?}"
+            )));
+        }
         if arch == Arch::Arm {
             let _ = uc.reg_write(RegisterARM::FPEXC, 0x4000_0000);
             let _ = uc.reg_write(RegisterARM::C1_C0_2, 0x00F0_0000);
@@ -1023,6 +1047,26 @@ mod tests {
         assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x1014);
         assert_eq!(cpu.read_return().unwrap(), 0x40000001);
         assert_eq!(cpu.read_mem(0x2000, 4).unwrap(), 0x40000001u32.to_le_bytes());
+    }
+
+    #[test]
+    fn optimization_combinations_execute_with_the_virtual_tlb() {
+        for flags in 0..8 {
+            let options = crate::Optimizations {
+                fast_memory_access: flags & 1 != 0,
+                extended_tlb_cache: flags & 2 != 0,
+                extended_jump_cache: flags & 4 != 0,
+            };
+            let mut cpu = UnicornCpu::new_for_arch_with_optimizations(Arch::Arm, options).unwrap();
+            cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+            // mov r0,#42; bx lr, with the normal PocketHLE virtual-TLB hook.
+            cpu.write_mem(0x1000, &[42, 0, 160, 227, 30, 255, 47, 225])
+                .unwrap();
+            cpu.write_reg(ArmReg::Lr, 0x1008).unwrap();
+            cpu.add_code_hook(0x1008).unwrap();
+            cpu.run_until_hook(0x1000, 100).unwrap();
+            assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 42, "flags={flags}");
+        }
     }
 
     #[test]
