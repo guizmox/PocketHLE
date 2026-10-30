@@ -601,25 +601,42 @@ impl Requirements {
         if self.entries.len() >= 1024 {
             return Err(8); // ERROR_NOT_ENOUGH_MEMORY
         }
-        let next = self.next.checked_add(1).filter(|n| *n < 0x100000).ok_or(8u32)?;
+        let next = self
+            .next
+            .checked_add(1)
+            .filter(|n| *n < 0x100000)
+            .ok_or(8u32)?;
         let handle = 0xda800000 + next;
         self.next = next;
         self.entries.insert(handle, request);
         Ok(handle)
     }
     pub fn release(&mut self, handle: u32) -> u32 {
-        if self.entries.remove(&handle).is_some() { 0 } else { 6 }
+        if self.entries.remove(&handle).is_some() {
+            0
+        } else {
+            6
+        }
     }
     /// Strongest active constraint for a named device in the supplied system
     /// state (D0 is strongest). No requirement means no requested constraint.
-    pub fn required_state(&self, device: &str, system_state: Option<&str>, state_flags: u32) -> Option<u32> {
-        self.entries.values().filter(|r| {
-            r.device.eq_ignore_ascii_case(device)
-                && r.system_state.as_deref().map_or(true, |s| {
-                    system_state.map_or(false, |current| s.eq_ignore_ascii_case(current))
-                })
-                && (r.state_flags == 0 || r.state_flags == state_flags)
-        }).map(|r| r.state).min()
+    pub fn required_state(
+        &self,
+        device: &str,
+        system_state: Option<&str>,
+        state_flags: u32,
+    ) -> Option<u32> {
+        self.entries
+            .values()
+            .filter(|r| {
+                r.device.eq_ignore_ascii_case(device)
+                    && r.system_state.as_deref().map_or(true, |s| {
+                        system_state.map_or(false, |current| s.eq_ignore_ascii_case(current))
+                    })
+                    && (r.state_flags == 0 || r.state_flags == state_flags)
+            })
+            .map(|r| r.state)
+            .min()
     }
 }
 
@@ -627,8 +644,13 @@ impl Requirements {
 mod requirement_tests {
     use super::*;
     fn request(state: u32) -> Requirement {
-        Requirement { device: "BKL1:".into(), state, device_flags: 1,
-            system_state: None, state_flags: 0 }
+        Requirement {
+            device: "BKL1:".into(),
+            state,
+            device_flags: 1,
+            system_state: None,
+            state_flags: 0,
+        }
     }
     #[test]
     fn handles_and_constraints_are_independent() {
@@ -648,9 +670,11 @@ mod requirement_tests {
     fn invalid_requests_and_system_scopes() {
         let mut r = Requirements::default();
         assert_eq!(r.acquire(request(5)), Err(87));
-        let mut q = request(0); q.device_flags = 0;
+        let mut q = request(0);
+        q.device_flags = 0;
         assert_eq!(r.acquire(q), Err(50));
-        let mut q = request(1); q.system_state = Some("on".into());
+        let mut q = request(1);
+        q.system_state = Some("on".into());
         r.acquire(q).unwrap();
         assert_eq!(r.required_state("BKL1:", Some("ON"), 0), Some(1));
         assert_eq!(r.required_state("BKL1:", Some("suspend"), 0), None);

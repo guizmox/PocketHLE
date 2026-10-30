@@ -20,29 +20,40 @@ use crate::raster::{
 use crate::texture::{self, Texture};
 use std::collections::HashMap;
 
-type SoftwareMipLevels = Vec<(u32,u32,Vec<u8>)>;
+type SoftwareMipLevels = Vec<(u32, u32, Vec<u8>)>;
 struct SoftwareSampler<'a> {
     textures: [Option<&'a Texture>; raster::MAX_TEXTURE_STAGES],
-    cache: &'a HashMap<u32,(u64,bool,SoftwareMipLevels)>,
-    names: [u32;raster::MAX_TEXTURE_STAGES],
+    cache: &'a HashMap<u32, (u64, bool, SoftwareMipLevels)>,
+    names: [u32; raster::MAX_TEXTURE_STAGES],
 }
 impl raster::TextureSampler for SoftwareSampler<'_> {
-    fn sample(&self,unit:usize,s:f32,t:f32)->Option<[u8;4]> {
-        let tex=self.textures[unit]?;
-        let levels=self.cache.get(&self.names[unit]).map_or(&[][..],|c|c.2.as_slice());
-        Some(tex.sample_lod(levels,s,t,0.))
+    fn sample(&self, unit: usize, s: f32, t: f32) -> Option<[u8; 4]> {
+        let tex = self.textures[unit]?;
+        let levels = self
+            .cache
+            .get(&self.names[unit])
+            .map_or(&[][..], |c| c.2.as_slice());
+        Some(tex.sample_lod(levels, s, t, 0.))
     }
-    fn needs_gradients(&self)->bool {
-        self.textures.iter().flatten().any(|t|t.min_filter.uses_mipmaps() || t.min_filter!=t.mag_filter)
+    fn needs_gradients(&self) -> bool {
+        self.textures
+            .iter()
+            .flatten()
+            .any(|t| t.min_filter.uses_mipmaps() || t.min_filter != t.mag_filter)
     }
-    fn sample_grad(&self,unit:usize,s:f32,t:f32,g:[f32;4],bias:f32)->Option<[u8;4]> {
-        let tex=self.textures[unit]?;
-        if !tex.min_filter.uses_mipmaps() && tex.min_filter==tex.mag_filter { return self.sample(unit,s,t); }
-        let x=(g[0]*tex.width as f32).powi(2)+(g[1]*tex.height as f32).powi(2);
-        let y=(g[2]*tex.width as f32).powi(2)+(g[3]*tex.height as f32).powi(2);
-        let lod=0.5*x.max(y).max(1e-30).log2()+bias.clamp(-4.,4.);
-        let levels=self.cache.get(&self.names[unit]).map_or(&[][..],|c|c.2.as_slice());
-        Some(tex.sample_lod(levels,s,t,lod))
+    fn sample_grad(&self, unit: usize, s: f32, t: f32, g: [f32; 4], bias: f32) -> Option<[u8; 4]> {
+        let tex = self.textures[unit]?;
+        if !tex.min_filter.uses_mipmaps() && tex.min_filter == tex.mag_filter {
+            return self.sample(unit, s, t);
+        }
+        let x = (g[0] * tex.width as f32).powi(2) + (g[1] * tex.height as f32).powi(2);
+        let y = (g[2] * tex.width as f32).powi(2) + (g[3] * tex.height as f32).powi(2);
+        let lod = 0.5 * x.max(y).max(1e-30).log2() + bias.clamp(-4., 4.);
+        let levels = self
+            .cache
+            .get(&self.names[unit])
+            .map_or(&[][..], |c| c.2.as_slice());
+        Some(tex.sample_lod(levels, s, t, lod))
     }
 }
 
@@ -294,7 +305,7 @@ pub struct Context {
 
     // ---- textures ----
     pub textures: HashMap<u32, Texture>,
-    software_mips: HashMap<u32,(u64,bool,SoftwareMipLevels)>,
+    software_mips: HashMap<u32, (u64, bool, SoftwareMipLevels)>,
     pub texture_units: [TextureUnitState; MAX_TEXTURE_UNITS],
     pub bound_texture: u32,
     next_texture_name: u32,
@@ -1344,10 +1355,12 @@ impl Context {
         }
     }
     /// Software implementation limit, not a hardware RAM/display claim.
-    pub fn max_viewport_dims(&self)->[i32;2] {
-        self.gpu.as_ref().map_or([16384;2],|g|g.max_viewport)
+    pub fn max_viewport_dims(&self) -> [i32; 2] {
+        self.gpu.as_ref().map_or([16384; 2], |g| g.max_viewport)
     }
-    pub fn subpixel_bits(&self)->i32 { self.gpu.as_ref().map_or(4,|g|g.subpixel_bits) }
+    pub fn subpixel_bits(&self) -> i32 {
+        self.gpu.as_ref().map_or(4, |g| g.subpixel_bits)
+    }
     pub fn primitive_size_range(&self, point: bool) -> [f32; 2] {
         self.gpu.as_ref().map_or(
             [1., 64.],
@@ -1460,7 +1473,7 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        let limit=self.max_viewport_dims();
+        let limit = self.max_viewport_dims();
         self.state.viewport = (x, y, w.min(limit[0]), h.min(limit[1]));
     }
 
@@ -2151,26 +2164,43 @@ impl Context {
             }),
         };
         if self.gpu.is_some()
-            && ((self.state.smooth_shading && matches!(mode,
-                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES))
+            && ((self.state.smooth_shading
+                && matches!(
+                    mode,
+                    GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+                ))
                 || (!self.state.smooth_shading && mode == GL_TRIANGLES))
         {
             let mut stream = std::mem::take(&mut self.vertex_stream);
             let mut flat = std::mem::take(&mut self.flat_vertex_stream);
-            let mut ready = self.prepare_vertex_stream(&mut stream, indices.clone(), count, sequential, stages);
+            let mut ready =
+                self.prepare_vertex_stream(&mut stream, indices.clone(), count, sequential, stages);
             if ready && !self.state.smooth_shading {
                 ready = stream.expand_flat_triangles(&mut flat);
             }
             if ready {
-                let prepared = if self.state.smooth_shading { &stream } else { &flat };
+                let prepared = if self.state.smooth_shading {
+                    &stream
+                } else {
+                    &flat
+                };
                 let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
                 let result = self.gpu.as_mut().unwrap().draw_stream_object_space(
-                    &self.target, &self.state, mode, prepared, stages, &self.textures, names, &transforms,
+                    &self.target,
+                    &self.state,
+                    mode,
+                    prepared,
+                    stages,
+                    &self.textures,
+                    names,
+                    &transforms,
                 );
                 self.vertex_stream = stream;
                 self.flat_vertex_stream = flat;
                 self.recycle_prepared_arrays();
-                if let Err(e) = result { self.gpu_failure("vertex stream", e); }
+                if let Err(e) = result {
+                    self.gpu_failure("vertex stream", e);
+                }
                 return;
             }
             self.vertex_stream = stream;
@@ -2269,22 +2299,35 @@ impl Context {
         }
         // Decode/generate only once per texture revision, and only in software.
         for stage in stages {
-            let name=self.texture_units[stage.unit].bound_texture;
-            if let Some(tex)=self.textures.get(&name) {
-                let mips=tex.min_filter.uses_mipmaps();
+            let name = self.texture_units[stage.unit].bound_texture;
+            if let Some(tex) = self.textures.get(&name) {
+                let mips = tex.min_filter.uses_mipmaps();
                 if mips || tex.rgba.is_empty() {
-                    if !self.software_mips.get(&name).is_some_and(|c|c.0==tex.revision && c.1==mips) {
-                        let mut levels=if mips { tex.upload_levels() } else {
-                            tex.rgba_level(0).map(|p|vec![(tex.width,tex.height,p.into_owned())]).unwrap_or_default()
+                    if !self
+                        .software_mips
+                        .get(&name)
+                        .is_some_and(|c| c.0 == tex.revision && c.1 == mips)
+                    {
+                        let mut levels = if mips {
+                            tex.upload_levels()
+                        } else {
+                            tex.rgba_level(0)
+                                .map(|p| vec![(tex.width, tex.height, p.into_owned())])
+                                .unwrap_or_default()
                         };
                         // Base RGBA already belongs to Texture; retain only
                         // derived levels, except for deferred compressed bases.
                         if !tex.rgba.is_empty() {
-                            if let Some(base) = levels.first_mut() { base.2 = Vec::new(); }
+                            if let Some(base) = levels.first_mut() {
+                                base.2 = Vec::new();
+                            }
                         }
-                        self.software_mips.insert(name,(tex.revision,mips,levels));
+                        self.software_mips
+                            .insert(name, (tex.revision, mips, levels));
                     }
-                } else { self.software_mips.remove(&name); }
+                } else {
+                    self.software_mips.remove(&name);
+                }
             }
         }
         // Resolve the bound textures once per draw, not per fragment.
@@ -2310,8 +2353,11 @@ impl Context {
             self.state.alpha_func,
             self.state.alpha_ref,
         );
-        let sample = SoftwareSampler { textures:texs,cache:&self.software_mips,
-            names:std::array::from_fn(|i|self.texture_units[i].bound_texture) };
+        let sample = SoftwareSampler {
+            textures: texs,
+            cache: &self.software_mips,
+            names: std::array::from_fn(|i| self.texture_units[i].bound_texture),
+        };
 
         match mode {
             GL_POINTS => {
@@ -3081,44 +3127,103 @@ mod tests {
 
     #[test]
     fn mipmapped_triangle_rendering_refreshes_cache_on_level_updates() {
-        let mut c=Context::new(8,8);
-        let mut m=FakeMem{base:BASE,bytes:quad_floats()};
-        c.vertex_array=ArrayPointer{enabled:true,size:3,ty:GL_FLOAT,stride:0,pointer:BASE,buffer:0};
-        let uv=[[0.,0.],[4.,0.],[4.,4.],[0.,4.]];
-        let uv_bytes:Vec<u8>=uv.iter().flatten().flat_map(|v:&f32|v.to_le_bytes()).collect();
-        let uv_ptr=BASE+m.bytes.len() as u32;m.bytes.extend(uv_bytes);
-        c.texture_units[0].texcoord_array=ArrayPointer{enabled:true,size:2,ty:GL_FLOAT,stride:0,pointer:uv_ptr,buffer:0};
-        c.texture_units[0].texture_enabled=true;c.texture_units[0].bound_texture=1;
-        let mut t=Texture::default();
-        t.set_level(0,4,4,[255,0,0,255].repeat(16));t.set_level(1,2,2,[0,255,0,255].repeat(4));t.set_level(2,1,1,vec![0,0,255,255]);
-        t.min_filter=texture::Filter::LinearMipmapLinear;c.textures.insert(1,t);
-        c.draw_arrays(&mut m,GL_TRIANGLE_FAN,0,4);
-        assert_eq!(&c.target.color[(4*8+4)*4..(4*8+4)*4+4],&[0,255,0,255]);
-        c.textures.get_mut(&1).unwrap().set_level(1,2,2,[255,255,0,255].repeat(4));
-        c.draw_arrays(&mut m,GL_TRIANGLE_FAN,0,4);
-        assert_eq!(&c.target.color[(4*8+4)*4..(4*8+4)*4+4],&[255,255,0,255]);
-        c.delete_textures(&[1]);assert!(!c.software_mips.contains_key(&1));
+        let mut c = Context::new(8, 8);
+        let mut m = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.vertex_array = ArrayPointer {
+            enabled: true,
+            size: 3,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: BASE,
+            buffer: 0,
+        };
+        let uv = [[0., 0.], [4., 0.], [4., 4.], [0., 4.]];
+        let uv_bytes: Vec<u8> = uv
+            .iter()
+            .flatten()
+            .flat_map(|v: &f32| v.to_le_bytes())
+            .collect();
+        let uv_ptr = BASE + m.bytes.len() as u32;
+        m.bytes.extend(uv_bytes);
+        c.texture_units[0].texcoord_array = ArrayPointer {
+            enabled: true,
+            size: 2,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: uv_ptr,
+            buffer: 0,
+        };
+        c.texture_units[0].texture_enabled = true;
+        c.texture_units[0].bound_texture = 1;
+        let mut t = Texture::default();
+        t.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
+        t.set_level(1, 2, 2, [0, 255, 0, 255].repeat(4));
+        t.set_level(2, 1, 1, vec![0, 0, 255, 255]);
+        t.min_filter = texture::Filter::LinearMipmapLinear;
+        c.textures.insert(1, t);
+        c.draw_arrays(&mut m, GL_TRIANGLE_FAN, 0, 4);
+        assert_eq!(
+            &c.target.color[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4],
+            &[0, 255, 0, 255]
+        );
+        c.textures
+            .get_mut(&1)
+            .unwrap()
+            .set_level(1, 2, 2, [255, 255, 0, 255].repeat(4));
+        c.draw_arrays(&mut m, GL_TRIANGLE_FAN, 0, 4);
+        assert_eq!(
+            &c.target.color[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4],
+            &[255, 255, 0, 255]
+        );
+        c.delete_textures(&[1]);
+        assert!(!c.software_mips.contains_key(&1));
     }
 
     #[test]
     fn flat_stream_uses_fresh_host_snapshots_and_sparse_indices_fall_back() {
-        let mut c=Context::new(8,8);
-        let mut bytes=Vec::new();
-        for i in 0..4 {for v in [i as f32,0.,0.] {bytes.extend(v.to_le_bytes());}}
-        let colors=bytes.len();for i in 0..4 {bytes.extend([i,10,20,255]);}
-        c.prepared_arrays.push((BASE,bytes));
-        c.vertex_array=ArrayPointer{enabled:true,size:3,ty:GL_FLOAT,stride:0,pointer:BASE,buffer:0};
-        c.color_array=ArrayPointer{enabled:true,size:4,ty:GL_UNSIGNED_BYTE,stride:0,pointer:BASE+colors as u32,buffer:0};
-        let indices=[2,0,3,3,0,1];
-        let mut source=crate::gpu::VertexStream::default();let mut out=crate::gpu::VertexStream::default();
-        assert!(c.prepare_vertex_stream(&mut source,indices.into_iter(),6,false,&[]));
+        let mut c = Context::new(8, 8);
+        let mut bytes = Vec::new();
+        for i in 0..4 {
+            for v in [i as f32, 0., 0.] {
+                bytes.extend(v.to_le_bytes());
+            }
+        }
+        let colors = bytes.len();
+        for i in 0..4 {
+            bytes.extend([i, 10, 20, 255]);
+        }
+        c.prepared_arrays.push((BASE, bytes));
+        c.vertex_array = ArrayPointer {
+            enabled: true,
+            size: 3,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: BASE,
+            buffer: 0,
+        };
+        c.color_array = ArrayPointer {
+            enabled: true,
+            size: 4,
+            ty: GL_UNSIGNED_BYTE,
+            stride: 0,
+            pointer: BASE + colors as u32,
+            buffer: 0,
+        };
+        let indices = [2, 0, 3, 3, 0, 1];
+        let mut source = crate::gpu::VertexStream::default();
+        let mut out = crate::gpu::VertexStream::default();
+        assert!(c.prepare_vertex_stream(&mut source, indices.into_iter(), 6, false, &[]));
         assert!(source.expand_flat_triangles(&mut out));
-        let offset=out.attributes[1].unwrap().offset;
-        assert_eq!(out.bytes[offset],3);
-        c.prepared_arrays[0].1[colors+3*4]=42;
-        assert!(c.prepare_vertex_stream(&mut source,indices.into_iter(),6,false,&[]));
-        assert!(source.expand_flat_triangles(&mut out));assert_eq!(out.bytes[offset],42);
-        assert!(!c.prepare_vertex_stream(&mut source,[0,0,3].into_iter(),3,false,&[]));
+        let offset = out.attributes[1].unwrap().offset;
+        assert_eq!(out.bytes[offset], 3);
+        c.prepared_arrays[0].1[colors + 3 * 4] = 42;
+        assert!(c.prepare_vertex_stream(&mut source, indices.into_iter(), 6, false, &[]));
+        assert!(source.expand_flat_triangles(&mut out));
+        assert_eq!(out.bytes[offset], 42);
+        assert!(!c.prepare_vertex_stream(&mut source, [0, 0, 3].into_iter(), 3, false, &[]));
         assert!(!source.flat_triangles);
     }
 
@@ -4218,13 +4323,11 @@ mod pvrtc_upload_tests {
     }
     #[test]
     fn software_viewport_limits_are_reported_and_enforced() {
-        let mut c=Context::new(8,8);
-        let dims=c.max_viewport_dims();assert!(dims[0]>0 && dims[1]>0);
-        c.set_viewport(3,4,i32::MAX,i32::MAX);
-        assert_eq!(c.state.viewport,(3,4,dims[0],dims[1]));
-        assert!(c.subpixel_bits()>0);
+        let mut c = Context::new(8, 8);
+        let dims = c.max_viewport_dims();
+        assert!(dims[0] > 0 && dims[1] > 0);
+        c.set_viewport(3, 4, i32::MAX, i32::MAX);
+        assert_eq!(c.state.viewport, (3, 4, dims[0], dims[1]));
+        assert!(c.subpixel_bits() > 0);
     }
-
-
-
 }

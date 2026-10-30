@@ -938,47 +938,122 @@ mod tests {
     // MIPS a0 remains a callback argument; the returned byte count is in v0.
     struct CallbackCpu(pocket_cpu::stub::StubCpu, u32);
     impl Cpu for CallbackCpu {
-        fn arch(&self) -> pocket_cpu::Arch { pocket_cpu::Arch::Mips }
-        fn read_return(&mut self) -> Result<u32, pocket_cpu::CpuError> { Ok(self.1) }
-        fn write_return(&mut self, value: u32) -> Result<(), pocket_cpu::CpuError> { self.1=value; Ok(()) }
-        fn map_region(&mut self, va:u32, size:u32, prot:Prot)->Result<(),pocket_cpu::CpuError>{self.0.map_region(va,size,prot)}
-        fn read_mem(&mut self, va:u32, size:u32)->Result<Vec<u8>,pocket_cpu::CpuError>{self.0.read_mem(va,size)}
-        fn write_mem(&mut self, va:u32, b:&[u8])->Result<(),pocket_cpu::CpuError>{self.0.write_mem(va,b)}
-        fn read_reg(&mut self, r:ArmReg)->Result<u32,pocket_cpu::CpuError>{self.0.read_reg(r)}
-        fn write_reg(&mut self, r:ArmReg, v:u32)->Result<(),pocket_cpu::CpuError>{self.0.write_reg(r,v)}
-        fn add_code_hook(&mut self, va:u32)->Result<(),pocket_cpu::CpuError>{self.0.add_code_hook(va)}
-        fn add_instruction_hook(&mut self, va:u32)->Result<(),pocket_cpu::CpuError>{self.0.add_instruction_hook(va)}
-        fn add_code_hook_range(&mut self, lo:u32, hi:u32)->Result<(),pocket_cpu::CpuError>{self.0.add_code_hook_range(lo,hi)}
-        fn run_until_hook(&mut self, va:u32, n:u64)->Result<pocket_cpu::StopReason,pocket_cpu::CpuError>{self.0.run_until_hook(va,n)}
-        fn request_stop(&mut self){self.0.request_stop();}
+        fn arch(&self) -> pocket_cpu::Arch {
+            pocket_cpu::Arch::Mips
+        }
+        fn read_return(&mut self) -> Result<u32, pocket_cpu::CpuError> {
+            Ok(self.1)
+        }
+        fn write_return(&mut self, value: u32) -> Result<(), pocket_cpu::CpuError> {
+            self.1 = value;
+            Ok(())
+        }
+        fn map_region(
+            &mut self,
+            va: u32,
+            size: u32,
+            prot: Prot,
+        ) -> Result<(), pocket_cpu::CpuError> {
+            self.0.map_region(va, size, prot)
+        }
+        fn read_mem(&mut self, va: u32, size: u32) -> Result<Vec<u8>, pocket_cpu::CpuError> {
+            self.0.read_mem(va, size)
+        }
+        fn write_mem(&mut self, va: u32, b: &[u8]) -> Result<(), pocket_cpu::CpuError> {
+            self.0.write_mem(va, b)
+        }
+        fn read_reg(&mut self, r: ArmReg) -> Result<u32, pocket_cpu::CpuError> {
+            self.0.read_reg(r)
+        }
+        fn write_reg(&mut self, r: ArmReg, v: u32) -> Result<(), pocket_cpu::CpuError> {
+            self.0.write_reg(r, v)
+        }
+        fn add_code_hook(&mut self, va: u32) -> Result<(), pocket_cpu::CpuError> {
+            self.0.add_code_hook(va)
+        }
+        fn add_instruction_hook(&mut self, va: u32) -> Result<(), pocket_cpu::CpuError> {
+            self.0.add_instruction_hook(va)
+        }
+        fn add_code_hook_range(&mut self, lo: u32, hi: u32) -> Result<(), pocket_cpu::CpuError> {
+            self.0.add_code_hook_range(lo, hi)
+        }
+        fn run_until_hook(
+            &mut self,
+            va: u32,
+            n: u64,
+        ) -> Result<pocket_cpu::StopReason, pocket_cpu::CpuError> {
+            self.0.run_until_hook(va, n)
+        }
+        fn request_stop(&mut self) {
+            self.0.request_stop();
+        }
     }
     #[test]
     fn callback_byte_count_uses_the_abi_return_register() {
         let (cpu, mut kernel, _) = setup();
         let mut cpu = CallbackCpu(cpu, 0);
-        cpu.map_region(0x50000000,0x10000,Prot::READ|Prot::WRITE).unwrap();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let bytes = bitmap();
-        let info = [60u32,0x1800,4096,0,0x2000,0,24,0x40000011,0,100,1000,1000,0x123400,0,u32::MAX];
-        cpu.write_mem(0x1000,&info.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>()).unwrap();
-        cpu.write_reg(ArmReg::R0,0x1000).unwrap();
+        let info = [
+            60u32,
+            0x1800,
+            4096,
+            0,
+            0x2000,
+            0,
+            24,
+            0x40000011,
+            0,
+            100,
+            1000,
+            1000,
+            0x123400,
+            0,
+            u32::MAX,
+        ];
+        cpu.write_mem(
+            0x1000,
+            &info
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
         let thunk = pocket_kernel::Thunk {
-            thunk_va:0x70001000,iat_va:0,dll:"imgdecmp.dll".into(),
-            binding:pocket_pe::ImportBinding::Name("DecompressImageIndirect".into()),friendly_name:None,
+            thunk_va: 0x70001000,
+            iat_va: 0,
+            dll: "imgdecmp.dll".into(),
+            binding: pocket_pe::ImportBinding::Name("DecompressImageIndirect".into()),
+            friendly_name: None,
         };
-        let mut ctx = CallCtx {cpu:&mut cpu,kernel:&mut kernel,thunk:&thunk};
-        assert_eq!(decompress(&mut ctx).unwrap(),DispatchOutcome::JumpTo(0x123400));
-        ctx.cpu.write_mem(0x1800,&bytes).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            decompress(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x123400)
+        );
+        ctx.cpu.write_mem(0x1800, &bytes).unwrap();
         // A callback is free to leave the input handle in a0.
-        ctx.cpu.write_reg(ArmReg::R0,0x40000011).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0x40000011).unwrap();
         ctx.cpu.write_return(bytes.len() as u32).unwrap();
-        assert_eq!(decompress(&mut ctx).unwrap(),DispatchOutcome::JumpTo(0x123400));
-        ctx.cpu.write_reg(ArmReg::R0,0x40000011).unwrap();
+        assert_eq!(
+            decompress(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x123400)
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 0x40000011).unwrap();
         ctx.cpu.write_return(0).unwrap();
-        assert_eq!(decompress(&mut ctx).unwrap(),DispatchOutcome::ReturnedR0(0));
-        let bitmap=ctx.cpu.read_u32_le(0x2000).unwrap();
-        let decoded=ctx.kernel.gdi.bitmap(bitmap).unwrap();
-        assert_eq!((decoded.width,decoded.height),(2,1));
+        assert_eq!(
+            decompress(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let bitmap = ctx.cpu.read_u32_le(0x2000).unwrap();
+        let decoded = ctx.kernel.gdi.bitmap(bitmap).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 1));
         assert!(ctx.kernel.gdi.image_decode_frames.is_empty());
     }
-
 }

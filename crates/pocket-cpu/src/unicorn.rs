@@ -1046,7 +1046,10 @@ mod tests {
         );
         assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x1014);
         assert_eq!(cpu.read_return().unwrap(), 0x40000001);
-        assert_eq!(cpu.read_mem(0x2000, 4).unwrap(), 0x40000001u32.to_le_bytes());
+        assert_eq!(
+            cpu.read_mem(0x2000, 4).unwrap(),
+            0x40000001u32.to_le_bytes()
+        );
     }
 
     #[test]

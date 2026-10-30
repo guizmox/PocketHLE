@@ -52,51 +52,87 @@ impl VertexStream {
         out.attributes.fill(None);
         out.flat_triangles = false;
         out.count = 0;
-        if self.flat_triangles || self.count == 0 || self.count > 65536 || self.attributes[0].is_none() {
+        if self.flat_triangles
+            || self.count == 0
+            || self.count > 65536
+            || self.attributes[0].is_none()
+        {
             return false;
         }
-        if self.indices.iter().any(|&i| i as usize >= self.count) { return false; }
-        let references = if self.indices.is_empty() { self.count } else { self.indices.len() };
+        if self.indices.iter().any(|&i| i as usize >= self.count) {
+            return false;
+        }
+        let references = if self.indices.is_empty() {
+            self.count
+        } else {
+            self.indices.len()
+        };
         let count = references / 3 * 3;
-        if count == 0 || count > 65536 { return false; }
-        let mut fields = [None;8];
+        if count == 0 || count > 65536 {
+            return false;
+        }
+        let mut fields = [None; 8];
         let mut stride = 0usize;
         for (slot, attribute) in self.attributes.iter().enumerate() {
-            let Some(attribute) = attribute else { continue; };
+            let Some(attribute) = attribute else {
+                continue;
+            };
             let width = match attribute.ty {
                 GL_BYTE | GL_UNSIGNED_BYTE => 1,
                 GL_SHORT => 2,
                 GL_FLOAT | GL_FIXED => 4,
                 _ => return false,
             };
-            if !(1..=4).contains(&attribute.size) || attribute.stride <= 0 || attribute.normalized > 1
-                || attribute.offset % width != 0 || attribute.stride as usize % width != 0 {
+            if !(1..=4).contains(&attribute.size)
+                || attribute.stride <= 0
+                || attribute.normalized > 1
+                || attribute.offset % width != 0
+                || attribute.stride as usize % width != 0
+            {
                 return false;
             }
             let bytes = attribute.size as usize * width;
-            let end = (self.count-1).checked_mul(attribute.stride as usize)
-                .and_then(|n|n.checked_add(attribute.offset)).and_then(|n|n.checked_add(bytes));
-            if end.is_none_or(|n|n>self.bytes.len()) { return false; }
-            stride = (stride + width-1) & !(width-1);
-            fields[slot] = Some((*attribute, stride, bytes, matches!(slot,1|6|7)));
+            let end = (self.count - 1)
+                .checked_mul(attribute.stride as usize)
+                .and_then(|n| n.checked_add(attribute.offset))
+                .and_then(|n| n.checked_add(bytes));
+            if end.is_none_or(|n| n > self.bytes.len()) {
+                return false;
+            }
+            stride = (stride + width - 1) & !(width - 1);
+            fields[slot] = Some((*attribute, stride, bytes, matches!(slot, 1 | 6 | 7)));
             stride += bytes;
         }
-        stride = (stride+3)&!3;
-        let Some(length) = count.checked_mul(stride) else { return false; };
-        out.bytes.resize(length,0);
+        stride = (stride + 3) & !3;
+        let Some(length) = count.checked_mul(stride) else {
+            return false;
+        };
+        out.bytes.resize(length, 0);
         out.constants = self.constants;
         for (slot, field) in fields.iter().enumerate() {
-            if let Some((attribute,offset,_,_)) = field {
-                out.attributes[slot] = Some(StreamAttribute {offset:*offset,stride:stride as i32,..*attribute});
+            if let Some((attribute, offset, _, _)) = field {
+                out.attributes[slot] = Some(StreamAttribute {
+                    offset: *offset,
+                    stride: stride as i32,
+                    ..*attribute
+                });
             }
         }
-        let index = |corner:usize| if self.indices.is_empty() { corner } else { self.indices[corner] as usize };
+        let index = |corner: usize| {
+            if self.indices.is_empty() {
+                corner
+            } else {
+                self.indices[corner] as usize
+            }
+        };
         for (corner, record) in out.bytes.chunks_exact_mut(stride).enumerate() {
             let geometry = index(corner);
-            let provoking = index(corner/3*3+2);
-            for (attribute,offset,bytes,flat) in fields.iter().flatten() {
-                let source = attribute.offset + if *flat {provoking}else{geometry} * attribute.stride as usize;
-                record[*offset..*offset+*bytes].copy_from_slice(&self.bytes[source..source+*bytes]);
+            let provoking = index(corner / 3 * 3 + 2);
+            for (attribute, offset, bytes, flat) in fields.iter().flatten() {
+                let source = attribute.offset
+                    + if *flat { provoking } else { geometry } * attribute.stride as usize;
+                record[*offset..*offset + *bytes]
+                    .copy_from_slice(&self.bytes[source..source + *bytes]);
             }
         }
         out.count = count;
@@ -1141,7 +1177,7 @@ pub struct Renderer {
     native_fixed: bool,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
-    pub max_viewport: [i32;2],
+    pub max_viewport: [i32; 2],
     pub subpixel_bits: i32,
 }
 impl Renderer {
@@ -1162,10 +1198,11 @@ impl Renderer {
             if units < 4 || attributes < 8 {
                 return Err("OpenGL driver lacks required texture/attribute units".into());
             }
-            let mut max_viewport=[0;2];let mut subpixel_bits=0;
-            (gl.GetIntegerv)(0x0d3a,max_viewport.as_mut_ptr());
-            (gl.GetIntegerv)(0x0d50,&mut subpixel_bits);
-            max_viewport=max_viewport.map(|v|v.max(1));
+            let mut max_viewport = [0; 2];
+            let mut subpixel_bits = 0;
+            (gl.GetIntegerv)(0x0d3a, max_viewport.as_mut_ptr());
+            (gl.GetIntegerv)(0x0d50, &mut subpixel_bits);
+            max_viewport = max_viewport.map(|v| v.max(1));
             let mut point_range = [1.; 2];
             let mut line_range = [1.; 2];
             (gl.GetFloatv)(0x846d, point_range.as_mut_ptr());
@@ -1799,8 +1836,11 @@ impl Renderer {
         transforms: &VertexTransforms,
     ) -> Result<(), String> {
         if (state.smooth_shading && stream.flat_triangles)
-            || (!state.smooth_shading && (!stream.flat_triangles || mode != GL_TRIANGLES
-                || !stream.indices.is_empty() || stream.count % 3 != 0))
+            || (!state.smooth_shading
+                && (!stream.flat_triangles
+                    || mode != GL_TRIANGLES
+                    || !stream.indices.is_empty()
+                    || stream.count % 3 != 0))
             || stream.count == 0
             || stream.count > 65536
             || stream.indices.len() > i32::MAX as usize
@@ -1868,13 +1908,15 @@ impl Renderer {
         self.host.make_current()?;
         self.scratch.clear();
         let layout = VertexLayout::new(state, stages, transforms);
-        let flat_direct = direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
-        let direct = flat_direct || (sequential
-            && state.smooth_shading
-            && matches!(
-                mode,
-                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
-            ));
+        let flat_direct =
+            direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
+        let direct = flat_direct
+            || (sequential
+                && state.smooth_shading
+                && matches!(
+                    mode,
+                    GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+                ));
         let draw_mode = if direct {
             mode
         } else {
@@ -2991,62 +3033,135 @@ mod tests {
     }
 
     fn typed_flat_source() -> VertexStream {
-        let mut stream=VertexStream::default();stream.count=4;
-        for i in 0..4 { for v in [i as f32,1.,2.] {stream.bytes.extend(v.to_le_bytes());} }
-        stream.attributes[0]=Some(StreamAttribute{size:3,ty:GL_FLOAT,normalized:0,stride:12,offset:0});
-        for i in 0..4 {stream.bytes.extend([i,10+i,20+i,255]);}
-        stream.attributes[1]=Some(StreamAttribute{size:4,ty:GL_UNSIGNED_BYTE,normalized:1,stride:4,offset:48});
-        for i in 0..4i16 {for v in [i,-i] {stream.bytes.extend(v.to_le_bytes());}}
-        stream.attributes[2]=Some(StreamAttribute{size:2,ty:GL_SHORT,normalized:0,stride:4,offset:64});
-        for i in 0..4 {stream.bytes.extend([i,0,127]);}
-        stream.attributes[6]=Some(StreamAttribute{size:3,ty:GL_BYTE,normalized:1,stride:3,offset:80});
-        stream.attributes[7]=stream.attributes[0];
-        stream.indices=vec![0,1,2,2,1,3];
+        let mut stream = VertexStream::default();
+        stream.count = 4;
+        for i in 0..4 {
+            for v in [i as f32, 1., 2.] {
+                stream.bytes.extend(v.to_le_bytes());
+            }
+        }
+        stream.attributes[0] = Some(StreamAttribute {
+            size: 3,
+            ty: GL_FLOAT,
+            normalized: 0,
+            stride: 12,
+            offset: 0,
+        });
+        for i in 0..4 {
+            stream.bytes.extend([i, 10 + i, 20 + i, 255]);
+        }
+        stream.attributes[1] = Some(StreamAttribute {
+            size: 4,
+            ty: GL_UNSIGNED_BYTE,
+            normalized: 1,
+            stride: 4,
+            offset: 48,
+        });
+        for i in 0..4i16 {
+            for v in [i, -i] {
+                stream.bytes.extend(v.to_le_bytes());
+            }
+        }
+        stream.attributes[2] = Some(StreamAttribute {
+            size: 2,
+            ty: GL_SHORT,
+            normalized: 0,
+            stride: 4,
+            offset: 64,
+        });
+        for i in 0..4 {
+            stream.bytes.extend([i, 0, 127]);
+        }
+        stream.attributes[6] = Some(StreamAttribute {
+            size: 3,
+            ty: GL_BYTE,
+            normalized: 1,
+            stride: 3,
+            offset: 80,
+        });
+        stream.attributes[7] = stream.attributes[0];
+        stream.indices = vec![0, 1, 2, 2, 1, 3];
         stream
     }
 
     #[test]
     fn flat_stream_preserves_typed_geometry_uv_and_provoking_lighting_data() {
-        let source=typed_flat_source();let mut out=VertexStream::default();
+        let source = typed_flat_source();
+        let mut out = VertexStream::default();
         assert!(source.expand_flat_triangles(&mut out));
-        assert!(out.flat_triangles);assert!(out.indices.is_empty());assert_eq!(out.count,6);
-        assert_eq!(out.bytes.len(),216);
-        for (corner,&index) in source.indices.iter().enumerate() {
-            let provoking=source.indices[corner/3*3+2] as usize;
-            for slot in [0,1,2,6,7] {
-                let before=source.attributes[slot].unwrap();let after=out.attributes[slot].unwrap();
-                assert_eq!((before.ty,before.size,before.normalized),(after.ty,after.size,after.normalized));
-                let index=if matches!(slot,1|6|7){provoking}else{index as usize};
-                let width=match before.ty {GL_BYTE|GL_UNSIGNED_BYTE=>1,GL_SHORT=>2,_=>4};
-                let len=before.size as usize*width;
-                let start=before.offset+index*before.stride as usize;
-                let dst=after.offset+corner*after.stride as usize;
-                assert_eq!(&out.bytes[dst..dst+len],&source.bytes[start..start+len]);
+        assert!(out.flat_triangles);
+        assert!(out.indices.is_empty());
+        assert_eq!(out.count, 6);
+        assert_eq!(out.bytes.len(), 216);
+        for (corner, &index) in source.indices.iter().enumerate() {
+            let provoking = source.indices[corner / 3 * 3 + 2] as usize;
+            for slot in [0, 1, 2, 6, 7] {
+                let before = source.attributes[slot].unwrap();
+                let after = out.attributes[slot].unwrap();
+                assert_eq!(
+                    (before.ty, before.size, before.normalized),
+                    (after.ty, after.size, after.normalized)
+                );
+                let index = if matches!(slot, 1 | 6 | 7) {
+                    provoking
+                } else {
+                    index as usize
+                };
+                let width = match before.ty {
+                    GL_BYTE | GL_UNSIGNED_BYTE => 1,
+                    GL_SHORT => 2,
+                    _ => 4,
+                };
+                let len = before.size as usize * width;
+                let start = before.offset + index * before.stride as usize;
+                let dst = after.offset + corner * after.stride as usize;
+                assert_eq!(
+                    &out.bytes[dst..dst + len],
+                    &source.bytes[start..start + len]
+                );
             }
         }
     }
     #[test]
     fn flat_stream_keeps_constant_attributes_and_ignores_incomplete_triangle() {
-        let mut source=typed_flat_source();source.indices=vec![0,1,2,3];
-        source.attributes[1]=None;source.attributes[6]=None;source.attributes[7]=None;
-        source.constants[1]=[0.25,0.5,0.75,1.];
-        let mut out=VertexStream::default();
+        let mut source = typed_flat_source();
+        source.indices = vec![0, 1, 2, 3];
+        source.attributes[1] = None;
+        source.attributes[6] = None;
+        source.attributes[7] = None;
+        source.constants[1] = [0.25, 0.5, 0.75, 1.];
+        let mut out = VertexStream::default();
         assert!(source.expand_flat_triangles(&mut out));
-        assert_eq!(out.count,3);assert_eq!(out.constants,source.constants);
-        assert!(out.attributes[1].is_none());assert!(out.attributes[6].is_none());
-        source.indices.clear();assert!(source.expand_flat_triangles(&mut out));
-        assert_eq!(out.count,3);
+        assert_eq!(out.count, 3);
+        assert_eq!(out.constants, source.constants);
+        assert!(out.attributes[1].is_none());
+        assert!(out.attributes[6].is_none());
+        source.indices.clear();
+        assert!(source.expand_flat_triangles(&mut out));
+        assert_eq!(out.count, 3);
     }
     #[test]
     fn flat_stream_rejects_invalid_snapshots_and_overlarge_expansion() {
-        let source=typed_flat_source();let mut out=VertexStream::default();
+        let source = typed_flat_source();
+        let mut out = VertexStream::default();
         assert!(source.expand_flat_triangles(&mut out));
-        let mut bad=typed_flat_source();bad.indices[0]=99;
-        assert!(!bad.expand_flat_triangles(&mut out));assert!(!out.flat_triangles);assert!(out.bytes.is_empty());
-        bad=typed_flat_source();bad.bytes.truncate(80);assert!(!bad.expand_flat_triangles(&mut out));
-        bad=typed_flat_source();bad.attributes[2].as_mut().unwrap().stride=0;assert!(!bad.expand_flat_triangles(&mut out));
-        bad=typed_flat_source();bad.indices=vec![0;65538];assert!(!bad.expand_flat_triangles(&mut out));
-        bad=typed_flat_source();bad.flat_triangles=true;assert!(!bad.expand_flat_triangles(&mut out));
+        let mut bad = typed_flat_source();
+        bad.indices[0] = 99;
+        assert!(!bad.expand_flat_triangles(&mut out));
+        assert!(!out.flat_triangles);
+        assert!(out.bytes.is_empty());
+        bad = typed_flat_source();
+        bad.bytes.truncate(80);
+        assert!(!bad.expand_flat_triangles(&mut out));
+        bad = typed_flat_source();
+        bad.attributes[2].as_mut().unwrap().stride = 0;
+        assert!(!bad.expand_flat_triangles(&mut out));
+        bad = typed_flat_source();
+        bad.indices = vec![0; 65538];
+        assert!(!bad.expand_flat_triangles(&mut out));
+        bad = typed_flat_source();
+        bad.flat_triangles = true;
+        assert!(!bad.expand_flat_triangles(&mut out));
     }
 
     #[test]
@@ -3054,53 +3169,73 @@ mod tests {
         assert!(direct_flat_triangles(GL_TRIANGLES, false, false));
         assert!(!direct_flat_triangles(GL_TRIANGLES, true, false));
         assert!(!direct_flat_triangles(GL_TRIANGLES, false, true));
-        for mode in [GL_TRIANGLE_STRIP,GL_TRIANGLE_FAN,GL_LINES,GL_LINE_STRIP,GL_LINE_LOOP,GL_POINTS] {
-            assert!(!direct_flat_triangles(mode,false,false));
+        for mode in [
+            GL_TRIANGLE_STRIP,
+            GL_TRIANGLE_FAN,
+            GL_LINES,
+            GL_LINE_STRIP,
+            GL_LINE_LOOP,
+            GL_POINTS,
+        ] {
+            assert!(!direct_flat_triangles(mode, false, false));
         }
     }
 
     #[test]
     fn direct_flat_triangles_preserve_all_provoking_and_interpolated_attributes() {
-        let mut state=PipelineState::default();
-        state.smooth_shading=false;
-        let mut transforms=identity_transforms();
-        transforms.lighting.enabled=true;
-        let stages: Vec<_>=(0..4).map(|unit| TextureStage {
-            unit,env:TexEnvMode::Modulate,env_color:[0.;4],lod_bias:0.,
-        }).collect();
-        let layout=VertexLayout::new(&state,&stages,Some(&transforms));
-        let vertices: Vec<_>=(0..6).map(|i| Vertex {
-            pos:[i as f32,1.,2.,1.], color:[i as f32/6.,0.5,0.25,1.],
-            normal:[i as f32,0.,1.], texcoord:[[i as f32,0.5];4],
-            fog_depth:i as f32+0.25, ..Default::default()
-        }).collect();
-        let mut packed=Vec::new();
-        pack_flat_triangles(&layout,&mut packed,&vertices);
-        assert_eq!(packed.len(),6*layout.floats);
-        for (i,record) in packed.chunks_exact(layout.floats).enumerate() {
-            let provoking=&vertices[i/3*3+2];
-            assert_eq!(&record[..4],&vertices[i].pos);
-            assert_eq!(&record[4..8],&provoking.color);
+        let mut state = PipelineState::default();
+        state.smooth_shading = false;
+        let mut transforms = identity_transforms();
+        transforms.lighting.enabled = true;
+        let stages: Vec<_> = (0..4)
+            .map(|unit| TextureStage {
+                unit,
+                env: TexEnvMode::Modulate,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            })
+            .collect();
+        let layout = VertexLayout::new(&state, &stages, Some(&transforms));
+        let vertices: Vec<_> = (0..6)
+            .map(|i| Vertex {
+                pos: [i as f32, 1., 2., 1.],
+                color: [i as f32 / 6., 0.5, 0.25, 1.],
+                normal: [i as f32, 0., 1.],
+                texcoord: [[i as f32, 0.5]; 4],
+                fog_depth: i as f32 + 0.25,
+                ..Default::default()
+            })
+            .collect();
+        let mut packed = Vec::new();
+        pack_flat_triangles(&layout, &mut packed, &vertices);
+        assert_eq!(packed.len(), 6 * layout.floats);
+        for (i, record) in packed.chunks_exact(layout.floats).enumerate() {
+            let provoking = &vertices[i / 3 * 3 + 2];
+            assert_eq!(&record[..4], &vertices[i].pos);
+            assert_eq!(&record[4..8], &provoking.color);
             for unit in 0..4 {
-                let (_,offset)=layout.attributes[unit+2].unwrap();
-                assert_eq!(&record[offset..offset+2],&vertices[i].texcoord[unit]);
+                let (_, offset) = layout.attributes[unit + 2].unwrap();
+                assert_eq!(&record[offset..offset + 2], &vertices[i].texcoord[unit]);
             }
-            let (_,offset)=layout.attributes[6].unwrap();
-            assert_eq!(&record[offset..offset+3],&provoking.normal);
-            assert_eq!(record[offset+3],vertices[i].fog_depth);
-            let (_,offset)=layout.attributes[7].unwrap();
-            assert_eq!(&record[offset..offset+4],&provoking.pos);
+            let (_, offset) = layout.attributes[6].unwrap();
+            assert_eq!(&record[offset..offset + 3], &provoking.normal);
+            assert_eq!(record[offset + 3], vertices[i].fog_depth);
+            let (_, offset) = layout.attributes[7].unwrap();
+            assert_eq!(&record[offset..offset + 4], &provoking.pos);
         }
     }
 
     #[test]
     fn direct_flat_triangles_ignore_incomplete_primitives_and_reuse_output() {
-        let mut state=PipelineState::default();state.smooth_shading=false;
-        let layout=VertexLayout::new(&state,&[],None);
-        let v=Vertex::default();let mut out=Vec::new();
+        let mut state = PipelineState::default();
+        state.smooth_shading = false;
+        let layout = VertexLayout::new(&state, &[], None);
+        let v = Vertex::default();
+        let mut out = Vec::new();
         for count in 0..10 {
-            out.clear();pack_flat_triangles(&layout,&mut out,&vec![v;count]);
-            assert_eq!(out.len(),count/3*3*layout.floats);
+            out.clear();
+            pack_flat_triangles(&layout, &mut out, &vec![v; count]);
+            assert_eq!(out.len(), count / 3 * 3 * layout.floats);
         }
     }
 
@@ -3963,7 +4098,10 @@ mod tests {
                 )
                 .unwrap();
                 if !state.smooth_shading {
-                    assert!(gpu.indices.is_empty(), "flat triangle lists use direct submission");
+                    assert!(
+                        gpu.indices.is_empty(),
+                        "flat triangle lists use direct submission"
+                    );
                 }
                 gpu.read(&mut target).unwrap();
                 center(&target)

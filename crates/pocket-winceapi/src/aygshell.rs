@@ -81,8 +81,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     for ord in [12u16, 13, 14, 21, 49, 50, 65, 71, 72, 80, 84, 341, 344] {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
-    for (ordinal, handler) in [(3, sh_set_app_key_window as crate::Handler),
-        (64, sh_load_image_resource), (97, crate::coredll::send_back_to_focus_window)] {
+    for (ordinal, handler) in [
+        (3, sh_set_app_key_window as crate::Handler),
+        (64, sh_load_image_resource),
+        (97, crate::coredll::send_back_to_focus_window),
+    ] {
         for name in [format!("ord:{ordinal}"), format!("#{ordinal}")] {
             d.register_handler(dll, &name, handler);
         }
@@ -579,7 +582,10 @@ fn sh_load_image_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     register_image_bitmap(ctx, &decoded)
 }
 
-fn register_image_bitmap(ctx: &mut CallCtx<'_>, decoded: &image::RgbaImage) -> Result<DispatchOutcome, KernelError> {
+fn register_image_bitmap(
+    ctx: &mut CallCtx<'_>,
+    decoded: &image::RgbaImage,
+) -> Result<DispatchOutcome, KernelError> {
     let (width, height) = decoded.dimensions();
     let handle = ctx.kernel.gdi.create_compatible_bitmap(width, height);
     let Some(bitmap) = ctx.kernel.gdi.bitmap_mut(handle) else {
@@ -648,11 +654,22 @@ mod memory_tests {
         assert_eq!(k.window_rects[&handle], (0, 294, 240, 26));
         assert_eq!(k.active_shell_bar(), None);
         for name in ["SHFindMenuBar", "ord:188", "#188"] {
-            assert_eq!(call(&mut cpu, &mut k, &mut d, "aygshell.dll", name, &[7]),
-                DispatchOutcome::ReturnedR0(handle));
+            assert_eq!(
+                call(&mut cpu, &mut k, &mut d, "aygshell.dll", name, &[7]),
+                DispatchOutcome::ReturnedR0(handle)
+            );
         }
-        assert_eq!(call(&mut cpu, &mut k, &mut d, "aygshell.dll", "SHFindMenuBar", &[8]),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHFindMenuBar",
+                &[8]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
 
         call(
             &mut cpu,
@@ -704,8 +721,17 @@ mod memory_tests {
             &[handle],
         );
         assert!(!k.gdi.shell_menus.bars.contains_key(&handle));
-        assert_eq!(call(&mut cpu, &mut k, &mut d, "aygshell.dll", "SHFindMenuBar", &[7]),
-            DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "aygshell.dll",
+                "SHFindMenuBar",
+                &[7]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
 
         assert_eq!(k.active_shell_bar(), None);
     }
@@ -976,11 +1002,18 @@ fn sh_init_extra_controls(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
 /// Hidden bars are still owned windows and must remain discoverable.
 fn sh_find_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let owner = ctx.arg_u32(0)?;
-    let handle = if owner == 0 { 0 } else {
-        ctx.kernel.gdi.shell_menus.bars.iter()
+    let handle = if owner == 0 {
+        0
+    } else {
+        ctx.kernel
+            .gdi
+            .shell_menus
+            .bars
+            .iter()
             .filter(|(_, bar)| bar.owner == owner)
             .map(|(&hwnd, _)| hwnd)
-            .min().unwrap_or(0)
+            .min()
+            .unwrap_or(0)
     };
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
@@ -1010,7 +1043,9 @@ fn sh_load_image_resource(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     let raw_name = ctx.arg_u32(1)?;
     let name = crate::coredll::read_wide_resource_key(ctx, raw_name)?;
     let resource_type = pocket_pe::ResourceKey::Name("GIF".into());
-    let Some((entry, base)) = crate::coredll::lookup_resource(ctx.kernel, module, &resource_type, &name) else {
+    let Some((entry, base)) =
+        crate::coredll::lookup_resource(ctx.kernel, module, &resource_type, &name)
+    else {
         return crate::coredll::load_bitmap_w(ctx);
     };
     let Some(address) = base.checked_add(entry.data_rva) else {
@@ -1031,75 +1066,146 @@ fn sh_load_image_resource(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 mod resource_and_focus_tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
-    use pocket_cpu::{Cpu, regs::ArmReg};
+    use pocket_cpu::{regs::ArmReg, Cpu};
     use pocket_pe::{ResourceEntry, ResourceKey};
     #[test]
     fn jpeg_bytes_decode_from_the_ce_gif_resource_type() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
         let mut bytes = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut bytes)
-            .encode(&[192; 18], 3, 2, image::ColorType::Rgb8).unwrap();
+            .encode(&[192; 18], 3, 2, image::ColorType::Rgb8)
+            .unwrap();
         kernel.image_base = 0x1000;
-        kernel.resources.push(ResourceEntry {ty:ResourceKey::Name("GIF".into()),
-            name:ResourceKey::Id(106),data_rva:0x1000,size:bytes.len() as u32,codepage:0});
-        cpu.write_mem(0x2000,&bytes).unwrap();
+        kernel.resources.push(ResourceEntry {
+            ty: ResourceKey::Name("GIF".into()),
+            name: ResourceKey::Id(106),
+            data_rva: 0x1000,
+            size: bytes.len() as u32,
+            codepage: 0,
+        });
+        cpu.write_mem(0x2000, &bytes).unwrap();
         for name in ["SHLoadImageResource", "ord:64", "#64"] {
-            let DispatchOutcome::ReturnedR0(handle) = call(&mut cpu,&mut kernel,&mut dispatcher,
-                "aygshell.dll",name,&[0,106]) else {panic!("bitmap expected")};
+            let DispatchOutcome::ReturnedR0(handle) = call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "aygshell.dll",
+                name,
+                &[0, 106],
+            ) else {
+                panic!("bitmap expected")
+            };
             let bitmap = kernel.gdi.bitmap(handle).expect("real GDI bitmap");
-            assert_eq!((bitmap.width,bitmap.height),(3,2));
+            assert_eq!((bitmap.width, bitmap.height), (3, 2));
             assert!(bitmap.pixels.iter().any(|byte| *byte != 0));
         }
-        kernel.resources[0].size=3;
-        cpu.write_mem(0x2000,b"bad").unwrap();
-        assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"aygshell.dll",
-            "ord:64",&[0,106]),DispatchOutcome::ReturnedR0(0));
+        kernel.resources[0].size = 3;
+        cpu.write_mem(0x2000, b"bad").unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "aygshell.dll",
+                "ord:64",
+                &[0, 106]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
     #[test]
     fn ordinary_bitmap_resources_keep_the_gdi_decoder() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
-        kernel.image_base=0x1000;
-        let mut dib=vec![0u8;44];
+        kernel.image_base = 0x1000;
+        let mut dib = vec![0u8; 44];
         dib[..4].copy_from_slice(&40u32.to_le_bytes());
         dib[4..8].copy_from_slice(&1i32.to_le_bytes());
         dib[8..12].copy_from_slice(&1i32.to_le_bytes());
         dib[12..14].copy_from_slice(&1u16.to_le_bytes());
         dib[14..16].copy_from_slice(&24u16.to_le_bytes());
-        dib[42]=255;
-        cpu.write_mem(0x2000,&dib).unwrap();
-        kernel.resources.push(ResourceEntry {ty:ResourceKey::Id(2),name:ResourceKey::Id(7),
-            data_rva:0x1000,size:dib.len() as u32,codepage:0});
-        let DispatchOutcome::ReturnedR0(handle)=call(&mut cpu,&mut kernel,&mut dispatcher,
-            "aygshell.dll","SHLoadImageResource",&[0,7]) else {panic!("bitmap expected")};
-        let bitmap=kernel.gdi.bitmap(handle).unwrap();
-        assert_eq!((bitmap.width,bitmap.height),(1,1));
-        assert_eq!(u16::from_le_bytes(bitmap.pixels[..2].try_into().unwrap()),0xf800);
+        dib[42] = 255;
+        cpu.write_mem(0x2000, &dib).unwrap();
+        kernel.resources.push(ResourceEntry {
+            ty: ResourceKey::Id(2),
+            name: ResourceKey::Id(7),
+            data_rva: 0x1000,
+            size: dib.len() as u32,
+            codepage: 0,
+        });
+        let DispatchOutcome::ReturnedR0(handle) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "aygshell.dll",
+            "SHLoadImageResource",
+            &[0, 7],
+        ) else {
+            panic!("bitmap expected")
+        };
+        let bitmap = kernel.gdi.bitmap(handle).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (1, 1));
+        assert_eq!(
+            u16::from_le_bytes(bitmap.pixels[..2].try_into().unwrap()),
+            0xf800
+        );
     }
     #[test]
     fn releasing_application_keys_and_unsupported_associations_are_explicit() {
-        let (mut cpu, mut kernel, mut dispatcher)=setup();
-        for name in ["SHSetAppKeyWndAssoc","ord:3","#3"] {
-            assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"aygshell.dll",name,
-                &[0xc1,0]),DispatchOutcome::ReturnedR0(1));
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for name in ["SHSetAppKeyWndAssoc", "ord:3", "#3"] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "aygshell.dll",
+                    name,
+                    &[0xc1, 0]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
         }
-        assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"aygshell.dll","ord:3",
-            &[0xc1,7]),DispatchOutcome::ReturnedR0(0));
-        assert_eq!(kernel.thread_last_errors[&kernel.current_thread],50);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "aygshell.dll",
+                "ord:3",
+                &[0xc1, 7]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.thread_last_errors[&kernel.current_thread], 50);
     }
     #[test]
     fn shell_forwarding_tail_calls_the_focused_window_with_three_original_arguments() {
-        let (mut cpu, mut kernel, mut dispatcher)=setup();
-        kernel.active_window=7;
-        kernel.controls.focus=7;
-        kernel.window_classes.insert(7,"Example".into());
-        kernel.window_procs.insert(7,0x123400);
-        kernel.window_visibility.insert(7,true);
-        cpu.write_reg(ArmReg::Lr,0x8888).unwrap();
-        assert_eq!(call(&mut cpu,&mut kernel,&mut dispatcher,"aygshell.dll","ord:97",
-            &[0x100,65,1]),DispatchOutcome::JumpTo(0x123400));
-        for (reg,value) in [(ArmReg::R0,7),(ArmReg::R1,0x100),(ArmReg::R2,65),(ArmReg::R3,1)] {
-            assert_eq!(cpu.read_reg(reg).unwrap(),value);
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.active_window = 7;
+        kernel.controls.focus = 7;
+        kernel.window_classes.insert(7, "Example".into());
+        kernel.window_procs.insert(7, 0x123400);
+        kernel.window_visibility.insert(7, true);
+        cpu.write_reg(ArmReg::Lr, 0x8888).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "aygshell.dll",
+                "ord:97",
+                &[0x100, 65, 1]
+            ),
+            DispatchOutcome::JumpTo(0x123400)
+        );
+        for (reg, value) in [
+            (ArmReg::R0, 7),
+            (ArmReg::R1, 0x100),
+            (ArmReg::R2, 65),
+            (ArmReg::R3, 1),
+        ] {
+            assert_eq!(cpu.read_reg(reg).unwrap(), value);
         }
-        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(),0x8888);
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x8888);
     }
 }

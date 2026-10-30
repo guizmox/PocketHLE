@@ -1304,26 +1304,32 @@ fn gl_get_error(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 }
 
 /// Capabilities shared by integer/float getters, with the correct arity.
-fn gl_capability(pname:u32)->Option<Vec<f32>> {
+fn gl_capability(pname: u32) -> Option<Vec<f32>> {
     Some(match pname {
-        0x0d3a => with_ctx(|c|c.max_viewport_dims()).map(|v|v as f32).to_vec(),
-        0x0d50 => vec![with_ctx(|c|c.subpixel_bits()) as f32],
-        0x846d | 0x0b12 => with_ctx(|c|c.primitive_size_range(true)).to_vec(),
-        0x846e | 0x0b22 => with_ctx(|c|c.primitive_size_range(false)).to_vec(),
+        0x0d3a => with_ctx(|c| c.max_viewport_dims())
+            .map(|v| v as f32)
+            .to_vec(),
+        0x0d50 => vec![with_ctx(|c| c.subpixel_bits()) as f32],
+        0x846d | 0x0b12 => with_ctx(|c| c.primitive_size_range(true)).to_vec(),
+        0x846e | 0x0b22 => with_ctx(|c| c.primitive_size_range(false)).to_vec(),
         // glReadPixels supports this pair in both rendering backends.
         0x8b9a => vec![pocket_gles::GL_UNSIGNED_BYTE as f32],
         0x8b9b => vec![pocket_gles::GL_RGBA as f32],
         pocket_gles::GL_MAX_TEXTURE_SIZE => vec![1024.],
         pocket_gles::GL_MAX_LIGHTS => vec![8.],
         pocket_gles::GL_MAX_TEXTURE_UNITS => vec![pocket_gles::raster::MAX_TEXTURE_STAGES as f32],
-        pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH | pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH | pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16.],
+        pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH
+        | pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH
+        | pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16.],
         pocket_gles::GL_DEPTH_BITS => vec![16.],
         pocket_gles::GL_STENCIL_BITS | pocket_gles::GL_ALPHA_BITS => vec![0.],
         pocket_gles::GL_RED_BITS | pocket_gles::GL_BLUE_BITS => vec![5.],
         pocket_gles::GL_GREEN_BITS => vec![6.],
         pocket_gles::GL_MAX_TEXTURE_LOD_BIAS_EXT => vec![4.],
         pocket_gles::GL_NUM_COMPRESSED_TEXTURE_FORMATS => vec![COMPRESSED_FORMATS.len() as f32],
-        pocket_gles::GL_COMPRESSED_TEXTURE_FORMATS => COMPRESSED_FORMATS.iter().map(|v|*v as f32).collect(),
+        pocket_gles::GL_COMPRESSED_TEXTURE_FORMATS => {
+            COMPRESSED_FORMATS.iter().map(|v| *v as f32).collect()
+        }
         _ => return None,
     })
 }
@@ -1334,9 +1340,12 @@ fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     if out == 0 {
         return Ok(VOID);
     }
-    if let Some(values)=gl_capability(pname) {
-        let bytes:Vec<u8>=values.iter().flat_map(|v|(v.round() as i32).to_le_bytes()).collect();
-        ctx.cpu.write_mem(out,&bytes)?;
+    if let Some(values) = gl_capability(pname) {
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|v| (v.round() as i32).to_le_bytes())
+            .collect();
+        ctx.cpu.write_mem(out, &bytes)?;
         return Ok(VOID);
     }
     let values: Vec<i32> = match pname {
@@ -1384,9 +1393,9 @@ fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if out == 0 {
         return Ok(VOID);
     }
-    if let Some(values)=gl_capability(pname) {
-        let bytes:Vec<u8>=values.iter().flat_map(|v|(*v).to_le_bytes()).collect();
-        ctx.cpu.write_mem(out,&bytes)?;
+    if let Some(values) = gl_capability(pname) {
+        let bytes: Vec<u8> = values.iter().flat_map(|v| (*v).to_le_bytes()).collect();
+        ctx.cpu.write_mem(out, &bytes)?;
         return Ok(VOID);
     }
     let values: Vec<f32> = match pname {
@@ -3946,23 +3955,28 @@ mod tests {
 
     #[test]
     fn capability_vectors_fill_both_words_and_keep_following_memory_intact() {
-        let _g=guard();reset_for_test(16,16);
-        let mut cpu=fresh_cpu();let mut kernel=fresh_kernel();
-        for pname in [0x0d3a,0x0b12,0x0b22,0x846d,0x846e] {
-            cpu.write_mem(SCRATCH,&[0xa5;16]).unwrap();
-            call(&mut cpu,&mut kernel,gl_get_integerv,&[pname,SCRATCH]);
-            assert!(cpu.read_u32_le(SCRATCH).unwrap()>0);
-            assert!(cpu.read_u32_le(SCRATCH+4).unwrap()>0);
-            assert_eq!(cpu.read_u32_le(SCRATCH+8).unwrap(),0xa5a5a5a5);
-            cpu.write_mem(SCRATCH,&[0xa5;16]).unwrap();
-            call(&mut cpu,&mut kernel,gl_get_floatv,&[pname,SCRATCH]);
-            assert!(f32::from_bits(cpu.read_u32_le(SCRATCH).unwrap())>0.);
-            assert!(f32::from_bits(cpu.read_u32_le(SCRATCH+4).unwrap())>0.);
-            assert_eq!(cpu.read_u32_le(SCRATCH+8).unwrap(),0xa5a5a5a5);
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        for pname in [0x0d3a, 0x0b12, 0x0b22, 0x846d, 0x846e] {
+            cpu.write_mem(SCRATCH, &[0xa5; 16]).unwrap();
+            call(&mut cpu, &mut kernel, gl_get_integerv, &[pname, SCRATCH]);
+            assert!(cpu.read_u32_le(SCRATCH).unwrap() > 0);
+            assert!(cpu.read_u32_le(SCRATCH + 4).unwrap() > 0);
+            assert_eq!(cpu.read_u32_le(SCRATCH + 8).unwrap(), 0xa5a5a5a5);
+            cpu.write_mem(SCRATCH, &[0xa5; 16]).unwrap();
+            call(&mut cpu, &mut kernel, gl_get_floatv, &[pname, SCRATCH]);
+            assert!(f32::from_bits(cpu.read_u32_le(SCRATCH).unwrap()) > 0.);
+            assert!(f32::from_bits(cpu.read_u32_le(SCRATCH + 4).unwrap()) > 0.);
+            assert_eq!(cpu.read_u32_le(SCRATCH + 8).unwrap(), 0xa5a5a5a5);
         }
-        for (pname,value) in [(0x8b9a,pocket_gles::GL_UNSIGNED_BYTE),(0x8b9b,pocket_gles::GL_RGBA)] {
-            call(&mut cpu,&mut kernel,gl_get_integerv,&[pname,SCRATCH]);
-            assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(),value);
+        for (pname, value) in [
+            (0x8b9a, pocket_gles::GL_UNSIGNED_BYTE),
+            (0x8b9b, pocket_gles::GL_RGBA),
+        ] {
+            call(&mut cpu, &mut kernel, gl_get_integerv, &[pname, SCRATCH]);
+            assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), value);
         }
     }
 
@@ -3999,12 +4013,29 @@ mod tests {
         reset_for_test(16, 16);
         let mut cpu = fresh_cpu();
         let mut kernel = fresh_kernel();
-        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
-        let pointer = call(&mut cpu, &mut kernel, gl_get_string, &[pocket_gles::GL_RENDERER]);
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let pointer = call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_string,
+            &[pocket_gles::GL_RENDERER],
+        );
         assert_ne!(pointer, 0);
-        assert_eq!(cpu.read_mem(pointer, b"PocketHLE Software Rasterizer\0".len() as u32).unwrap(),
-            b"PocketHLE Software Rasterizer\0".to_vec());
-        assert_eq!(call(&mut cpu, &mut kernel, gl_get_string, &[pocket_gles::GL_RENDERER]), pointer);
+        assert_eq!(
+            cpu.read_mem(pointer, b"PocketHLE Software Rasterizer\0".len() as u32)
+                .unwrap(),
+            b"PocketHLE Software Rasterizer\0".to_vec()
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_get_string,
+                &[pocket_gles::GL_RENDERER]
+            ),
+            pointer
+        );
     }
 
     #[test]
@@ -4191,17 +4222,21 @@ mod tests {
     #[test]
     fn standalone_egl_exports_use_the_shared_handlers() {
         let d = WinCeDispatcher::new();
-        let names: std::collections::HashSet<_> = d.registered_iter()
+        let names: std::collections::HashSet<_> = d
+            .registered_iter()
             .filter(|(dll, _)| *dll == "libegl.dll")
-            .map(|(_, name)| name.to_string()).collect();
+            .map(|(_, name)| name.to_string())
+            .collect();
         for name in EGL_NAMED_EXPORTS {
             assert!(names.contains(*name), "missing EGL export: {name}");
             assert!(handler_for(name).is_some());
         }
         assert!(!names.contains("glDrawElements"));
         assert!(!names.contains("ord:29"));
-        assert_eq!(crate::coredll::gles_module_handle("\\Windows\\libEGL.dll"),
-            Some(pocket_kernel::EGL_MODULE_HANDLE));
+        assert_eq!(
+            crate::coredll::gles_module_handle("\\Windows\\libEGL.dll"),
+            Some(pocket_kernel::EGL_MODULE_HANDLE)
+        );
     }
 
     #[test]
@@ -4280,11 +4315,20 @@ mod tests {
         kernel.fb_mapped = true;
         set_gpu_renderer(true);
         assert!(with_ctx(|c| c.gpu_active()));
-        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE).unwrap();
-        let renderer = call(&mut cpu, &mut kernel, gl_get_string, &[pocket_gles::GL_RENDERER]);
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let renderer = call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_string,
+            &[pocket_gles::GL_RENDERER],
+        );
         assert_ne!(renderer, 0);
-        assert_eq!(cpu.read_mem(renderer, b"PocketHLE GPU rasterizer\0".len() as u32).unwrap(),
-            b"PocketHLE GPU rasterizer\0".to_vec());
+        assert_eq!(
+            cpu.read_mem(renderer, b"PocketHLE GPU rasterizer\0".len() as u32)
+                .unwrap(),
+            b"PocketHLE GPU rasterizer\0".to_vec()
+        );
 
         let vertices: [f32; 9] = [-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.];
         let bytes: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();

@@ -80,8 +80,11 @@ impl Emulator {
     /// commit only after successful callbacks; the DLL hash + install directory
     /// marker lives in the same persistent device registry as those changes.
     pub fn complete_cab_registry_setup(&mut self, root: &Path, install_dir: &str) -> Result<usize> {
-        let state = &mut self.process.as_mut().context("No process loaded")?.state;
-        installed_files::complete(&mut state.vfs, root, install_dir)?;
+        // Metadata-only validation is also valid before loading an image.
+        // Shared payload installation needs the loaded process's mounted VFS.
+        if let Some(process) = self.process.as_mut() {
+            installed_files::complete(&mut process.state.vfs, root, install_dir)?;
+        }
         let mut completed = self.complete_cab_registry_setup_dir(root, install_dir)?;
         // The importer keeps add-on setup callbacks outside the guest mount.
         // Only its bounded, hash-named package directories are eligible here.
