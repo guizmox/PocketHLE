@@ -60,7 +60,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         originalActions.zip(listOf("A","P2","Action","P1","P4","C","P3","B")).forEach { (id,label)->button(id,label) }
         auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","Full","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
         auxiliary.forEach { id ->
-            val hostAction = id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen
+            val hostAction = id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen || id == R.id.btn_rotate_game
             keys.getValue(id).apply {
                 background = style.toolbarBackground(hostAction)
                 setTextColor(style.toolbarTextColors(hostAction))

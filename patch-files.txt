@@ -1,12 +1,1 @@
-Cargo.lock
-Cargo.toml
-frontends\pocket-android\app\build.gradle.kts
-frontends\pocket-android\app\src\main\java\com\pockethle\app\ConsoleControlStyle.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\GizmondoControls.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControllerGeometry.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControls.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcGeometry.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\StylusStickView.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\CompactLandscapeGeometryTest.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\DisplayScalePolicyTest.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcControllerGeometryTest.kt
