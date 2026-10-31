@@ -33,33 +33,50 @@ fn library_title(ui: &mut egui::Ui, game_id: &str, title: &str) {
     let text = egui::WidgetText::from(RichText::new(title).strong().size(16.0));
     let galley = text.into_galley(ui, Some(false), f32::INFINITY, egui::TextStyle::Body);
     let width = ui.available_width().max(0.0);
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, galley.size().y), Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, galley.size().y), Sense::hover());
     response.on_hover_text(title);
-    if !ui.is_rect_visible(rect) { return; }
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
     let overflow = galley.size().x - width;
     let id = egui::Id::new(("library_title_marquee", game_id));
     let mut offset = 0.0;
     if overflow > 0.5 {
         let now = ui.input(|i| i.time);
         let elapsed = ui.ctx().data_mut(|data| {
-            let mut state = data.get_temp::<TitleMarquee>(id).unwrap_or_else(|| TitleMarquee {
-                title: title.to_owned(), width, started: now,
-            });
+            let mut state = data
+                .get_temp::<TitleMarquee>(id)
+                .unwrap_or_else(|| TitleMarquee {
+                    title: title.to_owned(),
+                    width,
+                    started: now,
+                });
             if state.title != title || (state.width - width).abs() > 0.5 {
-                state = TitleMarquee { title: title.to_owned(), width, started: now };
+                state = TitleMarquee {
+                    title: title.to_owned(),
+                    width,
+                    started: now,
+                };
             }
             let elapsed = now - state.started;
-            data.insert_temp(id,state);
+            data.insert_temp(id, state);
             elapsed
         });
-        let frame = title_scroll::frame(elapsed,overflow);
+        let frame = title_scroll::frame(elapsed, overflow);
         offset = frame.offset;
-        if let Some(delay) = frame.repaint_after { ui.ctx().request_repaint_after(delay); }
+        if let Some(delay) = frame.repaint_after {
+            ui.ctx().request_repaint_after(delay);
+        }
     } else {
         ui.ctx().data_mut(|data| data.remove::<TitleMarquee>(id));
     }
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    painter.galley(rect.min - Vec2::new(offset,0.0), galley, ui.visuals().strong_text_color());
+    painter.galley(
+        rect.min - Vec2::new(offset, 0.0),
+        galley,
+        ui.visuals().strong_text_color(),
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,12 +330,18 @@ fn rotate_direction_button(button: GuestButton, turns: u8) -> GuestButton {
 // Desktop uses the Classic control banks. Remap only physical input paths;
 // virtual buttons already carry the destination identity after their layout swap.
 fn swapped_pocketpc_physical_vk(vk: u16, enabled: bool) -> u16 {
-    if !enabled { return vk; }
+    if !enabled {
+        return vk;
+    }
     match vk {
-        0x11 => 0xc4, 0xc4 => 0x11, // A / P4
-        0x20 => 0xc1, 0xc1 => 0x20, // B / P1
-        0x10 => 0xc2, 0xc2 => 0x10, // C / P2
-        0x0d => 0xc3, 0xc3 => 0x0d, // Action / P3
+        0x11 => 0xc4,
+        0xc4 => 0x11, // A / P4
+        0x20 => 0xc1,
+        0xc1 => 0x20, // B / P1
+        0x10 => 0xc2,
+        0xc2 => 0x10, // C / P2
+        0x0d => 0xc3,
+        0xc3 => 0x0d, // Action / P3
         _ => vk,
     }
 }
@@ -2391,7 +2414,7 @@ impl PocketLauncher {
         ui.add_space(10.0);
         ui.separator();
         ui.heading("Optimizations");
-        ui.small("Enabled by default. Changes apply on the next game launch. These settings do not change the emulated CPU speed or FPS limit.");
+        ui.small("Changes apply on the next game launch. These settings do not change the emulated CPU speed or FPS limit.");
         crate::controller_ui::checkbox(ui, &mut draft.optimizations.fast_memory_access, "Fast memory access");
         ui.small("Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.");
         crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_tlb_cache, "Extended memory translation cache");
@@ -2683,7 +2706,8 @@ impl PocketLauncher {
                             });
                         if self.gamepad_capture == Some(ControllerCapture::Guest(button)) {
                             ui.add(egui::Label::new("Press a controller input…").wrap(false));
-                            if crate::controller_ui::small_button(ui, "Cancel controller").clicked() {
+                            if crate::controller_ui::small_button(ui, "Cancel controller").clicked()
+                            {
                                 self.gamepad_capture = None;
                             }
                         } else if crate::controller_ui::button(ui, "Add controller input").clicked()
@@ -3391,7 +3415,9 @@ impl PocketLauncher {
                         GuestButton::PocketPcApp4 => ("A", GuestButton::ButtonA),
                         _ => (label, guest),
                     }
-                } else { (label, guest) };
+                } else {
+                    (label, guest)
+                };
                 let rect = Rect::from_min_size(
                     Pos2::new(
                         x + (i % 2) as f32 * (cell_w + gap),
@@ -4566,7 +4592,8 @@ impl PocketLauncher {
                     }) else {
                         continue;
                     };
-                    let vk = swapped_pocketpc_physical_vk(button.vk(), self.running_swap_button_groups);
+                    let vk =
+                        swapped_pocketpc_physical_vk(button.vk(), self.running_swap_button_groups);
                     let vk = if self.running_is_gizmondo {
                         vk
                     } else {
@@ -5221,7 +5248,8 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
-        self.running_swap_button_groups = !self.running_is_gizmondo && game.settings.pocketpc_swap_button_groups;
+        self.running_swap_button_groups =
+            !self.running_is_gizmondo && game.settings.pocketpc_swap_button_groups;
         self.running_controls_mode = if self.running_is_gizmondo {
             ControlsMode::Normal
         } else {
@@ -5658,7 +5686,11 @@ impl eframe::App for PocketLauncher {
                 Screen::Library => {
                     ui.add_enabled_ui(
                         self.information_game.is_none() && self.rename_draft.is_none(),
-                        |ui| crate::controller_ui::page_scope(ui, "library", |ui| self.ui_library(ui)),
+                        |ui| {
+                            crate::controller_ui::page_scope(ui, "library", |ui| {
+                                self.ui_library(ui)
+                            })
+                        },
                     );
                 }
                 Screen::Settings
@@ -5672,7 +5704,7 @@ impl eframe::App for PocketLauncher {
                         _ => "emulator_settings",
                     };
                     crate::controller_ui::page_scope(ui, page, |ui| self.ui_settings(ui));
-                },
+                }
                 Screen::GameSettings if self.stylus_editor.is_some() => {
                     if let Some((id, mut draft)) = self.game_settings_draft.take() {
                         ui.heading("PocketPC controls");
@@ -5760,18 +5792,24 @@ mod tests {
 
     #[test]
     fn physical_swap_matches_classic_slots_and_leaves_other_keys_unchanged() {
-        for (source, destination) in [(0x11,0xc4),(0xc2,0x10),(0x0d,0xc3),(0xc1,0x20),
-                                     (0xc4,0x11),(0x10,0xc2),(0xc3,0x0d),(0x20,0xc1)] {
-            assert_eq!(swapped_pocketpc_physical_vk(source,true),destination);
-            assert_eq!(swapped_pocketpc_physical_vk(source,false),source);
-            assert_eq!(swapped_pocketpc_physical_vk(destination,true),source);
+        for (source, destination) in [
+            (0x11, 0xc4),
+            (0xc2, 0x10),
+            (0x0d, 0xc3),
+            (0xc1, 0x20),
+            (0xc4, 0x11),
+            (0x10, 0xc2),
+            (0xc3, 0x0d),
+            (0x20, 0xc1),
+        ] {
+            assert_eq!(swapped_pocketpc_physical_vk(source, true), destination);
+            assert_eq!(swapped_pocketpc_physical_vk(source, false), source);
+            assert_eq!(swapped_pocketpc_physical_vk(destination, true), source);
         }
-        for vk in [0x25,0x26,0x27,0x28,0x09,0x1b,0x72,0x70] {
-            assert_eq!(swapped_pocketpc_physical_vk(vk,true),vk);
+        for vk in [0x25, 0x26, 0x27, 0x28, 0x09, 0x1b, 0x72, 0x70] {
+            assert_eq!(swapped_pocketpc_physical_vk(vk, true), vk);
         }
     }
-
-
 
     #[test]
     fn deck_filter_steps_wrap_and_reverse_without_skipping_a_filter() {

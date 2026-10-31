@@ -3,7 +3,7 @@
 //! Compiled only with `--features unicorn`. Apart from the build cost,
 //! this is the authoritative ARM backend used at runtime.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -123,7 +123,10 @@ pub struct UnicornCpu {
     arch: Arch,
     mips_status: u32,
     code_hooks: Vec<(u32, u32, UcHookId)>,
-    inline_arithmetic: std::collections::HashMap<u32, crate::arithmetic64::Arithmetic64>,
+    inline_arithmetic: std::collections::HashMap<u32, Rc<Cell<crate::arithmetic64::Arithmetic64>>>,
+    inline_error: Rc<RefCell<Option<String>>>,
+    #[cfg(test)]
+    backend_runs: u64,
     images: Rc<RefCell<crate::image_pages::ImagePages>>,
     scheduler_timeout_us: u64,
     shared_regions:
@@ -171,7 +174,10 @@ impl UnicornCpu {
             let _ = uc.reg_write(RegisterARM::C1_C0_2, 0x00F0_0000);
         }
         let last_fault: Rc<RefCell<Option<(String, u64)>>> = Rc::new(RefCell::new(None));
-        let images = Rc::new(RefCell::new(crate::image_pages::ImagePages::default()));
+        let images = Rc::new(RefCell::new(crate::image_pages::ImagePages {
+            batch_loading: options.batch_image_loading,
+            ..Default::default()
+        }));
         // Unicorn's virtual TLB can restore MIPS delay-slot branch state during
         // a store refill and raise an exception on the following branch. Keep
         // the architectural TLB for MIPS; the flat-memory fast path is ARM-only.
@@ -219,6 +225,9 @@ impl UnicornCpu {
             mips_status: 0,
             code_hooks: Vec::new(),
             inline_arithmetic: std::collections::HashMap::new(),
+            inline_error: Rc::new(RefCell::new(None)),
+            #[cfg(test)]
+            backend_runs: 0,
             images,
             scheduler_timeout_us: 0,
             shared_regions: Default::default(),
@@ -341,6 +350,9 @@ fn materialize_images(
     va: u32,
     len: u32,
 ) -> Result<bool, CpuError> {
+    if images.borrow().batch_loading {
+        return crate::image_batch::materialize(&mut UnicornImageBackend(uc), images, va, len);
+    }
     let mut found = false;
     for address in crate::image_pages::ImagePages::range(va, len)? {
         // Unicorn's host mem_write can itself refill the virtual TLB. Never
@@ -388,6 +400,25 @@ fn materialize_images(
         images.borrow_mut().pages.insert(address, image);
     }
     Ok(found)
+}
+
+struct UnicornImageBackend<'a, 'uc>(&'a mut Unicorn<'uc, ()>);
+impl crate::image_batch::ImageBackend for UnicornImageBackend<'_, '_> {
+    fn map(&mut self, address: u32, size: u32, prot: Prot) -> Result<(), CpuError> {
+        self.0
+            .mem_map(address as u64, size as u64, map_prot(prot))
+            .map_err(|e| CpuError::Backend(format!("image batch mem_map: {e:?}")))
+    }
+    fn write(&mut self, address: u32, bytes: &[u8]) -> Result<(), CpuError> {
+        self.0
+            .mem_write(address as u64, bytes)
+            .map_err(|e| CpuError::Backend(format!("image batch mem_write: {e:?}")))
+    }
+    fn unmap(&mut self, address: u32, size: u32) -> Result<(), CpuError> {
+        self.0
+            .mem_unmap(address as u64, size as u64)
+            .map_err(|e| CpuError::Backend(format!("image batch mem_unmap: {e:?}")))
+    }
 }
 
 fn map_prot(p: Prot) -> UcProt {
@@ -450,6 +481,29 @@ fn map_mips_reg(r: ArmReg) -> RegisterMIPS {
     }
 }
 
+/// Serve the exact existing arithmetic while Unicorn is in its code callback.
+/// Advancing PC skips the intercepted word; the next ARM BX LR preserves ARM /
+/// Thumb interworking. A timer stop at that point resumes at the BX LR, never
+/// recomputing a published result. CPSR, FPSCR, LR, SP and R2..R12 are untouched.
+fn serve_inline_arithmetic64(
+    uc: &mut Unicorn<'_, ()>,
+    address: u32,
+    operation: crate::arithmetic64::Arithmetic64,
+) -> Result<(), ::unicorn_engine::uc_error> {
+    let n = uc.reg_read(RegisterARM::R0)? as u32 as u64
+        | ((uc.reg_read(RegisterARM::R1)? as u32 as u64) << 32);
+    let d = if operation.unary() {
+        0
+    } else {
+        uc.reg_read(RegisterARM::R2)? as u32 as u64
+            | ((uc.reg_read(RegisterARM::R3)? as u32 as u64) << 32)
+    };
+    let value = operation.evaluate(n, d);
+    uc.reg_write(RegisterARM::R0, value as u32 as u64)?;
+    uc.reg_write(RegisterARM::R1, (value >> 32) as u64)?;
+    uc.reg_write(RegisterARM::PC, u64::from(address.wrapping_add(4)))
+}
+
 /// Optional per-slice wall-clock watchdog, in microseconds.
 ///
 /// Returns `0` (disabled) by default. We deliberately do **not** bound
@@ -482,8 +536,13 @@ impl UnicornCpu {
         scheduler_us: u64,
         watchdog_us: u64,
     ) -> Result<StopReason, CpuError> {
+        #[cfg(test)]
+        {
+            self.backend_runs += 1;
+        }
         *self.last_hook.borrow_mut() = None;
         *self.stop_requested.borrow_mut() = false;
+        *self.inline_error.borrow_mut() = None;
         // IMPORTANT: run with `count = 0` (no instruction limit) so the
         // QEMU TCG keeps chaining translation blocks at full speed. A
         // non-zero `count` would silently install a per-instruction
@@ -504,6 +563,9 @@ impl UnicornCpu {
         );
         if let Some(timer) = &self.scheduler_timer {
             timer.disarm();
+        }
+        if let Some(error) = self.inline_error.borrow_mut().take() {
+            return Err(CpuError::Backend(error));
         }
         if let Some(addr) = *self.last_hook.borrow() {
             return Ok(StopReason::Hook(addr));
@@ -554,7 +616,29 @@ impl Cpu for UnicornCpu {
         if self.arch != Arch::Arm {
             return Ok(false);
         }
-        self.add_code_hook(va)?;
+        if let Some(installed) = self.inline_arithmetic.get(&va) {
+            installed.set(operation);
+            return Ok(true);
+        }
+        let operation = Rc::new(Cell::new(operation));
+        let selected = operation.clone();
+        let error = self.inline_error.clone();
+        let stop = self.stop_requested.clone();
+        let callback = move |uc: &mut Unicorn<'_, ()>, address: u64, _size: u32| {
+            // Only a register-only runtime helper is served here. No kernel,
+            // memory access, guest callback, nested emulation or timer reset.
+            if let Err(failure) = serve_inline_arithmetic64(uc, address as u32, selected.get()) {
+                *error.borrow_mut() =
+                    Some(format!("inline arithmetic at 0x{address:08x}: {failure:?}"));
+                *stop.borrow_mut() = true;
+                let _ = uc.emu_stop();
+            }
+        };
+        let id = self
+            .uc
+            .add_code_hook(va as u64, va as u64, callback)
+            .map_err(|e| CpuError::Backend(format!("arithmetic code hook: {e:?}")))?;
+        self.code_hooks.push((va, va, id));
         self.inline_arithmetic.insert(va, operation);
         Ok(true)
     }
@@ -577,8 +661,6 @@ impl Cpu for UnicornCpu {
             return Ok(false);
         }
         let end = u64::from(va) + u64::from(size);
-        self.inline_arithmetic
-            .retain(|address, _| *address < va || u64::from(*address) >= end);
         let regions = self
             .uc
             .mem_regions()
@@ -711,6 +793,8 @@ impl Cpu for UnicornCpu {
             map.borrow_mut().remove(va as u64, size as u64);
         }
         let end = u64::from(va) + u64::from(size);
+        self.inline_arithmetic
+            .retain(|address, _| *address < va || u64::from(*address) >= end);
         let mut index = 0;
         while index < self.code_hooks.len() {
             let (lo, hi, id) = self.code_hooks[index];
@@ -962,54 +1046,9 @@ impl Cpu for UnicornCpu {
         start_va: u32,
         _max_instructions: u64,
     ) -> Result<StopReason, CpuError> {
-        if self.inline_arithmetic.is_empty() {
-            return self.run_once(start_va, self.scheduler_timeout_us, slice_watchdog_us());
-        }
-        let started = std::time::Instant::now();
-        let scheduler = self.scheduler_timeout_us;
-        let watchdog = slice_watchdog_us();
-        let mut current = start_va;
-        let mut consumed = false;
-        loop {
-            let elapsed = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-            if consumed
-                && ((scheduler != 0 && elapsed >= scheduler)
-                    || (watchdog != 0 && elapsed >= watchdog))
-            {
-                return Ok(StopReason::InstructionLimit);
-            }
-            let remaining = |limit: u64| {
-                if limit == 0 {
-                    0
-                } else {
-                    limit.saturating_sub(elapsed).max(1)
-                }
-            };
-            let stop = self.run_once(current, remaining(scheduler), remaining(watchdog))?;
-            let StopReason::Hook(address) = stop else {
-                return Ok(stop);
-            };
-            let Some(operation) = self.inline_arithmetic.get(&address).copied() else {
-                return Ok(stop);
-            };
-            // Read/write registers only while emulation is stopped. Pure helpers
-            // stay inside this CPU slice, retaining one fixed wall-clock deadline.
-            let n = u64::from(self.read_reg(ArmReg::R0)?)
-                | (u64::from(self.read_reg(ArmReg::R1)?) << 32);
-            let d = if operation.unary() {
-                0
-            } else {
-                u64::from(self.read_reg(ArmReg::R2)?)
-                    | (u64::from(self.read_reg(ArmReg::R3)?) << 32)
-            };
-            let value = operation.evaluate(n, d);
-            self.write_return_pair(value as u32, (value >> 32) as u32)?;
-            // The padded next word is bx lr. Execute it natively so Thumb returns
-            // and an interrupt between result publication and return stay exact.
-            current = address + 4;
-            self.write_reg(ArmReg::Pc, current)?;
-            consumed = true;
-        }
+        // Helper callbacks redirect to their padded BX LR without stopping the
+        // engine. One backend run retains one scheduler/watchdog deadline.
+        self.run_once(start_va, self.scheduler_timeout_us, slice_watchdog_us())
     }
 
     fn request_stop(&mut self) {
@@ -1054,11 +1093,12 @@ mod tests {
 
     #[test]
     fn optimization_combinations_execute_with_the_virtual_tlb() {
-        for flags in 0..8 {
+        for flags in 0..16 {
             let options = crate::Optimizations {
                 fast_memory_access: flags & 1 != 0,
                 extended_tlb_cache: flags & 2 != 0,
                 extended_jump_cache: flags & 4 != 0,
+                batch_image_loading: flags & 8 != 0,
             };
             let mut cpu = UnicornCpu::new_for_arch_with_optimizations(Arch::Arm, options).unwrap();
             cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
@@ -1398,5 +1438,132 @@ mod tests {
         );
         assert_eq!(writes.get(), 8);
         assert_eq!(cpu.read_mem(0x100000, 4).unwrap(), 123u32.to_le_bytes());
+    }
+    #[test]
+    fn inline_arithmetic_callbacks_share_one_backend_run_and_can_be_reinstalled() {
+        use crate::arithmetic64::Arithmetic64;
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        // Save the return, call the ARM helper twice, and return to the API hook.
+        let words = [
+            0xe52de004u32,
+            0xe1a0e00f,
+            0xe12fff14,
+            0xe1a0e00f,
+            0xe12fff14,
+            0xe49df004,
+        ];
+        let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        cpu.write_mem(0x1000, &bytes).unwrap();
+        cpu.write_mem(0x1200, &[0x1e, 0xff, 0x2f, 0xe1, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        cpu.install_inline_arithmetic64(0x1200, Arithmetic64::SignedRemainder)
+            .unwrap();
+        cpu.install_inline_arithmetic64(0x1200, Arithmetic64::UnsignedDivide)
+            .unwrap();
+        assert_eq!(cpu.code_hooks.len(), 1);
+        let budget = crate::image_pages::tests::Budget::new(1);
+        // A rejected overlapping mapping must not discard the active helper.
+        assert!(cpu
+            .map_image_region(0x1000, 0x1000, Prot::ALL, vec![], budget)
+            .is_err());
+        assert_eq!(cpu.inline_arithmetic.len(), 1);
+        cpu.add_code_hook(0x1100).unwrap();
+        cpu.write_reg(ArmReg::R0, 100).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 5).unwrap();
+        cpu.write_reg(ArmReg::R3, 0).unwrap();
+        cpu.write_reg(ArmReg::R4, 0x1200).unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1f00).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+        let before = cpu.backend_runs;
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 0).unwrap(),
+            StopReason::Hook(0x1100)
+        );
+        assert_eq!(cpu.backend_runs - before, 1);
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 4);
+        cpu.unmap_region(0x1000, 0x1000).unwrap();
+        assert!(cpu.inline_arithmetic.is_empty());
+    }
+
+    #[test]
+    fn inline_arithmetic_published_result_resumes_at_return_without_recomputing() {
+        use crate::arithmetic64::Arithmetic64;
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.write_mem(0x1200, &[0x1e, 0xff, 0x2f, 0xe1, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        cpu.install_inline_arithmetic64(0x1200, Arithmetic64::UnsignedDivide)
+            .unwrap();
+        cpu.add_code_hook(0x1204).unwrap();
+        cpu.write_reg(ArmReg::R0, 100).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 5).unwrap();
+        cpu.write_reg(ArmReg::R3, 0).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1200, 0).unwrap(),
+            StopReason::Hook(0x1204)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 20);
+        let (_, _, id) = cpu.code_hooks.pop().unwrap();
+        cpu.uc.remove_hook(id).unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1204, 0).unwrap(),
+            StopReason::Hook(0x1100)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 20);
+    }
+    #[test]
+    fn inline_conversion_callbacks_preserve_guest_rounding_and_exception_state() {
+        use crate::arithmetic64::Arithmetic64;
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.write_mem(0x1200, &[0x1e, 0xff, 0x2f, 0xe1, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        let values = [
+            0,
+            1,
+            u64::MAX,
+            i64::MIN as u64,
+            (1u64 << 53) + 1,
+            f64::NAN.to_bits(),
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            (-1.5f64).to_bits(),
+            1.5f64.to_bits(),
+        ];
+        for operation in [
+            Arithmetic64::SignedToDouble,
+            Arithmetic64::UnsignedToDouble,
+            Arithmetic64::DoubleToSigned,
+            Arithmetic64::DoubleToUnsigned,
+        ] {
+            cpu.install_inline_arithmetic64(0x1200, operation).unwrap();
+            for rounding in [0, 0x00400000, 0x00800000, 0x00c00000] {
+                for value in values {
+                    cpu.write_reg(ArmReg::R0, value as u32).unwrap();
+                    cpu.write_reg(ArmReg::R1, (value >> 32) as u32).unwrap();
+                    cpu.write_reg(ArmReg::R2, 0x12345678).unwrap();
+                    cpu.write_reg(ArmReg::R3, 0xabcdef01).unwrap();
+                    cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+                    let fpscr = 0x0200001f | rounding;
+                    cpu.write_fpscr(fpscr).unwrap();
+                    assert_eq!(
+                        cpu.run_until_hook(0x1200, 0).unwrap(),
+                        StopReason::Hook(0x1100)
+                    );
+                    let actual = u64::from(cpu.read_reg(ArmReg::R0).unwrap())
+                        | (u64::from(cpu.read_reg(ArmReg::R1).unwrap()) << 32);
+                    assert_eq!(actual, operation.evaluate(value, 0));
+                    assert_eq!(cpu.read_fpscr().unwrap(), fpscr);
+                    assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(), 0x12345678);
+                    assert_eq!(cpu.read_reg(ArmReg::R3).unwrap(), 0xabcdef01);
+                }
+            }
+        }
     }
 }

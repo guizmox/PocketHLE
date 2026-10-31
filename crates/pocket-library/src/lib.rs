@@ -4138,7 +4138,8 @@ mod tests {
     fn gizmondo_screen_overflow_defaults_off_and_round_trips() {
         use super::*;
         let mut legacy = serde_json::to_value(LauncherConfig::default()).unwrap();
-        legacy.as_object_mut()
+        legacy
+            .as_object_mut()
             .unwrap()
             .remove("android_gizmondo_maximize_screen");
         let mut config: LauncherConfig = serde_json::from_value(legacy).unwrap();
@@ -4203,6 +4204,15 @@ mod tests {
                 ..defaults
             }
         );
+        for previous in [false, true] {
+            let legacy = serde_json::json!({"batch_image_loading": previous});
+            let restored: OptimizationSettings = serde_json::from_value(legacy).unwrap();
+            assert_eq!(restored, defaults);
+            assert!(serde_json::to_value(restored)
+                .unwrap()
+                .get("batch_image_loading")
+                .is_none());
+        }
         for bits in 0..16 {
             let settings = OptimizationSettings {
                 fast_memory_access: bits & 1 != 0,

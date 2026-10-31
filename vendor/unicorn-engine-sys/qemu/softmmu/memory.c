@@ -957,8 +957,97 @@ bool flatview_copy(struct uc_struct *uc, FlatView *dst, FlatView *src, bool upda
     return true;
 }
 
+/* A new, page-aligned RAM leaf in a genuine hole cannot obscure any
+ * existing range. Publish just that range instead of rendering the complete
+ * region tree again. All other topology changes keep the original path.
+ */
+static bool flatview_insert_ram_gap(FlatView *fv, MemoryRegion *mr)
+{
+    struct uc_struct *uc = mr->uc;
+    MemoryRegion *root = uc->system_memory;
+    AddressSpace *as;
+    MemoryListener *listener;
+    FlatRange range;
+    unsigned low = 0, high = fv->nr;
+    Int128 end;
+
+    /* Do not mutate views retained by memory snapshots/other address spaces.
+     * The ordinary view has one hash-table reference and one address-space
+     * reference. Keep overlays, MMIO, subpages and clipped ranges unchanged.
+     */
+    if (uc->snapshot_level != 0 || fv->ref != 2 || !fv->dispatch ||
+        fv->root != root || mr->container != root || root->container ||
+        !root->enabled || root->terminates || root->addr != 0 ||
+        !mr->ram || mr->is_iommu || mr->subpage || !mr->enabled ||
+        !mr->terminates || mr->priority != 0 ||
+        !QTAILQ_EMPTY(&mr->subregions) ||
+        !int128_gt(mr->size, int128_zero()) ||
+        int128_ge(mr->size, int128_2_64()) ||
+        (mr->addr & (uc->target_page_size - 1)) ||
+        (int128_get64(mr->size) & (uc->target_page_size - 1))) {
+        return false;
+    }
+    as = QTAILQ_FIRST(&uc->address_spaces);
+    if (!as || QTAILQ_NEXT(as, address_spaces_link) || as->root != root ||
+        address_space_to_flatview(as) != fv) {
+        return false;
+    }
+    /* The TCG listener uses begin/commit and still receives both. Any
+     * listener requiring per-region notifications uses the original path.
+     */
+    QTAILQ_FOREACH(listener, &as->listeners, link_as) {
+        if (listener->region_add || listener->region_del || listener->region_nop) {
+            return false;
+        }
+    }
+    /* A move must remove the previous mapping, even if the destination is a
+     * hole. Only a leaf absent from the current view is an insertion.
+     */
+    for (unsigned i = 0; i < fv->nr; ++i) {
+        if (fv->ranges[i].mr == mr) {
+            return false;
+        }
+    }
+    range.addr = addrrange_make(int128_make64(mr->addr), mr->size);
+    end = addrrange_end(range.addr);
+    if (int128_gt(end, root->size) || int128_gt(end, int128_2_64())) {
+        return false;
+    }
+    while (low < high) {
+        unsigned middle = low + (high - low) / 2;
+        if (int128_lt(fv->ranges[middle].addr.start, range.addr.start)) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if ((low && int128_gt(addrrange_end(fv->ranges[low - 1].addr), range.addr.start)) ||
+        (low < fv->nr && int128_gt(end, fv->ranges[low].addr.start))) {
+        return false;
+    }
+    range.mr = mr;
+    range.offset_in_region = 0;
+    range.readonly = root->readonly || mr->readonly;
+    flatview_insert(fv, low, &range);
+    /* A dispatch tree has already been compacted: phys_page_set cannot add
+     * to that representation. Rebuild it using the established path, while
+     * avoiding the quadratic render of the unchanged memory-region tree.
+     */
+    address_space_dispatch_clear(fv->dispatch);
+    fv->dispatch = address_space_dispatch_new(uc, fv);
+    for (unsigned i = 0; i < fv->nr; ++i) {
+        MemoryRegionSection section = section_from_flat_range(&fv->ranges[i], fv);
+        flatview_add_to_dispatch(uc, fv, &section);
+    }
+    address_space_dispatch_compact(fv->dispatch);
+    return true;
+}
+
 static bool flatview_update(FlatView *fv, MemoryRegion *mr)
 {
+    if (flatview_insert_ram_gap(fv, mr)) {
+        return true;
+    }
     struct uc_struct *uc = mr->uc;
     MemoryRegion *c = mr;
     AddrRange r;

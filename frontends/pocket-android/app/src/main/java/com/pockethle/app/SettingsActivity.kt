@@ -90,11 +90,11 @@ class SettingsActivity : AppCompatActivity() {
             val optimizations=androidx.preference.PreferenceCategory(requireContext()).apply { title="Optimizations" }
             optimizations.order = 10000
             emulator.addPreference(optimizations)
-            fun optimization(name: String, label: String, help: String) {
+            fun optimization(name: String, label: String, help: String, enabledByDefault: Boolean = true) {
                 optimizations.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                     key="optimization_$name"; title=label; isPersistent=false
-                    isChecked=current.toJson().optJSONObject("optimizations")?.optBoolean(name,true) ?: true
-                    summary="$help Enabled by default; applies next launch."
+                    isChecked=current.toJson().optJSONObject("optimizations")?.optBoolean(name,enabledByDefault) ?: enabledByDefault
+                    summary="$help ${if (enabledByDefault) "Enabled" else "Disabled"} by default; applies next launch."
                     setOnPreferenceChangeListener { _, value ->
                         val config=current.toJson()
                         val settings=config.optJSONObject("optimizations") ?: JSONObject()
@@ -443,7 +443,7 @@ class SettingsActivity : AppCompatActivity() {
             if (result?.optBoolean("ok", false) == true && wantedOptimizations != null) {
                 val actual=saved?.optJSONObject("optimizations")
                 if(listOf("fast_memory_access","extended_tlb_cache","responsive_scheduling","extended_jump_cache").any {
-                    actual == null || actual.optBoolean(it,true) != wantedOptimizations.optBoolean(it,true)
+                    actual == null || !actual.has(it) || actual.optBoolean(it,true) != wantedOptimizations.optBoolean(it,true)
                 }) android.widget.Toast.makeText(context,"Optimization settings were not saved. Rebuild the native libraries and APK together.",android.widget.Toast.LENGTH_LONG).show()
             }
             if (result?.optBoolean("ok", false) == true &&

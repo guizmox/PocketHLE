@@ -22,6 +22,7 @@ pub struct Optimizations {
     pub fast_memory_access: bool,
     pub extended_tlb_cache: bool,
     pub extended_jump_cache: bool,
+    pub batch_image_loading: bool,
 }
 impl Default for Optimizations {
     fn default() -> Self {
@@ -29,11 +30,14 @@ impl Default for Optimizations {
             fast_memory_access: true,
             extended_tlb_cache: true,
             extended_jump_cache: true,
+            batch_image_loading: true,
         }
     }
 }
 
 pub mod arithmetic64;
+#[cfg(any(feature = "unicorn", test))]
+mod image_batch;
 pub mod image_pages;
 pub mod shared_memory;
 pub mod stub;

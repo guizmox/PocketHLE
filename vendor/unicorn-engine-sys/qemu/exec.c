@@ -972,10 +972,38 @@ static ram_addr_t find_ram_offset_last(struct uc_struct *uc, ram_addr_t size)
  * dirty bitmaps.
  * Called with the ramlist lock held.
  */
+/* Internal RAM offsets are independent of guest addresses. Keep the existing
+ * best-fit policy and list-order tie breaking, but index block starts once
+ * instead of scanning the entire list for each candidate after any unmap.
+ */
+static int ram_block_offset_compare(const void *a, const void *b)
+{
+    const RAMBlock *left = *(RAMBlock *const *)a;
+    const RAMBlock *right = *(RAMBlock *const *)b;
+    return (left->offset > right->offset) - (left->offset < right->offset);
+}
+
+static ram_addr_t ram_block_next_offset(RAMBlock **blocks, size_t count,
+                                        ram_addr_t candidate)
+{
+    size_t low = 0, high = count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (blocks[middle]->offset < candidate) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return low < count ? blocks[low]->offset : RAM_ADDR_MAX;
+}
+
 static ram_addr_t find_ram_offset(struct uc_struct *uc, ram_addr_t size)
 {
     RAMBlock *block, *next_block;
     ram_addr_t offset = RAM_ADDR_MAX, mingap = RAM_ADDR_MAX;
+    RAMBlock **blocks = NULL;
+    size_t count = 0, index = 0;
 
     assert(size != 0); /* it would hand out same offset multiple times */
 
@@ -985,6 +1013,19 @@ static ram_addr_t find_ram_offset(struct uc_struct *uc, ram_addr_t size)
 
     if (!uc->ram_list.freed) {
         return find_ram_offset_last(uc, size);
+    }
+
+    RAMBLOCK_FOREACH(block) {
+        ++count;
+    }
+    if (count <= SIZE_MAX / sizeof(*blocks)) {
+        blocks = malloc(count * sizeof(*blocks));
+    }
+    if (blocks) {
+        RAMBLOCK_FOREACH(block) {
+            blocks[index++] = block;
+        }
+        qsort(blocks, count, sizeof(*blocks), ram_block_offset_compare);
     }
 
     RAMBLOCK_FOREACH(block) {
@@ -999,9 +1040,16 @@ static ram_addr_t find_ram_offset(struct uc_struct *uc, ram_addr_t size)
         /* Search for the closest following block
          * and find the gap.
          */
-        RAMBLOCK_FOREACH(next_block) {
-            if (next_block->offset >= candidate) {
-                next = MIN(next, next_block->offset);
+        if (blocks) {
+            next = ram_block_next_offset(blocks, count, candidate);
+        } else {
+            /* A temporary host-index allocation failure must not introduce
+             * a new guest allocation failure. Retain the original search.
+             */
+            RAMBLOCK_FOREACH(next_block) {
+                if (next_block->offset >= candidate) {
+                    next = MIN(next, next_block->offset);
+                }
             }
         }
 
@@ -1014,6 +1062,8 @@ static ram_addr_t find_ram_offset(struct uc_struct *uc, ram_addr_t size)
             mingap = next - candidate;
         }
     }
+
+    free(blocks);
 
     if (offset == RAM_ADDR_MAX) {
         fprintf(stderr, "Failed to find gap of requested size: %" PRIu64 "\n",

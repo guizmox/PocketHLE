@@ -401,6 +401,21 @@ const TOLOWER: [u32; 8] = [
     BX_LR,
 ];
 
+// Same WinCE CRT ASCII/EOF policy as the host handler and TOLOWER.
+// Keep hot character comparisons inside guest execution instead of dispatching
+// each character to Rust. Unsigned bounds leave negative and non-ASCII inputs
+// unchanged, including EOF (0xffffffff).
+const TOUPPER: [u32; 8] = [
+    0xE350_0000, // cmp r0, #0
+    0x0A00_0004, // beq slot+28
+    0xE350_0061, // cmp r0, #'a'
+    0x3A00_0002, // blo slot+28
+    0xE350_007A, // cmp r0, #'z'
+    0x8A00_0000, // bhi slot+28
+    0xE240_0020, // sub r0, r0, #32
+    BX_LR,
+];
+
 /// Hand-rolled `GetTickCount()` — reads the host-managed tick cell
 /// at [`TICK_PAGE_VA`] + [`TICK_VALUE_OFFSET`] (= 0x6FFFF000) and
 /// returns it.
@@ -524,6 +539,7 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
         "strcmp" | "lstrcmpA" => STRCMP,
         "wcscmp" | "lstrcmpW" => WCSCMP,
         "tolower" => TOLOWER,
+        "toupper" => TOUPPER,
 
         // ---- host-managed tick page --------------------------------------
         // Reads `*(u32*)0x6FFFF000`, which the run loop refreshes
@@ -640,5 +656,76 @@ mod tests {
         // slot — the caller should fall back to the dispatcher.
         assert!(constant_return_thunk(0x100).is_none());
         assert!(constant_return_thunk(0xFFFF_FFFF).is_none());
+    }
+    // Execute the small emitted ARM subset, so tests verify branch targets and
+    // instruction encodings rather than only an equivalent Rust conversion.
+    fn execute_case_thunk(words: [u32; 8], input: u32) -> u32 {
+        let mut value = input;
+        let mut pc = 0usize;
+        let mut equal = false;
+        let mut carry = false;
+        for _ in 0..16 {
+            let word = words[pc];
+            if word == BX_LR {
+                return value;
+            }
+            let condition = word >> 28;
+            let execute = match condition {
+                0 => equal,
+                3 => !carry,
+                8 => carry && !equal,
+                14 => true,
+                _ => panic!("unexpected ARM condition"),
+            };
+            if !execute {
+                pc += 1;
+                continue;
+            }
+            match word & 0x0ff0_0000 {
+                0x0350_0000 => {
+                    let immediate = word & 0xff;
+                    equal = value == immediate;
+                    carry = value >= immediate;
+                    pc += 1;
+                }
+                0x0a00_0000 => {
+                    let offset = ((word << 8) as i32) >> 8;
+                    pc = (pc as i32 + 2 + offset) as usize;
+                }
+                0x0240_0000 => {
+                    value = value.wrapping_sub(word & 0xff);
+                    pc += 1;
+                }
+                0x0280_0000 => {
+                    value = value.wrapping_add(word & 0xff);
+                    pc += 1;
+                }
+                _ => panic!("unexpected ARM case-conversion instruction"),
+            }
+        }
+        panic!("case thunk failed to return");
+    }
+
+    #[test]
+    fn native_case_thunks_match_wince_ascii_and_preserve_eof() {
+        for input in (0..=255).chain([256, 65535, 0x7fff_ffff, 0x8000_0000, 0xffff_ff80, u32::MAX])
+        {
+            let expected_upper = if (97..=122).contains(&input) {
+                input - 32
+            } else {
+                input
+            };
+            let expected_lower = if (65..=90).contains(&input) {
+                input + 32
+            } else {
+                input
+            };
+            assert_eq!(execute_case_thunk(TOUPPER, input), expected_upper);
+            assert_eq!(execute_case_thunk(TOLOWER, input), expected_lower);
+        }
+        assert_eq!(native_thunk_for("COREDLL.dll", "toupper"), Some(TOUPPER));
+        assert_eq!(native_thunk_for("coredll.dll", "toupper"), Some(TOUPPER));
+        assert!(native_thunk_for("unrelated.dll", "toupper").is_none());
+        assert!(hybrid_fallback_offset("coredll.dll", "toupper").is_none());
     }
 }

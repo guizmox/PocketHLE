@@ -792,6 +792,7 @@ fn build_unicorn_for_machine(
         fast_memory_access: options.fast_memory_access,
         extended_tlb_cache: options.extended_tlb_cache,
         extended_jump_cache: options.extended_jump_cache,
+        batch_image_loading: true,
     };
 
     if matches!(
