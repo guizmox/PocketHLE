@@ -203,14 +203,14 @@ class SettingsActivity : AppCompatActivity() {
             val input = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="input_options";title="Controls" }
             preferenceScreen.addPreference(input)
             fun directionalSize(gizmondo: Boolean) {
-                val name = if (gizmondo) "Gizmondo arrows size" else "PocketPC arrows and stick size"
+                val name = if (gizmondo) "Gizmondo arrows and action buttons size" else "PocketPC arrows and stick size"
                 display.addPreference(ListPreference(requireContext()).apply {
                     key = if (gizmondo) "android_gizmondo_controls_size" else "android_pocketpc_controls_size"
                     title = name; dialogTitle = name; isPersistent = false
                     entries = arrayOf("Normal", "Big"); entryValues = arrayOf("normal", "big")
                     value = if (gizmondo) current.gizmondoControlsSize else current.pocketpcControlsSize
                     summaryProvider = Preference.SummaryProvider<ListPreference> { pref ->
-                        "${pref.entry ?: "Normal"}\nGlobal setting. Big enlarges directional controls by about one third, limited by available space. The game keeps its aspect ratio; its display scale may decrease. Applies next launch."
+                        "${pref.entry ?: "Normal"}\nGlobal setting. Big enlarges ${if (gizmondo) "arrows and action buttons" else "directional controls"} by about one third, limited by available space. The game keeps its aspect ratio; its display scale may decrease. Applies next launch."
                     }
                     setOnPreferenceChangeListener { _, value ->
                         current = if (gizmondo) current.copy(gizmondoControlsSize = value.toString())
@@ -220,6 +220,16 @@ class SettingsActivity : AppCompatActivity() {
                 })
             }
             directionalSize(false); directionalSize(true)
+            giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "android_gizmondo_maximize_screen"
+                title = "Maximize screen size by allowing controls to overflow it"
+                summary = "Use the whole available screen for the game, with translucent controls over it. Keeps the game aspect ratio and selected scale. Applies next launch."
+                isPersistent = false; isChecked = current.gizmondoMaximizeScreen
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(gizmondoMaximizeScreen = value as Boolean)
+                    writeConfig(); true
+                }
+            })
             val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Physical keyboard" }
             val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Physical controller" }
             input.addPreference(keyboard);input.addPreference(gamepad)
@@ -435,6 +445,11 @@ class SettingsActivity : AppCompatActivity() {
                 if(listOf("fast_memory_access","extended_tlb_cache","responsive_scheduling","extended_jump_cache").any {
                     actual == null || actual.optBoolean(it,true) != wantedOptimizations.optBoolean(it,true)
                 }) android.widget.Toast.makeText(context,"Optimization settings were not saved. Rebuild the native libraries and APK together.",android.widget.Toast.LENGTH_LONG).show()
+            }
+            if (result?.optBoolean("ok", false) == true &&
+                (saved == null || !saved.has("android_gizmondo_maximize_screen") ||
+                    saved.optBoolean("android_gizmondo_maximize_screen") != current.gizmondoMaximizeScreen)) {
+                android.widget.Toast.makeText(context, "Screen size setting was not saved. Rebuild the native libraries and APK together.", android.widget.Toast.LENGTH_LONG).show()
             }
             val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_gizmondo_controls_size", "") != current.gizmondoControlsSize) {

@@ -5,7 +5,7 @@ import android.graphics.drawable.StateListDrawable
 
 /** One palette and shape for Gizmondo and Pocket PC; each view owns its drawable. */
 internal class ConsoleControlStyle(private val dp: Float) {
-    fun backgroundShape(emulatorAction: Boolean = false, oval: Boolean = false): StateListDrawable {
+    fun backgroundShape(emulatorAction: Boolean = false, oval: Boolean = false, translucent: Boolean = false): StateListDrawable {
         fun shape(top: Int, bottom: Int, outline: Int) = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(top, bottom)
         ).apply {
@@ -15,10 +15,12 @@ internal class ConsoleControlStyle(private val dp: Float) {
         // Keep a visible highlight for the entire hold, including simultaneous keys.
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed),
-                if (emulatorAction) shape(0xffdd8b49.toInt(), 0xffa94d20.toInt(), 0xffffc48f.toInt())
+                if (translucent) shape(0x993288bf.toInt(), 0x99195b8c.toInt(), 0xc5ffffff.toInt())
+                else if (emulatorAction) shape(0xffdd8b49.toInt(), 0xffa94d20.toInt(), 0xffffc48f.toInt())
                 else shape(0xff3288bf.toInt(), 0xff195b8c.toInt(), 0xff91d6ff.toInt()))
             addState(intArrayOf(),
-                if (emulatorAction) shape(0xffa9592d.toInt(), 0xff71371f.toInt(), 0xffcf8b58.toInt())
+                if (translucent) shape(0x4510151d, 0x4510151d, 0x70ffffff)
+                else if (emulatorAction) shape(0xffa9592d.toInt(), 0xff71371f.toInt(), 0xffcf8b58.toInt())
                 else shape(0xff303a47.toInt(), 0xff141c28.toInt(), 0xff506078.toInt()))
         }
     }

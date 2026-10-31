@@ -203,7 +203,10 @@ class GameActivity : AppCompatActivity() {
         (gameControls as? PocketPcControls)?.configure(config, runCatching {
             GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(gameRoot, gameId)))
         }.getOrDefault(GameSettings.default()))
-        (gameControls as? GizmondoControls)?.bigDirectionalControls = config.gizmondoControlsSize == "big"
+        (gameControls as? GizmondoControls)?.apply {
+            bigDirectionalControls = config.gizmondoControlsSize == "big"
+            maximizeScreen = config.gizmondoMaximizeScreen
+        }
         if (gizmondoGame) {
             androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)
             hideSystemBars()

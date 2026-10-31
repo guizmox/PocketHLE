@@ -1,1 +1,11 @@
-tools\ramtest\src\proctest.c
+crates\pocket-library\src\lib.rs
+frontends\pocket-android\app\src\main\java\com\pockethle\app\ConsoleControlStyle.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GizmondoControls.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GizmondoGeometry.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GizmondoLayout.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\TouchDpad.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\GizmondoGeometryTest.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\LauncherControlsSizeTest.kt

@@ -1103,9 +1103,12 @@ pub struct LauncherConfig {
     /// Global Android PocketPC touch arrangement, independent of target size.
     #[serde(default)]
     pub android_pocketpc_touch_layout: PocketPcTouchLayout,
-    /// Android-wide size of the Gizmondo D-pad (there is no stylus stick).
+    /// Android-wide size of the Gizmondo D-pad and action buttons.
     #[serde(default)]
     pub android_gizmondo_controls_size: PocketPcControlsSize,
+    /// Allow Android Gizmondo controls to overlay the full game viewport.
+    #[serde(default)]
+    pub android_gizmondo_maximize_screen: bool,
     #[serde(default)]
     pub optimizations: OptimizationSettings,
 }
@@ -1308,6 +1311,7 @@ impl Default for LauncherConfig {
             android_pocketpc_controls_size: PocketPcControlsSize::Normal,
             android_pocketpc_touch_layout: PocketPcTouchLayout::Classic,
             android_gizmondo_controls_size: PocketPcControlsSize::Normal,
+            android_gizmondo_maximize_screen: false,
             optimizations: OptimizationSettings::default(),
         }
     }
@@ -4127,6 +4131,28 @@ mod tests {
                 );
                 assert_eq!(loaded.optimizations, OptimizationSettings::default());
             }
+        }
+    }
+
+    #[test]
+    fn gizmondo_screen_overflow_defaults_off_and_round_trips() {
+        use super::*;
+        let mut legacy = serde_json::to_value(LauncherConfig::default()).unwrap();
+        legacy.as_object_mut()
+            .unwrap()
+            .remove("android_gizmondo_maximize_screen");
+        let mut config: LauncherConfig = serde_json::from_value(legacy).unwrap();
+        assert!(!config.android_gizmondo_maximize_screen);
+        for enabled in [true, false] {
+            config.android_gizmondo_maximize_screen = enabled;
+            let restored: LauncherConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.android_gizmondo_maximize_screen, enabled);
+            assert_eq!(
+                restored.android_gizmondo_controls_size,
+                PocketPcControlsSize::Normal
+            );
+            assert_eq!(restored.optimizations, OptimizationSettings::default());
         }
     }
 

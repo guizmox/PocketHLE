@@ -33,4 +33,16 @@ class LauncherControlsSizeTest {
         val config = LauncherConfig.fromJson(JSONObject("{\"android_gizmondo_controls_size\":\"future\"}"))
         assertEquals("normal", config.gizmondoControlsSize)
     }
+    @Test fun gizmondoOverflowDefaultsOffAndRoundTripsIndependently() {
+        val old = LauncherConfig.fromJson(JSONObject("{\"untouched\":42}"))
+        assertFalse(old.gizmondoMaximizeScreen)
+        for (enabled in listOf(true, false)) for (size in listOf("normal", "big")) {
+            val loaded = LauncherConfig.fromJson(old.copy(gizmondoMaximizeScreen = enabled,
+                gizmondoControlsSize = size).toJson())
+            assertEquals(enabled, loaded.gizmondoMaximizeScreen)
+            assertEquals(size, loaded.gizmondoControlsSize)
+            assertEquals("normal", loaded.pocketpcControlsSize)
+            assertEquals(42, loaded.toJson().getInt("untouched"))
+        }
+    }
 }

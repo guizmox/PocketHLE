@@ -14,10 +14,10 @@ class GizmondoLayout(context: Context, attrs: AttributeSet? = null) : FrameLayou
             val w = (MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight).coerceAtLeast(1)
             val h = (MeasureSpec.getSize(heightMeasureSpec) - paddingTop - paddingBottom).coerceAtLeast(1)
             val room = GizmondoGeometry.calculate(w, h, resources.displayMetrics.density,
-                controls?.bigDirectionalControls == true).screen
+                controls?.bigDirectionalControls == true, controls?.maximizeScreen == true).screen
             val params = area.layoutParams as LayoutParams
             params.leftMargin = room.x; params.rightMargin = w - room.x - room.w
-            params.topMargin = room.y
+            params.topMargin = room.y; params.bottomMargin = h - room.y - room.h
         }
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }

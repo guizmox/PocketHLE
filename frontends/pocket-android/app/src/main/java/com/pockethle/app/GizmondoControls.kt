@@ -19,13 +19,14 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
     private val keys = mutableMapOf<Int, View>()
     val dpad = TouchDpad(context)
     init {
+        dpad.translucentStyle = true
         layoutDirection = View.LAYOUT_DIRECTION_LTR
         isMotionEventSplittingEnabled = true
-        fun button(id: Int, label: String): View = Button(context).apply {
+        fun button(id: Int, label: String): Button = Button(context).apply {
             this.id = id; text = label; contentDescription = label
-            setTextColor(Color.WHITE); textSize = 18f
+            setTextColor(0xb8ffffff.toInt()); textSize = 18f
             minWidth = 0; minHeight = 0; minimumWidth = 0; minimumHeight = 0
-            setPadding(0,0,0,0); background = controlStyle.backgroundShape(); backgroundTintList = null; stateListAnimator = null
+            setPadding(0,0,0,0); background = controlStyle.backgroundShape(oval = id in listOf(R.id.btn_a, R.id.btn_b, R.id.btn_c, R.id.btn_action), translucent = true); backgroundTintList = null; stateListAnimator = null
             keys[id] = this; addView(this)
         }
         button(R.id.btn_soft1, "L"); button(R.id.btn_soft2, "R")
@@ -42,9 +43,9 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             }
             keys[id] = icon; addView(icon)
         }
-        button(R.id.btn_fullscreen, "Full").apply { (this as Button).textSize=13f; background=controlStyle.backgroundShape(emulatorAction=true) }
+        button(R.id.btn_fullscreen, "Full").apply { textSize=13f; setTextColor(Color.WHITE); background=controlStyle.backgroundShape(emulatorAction=true) }
         button(R.id.btn_stop_emulation, "Exit").apply {
-            (this as Button).textSize = 13f
+            textSize = 13f; setTextColor(Color.WHITE)
             background = controlStyle.backgroundShape(emulatorAction = true)
         }
     }
@@ -60,48 +61,43 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         dpad.clearInput()
     }
 
+    var maximizeScreen: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value; requestLayout(); parent?.requestLayout()
+        }
+    private fun targets(): Map<Int, ControlRect> = (
+        listOf(R.id.btn_soft1, R.id.btn_soft2).zip(geometry.shoulders) +
+        listOf(R.id.btn_a, R.id.btn_c, R.id.btn_b, R.id.btn_action).zip(geometry.actions) +
+        listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3, R.id.btn_piano4,
+            R.id.btn_piano5, R.id.btn_stop_emulation, R.id.btn_fullscreen).zip(geometry.toolbar)
+    ).toMap()
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec); val h = MeasureSpec.getSize(heightMeasureSpec)
-        setMeasuredDimension(w,h)
-        geometry = GizmondoGeometry.calculate(w, h, dp, bigDirectionalControls)
-        val padSize = geometry.dpad.w
-        dpad.measure(MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY),
-            MeasureSpec.makeMeasureSpec(padSize, MeasureSpec.EXACTLY))
-        keys.forEach { (id,v) ->
-            val shoulder = id == R.id.btn_soft1 || id == R.id.btn_soft2
-            val toolbarScale = geometry.toolbarScale
-            val function = id in listOf(R.id.btn_piano1, R.id.btn_piano2, R.id.btn_piano3,
-                R.id.btn_piano4, R.id.btn_piano5, R.id.btn_stop_emulation, R.id.btn_fullscreen)
-            val bw = if (shoulder) 124f else if (id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen) 64f else 44f
-            val bh = if (shoulder) 132f else 44f
-            val scale = if (function) toolbarScale else 1f
-            v.measure(MeasureSpec.makeMeasureSpec((bw*dp*scale).toInt(),MeasureSpec.EXACTLY),
-                MeasureSpec.makeMeasureSpec((bh*dp*scale).toInt(),MeasureSpec.EXACTLY))
+        setMeasuredDimension(w, h)
+        geometry = GizmondoGeometry.calculate(w, h, dp, bigDirectionalControls, maximizeScreen)
+        fun measure(view: View, rect: ControlRect) {
+            view.measure(MeasureSpec.makeMeasureSpec(rect.w, MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(rect.h, MeasureSpec.EXACTLY))
+        }
+        measure(dpad, geometry.dpad)
+        targets().forEach { (id, rect) ->
+            val view = keys.getValue(id)
+            if (view is Button) view.textSize = when (id) {
+                R.id.btn_stop_emulation, R.id.btn_fullscreen -> 13f * geometry.toolbarScale
+                R.id.btn_soft1, R.id.btn_soft2 -> 18f
+                else -> 18f * geometry.controlScale
+            }
+            measure(view, rect)
         }
     }
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
-        fun place(id: Int, x: Float, y: Float) { val v = keys.getValue(id); val left=(x-v.measuredWidth/2).toInt(); val top=(y-v.measuredHeight/2).toInt(); v.layout(left,top,left+v.measuredWidth,top+v.measuredHeight) }
-        // Physical sides stay fixed in both landscape orientations and every locale.
-        val dpadCenter = geometry.dpad.x + geometry.dpad.w / 2f; val actionPadCenter = width-74*dp
-        // Bottom edge padding is shared by the 140dp pad and the action diamond.
-        val middle = height - 78 * dp
-        place(R.id.btn_soft1, dpadCenter, 74 * dp)
-        place(R.id.btn_soft2, actionPadCenter, 74 * dp)
-        listOf(R.id.btn_a,R.id.btn_c,R.id.btn_b,R.id.btn_action).forEachIndexed { i,id -> val offsets=listOf(0f to -46f,-46f to 0f,46f to 0f,0f to 46f); place(id,actionPadCenter+offsets[i].first*dp,middle+offsets[i].second*dp) }
-        val padLeft = (dpadCenter - dpad.measuredWidth / 2f).toInt()
-        val padTop = geometry.dpad.y
-        dpad.layout(padLeft, padTop, padLeft + dpad.measuredWidth, padTop + dpad.measuredHeight)
-        // Centre the complete toolbar, so the hardware group itself shifts left.
-        // Exit has a 28dp gap after Power instead of the hardware buttons' 8dp gaps.
-        val toolbarScale = geometry.toolbarScale
-        val unit = dp * toolbarScale
-        val start = geometry.screen.x + (geometry.screen.w - 416 * unit) / 2f
-        val topCenter = 8 * dp + 22 * unit
-        listOf(R.id.btn_piano1,R.id.btn_piano2,R.id.btn_piano3,R.id.btn_piano4,R.id.btn_piano5)
-            .forEachIndexed { i,id -> place(id, start + (22 + i * 52) * unit, topCenter) }
-        place(R.id.btn_stop_emulation, start + 312 * unit, topCenter)
-        place(R.id.btn_fullscreen, start + 384 * unit, topCenter)
+        fun place(view: View, rect: ControlRect) = view.layout(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)
+        place(dpad, geometry.dpad)
+        targets().forEach { (id, rect) -> place(keys.getValue(id), rect) }
     }
+
 }
 
 /** Symbols traced as native vector primitives from the desktop Gizmondo skin. */
@@ -109,8 +105,9 @@ private class FunctionButton(context: Context, private val kind: Int) : AppCompa
     private val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply { color=Color.WHITE; strokeWidth=1.8f; strokeCap=Paint.Cap.ROUND; strokeJoin=Paint.Join.ROUND }
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.save(); canvas.translate(width/2f-12*resources.displayMetrics.density,height/2f-12*resources.displayMetrics.density)
-        canvas.scale(resources.displayMetrics.density,resources.displayMetrics.density)
+        val scale = minOf(resources.displayMetrics.density, width / 28f, height / 28f)
+        canvas.save(); canvas.translate(width / 2f - 12 * scale, height / 2f - 12 * scale)
+        canvas.scale(scale, scale)
         ink.style=Paint.Style.STROKE
         when(kind) {
             0 -> { ink.style=Paint.Style.FILL; canvas.drawPath(Path().apply { moveTo(2f,11f);lineTo(5f,8f);lineTo(5f,3f);lineTo(8f,3f);lineTo(8f,5f);lineTo(12f,1f);lineTo(23f,11f);lineTo(20f,11f);lineTo(20f,23f);lineTo(14f,23f);lineTo(14f,15f);lineTo(10f,15f);lineTo(10f,23f);lineTo(4f,23f);lineTo(4f,11f);close() },ink) }
