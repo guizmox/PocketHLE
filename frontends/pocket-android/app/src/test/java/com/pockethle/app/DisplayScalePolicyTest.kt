@@ -4,8 +4,10 @@ import org.junit.Test
 
 class DisplayScalePolicyTest {
     @Test fun bigControlsCanReduceTheIntegerScaleWithoutChangingAspectRatio() {
-        val normal = GizmondoGeometry.calculate(1560, 1000, 2f).screen
-        val big = GizmondoGeometry.calculate(1560, 1000, 2f, true).screen
+        // Keep Normal above the x3 threshold with the current control margins.
+        // At 1560 px, Normal has only 956 px of viewport and correctly uses x2.
+        val normal = GizmondoGeometry.calculate(1600, 1000, 2f).screen
+        val big = GizmondoGeometry.calculate(1600, 1000, 2f, true).screen
         val a = displayRect(normal.w, normal.h, 320, 240, 3)
         val b = displayRect(big.w, big.h, 320, 240, 3)
         assertEquals(960, a.width); assertEquals(640, b.width)

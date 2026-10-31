@@ -38,24 +38,46 @@ internal object PocketPcControllerGeometry {
         // therefore retain exactly the same dimensions when size mode changes.
         val unit = minOf(density.coerceAtLeast(.1f) * .8f, w / minWidth, h / minHeight)
         fun px(value: Float) = (value * unit).roundToInt().coerceAtLeast(1)
-        val margin = px(edge); val pW = px(pWidth); val pH = px(76f)
+        val margin = px(edge); var pW = px(pWidth); val pH = px(76f)
         val pGap = px(12f); val safety = px(24f)
-        val pad = px(normalPad * if (big) 4f / 3f else 1f)
+        var pad = px(normalPad * if (big) 4f / 3f else 1f)
         val stick = px(normalStick * if (big) 4f / 3f else 1f)
-        val diameter = px(diamondDiameter); val delta = px(diamondOffset)
+        var diameter = px(diamondDiameter); var delta = px(diamondOffset)
+        val toolH = px(24f)
+        val toolY = px(8f)
+        val top = toolY + toolH + px(4f)
+        if (!portrait && w / density.coerceAtLeast(.1f) < 800f) {
+            val normalBank=maxOf(px(normalPad),2*pW+pGap,2*delta+diameter)
+            val nextScale=(w-2*(margin+normalBank+px(gutter)))/320+1
+            val cap=(w-320*nextScale)/2-margin-px(gutter)
+            val minKeyWidth=kotlin.math.ceil(44f*density.coerceAtLeast(.1f)).toInt()
+            // Size the P keys and diamond from the Normal envelope in both
+            // modes; Big enlarges its directional controls without overlap.
+            if (nextScale in 2..4 && h-top-px(16f)>=240*nextScale &&
+                cap>=px(normalPad) && cap>=(2*delta+diameter)*.9f &&
+                (cap-pGap)/2>=minKeyWidth) {
+                pW=minOf(pW,(cap-pGap)/2)
+                if (!big) pad=minOf(pad,cap)
+                val ratio=minOf(1f,cap.toFloat()/(2*delta+diameter))
+                diameter=(diameter*ratio).toInt().coerceAtLeast(1)
+                delta=(delta*ratio).toInt().coerceAtLeast(1)
+            }
+        }
         val faceX = w - margin - delta - diameter / 2
         val stickX = if (portrait) faceX - diameter / 2 - px(stickSideGap)
-            else faceX - stick / 2
+            else faceX
         val stickY = h - px(16f) - stick / 2
         // One shared horizontal axis for the D-pad and all four action keys.
-        val axisY = stickY - px(stickDrop)
+        val drop = if (portrait) px(stickDrop) else
+            maxOf(px(stickDrop),delta+diameter/2+stick/2+px(12f))
+        val axisY = stickY - drop
         val pY = axisY - maxOf(pad / 2, delta + diameter / 2) - safety - pH
         val pLeft1 = ControlRect(margin, pY, pW, pH)
         val pLeft2 = ControlRect(margin + pW + pGap, pY, pW, pH)
         val pRight2 = ControlRect(w - margin - pW, pY, pW, pH)
         val pRight1 = ControlRect(pRight2.x - pGap - pW, pY, pW, pH)
         fun centred(x: Int, y: Int, size: Int) = ControlRect(x - size / 2, y - size / 2, size, size)
-        val dpadX = margin + maxOf(px(maxPad), 2 * pW + pGap) / 2
+        val dpadX = margin + maxOf(pad, 2 * pW + pGap) / 2
         val dpad = centred(dpadX, axisY, pad)
         val stylus = centred(stickX, stickY, stick)
         val a = centred(faceX, axisY - delta, diameter)
@@ -64,16 +86,15 @@ internal object PocketPcControllerGeometry {
         val action = centred(faceX - delta, axisY, diameter)
         // Stable ID order: A, P2, Action, P1, P4, C, P3, B.
         val actions = listOf(a, pLeft2, action, pLeft1, pRight2, c, pRight1, b)
-        val toolH = px(28f); val toolGap = px(6f); val hostGap = px(18f)
+        val toolGap = px(6f); val hostGap = px(18f)
         // Never let a toolbar button cover a raised P key on narrow windows.
         val toolRoom = if (portrait) w else pRight1.x - (pLeft2.x + pW) - 2 * px(8f)
         val toolW = minOf(px(60f), (toolRoom - 4 * toolGap - hostGap) / 6).coerceAtLeast(1)
         val toolStart = (w - 6 * toolW - 4 * toolGap - hostGap) / 2
         val tools = (0..5).map { i ->
             ControlRect(toolStart + i * (toolW + toolGap) + if (i >= 3) hostGap - toolGap else 0,
-                px(14f), toolW, toolH)
+                toolY, toolW, toolH)
         }
-        val top = px(14f) + toolH + px(16f)
         val screen = if (portrait) {
             ControlRect(margin, top, (w - 2 * margin).coerceAtLeast(1), (pY - px(16f) - top).coerceAtLeast(1))
         } else {

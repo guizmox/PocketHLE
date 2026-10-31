@@ -35,6 +35,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
     private val auxiliary=listOf(R.id.btn_soft1,R.id.btn_soft2,R.id.btn_turbo,R.id.btn_stop_emulation,R.id.btn_fullscreen,R.id.btn_rotate_game)
     internal var geometry=PocketPcGeometry.calculate(1,1,dp)
     init {
+        dpad.translucentStyle = true
         layoutDirection=View.LAYOUT_DIRECTION_LTR
         isMotionEventSplittingEnabled=true
         fun button(id: Int,label: String,host: Boolean=false) {
@@ -51,13 +52,20 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
             }.apply {
                 this.id=id; text=label; textSize=if(host) 13f else 16f; contentDescription=label
                 minWidth=0; minimumWidth=0; minHeight=0; minimumHeight=0; setPadding(0,0,0,0)
-                setTextColor(0xffffffff.toInt()); background=style.backgroundShape(host)
+                setTextColor(0xb8ffffff.toInt()); background=style.backgroundShape(host, translucent=true)
                 backgroundTintList=null; stateListAnimator=null
             }
             keys[id]=b;addView(b)
         }
         originalActions.zip(listOf("A","P2","Action","P1","P4","C","P3","B")).forEach { (id,label)->button(id,label) }
         auxiliary.zip(listOf("Tab","Esc","Turbo","Exit","Full","↻")).forEachIndexed { index,(id,label)->button(id,label,index>=3) }
+        auxiliary.forEach { id ->
+            val hostAction = id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen
+            keys.getValue(id).apply {
+                background = style.toolbarBackground(hostAction)
+                setTextColor(style.toolbarTextColors(hostAction))
+            }
+        }
         keys.getValue(R.id.btn_rotate_game).contentDescription="Rotate game screen"
         keys.getValue(R.id.btn_rotate_game).textSize=24f
         addView(dpad);addView(aimTouchTarget)
@@ -80,7 +88,7 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         }
     private fun updateButtonShapes() {
         actions.forEach { id -> keys.getValue(id).apply {
-            background=style.backgroundShape(oval=controllerLayout && isDiamond(id)); textSize=16f
+            background=style.backgroundShape(oval=controllerLayout && isDiamond(id), translucent=true); textSize=16f
         } }
     }
     fun configure(config: LauncherConfig, settings: GameSettings = GameSettings.default()) {
@@ -93,12 +101,13 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         val w=MeasureSpec.getSize(widthMeasureSpec);val h=MeasureSpec.getSize(heightMeasureSpec)
         setMeasuredDimension(w,h);geometry=PocketPcGeometry.calculate(w,h,dp,bigDirectionalControls,controllerLayout)
         fun measure(view: View,rect: ControlRect) { view.measure(MeasureSpec.makeMeasureSpec(rect.w,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(rect.h,MeasureSpec.EXACTLY)) }
-        if (controllerLayout) {
-            (actions + auxiliary).forEach { id ->
+        (actions + auxiliary).forEach { id ->
+            if (controllerLayout || id in auxiliary) {
                 val button = keys.getValue(id)
                 val rect = if (id in actions) geometry.actions[actions.indexOf(id)] else geometry.auxiliary[auxiliary.indexOf(id)]
-                val desired = (if (id in actions) 16f else 11f) * resources.displayMetrics.scaledDensity
-                val pixels = minOf(desired, rect.h * .32f, rect.w / (button.text.length.coerceAtLeast(1) * .65f))
+                val desired = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,
+                    if (id in actions) 16f else 12f, resources.displayMetrics)
+                val pixels = minOf(desired, rect.h * (if (id in auxiliary) .55f else .32f), rect.w / (button.text.length.coerceAtLeast(1) * .65f))
                 button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, pixels.coerceAtLeast(1f))
             }
         }

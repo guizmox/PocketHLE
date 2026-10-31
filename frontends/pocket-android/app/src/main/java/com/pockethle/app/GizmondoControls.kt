@@ -39,14 +39,14 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         val names = listOf("Home", "Volume", "Brightness", "Geofence", "Power")
         icons.forEachIndexed { index, id ->
             val icon = FunctionButton(context, index).apply {
-                this.id = id; contentDescription = names[index]; background = controlStyle.backgroundShape(); backgroundTintList = null
+                this.id = id; contentDescription = names[index]; background = controlStyle.toolbarBackground(); backgroundTintList = null
             }
             keys[id] = icon; addView(icon)
         }
-        button(R.id.btn_fullscreen, "Full").apply { textSize=13f; setTextColor(Color.WHITE); background=controlStyle.backgroundShape(emulatorAction=true) }
+        button(R.id.btn_fullscreen, "Full").apply { textSize=13f; setTextColor(controlStyle.toolbarTextColors(true)); background=controlStyle.toolbarBackground(true) }
         button(R.id.btn_stop_emulation, "Exit").apply {
-            textSize = 13f; setTextColor(Color.WHITE)
-            background = controlStyle.backgroundShape(emulatorAction = true)
+            textSize = 13f; setTextColor(controlStyle.toolbarTextColors(true))
+            background = controlStyle.toolbarBackground(true)
         }
     }
     var bigDirectionalControls: Boolean = false
@@ -108,6 +108,7 @@ private class FunctionButton(context: Context, private val kind: Int) : AppCompa
         val scale = minOf(resources.displayMetrics.density, width / 28f, height / 28f)
         canvas.save(); canvas.translate(width / 2f - 12 * scale, height / 2f - 12 * scale)
         canvas.scale(scale, scale)
+        ink.color = if (!isEnabled) 0x40ffffff else if (isPressed) Color.WHITE else 0xb8ffffff.toInt()
         ink.style=Paint.Style.STROKE
         when(kind) {
             0 -> { ink.style=Paint.Style.FILL; canvas.drawPath(Path().apply { moveTo(2f,11f);lineTo(5f,8f);lineTo(5f,3f);lineTo(8f,3f);lineTo(8f,5f);lineTo(12f,1f);lineTo(23f,11f);lineTo(20f,11f);lineTo(20f,23f);lineTo(14f,23f);lineTo(14f,15f);lineTo(10f,15f);lineTo(10f,23f);lineTo(4f,23f);lineTo(4f,11f);close() },ink) }

@@ -19,12 +19,12 @@ internal class StylusStickView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         val r = minOf(width, height) * .43f
         paint.style=Paint.Style.FILL
-        paint.color = 0xff101824.toInt(); canvas.drawCircle(width/2f, height/2f, r, paint)
+        paint.color = 0x30101824; canvas.drawCircle(width/2f, height/2f, r, paint)
         paint.style=Paint.Style.STROKE; paint.strokeWidth=resources.displayMetrics.density
-        paint.color=0xff506078.toInt(); canvas.drawCircle(width/2f,height/2f,r,paint)
+        paint.color=0x70ffffff; canvas.drawCircle(width/2f,height/2f,r,paint)
         paint.style=Paint.Style.FILL
-        paint.color = 0xff303a47.toInt(); canvas.drawCircle(width/2f+xAxis*r*.65f, height/2f+yAxis*r*.65f, r*.35f, paint)
-        paint.style=Paint.Style.STROKE; paint.color=0xff64768e.toInt()
+        paint.color = if (pointer >= 0) 0x993288bf.toInt() else 0x7010151d; canvas.drawCircle(width/2f+xAxis*r*.65f, height/2f+yAxis*r*.65f, r*.35f, paint)
+        paint.style=Paint.Style.STROKE; paint.color=if (pointer >= 0) 0xc5ffffff.toInt() else 0x70ffffff
         canvas.drawCircle(width/2f+xAxis*r*.65f,height/2f+yAxis*r*.65f,r*.35f,paint)
     }
     override fun onTouchEvent(event: MotionEvent): Boolean {

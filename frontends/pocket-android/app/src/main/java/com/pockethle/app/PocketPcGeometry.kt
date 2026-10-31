@@ -19,9 +19,21 @@ internal data class PocketPcGeometry(
             val gap=dp(6f); val safety=dp(18f)
             val tablet = minOf(w, h) / density >= 600f
             if(w>h) {
-                val side=minOf(dp(140f),w/5,h/2).coerceAtLeast(1)
+                var side=minOf(dp(140f),w/5,h/2).coerceAtLeast(1)
                 val normalPad=minOf(side,h/3).coerceAtLeast(1)
-                val pad=if(bigDirectionalControls) minOf(normalPad*4/3,(w-6*gap)/4,(h*.44f).toInt()).coerceAtLeast(normalPad) else normalPad
+                var pad=if(bigDirectionalControls) minOf(normalPad*4/3,(w-6*gap)/4,(h*.44f).toInt()).coerceAtLeast(normalPad) else normalPad
+                val toolbarH=minOf(dp(24f),h/9).coerceAtLeast(1)
+                if (!bigDirectionalControls) {
+                    val bank=maxOf(side,pad)
+                    val nextScale=(w-2*(bank+2*gap))/320+1
+                    val cap=(w-320*nextScale)/2-2*gap
+                    // Shrink only modestly, only to gain an integer QVGA step,
+                    // and keep both columns at least 44dp wide for touch.
+                    if (nextScale in 2..4 && h-toolbarH-3*gap>=240*nextScale &&
+                        cap>=bank*.9f && cap>=2*dp(44f)+gap) {
+                        side=minOf(side,cap);pad=minOf(pad,cap)
+                    }
+                }
                 val padY=h-gap-pad
                 val actionBottom=(padY-safety).coerceAtLeast(gap+2)
                 val cellW=((side-gap)/2).coerceAtLeast(1)
@@ -32,7 +44,6 @@ internal data class PocketPcGeometry(
                 fun bank(x: Int)=listOf(ControlRect(x,bankTop,cellW,cellH),ControlRect(x+cellW+gap,bankTop,cellW,cellH),
                     ControlRect(x,bankTop+cellH+gap,cellW,cellH),ControlRect(x+cellW+gap,bankTop+cellH+gap,cellW,cellH))
                 val left=maxOf(side,pad)+2*gap; val room=(w-2*left).coerceAtLeast(1)
-                val toolbarH=minOf(dp(32f),h/9).coerceAtLeast(1)
                 // Wider guest keys, with a distinct gap before the orange host actions.
                 val bw=minOf(dp(64f),((room-6*gap)/6).coerceAtLeast(1))
                 val aux=(0..2).map { ControlRect(left+it*(bw+gap),gap,bw,toolbarH) } +
