@@ -132,10 +132,11 @@ fn run_launcher() -> Result<()> {
             .map_err(anyhow::Error::msg)
         })
         .transpose()?;
+    // The dedicated Steam Deck build starts fullscreen; an explicit CLI mode wins.
     let fullscreen = launch
         .as_ref()
         .and_then(|a| a.fullscreen)
-        .unwrap_or(library.config().fullscreen);
+        .unwrap_or(cfg!(feature = "steam-deck") || library.config().fullscreen);
 
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE logo")?
