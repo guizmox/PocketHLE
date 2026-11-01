@@ -72,10 +72,8 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
                 uploaded=frame
             }
             glBindFramebuffer(GL_FRAMEBUFFER,0)
-            val quarter = turn == 90 || turn == 270
-            val w = if (quarter) frame.height else frame.width
-            val h = if (quarter) frame.width else frame.height
-            val rect = if(controllerFullscreen) aspectDisplayRect(viewW,viewH,w,h) else if(pocketPc) pocketPcDisplayRect(viewW,viewH,w,h,scale) else displayRect(viewW,viewH,w,h,scale)
+            val rect = renderedDisplayRect(viewW,viewH,frame.width,frame.height,
+                frame.textureWidth,frame.textureHeight,turn,scale,pocketPc,controllerFullscreen)
             val drawnW=rect.width;val drawnH=rect.height
             val x=rect.left;val y=viewH-rect.top-drawnH
             glViewport(x,y,drawnW,drawnH);glUseProgram(program)

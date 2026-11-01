@@ -1089,15 +1089,23 @@ impl PocketLauncher {
     }
 
     fn upload_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
-        if !self.running_is_gizmondo
-            && self
-                .last_frame_snapshot
-                .as_ref()
-                .map(|old| (old.width, old.height))
-                != Some((frame.width, frame.height))
+        if self
+            .last_frame_snapshot
+            .as_ref()
+            .map(|old| (old.width, old.height, old.texture_width, old.texture_height))
+            != Some((
+                frame.width,
+                frame.height,
+                frame.texture_width,
+                frame.texture_height,
+            ))
         {
             self.console_fit_pending = true;
-            if self.last_frame_snapshot.is_some() {
+            if self
+                .last_frame_snapshot
+                .as_ref()
+                .is_some_and(|old| (old.width, old.height) != (frame.width, frame.height))
+            {
                 self.release_all_keys();
             }
         }
@@ -1127,16 +1135,13 @@ impl PocketLauncher {
             frame.rgba.clone(),
         )
         .ok_or_else(|| "invalid RGBA framebuffer size".to_string())?;
-        if factor == 1
-            || (frame.texture_width >= frame.width * factor
-                && frame.texture_height >= frame.height * factor)
-        {
+        if factor == 1 {
             return Ok(source);
         }
         Ok(image::imageops::resize(
             &source,
-            frame.width * factor,
-            frame.height * factor,
+            frame.texture_width * factor,
+            frame.texture_height * factor,
             self.upscale_filter.image_filter(),
         ))
     }
@@ -3129,16 +3134,20 @@ impl PocketLauncher {
             self.library_window_size.get_or_insert(inner);
             let scale = if self.upscale_x2 { 2.0 } else { 1.0 };
             let body = if self.running_is_gizmondo {
-                let width = (320.0 / 0.3920) * scale;
+                let render_width = self
+                    .last_frame_snapshot
+                    .as_ref()
+                    .map_or(320, |f| f.texture_width);
+                let width = (render_width as f32 / 0.3920) * scale;
                 Vec2::new(width, width * 928.0 / 1648.0)
             } else {
                 let Some(frame) = self.last_frame_snapshot.as_ref() else {
                     return;
                 };
                 let screen = if self.game_rotation.is_quarter_turn() {
-                    Vec2::new(frame.height as f32, frame.width as f32)
+                    Vec2::new(frame.texture_height as f32, frame.texture_width as f32)
                 } else {
-                    Vec2::new(frame.width as f32, frame.height as f32)
+                    Vec2::new(frame.texture_width as f32, frame.texture_height as f32)
                 };
                 let body = crate::fullscreen_layout::pocket_pc_window_body(
                     [screen.x as u32, screen.y as u32],
@@ -3344,12 +3353,10 @@ impl PocketLauncher {
             return;
         };
         let guest_size = Vec2::new(frame.width as f32, frame.height as f32);
-        let native = if self.running_is_gizmondo {
-            [320, 240]
-        } else if self.game_rotation.is_quarter_turn() {
-            [frame.height, frame.width]
+        let native = if !self.running_is_gizmondo && self.game_rotation.is_quarter_turn() {
+            [frame.texture_height, frame.texture_width]
         } else {
-            [frame.width, frame.height]
+            [frame.texture_width, frame.texture_height]
         };
         let available = ui.available_rect_before_wrap();
         self.stylus_touch = [0.0; 4];
@@ -3526,9 +3533,9 @@ impl PocketLauncher {
         if let Some(frame) = self.last_frame_snapshot.as_ref() {
             let guest = Vec2::new(frame.width as f32, frame.height as f32);
             let native = if self.game_rotation.is_quarter_turn() {
-                [frame.height, frame.width]
+                [frame.texture_height, frame.texture_width]
             } else {
-                [frame.width, frame.height]
+                [frame.texture_width, frame.texture_height]
             };
             let dpi = ui.ctx().pixels_per_point();
             let fit = crate::fullscreen_layout::integer_fit_capped(
@@ -3661,7 +3668,12 @@ impl PocketLauncher {
         let w = if fullscreen {
             available.x.min(available.y * aspect).max(1.0)
         } else {
-            (320.0 / 0.3920) * if self.upscale_x2 { 2.0 } else { 1.0 }
+            (self
+                .last_frame_snapshot
+                .as_ref()
+                .map_or(320, |f| f.texture_width) as f32
+                / 0.3920)
+                * if self.upscale_x2 { 2.0 } else { 1.0 }
         };
         let h = w / aspect;
         let scale = w * 0.3920 / 320.0;

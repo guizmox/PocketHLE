@@ -5464,6 +5464,48 @@ mod tests {
     }
 
     #[test]
+    fn hardware_diag_imports_one_executable_with_private_fixture_assets() {
+        use std::io::Write;
+        let root = tmpdir("hardware_diag");
+        fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("fixture.exe");
+        write_pe_importing(&fixture, &[]);
+        let pe = fs::read(fixture).unwrap();
+        let path = root.join("HARDWARE-DIAG.zip");
+        let mut archive = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        for (name, bytes) in [
+            ("GZHD999989/AUTORUN.EXE", pe.as_slice()),
+            ("GZHD999989/GZHD999989", b"mark".as_slice()),
+            ("GZHD999989/ram/ramprobe.dll", pe.as_slice()),
+            (
+                "GZHD999989/ram/badproc.bin",
+                b"invalid PE fixture".as_slice(),
+            ),
+            ("GZHD999989/vfs/asset.bin", b"VFS fixture".as_slice()),
+        ] {
+            archive
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        let mut lib = Library::open(root.join("library")).unwrap();
+        let entry = lib.import_zip(&path).unwrap().clone();
+        assert_eq!(lib.games().len(), 1);
+        assert_eq!(entry.display_name, "HARDWARE DIAG");
+        assert_eq!(
+            entry.executable,
+            PathBuf::from("extracted/GZHD999989/AUTORUN.EXE")
+        );
+        assert!(entry
+            .extracted_dir(lib.root())
+            .join("GZHD999989/ram/ramprobe.dll")
+            .is_file());
+        assert!(is_gizmondo_game(&entry, lib.root()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn single_directory_unwrapping_preserves_sdk_card_boundaries() {
         use std::io::Write;
         let root = tmpdir("sdk_boundary");

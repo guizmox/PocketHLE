@@ -168,7 +168,12 @@ void HELPER(exit_atomic)(CPUArchState *env)
 void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
     uc_engine *uc = p;
 
-    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot) {
+    /* A PC redirect restarts cpu_exec and clears the CPU-local exit flag.
+     * A concurrent timeout can already have set stop_request at that point.
+     * Honor that persistent request too: otherwise a code hook can be skipped
+     * by helper_uc_tracecode while the intercepted instruction still runs. */
+    if ((cpu_loop_exit_requested(uc->cpu) || uc->stop_request) &&
+        !in_delay_slot) {
         // There are stil something we have to before exiting to be compatible with previous behaviors
 
         // from cpu_tb_exec

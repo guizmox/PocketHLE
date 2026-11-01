@@ -648,15 +648,15 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun updatePocketPcDisplayGeometry(frame: FrameSnapshot) {
-        val swapped=rotationDegrees==90 || rotationDegrees==270
-        controllerFullscreenHost.setDisplaySize(if(swapped) frame.height else frame.width,if(swapped) frame.width else frame.height)
+        val quarter=rotationDegrees==90 || rotationDegrees==270
+        val renderW=if(quarter) frame.textureHeight else frame.textureWidth
+        val renderH=if(quarter) frame.textureWidth else frame.textureHeight
+        controllerFullscreenHost.setDisplaySize(renderW,renderH)
         if (gizmondoGame) return
-        val quarter = rotationDegrees == 90 || rotationDegrees == 270
-        val width = if (quarter) frame.height else frame.width
-        val height = if (quarter) frame.width else frame.height
+        val width=if(quarter) frame.height else frame.width
+        val height=if(quarter) frame.width else frame.height
         (findViewById<View>(R.id.game_root) as? PocketPcLayout)?.setDisplaySize(width,height,
-            if(displayScale<=0) 4 else displayScale.coerceIn(1,4))
-
+            if(displayScale<=0) 4 else displayScale.coerceIn(1,4),renderW,renderH)
     }
 
     private fun rotatedDirection(vk:Int):Int {
@@ -1137,7 +1137,7 @@ class GameActivity : AppCompatActivity() {
         frame: FrameSnapshot,
         pointerIndex: Int = 0,
     ): Pair<Int, Int>? {
-        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame,controllerFullscreenHost.active)
+        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame,controllerFullscreenHost.active,frame.textureWidth,frame.textureHeight)
     }
 
     data class FrameSnapshot(

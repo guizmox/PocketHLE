@@ -1062,6 +1062,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timed_inline_divisions_resume_without_skipping_hooks_or_repeating_results() {
+        use crate::arithmetic64::Arithmetic64;
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.map_region(0x3000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        // Sum 1024 distinct 64-bit quotients entirely in guest registers.
+        // Every helper redirects PC and may race the reusable slice timer.
+        let mut words = [
+            0xe92d4070u32, // push {r4,r5,r6,lr}
+            0xe3a04000,
+            0xe3a05000,
+            0xe3a06b01, // sum=0, count=1024
+            0xe1a00006,
+            0xe3e01000, // n = 0xffffffff00000000 | count
+            0xe3a02011,
+            0xe3a03000, // divisor=17
+            0,          // bl 0x1200
+            0xe0944000,
+            0xe0a55001, // sum += r0:r1
+            0xe2566001, // subs r6,r6,#1
+            0x1afffff6, // bne 0x1010
+            0xe1a00004,
+            0xe1a01005,
+            0xe8bd4070,
+            0xe12fff1e,
+        ];
+        words[8] = 0xeb000000 | ((0x1200u32 - (0x1020 + 8)) >> 2);
+        let code: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        cpu.write_mem(0x1000, &code).unwrap();
+        cpu.write_mem(0x1200, &0xe12fff1eu32.to_le_bytes().repeat(2))
+            .unwrap();
+        cpu.install_inline_arithmetic64(0x1200, Arithmetic64::UnsignedDivide)
+            .unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        cpu.set_slice_timeout_us(1).unwrap();
+        let expected = (1..=1024u64).fold(0u64, |sum, n| {
+            sum.wrapping_add((0xffffffff00000000 | n) / 17)
+        });
+        for _ in 0..256 {
+            cpu.write_reg(ArmReg::Sp, 0x3ff0).unwrap();
+            cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+            let mut pc = 0x1000;
+            let mut finished = false;
+            for _ in 0..10000 {
+                match cpu.run_until_hook(pc, 0).unwrap() {
+                    StopReason::Hook(0x1100) => {
+                        finished = true;
+                        break;
+                    }
+                    StopReason::InstructionLimit => pc = cpu.read_reg(ArmReg::Pc).unwrap(),
+                    reason => panic!("unexpected division stop: {reason:?}"),
+                }
+            }
+            assert!(finished, "timed divisions did not reach their return hook");
+            let actual = u64::from(cpu.read_reg(ArmReg::R0).unwrap())
+                | (u64::from(cpu.read_reg(ArmReg::R1).unwrap()) << 32);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn mips_delay_slot_store_preserves_the_following_call() {
         let mut cpu = UnicornCpu::new_for_arch(Arch::Mips).unwrap();
         cpu.map_region(0x1000, 0x2000, Prot::ALL).unwrap();

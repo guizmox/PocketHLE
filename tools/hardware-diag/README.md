@@ -219,3 +219,23 @@ The emulator now exposes the missing `glTexParameteri` by name for both Common
 and Common-Lite. Existing historical ordinal tables are unchanged. This fixes
 the OpenGLES benchmark's early `FAIL missing glTexParameteri`; do not conceal
 missing required API support by weakening that test.
+
+
+## On-screen score pages
+
+Integer, Floating and OpenGLES now finish on one compact 320x240 score page:
+one row per probe with its score, plus the historical CPU score or the OpenGLES
+global index. CPU values are iterations/second; GL rows are render FPS (not
+physical display refresh FPS). Higher is faster. The complete TXT reports and
+their existing score keys remain available and unchanged.
+
+Use B/Tab to switch between scores and the complete report, A/Enter/Back to
+return to the menu, and Left/Right to switch between completed benchmark pages.
+Touch the lower left/right corners to change pages, or the lower center to open
+the log. In the menu, B/Tab recalls the selected benchmark's last result.
+Missing/truncated reports and failed cases show FAIL, never a successful score.
+
+GitHub Actions publishes `HARDWARE-DIAG` from its independent HARDWARE DIAG job;
+the archive contains one integrated ARM executable. This job also verifies the
+archive, ARM benchmark/report wiring, and score-page navigation. Re-import the
+new diagnostic ZIP to update the executable inside PocketHLE.

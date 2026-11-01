@@ -128,7 +128,7 @@ for mode in ['integer','floating']:
  g=BenchmarkGuest(root/'AUTORUN.EXE');g.command='--hd-'+mode;g.run();s=bytes(g.files['\\Flash Disk\\'+('INTEGER.TXT' if mode=='integer' else 'FLOATING.TXT')]).decode();assert 'BENCHMARK_RESULT PASS' in s and g.exit==0,s;assert len(re.findall(r'^elapsed_ms=',s,re.M))==3;
  import re
  rates=list(map(int,re.findall(r'^work_iterations_per_second=(\d+)',s,re.M)));score=int(re.search(r'^FINAL_[A-Z]+_SCORE_ITERATIONS_PER_SECOND=(\d+)',s,re.M)[1]);assert len(set(rates))==3 and score==sorted(rates)[1];assert not g.created;print(mode, 'integrated ARM benchmark: 3 passes + warmup PASS; no child process')
-g=Guest(root/'AUTORUN.EXE');g.ui=True;g.run();assert 'HARDWARE DIAG' in g.text;assert len(g.created)==1 and g.created[0][0]=='thread',g.created;assert not g.calls['CreateProcessW'];assert 'SUITE FINISHED (exit 0)' in g.text;print('integrated ARM UI: menu, controller selection, same-process worker, completion, console PASS')
+g=Guest(root/'AUTORUN.EXE');g.ui=True;g.run();assert 'HARDWARE DIAG' in g.text;assert len(g.created)==1 and g.created[0][0]=='thread',g.created;assert not g.calls['CreateProcessW'];assert 'INTEGER' in g.text and 'FAIL' in g.text;print('integrated ARM UI: menu, controller selection, same-process worker; missing report fails summary PASS')
 # Execute the real same-image process adapter, preserving its ten-argument ABI.
 import importlib.util
 spec=importlib.util.spec_from_file_location('pe_builder',ROOT/'suites/ram/build.py');builder=importlib.util.module_from_spec(spec);spec.loader.exec_module(builder)

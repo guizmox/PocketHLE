@@ -32,6 +32,34 @@ jobs:
           path: dist/android-backup/PocketHLE-Android-ADB-Backup.zip
           if-no-files-found: error
 
+  hardware-diag:
+    name: HARDWARE DIAG (download)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install small ARM diagnostic toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld python3
+      - name: Build the single ARM diagnostic and verify its archive
+        run: python3 tools/hardware-diag/build.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check diagnostic bytecode, reports and score pages
+        run: |
+          python3 -m pip install --disable-pip-version-check -r tools/hardware-diag/tests/requirements.txt
+          python3 tools/hardware-diag/tests/guest_smoke.py
+          python3 tools/hardware-diag/tests/cpu_benchmark_smoke.py
+          python3 tools/hardware-diag/tests/gles_benchmark_smoke.py
+          python3 tools/hardware-diag/tests/score_summary_smoke.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HARDWARE-DIAG
+          path: tools/hardware-diag/dist/HARDWARE-DIAG.zip
+          if-no-files-found: error
+          retention-days: 30
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-24.04
@@ -195,12 +223,6 @@ jobs:
         with:
           name: arm-diagnostic-fixtures
           path: arm-diagnostic-fixtures.zip
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: HARDWARE-DIAG
-          path: tools/hardware-diag/dist/HARDWARE-DIAG.zip
           if-no-files-found: error
 
   build-windows:

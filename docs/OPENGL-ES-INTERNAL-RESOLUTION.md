@@ -12,7 +12,8 @@ GPU rendering enabled to render twice the logical width and height:
 This is actual geometry rasterization into a larger color/depth framebuffer,
 not a post-process resize. Textures/sprites keep their original source detail.
 It does not change the guest's reported LCD resolution, GAPI memory, viewport
-queries, touch coordinates, control layout or display zoom. The software GLES
+queries, touch coordinates or control hitboxes. Display zoom is applied separately to the
+actual rendered image. The software GLES
 renderer, GDI, DirectDraw and direct GAPI games keep native rendering.
 
 Native GPU viewport/scissor and point/line sizes account for the density, within
@@ -26,7 +27,11 @@ host renderer option, not a claim about original device hardware capabilities.
 Ordinary GDI/GAPI writes invalidate the host-only image. Native SIP/menu overlays
 use the native composite while visible. Returning to GLES restores full-density
 presentation at the next swap. Rotation/aspect ratio and integer display scaling
-continue to use the logical image dimensions. Offscreen reads and copy-to-texture
+use the produced image dimensions: internal 2× makes 640×480, then display 2×
+requests 1280×960 (portrait: 480×640 then 960×1280), limited by the available
+space. No presentation step first reduces that image to 320×240. Touch mapping
+uses the same display rectangle but still returns logical guest coordinates.
+The pre-existing presentation policy of native VGA PocketPC games is preserved. Offscreen reads and copy-to-texture
 operations preserve guest-sized buffers; this option cannot increase an image
 resource's dimensions or remove every low-resolution post-processing effect.
 
@@ -34,7 +39,7 @@ resource's dimensions or remove every low-resolution post-processing effect.
 
 Apply the modified files, rebuild PocketHLE, then choose the setting and relaunch
 a GLES game. On Android rebuild/install the native libraries and APK together.
-There is no keystore/signature or build workflow change in this patch.
+Signing/keystore behavior is unchanged. CI separately publishes HARDWARE DIAG.
 
 Keep Native (1×) for before/after performance comparisons unless deliberately
 comparing the two resolutions. Record the chosen setting alongside HARDWARE DIAG

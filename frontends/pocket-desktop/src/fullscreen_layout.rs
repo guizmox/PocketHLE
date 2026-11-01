@@ -148,3 +148,19 @@ mod pocket_pc_window_tests {
         assert_eq!(integer_fit_capped([488, 634], [240, 320], 4).factor, 1);
     }
 }
+
+#[cfg(test)]
+mod rendered_resolution_tests {
+    use super::*;
+    #[test]
+    fn rendered_pixels_are_the_base_for_integer_display_zoom() {
+        for native in [[640, 480], [480, 640]] {
+            let room = [native[0] * 3, native[1] * 3];
+            let fit = integer_fit_capped(room, native, 2);
+            assert_eq!([fit.width, fit.height], [native[0] * 2, native[1] * 2]);
+            assert_eq!(fit.factor, 2);
+            let fitted = integer_fit_capped([native[0] + 20, native[1] + 20], native, 2);
+            assert_eq!([fitted.width, fitted.height], native);
+        }
+    }
+}

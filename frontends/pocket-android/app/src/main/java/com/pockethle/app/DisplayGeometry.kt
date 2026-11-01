@@ -20,11 +20,20 @@ internal fun pocketPcDisplayRect(viewW: Int,viewH: Int,nativeW: Int,nativeH: Int
     val unit=if(vga) 2 else 1
     return displayRect(viewW,viewH,nativeW/unit,nativeH/unit,if(factor<=0) 4 else factor.coerceAtMost(4))
 }
-internal fun displayPointToGuest(x: Float,y: Float,viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,turn: Int,factor: Int,pocketPc: Boolean=false,fullscreen: Boolean=false): Pair<Int,Int>? {
-    if(viewW<=0 || viewH<=0 || nativeW<=0 || nativeH<=0) return null
+/** Presentation uses the actual rendered pixels; guest coordinates stay logical.
+ * Preserve the legacy VGA policy only when there is no separate rendered image. */
+internal fun renderedDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int,renderW:Int,renderH:Int,turn:Int,factor:Int,pocketPc:Boolean=false,fullscreen:Boolean=false):DisplayRect {
+    val quarter=turn==90 || turn==270
+    val w=if(quarter) renderH else renderW;val h=if(quarter) renderW else renderH
+    return if(fullscreen) aspectDisplayRect(viewW,viewH,w,h)
+        else if(pocketPc && renderW==nativeW && renderH==nativeH) pocketPcDisplayRect(viewW,viewH,w,h,factor)
+        else displayRect(viewW,viewH,w,h,factor)
+}
+internal fun displayPointToGuest(x: Float,y: Float,viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,turn: Int,factor: Int,pocketPc: Boolean=false,fullscreen: Boolean=false,renderW:Int=nativeW,renderH:Int=nativeH): Pair<Int,Int>? {
+    if(viewW<=0 || viewH<=0 || nativeW<=0 || nativeH<=0 || renderW<=0 || renderH<=0) return null
     val quarter=turn==90 || turn==270
     val w=if(quarter) nativeH else nativeW;val h=if(quarter) nativeW else nativeH
-    val rect=if(fullscreen) aspectDisplayRect(viewW,viewH,w,h) else if(pocketPc) pocketPcDisplayRect(viewW,viewH,w,h,factor) else displayRect(viewW,viewH,w,h,factor)
+    val rect=renderedDisplayRect(viewW,viewH,nativeW,nativeH,renderW,renderH,turn,factor,pocketPc,fullscreen)
     val dx=x-rect.left;val dy=y-rect.top
     if(dx<0 || dy<0 || dx>=rect.width || dy>=rect.height) return null
     val px=(dx*w/rect.width).toInt().coerceIn(0,w-1);val py=(dy*h/rect.height).toInt().coerceIn(0,h-1)
