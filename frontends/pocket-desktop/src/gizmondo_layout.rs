@@ -25,7 +25,7 @@ impl BoxRect {
         (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) <= r * r
     }
 }
-pub const HEADER: f32 = 116.0;
+pub const HEADER: f32 = 40.0 + 64.0 * (2.0 / 3.0) + 12.0;
 pub const GAP: f32 = 12.0;
 #[derive(Debug)]
 pub struct Layout {
@@ -96,7 +96,7 @@ pub fn calculate(
             fx + i as f32 * (fw + 8.0 * unit),
             40.0 * unit,
             fw,
-            64.0 * unit,
+            (64.0 * 2.0 / 3.0) * unit,
         )
     });
     let shoulder_h = (room.h * 0.20)

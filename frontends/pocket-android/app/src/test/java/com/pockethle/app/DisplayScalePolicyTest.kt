@@ -14,14 +14,16 @@ class DisplayScalePolicyTest {
         assertEquals(a.width * 3, a.height * 4)
         assertEquals(b.width * 3, b.height * 4)
     }
-    @Test fun pocketPcVgaUsesTheExistingQvgaGridAndTooSmallViewportsClip() {
-        val qvga = pocketPcDisplayRect(1200, 1200, 320, 240, 3)
-        val vga = pocketPcDisplayRect(1200, 1200, 640, 480, 3)
-        assertEquals(qvga, vga)
-        assertEquals(960, vga.width); assertEquals(720, vga.height)
-        val nativeVga = pocketPcDisplayRect(1200, 1200, 640, 480, 2)
-        assertEquals(640, nativeVga.width)
-        val clipped = displayRect(200, 150, 320, 240, 1)
-        assertEquals(320, clipped.width); assertTrue(clipped.left < 0)
+    @Test fun pocketPcVgaZoomUsesItsActualProducedPixels() {
+        val qvga=pocketPcDisplayRect(2400,1800,320,240,3)
+        val vga=pocketPcDisplayRect(2400,1800,640,480,3)
+        assertEquals(960,qvga.width);assertEquals(720,qvga.height)
+        assertEquals(1920,vga.width);assertEquals(1440,vga.height)
+        val doubled=pocketPcDisplayRect(2000,1600,640,480,2)
+        assertEquals(1280,doubled.width);assertEquals(960,doubled.height)
+        val fitted=pocketPcDisplayRect(1000,800,640,480,2)
+        assertEquals(640,fitted.width);assertEquals(480,fitted.height)
+        val clipped=displayRect(200,150,320,240,1)
+        assertEquals(320,clipped.width);assertTrue(clipped.left<0)
     }
 }

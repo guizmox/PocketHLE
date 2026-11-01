@@ -20,13 +20,13 @@ static const U64 cpu_divisors64[8] = {
 static const char *const cpu_case_names[] = {
     "f32_add_runtime", "f32_multiply_runtime", "f32_divide_runtime",
     "f32_sqrt_runtime", "i32_f32_roundtrip_runtime", "f32_f64_roundtrip_runtime",
-    "f64_add_multiply_runtime", "f64_divide_runtime", "f64_sqrt_runtime"
+    "f64_add_multiply_runtime", "f64_divide_runtime", "f64_sqrt_runtime", "series_f32_runtime"
 };
 static const U32 cpu_expected[] = {
     0x21f93dc5u, 0x9af9bdc5u, 0xcc59fdc5u, 0xdd5c21c5u, 0xc38145c5u,
-    0x5c643dc5u, 0x39443ec5u, 0x6118e8c5u, 0xfd7c3dc5u
+    0x5c643dc5u, 0x39443ec5u, 0x6118e8c5u, 0xfd7c3dc5u, 0x54f58aafu
 };
-static const U32 cpu_calls_per_iteration[] = {1, 1, 1, 1, 2, 2, 2, 1, 1};
+static const U32 cpu_calls_per_iteration[] = {1, 1, 1, 1, 2, 2, 2, 1, 1, 7};
 /* Normal signed inputs plus zero; sqrt receives the absolute value. */
 static const U32 cpu_single_inputs[8] = {
     0x00000000, 0xbfc00000, 0x40500000, 0xc1880000,
@@ -39,19 +39,23 @@ static const U64 cpu_double_inputs[8] = {
 #else
 static const char *const cpu_case_names[] = {
     "u32_multiply_add", "u32_divide_remainder", "i32_divide_remainder",
-    "u64_add_shift", "u64_multiply_runtime", "u64_divide_runtime", "i64_divide_runtime"
+    "u64_add_shift", "u64_multiply_runtime", "u64_divide_runtime", "i64_divide_runtime", "series_i32_signed_divide"
 };
 static const U32 cpu_expected[] = {
     0x331255c5u, 0x41affac5u, 0x1cd7b4c5u, 0x1a9a95c5u,
-    0x0246cac5u, 0xe64e09c5u, 0xa184cfc5u
+    0x0246cac5u, 0xe64e09c5u, 0xa184cfc5u, 0x803048f5u
 };
-static const U32 cpu_calls_per_iteration[] = {0, 1, 1, 0, 1, 1, 1};
+static const U32 cpu_calls_per_iteration[] = {0, 1, 1, 0, 1, 1, 1, 1};
 #endif
 #define CPU_CASE_COUNT (sizeof(cpu_expected) / sizeof(cpu_expected[0]))
 
 __attribute__((noinline)) static U32 cpu_case_block(U32 mode) {
     U32 i, j, h = 0x811c9dc5u;
     U64 value;
+    volatile U32 series_sum = 0;
+#ifdef FLOATING
+    U32 series_sign = 0x3f800000u, series_denominator = 0x3f800000u;
+#endif
     for (i = 0; i < CPU_CASE_ITERATIONS; i++) {
         j = i & 7;
 #ifdef FLOATING
@@ -66,7 +70,18 @@ __attribute__((noinline)) static U32 cpu_case_block(U32 mode) {
         case 5: value = __dtos(__stod(bits)); break;
         case 6: value = __muld(__addd(wide, 0x3ff4000000000000ull), 0x3fe8000000000000ull); break;
         case 7: value = __divd(wide, 0x400a000000000000ull); break;
-        default: value = sqrt(wide & 0x7fffffffffffffffull); break;
+        case 8: value = sqrt(wide & 0x7fffffffffffffffull); break;
+        default: {
+            /* Alternating reciprocal series: same runtime operation families
+               as GLBenchmark's CPU loop, with our own fixed bounded workload. */
+            U32 term = __divs(__muls(series_sign, 0x40800000u), series_denominator);
+            series_sum = __adds(series_sum, term);
+            series_sign = __subs(0, series_sign);
+            series_denominator = __adds(series_denominator, 0x40000000u);
+            value = series_sum | ((U64)(__lts(series_denominator, 0x45003000u)
+                    | (__nes(series_sum, 0) << 1)) << 32);
+            break;
+        }
         }
 #else
         U32 a = cpu_inputs32[j], d = cpu_divisors32[j];
@@ -81,7 +96,13 @@ __attribute__((noinline)) static U32 cpu_case_block(U32 mode) {
         case 4: value = __ll_mul(b, e); break;
         /* These explicit 64-by-64 helpers take the DIVIDEND first. */
         case 5: value = __rt_udiv64by64(b, e); break;
-        default: value = __rt_sdiv64by64(b, (j & 1) ? 0ull - e : e); break;
+        case 6: value = __rt_sdiv64by64(b, (j & 1) ? 0ull - e : e); break;
+        default: {
+            U32 quotient = (U32)__rt_sdiv(2u * i + 1u, 100000000u);
+            series_sum = (i & 1u) ? series_sum - quotient : series_sum + quotient;
+            value = series_sum;
+            break;
+        }
         }
 #endif
         /* Every result contributes, including the upper 32 bits/remainder.

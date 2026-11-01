@@ -17,10 +17,10 @@ DIVISORS64 = [3, 0x100000001, 65537, 17, 0x100000003, 257, 65521, 0x10001]
 FLOAT_INPUTS = [0., -1.5, 3.25, -17., 123.5, -.0625, 1024., -63.75]
 DOUBLE_INPUTS = [1e100, -1e-100, 0., -3.25, 123456789012.25, 1e-50, -1e50, 63.75]
 INT_CASES = ['u32_multiply_add', 'u32_divide_remainder', 'i32_divide_remainder',
-             'u64_add_shift', 'u64_multiply_runtime', 'u64_divide_runtime', 'i64_divide_runtime']
+             'u64_add_shift', 'u64_multiply_runtime', 'u64_divide_runtime', 'i64_divide_runtime', 'series_i32_signed_divide']
 FLOAT_CASES = ['f32_add_runtime', 'f32_multiply_runtime', 'f32_divide_runtime',
                'f32_sqrt_runtime', 'i32_f32_roundtrip_runtime', 'f32_f64_roundtrip_runtime',
-               'f64_add_multiply_runtime', 'f64_divide_runtime', 'f64_sqrt_runtime']
+               'f64_add_multiply_runtime', 'f64_divide_runtime', 'f64_sqrt_runtime', 'series_f32_runtime']
 
 def f32bits(x):
     return struct.unpack('<I', struct.pack('<f', x))[0]
@@ -82,8 +82,19 @@ def result(name, j):
 
 def checksum(name):
     h = 0x811c9dc5
+    series_sum = 0
     for i in range(1024):
-        value = result(name, i & 7)
+        if name == 'series_i32_signed_divide':
+            term = 100000000 // (2 * i + 1)
+            series_sum = (series_sum + (term if i % 2 == 0 else -term)) & MASK32
+            value = series_sum
+        elif name == 'series_f32_runtime':
+            term = f32(f32((1. if i % 2 == 0 else -1.) * 4.) / f32(2 * i + 1))
+            series_sum = f32(series_sum + term)
+            comparison = int(f32(2 * i + 3) < 2051.) | (int(series_sum != 0.) << 1)
+            value = f32bits(series_sum) | (comparison << 32)
+        else:
+            value = result(name, i & 7)
         h = ((h ^ (value & MASK32)) * 16777619) & MASK32
         h = ((h ^ (value >> 32)) * 16777619) & MASK32
     return h

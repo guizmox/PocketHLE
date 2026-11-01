@@ -42,6 +42,9 @@ SIG.update({
     'GetTickCount': ('unsigned int', 'void'),
     '__rt_udiv': ('unsigned int', 'unsigned int,unsigned int'),
     '__adds': ('unsigned int', 'unsigned int,unsigned int'),
+    '__subs': ('unsigned int', 'unsigned int,unsigned int'),
+    '__lts': ('unsigned int', 'unsigned int,unsigned int'),
+    '__nes': ('unsigned int', 'unsigned int,unsigned int'),
     '__muls': ('unsigned int', 'unsigned int,unsigned int'),
     # Bit-level WinCE runtime ABIs: 64-bit results occupy r0:r1.
     '__rt_sdiv': ('unsigned long long', 'unsigned int,unsigned int'),
@@ -59,6 +62,8 @@ SIG.update({
     '__divd': ('unsigned long long', 'unsigned long long,unsigned long long'),
     'sqrt': ('unsigned long long', 'unsigned long long'),
 })
+SIG.update({'memcpy': ('void*', 'void*,const void*,unsigned int'),
+            'memset': ('void*', 'void*,int,unsigned int')})
 COMMON = ['CreateFileW', 'ReadFile', 'WriteFile', 'CloseHandle', 'SetFilePointer',
           'GetLastError', 'SetLastError', 'GetTickCount', 'Sleep']
 WINDOW = ['RegisterClassW', 'CreateWindowExW', 'DefWindowProcW', 'ShowWindow',
@@ -119,11 +124,13 @@ def compile_integrated(args, card):
     header = '#ifndef HARDWARE_IMPORTS_H\n#define HARDWARE_IMPORTS_H\n'
     for api, address in addresses.items():
         ret, params = signatures[api]
-        header += f'#define {api} (*({ret} (**)({params}))0x{address:08x}u)\n'
+        macro_name = {'memcpy': 'WinCeMemcpy', 'memset': 'WinCeMemset'}.get(api, api)
+        header += f'#define {macro_name} (*({ret} (**)({params}))0x{address:08x}u)\n'
     (work / 'imports.h').write_text(header + '\n#endif\n')
     files = {'launcher': ROOT/'src/hardware_diag.c', 'integrated': ROOT/'src/integrated.c',
              'gles': ROOT/'src/gles_info.c', 'integer': ROOT/'src/benchmark.c',
              'floating': ROOT/'src/benchmark.c', 'glesbench': ROOT/'src/gles_benchmark.c',
+             'memory': ROOT/'src/memory_benchmark.c',
              'proctest': ROOT/'suites/ram/src/proctest.c',
              'procworker': ROOT/'suites/ram/src/procworker.c',
              'vfsworker': ROOT/'suites/vfs/src/vfstest.c'}
@@ -151,7 +158,7 @@ def compile_integrated(args, card):
         objects.append(obj)
     # Per-suite zero-initialized globals are isolated and reset on each run.
     # Do not silently discard future nonzero mutable initializers.
-    for name in list(SUITES) + ['gles','integer','floating','glesbench']:
+    for name in list(SUITES) + ['gles','integer','floating','glesbench','memory']:
         blob = (work/(name+'.o')).read_bytes()
         shoff = struct.unpack_from('<I',blob,32)[0]
         shsize, shnum, shstr = struct.unpack_from('<HHH',blob,46)
@@ -162,7 +169,7 @@ def compile_integrated(args, card):
             if label.startswith(b'.data') and section[5]:
                 raise ValueError(name+': initialized writable globals need an explicit reset policy')
     script = 'ENTRY(entry)\nSECTIONS { . = 0x11000; .image : { __image_start = .; *(.text.entry) *(.text*) *(.rodata*) *(.data*)\n'
-    for name in list(SUITES) + ['gles','integer','floating','glesbench']:
+    for name in list(SUITES) + ['gles','integer','floating','glesbench','memory']:
         script += f'. = ALIGN(4); diag_{name}_bss_start = .; "{(work/(name+".o")).as_posix()}"(.bss* COMMON) diag_{name}_bss_end = .;\n'
     script += '*((.bss*)) *(COMMON) __image_end = .; } /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.comment*) *(.note*) } }\n'
     # LLD's input section syntax, without a nested wildcard group.

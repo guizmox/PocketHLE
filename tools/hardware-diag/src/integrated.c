@@ -1,7 +1,7 @@
 #include "imports.h"
 typedef unsigned int U32;typedef unsigned short W16;
 volatile U32 hardware_diag_visual;
-U32 diag_ram_entry(void);U32 diag_vfs_entry(void);U32 diag_timing_entry(void);U32 diag_camera_entry(void);U32 diag_gps_entry(void);U32 diag_network_entry(void);U32 diag_vibration_entry(void);U32 diag_bluetooth_entry(void);U32 diag_gles_entry(void);U32 diag_integer_entry(void);U32 diag_floating_entry(void);U32 diag_glesbench_entry(void);
+U32 diag_ram_entry(void);U32 diag_vfs_entry(void);U32 diag_timing_entry(void);U32 diag_camera_entry(void);U32 diag_gps_entry(void);U32 diag_network_entry(void);U32 diag_vibration_entry(void);U32 diag_bluetooth_entry(void);U32 diag_gles_entry(void);U32 diag_integer_entry(void);U32 diag_floating_entry(void);U32 diag_glesbench_entry(void);U32 diag_memory_entry(void);
 U32 diag_proctest_entry(void);U32 diag_procworker_entry(U32,U32,const W16*,U32);U32 diag_vfsworker_entry(void);U32 hardware_diag_lifecycle_entry(void);
 void __aeabi_memclr(void*p,U32 n){volatile unsigned char*b=p;while(n--)*b++=0;}
 void __aeabi_memclr4(void*p,U32 n){__aeabi_memclr(p,n);}void __aeabi_memclr8(void*p,U32 n){__aeabi_memclr(p,n);}
@@ -20,12 +20,12 @@ U32 hardware_diag_load_fixture(const W16 *name){W16 p[260];const W16*base=L"\\SD
 /* Each suite's mutable storage is reset before reuse. Initialized writable
    globals are rejected by the builder rather than silently reset incorrectly. */
 #define RANGE(name) extern unsigned char diag_##name##_bss_start[],diag_##name##_bss_end[];
-RANGE(ram) RANGE(vfs) RANGE(timing) RANGE(camera) RANGE(gps) RANGE(network) RANGE(vibration) RANGE(bluetooth) RANGE(gles) RANGE(integer) RANGE(floating) RANGE(glesbench)
+RANGE(ram) RANGE(vfs) RANGE(timing) RANGE(camera) RANGE(gps) RANGE(network) RANGE(vibration) RANGE(bluetooth) RANGE(gles) RANGE(integer) RANGE(floating) RANGE(glesbench) RANGE(memory)
 #define SPAN(name) {diag_##name##_bss_start,diag_##name##_bss_end}
-static unsigned char *ranges[][2]={SPAN(ram),SPAN(vfs),SPAN(timing),SPAN(camera),SPAN(gps),SPAN(network),SPAN(vibration),SPAN(bluetooth),SPAN(gles),SPAN(integer),SPAN(floating),SPAN(glesbench)};
-static U32 (*const suites[])(void)={diag_ram_entry,diag_vfs_entry,diag_timing_entry,diag_camera_entry,diag_gps_entry,diag_network_entry,diag_vibration_entry,diag_bluetooth_entry,diag_gles_entry,diag_integer_entry,diag_floating_entry,diag_glesbench_entry};
-U32 hardware_diag_run(U32 index){unsigned char*p;if(index>=12)return 1;for(p=ranges[index][0];p<ranges[index][1];p++)*p=0;return suites[index]();}
+static unsigned char *ranges[][2]={SPAN(ram),SPAN(vfs),SPAN(timing),SPAN(camera),SPAN(gps),SPAN(network),SPAN(vibration),SPAN(bluetooth),SPAN(gles),SPAN(integer),SPAN(floating),SPAN(glesbench),SPAN(memory)};
+static U32 (*const suites[])(void)={diag_ram_entry,diag_vfs_entry,diag_timing_entry,diag_camera_entry,diag_gps_entry,diag_network_entry,diag_vibration_entry,diag_bluetooth_entry,diag_gles_entry,diag_integer_entry,diag_floating_entry,diag_glesbench_entry,diag_memory_entry};
+U32 hardware_diag_run(U32 index){unsigned char*p;if(index>=13)return 1;for(p=ranges[index][0];p<ranges[index][1];p++)*p=0;return suites[index]();}
 U32 hardware_diag_auxiliary(U32 *handled,U32 instance,U32 previous,const W16*command,U32 show){const W16*s=GetCommandLineW();U32 i=0;*handled=1;
  /* Preserve the actual WinMain command-line ABI check despite private role prefixes. */
  if(match(s,L"--hd-proctest")||match(s,L"--hd-procworker")||match(s,L"--hd-vfsworker")||match(s,L"--hd-lifecycle")){if(!command)return 1;while(s[i]&&command[i]&&s[i]==command[i])i++;if(s[i]!=command[i])return 1;}
-if(match(s,L"--hd-proctest"))return diag_proctest_entry();if(match(s,L"--hd-procworker"))return diag_procworker_entry(instance,previous,argument(command),show);if(match(s,L"--hd-vfsworker"))return diag_vfsworker_entry();if(match(s,L"--hd-lifecycle"))return hardware_diag_lifecycle_entry();if(match(s,L"--hd-integer"))return hardware_diag_run(9);if(match(s,L"--hd-floating"))return hardware_diag_run(10);if(match(s,L"--hd-glesbench"))return hardware_diag_run(11);*handled=0;return 0;}
+if(match(s,L"--hd-proctest"))return diag_proctest_entry();if(match(s,L"--hd-procworker"))return diag_procworker_entry(instance,previous,argument(command),show);if(match(s,L"--hd-vfsworker"))return diag_vfsworker_entry();if(match(s,L"--hd-lifecycle"))return hardware_diag_lifecycle_entry();if(match(s,L"--hd-integer"))return hardware_diag_run(9);if(match(s,L"--hd-floating"))return hardware_diag_run(10);if(match(s,L"--hd-glesbench"))return hardware_diag_run(11);if(match(s,L"--hd-memory"))return hardware_diag_run(12);*handled=0;return 0;}

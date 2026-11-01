@@ -53,6 +53,7 @@ jobs:
           python3 tools/hardware-diag/tests/cpu_benchmark_smoke.py
           python3 tools/hardware-diag/tests/gles_benchmark_smoke.py
           python3 tools/hardware-diag/tests/score_summary_smoke.py
+          python3 tools/hardware-diag/tests/memory_benchmark_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: HARDWARE-DIAG

@@ -3,7 +3,7 @@
 One importable diagnostic application, one native ARM executable:
 `dist/HARDWARE-DIAG.zip`. Import this ZIP into PocketHLE and launch **HARDWARE DIAG**.
 The menu, console, all eight hardware/API suites, OpenGL ES information and both
-CPU benchmarks and the separate OpenGLES cost benchmark are linked into the same `AUTORUN.EXE`. Choosing a menu item runs
+CPU benchmarks, the memory benchmark and the separate OpenGLES cost benchmark are linked into the same `AUTORUN.EXE`. Choosing a menu item runs
 a function on an internal worker thread, not another executable.
 
 The RAM/VFS tests must still create real guest processes to verify process
@@ -15,7 +15,7 @@ second executable is shipped, and no commercial assets or proprietary SDK are us
 ## Use
 
 - Up/Down selects a suite; Enter, Space or the Gizmondo action button runs it.
-  Touch users can tap a menu row. `Run all tests` executes the twelve entries.
+  Touch users can tap a menu row. `Run all tests` executes the thirteen entries.
 - The console shows live checks and elapsed time while the worker runs.
   Up/Down scrolls it; after completion, Enter/Back or the bottom touch area
   returns to the menu. Each menu item retains its last PASS/FAIL result.
@@ -177,14 +177,14 @@ remain comparable to previous versions. They are NOT replaced by a mixture of
 unrelated workloads. The full suite fails if any added computation fails, even
 when its historical v1 score remains valid.
 
-Integer adds seven probes: direct ARM uint32 multiply/add, unsigned and signed
+Integer adds eight probes: direct ARM uint32 multiply/add, unsigned and signed
 32-bit quotient+remainder, direct paired-word uint64 addition/shifts, runtime
 64-bit multiplication, and unsigned/signed 64-by-64 division. The division tests
 use nonzero varied divisors and validate BOTH quotient/remainder return words
 where that WinCE ABI provides them. Inputs cover positive/negative bit patterns,
 values with populated high words, carries and wrapping products.
 
-Floating adds nine probes: separate float32 addition, multiplication, division,
+Floating adds ten probes: separate float32 addition, multiplication, division,
 square root, signed-int32/float32 roundtrip, float32/float64 roundtrip, float64
 add+multiply, float64 division and float64 square root. Normal signed values and
 zero are used; roots receive nonnegative values. The double-precision vector
@@ -201,7 +201,7 @@ checksum consumes every result, including high words, and is verified against
 fixed independent expected values in warmup AND every measured block. A bad
 result/clock suppresses that probe's score. Other probes continue so the report
 still identifies which categories fail. Allow roughly 15 seconds for Integer
-and 20 seconds for Floating; slower runtime handlers may take longer.
+and 22 seconds for Floating; slower runtime handlers may take longer.
 
 `tests/cpu_benchmark_reference.py` contains an independent host arithmetic oracle
 for the fixed vectors, rounding and expected checksums. The build does NOT
@@ -239,3 +239,46 @@ GitHub Actions publishes `HARDWARE-DIAG` from its independent HARDWARE DIAG job;
 the archive contains one integrated ARM executable. This job also verifies the
 archive, ARM benchmark/report wiring, and score-page navigation. Re-import the
 new diagnostic ZIP to update the executable inside PocketHLE.
+
+## GLBenchmark-style CPU series
+
+The existing per-case IDs and legacy scores are retained. Integer case 7
+(`series_i32_signed_divide`) adds an alternating sum of 100000000 divided by
+consecutive odd integers, through `__rt_sdiv`. Floating case 9
+(`series_f32_runtime`) adds a float32 alternating reciprocal series, using
+`__muls`, `__divs`, `__adds`, `__subs`, `__lts` and `__nes`: seven runtime
+calls per iteration. Both use 1024 iterations with checked fixed results.
+These independently written bounded probes exercise the operation families
+observed in GLBenchmark 1.1.5's CPU loops. They do not reproduce its timing,
+iteration count, binary or score, and cannot be compared numerically with it.
+
+Integer, Floating and Memory display a black screen with centered
+“Running benchmark...” before starting their worker, then a score page.
+
+## Memory benchmark
+
+The same ARM EXE now includes **Memory benchmark**, producing `MEMORY.TXT`.
+It allocates two guarded 2 MiB buffers. Ten independently scored workloads:
+
+| Workload | Unit | Better |
+| --- | --- | --- |
+| Sequential ARM reads: 16 KiB, 256 KiB, 2 MiB | MiB/s | Higher |
+| Sequential ARM write: 2 MiB | MiB/s | Higher |
+| ARM copy, WinCE memcpy, WinCE memset: 2 MiB | MiB/s | Higher |
+| Read one word per 4 KiB page over 2 MiB | Million accesses/s | Higher |
+| Dependent pointer chains: 16 KiB, 2 MiB | ns/access | Lower |
+
+Each case warms up and takes three samples targeting 300 ms, with a bounded
+block cap. The median is shown on a single screenshot-friendly page. Logical
+payload bytes count once for copies; these are not estimates of bus traffic.
+Setup, full output verification and report writes are outside timed intervals;
+read checksums and loop overhead are included. Fixed results and guards are
+checked, and invalid results, clocks or allocation failures suppress scores.
+The existing RAM correctness suite remains independent and unchanged.
+
+The dependent chains make each load depend on the preceding result. The page
+stride exercises guest translation/memory paths; neither probe certifies host
+cache misses or physical RAM latency. All figures measure this ARM guest in
+PocketHLE, including emulator overhead, not the physical memory of an original
+PocketPC or Gizmondo. There is no misleading combined score across unlike units.
+Stop and relaunch HARDWARE DIAG after changing emulator optimizations.

@@ -13,20 +13,17 @@ internal fun displayRect(viewW: Int, viewH: Int, shownW: Int, shownH: Int, facto
     val h=shownH*scale
     return DisplayRect((viewW-w)/2,(viewH-h)/2,w,h)
 }
-/** VGA uses the same QVGA presentation grid: e.g. 640x480 -> 960x720 at x3.
- * This changes display size only; touch still addresses all native source pixels. */
-internal fun pocketPcDisplayRect(viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,factor: Int): DisplayRect {
-    val vga=(nativeW==640 && nativeH==480) || (nativeW==480 && nativeH==640)
-    val unit=if(vga) 2 else 1
-    return displayRect(viewW,viewH,nativeW/unit,nativeH/unit,if(factor<=0) 4 else factor.coerceAtMost(4))
-}
-/** Presentation uses the actual rendered pixels; guest coordinates stay logical.
- * Preserve the legacy VGA policy only when there is no separate rendered image. */
+/** Integer zoom is relative to the produced image, including native VGA. */
+internal fun pocketPcDisplayRect(viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,factor: Int): DisplayRect =
+    displayRect(viewW,viewH,nativeW,nativeH,if(factor<=0) 4 else factor.coerceAtMost(4))
+
+/** Presentation uses rendered pixels; inverse input still uses logical coordinates. */
 internal fun renderedDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int,renderW:Int,renderH:Int,turn:Int,factor:Int,pocketPc:Boolean=false,fullscreen:Boolean=false):DisplayRect {
+    require(nativeW>0 && nativeH>0 && renderW>0 && renderH>0)
     val quarter=turn==90 || turn==270
     val w=if(quarter) renderH else renderW;val h=if(quarter) renderW else renderH
     return if(fullscreen) aspectDisplayRect(viewW,viewH,w,h)
-        else if(pocketPc && renderW==nativeW && renderH==nativeH) pocketPcDisplayRect(viewW,viewH,w,h,factor)
+        else if(pocketPc) pocketPcDisplayRect(viewW,viewH,w,h,factor)
         else displayRect(viewW,viewH,w,h,factor)
 }
 internal fun displayPointToGuest(x: Float,y: Float,viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,turn: Int,factor: Int,pocketPc: Boolean=false,fullscreen: Boolean=false,renderW:Int=nativeW,renderH:Int=nativeH): Pair<Int,Int>? {

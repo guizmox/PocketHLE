@@ -3860,9 +3860,12 @@ impl PocketLauncher {
                 );
             }
             _ => {
-                let label_size = (rect.width() * 0.16)
+                let mut label_size = (rect.width() * 0.16)
                     .clamp(8., 12.)
                     .min(((rect.width() - 8.) / (caption.len().max(1) as f32 * 0.65)).max(6.));
+                if matches!(icon, GizIcon::Function(_)) {
+                    label_size = (label_size * 2.0 / 3.0).max(6.0);
+                }
                 let center = rect.center() - Vec2::new(0., label_size * 0.60);
                 paint_giz_icon(
                     ui.painter(),

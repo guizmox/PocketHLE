@@ -83,8 +83,9 @@ class Guest:
     else:
      x=f64(wide);y=f64(self.arg(2)|(self.arg(3)<<32));value=bits64(x+y if name=='__addd' else x*y if name=='__muld' else x/y)
     v=value&0xffffffff;high=value>>32
-  elif name in ('__adds','__muls','__divs'):
-   f=lambda x:struct.unpack('<f',struct.pack('<I',x))[0];x,y=f(self.arg(0)),f(self.arg(1));v=struct.unpack('<I',struct.pack('<f',x+y if name=='__adds' else x*y if name=='__muls' else x/y))[0]
+  elif name in ('__adds','__muls','__divs','__subs','__lts','__nes'):
+   f=lambda x:struct.unpack('<f',struct.pack('<I',x))[0];x,y=f(self.arg(0)),f(self.arg(1));v=struct.unpack('<I',struct.pack('<f',x+y if name=='__adds' else x*y if name=='__muls' else x-y if name=='__subs' else x/y if name=='__divs' else float(x<y) if name=='__lts' else float(x!=y)))[0]
+   if name in ('__lts','__nes'):v=int(x<y) if name=='__lts' else int(x!=y)
   elif name=='RegisterClassW':self.proc=self.word(self.arg(0)+4)
   elif name=='CreateWindowExW':v=0xdead0001
   elif name=='TextOutW':self.text.append(self.wide(self.arg(3))[:self.arg(4)])

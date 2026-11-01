@@ -71,7 +71,9 @@ for mode, names in [('integer', ref.INT_CASES), ('floating', ref.FLOAT_CASES)]:
     print(mode, 'ARM v2: all cases, independent checksums, separate legacy score, 3-pass medians PASS')
 
 for mode, api, bad_name in [('integer', '__ll_mul', 'u64_multiply_runtime'),
-                            ('floating', '__divs', 'f32_divide_runtime')]:
+                            ('floating', '__divs', 'f32_divide_runtime'),
+                            ('integer', '__rt_sdiv', 'series_i32_signed_divide'),
+                            ('floating', '__lts', 'series_f32_runtime')]:
     g = CostGuest(mode, corrupt=api)
     text = g.report()
     assert g.exit == 1 and 'CPU_COST_PROBES_RESULT FAIL' in text, text

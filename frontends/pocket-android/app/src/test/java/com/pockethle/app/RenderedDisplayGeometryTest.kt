@@ -32,7 +32,8 @@ class RenderedDisplayGeometryTest {
                 320,240,turn,2,true,false,640,480))
         }
     }
-    @Test fun nativeGamesAndControllerFullscreenKeepTheirPolicies() {
+    @Test fun nativeVgaAndControllerFullscreenUseProducedGeometry() {
+        assertEquals(DisplayRect(320,240,1280,960),renderedDisplayRect(1920,1440,640,480,640,480,0,2,true))
         assertEquals(pocketPcDisplayRect(1920,1440,640,480,3),
             renderedDisplayRect(1920,1440,640,480,640,480,0,3,true))
         for (turn in listOf(0,90,180,270)) {
