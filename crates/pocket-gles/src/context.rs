@@ -276,6 +276,7 @@ pub struct Context {
     gpu: Option<crate::gpu::Renderer>,
     gpu_requested: bool,
     anisotropic_filtering: u8,
+    internal_resolution: u8,
     gpu_failed: bool,
     // ---- transform state ----
     pub matrix_mode: MatrixMode,
@@ -364,6 +365,7 @@ impl Context {
             gpu: None,
             gpu_requested: false,
             anisotropic_filtering: 0,
+            internal_resolution: 1,
             gpu_failed: false,
             matrix_mode: MatrixMode::Modelview,
             modelview: MatrixStack::new(16),
@@ -434,18 +436,31 @@ impl Context {
         }
     }
 
+    /// Host-only GPU pixel density; guest surfaces, queries and reads stay logical.
+    pub fn set_internal_resolution(&mut self, scale: u8) {
+        self.internal_resolution = if scale == 2 { 2 } else { 1 };
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.set_render_scale(self.internal_resolution) {
+                self.gpu_failure("internal resolution", e);
+            }
+        }
+    }
+
+    pub fn scaled_rgb565_into(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        if self.gpu_failed {
+            return None;
+        }
+        self.gpu.as_ref()?.scaled_rgb565_into(out)
+    }
+
     /// Select before guest rendering begins. Initialization failure keeps software.
     pub fn enable_gpu(&mut self) -> Result<(), String> {
         self.gpu_requested = true;
         if self.gpu.is_none() {
-            self.gpu = Some(crate::gpu::Renderer::new(
-                self.target.width,
-                self.target.height,
-            )?);
-            self.gpu
-                .as_mut()
-                .unwrap()
-                .set_anisotropic_filtering(self.anisotropic_filtering);
+            let mut gpu = crate::gpu::Renderer::new(self.target.width, self.target.height)?;
+            gpu.set_anisotropic_filtering(self.anisotropic_filtering);
+            gpu.set_render_scale(self.internal_resolution)?;
+            self.gpu = Some(gpu);
         }
         Ok(())
     }
@@ -2459,6 +2474,41 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires host OpenGL; context configuration and full resolution presentation"]
+    fn internal_resolution_context_exports_sharp_host_image_and_native_guest_image() {
+        let mut c = Context::new(16, 16);
+        c.set_internal_resolution(2);
+        c.enable_gpu().unwrap();
+        c.clear_color = [1., 0., 0., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        let mut guest = vec![0; 16 * 16 * 2];
+        c.present_rgb565(&mut guest);
+        assert_eq!((c.target.width, c.target.height), (16, 16));
+        assert_eq!(&guest[..2], &0xf800u16.to_le_bytes());
+        let mut host = Vec::new();
+        assert_eq!(c.scaled_rgb565_into(&mut host), Some((32, 32)));
+        assert_eq!(host.len(), 32 * 32 * 2);
+        c.set_internal_resolution(1);
+        c.clear_color = [0., 0., 1., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.present_rgb565(&mut guest);
+        assert_eq!(&guest[..2], &0x001fu16.to_le_bytes());
+        assert_eq!(c.scaled_rgb565_into(&mut host), None);
+    }
+
+    #[test]
+    fn internal_resolution_never_changes_software_geometry_or_creates_a_gpu() {
+        let mut c = Context::new(240, 320);
+        c.set_internal_resolution(2);
+        assert!(!c.gpu_active());
+        assert_eq!((c.target.width, c.target.height), (240, 320));
+        assert_eq!(c.state.viewport, (0, 0, 240, 320));
+        assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), None);
+        c.set_internal_resolution(99);
+        assert_eq!(c.internal_resolution, 1);
+    }
+
     #[test]
     fn finish_and_flush_leave_synchronous_software_state_intact() {
         let mut c = Context::new(16, 16);

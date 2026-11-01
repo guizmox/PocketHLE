@@ -19,8 +19,6 @@ import android.view.View
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import org.json.JSONObject
 import android.content.pm.ActivityInfo
 import android.view.KeyEvent
@@ -600,14 +598,8 @@ class GameActivity : AppCompatActivity() {
     // -------------------------------------------------------------------
 
     private fun decodeFrame(raw: ByteArray): FrameSnapshot? {
-        if (raw.size < 8) return null
-        val buf = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-        val w = buf.int
-        val h = buf.int
-        if (w <= 0 || h <= 0) return null
-        val pixelBytes = w * h * 4
-        if (raw.size < 8 + pixelBytes) return null
-        return FrameSnapshot(w, h, raw, 8)
+        val frame = decodeFramePayload(raw) ?: return null
+        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight)
     }
 
     private fun updateFpsOverlay() {
@@ -1153,6 +1145,8 @@ class GameActivity : AppCompatActivity() {
         val height: Int,
         val rgba: ByteArray,
         val rgbaOffset: Int,
+        val textureWidth: Int = width,
+        val textureHeight: Int = height,
     )
 
     companion object {

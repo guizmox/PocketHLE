@@ -679,6 +679,7 @@ fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
                 .gpu_renderer
                 .unwrap_or(lib.config().gpu_renderer),
         );
+        emu.set_gles_internal_resolution(lib.config().gles_internal_resolution);
         emu.set_anisotropic_filtering(
             entry
                 .settings
@@ -954,25 +955,40 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollFrame<'loca
         // showing the previous content of the SurfaceView.
         return std::ptr::null_mut();
     };
-    let total = 8usize.saturating_add(frame.rgba.len());
-    let array = match env.new_byte_array(total as i32) {
+    // Native (1x) keeps the original eight-byte wire header. High resolution
+    // has a negative marker, logical dimensions and physical texture dimensions.
+    let words = if (frame.width, frame.height) == (frame.texture_width, frame.texture_height) {
+        vec![frame.width, frame.height]
+    } else {
+        vec![
+            u32::MAX,
+            frame.width,
+            frame.height,
+            frame.texture_width,
+            frame.texture_height,
+        ]
+    };
+    let header: Vec<i8> = words
+        .iter()
+        .flat_map(|word| word.to_le_bytes().map(|byte| byte as i8))
+        .collect();
+    let total = header.len().saturating_add(frame.rgba.len());
+    let Ok(total) = i32::try_from(total) else {
+        return std::ptr::null_mut();
+    };
+    let array = match env.new_byte_array(total) {
         Ok(array) => array,
         Err(e) => {
             log::error!("could not allocate jbyteArray: {e}");
             return std::ptr::null_mut();
         }
     };
-    let mut header = [0i8; 8];
-    for (dst, src) in header[..4].iter_mut().zip(frame.width.to_le_bytes()) {
-        *dst = src as i8;
-    }
-    for (dst, src) in header[4..].iter_mut().zip(frame.height.to_le_bytes()) {
-        *dst = src as i8;
-    }
     let rgba =
         unsafe { std::slice::from_raw_parts(frame.rgba.as_ptr() as *const i8, frame.rgba.len()) };
     if env.set_byte_array_region(&array, 0, &header).is_err()
-        || env.set_byte_array_region(&array, 8, rgba).is_err()
+        || env
+            .set_byte_array_region(&array, header.len() as i32, rgba)
+            .is_err()
     {
         log::error!("could not fill jbyteArray");
         return std::ptr::null_mut();

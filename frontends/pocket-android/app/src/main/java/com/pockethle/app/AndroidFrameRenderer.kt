@@ -59,10 +59,10 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
         try {
             glBindVertexArray(vao)
             if (uploaded !== frame) {
-                var bytes = frame.rgba.copyOfRange(frame.rgbaOffset, frame.rgbaOffset+frame.width*frame.height*4)
-                textureW=frame.width;textureH=frame.height
+                var bytes = frame.rgba.copyOfRange(frame.rgbaOffset, frame.rgbaOffset+frame.textureWidth*frame.textureHeight*4)
+                textureW=frame.textureWidth;textureH=frame.textureHeight
                 if (filter == "xbrz") {
-                    bytes = NativeBridge.upscaleXbrz(bytes,frame.width,frame.height) ?: error("xBRZ failed")
+                    bytes = NativeBridge.upscaleXbrz(bytes,frame.textureWidth,frame.textureHeight) ?: error("xBRZ failed")
                     textureW *= 3; textureH *= 3
                 }
                 glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture)

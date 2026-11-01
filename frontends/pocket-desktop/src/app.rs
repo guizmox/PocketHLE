@@ -1121,9 +1121,16 @@ impl PocketLauncher {
         frame: &FrameSnapshot,
         factor: u32,
     ) -> Result<image::RgbaImage, String> {
-        let source = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
-            .ok_or_else(|| "invalid RGBA framebuffer size".to_string())?;
-        if factor == 1 {
+        let source = image::RgbaImage::from_raw(
+            frame.texture_width,
+            frame.texture_height,
+            frame.rgba.clone(),
+        )
+        .ok_or_else(|| "invalid RGBA framebuffer size".to_string())?;
+        if factor == 1
+            || (frame.texture_width >= frame.width * factor
+                && frame.texture_height >= frame.height * factor)
+        {
             return Ok(source);
         }
         Ok(image::imageops::resize(
@@ -2318,6 +2325,20 @@ impl PocketLauncher {
                     });
                     ui.end_row();
                 }
+                ui.label("OpenGLES internal resolution (GPU only)");
+                ui.add_enabled_ui(draft.gpu_renderer, |ui| {
+                    crate::controller_ui::ComboBox::from_id_source("gles_internal_resolution")
+                        .selected_text(if draft.gles_internal_resolution == 2 { "2×" } else { "Native (1×)" })
+                        .show_ui(ui, |ui| {
+                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 1, "Native (1×)");
+                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 2, "2×");
+                        });
+                }).response.on_hover_text("Renders OpenGLES games at twice the width and height (320×240 → 640×480). Sharper 3D geometry; more GPU and readback work. Does not add detail to 2D assets or change touch coordinates. Applies next launch.");
+                ui.end_row();
+                ui.label("");
+                ui.small("2× increases OpenGLES rendering resolution. Screen layout and display zoom stay unchanged.");
+                ui.end_row();
+
                 ui.label("Anisotropic filtering (GPU only)");
                 ui.add_enabled_ui(draft.gpu_renderer, |ui| {
                     crate::controller_ui::ComboBox::from_id_source("global_anisotropy")

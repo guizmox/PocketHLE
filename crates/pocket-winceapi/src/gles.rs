@@ -148,7 +148,11 @@ fn flush_pixmap(ctx: &mut CallCtx<'_>, surface: u32) -> Result<(), KernelError> 
     crate::coredll::sync_bitmap_to_guest(ctx, bitmap)
 }
 
-/// Opt-in host GPU renderer. Must be called on the emulation thread.
+/// Host GPU pixel density. Guest geometry remains unchanged.
+pub fn set_internal_resolution(scale: u8) {
+    with_ctx(|c| c.set_internal_resolution(scale));
+}
+
 pub fn set_anisotropic_filtering(level: u8) {
     with_ctx(|c| c.set_anisotropic_filtering(level));
 }
@@ -2130,7 +2134,8 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     }
     let fb_len = ctx.kernel.framebuffer.pixels.len();
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
-    with_ctx(|c| {
+    let mut rendered = ctx.kernel.framebuffer.take_render_pixels();
+    let physical = with_ctx(|c| {
         // A guest that never called eglCreateWindowSurface — or a
         // frontend that resized the window since — leaves the two out
         // of step. Match the framebuffer, since that is what is shown.
@@ -2138,8 +2143,14 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             c.target.resize(w, h);
         }
         c.present_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
+        c.scaled_rgb565_into(&mut rendered)
     });
     ctx.kernel.framebuffer.mark_dirty();
+    if let Some((width, height)) = physical {
+        ctx.kernel
+            .framebuffer
+            .set_render_presentation(width, height, rendered);
+    }
     // The conversion above replaces the framebuffer, including any video
     // composed by the message pump. Invalidate that presentation before
     // DirectShow checks its cached frame, even if no new video frame is due.

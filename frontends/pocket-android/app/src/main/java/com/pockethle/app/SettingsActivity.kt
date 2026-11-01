@@ -353,7 +353,14 @@ class SettingsActivity : AppCompatActivity() {
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="gpu_renderer"; title="GPU rendering"; isPersistent=false; isChecked=current.gpuRenderer
                 summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
-                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("anisotropic_filtering")?.isEnabled=current.gpuRenderer;writeConfig();true }
+                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("anisotropic_filtering")?.isEnabled=current.gpuRenderer;findPreference<ListPreference>("gles_internal_resolution")?.isEnabled=current.gpuRenderer;writeConfig();true }
+            })
+            findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
+                key="gles_internal_resolution"; title="OpenGLES internal resolution (GPU only)"; isPersistent=false
+                entries=arrayOf("Native (1×)", "2×"); entryValues=arrayOf("1", "2")
+                value=current.glesInternalResolution.toString(); isEnabled=current.gpuRenderer
+                summary="2× renders twice the width and height for sharper 3D geometry, with more GPU/readback work. Does not add detail to 2D assets or change touch coordinates, layout or display zoom. Applies next launch."
+                setOnPreferenceChangeListener { _, v -> current=current.copy(glesInternalResolution=v.toString().toInt());writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="anisotropic_filtering"; title="Anisotropic filtering (GPU only)"; isPersistent=false
@@ -451,7 +458,7 @@ class SettingsActivity : AppCompatActivity() {
                     saved.optBoolean("android_gizmondo_maximize_screen") != current.gizmondoMaximizeScreen)) {
                 android.widget.Toast.makeText(context, "Screen size setting was not saved. Rebuild the native libraries and APK together.", android.widget.Toast.LENGTH_LONG).show()
             }
-            val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering
+            val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering && saved.has("gles_internal_resolution") && saved.optInt("gles_internal_resolution") == current.glesInternalResolution
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_gizmondo_controls_size", "") != current.gizmondoControlsSize) {
                 android.widget.Toast.makeText(context, "Control size could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
             }

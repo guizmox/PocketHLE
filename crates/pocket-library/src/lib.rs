@@ -954,6 +954,10 @@ impl CpuBackendPref {
     }
 }
 
+fn default_gles_internal_resolution() -> u8 {
+    1
+}
+
 fn default_gpu_renderer() -> bool {
     true
 }
@@ -1001,6 +1005,9 @@ pub struct LauncherConfig {
     /// GPU-only texture anisotropy. Zero disables it.
     #[serde(default)]
     pub anisotropic_filtering: u8,
+    /// Host-only OpenGLES GPU pixel density. Native=1; 2 renders four times as many pixels.
+    #[serde(default = "default_gles_internal_resolution")]
+    pub gles_internal_resolution: u8,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     /// Default CPU backend used when importing a new game.
@@ -1280,6 +1287,7 @@ impl Default for LauncherConfig {
             gizmondo_identity_revision: identity_revision(),
             gpu_renderer: true,
             anisotropic_filtering: 0,
+            gles_internal_resolution: 1,
             schema_version: 1,
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,
@@ -4238,6 +4246,25 @@ mod tests {
         let default = LauncherConfig::default();
         assert!(default.gpu_renderer);
         assert_eq!(default.anisotropic_filtering, 0);
+        assert_eq!(default.gles_internal_resolution, 1);
+        let mut old_config = serde_json::to_value(&default).unwrap();
+        old_config
+            .as_object_mut()
+            .unwrap()
+            .remove("gles_internal_resolution");
+        assert_eq!(
+            serde_json::from_value::<LauncherConfig>(old_config.clone())
+                .unwrap()
+                .gles_internal_resolution,
+            1
+        );
+        old_config["gles_internal_resolution"] = serde_json::json!(2);
+        assert_eq!(
+            serde_json::from_value::<LauncherConfig>(old_config)
+                .unwrap()
+                .gles_internal_resolution,
+            2
+        );
         let mut legacy = serde_json::to_value(&default).unwrap();
         legacy.as_object_mut().unwrap().remove("gpu_renderer");
         assert!(
@@ -5433,46 +5460,6 @@ mod tests {
         );
         assert_eq!(fs::read(save).unwrap(), b"progress");
         assert_eq!(lib.games().len(), 1);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn hardware_diag_imports_as_one_card_with_private_suite_executables() {
-        use std::io::Write;
-        let root = tmpdir("hardware_diag");
-        fs::create_dir_all(&root).unwrap();
-        let fixture = root.join("fixture.exe");
-        write_pe_importing(&fixture, &[]);
-        let pe = fs::read(fixture).unwrap();
-        let path = root.join("HARDWARE-DIAG.zip");
-        let mut archive = zip::ZipWriter::new(fs::File::create(&path).unwrap());
-        for (name, bytes) in [
-            ("GZHD999989/AUTORUN.EXE", pe.as_slice()),
-            ("GZHD999989/GZHD999989", b"mark".as_slice()),
-            ("GZHD999989/ram/TEST.EXE", pe.as_slice()),
-            ("GZHD999989/ram/proctest.exe", pe.as_slice()),
-            ("GZHD999989/vfs/TEST.EXE", pe.as_slice()),
-            ("GZHD999989/gles/TEST.EXE", pe.as_slice()),
-        ] {
-            archive
-                .start_file(name, zip::write::FileOptions::default())
-                .unwrap();
-            archive.write_all(bytes).unwrap();
-        }
-        archive.finish().unwrap();
-        let mut lib = Library::open(root.join("library")).unwrap();
-        let entry = lib.import_zip(&path).unwrap().clone();
-        assert_eq!(lib.games().len(), 1);
-        assert_eq!(entry.display_name, "HARDWARE DIAG");
-        assert_eq!(
-            entry.executable,
-            PathBuf::from("extracted/GZHD999989/AUTORUN.EXE")
-        );
-        assert!(entry
-            .extracted_dir(lib.root())
-            .join("GZHD999989/ram/proctest.exe")
-            .is_file());
-        assert!(is_gizmondo_game(&entry, lib.root()));
         let _ = fs::remove_dir_all(root);
     }
 

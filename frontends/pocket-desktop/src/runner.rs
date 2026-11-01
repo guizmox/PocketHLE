@@ -260,6 +260,7 @@ impl Runner {
                 .gpu_renderer
                 .unwrap_or(launcher_config.gpu_renderer),
         );
+        emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
         emu.set_anisotropic_filtering(
             game.settings
                 .anisotropic_filtering
@@ -700,18 +701,24 @@ pub struct FrameSnapshot {
     pub presentation_stats: pocket_core::kernel::framebuffer::PresentationStats,
     pub width: u32,
     pub height: u32,
+    pub texture_width: u32,
+    pub texture_height: u32,
     pub rgba: Vec<u8>,
     pub text_input: bool,
 }
 
 impl FrameSnapshot {
     fn from_framebuffer(fb: &pocket_core::kernel::Framebuffer) -> Self {
+        let mut rgba = Vec::new();
+        fb.snapshot_presentation_rgba8888_into(&mut rgba);
         Self {
             presentation_stats: fb.presentation_stats.clone(),
             text_input: false,
             width: fb.width,
             height: fb.height,
-            rgba: fb.snapshot_rgba8888(),
+            texture_width: fb.presentation_size().0,
+            texture_height: fb.presentation_size().1,
+            rgba,
         }
     }
 
@@ -719,12 +726,14 @@ impl FrameSnapshot {
     /// `rgba` buffer the caller owns. Saves the per-frame 300 KiB
     /// allocation that the naive constructor does.
     fn fill_from_framebuffer(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
-        fb.snapshot_rgba8888_into(scratch);
+        fb.snapshot_presentation_rgba8888_into(scratch);
         Self {
             presentation_stats: fb.presentation_stats.clone(),
             text_input: false,
             width: fb.width,
             height: fb.height,
+            texture_width: fb.presentation_size().0,
+            texture_height: fb.presentation_size().1,
             // `std::mem::take` hands ownership of the scratch buffer
             // to the snapshot we are about to ship across the
             // channel and leaves an empty `Vec` behind. The next
@@ -1532,5 +1541,23 @@ mod geofence_refresh_tests {
         tx.send(InputCommand::RefreshColorsGps).unwrap();
         assert!(!hook.drain_input(&mut pending));
         assert!(hook.refresh_colors_gps);
+    }
+}
+
+#[cfg(test)]
+mod internal_resolution_tests {
+    use super::FrameSnapshot;
+    #[test]
+    fn physical_texture_does_not_change_logical_input_or_zoom_dimensions() {
+        let mut fb = pocket_core::kernel::Framebuffer::new(2, 1);
+        fb.set_render_presentation(4, 2, vec![255; 4 * 2 * 2]);
+        let frame = FrameSnapshot::from_framebuffer(&fb);
+        assert_eq!((frame.width, frame.height), (2, 1));
+        assert_eq!((frame.texture_width, frame.texture_height), (4, 2));
+        assert_eq!(frame.rgba.len(), 4 * 2 * 4);
+        fb.mark_dirty();
+        let frame = FrameSnapshot::from_framebuffer(&fb);
+        assert_eq!((frame.texture_width, frame.texture_height), (2, 1));
+        assert_eq!(frame.rgba.len(), 2 * 1 * 4);
     }
 }

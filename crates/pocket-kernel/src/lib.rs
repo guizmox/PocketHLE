@@ -58,7 +58,6 @@ pub mod image_memory;
 pub mod imaging;
 pub mod internet;
 pub mod memory_division;
-mod mips_native_thunks;
 pub mod msgbox;
 pub mod native_thunks;
 pub mod power;
@@ -2000,6 +1999,8 @@ impl KernelState {
             return std::borrow::Cow::Borrowed(&self.framebuffer);
         }
         let mut frame = self.framebuffer.clone();
+        // Native GDI/SIP overlays use guest coordinates and take precedence.
+        frame.clear_render_presentation();
         if self.gdi.shell_menus.tracking.is_some() {
             self.gdi.shell_menus.render(
                 shell_menu::TRACKING_HANDLE,
@@ -3877,7 +3878,7 @@ impl Process {
             };
             let native =
                 if image.machine == machine::MIPS_R3000 || image.machine == machine::MIPS_R4000 {
-                    native_name.and_then(|n| mips_native_thunks::native_thunk_for(&imp.dll, n))
+                    None
                 } else {
                     native_name.and_then(|n| native_thunks::native_thunk_at(&imp.dll, n, thunk_va))
                 };

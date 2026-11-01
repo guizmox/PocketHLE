@@ -109,18 +109,20 @@ impl Reconstruction {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
             if let Some(frame) = self.pending.take() {
-                if frame.rgba.len() != frame.width as usize * frame.height as usize * 4 {
+                if frame.rgba.len()
+                    != frame.texture_width as usize * frame.texture_height as usize * 4
+                {
                     return;
                 }
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                if self.size == [frame.width, frame.height] {
+                if self.size == [frame.texture_width, frame.texture_height] {
                     gl.tex_sub_image_2d(
                         glow::TEXTURE_2D,
                         0,
                         0,
                         0,
-                        frame.width as i32,
-                        frame.height as i32,
+                        frame.texture_width as i32,
+                        frame.texture_height as i32,
                         glow::RGBA,
                         glow::UNSIGNED_BYTE,
                         glow::PixelUnpackData::Slice(&frame.rgba),
@@ -130,14 +132,14 @@ impl Reconstruction {
                         glow::TEXTURE_2D,
                         0,
                         glow::RGBA8 as i32,
-                        frame.width as i32,
-                        frame.height as i32,
+                        frame.texture_width as i32,
+                        frame.texture_height as i32,
                         0,
                         glow::RGBA,
                         glow::UNSIGNED_BYTE,
                         Some(&frame.rgba),
                     );
-                    self.size = [frame.width, frame.height];
+                    self.size = [frame.texture_width, frame.texture_height];
                 }
                 for name in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
                     gl.tex_parameter_i32(glow::TEXTURE_2D, name, glow::LINEAR as i32);
@@ -211,14 +213,19 @@ impl Reconstruction {
 fn prepare_frame(frame: &FrameSnapshot, filter: i32) -> FrameSnapshot {
     let mut output = frame.clone();
     if filter == 6
-        && frame.width > 0
-        && frame.height > 0
-        && frame.rgba.len() == frame.width as usize * frame.height as usize * 4
+        && frame.texture_width > 0
+        && frame.texture_height > 0
+        && frame.rgba.len() == frame.texture_width as usize * frame.texture_height as usize * 4
     {
         // Bound CPU work to x3; monitor scaling remains a separate GPU operation.
-        output.rgba = xbrz::scale_rgba(&frame.rgba, frame.width as usize, frame.height as usize, 3);
-        output.width *= 3;
-        output.height *= 3;
+        output.rgba = xbrz::scale_rgba(
+            &frame.rgba,
+            frame.texture_width as usize,
+            frame.texture_height as usize,
+            3,
+        );
+        output.texture_width *= 3;
+        output.texture_height *= 3;
     }
     output
 }
@@ -240,10 +247,13 @@ mod tests {
             text_input: false,
             width: 16,
             height: 16,
+            texture_width: 16,
+            texture_height: 16,
             rgba,
         };
         let scaled = prepare_frame(&native, 6);
-        assert_eq!((scaled.width, scaled.height), (48, 48));
+        assert_eq!((scaled.width, scaled.height), (16, 16));
+        assert_eq!((scaled.texture_width, scaled.texture_height), (48, 48));
         assert_eq!(scaled.rgba.len(), 48 * 48 * 4);
         assert!(scaled.rgba.chunks_exact(4).any(|p| p[0] > 0 && p[0] < 255));
         let pixel = |x: usize, y: usize| &scaled.rgba[(y * 48 + x) * 4..(y * 48 + x) * 4 + 3];

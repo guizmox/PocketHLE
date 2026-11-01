@@ -137,6 +137,10 @@ impl Emulator {
         pocket_winceapi::gles::set_gpu_renderer(enabled);
     }
 
+    pub fn set_gles_internal_resolution(&mut self, scale: u8) {
+        pocket_winceapi::gles::set_internal_resolution(scale);
+    }
+
     pub fn set_anisotropic_filtering(&mut self, level: u8) {
         pocket_winceapi::gles::set_anisotropic_filtering(level);
     }

@@ -160,6 +160,14 @@ impl PresentationStats {
     }
 }
 
+/// Optional host presentation image; never mapped into guest address space.
+#[derive(Debug, Clone)]
+struct RenderPresentation {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
 /// A simple RGB565 framebuffer.
 #[derive(Debug, Clone)]
 pub struct Framebuffer {
@@ -176,6 +184,7 @@ pub struct Framebuffer {
     pub directdraw: DirectDrawTiming,
     /// Host presentation only; RGB565 guest pixels remain unchanged.
     backlight_level: u32,
+    render_presentation: Option<RenderPresentation>,
 }
 
 impl Default for Framebuffer {
@@ -195,6 +204,7 @@ impl Framebuffer {
             presentation_stats: PresentationStats::default(),
             directdraw: DirectDrawTiming::default(),
             backlight_level: 11,
+            render_presentation: None,
         }
     }
 
@@ -257,7 +267,61 @@ impl Framebuffer {
     }
 
     pub fn mark_dirty(&mut self) {
+        self.render_presentation = None;
         self.frame_counter = self.frame_counter.wrapping_add(1);
+    }
+
+    pub fn clear_render_presentation(&mut self) {
+        self.render_presentation = None;
+    }
+
+    /// Reuse the large host buffer across EGL presentations.
+    pub fn take_render_pixels(&mut self) -> Vec<u8> {
+        self.render_presentation
+            .take()
+            .map_or_else(Vec::new, |image| image.pixels)
+    }
+
+    pub fn set_render_presentation(&mut self, width: u32, height: u32, pixels: Vec<u8>) {
+        let valid = width > 0
+            && height > 0
+            && self.width.checked_mul(2) == Some(width)
+            && self.height.checked_mul(2) == Some(height)
+            && (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|n| n.checked_mul(2))
+                == Some(pixels.len());
+        self.render_presentation = valid.then_some(RenderPresentation {
+            width,
+            height,
+            pixels,
+        });
+    }
+
+    /// Physical source image size, independent of guest/touch/display geometry.
+    pub fn presentation_size(&self) -> (u32, u32) {
+        self.render_presentation
+            .as_ref()
+            .map_or((self.width, self.height), |image| {
+                (image.width, image.height)
+            })
+    }
+
+    pub fn snapshot_presentation_rgba8888_into(&self, out: &mut Vec<u8>) {
+        let Some(image) = self.render_presentation.as_ref() else {
+            return self.snapshot_rgba8888_into(out);
+        };
+        out.resize(image.width as usize * image.height as usize * 4, 0);
+        for (source, dest) in image.pixels.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
+            let color = rgb565_to_rgba8888(u16::from_le_bytes([source[0], source[1]]));
+            let [red, green, blue, alpha] = color.to_le_bytes();
+            dest.copy_from_slice(&[
+                self.backlight_channel(red),
+                self.backlight_channel(green),
+                self.backlight_channel(blue),
+                alpha,
+            ]);
+        }
     }
 
     pub fn is_all_black(&self) -> bool {
@@ -491,6 +555,35 @@ fn clip_rect(x: i32, y: i32, w: i32, h: i32, max_w: u32, max_h: u32) -> (u32, u3
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn render_presentation_is_host_only_and_invalidated_by_guest_writes() {
+        let mut fb = Framebuffer::new(2, 1);
+        fb.pixels.copy_from_slice(&[0, 0, 255, 255]);
+        let native = fb.snapshot_rgba8888();
+        let image = [0x00, 0xf8, 0xe0, 0x07, 0x1f, 0, 0xff, 0xff].repeat(2);
+        fb.set_render_presentation(4, 2, image);
+        assert_eq!(
+            (fb.width, fb.height, fb.byte_size(), fb.stride_bytes()),
+            (2, 1, 4, 4)
+        );
+        assert_eq!(fb.snapshot_rgba8888(), native);
+        assert_eq!(fb.presentation_size(), (4, 2));
+        let mut high = Vec::new();
+        fb.snapshot_presentation_rgba8888_into(&mut high);
+        assert_eq!(high.len(), 4 * 2 * 4);
+        assert_eq!(&high[..4], &[255, 0, 0, 255]);
+        fb.set_backlight_level(1);
+        fb.snapshot_presentation_rgba8888_into(&mut high);
+        assert!(high[0] < 255);
+        assert_eq!(fb.presentation_size(), (4, 2));
+        fb.mark_dirty();
+        assert_eq!(fb.presentation_size(), (2, 1));
+        fb.snapshot_presentation_rgba8888_into(&mut high);
+        assert_eq!(high, fb.snapshot_rgba8888());
+        fb.set_render_presentation(3, 2, vec![0; 12]);
+        assert_eq!(fb.presentation_size(), (2, 1));
+    }
+
     #[test]
     fn backlight_changes_host_snapshots_without_modifying_guest_pixels() {
         let mut fb = super::Framebuffer::new(1, 1);

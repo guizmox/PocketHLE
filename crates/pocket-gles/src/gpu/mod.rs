@@ -1179,6 +1179,7 @@ pub struct Renderer {
     white: u32,
     width: u32,
     height: u32,
+    render_scale: u32,
     textures: HashMap<u32, (u32, u64)>,
     uniforms: HashMap<String, i32>,
     scratch: Vec<f32>,
@@ -1332,6 +1333,7 @@ impl Renderer {
                 uniforms: HashMap::new(),
                 scratch: Vec::new(),
                 readback: Vec::new(),
+                render_scale: 1,
                 dirty: true,
                 full_npot,
                 native_max_level,
@@ -1590,7 +1592,13 @@ impl Renderer {
     unsafe fn scissor(&self, s: Option<(i32, i32, i32, i32)>) {
         self.toggle(GL_SCISSOR_TEST, s.is_some());
         if let Some((x, y, w, h)) = s {
-            (self.gl.Scissor)(x, y, w, h);
+            let k = self.render_scale as i32;
+            (self.gl.Scissor)(
+                x.saturating_mul(k),
+                y.saturating_mul(k),
+                w.saturating_mul(k),
+                h.saturating_mul(k),
+            );
         }
     }
     unsafe fn params(&self, min: Filter, mag: Filter, s: Wrap, t: Wrap) {
@@ -1603,7 +1611,27 @@ impl Renderer {
             (self.gl.TexParameteri)(GL_TEXTURE_2D, p, v as i32);
         }
     }
+    /// Guest dimensions stay logical. Only native framebuffer/viewport pixels scale.
+    pub fn set_render_scale(&mut self, scale: u8) -> Result<(), String> {
+        let scale = if scale == 2 { 2 } else { 1 };
+        if scale == self.render_scale {
+            return Ok(());
+        }
+        let (w, h) = (
+            self.width / self.render_scale,
+            self.height / self.render_scale,
+        );
+        self.render_scale = scale;
+        self.resize(w, h)
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) -> Result<(), String> {
+        let w = w
+            .checked_mul(self.render_scale)
+            .ok_or("GPU width overflow")?;
+        let h = h
+            .checked_mul(self.render_scale)
+            .ok_or("GPU height overflow")?;
         if (w, h) == (self.width, self.height) {
             return Ok(());
         }
@@ -2041,21 +2069,25 @@ impl Renderer {
             (self.gl.UseProgram)(self.program);
             self.uniform_1f(
                 self.loc("pointSize"),
-                state
-                    .point_size
+                (state.point_size * self.render_scale as f32)
                     .clamp(self.point_range[0], self.point_range[1]),
             );
             if self.pipeline.as_ref() != Some(state) {
                 (self.gl.LineWidth)(
-                    state
-                        .line_width
+                    (state.line_width * self.render_scale as f32)
                         .clamp(self.line_range[0], self.line_range[1]),
                 );
                 if !self.host.es {
                     self.toggle(0x8642, true);
                 }
                 let (x, y, w, h) = state.viewport;
-                (self.gl.Viewport)(x, y, w, h);
+                let k = self.render_scale as i32;
+                (self.gl.Viewport)(
+                    x.saturating_mul(k),
+                    y.saturating_mul(k),
+                    w.saturating_mul(k),
+                    h.saturating_mul(k),
+                );
                 self.scissor(state.scissor);
                 self.toggle(GL_DEPTH_TEST, state.depth_test);
                 (self.gl.DepthFunc)(compare(state.depth_func));
@@ -2417,6 +2449,29 @@ impl Renderer {
         }
     }
 
+    /// Export the already-read native image. No additional GPU readback.
+    pub fn scaled_rgb565_into(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        if self.render_scale == 1
+            || self.dirty
+            || self.readback.len() != (self.width * self.height * 4) as usize
+        {
+            return None;
+        }
+        out.resize((self.width * self.height * 2) as usize, 0);
+        for y in 0..self.height as usize {
+            let row = self.height as usize - 1 - y;
+            for x in 0..self.width as usize {
+                let src = (row * self.width as usize + x) * 4;
+                let value = ((self.readback[src] as u16 >> 3) << 11)
+                    | ((self.readback[src + 1] as u16 >> 2) << 5)
+                    | (self.readback[src + 2] as u16 >> 3);
+                let dst = (y * self.width as usize + x) * 2;
+                out[dst..dst + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        Some((self.width, self.height))
+    }
+
     pub fn read(&mut self, target: &mut RenderTarget) -> Result<(), String> {
         self.read_inner(target, None)
     }
@@ -2455,6 +2510,37 @@ impl Renderer {
                 self.readback.as_mut_ptr().cast(),
             );
             self.check()?;
+            if self.render_scale > 1 {
+                // Guest read/copy APIs still see the logical image. Resolve only
+                // that cache; retain full native pixels for host presentation.
+                let k = self.render_scale as usize;
+                let native_w = self.width as usize;
+                let native_h = self.height as usize;
+                let logical_w = target.width as usize;
+                for y in 0..target.height as usize {
+                    for x in 0..logical_w {
+                        let mut sum = [0u32; 4];
+                        for dy in 0..k {
+                            let row = native_h - 1 - (y * k + dy);
+                            for dx in 0..k {
+                                let offset = (row * native_w + x * k + dx) * 4;
+                                for (channel, value) in sum.iter_mut().enumerate() {
+                                    *value += self.readback[offset + channel] as u32;
+                                }
+                            }
+                        }
+                        let offset = (y * logical_w + x) * 4;
+                        for (channel, value) in sum.iter().enumerate() {
+                            target.color[offset + channel] = (value / (k * k) as u32) as u8;
+                        }
+                    }
+                }
+                if let Some(out) = rgb565 {
+                    target.to_rgb565(out);
+                }
+                self.dirty = false;
+                return Ok(());
+            }
             let stride = self.width as usize * 4;
             for (row, out) in target.color.chunks_exact_mut(stride).enumerate() {
                 let start = (self.height as usize - 1 - row) * stride;
@@ -3997,6 +4083,83 @@ mod tests {
             gpu.read(&mut target).unwrap();
             assert_eq!(&target.color[..4], &[255, 0, 0, 255]);
             assert!(!gpu.dirty);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires desktop GL and GLES2; real 2x geometry, logical resolve and scissor"]
+    fn internal_resolution_renders_new_pixels_and_preserves_logical_reads() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(16, 16).unwrap()
+            } else {
+                Renderer::new(16, 16).unwrap()
+            };
+            gpu.set_render_scale(2).unwrap();
+            assert_eq!((gpu.width, gpu.height), (32, 32));
+            let mut target = RenderTarget::new(16, 16);
+            let mut state = PipelineState {
+                viewport: (0, 0, 16, 16),
+                ..Default::default()
+            };
+            let textures = HashMap::new();
+            gpu.clear(16, 16, &state, [0., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &triangle([1., 0., 0., 1.], 0.),
+                &[],
+                &textures,
+                [0; 4],
+            )
+            .unwrap();
+            let mut logical = vec![0; 16 * 16 * 2];
+            gpu.read_present(&mut target, &mut logical).unwrap();
+            assert_eq!(
+                (target.width, target.height, target.color.len()),
+                (16, 16, 16 * 16 * 4)
+            );
+            let mut high = Vec::new();
+            assert_eq!(gpu.scaled_rgb565_into(&mut high), Some((32, 32)));
+            assert_eq!(high.len(), 32 * 32 * 2);
+            let pixel = |x: usize, y: usize| {
+                u16::from_le_bytes([high[(y * 32 + x) * 2], high[(y * 32 + x) * 2 + 1]])
+            };
+            let mut subpixel_edges = 0;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let first = pixel(x * 2, y * 2);
+                    if pixel(x * 2 + 1, y * 2) != first
+                        || pixel(x * 2, y * 2 + 1) != first
+                        || pixel(x * 2 + 1, y * 2 + 1) != first
+                    {
+                        subpixel_edges += 1;
+                    }
+                }
+            }
+            assert!(
+                subpixel_edges > 0,
+                "2x must rasterize geometry, not repeat native pixels"
+            );
+            // A logical scissor affects a doubled rectangle in native GL coordinates.
+            state.scissor = Some((0, 0, 8, 8));
+            gpu.clear(16, 16, &state, [0., 1., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[((15 * 16) * 4)..((15 * 16) * 4 + 4)],
+                &[0, 255, 0, 255]
+            );
+            assert_ne!(&target.color[..4], &[0, 255, 0, 255]);
+            // Rotation-sized surfaces remain logical; disabling restores native FBO size.
+            gpu.resize(24, 16).unwrap();
+            assert_eq!((gpu.width, gpu.height), (48, 32));
+            gpu.set_render_scale(1).unwrap();
+            assert_eq!((gpu.width, gpu.height), (24, 16));
+            assert_eq!(gpu.scaled_rgb565_into(&mut high), None);
         }
     }
 
