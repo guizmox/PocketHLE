@@ -4,10 +4,23 @@ No real GPU or PocketHLE API validation is implied. Existing integration smoke
 checks run first because guest_smoke supplies the shared ARM harness.
 """
 import math
+import os
+import json
+from pathlib import Path
 import re
 import struct
 from collections import Counter
 import guest_smoke as base
+
+# Use real ordinal/name registration as the resolver allowlist. This prevents a
+# permissive shim from accepting an entry point that PocketHLE cannot expose.
+source_root = Path(os.environ.get('GLES_EXPORT_SOURCE_ROOT', base.ROOT.parents[1]))
+dispatch_path = Path(os.environ.get('GLES_DISPATCH_SOURCE', source_root / 'crates/pocket-winceapi/src/gles.rs'))
+export_path = source_root / 'crates/pocket-gles/data/libgles_cl-ordinals.json'
+exported = set(json.loads(export_path.read_text())['ordinals'].values())
+dispatch = dispatch_path.read_text()
+extras = re.search(r'const EXTRA_NAMED_EXPORTS:[^=]+?= \[(.*?)\];', dispatch, re.S)[1]
+exported.update(re.findall(r'"([A-Za-z0-9_]+)"', extras))
 
 CASES = ["geometry_512", "geometry_2048", "geometry_8192", "draw_calls_128",
          "matrix_animated", "vertices_rebuilt", "fill_solid",
@@ -46,6 +59,7 @@ class GLGuest(base.Guest):
             self.calls[name] += 1
         elif name == 'GetProcAddressA':
             api = self.cstring(self.arg(1))
+            assert api in exported, 'Unexported Common-Lite API: ' + api
             if api == self.options.get('missing'):
                 value = 0
             else:

@@ -2409,7 +2409,7 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glPolygonOffsetx" => gl_polygon_offsetx,
         "glTexSubImage2D" => gl_tex_sub_image_2d,
         "glTexParameterf" => gl_tex_parameterf,
-        "glTexParameterx" => gl_tex_parameterx,
+        "glTexParameteri" | "glTexParameterx" => gl_tex_parameterx,
         "glTexEnvf" => gl_tex_envf,
         "glTexEnvx" => gl_tex_envx,
         "glTexEnvfv" => gl_tex_envfv,
@@ -2542,7 +2542,10 @@ fn reset_for_test(width: u32, height: u32) {
 /// not extensions — and a game that imports by name (Xtrakt does, with
 /// 73 named symbols) resolves them through the name path regardless of
 /// what the ordinal table says.
-const EXTRA_NAMED_EXPORTS: [&str; 17] = [
+const EXTRA_NAMED_EXPORTS: [&str; 18] = [
+    // Integer texture parameters are also core in Common-Lite. Keep the
+    // historical vendor ordinals intact and expose the missing name separately.
+    "glTexParameteri",
     "glGetLightfv",
     "glGetLightxv",
     "glGetMaterialfv",
@@ -3556,6 +3559,62 @@ mod tests {
     /// Khronos ordinal list. Sticky Balls imports it by name, and an
     /// entry point that only exists inside `handler_for` is never
     /// registered — it has to be in `EXTRA_NAMED_EXPORTS` too.
+    #[test]
+    fn integer_texture_parameters_are_exported_in_common_and_common_lite() {
+        let _g = guard();
+        let d = WinCeDispatcher::new();
+        for dll in ["libgles_cm.dll", "libgles_cl.dll"] {
+            assert!(d
+                .registered_iter()
+                .any(|(library, name)| { library == dll && name == "glTexParameteri" }));
+        }
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let set = handler_for("glTexParameteri").unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            set,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                pocket_gles::GL_TEXTURE_MIN_FILTER,
+                pocket_gles::GL_NEAREST,
+            ],
+        );
+        with_ctx(|c| {
+            assert_eq!(
+                c.textures[&0].min_filter,
+                pocket_gles::texture::Filter::Nearest
+            );
+        });
+        call(
+            &mut cpu,
+            &mut kernel,
+            set,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                pocket_gles::GL_TEXTURE_MAG_FILTER,
+                pocket_gles::GL_LINEAR,
+            ],
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), 0);
+        call(
+            &mut cpu,
+            &mut kernel,
+            set,
+            &[
+                0,
+                pocket_gles::GL_TEXTURE_MIN_FILTER,
+                pocket_gles::GL_NEAREST,
+            ],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_ENUM
+        );
+    }
+
     #[test]
     fn vendor_named_exports_are_registered_not_just_handled() {
         let d = WinCeDispatcher::new();

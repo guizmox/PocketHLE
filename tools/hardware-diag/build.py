@@ -43,6 +43,21 @@ SIG.update({
     '__rt_udiv': ('unsigned int', 'unsigned int,unsigned int'),
     '__adds': ('unsigned int', 'unsigned int,unsigned int'),
     '__muls': ('unsigned int', 'unsigned int,unsigned int'),
+    # Bit-level WinCE runtime ABIs: 64-bit results occupy r0:r1.
+    '__rt_sdiv': ('unsigned long long', 'unsigned int,unsigned int'),
+    '__ll_mul': ('unsigned long long', 'unsigned long long,unsigned long long'),
+    '__rt_udiv64by64': ('unsigned long long', 'unsigned long long,unsigned long long'),
+    '__rt_sdiv64by64': ('unsigned long long', 'unsigned long long,unsigned long long'),
+    '__divs': ('unsigned int', 'unsigned int,unsigned int'),
+    'sqrtf': ('unsigned int', 'unsigned int'),
+    '__itos': ('unsigned int', 'int'),
+    '__stoi': ('unsigned int', 'unsigned int'),
+    '__stod': ('unsigned long long', 'unsigned int'),
+    '__dtos': ('unsigned int', 'unsigned long long'),
+    '__addd': ('unsigned long long', 'unsigned long long,unsigned long long'),
+    '__muld': ('unsigned long long', 'unsigned long long,unsigned long long'),
+    '__divd': ('unsigned long long', 'unsigned long long,unsigned long long'),
+    'sqrt': ('unsigned long long', 'unsigned long long'),
 })
 COMMON = ['CreateFileW', 'ReadFile', 'WriteFile', 'CloseHandle', 'SetFilePointer',
           'GetLastError', 'SetLastError', 'GetTickCount', 'Sleep']

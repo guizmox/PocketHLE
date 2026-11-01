@@ -1,10 +1,10 @@
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\gpu\mod.rs
 crates\pocket-winceapi\src\gles.rs
 tools\hardware-diag\README.md
 tools\hardware-diag\build.py
 tools\hardware-diag\dist\HARDWARE-DIAG.zip
-tools\hardware-diag\src\gles_benchmark.c
-tools\hardware-diag\src\hardware_diag.c
-tools\hardware-diag\src\integrated.c
+tools\hardware-diag\src\benchmark.c
+tools\hardware-diag\src\cpu_benchmark_cases.h
+tools\hardware-diag\tests\cpu_benchmark_reference.py
+tools\hardware-diag\tests\cpu_benchmark_smoke.py
 tools\hardware-diag\tests\gles_benchmark_smoke.py
+tools\hardware-diag\tests\guest_smoke.py

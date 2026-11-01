@@ -14,6 +14,7 @@ __attribute__((noinline)) static U32 block(void){U32 i,x;
  x=0x12345678;for(i=0;i<16384;i++){x^=x<<13;x^=x>>17;x^=x<<5;x=x*1664525u+1013904223u;}
 #endif
  result_sink=x;return x;}
+#include "cpu_benchmark_cases.h"
 __attribute__((section(".text.entry"))) U32 entry(void){U32 pass,blocks,start,elapsed,value=0,failed=0,rates[3]={0},tmp;
 #ifdef FLOATING
  const unsigned short*file=L"\\Flash Disk\\FLOATING.TXT";
@@ -46,5 +47,6 @@ __attribute__((section(".text.entry"))) U32 entry(void){U32 pass,blocks,start,el
 #endif
  line("Final score = median of three passes. Higher is faster.");
  }else line("FINAL_SCORE INVALID: computation or timing check failed");
+ failed |= cpu_cases();
  line(failed?"BENCHMARK_RESULT FAIL":"BENCHMARK_RESULT PASS");line("PASS verifies computation; elapsed_ms/work_iterations measures performance.");CloseHandle(out);return failed?1:0;
 }

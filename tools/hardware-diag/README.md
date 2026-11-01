@@ -167,3 +167,55 @@ Optional controlled ARM smoke checks (not a real renderer benchmark):
 `tests/requirements.txt`. They exercise the actual EXE with deterministic GL and
 clock shims, verify workload counts and median/global calculations, and reject
 missing APIs, GL errors, black readback and a stalled clock.
+
+## Additional Integer / Floating cost probes (v2)
+
+Both existing CPU menu entries now append separately named cost probes to their
+existing reports. The original v1 workload, its three one-second samples and
+`FINAL_INTEGER_SCORE_ITERATIONS_PER_SECOND` / `FINAL_FLOATING_SCORE_ITERATIONS_PER_SECOND`
+remain comparable to previous versions. They are NOT replaced by a mixture of
+unrelated workloads. The full suite fails if any added computation fails, even
+when its historical v1 score remains valid.
+
+Integer adds seven probes: direct ARM uint32 multiply/add, unsigned and signed
+32-bit quotient+remainder, direct paired-word uint64 addition/shifts, runtime
+64-bit multiplication, and unsigned/signed 64-by-64 division. The division tests
+use nonzero varied divisors and validate BOTH quotient/remainder return words
+where that WinCE ABI provides them. Inputs cover positive/negative bit patterns,
+values with populated high words, carries and wrapping products.
+
+Floating adds nine probes: separate float32 addition, multiplication, division,
+square root, signed-int32/float32 roundtrip, float32/float64 roundtrip, float64
+add+multiply, float64 division and float64 square root. Normal signed values and
+zero are used; roots receive nonnegative values. The double-precision vector
+also includes large and small finite magnitudes. Float32/float64 operations use
+the WinCE soft-float/runtime ABI, so their rates include API thunk/dispatch costs.
+They are NOT host FPU FLOPS. The EXE is ARM; these results do not measure MIPS.
+
+Each new probe warms up, then performs three samples targeting 500 ms, with a
+65536-block cap (1024 iterations per block). Early caps are explicitly reported.
+`CASE_MEDIAN_ITERATIONS_PER_SECOND` is the comparable per-probe score; higher is
+faster. Runtime calls per iteration are recorded. Input loads, loop control and
+a common rolling checksum are INCLUDED, never estimated or subtracted. The
+checksum consumes every result, including high words, and is verified against
+fixed independent expected values in warmup AND every measured block. A bad
+result/clock suppresses that probe's score. Other probes continue so the report
+still identifies which categories fail. Allow roughly 15 seconds for Integer
+and 20 seconds for Floating; slower runtime handlers may take longer.
+
+`tests/cpu_benchmark_reference.py` contains an independent host arithmetic oracle
+for the fixed vectors, rounding and expected checksums. The build does NOT
+regenerate expected results from emulator output. After installing the existing
+optional smoke dependencies, `python tests/cpu_benchmark_smoke.py` executes the
+real ARM EXE under deterministic WinCE/clock shims and checks all workloads,
+medians, 64-bit ABI return words and deliberately corrupted results. This is not
+a substitute for executing HARDWARE DIAG in PocketHLE.
+
+These are performance probes, not exhaustive instruction or IEEE-754 conformance
+tests: NaNs, infinities, denormals, exception flags, all rounding modes and every
+integer edge case are intentionally outside the timed workload.
+
+The emulator now exposes the missing `glTexParameteri` by name for both Common
+and Common-Lite. Existing historical ordinal tables are unchanged. This fixes
+the OpenGLES benchmark's early `FAIL missing glTexParameteri`; do not conceal
+missing required API support by weakening that test.

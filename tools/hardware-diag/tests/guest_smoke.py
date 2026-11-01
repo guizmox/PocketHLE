@@ -5,7 +5,7 @@ These checks verify the integrated menu/benchmark/role wiring, not PocketHLE's
 WinCE implementations, real timings, renderer or hardware providers.
 """
 from pathlib import Path
-import struct,collections,sys
+import struct,collections,sys,math,re
 import pefile
 from unicorn import Uc,UC_ARCH_ARM,UC_MODE_ARM,UC_HOOK_CODE
 from unicorn.arm_const import *
@@ -29,7 +29,7 @@ class Guest:
   return b.decode('utf-16le')
  def hook(self,u,a,size,data):
   if a==0x7000fff0:self.exit=self.arg(0);u.emu_stop();return
-  name=self.apis[a];self.calls[name]+=1;v=1
+  name=self.apis[a];self.calls[name]+=1;v=1;high=None
   if name=='GetCommandLineW':
    u.mem_write(0x7000f000,self.command.encode('utf-16le')+b'\0\0');v=0x7000f000
   elif name=='GetTickCount':self.time+=250;v=self.time
@@ -52,9 +52,39 @@ class Guest:
     if end>len(b):b.extend(b'\0'*(end-len(b)))
     b[h[1]:end]=chunk
    h[1]+=n;self.put(self.arg(3),n)
-  elif name=='__rt_udiv':v=self.arg(1)//self.arg(0) if self.arg(0) else 0
-  elif name in ('__adds','__muls'):
-   f=lambda x:struct.unpack('<f',struct.pack('<I',x))[0];x,y=f(self.arg(0)),f(self.arg(1));v=struct.unpack('<I',struct.pack('<f',x+y if name=='__adds' else x*y))[0]
+  elif name in ('__rt_udiv','__rt_sdiv'):
+   d,n=self.arg(0),self.arg(1)
+   if name=='__rt_sdiv':
+    d=d-(1<<32) if d>>31 else d;n=n-(1<<32) if n>>31 else n
+   v=abs(n)//abs(d) if d else 0
+   if (n<0)!=(d<0):v=-v
+   high=(n-v*d)&0xffffffff if d else 0;v&=0xffffffff
+  elif name in ('__ll_mul','__rt_udiv64by64','__rt_sdiv64by64'):
+   x=self.arg(0)|(self.arg(1)<<32);y=self.arg(2)|(self.arg(3)<<32)
+   if name=='__ll_mul':value=x*y
+   else:
+    if name=='__rt_sdiv64by64':x=x-(1<<64) if x>>63 else x;y=y-(1<<64) if y>>63 else y
+    value=abs(x)//abs(y) if y else 0
+    if (x<0)!=(y<0):value=-value
+   value&=(1<<64)-1;v=value&0xffffffff;high=value>>32
+  elif name in ('sqrtf','__itos','__stoi','__stod','__dtos','sqrt','__addd','__muld','__divd'):
+   f32=lambda n:struct.unpack('<f',struct.pack('<I',n))[0]
+   f64=lambda n:struct.unpack('<d',struct.pack('<Q',n))[0]
+   bits32=lambda x:struct.unpack('<I',struct.pack('<f',x))[0]
+   bits64=lambda x:struct.unpack('<Q',struct.pack('<d',x))[0]
+   a=self.arg(0);wide=a|(self.arg(1)<<32)
+   if name=='sqrtf':v=bits32(math.sqrt(f32(a)))
+   elif name=='__itos':v=bits32(a-(1<<32) if a>>31 else a)
+   elif name=='__stoi':v=int(f32(a))&0xffffffff
+   elif name=='__dtos':v=bits32(f64(wide))
+   else:
+    if name=='__stod':value=bits64(f32(a))
+    elif name=='sqrt':value=bits64(math.sqrt(f64(wide)))
+    else:
+     x=f64(wide);y=f64(self.arg(2)|(self.arg(3)<<32));value=bits64(x+y if name=='__addd' else x*y if name=='__muld' else x/y)
+    v=value&0xffffffff;high=value>>32
+  elif name in ('__adds','__muls','__divs'):
+   f=lambda x:struct.unpack('<f',struct.pack('<I',x))[0];x,y=f(self.arg(0)),f(self.arg(1));v=struct.unpack('<I',struct.pack('<f',x+y if name=='__adds' else x*y if name=='__muls' else x/y))[0]
   elif name=='RegisterClassW':self.proc=self.word(self.arg(0)+4)
   elif name=='CreateWindowExW':v=0xdead0001
   elif name=='TextOutW':self.text.append(self.wide(self.arg(3))[:self.arg(4)])
@@ -79,6 +109,7 @@ class Guest:
     if self.sleeps==8:u.emu_stop()
   elif name in ('TranslateMessage','DefWindowProcW'):v=0
   elif name not in ('PatBlt','GetDC','ReleaseDC','SelectObject','SetBkMode','SetTextColor','ValidateRect','CreateFontIndirectW','GetStockObject','ShowWindow','SetFocus','TerminateProcess','DestroyWindow','PostQuitMessage'):raise AssertionError('Unexpected API '+name)
+  if high is not None:u.reg_write(UC_ARM_REG_R1,high)
   u.reg_write(UC_ARM_REG_R0,v);u.reg_write(UC_ARM_REG_PC,u.reg_read(UC_ARM_REG_LR))
  def run(self):
   self.u.mem_write(0x7000d000,self.command.encode('utf-16le')+b'\0\0')
@@ -94,7 +125,7 @@ class BenchmarkGuest(Guest):
    self.time+=step;u.reg_write(UC_ARM_REG_R0,self.time);u.reg_write(UC_ARM_REG_PC,u.reg_read(UC_ARM_REG_LR));return
   super().hook(u,a,size,data)
 for mode in ['integer','floating']:
- g=BenchmarkGuest(root/'AUTORUN.EXE');g.command='--hd-'+mode;g.run();s=bytes(g.files['\\Flash Disk\\'+('INTEGER.TXT' if mode=='integer' else 'FLOATING.TXT')]).decode();assert 'BENCHMARK_RESULT PASS' in s and g.exit==0,s;assert s.count('elapsed_ms=')==3;
+ g=BenchmarkGuest(root/'AUTORUN.EXE');g.command='--hd-'+mode;g.run();s=bytes(g.files['\\Flash Disk\\'+('INTEGER.TXT' if mode=='integer' else 'FLOATING.TXT')]).decode();assert 'BENCHMARK_RESULT PASS' in s and g.exit==0,s;assert len(re.findall(r'^elapsed_ms=',s,re.M))==3;
  import re
  rates=list(map(int,re.findall(r'^work_iterations_per_second=(\d+)',s,re.M)));score=int(re.search(r'^FINAL_[A-Z]+_SCORE_ITERATIONS_PER_SECOND=(\d+)',s,re.M)[1]);assert len(set(rates))==3 and score==sorted(rates)[1];assert not g.created;print(mode, 'integrated ARM benchmark: 3 passes + warmup PASS; no child process')
 g=Guest(root/'AUTORUN.EXE');g.ui=True;g.run();assert 'HARDWARE DIAG' in g.text;assert len(g.created)==1 and g.created[0][0]=='thread',g.created;assert not g.calls['CreateProcessW'];assert 'SUITE FINISHED (exit 0)' in g.text;print('integrated ARM UI: menu, controller selection, same-process worker, completion, console PASS')
