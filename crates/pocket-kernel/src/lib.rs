@@ -58,6 +58,7 @@ pub mod image_memory;
 pub mod imaging;
 pub mod internet;
 pub mod memory_division;
+mod mips_native_thunks;
 pub mod msgbox;
 pub mod native_thunks;
 pub mod power;
@@ -3876,7 +3877,7 @@ impl Process {
             };
             let native =
                 if image.machine == machine::MIPS_R3000 || image.machine == machine::MIPS_R4000 {
-                    None
+                    native_name.and_then(|n| mips_native_thunks::native_thunk_for(&imp.dll, n))
                 } else {
                     native_name.and_then(|n| native_thunks::native_thunk_at(&imp.dll, n, thunk_va))
                 };
