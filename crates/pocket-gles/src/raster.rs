@@ -17,12 +17,19 @@
 //! * Vertices arrive in clip space; this module does the perspective
 //!   divide, the viewport transform, and near/far clipping.
 
+mod combine;
+pub use combine::Combine;
+
 /// How many texture stages a draw can cascade through.
 pub const MAX_TEXTURE_STAGES: usize = 4;
 
 /// A vertex after the modelview-projection transform, in clip space.
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
+    /// Eye-space position retained for user clipping, including singular projections.
+    pub eye: [f32; 4],
+    /// Derived point width; negative means use pipeline point size.
+    pub point_width: f32,
     /// Clip-space position, `w` not yet divided out.
     pub pos: [f32; 4],
     /// Object-space normal consumed by the native lighting shader.
@@ -40,6 +47,8 @@ pub struct Vertex {
 impl Default for Vertex {
     fn default() -> Self {
         Self {
+            eye: [0., 0., 0., 1.],
+            point_width: -1.,
             pos: [0.0, 0.0, 0.0, 1.0],
             normal: [0.0, 0.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
@@ -172,6 +181,7 @@ pub enum FrontFace {
 /// How the texture colour combines with the incoming fragment colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexEnvMode {
+    Combine(Combine),
     Modulate,
     Replace,
     Decal,
@@ -545,6 +555,8 @@ fn clip_plane(input: &[Vertex], out: &mut Vec<Vertex>, plane: usize) {
 fn lerp_vertex(a: &Vertex, b: &Vertex, t: f32) -> Vertex {
     let mix = |x: f32, y: f32| x + (y - x) * t;
     Vertex {
+        eye: std::array::from_fn(|i| mix(a.eye[i], b.eye[i])),
+        point_width: mix(a.point_width, b.point_width),
         pos: [
             mix(a.pos[0], b.pos[0]),
             mix(a.pos[1], b.pos[1]),
@@ -765,6 +777,7 @@ fn raster_clipped(
             // the stage order. Coordinates are interpolated per stage
             // rather than up front, because an unused unit's coordinate
             // set must not cost anything per fragment.
+            let primary = frag;
             for stage in stages {
                 let uv = |c: usize| {
                     p0 * sv[0].texcoord[stage.unit][c]
@@ -796,7 +809,7 @@ fn raster_clipped(
                         to_unit(texel[2]),
                         to_unit(texel[3]),
                     ];
-                    frag = apply_tex_env(stage, frag, tc);
+                    frag = apply_tex_env(stage, frag, tc, primary);
                 }
             }
 
@@ -898,7 +911,7 @@ fn primitive_fragment(
             gradients[stage.unit],
             stage.lod_bias,
         ) {
-            color = apply_tex_env(stage, color, texel.map(to_unit));
+            color = apply_tex_env(stage, color, texel.map(to_unit), v.color);
         }
     }
     write_fragment(target, state, idx, z, color, v.fog_depth)
@@ -938,7 +951,12 @@ pub fn draw_point(
     let Some((x0, y0, x1, y1)) = target.scissor_bounds(state.scissor) else {
         return 0;
     };
-    let size = state.point_size.clamp(1., 64.).round() as i32;
+    let width = if v.point_width >= 0. {
+        v.point_width
+    } else {
+        state.point_size
+    };
+    let size = width.clamp(1., 64.).round() as i32;
     let center = |p: f64| {
         if size % 2 == 0 {
             (p + 0.5).floor()
@@ -1115,8 +1133,14 @@ pub fn draw_line(
 /// The `glTexEnv` colour combiners GL ES 1.1 defines for a single unit.
 /// `frag` is the incoming colour: the interpolated vertex colour for the
 /// first stage, and the previous stage's result for every stage after.
-fn apply_tex_env(stage: &TextureStage, frag: [f32; 4], tex: [f32; 4]) -> [f32; 4] {
+fn apply_tex_env(
+    stage: &TextureStage,
+    frag: [f32; 4],
+    tex: [f32; 4],
+    primary: [f32; 4],
+) -> [f32; 4] {
     match stage.env {
+        TexEnvMode::Combine(c) => c.evaluate(frag, tex, stage.env_color, primary),
         TexEnvMode::Replace => tex,
         TexEnvMode::Modulate => [
             frag[0] * tex[0],
@@ -2155,4 +2179,118 @@ mod tests {
             assert!((actual - reference).abs() < 1e-4, "{g:?} != {expected:?}");
         }
     }
+}
+
+/// Clip assembled, lit vertices before either rasterizer consumes them. Topology
+/// is expanded only for draws which enable user planes, preserving fast draws.
+pub fn clip_user_primitives(
+    mode: u32,
+    vertices: &[Vertex],
+    planes: &[[f32; 4]],
+    smooth: bool,
+) -> (u32, Vec<Vertex>) {
+    use crate::consts::*;
+    let distance = |v: &Vertex, p: &[f32; 4]| (0..4).map(|i| v.eye[i] * p[i]).sum::<f32>();
+    let mut out = Vec::new();
+    if mode == GL_POINTS {
+        out.extend(
+            vertices
+                .iter()
+                .filter(|v| planes.iter().all(|p| distance(v, p) >= 0.))
+                .copied(),
+        );
+        return (GL_POINTS, out);
+    }
+    let mut primitive = |mut v: Vec<Vertex>| {
+        if !smooth {
+            let last = *v.last().unwrap();
+            for x in &mut v {
+                x.color = last.color;
+                x.back_color = last.back_color;
+            }
+        }
+        if v.len() == 2 {
+            for p in planes {
+                let a = distance(&v[0], p);
+                let b = distance(&v[1], p);
+                if a < 0. && b < 0. {
+                    return;
+                }
+                if (a < 0.) != (b < 0.) {
+                    let x = lerp_vertex(&v[0], &v[1], a / (a - b));
+                    if a < 0. {
+                        v[0] = x;
+                    } else {
+                        v[1] = x;
+                    }
+                }
+            }
+            out.extend(v);
+            return;
+        }
+        for p in planes {
+            let input = std::mem::take(&mut v);
+            if input.is_empty() {
+                return;
+            }
+            for i in 0..input.len() {
+                let a = &input[i];
+                let b = &input[(i + 1) % input.len()];
+                let da = distance(a, p);
+                let db = distance(b, p);
+                if da >= 0. {
+                    v.push(*a);
+                }
+                if (da < 0.) != (db < 0.) {
+                    v.push(lerp_vertex(a, b, da / (da - db)));
+                }
+            }
+        }
+        for i in 1..v.len().saturating_sub(1) {
+            out.extend([v[0], v[i], v[i + 1]]);
+        }
+    };
+    match mode {
+        GL_LINES => {
+            for v in vertices.chunks_exact(2) {
+                primitive(v.to_vec());
+            }
+        }
+        GL_LINE_STRIP | GL_LINE_LOOP => {
+            for v in vertices.windows(2) {
+                primitive(v.to_vec());
+            }
+            if mode == GL_LINE_LOOP && vertices.len() > 1 {
+                primitive(vec![*vertices.last().unwrap(), vertices[0]]);
+            }
+        }
+        GL_TRIANGLES => {
+            for v in vertices.chunks_exact(3) {
+                primitive(v.to_vec());
+            }
+        }
+        GL_TRIANGLE_STRIP => {
+            for i in 2..vertices.len() {
+                primitive(if i % 2 == 0 {
+                    vec![vertices[i - 2], vertices[i - 1], vertices[i]]
+                } else {
+                    vec![vertices[i - 1], vertices[i - 2], vertices[i]]
+                });
+            }
+        }
+        GL_TRIANGLE_FAN => {
+            for i in 2..vertices.len() {
+                primitive(vec![vertices[0], vertices[i - 1], vertices[i]]);
+            }
+        }
+        _ => {}
+    }
+    (
+        if matches!(mode, GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP) {
+            GL_LINES
+        } else {
+            GL_TRIANGLES
+        },
+        out,
+    )
 }

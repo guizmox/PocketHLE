@@ -4,6 +4,8 @@
 //! in [`register`] by iterating the ordinal tables, mirroring what
 //! [`super::WinCeDispatcher::new`] does for `coredll.dll`.
 
+mod es11;
+
 use pocket_gles::context::SurfaceBuffers;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -873,26 +875,36 @@ fn gl_normal3x(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// components reach the rasterizer; R and Q are consumed and dropped
 /// because we have no 3D or projective texturing.
 fn gl_multi_tex_coord4f(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (s, t) = (argf(ctx, 1)?, argf(ctx, 2)?);
-    with_ctx(|c| c.set_multi_texcoord(ctx.arg_u32(0).unwrap_or(pocket_gles::GL_TEXTURE0), s, t));
+    let unit = ctx.arg_u32(0)?;
+    let values = [argf(ctx, 1)?, argf(ctx, 2)?, argf(ctx, 3)?, argf(ctx, 4)?];
+    with_ctx(|c| c.set_multi_texcoord4(unit, values));
     Ok(VOID)
 }
 
 fn gl_multi_tex_coord4x(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (s, t) = (argx(ctx, 1)?, argx(ctx, 2)?);
-    with_ctx(|c| c.set_multi_texcoord(ctx.arg_u32(0).unwrap_or(pocket_gles::GL_TEXTURE0), s, t));
+    let unit = ctx.arg_u32(0)?;
+    let values = [argx(ctx, 1)?, argx(ctx, 2)?, argx(ctx, 3)?, argx(ctx, 4)?];
+    with_ctx(|c| c.set_multi_texcoord4(unit, values));
     Ok(VOID)
 }
 
 fn gl_active_texture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let unit = ctx.arg_u32(0)?.saturating_sub(pocket_gles::GL_TEXTURE0);
-    with_ctx(|c| c.set_active_texture(unit));
+    let raw = ctx.arg_u32(0)?;
+    if let Some(unit) = raw.checked_sub(pocket_gles::GL_TEXTURE0) {
+        with_ctx(|c| c.set_active_texture(unit));
+    } else {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+    }
     Ok(VOID)
 }
 
 fn gl_client_active_texture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let unit = ctx.arg_u32(0)?.saturating_sub(pocket_gles::GL_TEXTURE0);
-    with_ctx(|c| c.set_client_active_texture(unit));
+    let raw = ctx.arg_u32(0)?;
+    if let Some(unit) = raw.checked_sub(pocket_gles::GL_TEXTURE0) {
+        with_ctx(|c| c.set_client_active_texture(unit));
+    } else {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+    }
     Ok(VOID)
 }
 
@@ -1204,8 +1216,17 @@ fn gl_tex_parameterx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 
 fn gl_tex_envf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let target = ctx.arg_u32(0)?;
     let pname = ctx.arg_u32(1)?;
     let value = argf(ctx, 2)?;
+    if !es11::valid_env_target(target, pname) {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+        return Ok(VOID);
+    }
+    if matches!(pname, 0x8573 | 0x0d1c) && ![1., 2., 4.].contains(&value) {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
     with_ctx(|c| {
         if pname == pocket_gles::GL_TEXTURE_LOD_BIAS_EXT {
             c.set_lod_bias(value)
@@ -1216,8 +1237,23 @@ fn gl_tex_envf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(VOID)
 }
 fn gl_tex_envx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let target = ctx.arg_u32(0)?;
     let pname = ctx.arg_u32(1)?;
-    let value = ctx.arg_u32(2)?;
+    let raw = ctx.arg_u32(2)?;
+    if !es11::valid_env_target(target, pname) {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+        return Ok(VOID);
+    }
+    let value = if matches!(pname, 0x8573 | 0x0d1c) {
+        let v = word_to_f32(raw);
+        if ![1., 2., 4.].contains(&v) {
+            with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+            return Ok(VOID);
+        }
+        v as u32
+    } else {
+        raw
+    };
     with_ctx(|c| {
         if pname == pocket_gles::GL_TEXTURE_LOD_BIAS_EXT {
             c.set_lod_bias(word_to_f32(value))
@@ -1234,12 +1270,26 @@ fn tex_env_vector(
     ctx: &mut CallCtx<'_>,
     decode: fn(u32) -> f32,
 ) -> Result<DispatchOutcome, KernelError> {
+    let target = ctx.arg_u32(0)?;
     let pname = ctx.arg_u32(1)?;
+    if !es11::valid_env_target(target, pname) {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+        return Ok(VOID);
+    }
     let ptr = ctx.arg_u32(2)?;
     if pname != pocket_gles::GL_TEXTURE_ENV_COLOR {
         let Ok(word) = ctx.cpu.read_u32_le(ptr) else {
             return Ok(VOID);
         };
+        if matches!(pname, 0x8573 | 0x0d1c) {
+            let v = decode(word);
+            if ![1., 2., 4.].contains(&v) {
+                with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+                return Ok(VOID);
+            }
+            with_ctx(|c| c.tex_env(pname, v as u32));
+            return Ok(VOID);
+        }
         with_ctx(|c| {
             if pname == pocket_gles::GL_TEXTURE_LOD_BIAS_EXT {
                 c.set_lod_bias(decode(word))
@@ -1339,105 +1389,11 @@ fn gl_capability(pname: u32) -> Option<Vec<f32>> {
 }
 
 fn gl_get_integerv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let pname = ctx.arg_u32(0)?;
-    let out = ctx.arg_u32(1)?;
-    if out == 0 {
-        return Ok(VOID);
-    }
-    if let Some(values) = gl_capability(pname) {
-        let bytes: Vec<u8> = values
-            .iter()
-            .flat_map(|v| (v.round() as i32).to_le_bytes())
-            .collect();
-        ctx.cpu.write_mem(out, &bytes)?;
-        return Ok(VOID);
-    }
-    let values: Vec<i32> = match pname {
-        0x8037 => vec![with_ctx(|c| c.state.polygon_offset) as i32],
-        0x8038 => vec![with_ctx(|c| c.state.polygon_factor).round() as i32],
-        0x2a00 => vec![with_ctx(|c| c.state.polygon_units).round() as i32],
-        0x0b11 => vec![with_ctx(|c| c.state.point_size).round() as i32],
-        0x0b21 => vec![with_ctx(|c| c.state.line_width).round() as i32],
-        pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as i32],
-        pocket_gles::GL_NORMALIZE => vec![with_ctx(|c| c.lighting.normalize) as i32],
-        pocket_gles::GL_COLOR_MATERIAL => vec![with_ctx(|c| c.lighting.color_material) as i32],
-        pocket_gles::lighting::RESCALE_NORMAL => vec![with_ctx(|c| c.lighting.rescale) as i32],
-        pocket_gles::lighting::MODEL_TWO_SIDE => vec![with_ctx(|c| c.lighting.two_sided) as i32],
-        0x4000..=0x4007 => {
-            vec![with_ctx(|c| c.lighting.lights[(pname - 0x4000) as usize].enabled) as i32]
-        }
-        pocket_gles::GL_PACK_ALIGNMENT => vec![PACK_ALIGNMENT.with(Cell::get) as i32],
-        pocket_gles::GL_UNPACK_ALIGNMENT => vec![UNPACK_ALIGNMENT.with(Cell::get) as i32],
-        pocket_gles::GL_VIEWPORT => {
-            let vp = with_ctx(|c| c.state.viewport);
-            vec![vp.0, vp.1, vp.2, vp.3]
-        }
-        pocket_gles::GL_ARRAY_BUFFER_BINDING => {
-            vec![with_ctx(|c| c.array_buffer) as i32]
-        }
-        pocket_gles::GL_ELEMENT_ARRAY_BUFFER_BINDING => {
-            vec![with_ctx(|c| c.element_array_buffer) as i32]
-        }
-        _ => vec![0],
-    };
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    if !bytes.is_empty() {
-        ctx.cpu.write_mem(out, &bytes)?;
-    }
-    Ok(VOID)
+    es11::query(ctx, es11::Output::Int)
 }
 
-/// `glGetFloatv`. Games read the matrices back far more often than
-/// anything else here — a renderer that keeps its own copy of the
-/// modelview still asks GL for the projection to build a culling
-/// frustum, and gets a degenerate one if we answer with zeroes.
 fn gl_get_floatv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let pname = ctx.arg_u32(0)?;
-    let out = ctx.arg_u32(1)?;
-    if out == 0 {
-        return Ok(VOID);
-    }
-    if let Some(values) = gl_capability(pname) {
-        let bytes: Vec<u8> = values.iter().flat_map(|v| (*v).to_le_bytes()).collect();
-        ctx.cpu.write_mem(out, &bytes)?;
-        return Ok(VOID);
-    }
-    let values: Vec<f32> = match pname {
-        0x8037 => vec![with_ctx(|c| c.state.polygon_offset) as u8 as f32],
-        0x8038 => vec![with_ctx(|c| c.state.polygon_factor)],
-        0x2a00 => vec![with_ctx(|c| c.state.polygon_units)],
-        0x0b11 => vec![with_ctx(|c| c.state.point_size)],
-        0x0b21 => vec![with_ctx(|c| c.state.line_width)],
-        pocket_gles::GL_MODELVIEW_MATRIX => with_ctx(|c| c.modelview.current().to_vec()),
-        pocket_gles::GL_PROJECTION_MATRIX => with_ctx(|c| c.projection.current().to_vec()),
-        pocket_gles::GL_TEXTURE_MATRIX => with_ctx(|c| {
-            c.texture_matrix[c.active_texture as usize]
-                .current()
-                .to_vec()
-        }),
-        pocket_gles::GL_CURRENT_COLOR => with_ctx(|c| c.current_color.to_vec()),
-        pocket_gles::GL_DEPTH_RANGE => {
-            let (n, f) = with_ctx(|c| c.state.depth_range);
-            vec![n, f]
-        }
-        // Integer-valued queries are legal through glGetFloatv as well;
-        // GL converts. Only the few games actually ask for are listed.
-        pocket_gles::GL_LIGHTING => vec![with_ctx(|c| c.lighting.enabled) as u8 as f32],
-        pocket_gles::lighting::MODEL_AMBIENT => with_ctx(|c| c.lighting.model_ambient.to_vec()),
-        pocket_gles::lighting::MODEL_TWO_SIDE => {
-            vec![with_ctx(|c| c.lighting.two_sided) as u8 as f32]
-        }
-        pocket_gles::GL_VIEWPORT => {
-            let vp = with_ctx(|c| c.state.viewport);
-            vec![vp.0 as f32, vp.1 as f32, vp.2 as f32, vp.3 as f32]
-        }
-        _ => vec![0.0],
-    };
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    if !bytes.is_empty() {
-        ctx.cpu.write_mem(out, &bytes)?;
-    }
-    Ok(VOID)
+    es11::query(ctx, es11::Output::Float)
 }
 
 /// `glGetString`. The guest keeps the returned pointer, so the strings
@@ -2345,6 +2301,33 @@ pub const GLES_DLLS: [&str; 2] = ["libgles_cm.dll", "libgles_cl.dll"];
 /// exactly the signal we want when a new game calls something new.
 fn handler_for(name: &str) -> Option<crate::Handler> {
     Some(match name {
+        "glGetBooleanv" => es11::get_boolean,
+        "glGetFixedv" => es11::get_fixed,
+        "glGetPointerv" => es11::get_pointer,
+        "glGetBufferParameteriv" => es11::get_buffer,
+        "glIsEnabled" => es11::is_enabled,
+        "glIsTexture" => es11::is_texture,
+        "glIsBuffer" => es11::is_buffer,
+        "glColor4ub" => es11::color4ub,
+        "glClipPlanef" => es11::clip_f,
+        "glClipPlanex" => es11::clip_x,
+        "glGetClipPlanef" => es11::get_clip_f,
+        "glGetClipPlanex" => es11::get_clip_x,
+        "glPointParameterf" => es11::point_f,
+        "glPointParameterx" => es11::point_x,
+        "glPointParameterfv" => es11::point_fv,
+        "glPointParameterxv" => es11::point_xv,
+        "glGetTexEnvfv" => es11::get_env_f,
+        "glGetTexEnviv" => es11::get_env_i,
+        "glGetTexEnvxv" => es11::get_env_x,
+        "glGetTexParameterfv" => es11::get_tex_f,
+        "glGetTexParameteriv" => es11::get_tex_i,
+        "glGetTexParameterxv" => es11::get_tex_x,
+        "glTexParameterfv" => es11::tex_fv,
+        "glTexParameteriv" => es11::tex_iv,
+        "glTexParameterxv" => es11::tex_xv,
+        "glTexEnvi" => es11::env_i,
+        "glTexEnviv" => es11::env_iv,
         // transform
         "glMatrixMode" => gl_matrix_mode,
         "glQueryMatrixxOES" => gl_query_matrix_x_oes,
@@ -2478,9 +2461,17 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glFinish" => gl_finish,
         "glFlush" => gl_flush,
 
-        // No stencil buffer, no logic op, no multisample or mipmap hints.
-        "glStencilFunc" | "glStencilMask" | "glStencilOp" | "glClearStencil" | "glLogicOp"
-        | "glSampleCoverage" | "glSampleCoveragex" | "glHint" => gl_ignored,
+        // No stencil/multisample attachments, but their API parameter state
+        // and implementation hints must remain queryable. Logic-op rendering
+        // is an existing, separate limitation.
+        "glStencilFunc" => es11::stencil_func,
+        "glStencilMask" => es11::stencil_mask,
+        "glStencilOp" => es11::stencil_op,
+        "glClearStencil" => es11::clear_stencil,
+        "glLogicOp" => gl_ignored,
+        "glSampleCoverage" => es11::sample_f,
+        "glSampleCoveragex" => es11::sample_x,
+        "glHint" => es11::hint,
         "glPixelStorei" => gl_pixel_store,
 
         // Compressed and copy-from-framebuffer texture paths.
@@ -2553,7 +2544,34 @@ fn reset_for_test(width: u32, height: u32) {
 /// not extensions — and a game that imports by name (Xtrakt does, with
 /// 73 named symbols) resolves them through the name path regardless of
 /// what the ordinal table says.
-const EXTRA_NAMED_EXPORTS: [&str; 18] = [
+const EXTRA_NAMED_EXPORTS: [&str; 45] = [
+    "glGetBooleanv",
+    "glGetFixedv",
+    "glGetPointerv",
+    "glGetBufferParameteriv",
+    "glIsEnabled",
+    "glIsTexture",
+    "glIsBuffer",
+    "glColor4ub",
+    "glClipPlanef",
+    "glClipPlanex",
+    "glGetClipPlanef",
+    "glGetClipPlanex",
+    "glPointParameterf",
+    "glPointParameterx",
+    "glPointParameterfv",
+    "glPointParameterxv",
+    "glGetTexEnvfv",
+    "glGetTexEnviv",
+    "glGetTexEnvxv",
+    "glGetTexParameterfv",
+    "glGetTexParameteriv",
+    "glGetTexParameterxv",
+    "glTexParameterfv",
+    "glTexParameteriv",
+    "glTexParameterxv",
+    "glTexEnvi",
+    "glTexEnviv",
     // Integer texture parameters are also core in Common-Lite. Keep the
     // historical vendor ordinals intact and expose the missing name separately.
     "glTexParameteri",
@@ -4517,5 +4535,48 @@ mod tests {
         assert!(with_ctx(|c| c.gpu_active()));
         release_gpu();
         reset_for_session();
+    }
+    #[test]
+    fn es11_core_additions_are_registered_by_name_without_replacing_vendor_ordinals() {
+        let d = WinCeDispatcher::new();
+        for name in [
+            "glClipPlanef",
+            "glClipPlanex",
+            "glColor4ub",
+            "glGetBooleanv",
+            "glGetBufferParameteriv",
+            "glGetClipPlanef",
+            "glGetClipPlanex",
+            "glGetFixedv",
+            "glGetPointerv",
+            "glGetTexEnvfv",
+            "glGetTexEnviv",
+            "glGetTexEnvxv",
+            "glGetTexParameterfv",
+            "glGetTexParameteriv",
+            "glGetTexParameterxv",
+            "glIsBuffer",
+            "glIsEnabled",
+            "glIsTexture",
+            "glPointParameterf",
+            "glPointParameterfv",
+            "glPointParameterx",
+            "glPointParameterxv",
+            "glTexEnvi",
+            "glTexEnviv",
+            "glTexParameterfv",
+            "glTexParameteriv",
+            "glTexParameterxv",
+        ] {
+            assert!(handler_for(name).is_some(), "{name}");
+            assert!(EXTRA_NAMED_EXPORTS.contains(&name), "{name}");
+            for dll in ["libgles_cm.dll", "libgles_cl.dll"] {
+                assert!(
+                    d.registered_iter()
+                        .any(|(library, symbol)| library == dll && symbol == name),
+                    "{dll}!{name}"
+                );
+            }
+        }
     }
 }

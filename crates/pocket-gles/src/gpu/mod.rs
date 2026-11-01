@@ -147,6 +147,7 @@ impl VertexStream {
 struct VertexLayout {
     attributes: [Option<(i32, usize)>; 8],
     floats: usize,
+    prelit: bool,
 }
 impl VertexLayout {
     fn new(
@@ -158,6 +159,7 @@ impl VertexLayout {
         let mut layout = Self {
             attributes: [None; 8],
             floats: 8,
+            prelit: transforms.is_none(),
         };
         layout.attributes[0] = Some((4, 0));
         layout.attributes[1] = Some((4, 4));
@@ -165,7 +167,7 @@ impl VertexLayout {
             layout.attributes[stage.unit + 2] = Some((2, layout.floats));
             layout.floats += 2;
         }
-        if lighting || (transforms.is_none() && state.fog) {
+        if lighting || (transforms.is_none() && (state.fog || state.two_sided_lighting)) {
             layout.attributes[6] = Some((4, layout.floats));
             layout.floats += 4;
         }
@@ -192,10 +194,15 @@ impl VertexLayout {
             }
         }
         if self.attributes[6].is_some() {
-            out.extend(if smooth {
-                vertex.normal
+            let source = if smooth { vertex } else { provoking };
+            out.extend(if self.prelit {
+                [
+                    source.back_color[0],
+                    source.back_color[1],
+                    source.back_color[2],
+                ]
             } else {
-                provoking.normal
+                source.normal
             });
             out.push(vertex.fog_depth);
         }
@@ -231,6 +238,33 @@ const ENVIRONMENTS: [&str; 4] = ["env0", "env1", "env2", "env3"];
 const LOD_LIMITS: [&str; 4] = ["lodLimit0", "lodLimit1", "lodLimit2", "lodLimit3"];
 const LOD_BIASES: [&str; 4] = ["lodBias0", "lodBias1", "lodBias2", "lodBias3"];
 const ENV_COLORS: [&str; 4] = ["envColor0", "envColor1", "envColor2", "envColor3"];
+const COMBINE_UNIFORMS: [[&str; 4]; 5] = [
+    ["combineOps0", "combineOps1", "combineOps2", "combineOps3"],
+    [
+        "combineRgbSource0",
+        "combineRgbSource1",
+        "combineRgbSource2",
+        "combineRgbSource3",
+    ],
+    [
+        "combineAlphaSource0",
+        "combineAlphaSource1",
+        "combineAlphaSource2",
+        "combineAlphaSource3",
+    ],
+    [
+        "combineRgbOperand0",
+        "combineRgbOperand1",
+        "combineRgbOperand2",
+        "combineRgbOperand3",
+    ],
+    [
+        "combineAlphaOperand0",
+        "combineAlphaOperand1",
+        "combineAlphaOperand2",
+        "combineAlphaOperand3",
+    ],
+];
 #[allow(non_snake_case)]
 struct Gl {
     CompressedTexImage2D:
@@ -1214,6 +1248,10 @@ impl Renderer {
     pub(crate) fn new_es_for_test(width: u32, height: u32) -> Result<Self, String> {
         Self::with_host(Host::es_for_test()?, width, height)
     }
+    #[cfg(all(test, unix))]
+    pub(crate) fn es2_for_test(width: u32, height: u32) -> Result<Self, String> {
+        Self::with_host(Host::es_for_test()?, width, height)
+    }
     fn with_host(host: Host, width: u32, height: u32) -> Result<Self, String> {
         unsafe {
             let gl = Gl::load(&host)?;
@@ -1490,7 +1528,18 @@ impl Renderer {
                 r.cache_uniform(name);
             }
             for i in 0..4 {
-                for name in ["sampler", "env", "envColor", "lodBias", "lodLimit"] {
+                for name in [
+                    "sampler",
+                    "env",
+                    "envColor",
+                    "lodBias",
+                    "lodLimit",
+                    "combineOps",
+                    "combineRgbSource",
+                    "combineAlphaSource",
+                    "combineRgbOperand",
+                    "combineAlphaOperand",
+                ] {
                     r.cache_uniform(&format!("{name}{i}"));
                 }
             }
@@ -2141,7 +2190,8 @@ impl Renderer {
                 (matches!(
                     draw_mode,
                     GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN
-                ) && lighting.is_some_and(|t| t.lighting.two_sided)) as i32,
+                ) && (lighting.is_some_and(|t| t.lighting.two_sided)
+                    || (transforms.is_none() && state.two_sided_lighting))) as i32,
             );
             if let Some(t) = lighting {
                 let l = &t.lighting;
@@ -2361,12 +2411,65 @@ impl Renderer {
                         TexEnvMode::Decal => 2,
                         TexEnvMode::Blend => 3,
                         TexEnvMode::Add => 4,
+                        TexEnvMode::Combine(_) => 5,
                     }),
                 );
                 self.uniform_4fv(self.loc(LOD_LIMITS[i]), 1, lod_limit.as_ptr());
                 self.uniform_1f(self.loc(LOD_BIASES[i]), stage.map_or(0.0, |s| s.lod_bias));
                 if let Some(s) = stage {
                     self.uniform_4fv(self.loc(ENV_COLORS[i]), 1, s.env_color.as_ptr());
+                    if let TexEnvMode::Combine(c) = s.env {
+                        let op = |v| match v {
+                            0x1e01 => 0.,
+                            0x2100 => 1.,
+                            0x104 => 2.,
+                            0x8574 => 3.,
+                            0x8575 => 4.,
+                            0x84e7 => 5.,
+                            0x86ae => 6.,
+                            _ => 7.,
+                        };
+                        let source = |v| match v {
+                            0x1702 => 0.,
+                            0x8576 => 1.,
+                            0x8577 => 2.,
+                            _ => 3.,
+                        };
+                        let source_vector =
+                            |a: [u32; 3]| [source(a[0]), source(a[1]), source(a[2]), 0.];
+                        let operand = |a: [u32; 3], base: u32| {
+                            [
+                                (a[0] - base) as f32,
+                                (a[1] - base) as f32,
+                                (a[2] - base) as f32,
+                                0.,
+                            ]
+                        };
+                        for (parameter, (_, value)) in [
+                            (
+                                "combineOps",
+                                [
+                                    op(c.rgb),
+                                    op(c.alpha),
+                                    c.rgb_scale as f32,
+                                    c.alpha_scale as f32,
+                                ],
+                            ),
+                            ("combineRgbSource", source_vector(c.rgb_sources)),
+                            ("combineAlphaSource", source_vector(c.alpha_sources)),
+                            ("combineRgbOperand", operand(c.rgb_operands, 0x300)),
+                            ("combineAlphaOperand", operand(c.alpha_operands, 0x302)),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            self.uniform_4fv(
+                                self.loc(COMBINE_UNIFORMS[parameter][i]),
+                                1,
+                                value.as_ptr(),
+                            );
+                        }
+                    }
                 }
             }
             (self.gl.BindBuffer)(GL_ARRAY_BUFFER, self.buffer);
@@ -2700,7 +2803,7 @@ void main(){
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
  gl_Position.z=(depthRange.y-depthRange.x)*clip.z+(depthRange.x+depthRange.y-1.0)*clip.w;
- vColor=color;vBackColor=color;
+ vColor=color;vBackColor=objectSpace!=0?color:vec4(normalAndFog.xyz,color.a);
  if(lightingEnabled!=0){
   vec3 n=(normalMatrix*vec4(normalAndFog.xyz,0.0)).xyz;
   if(normalMode==1){n=unit(n);}else if(normalMode==2){n*=normalRescale;}
@@ -2720,6 +2823,22 @@ VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
+uniform vec4 combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0;
+uniform vec4 combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1;
+uniform vec4 combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2;
+uniform vec4 combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3;
+
+vec4 selectSource(float s,vec4 t,vec4 k,vec4 primary,vec4 previous){if(s<0.5)return t;if(s<1.5)return k;if(s<2.5)return primary;return previous;}
+vec3 rgbOperand(vec4 v,float op){if(op<0.5)return v.rgb;if(op<1.5)return vec3(1.0)-v.rgb;if(op<2.5)return vec3(v.a);return vec3(1.0-v.a);}
+vec3 rgbOperation(float f,vec3 a,vec3 b,vec3 c){if(f<0.5)return a;if(f<1.5)return a*b;if(f<2.5)return a+b;if(f<3.5)return a+b-vec3(0.5);if(f<4.5)return a*c+b*(vec3(1.0)-c);if(f<5.5)return a-b;return vec3(4.0*dot(a-vec3(0.5),b-vec3(0.5)));}
+float alphaOperand(vec4 v,float op){return op<0.5?v.a:1.0-v.a;}
+vec4 combineStage(vec4 previous,vec4 t,vec4 k,vec4 primary,vec4 ops,vec4 rs,vec4 asrc,vec4 ro,vec4 ao){
+ vec3 a=rgbOperand(selectSource(rs.x,t,k,primary,previous),ro.x),b=rgbOperand(selectSource(rs.y,t,k,primary,previous),ro.y),c=rgbOperand(selectSource(rs.z,t,k,primary,previous),ro.z);
+ float aa=alphaOperand(selectSource(asrc.x,t,k,primary,previous),ao.x),ab=alphaOperand(selectSource(asrc.y,t,k,primary,previous),ao.y),ac=alphaOperand(selectSource(asrc.z,t,k,primary,previous),ao.z);
+ vec3 rgb=rgbOperation(ops.x,a,b,c);float alpha=rgbOperation(ops.y,vec3(aa),vec3(ab),vec3(ac)).x*ops.w;
+ if(ops.x>6.5)alpha=rgb.x*ops.w;
+ return clamp(vec4(rgb*ops.z,alpha),0.0,1.0);
+}
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
 float limitedBias(vec2 uv,float bias,vec4 limit){
 #ifdef LOD_DERIVATIVES
@@ -2732,7 +2851,7 @@ float limitedBias(vec2 uv,float bias,vec4 limit){
 #endif
  return bias;
 }
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;if(env0>=0)c=stage(c,texture2D(sampler0,uv0,limitedBias(uv0,lodBias0,lodLimit0)),env0,envColor0);if(env1>=0)c=stage(c,texture2D(sampler1,uv1,limitedBias(uv1,lodBias1,lodLimit1)),env1,envColor1);if(env2>=0)c=stage(c,texture2D(sampler2,uv2,limitedBias(uv2,lodBias2,lodLimit2)),env2,envColor2);if(env3>=0)c=stage(c,texture2D(sampler3,uv3,limitedBias(uv3,lodBias3,lodLimit3)),env3,envColor3);
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=texture2D(sampler0,uv0,limitedBias(uv0,lodBias0,lodLimit0));if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=texture2D(sampler1,uv1,limitedBias(uv1,lodBias1,lodLimit1));if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=texture2D(sampler2,uv2,limitedBias(uv2,lodBias2,lodLimit2));if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=texture2D(sampler3,uv3,limitedBias(uv3,lodBias3,lodLimit3));if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the

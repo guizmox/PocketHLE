@@ -49,6 +49,7 @@ pub struct CompressedLevel {
 pub struct Texture {
     /// Incremented on pixel updates; used by the host GPU upload cache.
     pub revision: u64,
+    pub generate_mipmap: bool,
     pub width: u32,
     pub height: u32,
     /// Decoded RGBA8888 texels, row-major, `width * height * 4` bytes.
@@ -68,6 +69,7 @@ impl Default for Texture {
     fn default() -> Self {
         Self {
             revision: 0,
+            generate_mipmap: false,
             width: 0,
             height: 0,
             rgba: Vec::new(),
@@ -145,6 +147,9 @@ impl Texture {
                 bytes: bytes.into(),
             },
         );
+        if level == 0 {
+            self.regenerate_mipmaps();
+        }
     }
 
     /// Preserve explicit levels (RBR DXT3), deriving missing ones once per
@@ -198,7 +203,7 @@ impl Texture {
         self.compressed.remove(&level);
         if level == 0 {
             // A resize cannot retain an unrelated previous mip chain.
-            if self.width != width || self.height != height {
+            if self.generate_mipmap || self.width != width || self.height != height {
                 self.mipmaps.clear();
                 self.compressed.clear();
             }
@@ -208,7 +213,24 @@ impl Texture {
         } else {
             self.mipmaps.insert(level, (width, height, rgba));
         }
+        if level == 0 {
+            self.regenerate_mipmaps();
+        }
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// GL_GENERATE_MIPMAP creates actual level storage, not only a sampler
+    /// approximation: subsequent glTexSubImage2D can address the new levels.
+    pub fn regenerate_mipmaps(&mut self) {
+        if !self.generate_mipmap {
+            return;
+        }
+        self.mipmaps.clear();
+        self.compressed.retain(|level, _| *level == 0);
+        let levels = self.upload_levels();
+        for (level, (width, height, pixels)) in levels.into_iter().enumerate().skip(1) {
+            self.mipmaps.insert(level as u32, (width, height, pixels));
+        }
     }
 
     /// Is this texture complete enough to sample?
@@ -456,6 +478,10 @@ impl Texture {
     /// `GL_INVALID_ENUM`.
     pub fn set_parameter(&mut self, pname: u32, value: u32) -> bool {
         match pname {
+            0x8191 => {
+                self.generate_mipmap = value != 0;
+                true
+            }
             GL_TEXTURE_MIN_FILTER => {
                 self.min_filter = match value {
                     GL_NEAREST => Filter::Nearest,
@@ -1405,5 +1431,22 @@ mod pvrtc_tests {
         let levels = tex.upload_levels();
         assert_eq!(levels.len(), 2);
         assert_eq!(tex.sample_lod(&levels, 0.5, 0.5, 1.), [128, 0, 128, 255]);
+    }
+    #[test]
+    fn automatic_mipmaps_allocate_levels_and_replace_old_explicit_children() {
+        let mut t = Texture::default();
+        t.set_parameter(0x8191, 1);
+        t.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
+        assert_eq!(
+            t.mipmaps.get(&1).unwrap(),
+            &(2, 2, [255, 0, 0, 255].repeat(4))
+        );
+        t.set_level(1, 2, 2, [0, 0, 255, 255].repeat(4));
+        t.set_level(0, 4, 4, [0, 255, 0, 255].repeat(16));
+        assert_eq!(
+            t.mipmaps.get(&1).unwrap(),
+            &(2, 2, [0, 255, 0, 255].repeat(4))
+        );
+        assert_eq!(t.mipmaps.get(&2).unwrap(), &(1, 1, vec![0, 255, 0, 255]));
     }
 }

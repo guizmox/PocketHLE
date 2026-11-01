@@ -10,6 +10,9 @@
 //! implementation; the emulator backs it with the CPU's address space
 //! and the tests back it with a plain byte vector.
 
+mod es11;
+pub use es11::StateValue;
+
 use crate::consts::*;
 use crate::fixed;
 use crate::matrix::{self, Matrix4, MatrixMode, MatrixStack};
@@ -185,12 +188,21 @@ const MAX_TEXTURE_UNITS: usize = raster::MAX_TEXTURE_STAGES;
 /// or indices (`GL_ELEMENT_ARRAY_BUFFER`). The guest uploads once and
 /// then draws from the buffer many times, so keeping the bytes on the
 /// host side means a draw does not re-read guest memory at all.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Buffer {
     pub data: Vec<u8>,
     /// The `GL_STATIC_DRAW` / `GL_DYNAMIC_DRAW` hint. Recorded for
     /// debugging; a software rasterizer has no use for it.
     pub usage: u32,
+}
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            usage: GL_STATIC_DRAW,
+        }
+    }
 }
 
 impl Buffer {
@@ -273,6 +285,7 @@ impl SurfaceBuffers {
 }
 
 pub struct Context {
+    es11: es11::Es11State,
     gpu: Option<crate::gpu::Renderer>,
     gpu_requested: bool,
     anisotropic_filtering: u8,
@@ -362,6 +375,7 @@ impl Context {
         // the app enables it.
         state.depth_func = CompareFunc::Less;
         Self {
+            es11: Default::default(),
             gpu: None,
             gpu_requested: false,
             anisotropic_filtering: 0,
@@ -467,6 +481,9 @@ impl Context {
             let mut gpu = crate::gpu::Renderer::new(self.target.width, self.target.height)?;
             gpu.set_anisotropic_filtering(self.anisotropic_filtering);
             gpu.set_render_scale(self.internal_resolution)?;
+            if !self.es11.point_max_changed {
+                self.es11.point_max = gpu.point_range[1];
+            }
             self.gpu = Some(gpu);
         }
         Ok(())
@@ -673,7 +690,16 @@ impl Context {
             GL_COLOR_MATERIAL => self.lighting.color_material = on,
             crate::lighting::RESCALE_NORMAL => self.lighting.rescale = on,
             GL_POLYGON_OFFSET_FILL => self.state.polygon_offset = on,
-            GL_DITHER | GL_STENCIL_TEST => {}
+            0x0b10 | 0x0b20 | 0x0bf2 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
+                if on {
+                    self.es11.extra_enables.insert(cap);
+                } else {
+                    self.es11.extra_enables.remove(&cap);
+                }
+            }
+            GL_DITHER => self.es11.dither = on,
+            GL_STENCIL_TEST => self.es11.stencil = on,
+            0x3000..=0x3005 => self.es11.clip_enabled[(cap - 0x3000) as usize] = on,
             0x4000..=0x4007 => self.lighting.lights[(cap - 0x4000) as usize].enabled = on,
             _ => self.set_error(GL_INVALID_ENUM),
         }
@@ -702,8 +728,12 @@ impl Context {
     pub fn gen_textures(&mut self, n: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
+            while self.next_texture_name == 0 || self.textures.contains_key(&self.next_texture_name)
+            {
+                self.next_texture_name = self.next_texture_name.wrapping_add(1);
+            }
             let name = self.next_texture_name;
-            self.next_texture_name += 1;
+            self.next_texture_name = self.next_texture_name.wrapping_add(1);
             self.textures.insert(name, Texture::default());
             out.push(name);
         }
@@ -722,8 +752,9 @@ impl Context {
         }
         // Binding an unseen name creates the object, as GL requires.
         if name != 0 {
+            self.es11.texture_objects.insert(name);
             self.textures.entry(name).or_default();
-            self.next_texture_name = self.next_texture_name.max(name + 1);
+            self.next_texture_name = self.next_texture_name.max(name.saturating_add(1));
         }
         self.texture_units[unit].bound_texture = name;
         if unit == 0 {
@@ -741,8 +772,11 @@ impl Context {
     pub fn gen_buffers(&mut self, n: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
+            while self.next_buffer_name == 0 || self.buffers.contains_key(&self.next_buffer_name) {
+                self.next_buffer_name = self.next_buffer_name.wrapping_add(1);
+            }
             let name = self.next_buffer_name;
-            self.next_buffer_name += 1;
+            self.next_buffer_name = self.next_buffer_name.wrapping_add(1);
             self.buffers.insert(name, Buffer::default());
             out.push(name);
         }
@@ -753,9 +787,14 @@ impl Context {
     /// binding 0 means "no buffer" — client arrays go back to reading
     /// guest memory directly.
     pub fn bind_buffer(&mut self, target: u32, name: u32) {
+        if !matches!(target, GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER) {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
         if name != 0 {
+            self.es11.buffer_objects.insert(name);
             self.buffers.entry(name).or_default();
-            self.next_buffer_name = self.next_buffer_name.max(name + 1);
+            self.next_buffer_name = self.next_buffer_name.max(name.saturating_add(1));
         }
         match target {
             GL_ARRAY_BUFFER => self.array_buffer = name,
@@ -778,6 +817,7 @@ impl Context {
             if name == 0 {
                 continue;
             }
+            self.es11.buffer_objects.remove(&name);
             self.buffers.remove(&name);
             if self.array_buffer == name {
                 self.array_buffer = 0;
@@ -923,14 +963,28 @@ impl Context {
     }
 
     pub fn set_multi_texcoord(&mut self, unit: u32, s: f32, t: f32) {
-        let unit = unit.saturating_sub(GL_TEXTURE0) as usize;
+        let Some(unit) = unit.checked_sub(GL_TEXTURE0).map(|u| u as usize) else {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        };
         if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
+        self.es11.current_texcoords[unit] = [s, t, 0., 1.];
         self.texture_units[unit].current_texcoord = [s, t];
         if unit == 0 {
             self.current_texcoord = [s, t];
+        }
+    }
+
+    pub fn set_multi_texcoord4(&mut self, unit: u32, values: [f32; 4]) {
+        self.set_multi_texcoord(unit, values[0], values[1]);
+        if let Some(index) = unit
+            .checked_sub(GL_TEXTURE0)
+            .filter(|i| (*i as usize) < MAX_TEXTURE_UNITS)
+        {
+            self.es11.current_texcoords[index as usize] = values;
         }
     }
 
@@ -942,6 +996,7 @@ impl Context {
             if name == 0 {
                 continue;
             }
+            self.es11.texture_objects.remove(&name);
             self.textures.remove(&name);
             self.software_mips.remove(&name);
             for (unit, state) in self.texture_units.iter_mut().enumerate() {
@@ -1316,6 +1371,9 @@ impl Context {
             let len = (width * 4) as usize;
             pixels[dst..dst + len].copy_from_slice(&patch[src..src + len]);
         }
+        if level == 0 {
+            tex.regenerate_mipmaps();
+        }
     }
 
     pub fn tex_parameter(&mut self, target: u32, pname: u32, value: u32) {
@@ -1349,8 +1407,16 @@ impl Context {
 
     pub fn tex_env(&mut self, pname: u32, value: u32) {
         if pname != GL_TEXTURE_ENV_MODE {
-            // TEXTURE_ENV_COLOR and the COMBINE parameters are accepted
-            // and ignored rather than erroring.
+            let unit = self.active_texture as usize;
+            match self.es11.combiners[unit].set(pname, value) {
+                Ok(()) => {
+                    if matches!(self.texture_units[unit].tex_env, TexEnvMode::Combine(_)) {
+                        self.texture_units[unit].tex_env =
+                            TexEnvMode::Combine(self.es11.combiners[unit]);
+                    }
+                }
+                Err(error) => self.set_error(error),
+            }
             return;
         }
         let mode = match value {
@@ -1358,7 +1424,7 @@ impl Context {
             GL_REPLACE => TexEnvMode::Replace,
             GL_DECAL => TexEnvMode::Decal,
             GL_ADD => TexEnvMode::Add,
-            GL_COMBINE => TexEnvMode::Modulate,
+            GL_COMBINE => TexEnvMode::Combine(self.es11.combiners[self.active_texture as usize]),
             // GL_BLEND shares its value with the blend enable enum.
             0x0BE2 => TexEnvMode::Blend,
             _ => {
@@ -1382,7 +1448,7 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        self.texture_units[unit].tex_env_color = color;
+        self.texture_units[unit].tex_env_color = color.map(|v| v.clamp(0., 1.));
     }
 
     // ---- fragment state -------------------------------------------------
@@ -1722,7 +1788,7 @@ impl Context {
         normal_matrix: &Matrix4,
     ) -> Option<Vertex> {
         let obj = self.fetch(mem, self.vertex_array, index, false)?;
-        let clip = if self.gpu.is_some() {
+        let clip = if self.gpu.is_some() && !self.es11.pretransform {
             obj
         } else {
             matrix::transform(mvp, obj)
@@ -1746,7 +1812,7 @@ impl Context {
                     .fetch(mem, unit.texcoord_array, index, false)
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
                 // The texture matrix applies to incoming coordinates.
-                let m = if self.gpu.is_some() {
+                let m = if self.gpu.is_some() && !self.es11.pretransform {
                     t
                 } else {
                     matrix::transform(
@@ -1762,7 +1828,7 @@ impl Context {
 
         // Eye-space Z drives fog. The modelview alone takes us to eye
         // space; GL fogs on |z_eye|.
-        let eye = if self.gpu.is_some() {
+        let eye = if self.gpu.is_some() && !self.es11.pretransform {
             [0.0; 4]
         } else {
             matrix::transform(self.modelview.current(), obj)
@@ -1773,26 +1839,33 @@ impl Context {
         } else {
             self.current_normal
         };
-        let (color, back_color) = if self.gpu.is_none() && self.lighting.enabled {
-            let n = self.lighting.transform_normal(normal_matrix, normal);
-            let point = std::array::from_fn(|i| {
-                if eye[3] == 0. {
-                    eye[i]
+        let (color, back_color) =
+            if (self.gpu.is_none() || self.es11.pretransform) && self.lighting.enabled {
+                let n = self.lighting.transform_normal(normal_matrix, normal);
+                let point = std::array::from_fn(|i| {
+                    if eye[3] == 0. {
+                        eye[i]
+                    } else {
+                        eye[i] / eye[3]
+                    }
+                });
+                let front = self.lighting.shade(n, point, color);
+                let back = if self.lighting.two_sided {
+                    self.lighting.shade(n.map(|x| -x), point, color)
                 } else {
-                    eye[i] / eye[3]
-                }
-            });
-            let front = self.lighting.shade(n, point, color);
-            let back = if self.lighting.two_sided {
-                self.lighting.shade(n.map(|x| -x), point, color)
+                    front
+                };
+                (front, back)
             } else {
-                front
+                (color, color)
             };
-            (front, back)
-        } else {
-            (color, color)
-        };
         Some(Vertex {
+            eye,
+            point_width: if self.es11.point_draw {
+                self.derived_point_size(eye)
+            } else {
+                -1.
+            },
             normal,
             back_color,
             pos: clip,
@@ -2096,7 +2169,7 @@ impl Context {
     fn draw_indexed(
         &mut self,
         mem: &mut dyn GuestMemory,
-        mode: u32,
+        mut mode: u32,
         indices: impl Iterator<Item = u32> + Clone,
         count: usize,
         sequential: bool,
@@ -2104,12 +2177,17 @@ impl Context {
         if self.gpu_failed {
             return;
         }
+        self.es11.point_draw = mode == GL_POINTS
+            && (self.es11.attenuation != [1., 0., 0.]
+                || self.es11.point_min != 0.
+                || self.es11.point_max != self.primitive_size_range(true)[1]);
+        self.es11.pretransform = self.es11.clip_enabled.iter().any(|v| *v) || self.es11.point_draw;
         if self.gpu.is_none() {
             for tex in self.textures.values_mut() {
                 tex.ensure_rgba();
             }
         }
-        let mvp = if self.gpu.is_some() {
+        let mvp = if self.gpu.is_some() && !self.es11.pretransform {
             matrix::IDENTITY
         } else {
             self.mvp()
@@ -2211,6 +2289,7 @@ impl Context {
             }),
         };
         if self.gpu.is_some()
+            && !self.es11.pretransform
             && ((self.state.smooth_shading
                 && matches!(
                     mode,
@@ -2257,6 +2336,7 @@ impl Context {
         // guest vertex directly, instead of expanding then hashing float records.
         let native_indices = !sequential
             && self.gpu.is_some()
+            && !self.es11.pretransform
             && self.state.smooth_shading
             && matches!(
                 mode,
@@ -2307,7 +2387,53 @@ impl Context {
             }
         }
 
+        if self.es11.pretransform {
+            let planes = self.clip_draw_planes();
+            (mode, verts) =
+                raster::clip_user_primitives(mode, &verts, &planes, self.state.smooth_shading);
+        }
         if let Some(gpu) = self.gpu.as_mut() {
+            if self.es11.pretransform {
+                let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
+                let result = if mode == GL_POINTS {
+                    let mut result = Ok(());
+                    for v in &verts {
+                        let mut state = self.state.clone();
+                        state.point_size = if v.point_width >= 0. {
+                            v.point_width
+                        } else {
+                            self.state.point_size
+                        };
+                        if let Err(error) = gpu.draw(
+                            &self.target,
+                            &state,
+                            mode,
+                            &[*v],
+                            stages,
+                            &self.textures,
+                            names,
+                        ) {
+                            result = Err(error);
+                            break;
+                        }
+                    }
+                    result
+                } else {
+                    gpu.draw(
+                        &self.target,
+                        &self.state,
+                        mode,
+                        &verts,
+                        stages,
+                        &self.textures,
+                        names,
+                    )
+                };
+                if let Err(error) = result {
+                    self.gpu_failure("clipped draw", error);
+                }
+                return;
+            }
             let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
             let result = if direct_indexed {
                 gpu.draw_indexed_object_space(
