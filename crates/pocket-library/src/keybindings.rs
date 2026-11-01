@@ -150,7 +150,7 @@ impl GuestButton {
             GuestButton::GizPiano1 => "Gizmondo Home (Piano 1)",
             GuestButton::GizPiano2 => "Gizmondo Volume (Piano 2)",
             GuestButton::GizPiano3 => "Gizmondo Brightness (Piano 3)",
-            GuestButton::GizPiano4 => "Gizmondo Alert (Piano 4)",
+            GuestButton::GizPiano4 => "Gizmondo Geofence (Piano 4)",
             GuestButton::GizPiano5 => "Gizmondo Power (Piano 5)",
             GuestButton::PocketPcApp1 => "Pocket PC hardware button 1",
             GuestButton::PocketPcApp2 => "Pocket PC hardware button 2",

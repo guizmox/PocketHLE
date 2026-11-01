@@ -16,6 +16,7 @@ mod file_dialog;
 mod fullscreen_layout;
 mod gamepad;
 mod gamepad_host;
+mod gizmondo_layout;
 mod host_gpu;
 mod launch_args;
 mod native_share;

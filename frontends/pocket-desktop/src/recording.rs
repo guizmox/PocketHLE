@@ -44,6 +44,7 @@ pub struct Recording {
     result: Option<Receiver<Result<Vec<PathBuf>, String>>>,
     held_keys: Vec<u16>,
     touch_steering_enabled: bool,
+    gizmondo: bool,
     steering_axes: (i16, i16),
     pub label: Option<(String, Instant)>,
     pub direction: Option<(u16, Instant)>,
@@ -165,6 +166,12 @@ impl Recording {
             _ => None,
         }
     }
+    pub fn set_gizmondo(&mut self, enabled: bool) {
+        if self.gizmondo != enabled {
+            self.gizmondo = enabled;
+            self.refresh_keys(Instant::now());
+        }
+    }
     pub fn set_touch_steering_enabled(&mut self, enabled: bool) {
         self.touch_steering_enabled = enabled;
         if !enabled {
@@ -216,7 +223,7 @@ impl Recording {
             .rev()
             .copied()
             .find(|vk| !(0x25..=0x28).contains(vk))
-            .map(|vk| (key_label(vk), now));
+            .map(|vk| (key_label(vk, self.gizmondo), now));
     }
     pub fn aim(&mut self, x: i32, y: i32) {
         if !self.active() {
@@ -341,7 +348,26 @@ impl Drop for Recording {
         self.finish_and_wait();
     }
 }
-fn key_label(vk: u16) -> String {
+fn key_label(vk: u16, gizmondo: bool) -> String {
+    if gizmondo {
+        let label = match vk {
+            0x0d => Some("PLAY"),
+            0x11 => Some("STOP"),
+            0x10 => Some("REW"),
+            0x20 => Some("FWD"),
+            0x09 => Some("L"),
+            0x1b => Some("R"),
+            0x70 => Some("HOME"),
+            0x71 => Some("VOL"),
+            0x72 => Some("BRIGHTNESS"),
+            0x73 => Some("GEOFENCE"),
+            0x7a => Some("POWER"), // Piano 5 is VK_F11, not F5.
+            _ => None,
+        };
+        if let Some(label) = label {
+            return label.into();
+        }
+    }
     match vk {
         0x0d => "ACT".into(),
         0x1b => "Esc".into(),
@@ -412,6 +438,23 @@ fn circle(im: &mut image::RgbaImage, x: i32, y: i32, r: i32) {
         }
     }
 }
+// Longer console function names keep their full label instead of being truncated.
+fn label_marker(im: &mut image::RgbaImage, x: i32, y: i32, half: i32, r: i32) {
+    let straight = (half - r).max(0);
+    for dy in -r..=r {
+        for dx in -half..=half {
+            let edge = (dx.abs() - straight).max(0);
+            let distance = edge * edge + dy * dy;
+            if distance <= r * r {
+                if distance >= (r - 2) * (r - 2) {
+                    blend(im, x + dx, y + dy, [90, 195, 255], 210);
+                } else {
+                    blend(im, x + dx, y + dy, [8, 18, 32], 145);
+                }
+            }
+        }
+    }
+}
 fn line(im: &mut image::RgbaImage, a: (i32, i32), b: (i32, i32)) {
     let n = (b.0 - a.0).abs().max((b.1 - a.1).abs()).max(1);
     for i in 0..=n {
@@ -449,10 +492,11 @@ fn draw_overlay(im: &mut image::RgbaImage, o: &Overlay) {
         line(im, tip, (x + dy / 2, y - dx / 2));
     }
     if let Some(text) = &o.button {
-        let x = x + 2 * r + 5 * scale;
-        circle(im, x, y, r);
-        let label: String = text.chars().take(5).collect();
+        let label: String = text.chars().take(10).collect();
         let w = (label.len() as u32 * 6).max(1);
+        let half = ((w as i32 * scale + 8 * scale) / 2).max(r);
+        let x = x + r + 5 * scale + half;
+        label_marker(im, x, y, half, r);
         let mut bitmap = pocket_core::kernel::gdi::Bitmap::new(w, 8);
         pocket_core::kernel::font::draw_str(
             &mut pocket_core::kernel::gdi::Surface::Bitmap(&mut bitmap),
@@ -1215,5 +1259,64 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert_eq!(small.get_pixel(15, 226).0, [200, 50, 20, 255]);
         assert!(paths.iter().all(|p| p.metadata().unwrap().len() > 1000));
+    }
+}
+
+#[cfg(test)]
+mod gizmondo_label_tests {
+    use super::*;
+    #[test]
+    fn gizmondo_recording_uses_console_labels_that_fit_the_existing_marker() {
+        for (vk, label) in [
+            (0x0d, "PLAY"),
+            (0x11, "STOP"),
+            (0x10, "REW"),
+            (0x20, "FWD"),
+            (0x09, "L"),
+            (0x1b, "R"),
+            (0x70, "HOME"),
+            (0x71, "VOL"),
+            (0x72, "BRIGHTNESS"),
+            (0x73, "GEOFENCE"),
+            (0x7a, "POWER"),
+        ] {
+            assert_eq!(key_label(vk, true), label);
+            assert!(label.len() <= 10);
+        }
+        assert_eq!(key_label(0x0d, false), "ACT");
+        assert_eq!(key_label(0x11, false), "A");
+        assert_eq!(key_label(0x10, false), "C");
+        assert_eq!(key_label(0x20, false), "B");
+        assert_eq!(key_label(0xc1, false), "P1");
+        assert_eq!(key_label(0x26, true), "Up");
+    }
+    #[test]
+    fn longer_function_labels_are_fully_visible_and_short_markers_stay_unchanged() {
+        let mut before = image::RgbaImage::new(320, 240);
+        let mut after = before.clone();
+        circle(&mut before, 52, 221, 14);
+        label_marker(&mut after, 52, 221, 14, 14);
+        assert_eq!(before, after);
+        draw_overlay(
+            &mut after,
+            &Overlay {
+                button: Some("BRIGHTNESS".into()),
+                ..Default::default()
+            },
+        );
+        assert!(after
+            .enumerate_pixels()
+            .any(|(x, _, p)| x >= 96 && p[0] > 220 && p[1] > 220 && p[2] > 220));
+    }
+    #[test]
+    fn changing_recording_profile_updates_the_held_button_label() {
+        let mut recording = Recording::default();
+        recording.held_keys = vec![0x0d];
+        recording.refresh_keys(Instant::now());
+        assert_eq!(recording.label.as_ref().unwrap().0, "ACT");
+        recording.set_gizmondo(true);
+        assert_eq!(recording.label.as_ref().unwrap().0, "PLAY");
+        recording.set_gizmondo(false);
+        assert_eq!(recording.label.as_ref().unwrap().0, "ACT");
     }
 }

@@ -190,7 +190,6 @@ pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, egui::TextureHandle>,
     screen_cache: std::collections::HashMap<String, (ScreenPref, (u32, u32))>,
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
-    gizmondo_skin: Option<egui::TextureHandle>,
     upscale_x2: bool,
     upscale_filter: UpscaleFilter,
     deck_filter_notice: Option<(String, Instant)>,
@@ -796,7 +795,6 @@ impl PocketLauncher {
             icon_cache: std::collections::HashMap::new(),
             screen_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
-            gizmondo_skin: None,
             upscale_x2: false,
             upscale_filter,
             deck_filter_notice: None,
@@ -1242,6 +1240,7 @@ impl PocketLauncher {
         if self.screen != Screen::Run || self.last_frame_snapshot.is_none() {
             return;
         }
+        recording.set_gizmondo(self.running_is_gizmondo);
         let directory = self.library.root().join("recordings");
         let result = std::fs::create_dir_all(&directory)
             .map_err(|e| e.to_string())
@@ -1278,6 +1277,7 @@ impl PocketLauncher {
             });
         match result {
             Ok(audio) => {
+                recording.set_gizmondo(self.running_is_gizmondo);
                 recording.set_touch_steering_enabled(self.touch_steering_enabled());
                 for vk in self
                     .held
@@ -3135,14 +3135,17 @@ impl PocketLauncher {
         }
         if let Some(inner) = inner {
             self.library_window_size.get_or_insert(inner);
-            let scale = if self.upscale_x2 { 2.0 } else { 1.0 };
             let body = if self.running_is_gizmondo {
-                let render_width = self
+                let native = self
                     .last_frame_snapshot
                     .as_ref()
-                    .map_or(320, |f| f.texture_width);
-                let width = (render_width as f32 / 0.3920) * scale;
-                Vec2::new(width, width * 928.0 / 1648.0)
+                    .map_or([320, 240], |f| [f.texture_width, f.texture_height]);
+                let body = crate::gizmondo_layout::window_body(
+                    native,
+                    if self.upscale_x2 { 2 } else { 1 },
+                    ui.ctx().pixels_per_point(),
+                );
+                Vec2::new(body[0], body[1])
             } else {
                 let Some(frame) = self.last_frame_snapshot.as_ref() else {
                     return;
@@ -3389,11 +3392,7 @@ impl PocketLauncher {
     fn ui_run(&mut self, ui: &mut egui::Ui) {
         if self.running_is_gizmondo {
             self.fit_console_window(ui);
-            if ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false)) {
-                self.ui_gizmondo(ui);
-            } else {
-                ScrollArea::both().show(ui, |ui| self.ui_gizmondo(ui));
-            }
+            self.ui_gizmondo(ui);
             return;
         }
         self.fit_console_window(ui);
@@ -3648,247 +3647,254 @@ impl PocketLauncher {
         }
     }
 
-    /// Gizmondo-specific Run view. The guest framebuffer is drawn into the
-    /// console LCD and every physical control is a real held button. Keyboard
-    /// shortcuts intentionally describe the *host* keyboard; the VK sent to
-    /// Windows CE follows the official Gizmondo Keys SDK sample.
+    /// Host-only Gizmondo controls; guest key codes and user bindings are unchanged.
     fn ui_gizmondo(&mut self, ui: &mut egui::Ui) {
-        if self.gizmondo_skin.is_none() {
-            if let Ok(image) = load_image_bytes(include_bytes!("../assets/gizmondo.png")) {
-                self.gizmondo_skin = Some(ui.ctx().load_texture(
-                    "gizmondo-skin",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
-            }
-        }
-
-        // The supplied skin is 1648x928. Keep that ratio so all hitboxes and
-        // the LCD remain locked to the photographed controls while resizing.
-        let aspect = 1648.0 / 928.0;
         let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let available = ui.available_size();
-        let w = if fullscreen {
-            available.x.min(available.y * aspect).max(1.0)
-        } else {
-            (self
-                .last_frame_snapshot
-                .as_ref()
-                .map_or(320, |f| f.texture_width) as f32
-                / 0.3920)
-                * if self.upscale_x2 { 2.0 } else { 1.0 }
-        };
-        let h = w / aspect;
-        let scale = w * 0.3920 / 320.0;
-        let body = if fullscreen {
-            let (canvas, _) = ui.allocate_exact_size(available, Sense::hover());
-            Rect::from_center_size(canvas.center(), Vec2::new(w, h))
-        } else {
-            ui.allocate_exact_size(Vec2::new(w, h), Sense::hover()).0
-        };
-        let rr = |x: f32, y: f32, rw: f32, rh: f32| {
-            Rect::from_min_size(
-                Pos2::new(body.left() + x * w, body.top() + y * h),
-                Vec2::new(rw * w, rh * h),
-            )
-        };
-
-        if let Some(skin) = self.gizmondo_skin.as_ref() {
-            ui.painter().image(
-                skin.id(),
-                body,
-                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        } else {
-            ui.painter()
-                .rect_filled(body, 24.0, Color32::from_rgb(24, 25, 27));
-        }
-
-        // Replace the static picture in the skin with the emulator's live
-        // 320x240 framebuffer. These coordinates are measured from the skin.
-        let lcd = rr(0.3016, 0.2252, 0.3920, 0.5280);
-        let screen = Rect::from_center_size(lcd.center(), Vec2::new(320.0, 240.0) * scale);
-        // Cover the skin's entire photographed LCD, including the small
-        // bands outside the exact 4:3 game rectangle. Otherwise its old
-        // picture shows through above/below the live framebuffer at ×2.
-        ui.painter().rect_filled(
-            lcd.expand(1.0 / ui.ctx().pixels_per_point()),
-            0.0,
-            Color32::BLACK,
+        let native = self
+            .last_frame_snapshot
+            .as_ref()
+            .map_or([320, 240], |f| [f.texture_width, f.texture_height]);
+        let guest = self
+            .last_frame_snapshot
+            .as_ref()
+            .map_or(Vec2::new(320., 240.), |f| {
+                Vec2::new(f.width as f32, f.height as f32)
+            });
+        let bounds = ui
+            .allocate_exact_size(ui.available_size(), Sense::hover())
+            .0;
+        let layout = crate::gizmondo_layout::calculate(
+            [bounds.width(), bounds.height()],
+            native,
+            ui.ctx().pixels_per_point(),
+            if fullscreen {
+                None
+            } else {
+                Some(if self.upscale_x2 { 2 } else { 1 })
+            },
+            cfg!(feature = "steam-deck"),
         );
+        let rect = |r: crate::gizmondo_layout::BoxRect| {
+            Rect::from_min_size(bounds.min + Vec2::new(r.x, r.y), Vec2::new(r.w, r.h))
+        };
+        ui.painter()
+            .rect_filled(bounds, 0., Color32::from_rgb(8, 13, 21));
+        ui.painter().text(
+            bounds.min + Vec2::new(12., 12.),
+            egui::Align2::LEFT_CENTER,
+            "PocketHLE · Gizmondo",
+            egui::FontId::proportional(13.),
+            Color32::from_gray(220),
+        );
+        let screen = rect(layout.screen);
+        ui.painter().rect_filled(screen, 0., Color32::BLACK);
         if self.last_frame_texture.is_some() {
             self.paint_guest_frame(ui, screen);
-            let guest_size = self
-                .last_frame_snapshot
-                .as_ref()
-                .map(|frame| Vec2::new(frame.width as f32, frame.height as f32))
-                .unwrap_or(Vec2::new(320.0, 240.0));
-            self.handle_pointer(ui.ctx(), &screen, guest_size);
+            self.handle_pointer(ui.ctx(), &screen, guest);
         } else {
-            ui.painter().rect_filled(screen, 0.0, Color32::BLACK);
             ui.painter().text(
                 screen.center(),
                 egui::Align2::CENTER_CENTER,
                 "Starting…",
-                egui::FontId::proportional(18.0),
+                egui::FontId::proportional(16.),
                 Color32::from_gray(180),
             );
         }
-
-        // Five top "piano" buttons. Their host keys come from Settings;
-        // Piano 5 still sends guest VK_F11, as required by the official SDK.
-        for (rect, symbol, label, button) in [
-            (
-                rr(0.347, 0.020, 0.039, 0.102),
-                "⌂",
-                "Home / Piano 1",
-                GuestButton::GizPiano1,
-            ),
-            (
-                rr(0.410, 0.018, 0.039, 0.104),
-                "♪",
-                "Volume / Piano 2",
-                GuestButton::GizPiano2,
-            ),
-            (
-                rr(0.475, 0.015, 0.039, 0.108),
-                "☀",
-                "Brightness / Piano 3",
-                GuestButton::GizPiano3,
-            ),
-            (
-                rr(0.540, 0.017, 0.039, 0.106),
-                "!",
-                "Alert / Piano 4",
-                GuestButton::GizPiano4,
-            ),
-            (
-                rr(0.606, 0.020, 0.039, 0.102),
-                "⏻",
-                "Power / Piano 5",
-                GuestButton::GizPiano5,
-            ),
-        ] {
-            self.giz_button(ui, rect, symbol, label, button);
+        for (i, (caption, button)) in [
+            ("HOME", GuestButton::GizPiano1),
+            ("VOLUME", GuestButton::GizPiano2),
+            ("BRIGHTNESS", GuestButton::GizPiano3),
+            ("GEOFENCE", GuestButton::GizPiano4),
+            ("POWER", GuestButton::GizPiano5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.giz_button(
+                ui,
+                rect(layout.functions[i]),
+                GizIcon::Function(i),
+                caption,
+                button,
+                false,
+            );
         }
-
-        self.giz_button(
-            ui,
-            rr(0.105, 0.010, 0.105, 0.145),
-            "L",
-            "Left shoulder",
-            GuestButton::Soft1,
+        for (i, (label, button)) in [("L", GuestButton::Soft1), ("R", GuestButton::Soft2)]
+            .into_iter()
+            .enumerate()
+        {
+            self.giz_button(
+                ui,
+                rect(layout.shoulders[i]),
+                GizIcon::Text(label),
+                label,
+                button,
+                false,
+            );
+        }
+        for (i, (symbol, button)) in [
+            ("▲", GuestButton::DpadUp),
+            ("◀", GuestButton::DpadLeft),
+            ("▶", GuestButton::DpadRight),
+            ("▼", GuestButton::DpadDown),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.giz_button(
+                ui,
+                rect(layout.directions[i]),
+                GizIcon::Text(symbol),
+                "D-pad",
+                button,
+                false,
+            );
+        }
+        let pad = rect(layout.dpad);
+        ui.painter().circle_filled(
+            pad.center(),
+            pad.width() / 5.0,
+            Color32::from_rgb(20, 28, 40),
         );
-        self.giz_button(
-            ui,
-            rr(0.790, 0.010, 0.105, 0.145),
-            "R",
-            "Right shoulder",
-            GuestButton::Soft2,
+        ui.painter().circle_stroke(
+            pad.center(),
+            pad.width() / 5.0,
+            egui::Stroke::new(1.5, Color32::from_rgb(80, 96, 120)),
         );
-
-        self.giz_button(
-            ui,
-            rr(0.113, 0.335, 0.061, 0.105),
-            "▲",
-            "D-pad up",
-            GuestButton::DpadUp,
-        );
-        self.giz_button(
-            ui,
-            rr(0.075, 0.420, 0.061, 0.105),
-            "◀",
-            "D-pad left",
-            GuestButton::DpadLeft,
-        );
-        self.giz_button(
-            ui,
-            rr(0.151, 0.420, 0.061, 0.105),
-            "▶",
-            "D-pad right",
-            GuestButton::DpadRight,
-        );
-        self.giz_button(
-            ui,
-            rr(0.113, 0.505, 0.061, 0.105),
-            "▼",
-            "D-pad down",
-            GuestButton::DpadDown,
-        );
-
-        self.giz_button(
-            ui,
-            rr(0.827, 0.285, 0.060, 0.105),
-            "■",
-            "North / Stop",
-            GuestButton::ButtonA,
-        );
-        self.giz_button(
-            ui,
-            rr(0.775, 0.385, 0.060, 0.105),
-            "◀◀",
-            "West / Rewind",
-            GuestButton::ButtonC,
-        );
-        self.giz_button(
-            ui,
-            rr(0.875, 0.385, 0.060, 0.105),
-            "▶▶",
-            "East / Forward",
-            GuestButton::ButtonB,
-        );
-        self.giz_button(
-            ui,
-            rr(0.827, 0.500, 0.060, 0.105),
-            "▶",
-            "South / Play",
-            GuestButton::Action,
-        );
+        for (i, (caption, button)) in [
+            ("STOP", GuestButton::ButtonA),
+            ("REW", GuestButton::ButtonC),
+            ("FWD", GuestButton::ButtonB),
+            ("PLAY", GuestButton::Action),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.giz_button(
+                ui,
+                rect(layout.actions[i]),
+                GizIcon::Media(i),
+                caption,
+                button,
+                true,
+            );
+        }
+        let orange = Color32::from_rgb(207, 139, 88);
+        let host = |name: &str| {
+            egui::Button::new(egui::RichText::new(name).color(orange))
+                .fill(Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(1., orange))
+                .rounding(7.)
+        };
+        if ui.put(rect(layout.host[0]), host("EXIT")).clicked() {
+            self.return_to_library(ui.ctx());
+            return;
+        }
+        if ui.put(rect(layout.host[1]), host("FULL")).clicked() {
+            self.set_fullscreen(ui.ctx(), !fullscreen);
+        }
     }
 
     fn giz_button(
         &mut self,
         ui: &mut egui::Ui,
         rect: Rect,
-        symbol: &str,
-        label: &str,
+        icon: GizIcon,
+        caption: &str,
         button: GuestButton,
+        round: bool,
     ) {
         let vk = button.vk();
-        let host = self
+        let hit = rect.intersect(ui.clip_rect());
+        let mut pressed = pointer_held_in(ui.ctx(), &hit);
+        if round {
+            let shape = crate::gizmondo_layout::BoxRect {
+                x: rect.left(),
+                y: rect.top(),
+                w: rect.width(),
+                h: rect.height(),
+            };
+            pressed &= ui.ctx().input(|i| {
+                i.pointer
+                    .press_origin()
+                    .is_some_and(|p| shape.contains([p.x, p.y], true))
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| shape.contains([p.x, p.y], true))
+            });
+        }
+        let was_pressed = self.held.is_held_by(InputSource::Pointer, vk);
+        if pressed && !was_pressed && self.held.press(InputSource::Pointer, vk) {
+            self.send_input(InputEvent::KeyDown { vk });
+        } else if was_pressed && !pressed && self.held.release(InputSource::Pointer, vk) {
+            self.send_input(InputEvent::KeyUp { vk });
+        }
+        let held = self.held.is_held(vk);
+        let fill = if held {
+            Color32::from_rgb(50, 136, 191)
+        } else {
+            Color32::from_rgb(48, 58, 71)
+        };
+        let outline = egui::Stroke::new(
+            1.5,
+            if held {
+                Color32::from_rgb(145, 214, 255)
+            } else {
+                Color32::from_rgb(80, 96, 120)
+            },
+        );
+        if round {
+            ui.painter()
+                .circle(rect.center(), rect.width() / 2., fill, outline);
+        } else {
+            ui.painter().rect(rect, 10., fill, outline);
+        }
+        match icon {
+            GizIcon::Text(symbol) => {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    symbol,
+                    egui::FontId::proportional((rect.height() * 0.36).clamp(14., 34.)),
+                    Color32::WHITE,
+                );
+            }
+            _ => {
+                let label_size = (rect.width() * 0.16)
+                    .clamp(8., 12.)
+                    .min(((rect.width() - 8.) / (caption.len().max(1) as f32 * 0.65)).max(6.));
+                let center = rect.center() - Vec2::new(0., label_size * 0.60);
+                paint_giz_icon(
+                    ui.painter(),
+                    center,
+                    rect.width().min(rect.height()) * 0.22,
+                    icon,
+                );
+                ui.painter().text(
+                    Pos2::new(rect.center().x, rect.bottom() - 5.),
+                    egui::Align2::CENTER_BOTTOM,
+                    caption,
+                    egui::FontId::proportional(label_size),
+                    Color32::WHITE,
+                );
+            }
+        }
+        let keys = self
             .library
             .config()
             .keybindings
             .keys_for(button)
             .join(", ");
-        let was_pressed = self.held.is_held_by(InputSource::Pointer, vk);
-        let now_pressed = pointer_held_in(ui.ctx(), &rect);
-        if now_pressed && !was_pressed && self.held.press(InputSource::Pointer, vk) {
-            self.send_input(InputEvent::KeyDown { vk });
-        } else if was_pressed && !now_pressed && self.held.release(InputSource::Pointer, vk) {
-            self.send_input(InputEvent::KeyUp { vk });
-        }
-
-        // The skin already contains the physical button. On press we only
-        // repaint its dark legend in white, which gives the requested
-        // illuminated-button feedback without covering the artwork.
-        if self.held.is_held(vk) {
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                symbol,
-                egui::FontId::proportional((rect.height() * 0.38).max(12.0)),
-                Color32::WHITE,
-            );
-        }
-        let id = ui.make_persistent_id(("giz_button", vk));
-        ui.interact(rect, id, Sense::click_and_drag())
-            .on_hover_text(if host.is_empty() {
-                format!("{label} — keyboard: unbound")
-            } else {
-                format!("{label} — keyboard: {host}")
-            });
+        ui.interact(
+            rect,
+            ui.make_persistent_id(("giz_button", vk)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_text(if keys.is_empty() {
+            format!("{caption} — keyboard: unbound")
+        } else {
+            format!("{caption} — keyboard: {keys}")
+        });
     }
 
     fn handle_pointer(&mut self, ctx: &egui::Context, rect: &Rect, size: Vec2) {
@@ -3997,6 +4003,7 @@ impl PocketLauncher {
     fn send_input(&self, ev: InputEvent) {
         {
             let mut recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
+            recording.set_gizmondo(self.running_is_gizmondo);
             recording.set_touch_steering_enabled(self.touch_steering_enabled());
             recording.observe(ev);
         }
@@ -5724,7 +5731,11 @@ impl eframe::App for PocketLauncher {
                 return;
             }
             if console_only {
-                self.ui_fullscreen_game(ui);
+                if self.running_is_gizmondo {
+                    self.ui_gizmondo(ui);
+                } else {
+                    self.ui_fullscreen_game(ui);
+                }
                 return;
             }
             match self.screen {
@@ -6056,5 +6067,98 @@ mod tests {
         let (x, y) =
             rotated_pointer_to_game(Vec2::new(0.0, 0.0), display, game, RotationPref::None);
         assert_eq!((x, y), (0, 0));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GizIcon {
+    Text(&'static str),
+    Function(usize),
+    Media(usize),
+}
+fn paint_giz_icon(p: &egui::Painter, c: Pos2, r: f32, icon: GizIcon) {
+    let color = Color32::WHITE;
+    let stroke = egui::Stroke::new((r * 0.12).max(1.2), color);
+    let line = |a: Vec2, b: Vec2| {
+        p.line_segment([c + a * r, c + b * r], stroke);
+    };
+    let polygon = |points: &[Vec2]| {
+        p.add(egui::Shape::convex_polygon(
+            points.iter().map(|v| c + *v * r).collect(),
+            color,
+            egui::Stroke::new(0., color),
+        ));
+    };
+    let arc = |origin: Vec2, radius: f32, start: f32, end: f32| {
+        let points = (0..=20)
+            .map(|i| {
+                let a = start + (end - start) * i as f32 / 20.;
+                c + (origin + Vec2::new(a.cos(), a.sin()) * radius) * r
+            })
+            .collect();
+        p.add(egui::Shape::line(points, stroke));
+    };
+    let pi = std::f32::consts::PI;
+    match icon {
+        GizIcon::Function(0) => {
+            line(Vec2::new(-1., 0.), Vec2::new(0., -0.9));
+            line(Vec2::new(0., -0.9), Vec2::new(1., 0.));
+            line(Vec2::new(-0.65, -0.2), Vec2::new(-0.65, 0.8));
+            line(Vec2::new(0.65, -0.2), Vec2::new(0.65, 0.8));
+            line(Vec2::new(-0.65, 0.8), Vec2::new(0.65, 0.8));
+        }
+        GizIcon::Function(1) => {
+            polygon(&[
+                Vec2::new(-0.9, -0.3),
+                Vec2::new(-0.5, -0.3),
+                Vec2::new(0., -0.8),
+                Vec2::new(0., 0.8),
+                Vec2::new(-0.5, 0.3),
+                Vec2::new(-0.9, 0.3),
+            ]);
+            arc(Vec2::new(-0.1, 0.), 0.65, -0.75, 0.75);
+            arc(Vec2::new(-0.1, 0.), 1.05, -0.75, 0.75);
+        }
+        GizIcon::Function(2) => {
+            p.circle_stroke(c, r * 0.45, stroke);
+            for i in 0..8 {
+                let a = i as f32 * pi / 4.;
+                let v = Vec2::new(a.cos(), a.sin());
+                line(v * 0.7, v);
+            }
+        }
+        GizIcon::Function(3) => {
+            line(Vec2::new(0., -0.25), Vec2::new(0., 0.85));
+            line(Vec2::new(-0.4, 0.85), Vec2::new(0.4, 0.85));
+            p.circle_filled(c + Vec2::new(0., -0.35) * r, r * 0.12, color);
+            for radius in [0.5, 0.9] {
+                arc(Vec2::new(0., -0.35), radius, -0.7, 0.7);
+                arc(Vec2::new(0., -0.35), radius, pi - 0.7, pi + 0.7);
+            }
+        }
+        GizIcon::Function(_) => {
+            arc(Vec2::ZERO, 0.85, -pi / 2. + 0.5, 3. * pi / 2. - 0.5);
+            line(Vec2::new(0., -1.), Vec2::new(0., 0.1));
+        }
+        GizIcon::Media(0) => {
+            p.rect_filled(Rect::from_center_size(c, Vec2::splat(r * 1.25)), 1., color);
+        }
+        GizIcon::Media(n) => {
+            let count = if n == 3 { 1 } else { 2 };
+            for i in 0..count {
+                let x = if count == 1 {
+                    -0.25
+                } else {
+                    -0.55 + i as f32 * 0.85
+                };
+                let sign = if n == 1 { -1. } else { 1. };
+                polygon(&[
+                    Vec2::new(sign * (x - 0.35), -0.65),
+                    Vec2::new(sign * (x + 0.55), 0.),
+                    Vec2::new(sign * (x - 0.35), 0.65),
+                ]);
+            }
+        }
+        GizIcon::Text(_) => {}
     }
 }

@@ -1,10 +1,7 @@
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\gpu\mod.rs
-crates\pocket-library\src\lib.rs
-docs\OPENGL-ES-INTERNAL-RESOLUTION.md
-frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\InternalResolutionSettingsTest.kt
+crates\pocket-library\src\keybindings.rs
+docs\GIZMONDO-DESKTOP-CONTROLS.md
 frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\desktop_main.rs
-frontends\pocket-desktop\src\launch_args.rs
+frontends\pocket-desktop\src\gizmondo_layout.rs
+frontends\pocket-desktop\src\recording.rs
+removed-files.txt
