@@ -132,11 +132,12 @@ fn run_launcher() -> Result<()> {
             .map_err(anyhow::Error::msg)
         })
         .transpose()?;
-    // The dedicated Steam Deck build starts fullscreen; an explicit CLI mode wins.
-    let fullscreen = launch
-        .as_ref()
-        .and_then(|a| a.fullscreen)
-        .unwrap_or(cfg!(feature = "steam-deck") || library.config().fullscreen);
+    let explicit_fullscreen = launch.as_ref().and_then(|a| a.fullscreen);
+    let fullscreen = launch_args::startup_fullscreen(
+        cfg!(feature = "steam-deck"),
+        library.config().fullscreen,
+        explicit_fullscreen,
+    );
 
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE logo")?
@@ -164,6 +165,11 @@ fn run_launcher() -> Result<()> {
             let mut app = app::PocketLauncher::new(cc, lib);
             if let Some(game) = &launch_game {
                 app.launch_from_command_line(game, launch.as_ref().and_then(|a| a.filter));
+            }
+            // Reapply after native window creation/restoration. Do this once;
+            // the user can subsequently leave fullscreen using the normal controls.
+            if cfg!(feature = "steam-deck") || explicit_fullscreen.is_some() {
+                app.request_startup_fullscreen(fullscreen);
             }
             Box::new(app) as Box<dyn eframe::App>
         }),

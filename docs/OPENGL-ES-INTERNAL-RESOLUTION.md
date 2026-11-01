@@ -2,12 +2,19 @@
 
 The global **Emulator Settings > Graphics > OpenGLES internal resolution (GPU
 only)** setting is available on desktop (Windows/Linux/Steam Deck) and Android.
-It applies on the next launch and defaults to **Native (1×)**. Select **2×** with
-GPU rendering enabled to render twice the logical width and height:
+It applies on the next launch and defaults to **Native (1×)**. The GPU choices are:
 
-- 320×240 guest surface → 640×480 rendered image;
-- 240×320 portrait surface → 480×640 rendered image;
-- a guest that already uses VGA is likewise doubled.
+- **Native (1×)**: original rendering size.
+- **2x - only for 320x240 games**: double 320×240 or 240×320 surfaces; other
+  native sizes, including 640×480 and 480×640, remain unchanged.
+- **2x - also for 640x480 games**: double every native GLES surface, including
+  640×480 → 1280×960 and 480×640 → 960×1280 (and larger native surfaces).
+
+The existing serialized value 2 keeps its previous all-sizes meaning. Value 3
+is the new QVGA-only policy; value 1 remains native. The policy is evaluated on
+logical surface creation/resize, so a size/orientation change or restored EGL
+surface does not inherit the previous surface's effective scale. The normal
+no-resize draw path does not evaluate the policy again.
 
 This is actual geometry rasterization into a larger color/depth framebuffer,
 not a post-process resize. Textures/sprites keep their original source detail.
@@ -61,3 +68,34 @@ the host-only pixel density.
 - Added pure Kotlin payload tests for native/high-resolution frames, malformed
   lengths and oversized dimensions. These are included for Android unit tests;
   no complete Android/desktop build or full GitHub CI run was performed here.
+
+## Steam Deck startup
+
+The dedicated Steam Deck build starts fullscreen even when the previous desktop
+configuration was windowed. It requests fullscreen in the initial native window
+builder and once on the first UI frame, after native window-state restoration.
+Subsequent fullscreen controls work normally. An explicit CLI display argument
+still takes priority: `0` fullscreen, `1` windowed. This applies to the dedicated
+Steam Deck build (`steam-deck` feature), not automatic detection in a regular
+Windows/Linux desktop binary.
+
+## Recognizing a fixed-size software framebuffer
+
+GAPI imports alone do not establish whether a game's renderer is resolution
+independent (nor do they rule out dynamically loaded GL). Source review or a
+trace must follow the width, height and signed X/Y byte pitches returned by
+GXGetDisplayProperties into buffer allocations, row addressing, drawing loops,
+clipping, depth buffers and the 3D projection. A hardcoded 320×240 buffer or a
+640-byte row stride for 320 RGB565 pixels is evidence of an assumption, not
+proof from the mere presence of those constants. Engines may query display
+properties but still render into a fixed-size private buffer and then copy it.
+Changing the reported framebuffer size alone cannot safely add rendering detail.
+
+## Follow-up validation
+
+Policy selection and actual native framebuffer resizing were checked for QVGA,
+VGA, both portrait orientations, policy changes, and parked EGL surfaces.
+Existing native internal-resolution geometry/readback tests were rerun. Startup
+preference/CLI precedence tests passed. Kotlin configuration roundtrip tests are
+included for Android CI; no full Android/desktop build or physical Steam Deck
+launch was performed here. No game-specific framebuffer patch is included.

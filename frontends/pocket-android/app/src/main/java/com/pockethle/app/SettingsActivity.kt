@@ -357,9 +357,9 @@ class SettingsActivity : AppCompatActivity() {
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="gles_internal_resolution"; title="OpenGLES internal resolution (GPU only)"; isPersistent=false
-                entries=arrayOf("Native (1×)", "2×"); entryValues=arrayOf("1", "2")
+                entries=arrayOf("Native (1×)", "2x - only for 320x240 games", "2x - also for 640x480 games"); entryValues=arrayOf("1", "3", "2")
                 value=current.glesInternalResolution.toString(); isEnabled=current.gpuRenderer
-                summary="2× renders twice the width and height for sharper 3D geometry, with more GPU/readback work. Does not add detail to 2D assets or change touch coordinates, layout or display zoom. Applies next launch."
+                summary="Includes portrait equivalents (240x320 and 480x640). The second 2x mode also doubles larger native surfaces. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch."
                 setOnPreferenceChangeListener { _, v -> current=current.copy(glesInternalResolution=v.toString().toInt());writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {

@@ -203,6 +203,7 @@ pub struct PocketLauncher {
     console_fit_pending: bool,
     library_window_size: Option<Vec2>,
     display_fullscreen: bool,
+    startup_fullscreen: Option<bool>,
     fullscreen_window_size: Option<Vec2>,
     reconstruction: Option<std::sync::Arc<std::sync::Mutex<crate::reconstruction::Reconstruction>>>,
     screenshot: crate::screenshot::SharedScreenshot,
@@ -807,6 +808,7 @@ impl PocketLauncher {
             console_fit_pending: false,
             library_window_size: None,
             display_fullscreen: false,
+            startup_fullscreen: None,
             fullscreen_window_size: None,
             reconstruction: cc.gl.as_ref().and_then(|gl| {
                 match crate::reconstruction::Reconstruction::new(gl) {
@@ -2333,15 +2335,16 @@ impl PocketLauncher {
                 ui.label("OpenGLES internal resolution (GPU only)");
                 ui.add_enabled_ui(draft.gpu_renderer, |ui| {
                     crate::controller_ui::ComboBox::from_id_source("gles_internal_resolution")
-                        .selected_text(if draft.gles_internal_resolution == 2 { "2×" } else { "Native (1×)" })
+                        .selected_text(match draft.gles_internal_resolution { 3 => "2x - only for 320x240 games", 2 => "2x - also for 640x480 games", _ => "Native (1×)" })
                         .show_ui(ui, |ui| {
                             crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 1, "Native (1×)");
-                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 2, "2×");
+                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 3, "2x - only for 320x240 games");
+                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 2, "2x - also for 640x480 games");
                         });
-                }).response.on_hover_text("Renders OpenGLES games at twice the width and height (320×240 → 640×480). Sharper 3D geometry; more GPU and readback work. Does not add detail to 2D assets or change touch coordinates. Applies next launch.");
+                }).response.on_hover_text("Includes portrait equivalents (240x320 and 480x640). The second 2x mode also doubles larger native surfaces. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch.");
                 ui.end_row();
                 ui.label("");
-                ui.small("2× increases OpenGLES rendering resolution. Screen layout and display zoom stay unchanged.");
+                ui.small("2x increases the rendered resolution; display zoom then scales that image. Applies next launch.");
                 ui.end_row();
 
                 ui.label("Anisotropic filtering (GPU only)");
@@ -5046,6 +5049,10 @@ impl PocketLauncher {
         self.status = "Importing...".to_string();
     }
 
+    pub fn request_startup_fullscreen(&mut self, fullscreen: bool) {
+        self.startup_fullscreen = Some(fullscreen);
+    }
+
     pub fn launch_from_command_line(&mut self, game: &GameEntry, filter: Option<usize>) {
         if let Some(filter) = filter.and_then(|i| UpscaleFilter::ALL.get(i)).copied() {
             self.upscale_filter = filter;
@@ -5393,6 +5400,11 @@ impl eframe::App for PocketLauncher {
         );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // One-shot startup override, after egui/native window state restoration.
+        if let Some(fullscreen) = self.startup_fullscreen.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
+        }
+
         crate::controller_ui::begin_frame(ctx);
         if self.screen != Screen::Library
             || self.library_tab != crate::deck_navigation::LibraryTab::Recordings

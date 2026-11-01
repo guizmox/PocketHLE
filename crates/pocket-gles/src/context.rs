@@ -417,6 +417,9 @@ impl Context {
         self.park_surface(surface);
         if let Some(gpu) = &mut self.gpu {
             gpu.set_anisotropic_filtering(self.anisotropic_filtering);
+            if let Err(e) = gpu.set_render_scale(self.internal_resolution) {
+                self.gpu_failure("surface resolution", e);
+            }
         }
         if self.gpu_requested && self.gpu.is_none() {
             if let Err(e) = self.enable_gpu() {
@@ -436,9 +439,13 @@ impl Context {
         }
     }
 
-    /// Host-only GPU pixel density; guest surfaces, queries and reads stay logical.
+    /// Host-only GPU resolution policy: 1=native, 2=all 2x, 3=QVGA-only 2x.
+    /// Guest surfaces, queries and reads stay logical.
     pub fn set_internal_resolution(&mut self, scale: u8) {
-        self.internal_resolution = if scale == 2 { 2 } else { 1 };
+        self.internal_resolution = match scale {
+            2 | 3 => scale,
+            _ => 1,
+        };
         if let Some(gpu) = self.gpu.as_mut() {
             if let Err(e) = gpu.set_render_scale(self.internal_resolution) {
                 self.gpu_failure("internal resolution", e);
@@ -2498,6 +2505,34 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native OpenGL; restored EGL surface policy"]
+    fn internal_resolution_policy_reapplies_to_parked_surface_renderers() {
+        let mut c = Context::new(320, 240);
+        c.set_internal_resolution(3);
+        c.enable_gpu().unwrap();
+        c.clear(GL_COLOR_BUFFER_BIT);
+        let mut qvga = SurfaceBuffers::new(640, 480);
+        c.exchange_surface(&mut qvga);
+        c.clear(GL_COLOR_BUFFER_BIT);
+        let mut guest = vec![0; 640 * 480 * 2];
+        c.present_rgb565(&mut guest);
+        assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), None);
+        let mut parked = SurfaceBuffers::new(1, 1);
+        c.park_surface(&mut parked);
+        c.set_internal_resolution(2);
+        c.exchange_surface(&mut parked);
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.present_rgb565(&mut guest);
+        assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), Some((1280, 960)));
+        c.set_internal_resolution(3);
+        c.exchange_surface(&mut qvga);
+        c.clear(GL_COLOR_BUFFER_BIT);
+        let mut guest = vec![0; 320 * 240 * 2];
+        c.present_rgb565(&mut guest);
+        assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), Some((640, 480)));
+    }
+
+    #[test]
     fn internal_resolution_never_changes_software_geometry_or_creates_a_gpu() {
         let mut c = Context::new(240, 320);
         c.set_internal_resolution(2);
@@ -2505,6 +2540,9 @@ mod tests {
         assert_eq!((c.target.width, c.target.height), (240, 320));
         assert_eq!(c.state.viewport, (0, 0, 240, 320));
         assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), None);
+        c.set_internal_resolution(3);
+        assert_eq!(c.internal_resolution, 3);
+        assert!(!c.gpu_active());
         c.set_internal_resolution(99);
         assert_eq!(c.internal_resolution, 1);
     }

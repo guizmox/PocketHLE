@@ -5,7 +5,12 @@ pub struct LaunchArgs {
     pub fullscreen: Option<bool>,
     pub filter: Option<usize>,
 }
-pub const HELP: &str = "Usage: pockethle-gui [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted options keep saved preferences.\nFilters: 0 reconstruction, 1 SMAA + reconstruction, 2 SMAA + bilinear,\n3 xBRZ, 4 bicubic, 5 Lanczos, 6 bilinear, 7 nearest.\nThe Steam Deck executable accepts the same arguments.";
+pub const HELP: &str = "Usage: pockethle-gui [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted options keep saved preferences (Steam Deck starts fullscreen).\nFilters: 0 reconstruction, 1 SMAA + reconstruction, 2 SMAA + bilinear,\n3 xBRZ, 4 bicubic, 5 Lanczos, 6 bilinear, 7 nearest.\nThe Steam Deck executable accepts the same arguments.";
+
+/// Startup policy is applied after native-window restoration as well as in its builder.
+pub fn startup_fullscreen(deck: bool, saved: bool, explicit: Option<bool>) -> bool {
+    explicit.unwrap_or(deck || saved)
+}
 
 pub fn parse(args: Vec<String>) -> Result<Option<LaunchArgs>, String> {
     if args.is_empty() {
@@ -111,5 +116,19 @@ mod tests {
         assert_eq!(find_game("OTHER", games).unwrap(), "three");
         assert!(find_game("Game", games).unwrap_err().contains("one, two"));
         assert!(find_game("Missing", games).is_err());
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    #[test]
+    fn deck_starts_fullscreen_with_an_old_windowed_preference_but_cli_wins() {
+        for saved in [false, true] {
+            assert!(startup_fullscreen(true, saved, None));
+            assert!(!startup_fullscreen(true, saved, Some(false)));
+            assert!(startup_fullscreen(true, saved, Some(true)));
+            assert_eq!(startup_fullscreen(false, saved, None), saved);
+        }
     }
 }

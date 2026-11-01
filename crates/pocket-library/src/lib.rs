@@ -1005,7 +1005,7 @@ pub struct LauncherConfig {
     /// GPU-only texture anisotropy. Zero disables it.
     #[serde(default)]
     pub anisotropic_filtering: u8,
-    /// Host-only OpenGLES GPU pixel density. Native=1; 2 renders four times as many pixels.
+    /// Host-only GLES resolution: 1=native, 2=double all, 3=double QVGA only.
     #[serde(default = "default_gles_internal_resolution")]
     pub gles_internal_resolution: u8,
     #[serde(default = "default_schema_version")]
@@ -4264,6 +4264,14 @@ mod tests {
                 .unwrap()
                 .gles_internal_resolution,
             2
+        );
+        let mut qvga_config = serde_json::to_value(&default).unwrap();
+        qvga_config["gles_internal_resolution"] = serde_json::json!(3);
+        assert_eq!(
+            serde_json::from_value::<LauncherConfig>(qvga_config)
+                .unwrap()
+                .gles_internal_resolution,
+            3
         );
         let mut legacy = serde_json::to_value(&default).unwrap();
         legacy.as_object_mut().unwrap().remove("gpu_renderer");

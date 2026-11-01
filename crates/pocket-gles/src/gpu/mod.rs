@@ -1180,6 +1180,7 @@ pub struct Renderer {
     width: u32,
     height: u32,
     render_scale: u32,
+    render_policy: u8,
     textures: HashMap<u32, (u32, u64)>,
     uniforms: HashMap<String, i32>,
     scratch: Vec<f32>,
@@ -1197,6 +1198,14 @@ pub struct Renderer {
     pub max_viewport: [i32; 2],
     pub subpixel_bits: i32,
 }
+fn render_scale_for(policy: u8, width: u32, height: u32) -> u32 {
+    match policy {
+        2 => 2,
+        3 if matches!((width, height), (320, 240) | (240, 320)) => 2,
+        _ => 1,
+    }
+}
+
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
         Self::with_host(Host::new()?, width, height)
@@ -1334,6 +1343,7 @@ impl Renderer {
                 scratch: Vec::new(),
                 readback: Vec::new(),
                 render_scale: 1,
+                render_policy: 1,
                 dirty: true,
                 full_npot,
                 native_max_level,
@@ -1611,30 +1621,36 @@ impl Renderer {
             (self.gl.TexParameteri)(GL_TEXTURE_2D, p, v as i32);
         }
     }
-    /// Guest dimensions stay logical. Only native framebuffer/viewport pixels scale.
-    pub fn set_render_scale(&mut self, scale: u8) -> Result<(), String> {
-        let scale = if scale == 2 { 2 } else { 1 };
-        if scale == self.render_scale {
-            return Ok(());
-        }
+    /// Policy 1=native, 2=double all, 3=double QVGA only. Guest sizes stay logical.
+    pub fn set_render_scale(&mut self, policy: u8) -> Result<(), String> {
+        self.render_policy = policy;
         let (w, h) = (
             self.width / self.render_scale,
             self.height / self.render_scale,
         );
+        let scale = render_scale_for(policy, w, h);
+        if scale == self.render_scale {
+            return Ok(());
+        }
         self.render_scale = scale;
         self.resize(w, h)
     }
 
-    pub fn resize(&mut self, w: u32, h: u32) -> Result<(), String> {
-        let w = w
+    pub fn resize(&mut self, logical_w: u32, logical_h: u32) -> Result<(), String> {
+        let w = logical_w
             .checked_mul(self.render_scale)
             .ok_or("GPU width overflow")?;
-        let h = h
+        let h = logical_h
             .checked_mul(self.render_scale)
             .ok_or("GPU height overflow")?;
+        // Keep the existing no-resize fast path; policy selection is only done
+        // when surface dimensions or the configured policy actually change.
         if (w, h) == (self.width, self.height) {
             return Ok(());
         }
+        let scale = render_scale_for(self.render_policy, logical_w, logical_h);
+        let w = logical_w.checked_mul(scale).ok_or("GPU width overflow")?;
+        let h = logical_h.checked_mul(scale).ok_or("GPU height overflow")?;
         if w == 0 || h == 0 || w > 8192 || h > 8192 {
             return Err("unsupported GPU target size".into());
         }
@@ -1684,6 +1700,7 @@ impl Renderer {
             (self.gl.DepthMask)(1);
             (self.gl.ClearColor)(0., 0., 0., 0.);
             (self.gl.Clear)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            self.render_scale = scale;
             self.width = w;
             self.height = h;
             self.dirty = true;
@@ -4673,5 +4690,62 @@ mod tests {
         target.resize(64, 48);
         gpu.read(&mut target).unwrap();
         assert_eq!(target.color.len(), 64 * 48 * 4);
+    }
+}
+
+#[cfg(test)]
+mod resolution_policy_tests {
+    use super::*;
+    #[test]
+    fn selective_doubling_uses_logical_surface_size_in_both_orientations() {
+        for size in [
+            (320, 240),
+            (240, 320),
+            (640, 480),
+            (480, 640),
+            (800, 480),
+            (16, 16),
+        ] {
+            assert_eq!(render_scale_for(1, size.0, size.1), 1);
+            assert_eq!(render_scale_for(2, size.0, size.1), 2);
+            assert_eq!(
+                render_scale_for(3, size.0, size.1),
+                if matches!(size, (320, 240) | (240, 320)) {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert_eq!(render_scale_for(99, size.0, size.1), 1);
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2 contexts"]
+    fn native_framebuffer_policy_tracks_surface_resizes_and_policy_changes() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(320, 240).unwrap()
+            } else {
+                Renderer::new(320, 240).unwrap()
+            };
+            gpu.set_render_scale(3).unwrap();
+            assert_eq!((gpu.width, gpu.height), (640, 480));
+            gpu.resize(640, 480).unwrap();
+            assert_eq!((gpu.width, gpu.height), (640, 480));
+            assert_eq!(gpu.render_scale, 1);
+            gpu.set_render_scale(2).unwrap();
+            assert_eq!((gpu.width, gpu.height), (1280, 960));
+            gpu.set_render_scale(3).unwrap();
+            assert_eq!((gpu.width, gpu.height), (640, 480));
+            gpu.resize(240, 320).unwrap();
+            assert_eq!((gpu.width, gpu.height), (480, 640));
+            gpu.resize(480, 640).unwrap();
+            assert_eq!((gpu.width, gpu.height), (480, 640));
+            gpu.set_render_scale(2).unwrap();
+            assert_eq!((gpu.width, gpu.height), (960, 1280));
+            gpu.set_render_scale(1).unwrap();
+            assert_eq!((gpu.width, gpu.height), (480, 640));
+        }
     }
 }

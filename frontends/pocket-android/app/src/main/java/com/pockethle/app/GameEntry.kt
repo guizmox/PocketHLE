@@ -257,7 +257,7 @@ data class LauncherConfig(
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
             anisotropicFiltering = obj.optInt("anisotropic_filtering", 0),
-            glesInternalResolution = if (obj.optInt("gles_internal_resolution", 1) == 2) 2 else 1,
+            glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
             fullscreen = obj.optBoolean("fullscreen", false),
