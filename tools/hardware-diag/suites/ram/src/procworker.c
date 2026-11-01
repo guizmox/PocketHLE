@@ -32,13 +32,19 @@ __attribute__((section(".text.entry"))) U32 entry(U32 instance,U32 previous,cons
         good=WaitForSingleObject(alias,5000)==0&&GetExitCodeThread(alias,&code)&&code==88;
         CloseHandle(alias);CloseHandle(h);return good?77:13;
     case 'o':
+    { U32 wait_result,exit_ok,wait_error,exit_error;
         if(!read_data(data,sizeof(data)))return 14;
         h=OpenProcess(0,0,data[2]);if(!h)return 15;SetEvent(ready);
-        good=WaitForSingleObject(h,5000)==0&&GetExitCodeProcess(h,&code)&&code==77;CloseHandle(h);
+        wait_result=WaitForSingleObject(h,5000);wait_error=GetLastError();
+        exit_ok=GetExitCodeProcess(h,&code);exit_error=GetLastError();
+        good=wait_result==0&&exit_ok&&code==77;CloseHandle(h);
         {U32 file=CreateFileW(L"\\Flash Disk\\ORPHANTEST.TXT",0x40000000,3,0,2,0,0);
          const char *s=good?"ORPHANTEST_RESULT PASS\r\n":"ORPHANTEST_RESULT FAIL\r\n";
-         if(file==0xFFFFFFFF)return 16;WriteFile(file,s,24,&n,0);CloseHandle(file);}
-        h=CreateEventW(0,1,0,L"PocketHLE.PROC.ORPHAN_DONE");SetEvent(h);return good?77:17;
+         const char *labels[]={"parent_pid=", "wait_result=", "wait_last_error=", "exit_query_ok=", "parent_exit_code=", "exit_last_error="};
+         U32 values[6],i,j,k;char detail[80];values[0]=data[2];values[1]=wait_result;values[2]=wait_error;values[3]=exit_ok;values[4]=code;values[5]=exit_error;
+         if(file==0xFFFFFFFF)return 16;WriteFile(file,s,24,&n,0);
+         for(i=0;i<6;i++){k=0;j=0;while(labels[i][j])detail[k++]=labels[i][j++];detail[k++]='0';detail[k++]='x';for(j=0;j<8;j++)detail[k++]="0123456789ABCDEF"[(values[i]>>(28-j*4))&15];detail[k++]='\r';detail[k++]='\n';WriteFile(file,detail,k,&n,0);}CloseHandle(file);}
+        h=CreateEventW(0,1,0,L"PocketHLE.PROC.ORPHAN_DONE");SetEvent(h);return good?77:17;}
     default:return 18;
     }
 }

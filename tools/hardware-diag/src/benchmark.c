@@ -14,7 +14,7 @@ __attribute__((noinline)) static U32 block(void){U32 i,x;
  x=0x12345678;for(i=0;i<16384;i++){x^=x<<13;x^=x>>17;x^=x<<5;x=x*1664525u+1013904223u;}
 #endif
  result_sink=x;return x;}
-__attribute__((section(".text.entry"))) U32 entry(void){U32 pass,blocks,start,elapsed,value=0,failed=0;
+__attribute__((section(".text.entry"))) U32 entry(void){U32 pass,blocks,start,elapsed,value=0,failed=0,rates[3]={0},tmp;
 #ifdef FLOATING
  const unsigned short*file=L"\\Flash Disk\\FLOATING.TXT";
  const char*title="Floating point / single precision / WinCE runtime ABI";
@@ -28,10 +28,23 @@ __attribute__((section(".text.entry"))) U32 entry(void){U32 pass,blocks,start,el
  line("HARDWARE DIAG CPU benchmark v1");line(title);line("Same device/build/backend/power settings required for comparison.");line("Three timed passes after warmup. Each block restarts from a fixed seed.");
  if(block()!=expected){line("FAIL warmup checksum");CloseHandle(out);return 1;}
  for(pass=0;pass<3;pass++){blocks=0;start=GetTickCount();do{value=block();if(value!=expected)failed=1;blocks++;elapsed=GetTickCount()-start;}while(elapsed<1000&&blocks<65536);
- number("pass=",pass+1);number("elapsed_ms=",elapsed);number("work_iterations=",blocks*16384u);if(elapsed){U32 iterations=blocks*16384u,q=__rt_udiv(elapsed,iterations),rem=iterations-q*elapsed;if(q<=4294966u)number("work_iterations_per_second=",q*1000u+__rt_udiv(elapsed,rem*1000u));else line("Rate exceeds 32-bit reporting range");}number("checksum_bits=",value);if(!elapsed){failed=1;line("FAIL clock did not advance");}
+ number("pass=",pass+1);number("elapsed_ms=",elapsed);number("work_iterations=",blocks*16384u);if(elapsed){U32 iterations=blocks*16384u,q=__rt_udiv(elapsed,iterations),rem=iterations-q*elapsed;if(q<=4294966u){rates[pass]=q*1000u+__rt_udiv(elapsed,rem*1000u);number("work_iterations_per_second=",rates[pass]);}else{failed=1;line("Rate exceeds 32-bit reporting range");}}number("checksum_bits=",value);if(!elapsed){failed=1;line("FAIL clock did not advance");}
 #ifdef HARDWARE_DIAG
  hardware_diag_progress("benchmark pass complete",!failed);
 #endif
  }
+ if(rates[0]>rates[1]){tmp=rates[0];rates[0]=rates[1];rates[1]=tmp;}
+ if(rates[1]>rates[2]){tmp=rates[1];rates[1]=rates[2];rates[2]=tmp;}
+ if(rates[0]>rates[1]){tmp=rates[0];rates[0]=rates[1];rates[1]=tmp;}
+ if(!failed){
+#ifdef FLOATING
+ number("FINAL FLOAT SCORE (iterations/s): ",rates[1]);
+ number("FINAL_FLOATING_SCORE_ITERATIONS_PER_SECOND=",rates[1]);
+#else
+ number("FINAL INTEGER SCORE (iterations/s): ",rates[1]);
+ number("FINAL_INTEGER_SCORE_ITERATIONS_PER_SECOND=",rates[1]);
+#endif
+ line("Final score = median of three passes. Higher is faster.");
+ }else line("FINAL_SCORE INVALID: computation or timing check failed");
  line(failed?"BENCHMARK_RESULT FAIL":"BENCHMARK_RESULT PASS");line("PASS verifies computation; elapsed_ms/work_iterations measures performance.");CloseHandle(out);return failed?1:0;
 }

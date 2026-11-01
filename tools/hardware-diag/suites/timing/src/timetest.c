@@ -68,7 +68,10 @@ static void egl(void){
  surface=window(dpy,cfg,0,attr);context=create(dpy,cfg,0,attr);check("egl.make_current",surface&&context&&current(dpy,surface,surface,context));
  start=GetTickCount();for(i=0;i<12;i++)if(!swap(dpy,surface)){good=0;break;}
  check("egl.identical_window_frames_paced",good&&i==12&&elapsed(start)>=150);measure("egl12_swaps",elapsed(start));
- Sleep(50);check("egl.late_resume_swap",swap(dpy,surface));start=GetTickCount();check("egl.next_swap_does_not_catch_up",swap(dpy,surface)&&elapsed(start)>=14);
+ /* Measure the pair BEFORE emitting progress or report I/O. A console
+    update between these swaps can itself consume an entire frame interval. */
+ {U32 late_ok,next_ok,next_ms;Sleep(50);late_ok=swap(dpy,surface);start=GetTickCount();next_ok=swap(dpy,surface);next_ms=elapsed(start);
+ check("egl.late_resume_swap",late_ok);check("egl.next_swap_does_not_catch_up",next_ok&&next_ms>=14);measure("egl_next_swap_after_late",next_ms);}
 done:
  if(current&&dpy)current(dpy,0,0,0);if(destroySurface&&surface)check("egl.destroy_surface",destroySurface(dpy,surface));if(destroyContext&&context)check("egl.destroy_context",destroyContext(dpy,context));if(terminate&&dpy)check("egl.terminate",terminate(dpy));FreeLibrary(dll);
 }

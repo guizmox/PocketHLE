@@ -86,8 +86,17 @@ class Guest:
   self.u.emu_start(self.pe.OPTIONAL_HEADER.ImageBase+self.pe.OPTIONAL_HEADER.AddressOfEntryPoint,0,timeout=20000000)
 ROOT=Path(__file__).resolve().parents[1]
 root=ROOT/'build/card/GZHD999989'
+class BenchmarkGuest(Guest):
+ def hook(self,u,a,size,data):
+  if self.apis.get(a)=='GetTickCount':
+   self.tick_count=getattr(self,'tick_count',0)+1
+   step=250 if self.tick_count<=5 else 200 if self.tick_count<=11 else 333
+   self.time+=step;u.reg_write(UC_ARM_REG_R0,self.time);u.reg_write(UC_ARM_REG_PC,u.reg_read(UC_ARM_REG_LR));return
+  super().hook(u,a,size,data)
 for mode in ['integer','floating']:
- g=Guest(root/'AUTORUN.EXE');g.command='--hd-'+mode;g.run();s=bytes(g.files['\\Flash Disk\\'+('INTEGER.TXT' if mode=='integer' else 'FLOATING.TXT')]).decode();assert 'BENCHMARK_RESULT PASS' in s and g.exit==0,s;assert s.count('elapsed_ms=')==3;assert not g.created;print(mode, 'integrated ARM benchmark: 3 passes + warmup PASS; no child process')
+ g=BenchmarkGuest(root/'AUTORUN.EXE');g.command='--hd-'+mode;g.run();s=bytes(g.files['\\Flash Disk\\'+('INTEGER.TXT' if mode=='integer' else 'FLOATING.TXT')]).decode();assert 'BENCHMARK_RESULT PASS' in s and g.exit==0,s;assert s.count('elapsed_ms=')==3;
+ import re
+ rates=list(map(int,re.findall(r'^work_iterations_per_second=(\d+)',s,re.M)));score=int(re.search(r'^FINAL_[A-Z]+_SCORE_ITERATIONS_PER_SECOND=(\d+)',s,re.M)[1]);assert len(set(rates))==3 and score==sorted(rates)[1];assert not g.created;print(mode, 'integrated ARM benchmark: 3 passes + warmup PASS; no child process')
 g=Guest(root/'AUTORUN.EXE');g.ui=True;g.run();assert 'HARDWARE DIAG' in g.text;assert len(g.created)==1 and g.created[0][0]=='thread',g.created;assert not g.calls['CreateProcessW'];assert 'SUITE FINISHED (exit 0)' in g.text;print('integrated ARM UI: menu, controller selection, same-process worker, completion, console PASS')
 # Execute the real same-image process adapter, preserving its ten-argument ABI.
 import importlib.util
@@ -107,3 +116,58 @@ for suffix,mode,flag in [('ram\\proctest.exe','suite','proctest'),('ram\\procwor
  sp=g.u.reg_read(UC_ARM_REG_SP)-64;g.u.reg_write(UC_ARM_REG_SP,sp);g.u.mem_write(sp,struct.pack('<6I',0,4,0,0,0,0x7000e400));g.u.emu_start(symbols['hardware_diag_spawn'],0,timeout=1000000)
  assert g.created==[('\\SD Card\\GZHD999989\\AUTORUN.EXE','--hd-'+flag+' '+mode,4)],g.created
 print('integrated ARM process fixtures: SAME EXE for all 3 child roles; flags preserved PASS')
+
+# GPS/COM8 protocol checks use a controlled provider, independent sentence
+# checksums, fragmented reads, and corrupt/no-fix variants. No real GPS claim.
+class GpsGuest(Guest):
+ def __init__(self,path,fix=True,corrupt=False):
+  super().__init__(path);self.ports={};self.fix=fix;self.corrupt=corrupt
+  self.files['\\Flash Disk\\HARDWARELIVE.TXT']=bytearray(b' '*240)
+  self.live_sizes=[]
+ def hook(self,u,a,size,data):
+  name=self.apis.get(a);h=self.arg(0);v=1;handled=True
+  if name=='CreateFileW' and self.wide(h) in ('GPS1:','COM8:'):
+   kind=self.wide(h)
+   if any(p['kind']==kind for p in self.ports.values()):self.error=32;v=0xffffffff
+   else:
+    v=0xdead1000+len(self.ports);self.ports[v]={'kind':kind,'queue':None,'dcb':bytearray(28),'timeouts':bytes(20)};p=self.ports[v];struct.pack_into('<II',p['dcb'],0,28,4800);p['dcb'][8]=1;p['dcb'][18]=8
+  elif name=='CloseHandle' and h in self.ports:self.ports.pop(h)
+  elif name in ('ReadFile','WriteFile') and h in self.ports:
+   p=self.ports[h];ptr=self.arg(1);n=self.arg(2);done=self.arg(3)
+   if name=='WriteFile':self.error=5;v=0;self.put(done,0) if done else None
+   elif not ptr or (p['kind']=='GPS1:' and n!=180):self.error=87;v=0;self.put(done,0) if done else None
+   elif p['kind']=='GPS1:':
+    packet=bytearray(180);struct.pack_into('<I',packet,15,int(self.fix));struct.pack_into('<i',packet,21,510000000);struct.pack_into('<i',packet,25,10000000);struct.pack_into('<I',packet,37,100);u.mem_write(ptr,bytes(packet));self.put(done,180)
+   else:
+    if p['queue'] is None:
+     def sentence(body):
+      checksum=0
+      for c in body.encode():checksum^=c
+      return f'${body}*{checksum:02X}\r\n'.encode()
+     status='A' if self.fix else 'V';quality='1' if self.fix else '0'
+     stream=sentence('GPGGA,120000.00,5100.000000,N,00100.000000,E,'+quality+',00,,0.00,M,,M,,')+sentence('GPRMC,120000.00,'+status+',5100.000000,N,00100.000000,E,0.00,0.00,011126,,')
+     if self.corrupt:stream=stream.replace(b'*',b'*0',1)
+     p['queue']=bytearray(stream)
+    chunk=bytes(p['queue'][:n]);del p['queue'][:n];u.mem_write(ptr,chunk) if chunk else None;self.put(done,len(chunk))
+  elif name in ('GetCommState','SetCommState','GetCommTimeouts','SetCommTimeouts'):
+   p=self.ports[h];key='dcb' if name.endswith('State') else 'timeouts';n=28 if key=='dcb' else 20
+   if name.startswith('Get'):u.mem_write(self.arg(1),bytes(p[key]))
+   else:p[key]=bytes(u.mem_read(self.arg(1),n))
+  elif name in ('SetupComm','PurgeComm'):pass
+  elif name=='ClearCommError':self.put(self.arg(1),0);u.mem_write(self.arg(2),bytes(12))
+  else:handled=False
+  if handled:u.reg_write(UC_ARM_REG_R0,v);u.reg_write(UC_ARM_REG_PC,u.reg_read(UC_ARM_REG_LR))
+  else:
+   if name=='WriteFile' and h in self.handles and self.handles[h][0]=='\\Flash Disk\\HARDWARELIVE.TXT':
+    # The mailbox must remain writable even with ZERO free quota: every write
+    # overwrites its preallocated bytes, never appends or extends the file.
+    assert self.handles[h][1]==0 and self.arg(2)==240
+    self.live_sizes.append(len(self.files['\\Flash Disk\\HARDWARELIVE.TXT']))
+   super().hook(u,a,size,data)
+for fix,corrupt in [(True,False),(False,False),(True,True)]:
+ g=GpsGuest(root/'AUTORUN.EXE',fix,corrupt);g.u.emu_start(symbols['diag_gps_entry'],0,timeout=20000000)
+ report=bytes(g.files['\\Flash Disk\\GPSTEST.TXT']).decode();assert ('GPSTEST_RESULT FAIL' if corrupt else 'GPSTEST_RESULT PASS') in report,report
+ assert not g.ports and set(g.live_sizes)=={240};assert len(g.files['\\Flash Disk\\HARDWARELIVE.TXT'])==240
+ if not fix:assert 'COM8_POSITION NO_FIX' in report
+print('integrated ARM GPS: GPS1 + COM8 8N1, fragmented NMEA, checksum rejection, NO_FIX, cleanup PASS')
+print('live reporting: repeated ARM writes never grow the 240-byte preallocated mailbox PASS')

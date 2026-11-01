@@ -8,6 +8,10 @@ b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
 NAMES = ['CreateFileW','ReadFile','WriteFile','CloseHandle','GetLastError','MessageBoxW','GetTickCount','Sleep']
 SIG = {**b.SIGNATURES, 'GetTickCount':('unsigned int','void'),
        'DeviceIoControl':('unsigned int','unsigned int,unsigned int,void*,unsigned int,void*,unsigned int,unsigned int*,void*')}
+SIG.update({api: ('unsigned int','unsigned int,void*') for api in ('GetCommState','SetCommState','GetCommTimeouts','SetCommTimeouts')})
+SIG.update({'SetupComm':('unsigned int','unsigned int,unsigned int,unsigned int'), 'PurgeComm':('unsigned int','unsigned int,unsigned int'), 'ClearCommError':('unsigned int','unsigned int,unsigned int*,void*')})
+for api in ('GetCommState','SetCommState','GetCommTimeouts','SetCommTimeouts','SetupComm','PurgeComm','ClearCommError'):
+    if api not in NAMES: NAMES.append(api)
 for api in ('SetLastError', 'SetFilePointer'):
     if api not in NAMES: NAMES.append(api)
 

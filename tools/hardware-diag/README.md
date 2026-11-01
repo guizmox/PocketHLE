@@ -20,10 +20,16 @@ second executable is shipped, and no commercial assets or proprietary SDK are us
   Up/Down scrolls it; after completion, Enter/Back or the bottom touch area
   returns to the menu. Each menu item retains its last PASS/FAIL result.
 - Reports remain in the title's writable `Flash Disk`: `HARDWAREDIAG.TXT`
-  summarizes runs, and `HARDWARELIVE.TXT` contains the current progress stream.
+  summarizes runs, and `HARDWARELIVE.TXT` is a fixed 240-byte latest-progress mailbox. It is
+  preallocated before each suite, so reporting never grows Flash usage while
+  a storage/quota measurement is in progress. The console samples that mailbox;
+  the original detailed suite reports retain every check.
   Original reports (`RAMTEST.TXT`, `PROCTEST.TXT`, `DLLTEST.TXT`, `VFSTEST.TXT`,
   `TIMETEST.TXT`, `CAMTEST.TXT`, `GPSTEST.TXT`, `NETTEST.TXT`, `VIBTEST.TXT`,
-  `BTTEST.TXT`) remain available. RAM lifecycle checks also produce
+  `BTTEST.TXT`) remain available. GPS includes both the binary `GPS1:` interface
+  and the `COM8:` serial/NMEA bridge: 4800 baud 8N1 configuration, timeouts,
+  fragmented GGA/RMC sentences, checksums/CRLF, permissions and close/reopen.
+  `COM8-NMEA.TXT` retains the actual received sentences, including NO_FIX status. RAM lifecycle checks also produce
   `RAMLIFECYCLE.TXT`/`.BIN`.
 - Let a running suite finish. For a genuine hang use PocketHLE's Stop action;
   the application does not force-kill a thread inside its own shared process.
@@ -54,7 +60,10 @@ Floating point: single-precision multiply/add through the WinCE runtime ABI,
 including the native helper fast path when provided by PocketHLE.
 
 Each benchmark warms up, then records three timed passes, elapsed milliseconds,
-work iterations, iterations/second and a checked result. Work is used and stored
+work iterations, iterations/second and a checked result. The final
+`FINAL_INTEGER_SCORE_ITERATIONS_PER_SECOND` /
+`FINAL_FLOATING_SCORE_ITERATIONS_PER_SECOND` is the median of the three passes;
+higher is faster. No valid final score is reported if computation/timing fails. Work is used and stored
 through a volatile sink; it is not an empty loop optimized away. Fixed seeds and
 IEEE single-precision rounding give a known result for every block. A benchmark
 PASS verifies computation, not performance.

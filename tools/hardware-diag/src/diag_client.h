@@ -3,14 +3,16 @@
 static void hardware_diag_progress(const char *name, unsigned int state) {
     unsigned int error = GetLastError(), h, count, n = 0, i = 0;
     char text[240];
+    /* Fixed-size mailbox: never consume more Flash space during quota tests. */
+    for (i=0;i<sizeof(text);i++) text[i]=' ';
+    i=0;
     const char *prefix = state == 2 ? "STEP " : state ? "PASS " : "FAIL ";
     while (*prefix) text[n++] = *prefix++;
     while (name[i] && n < sizeof(text)-3) text[n++] = name[i++];
-    text[n++] = '\r'; text[n++] = '\n';
-    h = CreateFileW(L"\\Flash Disk\\HARDWARELIVE.TXT", 0x40000000, 3, 0, 4, 0, 0);
+    text[238] = '\r'; text[239] = '\n';
+    h = CreateFileW(L"\\Flash Disk\\HARDWARELIVE.TXT", 0x40000000, 3, 0, 3, 0, 0);
     if (h != 0xffffffff) {
-        SetFilePointer(h, 0, 0, 2);
-        WriteFile(h, text, n, &count, 0);
+        WriteFile(h, text, sizeof(text), &count, 0);
         CloseHandle(h);
     }
     SetLastError(error);
