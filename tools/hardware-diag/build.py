@@ -108,7 +108,7 @@ def compile_integrated(args, card):
     (work / 'imports.h').write_text(header + '\n#endif\n')
     files = {'launcher': ROOT/'src/hardware_diag.c', 'integrated': ROOT/'src/integrated.c',
              'gles': ROOT/'src/gles_info.c', 'integer': ROOT/'src/benchmark.c',
-             'floating': ROOT/'src/benchmark.c',
+             'floating': ROOT/'src/benchmark.c', 'glesbench': ROOT/'src/gles_benchmark.c',
              'proctest': ROOT/'suites/ram/src/proctest.c',
              'procworker': ROOT/'suites/ram/src/procworker.c',
              'vfsworker': ROOT/'suites/vfs/src/vfstest.c'}
@@ -136,7 +136,7 @@ def compile_integrated(args, card):
         objects.append(obj)
     # Per-suite zero-initialized globals are isolated and reset on each run.
     # Do not silently discard future nonzero mutable initializers.
-    for name in list(SUITES) + ['gles','integer','floating']:
+    for name in list(SUITES) + ['gles','integer','floating','glesbench']:
         blob = (work/(name+'.o')).read_bytes()
         shoff = struct.unpack_from('<I',blob,32)[0]
         shsize, shnum, shstr = struct.unpack_from('<HHH',blob,46)
@@ -147,7 +147,7 @@ def compile_integrated(args, card):
             if label.startswith(b'.data') and section[5]:
                 raise ValueError(name+': initialized writable globals need an explicit reset policy')
     script = 'ENTRY(entry)\nSECTIONS { . = 0x11000; .image : { __image_start = .; *(.text.entry) *(.text*) *(.rodata*) *(.data*)\n'
-    for name in list(SUITES) + ['gles','integer','floating']:
+    for name in list(SUITES) + ['gles','integer','floating','glesbench']:
         script += f'. = ALIGN(4); diag_{name}_bss_start = .; "{(work/(name+".o")).as_posix()}"(.bss* COMMON) diag_{name}_bss_end = .;\n'
     script += '*((.bss*)) *(COMMON) __image_end = .; } /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.comment*) *(.note*) } }\n'
     # LLD's input section syntax, without a nested wildcard group.

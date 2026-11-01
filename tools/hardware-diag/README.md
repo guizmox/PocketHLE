@@ -3,7 +3,7 @@
 One importable diagnostic application, one native ARM executable:
 `dist/HARDWARE-DIAG.zip`. Import this ZIP into PocketHLE and launch **HARDWARE DIAG**.
 The menu, console, all eight hardware/API suites, OpenGL ES information and both
-CPU benchmarks are linked into the same `AUTORUN.EXE`. Choosing a menu item runs
+CPU benchmarks and the separate OpenGLES cost benchmark are linked into the same `AUTORUN.EXE`. Choosing a menu item runs
 a function on an internal worker thread, not another executable.
 
 The RAM/VFS tests must still create real guest processes to verify process
@@ -15,7 +15,7 @@ second executable is shipped, and no commercial assets or proprietary SDK are us
 ## Use
 
 - Up/Down selects a suite; Enter, Space or the Gizmondo action button runs it.
-  Touch users can tap a menu row. `Run all tests` executes the eleven entries.
+  Touch users can tap a menu row. `Run all tests` executes the twelve entries.
 - The console shows live checks and elapsed time while the worker runs.
   Up/Down scrolls it; after completion, Enter/Back or the bottom touch area
   returns to the menu. Each menu item retains its last PASS/FAIL result.
@@ -39,10 +39,12 @@ second executable is shipped, and no commercial assets or proprietary SDK are us
   A GPS `NO_FIX` is distinguished from an API failure. An API PASS alone does
   not certify the physical hardware.
 
-The process suite's aggregate parent wait is two minutes; its individual
-5-second operation deadlines and success/exit-code checks are retained. This
-avoids reporting a false parent failure when a full successful suite takes
-more than fifteen seconds.
+The original process-suite parent deadline is 15 seconds, with the original
+5-second operation deadlines and exit-code requirements retained. Desktop,
+Linux and Steam Deck runners must publish a parent's completed exit after its
+private RAM is released, before waiting for surviving descendants. The Android
+runner already uses this ordering. No diagnostic timeout is increased to hide
+this process-lifecycle failure.
 
 ## OpenGL ES
 
@@ -109,3 +111,59 @@ Optional bytecode smoke tests (controlled API/clock shims, not real-device or
 PocketHLE conformance results): install `tests/requirements.txt`, build the tool,
 then run `python tools/hardware-diag/tests/guest_smoke.py`. The normal tool build
 and public application do not require these Python packages.
+
+## OpenGLES Benchmark (separate menu entry)
+
+The existing **OpenGL ES information + triangle** test is unchanged. The new
+**OpenGLES Benchmark** runs in the same ARM EXE and writes `OGLESBENCH.TXT` to
+Flash Disk. No extra application or game modification is needed.
+
+Ten fixed workloads isolate common costs at a 320x240 viewport:
+
+| Report name | Work per frame | Compare with |
+| --- | --- | --- |
+| geometry_512 / geometry_2048 / geometry_8192 | Small visible triangles, one draw | Each other: geometry load sweep |
+| draw_calls_128 | Same 512 triangles in 128 draws | geometry_512: submission cost |
+| matrix_animated | Same 512 triangles, modelview rotation | geometry_512: matrix path |
+| vertices_rebuilt | Same 512 triangles, guest rebuild of coordinates | geometry_512: guest preparation |
+| fill_solid | 16 fullscreen quads, opaque, no depth rejection | Fill baseline |
+| fill_texture_nearest | Same quads, 64x64 RGBA checker texture | fill_solid |
+| fill_texture_linear | Same scene, linear filtering | fill_texture_nearest |
+| fill_texture_blend | Same linear scene, alpha blending | fill_texture_linear |
+
+There is a short visible preview and warmup, followed by three samples of at
+least 600 ms per workload. Samples draw eight-frame batches, completed by `glFinish`. They exclude
+`eglSwapBuffers`, framebuffer readback, report I/O and progress notifications. Swaps between
+samples/preview are deliberately outside the timer. Thus `render_millifps` is
+**render throughput**, not display FPS, and includes guest CPU work, emulator
+API processing and completion of rendering. This delivery fixes the previously ignored `glFinish` and `glFlush` in the
+emulator. Native `glFinish` waits for rendering without a framebuffer download;
+`glFlush` only submits work. Software rendering is already synchronous. The
+benchmark requires this fix; the EXE cannot detect an old ignored handler.
+This is not a GPU timer or a claim
+that the physical display exceeds its refresh rate. Matrix animation includes
+its API calls; rebuilding includes its guest arithmetic and memory writes.
+No emulator scheduling/frame-limit setting is silently modified.
+
+The median of the three rates is reported per test, along with reciprocal frame
+microseconds, triangles/second and draw calls/frame. `1000 render_millifps` means
+one rendered frame/second. `GLOBAL_INDEX_MILLI / 1000` is the geometric mean of
+the ten median rates expressed as a fixed comparison index: 100 means 100
+render frames/second in every workload. Higher is faster. This neutral reference
+is a comparison convention, not a calibrated hardware score. Compare only the
+same benchmark version, resolution, renderer and emulator settings; the report
+records guest-visible GL vendor/renderer/version. Settings not exposed by the
+WinCE API must be noted by the user, not guessed by the EXE. An API/readback/
+clock error or an exceeded 180-second between-workloads budget suppresses the
+global score. Extremely slow individual GL calls cannot be interrupted safely.
+
+Normal duration is about 20-40 seconds, depending on presentation and renderer.
+Use per-test results to find regressions; the global index alone cannot explain
+a bottleneck. Mipmap, lighting and unrelated capabilities remain outside this
+small cost probe. Reimport the rebuilt `dist/HARDWARE-DIAG.zip` to update the tool.
+
+Optional controlled ARM smoke checks (not a real renderer benchmark):
+`python tests/gles_benchmark_smoke.py`, after building and installing
+`tests/requirements.txt`. They exercise the actual EXE with deterministic GL and
+clock shims, verify workload counts and median/global calculations, and reject
+missing APIs, GL errors, black readback and a stalled clock.

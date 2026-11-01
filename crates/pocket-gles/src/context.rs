@@ -474,6 +474,31 @@ impl Context {
     pub fn gpu_active(&self) -> bool {
         self.gpu.is_some()
     }
+    /// Software rendering is synchronous; a GPU context must explicitly wait.
+    /// Completion does not update the CPU framebuffer or present a surface.
+    pub fn finish(&mut self) {
+        if self.gpu_failed {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.finish() {
+                self.gpu_failure("finish", e);
+            }
+        }
+    }
+
+    /// Flush submission without imposing glFinish's completion barrier.
+    pub fn flush(&mut self) {
+        if self.gpu_failed {
+            return;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.flush() {
+                self.gpu_failure("flush", e);
+            }
+        }
+    }
+
     /// Read back only for presentation or glReadPixels, never per draw.
     pub fn sync_gpu(&mut self) {
         if self.gpu_failed {
@@ -2434,6 +2459,19 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finish_and_flush_leave_synchronous_software_state_intact() {
+        let mut c = Context::new(16, 16);
+        c.target.color.fill(123);
+        c.set_error(GL_INVALID_ENUM);
+        c.flush();
+        c.finish();
+        assert!(!c.gpu_active(), "software completion must not create a GPU");
+        assert!(c.target.color.iter().all(|&v| v == 123));
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+
     fn scissor_enable_sequence(c: &mut Context) {
         let mut mem = FakeMem {
             base: BASE,

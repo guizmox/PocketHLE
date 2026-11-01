@@ -238,6 +238,8 @@ struct Gl {
     GenerateMipmap: Option<unsafe extern "system" fn(u32)>,
     GetString: unsafe extern "system" fn(u32) -> *const u8,
     GetError: unsafe extern "system" fn() -> u32,
+    Finish: unsafe extern "system" fn(),
+    Flush: unsafe extern "system" fn(),
     GetIntegerv: unsafe extern "system" fn(u32, *mut i32),
     GetFloatv: unsafe extern "system" fn(u32, *mut f32),
     LineWidth: unsafe extern "system" fn(f32),
@@ -353,6 +355,20 @@ impl Gl {
                     return Err("driver lacks glGetError".into());
                 }
                 std::mem::transmute::<*mut c_void, unsafe extern "system" fn() -> u32>(p)
+            },
+            Finish: {
+                let p = host.load(c"glFinish");
+                if p.is_null() {
+                    return Err("driver lacks glFinish".into());
+                }
+                std::mem::transmute::<*mut c_void, unsafe extern "system" fn()>(p)
+            },
+            Flush: {
+                let p = host.load(c"glFlush");
+                if p.is_null() {
+                    return Err("driver lacks glFlush".into());
+                }
+                std::mem::transmute::<*mut c_void, unsafe extern "system" fn()>(p)
             },
             GetFloatv: {
                 let p = host.load(c"glGetFloatv");
@@ -2383,6 +2399,24 @@ impl Renderer {
             self.check()
         }
     }
+    /// Wait for this context's queued GL work without reading back or presenting.
+    pub fn finish(&mut self) -> Result<(), String> {
+        self.host.make_current()?;
+        unsafe {
+            (self.gl.Finish)();
+            self.check()
+        }
+    }
+
+    /// Submit this context's queued work without waiting for its completion.
+    pub fn flush(&mut self) -> Result<(), String> {
+        self.host.make_current()?;
+        unsafe {
+            (self.gl.Flush)();
+            self.check()
+        }
+    }
+
     pub fn read(&mut self, target: &mut RenderTarget) -> Result<(), String> {
         self.read_inner(target, None)
     }
@@ -3907,6 +3941,62 @@ mod tests {
                     assert_eq!(&native.color[i..i + 4], &cpu.color[i..i + 4]);
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2; completion without readback"]
+    fn finish_and_flush_submit_native_work_without_readback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static FINISH_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static FLUSH_CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "system" fn finish_probe() {
+            FINISH_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe extern "system" fn flush_probe() {
+            FLUSH_CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        FINISH_CALLS.store(0, Ordering::SeqCst);
+        FLUSH_CALLS.store(0, Ordering::SeqCst);
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(16, 16).unwrap()
+            } else {
+                Renderer::new(16, 16).unwrap()
+            };
+            let mut target = RenderTarget::new(16, 16);
+            gpu.clear(
+                16,
+                16,
+                &PipelineState::default(),
+                [1., 0., 0., 1.],
+                1.,
+                GL_COLOR_BUFFER_BIT,
+            )
+            .unwrap();
+            let before = target.color.clone();
+            let finish = gpu.gl.Finish;
+            let flush = gpu.gl.Flush;
+            gpu.gl.Finish = finish_probe;
+            gpu.gl.Flush = flush_probe;
+            gpu.flush().unwrap();
+            gpu.finish().unwrap();
+            assert_eq!(FINISH_CALLS.load(Ordering::SeqCst), if es { 2 } else { 1 });
+            assert_eq!(FLUSH_CALLS.load(Ordering::SeqCst), if es { 2 } else { 1 });
+            gpu.gl.Finish = finish;
+            gpu.gl.Flush = flush;
+            gpu.flush().unwrap();
+            gpu.finish().unwrap();
+            assert!(
+                gpu.dirty,
+                "completion must not mark the readback cache as current"
+            );
+            assert_eq!(target.color, before);
+            assert!(gpu.readback.is_empty(), "no hidden framebuffer download");
+            gpu.read(&mut target).unwrap();
+            assert_eq!(&target.color[..4], &[255, 0, 0, 255]);
+            assert!(!gpu.dirty);
         }
     }
 

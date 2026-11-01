@@ -199,8 +199,8 @@ static void test_processes(void) {
     if(file!=0xFFFFFFFF){WriteFile(file,&host,sizeof(host),&n,0);CloseHandle(file);}
     MemStatus before=status("processes.before"),after;
     check("processes.suite_launch",n==sizeof(host)&&CreateProcessW(L"\\SD Card\\GZHD999989\\ram\\proctest.exe",L"suite",0,0,0,0,0,0,0,info)!=0);
-    /* Whole-suite budget: individual 5-second operation deadlines remain unchanged. */
-    check("processes.suite_exit_and_report",info[0]&&WaitForSingleObject(info[0],120000)==0&&GetExitCodeProcess(info[0],&code)&&code==77);
+    /* Original suite deadline; process-exit publication must not wait for descendants. */
+    check("processes.suite_exit_and_report",info[0]&&WaitForSingleObject(info[0],15000)==0&&GetExitCodeProcess(info[0],&code)&&code==77);
     /* The event is sent before the orphan returns. Retain its process handle
        in this namespace and wait for actual termination before measuring RAM. */
     file=CreateFileW(L"\\Flash Disk\\PROCHOST.BIN",0x80000000,3,0,3,0,0);n=0;
@@ -387,7 +387,7 @@ U32 hardware_diag_lifecycle_entry(void) {
 static void test_lifecycle(void) {
     W16 self[260];U32 info[4]={0},code=1,h,n=0,data[3]={0};char bytes[256];U32 used=0,i,found=0;
     if(!GetModuleFileNameW(0,self,260)||!CreateProcessW(self,L"--hd-lifecycle",0,0,0,0,0,0,0,info)) {check("dll_lifecycle.self_launch",0);return;}
-    if(WaitForSingleObject(info[0],120000)!=0||!GetExitCodeProcess(info[0],&code))code=1;
+    if(WaitForSingleObject(info[0],15000)!=0||!GetExitCodeProcess(info[0],&code))code=1;
     CloseHandle(info[1]);CloseHandle(info[0]);
     h=CreateFileW(L"\\Flash Disk\\RAMLIFECYCLE.BIN",0x80000000,3,0,3,0,0);
     if(h!=0xffffffff){ReadFile(h,data,sizeof(data),&n,0);CloseHandle(h);}

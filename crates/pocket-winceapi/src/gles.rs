@@ -1594,6 +1594,17 @@ fn gl_pixel_store(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(VOID)
 }
 
+/// GL completion is independent of EGL presentation and framebuffer readback.
+fn gl_finish(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    with_ctx(|c| c.finish());
+    Ok(VOID)
+}
+
+fn gl_flush(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    with_ctx(|c| c.flush());
+    Ok(VOID)
+}
+
 fn gl_ignored(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(VOID)
 }
@@ -2453,11 +2464,12 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glLineWidth" => gl_line_width,
         "glLineWidthx" => gl_line_widthx,
 
+        "glFinish" => gl_finish,
+        "glFlush" => gl_flush,
+
         // No stencil buffer, no logic op, no multisample or mipmap hints.
         "glStencilFunc" | "glStencilMask" | "glStencilOp" | "glClearStencil" | "glLogicOp"
-        | "glSampleCoverage" | "glSampleCoveragex"
-        | "glHint"
-        | "glFinish" | "glFlush" => gl_ignored,
+        | "glSampleCoverage" | "glSampleCoveragex" | "glHint" => gl_ignored,
         "glPixelStorei" => gl_pixel_store,
 
         // Compressed and copy-from-framebuffer texture paths.

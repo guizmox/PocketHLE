@@ -631,7 +631,15 @@ impl Runner {
         } else {
             0xc0000005
         };
-        drop(emu); // Refund the parent's private RAM while its children remain alive.
+        // A surviving child may wait for this process to exit. Publish completion
+        // after private RAM is refunded, BEFORE joining those surviving children.
+        // Otherwise a child waiting for its parent and the host joining that child
+        // wait on each other. Thread exits remain independently observable.
+        let table = emu.process().map(|p| p.state.object_handles.clone());
+        drop(emu);
+        if let Some(table) = table {
+            table.complete_process_exit(exit_code);
+        }
         hook.finish_children();
         (
             RunOutcome {
@@ -1219,6 +1227,17 @@ mod launcher_return_tests {
     #[cfg(feature = "unicorn")]
     #[test]
     fn desktop_runner_executes_parallel_children_and_surviving_orphan() {
+        check_parallel_children_and_orphan(false);
+    }
+
+    #[cfg(feature = "unicorn")]
+    #[test]
+    fn desktop_child_process_publishes_exit_before_joining_its_orphan() {
+        check_parallel_children_and_orphan(true);
+    }
+
+    #[cfg(feature = "unicorn")]
+    fn check_parallel_children_and_orphan(deferred: bool) {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1275,10 +1294,28 @@ mod launcher_return_tests {
             icon: None,
             companions: vec![],
         };
+        // The original top-level test does not defer exit publication. Exercise
+        // the real child-process context too: that is where the deadlock occurred.
+        let mut parent = if deferred {
+            let mut emu = Emulator::with_unicorn_cpu().unwrap();
+            emu.load_pe(dir.join("proctest.exe")).unwrap();
+            Some(emu)
+        } else {
+            None
+        };
+        let context = parent.as_mut().map(|parent| {
+            let state = &mut parent.process_mut().unwrap().state;
+            let (handle, _) = state.object_handles.new_child().unwrap();
+            state.child_handle_context(handle).unwrap()
+        });
+        let table = context.as_ref().map(|context| context.table.clone());
         let mut hook = RunHook::new(None, None);
         let (outcome, code) =
-            Runner::new().run_process(&root, &game, &card, None, None, None, None, &mut hook);
+            Runner::new().run_process(&root, &game, &card, None, None, context, None, &mut hook);
         assert_eq!(code, 77, "{}", outcome.summary);
+        if let Some(table) = table {
+            assert_eq!(table.exit_code(table.process_id(), None), Some(77));
+        }
         for (name, expected) in [
             ("PROCTEST.TXT", "PROCTEST_RESULT PASS"),
             ("ORPHANTEST.TXT", "ORPHANTEST_RESULT PASS"),
@@ -1300,6 +1337,7 @@ mod launcher_return_tests {
                 "{report}"
             );
         }
+        drop(parent);
         std::fs::remove_dir_all(root).unwrap();
     }
 
