@@ -46,8 +46,8 @@ def main():
             ['--', '--test-threads=1'], args.logs / f'unit-{iteration + 1:03}.log')
     if args.guest:
         # ram_guest.rs embeds TIMETEST too, even when a name filter is passed.
-        for suite in ('ramtest', 'vfstest', 'timetest'):
-            run([sys.executable, str(ROOT / 'tools' / suite / 'build.py'),
+        for suite in ('ram', 'vfs', 'timing'):
+            run([sys.executable, str(ROOT / 'tools' / 'hardware-diag' / 'suites' / suite / 'build.py'),
                  '--clang', args.clang, '--lld', args.lld], args.logs / f'build-{suite}.log')
         run([args.cargo, 'test', '-p', 'pocket-core', '--no-default-features',
              '--features', 'unicorn', '--locked', '--test', 'ram_guest',

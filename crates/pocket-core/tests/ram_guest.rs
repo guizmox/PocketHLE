@@ -30,21 +30,23 @@ impl Drop for GuestFiles {
 #[test]
 fn native_arm_guest_verifies_ram_division_stacks_and_dll_lifetimes() {
     run_guest(
-        include_bytes!("../../../tools/ramtest/dist/GZRT999999/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/AUTORUN.EXE"),
         0,
     );
 }
 #[test]
 fn explicit_exitprocess_runs_detach_before_unmapping() {
     run_guest(
-        include_bytes!("../../../tools/ramtest/dist/fixtures/explicit-exit.exe"),
+        include_bytes!("../../../tools/hardware-diag/suites/ram/dist/fixtures/explicit-exit.exe"),
         77,
     );
 }
 #[test]
 fn main_exitthread_then_last_worker_exit_keeps_callback_stacks_alive() {
     run_guest(
-        include_bytes!("../../../tools/ramtest/dist/fixtures/last-worker-exit.exe"),
+        include_bytes!(
+            "../../../tools/hardware-diag/suites/ram/dist/fixtures/last-worker-exit.exe"
+        ),
         33,
     );
 }
@@ -65,31 +67,40 @@ fn run_guest(executable: &[u8], expected_code: u32) {
         ("AUTORUN.EXE", executable),
         (
             "proctest.exe",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/proctest.exe").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/proctest.exe")
+                .as_slice(),
         ),
         (
             "procworker.exe",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/procworker.exe").as_slice(),
+            include_bytes!(
+                "../../../tools/hardware-diag/suites/ram/dist/GZRT999999/procworker.exe"
+            )
+            .as_slice(),
         ),
         (
             "badproc.exe",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/badproc.exe").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/badproc.exe")
+                .as_slice(),
         ),
         (
             "pageprobe.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/pageprobe.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/pageprobe.dll")
+                .as_slice(),
         ),
         (
             "ramprobe.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/ramprobe.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/ramprobe.dll")
+                .as_slice(),
         ),
         (
             "ramprobe2.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/ramprobe2.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/ramprobe2.dll")
+                .as_slice(),
         ),
         (
             "ramreject.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/ramreject.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/ramreject.dll")
+                .as_slice(),
         ),
     ] {
         fs::write(files.0.join(name), bytes).unwrap();
@@ -97,35 +108,47 @@ fn run_guest(executable: &[u8], expected_code: u32) {
     for (name, bytes) in [
         (
             "depleaf.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/depleaf.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/depleaf.dll")
+                .as_slice(),
         ),
         (
             "deproot.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/deproot.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/deproot.dll")
+                .as_slice(),
         ),
         (
             "deppeer.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/deppeer.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/deppeer.dll")
+                .as_slice(),
         ),
         (
             "depreject.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/depreject.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/depreject.dll")
+                .as_slice(),
         ),
         (
             "depmissing.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/depmissing.dll").as_slice(),
+            include_bytes!(
+                "../../../tools/hardware-diag/suites/ram/dist/GZRT999999/depmissing.dll"
+            )
+            .as_slice(),
         ),
         (
             "depbadexport.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/depbadexport.dll").as_slice(),
+            include_bytes!(
+                "../../../tools/hardware-diag/suites/ram/dist/GZRT999999/depbadexport.dll"
+            )
+            .as_slice(),
         ),
         (
             "depcyclea.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/depcyclea.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/depcyclea.dll")
+                .as_slice(),
         ),
         (
             "depcycleb.dll",
-            include_bytes!("../../../tools/ramtest/dist/GZRT999999/depcycleb.dll").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/ram/dist/GZRT999999/depcycleb.dll")
+                .as_slice(),
         ),
     ] {
         fs::write(files.0.join(name), bytes).unwrap();
@@ -141,9 +164,9 @@ fn run_guest(executable: &[u8], expected_code: u32) {
         let state = &mut emu.process_mut().unwrap().state;
         state
             .vfs
-            .mount_read_only("\\SD Card\\GZRT999999\\", &files.0);
+            .mount_read_only("\\SD Card\\GZHD999989\\ram\\", &files.0);
         state.vfs.mount_save_dir("\\Flash Disk\\", &flash);
-        state.module_path = "\\SD Card\\GZRT999999\\AUTORUN.EXE".into();
+        state.module_path = "\\SD Card\\GZHD999989\\ram\\AUTORUN.EXE".into();
         state.synthetic_message_budget = 0;
         state.process_launch_enabled = true;
     }
@@ -381,15 +404,18 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
     for (n, b) in [
         (
             "AUTORUN.EXE",
-            include_bytes!("../../../tools/vfstest/dist/GZVT999998/AUTORUN.EXE").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/vfs/dist/GZVT999998/AUTORUN.EXE")
+                .as_slice(),
         ),
         (
             "vfsworker.exe",
-            include_bytes!("../../../tools/vfstest/dist/GZVT999998/vfsworker.exe").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/vfs/dist/GZVT999998/vfsworker.exe")
+                .as_slice(),
         ),
         (
             "asset.bin",
-            include_bytes!("../../../tools/vfstest/dist/GZVT999998/asset.bin").as_slice(),
+            include_bytes!("../../../tools/hardware-diag/suites/vfs/dist/GZVT999998/asset.bin")
+                .as_slice(),
         ),
     ] {
         fs::write(files.0.join(n), b).unwrap();
@@ -411,9 +437,9 @@ fn native_arm_vfs_diagnostic_runs_twice_and_restores_device_ram() {
         let state = &mut emu.process_mut().unwrap().state;
         state
             .vfs
-            .mount_read_only("\\SD Card\\GZVT999998\\", &files.0);
+            .mount_read_only("\\SD Card\\GZHD999989\\vfs\\", &files.0);
         state.vfs.mount_save_dir("\\Flash Disk\\", &flash);
-        state.module_path = "\\SD Card\\GZVT999998\\AUTORUN.EXE".into();
+        state.module_path = "\\SD Card\\GZHD999989\\vfs\\AUTORUN.EXE".into();
         state.synthetic_message_budget = 0;
         state.process_launch_enabled = true;
         let mut children = Vec::new();
@@ -493,7 +519,7 @@ fn native_arm_timing_waits_callbacks_and_egl_release_resources() {
     fs::create_dir_all(&flash).unwrap();
     fs::write(
         files.0.join("AUTORUN.EXE"),
-        include_bytes!("../../../tools/timetest/dist/GZTT999995/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/timing/dist/GZTT999995/AUTORUN.EXE"),
     )
     .unwrap();
     let mut emu = Emulator::with_unicorn_cpu().unwrap();

@@ -47,3 +47,11 @@ __pycache__/
 /tools/*/build/
 /tools/*/dist/GZ*/
 target-copilot-check
+
+# Unified diagnostics: compiled suite payloads are rebuilt by CI.
+/tools/hardware-diag/build/
+/tools/hardware-diag/suites/*/build/
+/tools/hardware-diag/suites/*/dist/GZ*/
+/tools/hardware-diag/suites/*/dist/fixtures/
+/tools/hardware-diag/suites/*/*.zip
+/tools/hardware-diag/suites/*/dist/*.zip

@@ -119,7 +119,7 @@ fn native_arm_camera_cycles_release_capture() {
     let live = Arc::new(AtomicUsize::new(0));
     let count = live.clone();
     run(
-        include_bytes!("../../../tools/camtest/dist/GZCT999997/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/camera/dist/GZCT999997/AUTORUN.EXE"),
         "GZCT999997",
         "CAMTEST",
         move |state| {
@@ -166,7 +166,7 @@ fn native_arm_gps_cycles_release_provider() {
     let live = Arc::new(AtomicUsize::new(0));
     let count = live.clone();
     run(
-        include_bytes!("../../../tools/gpstest/dist/GZGP999994/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/gps/dist/GZGP999994/AUTORUN.EXE"),
         "GZGP999994",
         "GPSTEST",
         move |state| {
@@ -201,7 +201,7 @@ fn native_arm_vibration_cycles_release_motor() {
     let live = Arc::new(AtomicUsize::new(0));
     let count = live.clone();
     run(
-        include_bytes!("../../../tools/vibtest/dist/GZVB999990/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/vibration/dist/GZVB999990/AUTORUN.EXE"),
         "GZVB999990",
         "VIBTEST",
         move |state| {
@@ -277,7 +277,7 @@ fn native_arm_network_cycles_release_sessions_and_transfers() {
     let live = Arc::new(AtomicUsize::new(0));
     let count = live.clone();
     run(
-        include_bytes!("../../../tools/nettest/dist/GZNT999993/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/network/dist/GZNT999993/AUTORUN.EXE"),
         "GZNT999993",
         "NETTEST",
         move |state| {
@@ -306,7 +306,7 @@ impl kernel::bluetooth::Backend for Bluetooth {
 #[test]
 fn native_arm_bluetooth_startup_and_cancelled_inquiry_cycles() {
     run(
-        include_bytes!("../../../tools/bttest/dist/GZBT999996/AUTORUN.EXE"),
+        include_bytes!("../../../tools/hardware-diag/suites/bluetooth/dist/GZBT999996/AUTORUN.EXE"),
         "GZBT999996",
         "BTTEST",
         |state| {

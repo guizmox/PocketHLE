@@ -1228,25 +1228,34 @@ mod launcher_return_tests {
             std::process::id()
         ));
         let card = root.join("games/probe/extracted");
-        let dir = card.join("GZRT999999");
+        let dir = card.join("GZHD999989/ram");
         std::fs::create_dir_all(&dir).unwrap();
         for (name, bytes) in [
             (
                 "proctest.exe",
-                include_bytes!("../../../tools/ramtest/dist/GZRT999999/proctest.exe").as_slice(),
+                include_bytes!(
+                    "../../../tools/hardware-diag/suites/ram/dist/GZRT999999/proctest.exe"
+                )
+                .as_slice(),
             ),
             (
                 "procworker.exe",
-                include_bytes!("../../../tools/ramtest/dist/GZRT999999/procworker.exe").as_slice(),
+                include_bytes!(
+                    "../../../tools/hardware-diag/suites/ram/dist/GZRT999999/procworker.exe"
+                )
+                .as_slice(),
             ),
             (
                 "badproc.exe",
-                include_bytes!("../../../tools/ramtest/dist/GZRT999999/badproc.exe").as_slice(),
+                include_bytes!(
+                    "../../../tools/hardware-diag/suites/ram/dist/GZRT999999/badproc.exe"
+                )
+                .as_slice(),
             ),
         ] {
             std::fs::write(dir.join(name), bytes).unwrap();
         }
-        std::fs::write(dir.join("GZRT999999"), 999999u32.to_le_bytes()).unwrap();
+        std::fs::write(card.join("GZHD999989/GZHD999989"), 999999u32.to_le_bytes()).unwrap();
         let mut settings = pocket_library::GameSettings::default();
         settings.cpu_backend = CpuBackendPref::Unicorn;
         settings.max_slices = 3_000_000;
@@ -1255,7 +1264,7 @@ mod launcher_return_tests {
             id: "probe".into(),
             display_name: "Process diagnostic".into(),
             provider: None,
-            executable: PathBuf::from("extracted/GZRT999999/proctest.exe"),
+            executable: PathBuf::from("extracted/GZHD999989/ram/proctest.exe"),
             source_cab: "diagnostic.zip".into(),
             install_dir: None,
             install_dirs: vec![],
@@ -1303,25 +1312,32 @@ mod launcher_return_tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("pockethle-runner-vfs-{nonce}"));
         let card = root.join("games/probe/extracted");
-        let dir = card.join("GZVT999998");
+        let dir = card.join("GZHD999989/vfs");
         std::fs::create_dir_all(&dir).unwrap();
         for (n, b) in [
             (
                 "AUTORUN.EXE",
-                include_bytes!("../../../tools/vfstest/dist/GZVT999998/AUTORUN.EXE").as_slice(),
+                include_bytes!(
+                    "../../../tools/hardware-diag/suites/vfs/dist/GZVT999998/AUTORUN.EXE"
+                )
+                .as_slice(),
             ),
             (
                 "vfsworker.exe",
-                include_bytes!("../../../tools/vfstest/dist/GZVT999998/vfsworker.exe").as_slice(),
+                include_bytes!(
+                    "../../../tools/hardware-diag/suites/vfs/dist/GZVT999998/vfsworker.exe"
+                )
+                .as_slice(),
             ),
             (
                 "asset.bin",
-                include_bytes!("../../../tools/vfstest/dist/GZVT999998/asset.bin").as_slice(),
+                include_bytes!("../../../tools/hardware-diag/suites/vfs/dist/GZVT999998/asset.bin")
+                    .as_slice(),
             ),
         ] {
             std::fs::write(dir.join(n), b).unwrap();
         }
-        std::fs::write(dir.join("GZVT999998"), 999998u32.to_le_bytes()).unwrap();
+        std::fs::write(card.join("GZHD999989/GZHD999989"), 999998u32.to_le_bytes()).unwrap();
         let mut settings = pocket_library::GameSettings::default();
         settings.cpu_backend = CpuBackendPref::Unicorn;
         settings.max_slices = 3_000_000;
@@ -1330,7 +1346,7 @@ mod launcher_return_tests {
             id: "probe".into(),
             display_name: "VFS diagnostic".into(),
             provider: None,
-            executable: PathBuf::from("extracted/GZVT999998/AUTORUN.EXE"),
+            executable: PathBuf::from("extracted/GZHD999989/vfs/AUTORUN.EXE"),
             source_cab: "diagnostic.zip".into(),
             install_dir: None,
             install_dirs: vec![],

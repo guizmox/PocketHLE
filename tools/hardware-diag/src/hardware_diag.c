@@ -1,0 +1,39 @@
+#include "imports.h"
+typedef unsigned int U32;
+typedef unsigned short W16;
+typedef struct { int left,top,right,bottom; } Rect;
+typedef struct { U32 hwnd,message,wparam,lparam,time; int x,y; } Msg;
+typedef struct { U32 style; void *proc; int cls_extra,wnd_extra; U32 instance,icon,cursor,brush; const W16 *menu,*name; } WClass;
+extern volatile U32 hardware_diag_visual;
+U32 hardware_diag_run(U32);U32 hardware_diag_auxiliary(U32*,U32,U32,const unsigned short*,U32);
+static U32 outcomes[11];
+static U32 window,font,selected,running,all,process[4],started,last_second,mode,dirty=1,scroll;
+static char lines[192][96],partial[96];static U32 count,part,offset;
+static const char *names[]={"RAM / paging / TLS / processes","Files and storage (VFS)","Timing / threads / audio","Camera","GPS","Network (HTTP / HTTPS)","Vibration","Bluetooth","OpenGL ES information + triangle","CPU benchmark: Integer","CPU benchmark: Floating point","Run all tests"};
+static const W16 *reports[]={L"RAMTEST.TXT",L"VFSTEST.TXT",L"TIMETEST.TXT",L"CAMTEST.TXT",L"GPSTEST.TXT",L"NETTEST.TXT",L"VIBTEST.TXT",L"BTTEST.TXT",L"OGLESTEST.TXT",L"INTEGER.TXT",L"FLOATING.TXT"};
+void __aeabi_memclr4(void *p,U32 n){volatile unsigned char *b=p;while(n--)*b++=0;}
+static U32 length(const char*s){U32 n=0;while(s[n])n++;return n;}
+static void append(const char*s){U32 i,j,pos=0;do{if(count==192){for(j=1;j<192;j++)for(i=0;i<96;i++)lines[j-1][i]=lines[j][i];count--;}i=0;while(s[pos]&&i<48)lines[count][i++]=s[pos++];lines[count++][i]=0;}while(s[pos]);dirty=1;}
+static U32 decimal(char *b,U32 v){char t[12];U32 n=0,i;do{t[n++]=(char)('0'+v%10);v/=10;}while(v);for(i=0;i<n;i++)b[i]=t[n-1-i];b[n]=0;return n;}
+static void text(U32 dc,int x,int y,const char*s){W16 w[128];U32 n=0;while(s[n]&&n<127){w[n]=(unsigned char)s[n];n++;}TextOutW(dc,x,y,w,n);}
+static void path(W16*out,const W16*name){const W16 *base=L"\\Flash Disk\\";U32 n=0,i=0;while(base[n]){out[n]=base[n];n++;}while(name[i])out[n++]=name[i++];out[n]=0;}
+static void save_summary(const char*s){U32 h,n;h=CreateFileW(L"\\Flash Disk\\HARDWAREDIAG.TXT",0x40000000,3,0,4,0,0);if(h!=0xffffffff){SetFilePointer(h,0,0,2);WriteFile(h,s,length(s),&n,0);WriteFile(h,"\r\n",2,&n,0);CloseHandle(h);}}
+static void poll_console(void){U32 h,n=0,i;char b[1024];h=CreateFileW(L"\\Flash Disk\\HARDWARELIVE.TXT",0x80000000,3,0,3,0,0);if(h==0xffffffff)return;SetFilePointer(h,offset,0,0);if(ReadFile(h,b,sizeof(b),&n,0)){offset+=n;for(i=0;i<n;i++){if(b[i]=='\n'){partial[part]=0;append(partial);part=0;}else if(b[i]!='\r'&&part<95)partial[part++]=b[i];}}CloseHandle(h);}
+static void report_tail(void){U32 h,n=0,i,at=0;W16 p[260];char b[512],line[96];path(p,reports[selected]);h=CreateFileW(p,0x80000000,3,0,3,0,0);if(h==0xffffffff){append("No report file: test may have failed to start.");return;}while(ReadFile(h,b,sizeof(b),&n,0)&&n){for(i=0;i<n;i++){if(b[i]=='\n'){line[at]=0;append(line);at=0;}else if(b[i]!='\r'&&at<95)line[at++]=b[i];}}if(at){line[at]=0;append(line);}CloseHandle(h);}
+static U32 suite_worker(void *argument){return hardware_diag_run((U32)argument);}
+static void start_suite(void){U32 h,id=0;count=part=offset=scroll=0;append(names[selected]);append("Running inside HARDWARE DIAG.");h=CreateFileW(L"\\Flash Disk\\HARDWARELIVE.TXT",0x40000000,3,0,2,0,0);if(h!=0xffffffff)CloseHandle(h);started=GetTickCount();mode=1;process[0]=CreateThread(0,0x40000,suite_worker,(void*)selected,0,&id);
+ if(!process[0]){append("FAIL: cannot start diagnostic worker thread.");save_summary("FAIL: diagnostic worker could not start");mode=2;running=0;all=0;return;}running=1;dirty=1;}
+static void tick(void){U32 code=259,elapsed;if(!running)return;poll_console();elapsed=GetTickCount()-started;if(elapsed/1000!=last_second){last_second=elapsed/1000;dirty=1;}
+ if(WaitForSingleObject(process[0],0)==0){GetExitCodeThread(process[0],&code);running=0;CloseHandle(process[0]);SetFocus(window);poll_console();append("--- Full suite report ---");report_tail();append(code==0?"SUITE FINISHED (exit 0)":"SUITE FAILED (nonzero exit)");save_summary(names[selected]);{char b[48]="exit_code=";U32 i=10;decimal(b+i,code);save_summary(b);}outcomes[selected]=code==0?1:2;mode=2;if(all&&selected<10){selected++;start_suite();}else{all=0;append("Reports: Flash Disk. Enter / Back returns to menu.");}}
+ else if(elapsed>300000){append("SLOW: more than five minutes; suite still running.");save_summary("SLOW: suite exceeded five minutes; no unsafe thread termination");started=GetTickCount();all=0;}}
+static void draw(void){U32 dc,old,i,start;char elapsed[48]="Elapsed: ";dc=GetDC(window);PatBlt(dc,0,0,320,240,0x42);old=SelectObject(dc,font);SetBkMode(dc,1);SetTextColor(dc,0x00e8e8e8);text(dc,6,4,"HARDWARE DIAG");SetTextColor(dc,0x0099ccff);
+ if(mode==0){text(dc,6,19,"D-pad: choose   Enter/A: run   Tap: run");for(i=0;i<12;i++){SetTextColor(dc,i==selected?0x0000ccff:0x00dddddd);text(dc,6,36+(int)i*14,i==selected?">":" ");text(dc,20,36+(int)i*14,names[i]);if(i<11&&outcomes[i])text(dc,269,36+(int)i*14,outcomes[i]==1?"PASS":"FAIL");}SetTextColor(dc,0x00999999);text(dc,6,220,"Host permissions/providers may be required.");}
+ else{decimal(elapsed+9,(GetTickCount()-started)/1000);{U32 n=length(elapsed);elapsed[n++]='s';elapsed[n]=0;}text(dc,6,19,elapsed);start=count>14?count-14:0;if(scroll<start)start-=scroll;else if(scroll)start=0;SetTextColor(dc,0x00dddddd);for(i=start;i<count&&i<start+14;i++)text(dc,6,38+(int)(i-start)*12,lines[i]);SetTextColor(dc,0x0099ccff);text(dc,6,219,running?"Running... Up/Down: scroll. Please wait.":"Enter/Back or tap here: menu; arrows: scroll");}
+ SelectObject(dc,old);ReleaseDC(window,dc);ValidateRect(window,0);dirty=0;}
+static void activate(void){if(mode==0){all=selected==11;if(all)selected=0;start_suite();}else if(!running){mode=0;dirty=1;}}
+static U32 proc(U32 h,U32 m,U32 w,U32 l){if(m==0x0f){dirty=1;ValidateRect(h,0);return 0;}if(m==0x100){if(w==38){if(mode==0)selected=selected?selected-1:11;else if(scroll+14<count)scroll++;dirty=1;}else if(w==40){if(mode==0)selected=(selected+1)%12;else if(scroll)scroll--;dirty=1;}else if(w==13||w==32||w==0xc1||w==0x70||w==0x41)activate();else if((w==27||w==8)&&!running){mode=0;dirty=1;}return 0;}if(m==0x202&&mode==0){U32 y=(l>>16)&65535;if(y>=36&&y<204){selected=(y-36)/14;activate();}return 0;}if(m==0x202&&mode==2&&!running&&((l>>16)&65535)>=210){activate();return 0;}if(m==2){PostQuitMessage(0);return 0;}return DefWindowProcW(h,m,w,l);}
+__attribute__((section(".text.entry"))) U32 entry(U32 instance,U32 previous,const W16 *command,U32 show){U32 handled,result=hardware_diag_auxiliary(&handled,instance,previous,command,show);WClass c={0};Msg m;unsigned char lf[92]={0};U32 i;if(handled)return result;c.proc=proc;c.name=L"HardwareDiag";c.instance=0x10000;RegisterClassW(&c);window=CreateWindowExW(0,c.name,L"HARDWARE DIAG",0x10000000,0,0,320,240,0,0,c.instance,0);if(!window)return 1;
+ /* Fixed-size console font, independent of host DPI/font substitutions. */
+ *(int*)lf=-11;*(int*)(lf+4)=6;lf[20]=0;{const W16*n=L"Courier New";for(i=0;n[i]&&i<31;i++)((W16*)(lf+28))[i]=n[i];}font=CreateFontIndirectW(lf);if(!font)font=GetStockObject(13);ShowWindow(window,5);SetFocus(window);save_summary("HARDWARE DIAG session started; configure optimizations in PocketHLE.");
+ for(;;){while(PeekMessageW(&m,0,0,0,1)){if(m.message==0x12)return 0;TranslateMessage(&m);DispatchMessageW(&m);}tick();if(dirty&&!hardware_diag_visual)draw();Sleep(25);}
+}

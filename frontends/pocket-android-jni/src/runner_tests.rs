@@ -82,7 +82,7 @@ fn android_runner_ramtest_processes_and_orphan_complete() {
     let id = lib
         .import_zip(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tools/ramtest/dist/PocketHLE-RAMTEST.zip"),
+                .join("../../tools/hardware-diag/suites/ram/dist/PocketHLE-RAMTEST.zip"),
         )
         .unwrap()
         .id
@@ -111,7 +111,7 @@ fn android_runner_vfstest_sharing_rename_quota_and_repeat_cleanup() {
     let id = lib
         .import_zip(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tools/vfstest/dist/PocketHLE-VFSTEST.zip"),
+                .join("../../tools/hardware-diag/suites/vfs/dist/PocketHLE-VFSTEST.zip"),
         )
         .unwrap()
         .id
@@ -178,7 +178,7 @@ fn disabled_process_launch_reproduces_android_vfs_report() {
     let entry = lib
         .import_zip(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tools/vfstest/dist/PocketHLE-VFSTEST.zip"),
+                .join("../../tools/hardware-diag/suites/vfs/dist/PocketHLE-VFSTEST.zip"),
         )
         .unwrap()
         .clone();

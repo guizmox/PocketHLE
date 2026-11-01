@@ -17,6 +17,10 @@ name = "pockethle-steamdeck"
 path = "src/steamdeck_main.rs"
 required-features = ["steam-deck"]
 
+[[example]]
+name = "hardware-diag-bluetooth-host"
+path = "../../tools/hardware-diag/suites/bluetooth/host-radio.rs"
+
 [features]
 # Default builds include the real ARM CPU (unicorn-engine) and
 # real-time audio (cpal). Without `unicorn` the stub CPU is
