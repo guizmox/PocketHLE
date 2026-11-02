@@ -1185,7 +1185,7 @@ fn load_texels(
         return Ok(Some(Vec::new()));
     }
     let bpp =
-        pocket_gles::texture::pixel_layout(format, ty).expect("validated pixel layout") as u32;
+        with_ctx(|c| c.upload_pixel_layout(format, ty)).expect("validated pixel layout") as u32;
     if width > 1024 || height > 1024 {
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
         return Ok(None);
@@ -2972,6 +2972,92 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn gizmondo_bgra_uploads_preserve_alpha_and_unpack_alignment() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        // Distinct channels and alpha, including fully transparent menu texels.
+        let bgra = [
+            30, 20, 10, 0, 60, 50, 40, 128, 90, 80, 70, 255, 120, 110, 100, 64,
+        ];
+        cpu.write_mem(SCRATCH, &bgra).unwrap();
+        let args = [
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            2,
+            2,
+            0,
+            0x80E1,
+            GL_UNSIGNED_BYTE,
+            SCRATCH,
+        ];
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_ENUM
+        );
+        set_gizmondo_goforce_driver(true);
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        assert_eq!(
+            with_ctx(|c| c.textures[&0].rgba.clone()),
+            [10, 20, 30, 0, 40, 50, 60, 128, 70, 80, 90, 255, 100, 110, 120, 64]
+        );
+        assert_eq!(with_ctx(|c| c.textures[&0].formats[&0]), GL_RGBA);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_sub_image_2d,
+            &[
+                GL_TEXTURE_2D,
+                0,
+                1,
+                1,
+                1,
+                1,
+                0x80E1,
+                GL_UNSIGNED_BYTE,
+                SCRATCH,
+            ],
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        assert_eq!(
+            with_ctx(|c| c.textures[&0].rgba[12..].to_vec()),
+            [10, 20, 30, 0]
+        );
+        // Three-byte BGR rows use the same guest UNPACK_ALIGNMENT as RGB.
+        cpu.write_mem(SCRATCH, &[3, 2, 1, 6, 5, 4, 99, 99, 9, 8, 7, 12, 11, 10])
+            .unwrap();
+        let bgr_args = [
+            GL_TEXTURE_2D,
+            0,
+            GL_RGB,
+            2,
+            2,
+            0,
+            0x80E0,
+            GL_UNSIGNED_BYTE,
+            SCRATCH,
+        ];
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &bgr_args);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        assert_eq!(
+            with_ctx(|c| c.textures[&0].rgba.clone()),
+            [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]
+        );
+        assert_eq!(with_ctx(|c| c.textures[&0].formats[&0]), GL_RGB);
+        set_gizmondo_goforce_driver(false);
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_ENUM
+        );
+    }
 
     #[test]
     fn gizmondo_driver_accepts_carmageddon_source_format_without_losing_alpha() {

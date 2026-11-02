@@ -427,6 +427,9 @@ fn run_process(
 
     let is_gizmondo = is_gizmondo_game(entry, library_root);
     emu.set_pocket_pc_input(!is_gizmondo);
+    if is_gizmondo {
+        emu.set_gizmondo_platform_identity();
+    }
     emu.set_gizmondo_audio_compatibility(is_gizmondo);
     if let Some(process) = emu.process_mut() {
         process.state.touch_steering.enabled = !is_gizmondo

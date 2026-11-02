@@ -1390,6 +1390,42 @@ impl Context {
         }
     }
 
+    /// NVIDIA's Gizmondo driver accepts BGR/BGRA source uploads. Keep the
+    /// standard ES format validation unchanged outside that device profile.
+    fn upload_format(&self, format: u32) -> u32 {
+        if self.gizmondo_goforce_20051013 {
+            match format {
+                0x80E0 => GL_RGB,
+                0x80E1 => GL_RGBA,
+                _ => format,
+            }
+        } else {
+            format
+        }
+    }
+
+    pub fn upload_pixel_layout(&self, format: u32, ty: u32) -> Result<usize, u32> {
+        texture::pixel_layout(self.upload_format(format), ty)
+    }
+
+    fn decode_upload(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        format: u32,
+        ty: u32,
+    ) -> Option<Vec<u8>> {
+        let canonical = self.upload_format(format);
+        let mut rgba = texture::decode_to_rgba(data, width, height, canonical, ty)?;
+        if canonical != format {
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+        Some(rgba)
+    }
+
     /// Validate before the bridge touches guest pixel memory, including NULL uploads.
     #[allow(clippy::too_many_arguments)]
     pub fn validate_tex_image_2d(
@@ -1418,7 +1454,7 @@ impl Context {
             || (height != 0 && !height.is_power_of_two())
         {
             Some(GL_INVALID_VALUE)
-        } else if let Err(error) = texture::pixel_layout(format, ty) {
+        } else if let Err(error) = self.upload_pixel_layout(format, ty) {
             Some(error)
         } else if internalformat != format && !self.gizmondo_goforce_20051013 {
             Some(GL_INVALID_OPERATION)
@@ -1458,7 +1494,7 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return false;
         }
-        if let Err(error) = texture::pixel_layout(format, ty) {
+        if let Err(error) = self.upload_pixel_layout(format, ty) {
             self.set_error(error);
             return false;
         }
@@ -1491,7 +1527,7 @@ impl Context {
         if matches!(
             internal,
             GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA | GL_RGB | GL_RGBA
-        ) && internal != format
+        ) && internal != self.upload_format(format)
         {
             self.set_error(GL_INVALID_OPERATION);
             return false;
@@ -1509,7 +1545,16 @@ impl Context {
         ty: u32,
         data: &[u8],
     ) {
-        if !self.validate_tex_image_2d(target, level, format, width, height, 0, format, ty) {
+        if !self.validate_tex_image_2d(
+            target,
+            level,
+            self.upload_format(format),
+            width,
+            height,
+            0,
+            format,
+            ty,
+        ) {
             return;
         }
         let unit = self.active_texture as usize;
@@ -1520,7 +1565,7 @@ impl Context {
         let rgba = if data.is_empty() {
             vec![0u8; (width as usize) * (height as usize) * 4]
         } else {
-            match texture::decode_to_rgba(data, width, height, format, ty) {
+            match self.decode_upload(data, width, height, format, ty) {
                 Some(v) => v,
                 None => {
                     self.set_error(GL_INVALID_OPERATION);
@@ -1528,10 +1573,11 @@ impl Context {
                 }
             }
         };
+        let canonical_format = self.upload_format(format);
         let name = self.texture_units[self.active_texture as usize].bound_texture;
         let tex = self.textures.entry(name).or_default();
         tex.set_level(level as u32, width, height, rgba);
-        tex.set_format(level as u32, format);
+        tex.set_format(level as u32, canonical_format);
         log::debug!(
             "GLES tex image texture={} level={} {}x{} format=0x{format:04x} type=0x{ty:04x} bytes={} complete={} first={:02x?}",
             name,
@@ -1744,7 +1790,7 @@ impl Context {
         if width == 0 || height == 0 || data.is_empty() {
             return;
         }
-        let Some(patch) = texture::decode_to_rgba(data, width, height, format, ty) else {
+        let Some(patch) = self.decode_upload(data, width, height, format, ty) else {
             self.set_error(GL_INVALID_OPERATION);
             return;
         };

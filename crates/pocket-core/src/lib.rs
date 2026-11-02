@@ -110,6 +110,19 @@ impl Emulator {
         }
     }
 
+    /// Advertise the selected console's readable platform identity. This is
+    /// process-local, like PocketPC OEM overrides; never persist it to the host
+    /// device registry. Games use SPI_GETPLATFORMTYPE to select hardware keys.
+    pub fn set_gizmondo_platform_identity(&mut self) {
+        if let Some(process) = self.process.as_mut() {
+            process.state.registry.set_volatile_value(
+                r"HKLM\System\Platform",
+                "PlatformType",
+                pocket_kernel::registry::RegistryValue::Sz("Gizmondo Terminal".into()),
+            );
+        }
+    }
+
     /// Apply the Gizmondo audio compatibility profile after loading a process.
     /// The 32-handle budget restores finite-capacity enumeration for console
     /// software. It is a compatibility policy, not a ROM-proven hardware limit.

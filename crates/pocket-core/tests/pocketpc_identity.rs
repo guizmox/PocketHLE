@@ -175,3 +175,37 @@ fn settings_override_owner_and_hal_identity_but_device_registry_stays_unchanged(
         original_owner
     );
 }
+
+#[test]
+fn gizmondo_platform_identity_is_volatile_and_does_not_change_other_devices() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = Files(std::env::temp_dir().join(format!("pockethle-console-{stamp}")));
+    fs::create_dir_all(&dir.0).unwrap();
+    let pe = dir.0.join("test.exe");
+    fs::write(&pe, fixture()).unwrap();
+    let persisted = dir.0.join("registry.json");
+    let mut emu = Emulator::with_stub_cpu();
+    emu.load_pe(&pe).unwrap();
+    emu.process_mut()
+        .unwrap()
+        .state
+        .registry
+        .configure_persistence(&persisted)
+        .unwrap();
+    emu.set_gizmondo_platform_identity();
+    assert_eq!(
+        emu.process()
+            .unwrap()
+            .state
+            .registry
+            .value(r"HKLM\System\Platform", "PlatformType"),
+        Some(RegistryValue::Sz("Gizmondo Terminal".into()))
+    );
+    emu.process_mut().unwrap().state.registry.flush().unwrap();
+    let mut other = Registry::with_device_defaults();
+    other.configure_persistence(&persisted).unwrap();
+    assert_eq!(other.value(r"HKLM\System\Platform", "PlatformType"), None);
+}
