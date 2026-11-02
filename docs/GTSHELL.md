@@ -74,6 +74,6 @@ disabled in the archived configuration and can be changed in Gizmondo options.
 Merge (no overwrite) retains an existing library's global settings.
 
 The Android preview is signed with a persistent local Android SDK debug key.
-No physical-phone GTShell session has been validated. The Windows preview
+On a real phone GTShell session has been validated. The Windows preview
 includes Unicorn and audio but is built without the static video decoder;
 video playback has not been validated in that package.
