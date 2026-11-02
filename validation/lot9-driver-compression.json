@@ -1,0 +1,342 @@
+[
+  {
+    "api": "glTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f0",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCopyTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f0",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x0"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCompressedTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f0",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x8",
+      "0x27000000"
+    ],
+    "r0": "0x8",
+    "log": [
+      {
+        "validation": "accepted_before_allocation"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f1",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCopyTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f1",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x0"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCompressedTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f1",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x8",
+      "0x27000000"
+    ],
+    "r0": "0x8",
+    "log": [
+      {
+        "validation": "accepted_before_allocation"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f2",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCopyTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f2",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x0"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCompressedTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f2",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x10",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f3",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCopyTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f3",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x0"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glCompressedTexImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x83f3",
+      "0x4",
+      "0x4",
+      "0x0",
+      "0x10",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexSubImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {},
+    "texture_internalformat": "0x83f0"
+  },
+  {
+    "api": "glTexSubImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {},
+    "texture_internalformat": "0x83f1"
+  },
+  {
+    "api": "glTexSubImage2D",
+    "args": [
+      "0xde1",
+      "0x0",
+      "0x0",
+      "0x0",
+      "0x4",
+      "0x4",
+      "0x1908",
+      "0x1401",
+      "0x27000000"
+    ],
+    "r0": "0x502",
+    "log": [
+      {
+        "error": "0x502"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {},
+    "texture_internalformat": "0x8b91"
+  }
+]

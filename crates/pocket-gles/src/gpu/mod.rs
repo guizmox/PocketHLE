@@ -3395,6 +3395,78 @@ mod tests {
     use crate::raster;
     #[cfg(unix)]
     #[test]
+    #[ignore = "requires native GL/GLES; DXT5 native uploads and forced decoded fallback"]
+    fn dxt5_native_and_decoded_routes_preserve_pixels_and_alpha() {
+        for es in [false, true] {
+            for fallback in [false, true] {
+                let mut gpu = if es {
+                    Renderer::with_host(Host::es_for_test().unwrap(), 8, 8).unwrap()
+                } else {
+                    Renderer::new(8, 8).unwrap()
+                };
+                let fmt = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+                if fallback {
+                    gpu.compressed_formats.remove(&fmt);
+                }
+                let mut tex = Texture::default();
+                tex.min_filter = Filter::Nearest;
+                tex.mag_filter = Filter::Nearest;
+                let mut block = [0u8; 16];
+                block[10..12].copy_from_slice(&0xffffu16.to_le_bytes());
+                block[12..16].fill(0xff);
+                let mut textures = HashMap::new();
+                let stages = [TextureStage {
+                    unit: 0,
+                    env: TexEnvMode::Replace,
+                    env_color: [0.; 4],
+                    lod_bias: 0.,
+                }];
+                let vertices =
+                    [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
+                        pos,
+                        color: [1.; 4],
+                        texcoord: [[0.125, 0.125, 0., 1.]; 4],
+                        ..Default::default()
+                    });
+                let mut target = RenderTarget::new(8, 8);
+                let state = PipelineState {
+                    viewport: (0, 0, 8, 8),
+                    ..Default::default()
+                };
+                for alpha in [0u8, 90, 255] {
+                    block[0] = alpha;
+                    tex.set_compressed(0, 4, 4, fmt, &block, Vec::new());
+                    textures.insert(1, tex.clone());
+                    gpu.draw(
+                        &target,
+                        &state,
+                        GL_TRIANGLES,
+                        &vertices,
+                        &stages,
+                        &textures,
+                        [1, 0, 0, 0],
+                    )
+                    .unwrap();
+                    gpu.read(&mut target).unwrap();
+                    let at = (4 * 8 + 4) * 4;
+                    for (got, want) in target.color[at..at + 4].iter().zip([170, 170, 170, alpha]) {
+                        assert!(
+                            got.abs_diff(want) <= 1,
+                            "es={es} fallback={fallback} got={:?}",
+                            &target.color[at..at + 4]
+                        );
+                    }
+                }
+                gpu.host.make_current().unwrap();
+                unsafe {
+                    assert_eq!((gpu.gl.GetError)(), 0);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     #[ignore = "requires native desktop GL and GLES2; upload routes and driver fallbacks"]
     fn host_upload_routes_and_fallbacks() {
         for es in [false, true] {

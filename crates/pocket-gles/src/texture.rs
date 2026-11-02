@@ -887,6 +887,11 @@ pub fn compressed_upload_size(format: u32, level: i32, width: u32, height: u32) 
     }
 }
 
+/// S3TC formats accepted by EXT_dxt1 and ANGLE_dxt3/dxt5 uploads.
+pub fn is_s3tc(format: u32) -> bool {
+    (GL_COMPRESSED_RGB_S3TC_DXT1_EXT..=GL_COMPRESSED_RGBA_S3TC_DXT5_EXT).contains(&format)
+}
+
 /// Bytes for a single encoded image, including its palette when present.
 pub fn compressed_image_size(format: u32, width: u32, height: u32) -> Option<usize> {
     if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG).contains(&format)
@@ -904,7 +909,8 @@ pub fn compressed_image_size(format: u32, width: u32, height: u32) -> Option<usi
         GL_ATC_RGB_AMD | GL_COMPRESSED_RGB_S3TC_DXT1_EXT | GL_COMPRESSED_RGBA_S3TC_DXT1_EXT => 8,
         GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
         | GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD
-        | GL_COMPRESSED_RGBA_S3TC_DXT3_EXT => 16,
+        | GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
+        | GL_COMPRESSED_RGBA_S3TC_DXT5_EXT => 16,
         GL_PALETTE4_RGB8_OES
         | GL_PALETTE4_RGBA8_OES
         | GL_PALETTE4_R5_G6_B5_OES
@@ -1139,9 +1145,9 @@ fn decode_paletted(data: &[u8], width: u32, height: u32, format: u32) -> Option<
     Some(out)
 }
 
-/// Decode an ATC image into RGBA8888.
+/// Decode a supported block-compressed or paletted image into RGBA8888.
 ///
-/// Returns `None` if the format is not ATC or the guest handed us fewer
+/// Returns `None` if the format is unsupported or the guest handed us fewer
 /// bytes than the block layout needs.
 pub fn decode_compressed_to_rgba(
     data: &[u8],
@@ -1228,6 +1234,10 @@ pub fn decode_compressed_to_rgba(
                     }
                     (dxt_rgb_block(&block[8..], true).0, alpha)
                 }
+                GL_COMPRESSED_RGBA_S3TC_DXT5_EXT => (
+                    dxt_rgb_block(&block[8..], true).0,
+                    interpolated_alpha_block(block),
+                ),
                 GL_ATC_RGBA_EXPLICIT_ALPHA_AMD => {
                     let mut a = [0u8; 16];
                     for (i, slot) in a.iter_mut().enumerate() {
@@ -1845,5 +1855,54 @@ mod compressed_upload_tests {
                 None
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dxt5_tests {
+    use super::*;
+    #[test]
+    fn both_alpha_palettes_and_opaque_colour_mode_match_the_block_spec() {
+        for (endpoints, expected) in [
+            ([210, 0], [210, 0, 180, 150, 120, 90, 60, 30]),
+            ([0, 200], [0, 200, 40, 80, 120, 160, 0, 255]),
+        ] {
+            let mut block = [0u8; 16];
+            block[..2].copy_from_slice(&endpoints);
+            let selectors = (0..16).fold(0u64, |v, i| v | (((i % 8) as u64) << (i * 3)));
+            block[2..8].copy_from_slice(&selectors.to_le_bytes()[..6]);
+            // c0 <= c1 must still use four opaque colour entries in DXT5.
+            block[10..12].copy_from_slice(&0xffffu16.to_le_bytes());
+            block[12..16].fill(0xff);
+            let pixels =
+                decode_compressed_to_rgba(&block, 4, 4, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT).unwrap();
+            for (i, p) in pixels.chunks_exact(4).enumerate() {
+                assert_eq!(p, [170, 170, 170, expected[i % 8]]);
+            }
+            for (w, h) in [(1, 1), (2, 2), (1, 4)] {
+                let small =
+                    decode_compressed_to_rgba(&block, w, h, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT)
+                        .unwrap();
+                for y in 0..h as usize {
+                    for x in 0..w as usize {
+                        assert_eq!(
+                            &small[(y * w as usize + x) * 4..(y * w as usize + x + 1) * 4],
+                            &pixels[(y * 4 + x) * 4..(y * 4 + x + 1) * 4]
+                        );
+                    }
+                }
+            }
+            assert!(decode_compressed_to_rgba(
+                &block[..15],
+                4,
+                4,
+                GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+            )
+            .is_none());
+        }
+        assert_eq!(
+            compressed_image_size(GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 8, 4),
+            Some(32)
+        );
     }
 }

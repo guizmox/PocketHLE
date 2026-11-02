@@ -1279,7 +1279,77 @@ impl Context {
         );
     }
 
-    /// ES 1.1 section 3.7.3 plus IMG PVRTC, EXT S3TC and AMD ATC restrictions.
+    /// ES 1.1 plus IMG PVRTC, EXT/ANGLE DXT and AMD ATC restrictions.
+    /// Validate the complete update before reading the guest payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_compressed_tex_sub_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        xo: i32,
+        yo: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+    ) -> Option<usize> {
+        if target != GL_TEXTURE_2D || texture::compressed_image_size(format, 4, 4).is_none() {
+            self.set_error(GL_INVALID_ENUM);
+            return None;
+        }
+        if !(0..=10).contains(&level) || xo < 0 || yo < 0 || width < 0 || height < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return None;
+        }
+        // Paletted subimages and all ATC subimages are explicitly forbidden.
+        if (GL_PALETTE4_RGB8_OES..=GL_PALETTE8_RGB5_A1_OES).contains(&format)
+            || matches!(
+                format,
+                GL_ATC_RGB_AMD
+                    | GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
+                    | GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD
+            )
+        {
+            self.set_error(GL_INVALID_OPERATION);
+            return None;
+        }
+        let name = self.texture_units[self.active_texture as usize].bound_texture;
+        let Some(old) = self
+            .textures
+            .get(&name)
+            .and_then(|t| t.compressed.get(&(level as u32)))
+        else {
+            self.set_error(GL_INVALID_OPERATION);
+            return None;
+        };
+        if old.format != format {
+            self.set_error(GL_INVALID_OPERATION);
+            return None;
+        }
+        let (xo, yo, w, h) = (xo as u32, yo as u32, width as u32, height as u32);
+        if u64::from(xo) + u64::from(w) > u64::from(old.width)
+            || u64::from(yo) + u64::from(h) > u64::from(old.height)
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return None;
+        }
+        let pvrtc = (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
+            .contains(&format);
+        if pvrtc && (xo != 0 || yo != 0 || w != old.width || h != old.height)
+            || !pvrtc
+                && (xo % 4 != 0
+                    || yo % 4 != 0
+                    || w % 4 != 0 && xo + w != old.width
+                    || h % 4 != 0 && yo + h != old.height)
+        {
+            self.set_error(GL_INVALID_OPERATION);
+            return None;
+        }
+        if w == 0 || h == 0 {
+            return Some(0);
+        }
+        texture::compressed_image_size(format, w, h)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn compressed_tex_sub_image_2d(
         &mut self,
@@ -1292,67 +1362,23 @@ impl Context {
         format: u32,
         data: &[u8],
     ) {
-        if target != GL_TEXTURE_2D || texture::compressed_image_size(format, 4, 4).is_none() {
-            self.set_error(GL_INVALID_ENUM);
-            return;
-        }
-        if !(0..=10).contains(&level) || xo < 0 || yo < 0 || width < 0 || height < 0 {
-            self.set_error(GL_INVALID_VALUE);
-            return;
-        }
-        // Paletted subimages and all ATC subimages are explicitly forbidden.
-        if (GL_PALETTE4_RGB8_OES..=GL_PALETTE8_RGB5_A1_OES).contains(&format)
-            || matches!(
-                format,
-                GL_ATC_RGB_AMD
-                    | GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
-                    | GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD
-            )
-        {
-            self.set_error(GL_INVALID_OPERATION);
-            return;
-        }
-        let name = self.texture_units[self.active_texture as usize].bound_texture;
-        let Some(old) = self
-            .textures
-            .get(&name)
-            .and_then(|t| t.compressed.get(&(level as u32)))
-            .cloned()
+        let Some(needed) =
+            self.validate_compressed_tex_sub_image_2d(target, level, xo, yo, width, height, format)
         else {
-            self.set_error(GL_INVALID_OPERATION);
             return;
         };
-        if old.format != format {
-            self.set_error(GL_INVALID_OPERATION);
-            return;
-        }
-        let (xo, yo, w, h) = (xo as u32, yo as u32, width as u32, height as u32);
-        if u64::from(xo) + u64::from(w) > u64::from(old.width)
-            || u64::from(yo) + u64::from(h) > u64::from(old.height)
-        {
-            self.set_error(GL_INVALID_VALUE);
-            return;
-        }
-        let pvrtc = (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
-            .contains(&format);
-        if pvrtc && (xo != 0 || yo != 0 || w != old.width || h != old.height)
-            || !pvrtc
-                && (xo % 4 != 0
-                    || yo % 4 != 0
-                    || w % 4 != 0 && xo + w != old.width
-                    || h % 4 != 0 && yo + h != old.height)
-        {
-            self.set_error(GL_INVALID_OPERATION);
-            return;
-        }
-        let needed = texture::compressed_image_size(format, w, h).unwrap();
         if data.len() != needed {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        if w == 0 || h == 0 {
+        if width == 0 || height == 0 {
             return;
         }
+        let name = self.texture_units[self.active_texture as usize].bound_texture;
+        let old = self.textures[&name].compressed[&(level as u32)].clone();
+        let (xo, yo, w, h) = (xo as u32, yo as u32, width as u32, height as u32);
+        let pvrtc = (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
+            .contains(&format);
         let mut packed = old.bytes.to_vec();
         if pvrtc {
             packed.copy_from_slice(data);
@@ -1398,6 +1424,16 @@ impl Context {
         height: i32,
         border: i32,
     ) {
+        if target == GL_TEXTURE_2D && texture::is_s3tc(format) {
+            self.set_error(
+                if self.gizmondo_goforce_20051013 && format > GL_COMPRESSED_RGBA_S3TC_DXT1_EXT {
+                    GL_INVALID_VALUE
+                } else {
+                    GL_INVALID_OPERATION
+                },
+            );
+            return;
+        }
         if target != GL_TEXTURE_2D
             || !matches!(
                 format,
@@ -1522,6 +1558,16 @@ impl Context {
     ) -> bool {
         let error = if target != GL_TEXTURE_2D {
             Some(GL_INVALID_ENUM)
+        } else if texture::is_s3tc(internalformat) {
+            Some(
+                if self.gizmondo_goforce_20051013
+                    && internalformat > GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+                {
+                    GL_INVALID_VALUE
+                } else {
+                    GL_INVALID_OPERATION
+                },
+            )
         } else if !matches!(
             internalformat,
             GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA | GL_RGB | GL_RGBA
@@ -1607,6 +1653,10 @@ impl Context {
             return false;
         }
         let internal = tex.formats.get(&(level as u32)).copied().unwrap_or(GL_RGBA);
+        if texture::compressed_image_size(internal, 4, 4).is_some() {
+            self.set_error(GL_INVALID_OPERATION);
+            return false;
+        }
         // Compressed-image update restrictions belong to their format-specific path.
         if matches!(
             internal,
@@ -1690,6 +1740,15 @@ impl Context {
             return None;
         }
         let paletted = texture::is_paletted(format);
+        // NVIDIA returns INVALID_VALUE for a DXT border; retain that measured
+        // legacy result while standard EXT/ANGLE compression uses INVALID_OPERATION.
+        if texture::is_s3tc(format)
+            && border != 0
+            && !(self.gizmondo_goforce_20051013 && format <= GL_COMPRESSED_RGBA_S3TC_DXT1_EXT)
+        {
+            self.set_error(GL_INVALID_OPERATION);
+            return None;
+        }
         if paletted && border != 0 {
             self.set_error(GL_INVALID_OPERATION);
             return None;
@@ -6950,7 +7009,7 @@ mod compressed_validation_tests {
                 4,
                 GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
                 1,
-                GL_INVALID_VALUE,
+                GL_INVALID_OPERATION,
             ),
             (i32::MIN, 4, 4, GL_PALETTE4_RGBA8_OES, 0, GL_INVALID_VALUE),
         ] {
@@ -7475,5 +7534,97 @@ mod array_validation_tests {
         assert_eq!(c.take_error(), GL_INVALID_ENUM);
         c.draw_elements_from_guest(&mut NoRead, GL_TRIANGLES, 0, GL_UNSIGNED_SHORT, 0);
         assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod dxt5_update_tests {
+    use super::*;
+    #[test]
+    fn block_update_small_mips_and_rejected_calls_preserve_storage() {
+        let mut c = Context::new(8, 8);
+        let fmt = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        let mut block = [0u8; 16];
+        block[0] = 255;
+        block[8..10].copy_from_slice(&0xf800u16.to_le_bytes());
+        c.compressed_tex_image_2d(GL_TEXTURE_2D, 0, 8, 4, fmt, &[block, block].concat());
+        let mut green = block;
+        green[8..10].copy_from_slice(&0x07e0u16.to_le_bytes());
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 4, 0, 4, 4, fmt, &green);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        let rgba = c.textures[&0].rgba_level(0).unwrap();
+        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
+        assert_eq!(&rgba[16..20], &[0, 255, 0, 255]);
+        let revision = c.textures[&0].revision;
+        for (x, w, format, data, error) in [
+            (1, 4, fmt, &green[..], GL_INVALID_OPERATION),
+            (4, 8, fmt, &green[..], GL_INVALID_VALUE),
+            (
+                0,
+                4,
+                GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+                &green[..],
+                GL_INVALID_OPERATION,
+            ),
+            (0, 4, fmt, &green[..15], GL_INVALID_VALUE),
+        ] {
+            c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, x, 0, w, 4, format, data);
+            assert_eq!(c.take_error(), error);
+            assert_eq!(c.textures[&0].revision, revision);
+        }
+        c.compressed_tex_image_2d(GL_TEXTURE_2D, 1, 2, 2, fmt, &block);
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 1, 0, 0, 2, 2, fmt, &green);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(
+            c.textures[&0].rgba_level(1).unwrap().as_ref(),
+            [0, 255, 0, 255].repeat(4)
+        );
+    }
+
+    #[test]
+    fn standard_dxt_errors_and_native_dxt1_border_are_distinct() {
+        let mut c = Context::new(8, 8);
+        for profile in [false, true, false] {
+            c.gizmondo_goforce_20051013 = profile;
+            assert_eq!(
+                c.validate_compressed_tex_image_2d(
+                    GL_TEXTURE_2D,
+                    0,
+                    4,
+                    4,
+                    GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                    1
+                ),
+                None
+            );
+            assert_eq!(
+                c.take_error(),
+                if profile {
+                    GL_INVALID_VALUE
+                } else {
+                    GL_INVALID_OPERATION
+                }
+            );
+            for fmt in GL_COMPRESSED_RGB_S3TC_DXT1_EXT..=GL_COMPRESSED_RGBA_S3TC_DXT5_EXT {
+                let error = if profile && fmt > GL_COMPRESSED_RGBA_S3TC_DXT1_EXT {
+                    GL_INVALID_VALUE
+                } else {
+                    GL_INVALID_OPERATION
+                };
+                assert!(!c.validate_tex_image_2d(
+                    GL_TEXTURE_2D,
+                    0,
+                    fmt,
+                    4,
+                    4,
+                    0,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE
+                ));
+                assert_eq!(c.take_error(), error);
+                c.copy_tex_image_2d(GL_TEXTURE_2D, 0, fmt, 0, 0, 4, 4, 0);
+                assert_eq!(c.take_error(), error);
+            }
+        }
     }
 }

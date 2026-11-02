@@ -250,13 +250,14 @@ pub(crate) fn resume(saved: SuspendedGles) {
 
 /// Compressed formats we decode, reported through
 /// `GL_COMPRESSED_TEXTURE_FORMATS` and the extension string.
-const COMPRESSED_FORMATS: [u32; 20] = [
+const COMPRESSED_FORMATS: [u32; 21] = [
     pocket_gles::GL_ATC_RGB_AMD,
     pocket_gles::GL_ATC_RGBA_EXPLICIT_ALPHA_AMD,
     pocket_gles::GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD,
     pocket_gles::GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
     pocket_gles::GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
     pocket_gles::GL_COMPRESSED_RGBA_S3TC_DXT3_EXT,
+    pocket_gles::GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
     pocket_gles::GL_PALETTE4_RGB8_OES,
     pocket_gles::GL_PALETTE4_RGBA8_OES,
     pocket_gles::GL_PALETTE4_R5_G6_B5_OES,
@@ -1475,7 +1476,7 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }),
         pocket_gles::GL_VERSION => "OpenGL ES-CL 1.1",
         pocket_gles::GL_EXTENSIONS => {
-            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
+            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
         }
         _ => {
             with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
@@ -1706,6 +1707,24 @@ fn gl_compressed_tex_sub_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
         .collect::<Result<Vec<_>, _>>()?;
     // Validate size before touching guest memory; dimensions above GL limits cannot be valid.
     if (a[7] as i32) < 0 || a[7] > 1024 * 1024 * 4 {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
+    let needed = with_ctx(|c| {
+        c.validate_compressed_tex_sub_image_2d(
+            a[0],
+            a[1] as i32,
+            a[2] as i32,
+            a[3] as i32,
+            a[4] as i32,
+            a[5] as i32,
+            a[6],
+        )
+    });
+    let Some(needed) = needed else {
+        return Ok(VOID);
+    };
+    if a[7] as usize != needed {
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
         return Ok(VOID);
     }
@@ -3012,6 +3031,101 @@ mod tests {
     const SCRATCH: u32 = 0x2000_0000;
 
     #[test]
+    fn compressed_format_queries_and_extension_names_match_decoders() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let ptr = call(&mut cpu, &mut kernel, gl_get_string, &[GL_EXTENSIONS]);
+        assert_ne!(ptr, 0);
+        let text = kernel
+            .gles_strings
+            .keys()
+            .find(|s| s.contains("GL_EXT_texture_compression_dxt1"))
+            .unwrap();
+        let names: std::collections::HashSet<_> = text.split_whitespace().collect();
+        assert!(names.contains("GL_ANGLE_texture_compression_dxt3"));
+        assert!(names.contains("GL_ANGLE_texture_compression_dxt5"));
+        assert!(!names.contains("GL_EXT_texture_compression_s3tc"));
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_integerv,
+            &[GL_COMPRESSED_TEXTURE_FORMATS, SCRATCH],
+        );
+        let mut unique = std::collections::HashSet::new();
+        for (i, &fmt) in COMPRESSED_FORMATS.iter().enumerate() {
+            assert_eq!(cpu.read_u32_le(SCRATCH + i as u32 * 4).unwrap(), fmt);
+            assert!(unique.insert(fmt));
+            let size = pocket_gles::texture::compressed_image_size(fmt, 4, 4).unwrap();
+            let data = vec![0; size];
+            assert!(
+                pocket_gles::texture::decode_compressed_to_rgba(&data, 4, 4, fmt).is_some(),
+                "format={fmt:x}"
+            );
+        }
+        assert!(unique.contains(&GL_COMPRESSED_RGBA_S3TC_DXT5_EXT));
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+    }
+
+    #[test]
+    fn compressed_subimage_bridge_validates_before_reading_guest_bytes() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let fmt = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        cpu.write_mem(SCRATCH, &[0; 16]).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_compressed_tex_image_2d,
+            &[GL_TEXTURE_2D, 0, fmt, 4, 4, 0, 16, SCRATCH],
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        let revision = with_ctx(|c| c.textures[&0].revision);
+        let good = [GL_TEXTURE_2D, 0, 0, 0, 4, 4, fmt, 16, 0xdeadbeef];
+        for (field, value, error) in [
+            (0, 0xdead, GL_INVALID_ENUM),
+            (1, u32::MAX, GL_INVALID_VALUE),
+            (2, 1, GL_INVALID_VALUE),
+            (6, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, GL_INVALID_OPERATION),
+            (7, 15, GL_INVALID_VALUE),
+        ] {
+            let mut args = good;
+            args[field] = value;
+            call(&mut cpu, &mut kernel, gl_compressed_tex_sub_image_2d, &args);
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), error);
+            assert_eq!(with_ctx(|c| c.textures[&0].revision), revision);
+        }
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_sub_image_2d,
+            &[
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                4,
+                4,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                0xdeadbeef,
+            ],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+        assert_eq!(with_ctx(|c| c.textures[&0].revision), revision);
+    }
+
+    #[test]
     fn buffer_validation_precedes_guest_reads_and_preserves_store() {
         use pocket_gles::*;
         let _g = guard();
@@ -3105,7 +3219,7 @@ mod tests {
         for (field, value, error) in [
             (6, 7, GL_INVALID_VALUE),
             (6, 9, GL_INVALID_VALUE),
-            (5, 1, GL_INVALID_VALUE),
+            (5, 1, GL_INVALID_OPERATION),
             (7, 0xdeadbeef, GL_INVALID_OPERATION),
             (1, (-1i32) as u32, GL_INVALID_VALUE),
         ] {
