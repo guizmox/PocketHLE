@@ -153,7 +153,12 @@ fn flush_pixmap(ctx: &mut CallCtx<'_>, surface: u32) -> Result<(), KernelError> 
 /// Select the dated NVIDIA GoForce driver used by the Gizmondo platform.
 /// This belongs to the rendering session, independently of controls and audio.
 pub fn set_gizmondo_goforce_driver(enabled: bool) {
-    with_ctx(|c| c.gizmondo_goforce_20051013 = enabled);
+    with_ctx(|c| {
+        c.gizmondo_goforce_20051013 = enabled;
+        for tex in c.textures.values_mut() {
+            tex.goforce_lod = enabled;
+        }
+    });
 }
 
 /// Explicit legacy-driver compatibility, independent of CPU identity and game ID.
@@ -1214,19 +1219,27 @@ fn gl_tex_parameterf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     // The filters and wrap modes are enums even in the float entry
     // point, so the guest passes them as a float-encoded enum value.
     let value = argf(ctx, 2)?;
-    with_ctx(|c| {
-        if pname == pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS && (!value.is_finite() || value < 0.) {
-            c.set_error(pocket_gles::GL_INVALID_VALUE);
-        } else {
-            c.tex_parameter(target, pname, value as u32);
-        }
-    });
+    with_ctx(|c| c.tex_parameter_float(target, pname, value));
     Ok(VOID)
 }
 
-fn gl_tex_parameterx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+fn gl_tex_parameteri(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (target, pname, value) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
     with_ctx(|c| c.tex_parameter(target, pname, value));
+    Ok(VOID)
+}
+fn gl_tex_parameterx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (target, pname, value) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
+    with_ctx(|c| {
+        if matches!(
+            pname,
+            pocket_gles::GL_TEXTURE_MIN_LOD_SGIS | pocket_gles::GL_TEXTURE_MAX_LOD_SGIS
+        ) {
+            c.tex_parameter_float(target, pname, word_to_f32(value));
+        } else {
+            c.tex_parameter(target, pname, value);
+        }
+    });
     Ok(VOID)
 }
 
@@ -2507,7 +2520,8 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glPolygonOffsetx" => gl_polygon_offsetx,
         "glTexSubImage2D" => gl_tex_sub_image_2d,
         "glTexParameterf" => gl_tex_parameterf,
-        "glTexParameteri" | "glTexParameterx" => gl_tex_parameterx,
+        "glTexParameteri" => gl_tex_parameteri,
+        "glTexParameterx" => gl_tex_parameterx,
         "glTexEnvf" => gl_tex_envf,
         "glTexEnvx" => gl_tex_envx,
         "glTexEnvfv" => gl_tex_envfv,
@@ -3035,6 +3049,141 @@ mod tests {
             call(&mut cpu, &mut kernel, gl_get_error, &[]),
             GL_INVALID_OPERATION
         );
+    }
+
+    #[test]
+    fn lod_scalar_vector_and_fixed_apis_keep_fractional_signed_values() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        for (handler, value, expected) in [
+            (
+                gl_tex_parameterf as crate::Handler,
+                (-1.25f32).to_bits(),
+                -1.25,
+            ),
+            (
+                gl_tex_parameterx as crate::Handler,
+                (-81920i32) as u32,
+                -1.25,
+            ),
+            (gl_tex_parameteri as crate::Handler, (-2i32) as u32, -2.),
+        ] {
+            call(
+                &mut cpu,
+                &mut kernel,
+                handler,
+                &[GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, value],
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+            assert_eq!(
+                with_ctx(|c| c
+                    .get_tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS)
+                    .unwrap()
+                    .numbers()),
+                [expected as f64]
+            );
+        }
+        for (handler, word, expected) in [
+            (es11::tex_fv as crate::Handler, 1.25f32.to_bits(), 1.25),
+            (es11::tex_xv as crate::Handler, 81920, 1.25),
+            (es11::tex_iv as crate::Handler, 2, 2.),
+        ] {
+            cpu.write_mem(SCRATCH, &word.to_le_bytes()).unwrap();
+            call(
+                &mut cpu,
+                &mut kernel,
+                handler,
+                &[GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS, SCRATCH],
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+            assert_eq!(
+                with_ctx(|c| c
+                    .get_tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS)
+                    .unwrap()
+                    .numbers()),
+                [expected as f64]
+            );
+        }
+    }
+
+    #[test]
+    fn nvidia_component_counts_are_profile_only_and_keep_source_alpha() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let rgba = [
+            10, 20, 30, 0, 40, 50, 60, 127, 70, 80, 90, 255, 100, 110, 120, 64,
+        ];
+        cpu.write_mem(SCRATCH, &rgba).unwrap();
+        for profile in [false, true, false] {
+            set_gizmondo_goforce_driver(profile);
+            for count in 1..=4 {
+                let args = [
+                    GL_TEXTURE_2D,
+                    0,
+                    count,
+                    2,
+                    2,
+                    0,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    SCRATCH,
+                ];
+                let revision = with_ctx(|c| c.textures.get(&0).map(|t| t.revision));
+                call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+                assert_eq!(
+                    call(&mut cpu, &mut kernel, gl_get_error, &[]),
+                    if profile {
+                        GL_NO_ERROR
+                    } else {
+                        GL_INVALID_VALUE
+                    }
+                );
+                if profile {
+                    assert_eq!(with_ctx(|c| c.textures[&0].rgba.clone()), rgba);
+                    assert_eq!(with_ctx(|c| c.textures[&0].formats[&0]), GL_RGBA);
+                } else {
+                    assert_eq!(
+                        with_ctx(|c| c.textures.get(&0).map(|t| t.revision)),
+                        revision
+                    );
+                }
+            }
+        }
+        set_gizmondo_goforce_driver(true);
+        // Retain rejection and atomicity for the native driver's invalid values,
+        // and for invalid dimensions/source types or inaccessible source bytes.
+        for (index, value, error) in [
+            (2, 0, GL_INVALID_VALUE),
+            (2, 0xdead, GL_INVALID_VALUE),
+            (3, 3, GL_INVALID_VALUE),
+            (5, 1, GL_INVALID_VALUE),
+            (7, GL_UNSIGNED_SHORT_5_6_5, GL_INVALID_OPERATION),
+            (8, 0xdeadbeef, GL_INVALID_OPERATION),
+        ] {
+            let revision = with_ctx(|c| c.textures[&0].revision);
+            let mut args = [
+                GL_TEXTURE_2D,
+                0,
+                3,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                SCRATCH,
+            ];
+            args[index] = value;
+            call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), error);
+            assert_eq!(with_ctx(|c| c.textures[&0].revision), revision);
+            assert_eq!(with_ctx(|c| c.textures[&0].rgba.clone()), rgba);
+        }
     }
 
     #[test]

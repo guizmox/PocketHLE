@@ -276,6 +276,15 @@ impl Context {
             crate::texture::Filter::NearestMipmapLinear => 0x2702,
             crate::texture::Filter::LinearMipmapLinear => 0x2703,
         };
+        if pname == GL_TEXTURE_BASE_LEVEL_SGIS {
+            return Some(StateValue::Number(vec![t.base_level as f64]));
+        }
+        if pname == GL_TEXTURE_MIN_LOD_SGIS {
+            return Some(StateValue::Number(vec![t.min_lod as f64]));
+        }
+        if pname == GL_TEXTURE_MAX_LOD_SGIS {
+            return Some(StateValue::Number(vec![t.max_lod as f64]));
+        }
         if pname == GL_TEXTURE_MAX_LEVEL_SGIS {
             return Some(StateValue::Number(vec![f64::from(t.max_level)]));
         }
@@ -286,14 +295,18 @@ impl Context {
             GL_TEXTURE_MIN_FILTER => f(t.min_filter),
             GL_TEXTURE_MAG_FILTER => f(t.mag_filter),
             GL_TEXTURE_WRAP_S => {
-                if t.wrap_s == crate::texture::Wrap::Repeat {
+                if t.wrap_s == crate::texture::Wrap::GizmondoClamp {
+                    0x2900
+                } else if t.wrap_s == crate::texture::Wrap::Repeat {
                     GL_REPEAT
                 } else {
                     GL_CLAMP_TO_EDGE
                 }
             }
             GL_TEXTURE_WRAP_T => {
-                if t.wrap_t == crate::texture::Wrap::Repeat {
+                if t.wrap_t == crate::texture::Wrap::GizmondoClamp {
+                    0x2900
+                } else if t.wrap_t == crate::texture::Wrap::Repeat {
                     GL_REPEAT
                 } else {
                     GL_CLAMP_TO_EDGE

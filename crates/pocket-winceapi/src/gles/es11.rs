@@ -254,7 +254,11 @@ pub(super) fn get_tex_i(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 pub(super) fn get_tex_x(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     tex_get(c, false, Output::Fixed)
 }
-fn tex_vector(ctx: &mut CallCtx<'_>, float: bool) -> Result<DispatchOutcome, KernelError> {
+fn tex_vector(
+    ctx: &mut CallCtx<'_>,
+    float: bool,
+    fixed: bool,
+) -> Result<DispatchOutcome, KernelError> {
     let target = ctx.arg_u32(0)?;
     let pname = ctx.arg_u32(1)?;
     let ptr = ctx.arg_u32(2)?;
@@ -266,6 +270,9 @@ fn tex_vector(ctx: &mut CallCtx<'_>, float: bool) -> Result<DispatchOutcome, Ker
                 | pocket_gles::GL_TEXTURE_WRAP_S
                 | pocket_gles::GL_TEXTURE_WRAP_T
                 | pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS
+                | pocket_gles::GL_TEXTURE_BASE_LEVEL_SGIS
+                | pocket_gles::GL_TEXTURE_MIN_LOD_SGIS
+                | pocket_gles::GL_TEXTURE_MAX_LOD_SGIS
                 | 0x8191
         )
     {
@@ -273,33 +280,30 @@ fn tex_vector(ctx: &mut CallCtx<'_>, float: bool) -> Result<DispatchOutcome, Ker
         return Ok(VOID);
     }
     let w = ctx.cpu.read_u32_le(ptr)?;
-    if float
-        && pname == pocket_gles::GL_TEXTURE_MAX_LEVEL_SGIS
-        && (!f32::from_bits(w).is_finite() || f32::from_bits(w) < 0.)
-    {
-        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
-        return Ok(VOID);
-    }
-    let value = if float {
-        if pname == 0x8191 {
-            u32::from(f32::from_bits(w) != 0.)
+    with_ctx(|c| {
+        if float {
+            c.tex_parameter_float(target, pname, f32::from_bits(w));
+        } else if fixed
+            && matches!(
+                pname,
+                pocket_gles::GL_TEXTURE_MIN_LOD_SGIS | pocket_gles::GL_TEXTURE_MAX_LOD_SGIS
+            )
+        {
+            c.tex_parameter_float(target, pname, word_to_f32(w));
         } else {
-            f32::from_bits(w) as u32
+            c.tex_parameter(target, pname, w);
         }
-    } else {
-        w
-    };
-    with_ctx(|c| c.tex_parameter(target, pname, value));
+    });
     Ok(VOID)
 }
 pub(super) fn tex_fv(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    tex_vector(c, true)
+    tex_vector(c, true, false)
 }
 pub(super) fn tex_iv(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    tex_vector(c, false)
+    tex_vector(c, false, false)
 }
 pub(super) fn tex_xv(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    tex_vector(c, false)
+    tex_vector(c, false, true)
 }
 pub(super) fn env_i(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let target = ctx.arg_u32(0)?;

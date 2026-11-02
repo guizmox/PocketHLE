@@ -242,7 +242,21 @@ mod native {
                 } else {
                     vec![0x3038]
                 };
-                host.context = create_context(display, config, std::ptr::null_mut(), ca.as_ptr());
+                // Prefer core ES3 when available: exact fragment LOD is core
+                // there. Existing GLSL100 programs remain valid. Older devices
+                // retain the ES2 path and its advertised host extensions.
+                if host.es {
+                    host.context = create_context(
+                        display,
+                        config,
+                        std::ptr::null_mut(),
+                        [0x3098, 3, 0x3038].as_ptr(),
+                    );
+                }
+                if host.context.is_null() {
+                    host.context =
+                        create_context(display, config, std::ptr::null_mut(), ca.as_ptr());
+                }
                 if host.surface.is_null() || host.context.is_null() {
                     return Err("EGL offscreen creation failed".into());
                 }

@@ -34,6 +34,8 @@ impl Filter {
 pub enum Wrap {
     Repeat,
     ClampToEdge,
+    /// NVIDIA accepts GL_CLAMP but emits the same hardware wrap as EDGE.
+    GizmondoClamp,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,10 @@ pub struct Texture {
     pub mipmaps: std::collections::BTreeMap<u32, (u32, u32, Vec<u8>)>,
     pub compressed: std::collections::BTreeMap<u32, CompressedLevel>,
     pub max_level: u32,
+    pub base_level: u32,
+    pub min_lod: f32,
+    pub max_lod: f32,
+    pub goforce_lod: bool,
     pub min_filter: Filter,
     pub mag_filter: Filter,
     pub wrap_s: Wrap,
@@ -78,6 +84,10 @@ impl Default for Texture {
             mipmaps: Default::default(),
             compressed: Default::default(),
             max_level: 1000,
+            base_level: 0,
+            min_lod: -1000.,
+            max_lod: 1000.,
+            goforce_lod: false,
             min_filter: Filter::NearestMipmapLinear,
             mag_filter: Filter::Linear,
             wrap_s: Wrap::Repeat,
@@ -131,10 +141,18 @@ impl Texture {
     /// Internal formats survive RGBA decoding and automatic mip generation.
     pub fn set_format(&mut self, level: u32, format: u32) {
         self.formats.insert(level, format);
-        if level == 0 && self.generate_mipmap && !self.compressed.contains_key(&0) {
-            let q = self.width.max(self.height).checked_ilog2().unwrap_or(0);
+        if level == self.base_level
+            && self.generate_mipmap
+            && !self.compressed.contains_key(&self.base_level)
+        {
+            let q = self
+                .sampling_size()
+                .0
+                .max(self.sampling_size().1)
+                .checked_ilog2()
+                .unwrap_or(0);
             for level in 1..=q {
-                self.formats.insert(level, format);
+                self.formats.insert(level + self.base_level, format);
             }
         }
     }
@@ -167,37 +185,112 @@ impl Texture {
         }
     }
 
+    pub fn level_size(&self, level: u32) -> Option<(u32, u32)> {
+        if level == 0 {
+            Some((self.width, self.height))
+        } else {
+            self.mipmaps.get(&level).map(|m| (m.0, m.1))
+        }
+    }
+    pub fn sampling_size(&self) -> (u32, u32) {
+        self.level_size(self.base_level).unwrap_or((0, 0))
+    }
+    pub fn last_level(&self) -> u32 {
+        let (w, h) = self.sampling_size();
+        self.base_level
+            .saturating_add(w.max(h).checked_ilog2().unwrap_or(0))
+            .min(self.max_level)
+    }
+    pub fn lod_bounds(&self) -> (f32, f32) {
+        if self.goforce_lod && (self.min_lod != -1000. || self.max_lod != 1000.) {
+            // The driver first stores 16.16, then adds 0x8000 and shifts
+            // arithmetically when programming the sampler's level bounds.
+            let rounded = |v: f32| {
+                let fixed = (f64::from(v) * 65536.)
+                    .round()
+                    .clamp(i32::MIN as f64, i32::MAX as f64) as i64;
+                ((fixed + 0x8000) >> 16) as f32
+            };
+            (rounded(self.min_lod), rounded(self.max_lod))
+        } else {
+            (self.min_lod, self.max_lod)
+        }
+    }
+
+    /// A host texture starts at level zero. Rebase only on upload, keeping
+    /// original guest images and shared native compressed payloads intact.
+    pub(crate) fn host_view(&self) -> Self {
+        let (w, h) = self.sampling_size();
+        let b = self.base_level;
+        Self {
+            width: w,
+            height: h,
+            rgba: if b == 0 {
+                self.rgba.clone()
+            } else {
+                self.mipmaps
+                    .get(&b)
+                    .map(|m| m.2.clone())
+                    .unwrap_or_default()
+            },
+            mipmaps: self
+                .mipmaps
+                .iter()
+                .filter(|(l, _)| **l > b && **l <= self.last_level())
+                .map(|(l, m)| (*l - b, m.clone()))
+                .collect(),
+            compressed: self
+                .compressed
+                .iter()
+                .filter(|(l, _)| **l >= b && **l <= self.last_level())
+                .map(|(l, m)| (*l - b, m.clone()))
+                .collect(),
+            formats: self
+                .formats
+                .iter()
+                .filter(|(l, _)| **l >= b)
+                .map(|(l, f)| (*l - b, *f))
+                .collect(),
+            max_level: self.max_level.saturating_sub(b),
+            base_level: 0,
+            min_filter: self.min_filter,
+            mag_filter: self.mag_filter,
+            wrap_s: self.wrap_s,
+            wrap_t: self.wrap_t,
+            ..Self::default()
+        }
+    }
+
     /// Snapshot defined images without silently inventing missing mip levels.
     pub fn upload_levels(&self) -> Vec<(u32, u32, Vec<u8>)> {
         if !self.is_complete() {
             return Vec::new();
         }
         let last = if self.min_filter.uses_mipmaps() {
-            self.width.max(self.height).ilog2().min(self.max_level)
+            self.last_level()
         } else {
-            0
+            self.base_level
         };
-        (0..=last)
+        (self.base_level..=last)
             .map(|level| {
-                let (w, h) = if level == 0 {
-                    (self.width, self.height)
-                } else {
-                    let image = &self.mipmaps[&level];
-                    (image.0, image.1)
-                };
+                let (w, h) = self.level_size(level).unwrap();
                 (w, h, self.rgba_level(level).unwrap().into_owned())
             })
             .collect()
     }
 
     fn generated_levels(&self) -> Vec<(u32, u32, Vec<u8>)> {
-        if !self.image_defined(0, self.width, self.height) {
+        if !self.image_defined(
+            self.base_level,
+            self.sampling_size().0,
+            self.sampling_size().1,
+        ) {
             return Vec::new();
         }
         let mut levels = vec![(
-            self.width,
-            self.height,
-            self.rgba_level(0).unwrap().into_owned(),
+            self.sampling_size().0,
+            self.sampling_size().1,
+            self.rgba_level(self.base_level).unwrap().into_owned(),
         )];
         while levels.last().is_some_and(|(w, h, _)| *w > 1 || *h > 1) {
             let (w, h, src) = levels.last().unwrap();
@@ -233,7 +326,7 @@ impl Texture {
         } else {
             self.mipmaps.insert(level, (width, height, rgba));
         }
-        if level == 0 {
+        if level == self.base_level {
             self.regenerate_mipmaps();
         }
         self.revision = self.revision.wrapping_add(1);
@@ -243,9 +336,12 @@ impl Texture {
     /// approximation: subsequent glTexSubImage2D can address the new levels.
     pub fn regenerate_mipmaps(&mut self) {
         if !self.generate_mipmap
-            || self.compressed.contains_key(&0)
+            || self.compressed.contains_key(&self.base_level)
             || !matches!(
-                self.formats.get(&0).copied().unwrap_or(GL_RGBA),
+                self.formats
+                    .get(&self.base_level)
+                    .copied()
+                    .unwrap_or(GL_RGBA),
                 GL_RGBA | GL_RGB | GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA
             )
         {
@@ -253,11 +349,15 @@ impl Texture {
         }
         let levels = self.generated_levels();
         for (level, (width, height, pixels)) in levels.into_iter().enumerate().skip(1) {
-            self.compressed.remove(&(level as u32));
-            self.mipmaps.insert(level as u32, (width, height, pixels));
+            let level = level as u32 + self.base_level;
+            self.compressed.remove(&level);
+            self.mipmaps.insert(level, (width, height, pixels));
             self.formats.insert(
-                level as u32,
-                self.formats.get(&0).copied().unwrap_or(GL_RGBA),
+                level,
+                self.formats
+                    .get(&self.base_level)
+                    .copied()
+                    .unwrap_or(GL_RGBA),
             );
         }
     }
@@ -290,20 +390,25 @@ impl Texture {
     /// through min(MAX_LEVEL, log2(max(width,height))),
     /// with consistent dimensions and internal formats. Nonmip filters need base only.
     pub fn is_complete(&self) -> bool {
-        if !self.image_defined(0, self.width, self.height) {
+        if self.base_level > self.max_level {
+            return false;
+        }
+        let (w, h) = self.sampling_size();
+        if !self.image_defined(self.base_level, w, h) {
             return false;
         }
         if !self.min_filter.uses_mipmaps() {
             return true;
         }
-        let base_format = self.formats.get(&0).copied().unwrap_or(GL_RGBA);
-        (1..=self.width.max(self.height).ilog2().min(self.max_level)).all(|level| {
-            self.formats.get(&level).copied().unwrap_or(GL_RGBA) == base_format
-                && self.image_defined(
-                    level,
-                    (self.width >> level).max(1),
-                    (self.height >> level).max(1),
-                )
+        let format = self
+            .formats
+            .get(&self.base_level)
+            .copied()
+            .unwrap_or(GL_RGBA);
+        (self.base_level + 1..=self.last_level()).all(|level| {
+            let shift = level - self.base_level;
+            self.formats.get(&level).copied().unwrap_or(GL_RGBA) == format
+                && self.image_defined(level, (w >> shift).max(1), (h >> shift).max(1))
         })
     }
 
@@ -313,58 +418,22 @@ impl Texture {
     /// coordinates are resolved through the wrap modes.
     pub fn sample_nearest(&self, s: f32, t: f32) -> [u8; 4] {
         if !self.is_complete() {
-            // An incomplete texture samples as opaque white in our
-            // pipeline, which makes `GL_MODULATE` a no-op and leaves
-            // the underlying vertex colour visible instead of turning
-            // the surface black.
-            return [255, 255, 255, 255];
+            return [255; 4];
         }
-        let pixels = self.rgba_level(0).unwrap();
-        let x = Self::wrap_coord(s, self.width, self.wrap_s);
-        let y = Self::wrap_coord(t, self.height, self.wrap_t);
-        let idx = ((y * self.width + x) * 4) as usize;
-        [
-            pixels[idx],
-            pixels[idx + 1],
-            pixels[idx + 2],
-            pixels[idx + 3],
-        ]
+        let (w, h) = self.sampling_size();
+        let pixels = self.rgba_level(self.base_level).unwrap();
+        let x = Self::wrap_coord(s, w, self.wrap_s);
+        let y = Self::wrap_coord(t, h, self.wrap_t);
+        let i = ((y * w + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
     }
-
-    /// Sample a texel with bilinear filtering.
-    ///
-    /// GL places texel centres at half-integer coordinates, so the
-    /// weights come from `s * width - 0.5`. Filtering runs on straight
-    /// alpha, which lets the RGB of fully transparent texels bleed into
-    /// a glyph's edge — that is what real GL does too, and font atlases
-    /// are authored knowing it.
     pub fn sample_linear(&self, s: f32, t: f32) -> [u8; 4] {
         if !self.is_complete() {
-            return [255, 255, 255, 255];
+            return [255; 4];
         }
-        let pixels = self.rgba_level(0).unwrap();
-        let fx = s * self.width as f32 - 0.5;
-        let fy = t * self.height as f32 - 0.5;
-        let (x0, y0) = (fx.floor(), fy.floor());
-        let (wx, wy) = (fx - x0, fy - y0);
-        let (x0, y0) = (x0 as i64, y0 as i64);
-
-        let texel = |x: i64, y: i64| {
-            let x = Self::wrap_texel(x, self.width, self.wrap_s);
-            let y = Self::wrap_texel(y, self.height, self.wrap_t);
-            let i = ((y * self.width + x) * 4) as usize;
-            &pixels[i..i + 4]
-        };
-        let (c00, c10) = (texel(x0, y0), texel(x0 + 1, y0));
-        let (c01, c11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
-
-        let mut out = [0u8; 4];
-        for (ch, o) in out.iter_mut().enumerate() {
-            let top = c00[ch] as f32 + (c10[ch] as f32 - c00[ch] as f32) * wx;
-            let bot = c01[ch] as f32 + (c11[ch] as f32 - c01[ch] as f32) * wx;
-            *o = (top + (bot - top) * wy).round().clamp(0.0, 255.0) as u8;
-        }
-        out
+        let (w, h) = self.sampling_size();
+        let pixels = self.rgba_level(self.base_level).unwrap();
+        Self::sample_pixels(&pixels, w, h, self.wrap_s, self.wrap_t, s, t, true)
     }
 
     /// Legacy base-level adapter. Rendering with a known footprint uses
@@ -409,6 +478,8 @@ impl Texture {
             0.0
         };
         let lambda = if lambda.is_nan() { 0.0 } else { lambda };
+        let (min_lod, max_lod) = self.lod_bounds();
+        let lambda = lambda.max(min_lod).min(max_lod);
         let filter = if lambda <= threshold {
             self.mag_filter
         } else {
@@ -419,7 +490,10 @@ impl Texture {
             Filter::Linear | Filter::LinearMipmapNearest | Filter::LinearMipmapLinear
         );
         let max_level = if filter.uses_mipmaps() {
-            levels.len().saturating_sub(1).min(self.max_level as usize)
+            levels
+                .len()
+                .saturating_sub(1)
+                .min(self.max_level.saturating_sub(self.base_level) as usize)
         } else {
             0
         };
@@ -434,7 +508,7 @@ impl Texture {
             (lod + 0.5).floor() as usize
         };
         let at = |level: usize| {
-            if level == 0 && !self.rgba.is_empty() {
+            if level == 0 && self.base_level == 0 && !self.rgba.is_empty() {
                 Self::sample_pixels(
                     &self.rgba,
                     self.width,
@@ -520,7 +594,7 @@ impl Texture {
         }
         match wrap {
             Wrap::Repeat => v.rem_euclid(size as i64) as u32,
-            Wrap::ClampToEdge => v.clamp(0, size as i64 - 1) as u32,
+            Wrap::ClampToEdge | Wrap::GizmondoClamp => v.clamp(0, size as i64 - 1) as u32,
         }
     }
 
@@ -534,7 +608,7 @@ impl Texture {
                 let m = (scaled.floor() as i64).rem_euclid(size as i64);
                 m as u32
             }
-            Wrap::ClampToEdge => {
+            Wrap::ClampToEdge | Wrap::GizmondoClamp => {
                 let c = scaled.floor();
                 if c < 0.0 {
                     0
@@ -597,10 +671,22 @@ impl Texture {
                 }
                 true
             }
-            GL_TEXTURE_MIN_LOD_SGIS
-            | GL_TEXTURE_MAX_LOD_SGIS
-            | GL_TEXTURE_BASE_LEVEL_SGIS
-            | GL_TEXTURE_LOD_BIAS_EXT => true,
+            GL_TEXTURE_BASE_LEVEL_SGIS => {
+                if self.base_level != value {
+                    self.base_level = value;
+                    self.revision = self.revision.wrapping_add(1);
+                }
+                true
+            }
+            GL_TEXTURE_MIN_LOD_SGIS => {
+                self.min_lod = value as i32 as f32;
+                true
+            }
+            GL_TEXTURE_MAX_LOD_SGIS => {
+                self.max_lod = value as i32 as f32;
+                true
+            }
+            GL_TEXTURE_LOD_BIAS_EXT => true,
             _ => false,
         }
     }
@@ -1125,7 +1211,15 @@ pub fn decode_compressed_to_rgba(
             let (rgb, alpha) = match format {
                 GL_ATC_RGB_AMD => (atc_rgb_block(block), [255u8; 16]),
                 GL_COMPRESSED_RGB_S3TC_DXT1_EXT | GL_COMPRESSED_RGBA_S3TC_DXT1_EXT => {
-                    dxt_rgb_block(block, false)
+                    let (rgb, alpha) = dxt_rgb_block(block, false);
+                    (
+                        rgb,
+                        if format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT {
+                            [255; 16]
+                        } else {
+                            alpha
+                        },
+                    )
                 }
                 GL_COMPRESSED_RGBA_S3TC_DXT3_EXT => {
                     let mut alpha = [0; 16];

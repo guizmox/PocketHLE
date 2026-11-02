@@ -49,8 +49,9 @@ impl raster::TextureSampler for SoftwareSampler<'_> {
         if !tex.min_filter.uses_mipmaps() && tex.min_filter == tex.mag_filter {
             return self.sample(unit, s, t);
         }
-        let x = (g[0] * tex.width as f32).powi(2) + (g[1] * tex.height as f32).powi(2);
-        let y = (g[2] * tex.width as f32).powi(2) + (g[3] * tex.height as f32).powi(2);
+        let (w, h) = tex.sampling_size();
+        let x = (g[0] * w as f32).powi(2) + (g[1] * h as f32).powi(2);
+        let y = (g[2] * w as f32).powi(2) + (g[3] * h as f32).powi(2);
         let lod = 0.5 * x.max(y).max(1e-30).log2() + bias.clamp(-4., 4.);
         let levels = self
             .cache
@@ -1444,7 +1445,10 @@ impl Context {
         } else if !matches!(
             internalformat,
             GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA | GL_RGB | GL_RGBA
-        ) {
+        ) && !(self.gizmondo_goforce_20051013 && (1..=4).contains(&internalformat))
+        {
+            // The dated NVIDIA driver also accepts legacy component counts.
+            // Source format/type still determine decoding and retained alpha.
             Some(GL_INVALID_VALUE)
         } else if !(0..=10).contains(&level)
             || border != 0
@@ -1799,7 +1803,7 @@ impl Context {
             let len = (width * 4) as usize;
             pixels[dst..dst + len].copy_from_slice(&patch[src..src + len]);
         }
-        if level == 0 {
+        if level as u32 == tex.base_level {
             tex.regenerate_mipmaps();
         }
     }
@@ -1809,7 +1813,11 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        if pname == GL_TEXTURE_MAX_LEVEL_SGIS && (value as i32) < 0 {
+        if matches!(
+            pname,
+            GL_TEXTURE_MAX_LEVEL_SGIS | GL_TEXTURE_BASE_LEVEL_SGIS
+        ) && (value as i32) < 0
+        {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
@@ -1820,8 +1828,60 @@ impl Context {
         }
         let name = self.texture_units[unit].bound_texture;
         let tex = self.textures.entry(name).or_default();
+        tex.goforce_lod = self.gizmondo_goforce_20051013;
+        if self.gizmondo_goforce_20051013
+            && matches!(pname, GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T)
+            && value == 0x2900
+        {
+            if pname == GL_TEXTURE_WRAP_S {
+                tex.wrap_s = texture::Wrap::GizmondoClamp;
+            } else {
+                tex.wrap_t = texture::Wrap::GizmondoClamp;
+            }
+            return;
+        }
         if !tex.set_parameter(pname, value) {
             self.set_error(GL_INVALID_ENUM);
+        }
+    }
+
+    /// Float-valued SGIS LOD parameters are not enum bit patterns.
+    pub fn tex_parameter_float(&mut self, target: u32, pname: u32, value: f32) {
+        if target != GL_TEXTURE_2D {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
+        if !value.is_finite() {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if matches!(pname, GL_TEXTURE_MIN_LOD_SGIS | GL_TEXTURE_MAX_LOD_SGIS) {
+            let name = self.texture_units[self.active_texture as usize].bound_texture;
+            let tex = self.textures.entry(name).or_default();
+            tex.goforce_lod = self.gizmondo_goforce_20051013;
+            if pname == GL_TEXTURE_MIN_LOD_SGIS {
+                tex.min_lod = value;
+            } else {
+                tex.max_lod = value;
+            }
+        } else {
+            if matches!(
+                pname,
+                GL_TEXTURE_BASE_LEVEL_SGIS | GL_TEXTURE_MAX_LEVEL_SGIS
+            ) && (value < 0. || value > i32::MAX as f32)
+            {
+                self.set_error(GL_INVALID_VALUE);
+                return;
+            }
+            self.tex_parameter(
+                target,
+                pname,
+                if pname == 0x8191 {
+                    u32::from(value != 0.)
+                } else {
+                    value.round() as u32
+                },
+            );
         }
     }
 
@@ -2055,7 +2115,14 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        // There is no stencil attachment in this configuration.
+        // This NVIDIA window/depth path emits the same depth command for a
+        // stencil clear as for a depth clear, independent of stencil state.
+        let mask = if self.gizmondo_goforce_20051013 && mask & GL_STENCIL_BUFFER_BIT != 0 {
+            mask | GL_DEPTH_BUFFER_BIT
+        } else {
+            mask
+        };
+        // Standard ES has no stencil attachment in this configuration.
         if mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT) == 0 {
             return;
         }
@@ -2958,22 +3025,16 @@ impl Context {
             let name = self.texture_units[stage.unit].bound_texture;
             if let Some(tex) = self.textures.get(&name) {
                 let mips = tex.min_filter.uses_mipmaps();
-                if mips || tex.rgba.is_empty() {
+                if mips || tex.rgba.is_empty() || tex.base_level != 0 {
                     if !self
                         .software_mips
                         .get(&name)
                         .is_some_and(|c| c.0 == tex.revision && c.1 == mips)
                     {
-                        let mut levels = if mips {
-                            tex.upload_levels()
-                        } else {
-                            tex.rgba_level(0)
-                                .map(|p| vec![(tex.width, tex.height, p.into_owned())])
-                                .unwrap_or_default()
-                        };
-                        // Base RGBA already belongs to Texture; retain only
-                        // derived levels, except for deferred compressed bases.
-                        if !tex.rgba.is_empty() {
+                        let mut levels = tex.upload_levels();
+                        // Base zero is already owned by Texture; other bases
+                        // and deferred compressed data must retain their snapshot.
+                        if tex.base_level == 0 && !tex.rgba.is_empty() {
                             if let Some(base) = levels.first_mut() {
                                 base.2 = Vec::new();
                             }
@@ -6649,7 +6710,10 @@ mod goforce_driver_tests {
                 raster::draw_triangle(&mut c.target, &c.state, &|_, _, _| None, &[], v);
             }
         };
-        for profile in [false, true, false] {
+        for (profile, clear_mask) in [false, true, false]
+            .into_iter()
+            .flat_map(|p| [GL_DEPTH_BUFFER_BIT, GL_STENCIL_BUFFER_BIT].map(|m| (p, m)))
+        {
             c.gizmondo_goforce_20051013 = profile;
             c.state.depth_test = true;
             c.state.depth_func = CompareFunc::Lequal;
@@ -6659,7 +6723,7 @@ mod goforce_driver_tests {
             draw(c, near);
             c.state.depth_write = false;
             c.state.scissor = Some((0, 0, 8, 16));
-            c.clear(GL_DEPTH_BUFFER_BIT);
+            c.clear(clear_mask);
             assert!(!c.state.depth_write);
             assert_eq!(c.state.scissor, Some((0, 0, 8, 16)));
             c.state.scissor = None;
@@ -6878,6 +6942,278 @@ mod compressed_validation_tests {
                         }
                     );
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod retrospective_texture_tests {
+    use super::*;
+    fn mip_colors(c: &mut Context) {
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL_SGIS, 2);
+        c.tex_parameter(
+            GL_TEXTURE_2D,
+            GL_TEXTURE_MIN_FILTER,
+            GL_LINEAR_MIPMAP_LINEAR,
+        );
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        for (level, w, col) in [
+            (2, 4, [255, 0, 0, 255]),
+            (3, 2, [0, 255, 0, 255]),
+            (4, 1, [0, 0, 255, 255]),
+        ] {
+            c.tex_image_2d(
+                GL_TEXTURE_2D,
+                level,
+                w,
+                w,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                &col.repeat((w * w) as usize),
+            );
+        }
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert!(c.textures[&0].is_complete());
+    }
+    #[test]
+    fn base_levels_and_fractional_bounds_select_real_images_without_level_zero() {
+        for profile in [false, true] {
+            let mut c = Context::new(16, 16);
+            c.gizmondo_goforce_20051013 = profile;
+            mip_colors(&mut c);
+            c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, 1.25);
+            let t = &c.textures[&0];
+            let levels = t.upload_levels();
+            assert_eq!(
+                levels.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(),
+                [(4, 4), (2, 2), (1, 1)]
+            );
+            assert_eq!(
+                t.sample_lod(&levels, 0.5, 0.5, -20.),
+                if profile {
+                    [0, 255, 0, 255]
+                } else {
+                    [0, 191, 64, 255]
+                }
+            );
+            c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS, 0.);
+            assert_eq!(
+                c.textures[&0].sample_lod(&levels, 0.5, 0.5, 20.),
+                [255, 0, 0, 255]
+            );
+            c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL_SGIS, 1.9);
+            assert_eq!(c.textures[&0].base_level, 2);
+            if profile {
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, 0.4999999);
+                assert_eq!(c.textures[&0].lod_bounds().0, 1.);
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, 1.25);
+            }
+            let before = c.textures[&0].base_level;
+            c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL_SGIS, -1.);
+            assert_eq!(c.take_error(), GL_INVALID_VALUE);
+            assert_eq!(c.textures[&0].base_level, before);
+            c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, f32::NAN);
+            assert_eq!(c.take_error(), GL_INVALID_VALUE);
+            assert_eq!(c.textures[&0].min_lod, 1.25);
+        }
+    }
+    #[test]
+    fn legacy_clamp_is_driver_only_and_keeps_its_query_identity() {
+        let mut c = Context::new(4, 4);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x2900);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        c.gizmondo_goforce_20051013 = true;
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x2900);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            2,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+        );
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        assert_eq!(
+            c.get_tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S)
+                .unwrap()
+                .numbers(),
+            [0x2900 as f64]
+        );
+        assert_eq!(c.textures[&0].sample_linear(-5., 0.5), [255, 0, 0, 255]);
+        assert_eq!(c.textures[&0].sample_linear(5., 0.5), [0, 255, 0, 255]);
+    }
+    #[test]
+    fn generated_mipmaps_follow_the_selected_base_and_keep_internal_formats() {
+        let mut c = Context::new(4, 4);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL_SGIS, 2);
+        c.tex_parameter(GL_TEXTURE_2D, 0x8191, 1);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            2,
+            4,
+            4,
+            GL_RGB,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0].repeat(16),
+        );
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        let t = &c.textures[&0];
+        assert!(t.is_complete());
+        assert!(t.rgba.is_empty());
+        assert_eq!(t.mipmaps[&4].2, [255, 0, 0, 255]);
+        assert_eq!(t.formats[&4], GL_RGB);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 255, 0, 255],
+        );
+        assert_eq!(c.textures[&0].mipmaps[&4].2, [255, 0, 0, 255]);
+    }
+    #[test]
+    fn software_draw_uses_nonzero_base_cache_and_live_lod_limits() {
+        struct Memory(Vec<u8>);
+        impl GuestMemory for Memory {
+            fn read(&mut self, addr: u32, len: usize, out: &mut Vec<u8>) -> bool {
+                let Some(bytes) = self.0.get(addr as usize..addr as usize + len) else {
+                    return false;
+                };
+                out.clear();
+                out.extend_from_slice(bytes);
+                true
+            }
+        }
+        let mut c = Context::new(16, 16);
+        mip_colors(&mut c);
+        c.texture_units[0].texture_enabled = true;
+        c.texture_units[0].tex_env = TexEnvMode::Replace;
+        c.vertex_array = ArrayPointer {
+            enabled: true,
+            size: 3,
+            ty: GL_FLOAT,
+            stride: 0,
+            pointer: 16,
+            buffer: 0,
+        };
+        let mut bytes = vec![0; 16];
+        for v in [-1f32, -1., 0., 1., -1., 0., 0., 1., 0.] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut memory = Memory(bytes);
+        c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, 1.25);
+        c.draw_arrays(&mut memory, GL_TRIANGLES, 0, 3);
+        assert_eq!(
+            &c.target.color[(8 * 16 + 7) * 4..(8 * 16 + 7) * 4 + 4],
+            &[0, 191, 64, 255]
+        );
+        c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS, 0.);
+        c.draw_arrays(&mut memory, GL_TRIANGLES, 0, 3);
+        assert_eq!(
+            &c.target.color[(8 * 16 + 7) * 4..(8 * 16 + 7) * 4 + 4],
+            &[255, 0, 0, 255]
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; base remapping, exact fractional LOD and shader restoration"]
+    fn native_base_bounds_clamp_and_dxt_alpha_match_software() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = Context::new(16, 16);
+                if es {
+                    c.gpu = Some(crate::gpu::Renderer::new_es_for_test(16, 16).unwrap());
+                } else {
+                    c.enable_gpu().unwrap();
+                }
+                c.set_internal_resolution(scale);
+                mip_colors(&mut c);
+                let stage = [raster::TextureStage {
+                    unit: 0,
+                    env: TexEnvMode::Replace,
+                    env_color: [0.; 4],
+                    lod_bias: 0.,
+                }];
+                let draw = |c: &mut Context, footprint: f32, expected: [u8; 4]| {
+                    let tri =
+                        [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| {
+                            raster::Vertex {
+                                pos,
+                                texcoord: [[
+                                    (pos[0] + 1.) * footprint,
+                                    (pos[1] + 1.) * footprint,
+                                    0.,
+                                    1.,
+                                ]; 4],
+                                ..Default::default()
+                            }
+                        });
+                    c.gpu
+                        .as_mut()
+                        .unwrap()
+                        .draw(
+                            &c.target,
+                            &c.state,
+                            GL_TRIANGLES,
+                            &tri,
+                            &stage,
+                            &c.textures,
+                            [0; 4],
+                        )
+                        .unwrap();
+                    c.sync_gpu();
+                    let pixel = &c.target.color[(8 * 16 + 7) * 4..(8 * 16 + 7) * 4 + 4];
+                    for (a, b) in pixel.iter().zip(expected) {
+                        assert!(
+                            (*a as i32 - b as i32).abs() <= 1,
+                            "es={es} scale={scale} {pixel:?} expected={expected:?}"
+                        );
+                    }
+                };
+                draw(&mut c, 0., [255, 0, 0, 255]);
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, 1.25);
+                draw(&mut c, 0., [0, 191, 64, 255]);
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, -1000.);
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS, 0.);
+                draw(&mut c, 64., [255, 0, 0, 255]);
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS, 1000.);
+                draw(&mut c, 64., [0, 0, 255, 255]);
+                c.gizmondo_goforce_20051013 = true;
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, 1.25);
+                draw(&mut c, 0., [0, 255, 0, 255]);
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD_SGIS, -1000.);
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL_SGIS, 0);
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x2900);
+                for (format, alpha) in [
+                    (GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 255),
+                    (GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 0),
+                ] {
+                    c.compressed_tex_image_2d(
+                        GL_TEXTURE_2D,
+                        0,
+                        4,
+                        4,
+                        format,
+                        &[0, 0, 255, 255, 255, 255, 255, 255],
+                    );
+                    assert_eq!(c.textures[&0].rgba_level(0).unwrap()[3], alpha);
+                    draw(&mut c, 0., [0, 0, 0, alpha]);
+                }
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL_SGIS, 2);
+                c.compressed_tex_image_2d(
+                    GL_TEXTURE_2D,
+                    2,
+                    4,
+                    4,
+                    GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                    &[0, 248, 0, 0, 0, 0, 0, 0],
+                );
+                draw(&mut c, 0., [255, 0, 0, 255]);
             }
         }
     }

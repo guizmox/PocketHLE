@@ -1091,13 +1091,11 @@ impl Gl {
     }
 }
 fn native_compressed_format(format: u32) -> u32 {
-    // Preserve the software HLE's DXT1 RGB selector-3 alpha contract.
-    if format == GL_COMPRESSED_RGB_S3TC_DXT1_EXT {
-        GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
-    } else {
-        format
-    }
+    // RGB DXT1 has opaque alpha even for selector 3. Never reinterpret it
+    // as RGBA DXT1 on the native path; unsupported hosts use the decoder.
+    format
 }
+
 #[derive(Debug, PartialEq, Eq)]
 enum UploadRoute {
     Compressed,
@@ -1129,6 +1127,13 @@ unsafe fn upload_texture(
     if !tex.is_complete() {
         return Err("incomplete guest texture must not reach GPU upload".into());
     }
+    let rebased;
+    let tex = if tex.base_level != 0 {
+        rebased = tex.host_view();
+        &rebased
+    } else {
+        tex
+    };
     let full_levels = tex.width.max(tex.height).ilog2() + 1;
     let levels = full_levels.min(tex.max_level.saturating_add(1));
 
@@ -1239,6 +1244,8 @@ pub struct Renderer {
     program: u32,
     alternate_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
     affine_program: bool,
+    range_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
+    range_active: bool,
     buffer: u32,
     index_buffer: u32,
     indices: Vec<u16>,
@@ -1408,6 +1415,8 @@ impl Renderer {
                 program: 0,
                 alternate_program: None,
                 affine_program: false,
+                range_program: None,
+                range_active: false,
                 buffer: 0,
                 index_buffer: 0,
                 indices: Vec::new(),
@@ -1528,6 +1537,7 @@ impl Renderer {
                     "envColor",
                     "lodBias",
                     "lodLimit",
+                    "lodRange",
                     "combineOps",
                     "combineRgbSource",
                     "combineAlphaSource",
@@ -1575,14 +1585,24 @@ impl Renderer {
         } else {
             "#version 120\n#define VARYING varying\n"
         };
-        let vs = match self.shader(
-            0x8b31,
-            &format!(
-                "{}{}",
-                prefix.replace("precision mediump float", "precision highp float"),
-                vertex
-            ),
-        ) {
+        let modern_range = self.host.es && fragment.contains("#define TEXTURE_LOD_RANGE") && {
+            let p = (self.gl.GetString)(0x1f02);
+            !p.is_null()
+                && CStr::from_ptr(p.cast())
+                    .to_string_lossy()
+                    .starts_with("OpenGL ES 3.")
+        };
+        let vertex_source = if modern_range {
+            vertex.replace("attribute ", "in ")
+        } else {
+            vertex.to_owned()
+        };
+        let vertex_prefix = if modern_range {
+            "#version 300 es\nprecision highp float;\nprecision mediump int;\n#define VARYING out mediump\n".to_owned()
+        } else {
+            prefix.replace("precision mediump float", "precision highp float")
+        };
+        let vs = match self.shader(0x8b31, &format!("{}{}", vertex_prefix, vertex_source)) {
             Ok(shader) => shader,
             Err(error) => {
                 (self.gl.DeleteProgram)(program);
@@ -1597,6 +1617,17 @@ impl Renderer {
             }
         } else {
             prefix.to_owned()
+        };
+        let fragment_prefix = if modern_range {
+            "#version 300 es\nprecision mediump float;\nprecision mediump int;\n#define VARYING in mediump\n#define LOD_DERIVATIVES\n#define RANGE_SAMPLE textureLod\n#define texture2D texture\nout vec4 rangeColor;\n#define gl_FragColor rangeColor\n".to_owned()
+        } else if fragment.contains("#define TEXTURE_LOD_RANGE") {
+            if self.host.es {
+                fragment_prefix.replace("#version 100\n","#version 100\n#extension GL_EXT_shader_texture_lod : require\n#define RANGE_SAMPLE texture2DLodEXT\n")
+            } else {
+                fragment_prefix.replace("#version 120\n","#version 120\n#extension GL_ARB_shader_texture_lod : require\n#define RANGE_SAMPLE texture2DLod\n")
+            }
+        } else {
+            fragment_prefix
         };
         let fs = match self.shader(0x8b30, &format!("{fragment_prefix}{fragment}")) {
             Ok(s) => s,
@@ -1641,6 +1672,47 @@ impl Renderer {
         }
         Ok(program)
     }
+    fn select_range_program(&mut self, enabled: bool) -> Result<(), String> {
+        if self.range_active == enabled {
+            return Ok(());
+        }
+        if enabled {
+            self.select_affine_program(false);
+            if self.range_program.is_none() {
+                if !self.lod_derivatives {
+                    return Err("LOD bounds require fragment derivatives on the host GPU".into());
+                }
+                unsafe {
+                    let program = self.compile_program(
+                        VERTEX,
+                        &format!("#define TEXTURE_LOD_RANGE\n{FRAGMENT}"),
+                    )?;
+                    let locations = self
+                        .uniforms
+                        .keys()
+                        .map(|n| {
+                            (
+                                n.clone(),
+                                (self.gl.GetUniformLocation)(
+                                    program,
+                                    CString::new(n.as_str()).unwrap().as_ptr(),
+                                ),
+                            )
+                        })
+                        .collect();
+                    self.range_program = Some((program, locations, HashMap::new()));
+                }
+            }
+        }
+        let range = self.range_program.as_mut().unwrap();
+        std::mem::swap(&mut self.program, &mut range.0);
+        std::mem::swap(&mut self.uniforms, &mut range.1);
+        std::mem::swap(&mut self.uniform_values, &mut range.2);
+        self.range_active = enabled;
+        self.point_drawing = true;
+        Ok(())
+    }
+
     fn select_affine_program(&mut self, affine: bool) {
         if self.affine_program == affine {
             return;
@@ -2200,10 +2272,21 @@ impl Renderer {
         } else {
             0
         };
-        let affine = mode != GL_POINTS
+        let range = stages.iter().any(|stage| {
+            textures.get(&names[stage.unit]).is_some_and(|tex| {
+                let (lo, hi) = tex.lod_bounds();
+                let (w, h) = tex.sampling_size();
+                (lo > 0. || hi < w.max(h).checked_ilog2().unwrap_or(0) as f32) && tex.is_complete()
+            })
+        });
+        self.select_range_program(range)?;
+        let affine = !range
+            && mode != GL_POINTS
             && !state.logic_op
             && affine_texture_coordinates(vertices, stages, transforms, stream);
-        self.select_affine_program(affine);
+        if !range {
+            self.select_affine_program(affine);
+        }
         let point_sizes = mode == GL_POINTS && state.point_size_array && transforms.is_some();
         let layout = if mask == 0 {
             VertexLayout::new(state, stages, transforms)
@@ -2565,20 +2648,28 @@ impl Renderer {
                         });
                         id = item.0;
                         (self.gl.BindTexture)(GL_TEXTURE_2D, id);
-                        let last_level = tex.width.max(tex.height).ilog2();
-                        let restricted = tex.max_level < last_level;
-                        let base_only = tex.max_level == 0
+                        let (sample_w, sample_h) = tex.sampling_size();
+                        let relative_max = tex.max_level.saturating_sub(tex.base_level);
+                        let (min_lod, max_lod) = tex.lod_bounds();
+                        let last_level = sample_w.max(sample_h).ilog2();
+                        let restricted = relative_max < last_level
+                            || min_lod > 0.
+                            || max_lod < last_level as f32;
+                        let base_only = relative_max == 0
                             || (restricted && !self.native_max_level && !self.lod_derivatives);
                         lod_limit = [
-                            tex.width as f32,
-                            tex.height as f32,
-                            tex.max_level.min(last_level) as f32,
-                            (restricted && !self.native_max_level && !base_only) as u8 as f32,
+                            sample_w as f32,
+                            sample_h as f32,
+                            relative_max.min(last_level) as f32,
+                            ((restricted && !self.native_max_level && !base_only)
+                                || min_lod > 0.
+                                || max_lod < last_level as f32) as u8
+                                as f32,
                         ];
                         let needs_mips = !base_only
                             && tex.min_filter.uses_mipmaps()
                             && (self.full_npot
-                                || (tex.width.is_power_of_two() && tex.height.is_power_of_two()));
+                                || (sample_w.is_power_of_two() && sample_h.is_power_of_two()));
                         let newly_mipped = needs_mips
                             && self
                                 .texture_params
@@ -2589,7 +2680,7 @@ impl Renderer {
                                 (self.gl.TexParameteri)(
                                     GL_TEXTURE_2D,
                                     GL_TEXTURE_MAX_LEVEL_SGIS,
-                                    tex.max_level.min(last_level) as i32,
+                                    relative_max.min(last_level) as i32,
                                 );
                             }
                             upload_texture(
@@ -2614,7 +2705,7 @@ impl Renderer {
                                 tex.wrap_t,
                             )
                         } else if !self.full_npot
-                            && (!tex.width.is_power_of_two() || !tex.height.is_power_of_two())
+                            && (!sample_w.is_power_of_two() || !sample_h.is_power_of_two())
                         {
                             (
                                 match tex.min_filter {
@@ -2630,12 +2721,17 @@ impl Renderer {
                         } else {
                             (tex.min_filter, tex.mag_filter, tex.wrap_s, tex.wrap_t)
                         };
+                        let anisotropy = if self.range_active {
+                            1
+                        } else {
+                            self.anisotropy
+                        };
                         if self.max_anisotropy > 1
-                            && self.texture_anisotropy.get(&id) != Some(&self.anisotropy)
+                            && self.texture_anisotropy.get(&id) != Some(&anisotropy)
                         {
                             // The EXT/ARB parameter accepts integer values too.
-                            (self.gl.TexParameteri)(GL_TEXTURE_2D, 0x84fe, self.anisotropy as i32);
-                            self.texture_anisotropy.insert(id, self.anisotropy);
+                            (self.gl.TexParameteri)(GL_TEXTURE_2D, 0x84fe, anisotropy as i32);
+                            self.texture_anisotropy.insert(id, anisotropy);
                         }
                         if self.texture_params.get(&id) != Some(&params) {
                             self.params(params.0, params.1, params.2, params.3);
@@ -2656,6 +2752,16 @@ impl Renderer {
                         TexEnvMode::Combine(_) => 5,
                     }),
                 );
+                if self.range_active {
+                    let (lo, hi) = textures
+                        .get(&name)
+                        .map_or((-1000., 1000.), |t| t.lod_bounds());
+                    self.uniform_2f(
+                        self.loc(["lodRange0", "lodRange1", "lodRange2", "lodRange3"][i]),
+                        lo,
+                        hi,
+                    );
+                }
                 self.uniform_4fv(self.loc(LOD_LIMITS[i]), 1, lod_limit.as_ptr());
                 self.uniform_1f(self.loc(LOD_BIASES[i]), stage.map_or(0.0, |s| s.lod_bias));
                 if let Some(s) = stage {
@@ -3042,6 +3148,9 @@ impl Drop for Renderer {
             (self.gl.DeleteFramebuffers)(1, &self.fbo);
             (self.gl.DeleteBuffers)(1, &self.buffer);
             (self.gl.DeleteBuffers)(1, &self.index_buffer);
+            if let Some((program, _, _)) = &self.range_program {
+                (self.gl.DeleteProgram)(*program);
+            }
             (self.gl.DeleteProgram)(self.program);
             if let Some((program, _, _)) = &self.alternate_program {
                 (self.gl.DeleteProgram)(*program);
@@ -3090,7 +3199,7 @@ fn filter(v: Filter) -> u32 {
 fn wrap(v: Wrap) -> u32 {
     match v {
         Wrap::Repeat => GL_REPEAT,
-        Wrap::ClampToEdge => GL_CLAMP_TO_EDGE,
+        Wrap::ClampToEdge | Wrap::GizmondoClamp => GL_CLAMP_TO_EDGE,
     }
 }
 // Conservative, draw-level proof: no per-fragment branch is needed for q=1.
@@ -3218,6 +3327,7 @@ vec4 logicalColor(vec4 source,vec4 destination){
 }
 #endif
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
+uniform vec2 lodRange0,lodRange1,lodRange2,lodRange3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform vec4 pointReplace;uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 uniform vec4 combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0;
@@ -3243,7 +3353,7 @@ vec2 pointCoordinate(vec2 uv,float replace){return uv;}
 vec2 project(vec4 uv){return uv.w==0.0?vec2(0.0):uv.xy/uv.w;}
 vec2 pointCoordinate(vec4 uv,float replace){return replace>0.5?gl_PointCoord:project(uv);}
 #endif
-float limitedBias(vec2 uv,float bias,vec4 limit){
+float limitedBias(vec2 uv,float bias,vec4 limit,vec2 bounds){
 #ifdef LOD_DERIVATIVES
  if(limit.w>0.5){
   vec2 dx=dFdx(uv)*limit.xy;vec2 dy=dFdy(uv)*limit.xy;
@@ -3254,7 +3364,20 @@ float limitedBias(vec2 uv,float bias,vec4 limit){
 #endif
  return bias;
 }
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=texture2D(sampler0,pointCoordinate(uv0,pointReplace.x),limitedBias(pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0));if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=texture2D(sampler1,pointCoordinate(uv1,pointReplace.y),limitedBias(pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1));if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=texture2D(sampler2,pointCoordinate(uv2,pointReplace.z),limitedBias(pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2));if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=texture2D(sampler3,pointCoordinate(uv3,pointReplace.w),limitedBias(pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3));if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
+#ifdef TEXTURE_LOD_RANGE
+vec4 sampleRange(sampler2D tex,vec2 uv,float bias,vec4 limit,vec2 bounds){
+ if(bounds.x>0.0 || bounds.y<limit.z){
+  vec2 dx=dFdx(uv)*limit.xy;vec2 dy=dFdy(uv)*limit.xy;
+  float lod=log2(max(max(length(dx),length(dy)),0.000001))+bias;
+  lod=min(max(lod,bounds.x),bounds.y);
+  return RANGE_SAMPLE(tex,uv,min(lod,limit.z));
+ }
+ return texture2D(tex,uv,limitedBias(uv,bias,limit,bounds));
+}
+#else
+#define sampleRange(tex,uv,bias,lim,ran) texture2D(tex,uv,limitedBias(uv,bias,lim,ran))
+#endif
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=sampleRange(sampler0,pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0,lodRange0);if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=sampleRange(sampler1,pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1,lodRange1);if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=sampleRange(sampler2,pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2,lodRange2);if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=sampleRange(sampler3,pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3,lodRange3);if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the
@@ -5739,6 +5862,69 @@ mod resolution_policy_tests {
             assert_eq!((gpu.width, gpu.height), (960, 1280));
             gpu.set_render_scale(1).unwrap();
             assert_eq!((gpu.width, gpu.height), (480, 640));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod nonzero_base_es2_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires native GL/GLES; POT mip chain without original level zero under ES2 limits"]
+    fn pot_base_is_not_mistaken_for_an_undefined_npot_level_zero() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(16, 16).unwrap()
+            } else {
+                Renderer::new(16, 16).unwrap()
+            };
+            gpu.full_npot = false;
+            let mut tex = Texture {
+                base_level: 2,
+                min_filter: Filter::NearestMipmapNearest,
+                mag_filter: Filter::Nearest,
+                ..Default::default()
+            };
+            for (l, w, color) in [
+                (2, 4, [255, 0, 0, 255]),
+                (3, 2, [0, 255, 0, 255]),
+                (4, 1, [0, 0, 255, 255]),
+            ] {
+                tex.set_level(l, w, w, color.repeat((w * w) as usize));
+            }
+            assert!(tex.is_complete());
+            assert_eq!(tex.width, 0);
+            let textures = HashMap::from([(1, tex)]);
+            let stages = [TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            }];
+            let tri = [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
+                pos,
+                texcoord: [[(pos[0] + 1.) * 64., (pos[1] + 1.) * 64., 0., 1.]; 4],
+                ..Default::default()
+            });
+            let mut target = RenderTarget::new(16, 16);
+            gpu.draw(
+                &target,
+                &PipelineState {
+                    viewport: (0, 0, 16, 16),
+                    ..Default::default()
+                },
+                GL_TRIANGLES,
+                &tri,
+                &stages,
+                &textures,
+                [1, 0, 0, 0],
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(8 * 16 + 7) * 4..(8 * 16 + 7) * 4 + 4],
+                &[0, 0, 255, 255]
+            );
         }
     }
 }
