@@ -2410,7 +2410,7 @@ impl PocketLauncher {
                     self.set_fullscreen(ui.ctx(), draft.fullscreen);
                 }
                 ui.end_row();
-                ui.label("Show FPS in status bar");
+                ui.label("Show FPS on game screen");
                 crate::controller_ui::checkbox(ui, &mut draft.show_fps, "");
                 ui.end_row();
                 ui.label("Library root");
@@ -3250,6 +3250,7 @@ impl PocketLauncher {
                     )),
                 });
                 self.paint_recording_indicator(ui, rect);
+                self.paint_fps_indicator(ui, rect);
                 return;
             }
         }
@@ -3318,6 +3319,37 @@ impl PocketLauncher {
             }
         }
         self.paint_recording_indicator(ui, rect);
+        self.paint_fps_indicator(ui, rect);
+    }
+
+    /// Host overlay: use the actual displayed image bounds, including rotation
+    /// and internal GLES resolution. Captures above keep the original image.
+    fn paint_fps_indicator(&self, ui: &egui::Ui, rect: Rect) {
+        if !self.library.config().show_fps {
+            return;
+        }
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let unit = if self
+            .frame_stats
+            .presentation_stats
+            .as_ref()
+            .and_then(|stats| stats.fps())
+            .is_some()
+        {
+            "FPS"
+        } else {
+            "IPS"
+        };
+        let text = format!("{:.1} {unit}", self.frame_stats.current_fps());
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::proportional(13.0),
+            Color32::from_white_alpha(220),
+        );
+        let size = galley.size() + Vec2::new(10.0, 6.0);
+        let badge = Rect::from_min_size(rect.right_top() + Vec2::new(-size.x - 6.0, 6.0), size);
+        painter.rect_filled(badge, 3.0, Color32::from_black_alpha(115));
+        painter.galley(badge.min + Vec2::new(5.0, 3.0), galley, Color32::WHITE);
     }
 
     // Painted after the framebuffer capture callbacks: visible locally only.
@@ -5669,8 +5701,7 @@ impl eframe::App for PocketLauncher {
             });
             egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let show_fps = self.library.config().show_fps && self.screen == Screen::Run;
-                    let reserve = if show_fps { 130.0 } else { 45.0 };
+                    let reserve = 45.0;
                     ui.add_sized(
                         Vec2::new(
                             (ui.available_width() - reserve).max(0.0),
@@ -5683,30 +5714,6 @@ impl eframe::App for PocketLauncher {
                     )
                     .on_hover_text(&self.status);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if show_fps {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{:.1} {}",
-                                    self.frame_stats.current_fps(),
-                                    if self
-                                        .frame_stats
-                                        .presentation_stats
-                                        .as_ref()
-                                        .and_then(|stats| stats.fps())
-                                        .is_some()
-                                    {
-                                        "FPS"
-                                    } else {
-                                        "IPS"
-                                    }
-                                ))
-                                .small()
-                                .color(Color32::from_rgb(116, 205, 176)),
-                            )
-                            .on_hover_text(
-                                "Game frames per second. The frame rate may drop in static menus.",
-                            );
-                        }
                         ui.label(
                             RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                 .small()
@@ -5734,11 +5741,7 @@ impl eframe::App for PocketLauncher {
                 return;
             }
             if console_only {
-                if self.running_is_gizmondo {
-                    self.ui_gizmondo(ui);
-                } else {
-                    self.ui_fullscreen_game(ui);
-                }
+                self.ui_fullscreen_game(ui);
                 return;
             }
             match self.screen {

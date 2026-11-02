@@ -74,19 +74,19 @@ class PocketPcGeometryTest {
             }
         }
     }
-    @Test fun vgaUsesQvgaMultiplesAndStillMapsToEveryNativePixel() {
+    @Test fun vgaUsesProducedPixelMultiplesAndStillMapsToEveryNativePixel() {
         val rect=pocketPcDisplayRect(1400,800,640,480,0)
-        assertEquals(960,rect.width);assertEquals(720,rect.height)
+        assertEquals(640,rect.width);assertEquals(480,rect.height)
         assertEquals(0 to 0,displayPointToGuest(rect.left.toFloat(),rect.top.toFloat(),1400,800,640,480,0,0,true))
         assertEquals(639 to 479,displayPointToGuest((rect.left+rect.width-1).toFloat(),(rect.top+rect.height-1).toFloat(),1400,800,640,480,0,0,true))
         for(turn in listOf(0,90,180,270)) {
             val w=if(turn%180==0) 640 else 480;val h=if(turn%180==0) 480 else 640
             val fit=pocketPcDisplayRect(1080,1920,w,h,0)
-            assertEquals(0,fit.width%(w/2));assertEquals(0,fit.height%(h/2))
+            assertEquals(0,fit.width%w);assertEquals(0,fit.height%h)
             val pos=displayPointToGuest((fit.left+fit.width-1).toFloat(),(fit.top+fit.height-1).toFloat(),1080,1920,640,480,turn,0,true)!!
             assertTrue(pos.first in 0..639);assertTrue(pos.second in 0..479)
         }
-        // Gizmondo / old callers retain the original native-pixel scale policy.
+        // Both platforms zoom relative to the produced pixels, never a fixed QVGA grid.
         assertEquals(640,displayRect(1400,800,640,480,0).width)
     }
 
