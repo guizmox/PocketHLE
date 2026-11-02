@@ -50,6 +50,9 @@ struct EglImage {
 }
 struct EglSurfaces {
     initialized: bool,
+    context_alive: bool,
+    context_deleted: bool,
+    context_ever_bound: bool,
     images: HashMap<u32, EglImage>,
     active: u32,
     draw: u32,
@@ -72,11 +75,14 @@ impl EglSurfaces {
         );
         Self {
             initialized: false,
+            context_alive: false,
+            context_deleted: false,
+            context_ever_bound: false,
             images,
             active: SURFACE_HANDLE,
-            draw: SURFACE_HANDLE,
-            read: SURFACE_HANDLE,
-            bound: true,
+            draw: 0,
+            read: 0,
+            bound: false,
             next: 0x45471000,
         }
     }
@@ -1820,21 +1826,37 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
-fn egl_terminate(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    release_gpu();
-    let (w, h) = with_ctx(|c| {
-        let w = c.target.width;
-        let h = c.target.height;
-        c.target = pocket_gles::raster::RenderTarget::with_format(w, h, true);
-        (w, h)
+// Termination must not invalidate a context or framebuffer still current.
+// Its pending deletion is collected by the next successful unbind/rebind.
+fn egl_terminate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(0)? != DISPLAY_HANDLE {
+        set_egl_error(EGL_BAD_DISPLAY);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let release = SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        if !s.initialized {
+            return false;
+        }
+        s.initialized = false;
+        s.context_deleted = s.context_alive;
+        for image in s.images.values_mut() {
+            image.deleted = true;
+        }
+        s.collect();
+        if !s.bound {
+            s.context_alive = false;
+            s.active = 0;
+            s.images.clear();
+            true
+        } else {
+            false
+        }
     });
-    SURFACES.with(|s| {
-        let mut fresh = EglSurfaces::new();
-        let image = fresh.images.get_mut(&SURFACE_HANDLE).unwrap();
-        image.width = w;
-        image.height = h;
-        *s.borrow_mut() = fresh;
-    });
+    if release {
+        reset_client_context();
+        release_gpu();
+    }
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
@@ -1931,12 +1953,17 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
     }
-    let attribs = ctx.arg_u32(3)?;
-    match egl_config::read_pairs(ctx, attribs) {
-        Ok(pairs) if pairs.is_empty() => {}
-        _ => {
-            set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
-            return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+    // The 2005-10-13 GoForce driver never reads attrib_list here (including
+    // its address). Keep that device behavior: applications can reuse their
+    // eglChooseConfig list. Other profiles retain EGL attribute validation.
+    if !with_ctx(|c| c.gizmondo_goforce_20051013) {
+        let attribs = ctx.arg_u32(3)?;
+        match egl_config::read_pairs(ctx, attribs) {
+            Ok(pairs) if pairs.is_empty() => {}
+            _ => {
+                set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+                return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+            }
         }
     }
     if ctx.arg_u32(2)? == 0 {
@@ -1974,7 +2001,55 @@ fn egl_create_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
+    // EGL 1.1 recognizes no context creation attributes. The dated GoForce
+    // driver applies the same empty-list check before checking share_context.
+    let attribs = ctx.arg_u32(3)?;
+    if !matches!(egl_config::read_pairs(ctx, attribs), Ok(pairs) if pairs.is_empty()) {
+        set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let share = ctx.arg_u32(2)?;
+    if share != 0 && (share != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive)) {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if SURFACES.with(|s| {
+        let s = s.borrow();
+        s.context_alive && s.context_deleted
+    }) {
+        set_egl_error(pocket_gles::EGL_BAD_ALLOC);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        if !s.context_alive {
+            s.context_ever_bound = false;
+        }
+        s.context_alive = true;
+        s.context_deleted = false;
+    });
     Ok(DispatchOutcome::ReturnedR0(CONTEXT_HANDLE))
+}
+
+fn egl_query_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if ctx.arg_u32(1)? != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive) {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if ctx.arg_u32(2)? != EGL_CONFIG_ID {
+        set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let out = ctx.arg_u32(3)?;
+    if out == 0 {
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    ctx.cpu.write_mem(out, &1i32.to_le_bytes())?;
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
 fn egl_surface_args(ctx: &mut CallCtx<'_>) -> Result<bool, KernelError> {
@@ -2080,6 +2155,9 @@ fn egl_create_pixmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     )))
 }
 fn egl_destroy_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
     let surface = ctx.arg_u32(1)?;
     flush_pixmap(ctx, surface)?;
     let ok = SURFACES.with(|s| {
@@ -2097,9 +2175,81 @@ fn egl_destroy_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     }
     Ok(DispatchOutcome::ReturnedR0(ok as u32))
 }
-fn egl_destroy_context(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    release_gpu();
+fn reset_client_context() {
+    let names: Vec<_> = with_ctx(|c| c.textures.keys().copied().collect());
+    SURFACES.with(|s| {
+        for image in s.borrow_mut().images.values_mut() {
+            if let Some(buffers) = image.buffers.as_mut() {
+                buffers.delete_textures(&names);
+            }
+        }
+    });
+    with_ctx(|c| c.reset_client_state());
+    PACK_ALIGNMENT.with(|a| a.set(4));
+    UNPACK_ALIGNMENT.with(|a| a.set(4));
+}
+
+fn egl_destroy_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if ctx.arg_u32(1)? != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive) {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let release = SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        s.context_deleted = true;
+        if !s.bound {
+            s.context_alive = false;
+            true
+        } else {
+            false
+        }
+    });
+    if release {
+        reset_client_context();
+    }
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+}
+
+/// EGL 1.2+ compatibility export: detach this thread, not the display.
+fn egl_release_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    unbind_egl(ctx)?;
+    EGL_ERROR.with(|e| e.set(EGL_SUCCESS));
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+}
+
+fn unbind_egl(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+    let old = SURFACES.with(|s| s.borrow().draw);
+    flush_pixmap(ctx, old)?;
+    let release = SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        with_ctx(|c| {
+            c.flush();
+            let mut empty = SurfaceBuffers::new_rgb565(1, 1);
+            c.park_surface(&mut empty);
+            let active = s.active;
+            if let Some(image) = s.images.get_mut(&active) {
+                image.buffers = Some(empty);
+            }
+        });
+        s.active = 0;
+        s.bound = false;
+        s.draw = 0;
+        s.read = 0;
+        s.collect();
+        if s.context_deleted {
+            s.context_alive = false;
+            true
+        } else {
+            false
+        }
+    });
+    if release {
+        reset_client_context();
+    }
+    Ok(())
 }
 fn egl_make_current(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (dpy, draw, read, context) = (
@@ -2112,28 +2262,25 @@ fn egl_make_current(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         set_egl_error(EGL_BAD_DISPLAY);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    let old = SURFACES.with(|s| s.borrow().draw);
-    flush_pixmap(ctx, old)?;
-    let ok = SURFACES.with(|s| {
-        let mut s = s.borrow_mut();
-        if context == 0 && draw == 0 && read == 0 {
-            let mut empty = SurfaceBuffers::new_rgb565(1, 1);
-            with_ctx(|c| c.park_surface(&mut empty));
-            let active = s.active;
-            if let Some(image) = s.images.get_mut(&active) {
-                image.buffers = Some(empty);
-            }
-            s.active = 0;
-            s.bound = false;
-            s.draw = 0;
-            s.read = 0;
-            s.collect();
-            return true;
-        }
-        if context != CONTEXT_HANDLE {
-            set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
-            return false;
-        }
+    if context == 0 && draw == 0 && read == 0 {
+        unbind_egl(ctx)?;
+        return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
+    }
+    if !SURFACES.with(|s| s.borrow().initialized) {
+        set_egl_error(pocket_gles::EGL_NOT_INITIALIZED);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if context == 0 || draw == 0 || read == 0 {
+        set_egl_error(pocket_gles::EGL_BAD_MATCH);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if context != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive) {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    // Validate before flushing/altering the old binding. Failed calls are atomic.
+    let valid = SURFACES.with(|s| {
+        let s = s.borrow();
         if [draw, read]
             .iter()
             .any(|h| s.images.get(h).is_none_or(|i| i.deleted))
@@ -2141,7 +2288,29 @@ fn egl_make_current(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
             set_egl_error(pocket_gles::EGL_BAD_SURFACE);
             return false;
         }
-        with_ctx(|c| s.select(c, draw));
+        true
+    });
+    if !valid {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    // A context marked for deletion cannot be resurrected by rebinding it.
+    if SURFACES.with(|s| s.borrow().context_deleted) {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let old = SURFACES.with(|s| s.borrow().draw);
+    flush_pixmap(ctx, old)?;
+    with_ctx(|c| c.flush());
+    let ok = SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        with_ctx(|c| {
+            s.select(c, draw);
+            if !s.context_ever_bound {
+                c.set_viewport(0, 0, c.target.width as i32, c.target.height as i32);
+                c.set_scissor(0, 0, c.target.width as i32, c.target.height as i32);
+            }
+        });
+        s.context_ever_bound = true;
         s.draw = draw;
         s.read = read;
         s.bound = true;
@@ -2194,6 +2363,9 @@ fn egl_get_error(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 fn egl_query_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let name = ctx.arg_u32(1)?;
     let text = match name {
         EGL_VENDOR => "PocketHLE",
@@ -2209,6 +2381,9 @@ fn egl_query_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 
 /// `eglQuerySurface(dpy, surface, attribute, *value)`.
 fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
     let surface = ctx.arg_u32(1)?;
     let dims = SURFACES.with(|s| s.borrow().images.get(&surface).map(|i| (i.width, i.height)));
     let Some((w, h)) = dims else {
@@ -2227,9 +2402,11 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
             return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
         }
     };
-    if out != 0 {
-        ctx.cpu.write_mem(out, &value.to_le_bytes())?;
+    if out == 0 {
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
+    ctx.cpu.write_mem(out, &value.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
@@ -2305,11 +2482,70 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
 
 /// Synchronize rendering without presenting or advancing the display clock.
 fn egl_wait(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !SURFACES.with(|s| s.borrow().bound) {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
+    }
     let surface = SURFACES.with(|s| s.borrow().draw);
     flush_pixmap(ctx, surface)?;
     with_ctx(|c| c.sync_gpu());
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
+// Native GDI commands execute synchronously in the dispatcher. Waiting for
+// that command stream must not force a GL framebuffer readback.
+fn egl_wait_native(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(0)? != 0x305b {
+        // EGL_CORE_NATIVE_ENGINE
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+}
+
+fn egl_surface_attrib(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let surface = ctx.arg_u32(1)?;
+    if !SURFACES.with(|s| s.borrow().images.contains_key(&surface)) {
+        set_egl_error(pocket_gles::EGL_BAD_SURFACE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if ctx.arg_u32(2)? != 0x3083 {
+        // EGL_MIPMAP_LEVEL
+        set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    // None of our surfaces is texture-bound; EGL 1.1 defines this as no effect.
+    let _level = ctx.arg_u32(3)?;
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+}
+
+fn egl_swap_interval(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    if !SURFACES.with(|s| s.borrow().bound) {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let _interval = ctx.arg_u32(1)? as i32;
+    // The advertised minimum and maximum are both one. All values clamp to it.
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+}
+
+fn egl_bind_api(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(0)? != 0x30a0 {
+        // EGL_OPENGL_ES_API
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+}
+
+fn egl_query_api(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(0x30a0))
+}
+
 fn egl_copy_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let surface = ctx.arg_u32(1)?;
     let bitmap = ctx.arg_u32(2)?;
@@ -2602,8 +2838,7 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glMatrixIndexPointerOES"
         | "glWeightPointerOES"
         | "glCurrentPaletteMatrixOES"
-        | "glLoadPaletteFromModelViewMatrixOES"
-        => gl_ignored,
+        | "glLoadPaletteFromModelViewMatrixOES" => gl_ignored,
         "glPointSizePointerOES" => gl_point_size_pointer,
 
         "glLightf" => gl_lightf,
@@ -2669,18 +2904,20 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "eglGetCurrentDisplay" => egl_get_current_display,
         "eglGetCurrentContext" => egl_get_current_context,
         "eglGetCurrentSurface" => egl_get_current_surface,
-        "eglWaitGL" | "eglWaitNative" | "eglWaitClient" => egl_wait,
+        "eglWaitGL" | "eglWaitClient" => egl_wait,
+        "eglWaitNative" => egl_wait_native,
         "eglCopyBuffers" => egl_copy_buffers,
-        "eglSwapInterval"
-        // The Gizmondo's GoForce driver exposed the swap interval under an
-        // NV name, and Sticky Balls calls that one. Retain compatibility
-        // acceptance; window swaps always observe the emulator's 60 Hz cap.
-        | "eglSwapIntervalNV"
-        | "eglSurfaceAttrib" | "eglBindAPI" => egl_true,
-        "eglReleaseThread" => egl_terminate,
+        "eglSwapInterval" => egl_swap_interval,
+        // Historical NV alias has a different, one-argument ABI. It must not
+        // be routed through the two-argument core handler.
+        "eglSwapIntervalNV" => egl_true,
+        "eglSurfaceAttrib" => egl_surface_attrib,
+        "eglBindAPI" => egl_bind_api,
+        "eglQueryAPI" => egl_query_api,
+        "eglReleaseThread" => egl_release_thread,
+        "eglQueryContext" => egl_query_context,
         "eglCreatePbufferFromClientBuffer" => egl_no_surface,
-        "eglBindTexImage" | "eglReleaseTexImage" | "eglQueryContext"
-        | "eglQueryAPI" => egl_unsupported,
+        "eglBindTexImage" | "eglReleaseTexImage" => egl_unsupported,
         "eglGetProcAddress" => egl_get_proc_address,
 
         _ => return None,
@@ -2694,6 +2931,12 @@ fn reset_for_test(width: u32, height: u32) {
     SURFACES.with(|s| {
         let mut s = s.borrow_mut();
         s.initialized = true;
+        // Most GL bridge tests start with an already-created, current EGL setup.
+        s.context_alive = true;
+        s.context_ever_bound = true;
+        s.bound = true;
+        s.draw = SURFACE_HANDLE;
+        s.read = SURFACE_HANDLE;
         let image = s.images.get_mut(&SURFACE_HANDLE).unwrap();
         image.width = width;
         image.height = height;
@@ -5139,6 +5382,526 @@ mod tests {
     }
 
     #[test]
+    fn goforce_window_surface_ignores_attributes_but_validates_other_arguments() {
+        use pocket_gles::{
+            EGL_BAD_ATTRIBUTE, EGL_BAD_CONFIG, EGL_BAD_NATIVE_WINDOW, EGL_NOT_INITIALIZED,
+        };
+        let _g = guard();
+        reset_for_test(64, 64);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        write_egl_attributes(&mut cpu, &[(EGL_DEPTH_SIZE, 16)]);
+        for profile in [false, true] {
+            set_gizmondo_goforce_driver(profile);
+            for attributes in [SCRATCH, 0xffff0000] {
+                assert_eq!(
+                    call(
+                        &mut cpu,
+                        &mut kernel,
+                        egl_create_window_surface,
+                        &[DISPLAY_HANDLE, CONFIG_HANDLE, 0x1234, attributes]
+                    ),
+                    if profile {
+                        SURFACE_HANDLE
+                    } else {
+                        EGL_NO_SURFACE
+                    }
+                );
+                assert_eq!(
+                    call(&mut cpu, &mut kernel, egl_get_error, &[]),
+                    if profile {
+                        EGL_SUCCESS
+                    } else {
+                        EGL_BAD_ATTRIBUTE
+                    }
+                );
+            }
+        }
+        for (display, config, window, error) in [
+            (0xdead, CONFIG_HANDLE, 0x1234, EGL_BAD_DISPLAY),
+            (DISPLAY_HANDLE, 0xdead, 0x1234, EGL_BAD_CONFIG),
+            (DISPLAY_HANDLE, CONFIG_HANDLE, 0, EGL_BAD_NATIVE_WINDOW),
+        ] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_create_window_surface,
+                    &[display, config, window, SCRATCH]
+                ),
+                EGL_NO_SURFACE
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), error);
+        }
+        SURFACES.with(|s| s.borrow_mut().initialized = false);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_window_surface,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0x1234, SCRATCH]
+            ),
+            EGL_NO_SURFACE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn egl_session_starts_without_a_current_context() {
+        let _g = guard();
+        reset_for_session();
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        assert_eq!(call(&mut cpu, &mut kernel, egl_get_current_context, &[]), 0);
+        assert_eq!(call(&mut cpu, &mut kernel, egl_get_current_display, &[]), 0);
+        for selector in [pocket_gles::EGL_DRAW, pocket_gles::EGL_READ] {
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_current_surface, &[selector]),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn egl_release_thread_preserves_display_objects_and_client_state() {
+        let _g = guard();
+        reset_for_test(8, 8);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        with_ctx(|c| {
+            c.current_color = [0.2, 0.3, 0.4, 1.];
+            c.bind_texture(pocket_gles::GL_TEXTURE_2D, 17);
+        });
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_release_thread, &[]),
+            EGL_TRUE
+        );
+        assert!(SURFACES.with(|s| s.borrow().initialized));
+        assert!(SURFACES.with(|s| s.borrow().images.contains_key(&SURFACE_HANDLE)));
+        assert_eq!(call(&mut cpu, &mut kernel, egl_get_current_context, &[]), 0);
+        with_ctx(|c| {
+            assert!(c.textures.contains_key(&17));
+            assert_eq!(c.current_color, [0.2, 0.3, 0.4, 1.]);
+        });
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[
+                    DISPLAY_HANDLE,
+                    SURFACE_HANDLE,
+                    SURFACE_HANDLE,
+                    CONTEXT_HANDLE
+                ]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_current_context, &[]),
+            CONTEXT_HANDLE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_query_context,
+                &[DISPLAY_HANDLE, CONTEXT_HANDLE, EGL_CONFIG_ID, SCRATCH]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 1);
+    }
+
+    fn egl_deferred_destroy_roundtrip(gpu: bool) {
+        reset_for_test(8, 8);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        set_gizmondo_goforce_driver(true);
+        set_internal_resolution(2);
+        set_gpu_renderer(gpu);
+        with_ctx(|c| {
+            c.clear_color = [1., 0., 0., 1.];
+            c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
+            c.bind_texture(pocket_gles::GL_TEXTURE_2D, 17);
+            c.bind_buffer(pocket_gles::GL_ARRAY_BUFFER, 23);
+            c.current_color = [0., 0., 1., 1.];
+        });
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_destroy_context,
+                &[DISPLAY_HANDLE, CONTEXT_HANDLE]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_current_context, &[]),
+            CONTEXT_HANDLE
+        );
+        with_ctx(|c| {
+            assert!(c.textures.contains_key(&17));
+            assert_eq!(c.gpu_active(), gpu);
+        });
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_make_current, &[0xdead, 0, 0, 0]),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_BAD_DISPLAY
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_current_context, &[]),
+            CONTEXT_HANDLE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_release_thread, &[]),
+            EGL_TRUE
+        );
+        assert!(!SURFACES.with(|s| s.borrow().context_alive));
+        with_ctx(|c| {
+            assert!(c.textures.is_empty());
+            assert!(c.buffers.is_empty());
+            assert_eq!(c.current_color, [1.; 4]);
+            assert!(c.gizmondo_goforce_20051013);
+        });
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_query_context,
+                &[DISPLAY_HANDLE, CONTEXT_HANDLE, EGL_CONFIG_ID, SCRATCH]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_CONTEXT
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_context,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0]
+            ),
+            CONTEXT_HANDLE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[
+                    DISPLAY_HANDLE,
+                    SURFACE_HANDLE,
+                    SURFACE_HANDLE,
+                    CONTEXT_HANDLE
+                ]
+            ),
+            EGL_TRUE
+        );
+        with_ctx(|c| {
+            c.sync_gpu();
+            assert_eq!(&c.target.color[..4], &[255, 0, 0, 255]);
+            assert!(c.target.rgb565);
+            assert_eq!(c.gpu_active(), gpu);
+            assert_eq!(c.state.viewport, (0, 0, 8, 8));
+            if gpu {
+                let mut pixels = vec![];
+                assert_eq!(c.scaled_rgb565_into(&mut pixels), Some((16, 16)));
+            }
+        });
+    }
+
+    #[test]
+    fn egl_context_destroy_is_deferred_and_preserves_software_surface_pixels() {
+        let _g = guard();
+        egl_deferred_destroy_roundtrip(false);
+    }
+
+    #[test]
+    #[ignore = "requires host OpenGL"]
+    fn egl_context_destroy_is_deferred_and_preserves_gpu_surface_pixels() {
+        let _g = guard();
+        egl_deferred_destroy_roundtrip(true);
+    }
+
+    #[test]
+    fn egl_termination_is_deferred_and_cannot_resurrect_resources() {
+        let _g = guard();
+        reset_for_test(8, 8);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_terminate, &[0xdead]),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_BAD_DISPLAY
+        );
+        assert!(SURFACES.with(|s| s.borrow().initialized));
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_current_context, &[]),
+            CONTEXT_HANDLE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[
+                    DISPLAY_HANDLE,
+                    SURFACE_HANDLE,
+                    SURFACE_HANDLE,
+                    CONTEXT_HANDLE
+                ]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_NOT_INITIALIZED
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_initialize,
+                &[DISPLAY_HANDLE, 0, 0]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_context,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0]
+            ),
+            0
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_ALLOC
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[DISPLAY_HANDLE, 0, 0, 0]
+            ),
+            EGL_TRUE
+        );
+        assert!(!SURFACES.with(|s| s.borrow().images.contains_key(&SURFACE_HANDLE)));
+        assert!(!SURFACES.with(|s| s.borrow().context_alive));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[
+                    DISPLAY_HANDLE,
+                    SURFACE_HANDLE,
+                    SURFACE_HANDLE,
+                    CONTEXT_HANDLE
+                ]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_CONTEXT
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]),
+            EGL_TRUE
+        );
+    }
+
+    #[test]
+    fn egl_context_creation_and_queries_validate_without_modifying_the_binding() {
+        let _g = guard();
+        reset_for_test(8, 8);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        write_egl_attributes(&mut cpu, &[(EGL_DEPTH_SIZE, 16)]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_context,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, SCRATCH]
+            ),
+            0
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_ATTRIBUTE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_context,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0xdead, 0]
+            ),
+            0
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_CONTEXT
+        );
+        cpu.write_mem(SCRATCH, &0xaaaaaaaau32.to_le_bytes())
+            .unwrap();
+        for (args, error) in [
+            (
+                [0xdead, CONTEXT_HANDLE, EGL_CONFIG_ID, SCRATCH],
+                EGL_BAD_DISPLAY,
+            ),
+            (
+                [DISPLAY_HANDLE, 0xdead, EGL_CONFIG_ID, SCRATCH],
+                pocket_gles::EGL_BAD_CONTEXT,
+            ),
+            (
+                [DISPLAY_HANDLE, CONTEXT_HANDLE, 0xdead, SCRATCH],
+                pocket_gles::EGL_BAD_ATTRIBUTE,
+            ),
+            (
+                [DISPLAY_HANDLE, CONTEXT_HANDLE, EGL_CONFIG_ID, 0],
+                pocket_gles::EGL_BAD_PARAMETER,
+            ),
+        ] {
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_query_context, &args),
+                EGL_FALSE
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), error);
+            assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 0xaaaaaaaa);
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_current_context, &[]),
+                CONTEXT_HANDLE
+            );
+        }
+        for args in [
+            [DISPLAY_HANDLE, 0, SURFACE_HANDLE, CONTEXT_HANDLE],
+            [DISPLAY_HANDLE, SURFACE_HANDLE, SURFACE_HANDLE, 0],
+            [DISPLAY_HANDLE, SURFACE_HANDLE, 0, CONTEXT_HANDLE],
+        ] {
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_make_current, &args),
+                EGL_FALSE
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_error, &[]),
+                pocket_gles::EGL_BAD_MATCH
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_current_context, &[]),
+                CONTEXT_HANDLE
+            );
+        }
+    }
+
+    #[test]
+    fn egl_native_wait_and_service_exports_validate_their_own_abi() {
+        let _g = guard();
+        reset_for_test(8, 8);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        let counter = kernel.framebuffer.frame_counter;
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_wait_native, &[0]),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_PARAMETER
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_wait_native, &[0x305b]),
+            EGL_TRUE
+        );
+        assert_eq!(kernel.framebuffer.frame_counter, counter);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_surface_attrib,
+                &[DISPLAY_HANDLE, SURFACE_HANDLE, 0x3083, 17]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_surface_attrib,
+                &[DISPLAY_HANDLE, SURFACE_HANDLE, 0xdead, 0]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_ATTRIBUTE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_swap_interval,
+                &[DISPLAY_HANDLE, u32::MAX]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                handler_for("eglSwapIntervalNV").unwrap(),
+                &[0]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_bind_api, &[0x30a0]),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_bind_api, &[0x30a2]),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_PARAMETER
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, egl_query_api, &[]), 0x30a0);
+        call(&mut cpu, &mut kernel, egl_release_thread, &[]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_swap_interval,
+                &[DISPLAY_HANDLE, 1]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            pocket_gles::EGL_BAD_CONTEXT
+        );
+    }
+
+    #[test]
     fn choose_config_yields_one_config_and_describes_it_as_rgb565() {
         let _g = guard();
         reset_for_test(64, 64);
@@ -5838,6 +6601,7 @@ mod tests {
     #[test]
     fn swap_buffers_pushes_pixels_into_a_mapped_gapi_framebuffer() {
         let _g = guard();
+        reset_for_test(240, 320);
         let mut cpu = fresh_cpu();
         let mut kernel = fresh_kernel();
         let (w, h) = (kernel.framebuffer.width, kernel.framebuffer.height);
@@ -6001,6 +6765,14 @@ mod tests {
         );
         assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[0, 248]);
         call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]);
+        // EGL 1.1 retains current resources until the next valid unbind.
+        assert!(with_ctx(|c| c.gpu_active()));
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_make_current,
+            &[DISPLAY_HANDLE, 0, 0, 0],
+        );
         assert!(!with_ctx(|c| c.gpu_active()));
         call(
             &mut cpu,

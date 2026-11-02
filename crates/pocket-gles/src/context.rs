@@ -448,6 +448,29 @@ impl Context {
         std::mem::swap(&mut self.gpu, &mut surface.gpu);
         std::mem::swap(&mut self.gpu_failed, &mut surface.failed);
     }
+
+    /// Reset client state after the EGL context is destroyed, retaining the
+    /// surface attachments and host rendering policy. Other EGL surfaces must
+    /// also have their cached textures invalidated by the owner.
+    pub fn reset_client_state(&mut self) {
+        let names: Vec<_> = self.textures.keys().copied().collect();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.delete_textures(&names);
+        }
+        let mut fresh = Self::new(self.target.width, self.target.height);
+        fresh.gpu_requested = self.gpu_requested;
+        fresh.anisotropic_filtering = self.anisotropic_filtering;
+        fresh.internal_resolution = self.internal_resolution;
+        fresh.gizmondo_goforce_20051013 = self.gizmondo_goforce_20051013;
+        fresh.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
+        std::mem::swap(&mut fresh.target, &mut self.target);
+        std::mem::swap(&mut fresh.gpu, &mut self.gpu);
+        fresh.gpu_failed = self.gpu_failed;
+        if let Some(gpu) = fresh.gpu.as_ref() {
+            fresh.es11.point_max = gpu.logical_point_range()[1];
+        }
+        *self = fresh;
+    }
     pub fn exchange_surface(&mut self, surface: &mut SurfaceBuffers) {
         self.park_surface(surface);
         if let Some(gpu) = &mut self.gpu {
@@ -4086,6 +4109,60 @@ mod tests {
             1.0, 1.0, 0.0, //
             -1.0, 1.0, 0.0,
         ])
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL/GLES; client-state lifetime and texture caches"]
+    fn client_state_reset_preserves_surface_policy_and_invalidates_reused_texture_names() {
+        for es in [false, true] {
+            let mut c = Context::new_rgb565(8, 8);
+            if es {
+                let mut renderer = crate::gpu::Renderer::new_es_for_test(8, 8).unwrap();
+                renderer.set_surface_rgb565(true).unwrap();
+                c.gpu = Some(renderer);
+                c.gpu_requested = true;
+            } else {
+                c.enable_gpu().unwrap();
+            }
+            c.set_internal_resolution(2);
+            c.set_anisotropic_filtering(4);
+            c.gizmondo_goforce_20051013 = true;
+            c.state.intel2700g_depth_bias = true;
+            let mut mem = FakeMem {
+                base: BASE,
+                bytes: quad_floats(),
+            };
+            for rgba in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+                c.bind_texture(GL_TEXTURE_2D, 1);
+                c.tex_image_2d(GL_TEXTURE_2D, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &rgba);
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                c.set_capability(GL_TEXTURE_2D, true);
+                c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+                c.set_client_state(GL_VERTEX_ARRAY, true);
+                c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+                c.sync_gpu();
+                assert_eq!(
+                    &c.target.color[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4],
+                    &rgba,
+                    "ES={es}"
+                );
+                c.current_color = [0.; 4];
+                c.set_error(GL_INVALID_ENUM);
+                c.reset_client_state();
+                assert_eq!(&c.target.color[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4], &rgba);
+                assert!(c.textures.is_empty());
+                assert!(c.buffers.is_empty());
+                assert_eq!(c.current_color, [1.; 4]);
+                assert!(!c.vertex_array.enabled);
+                assert_eq!(c.take_error(), GL_NO_ERROR);
+                assert!(c.target.rgb565);
+                assert!(c.gpu_active());
+                assert_eq!(c.internal_resolution, 2);
+                assert_eq!(c.anisotropic_filtering, 4);
+                assert!(c.gizmondo_goforce_20051013);
+                assert!(c.state.intel2700g_depth_bias);
+            }
+        }
     }
 
     #[test]
