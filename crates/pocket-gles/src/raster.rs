@@ -345,6 +345,34 @@ impl RenderTarget {
         }
     }
 
+    /// Clear only enabled color components; keep the full-write fast path.
+    pub fn clear_color_masked(
+        &mut self,
+        rgba: [u8; 4],
+        scissor: Option<(i32, i32, i32, i32)>,
+        mask: [bool; 4],
+    ) {
+        if mask == [true; 4] {
+            self.clear_color(rgba, scissor);
+            return;
+        }
+        if mask == [false; 4] {
+            return;
+        }
+        if let Some((x0, y0, x1, y1)) = self.scissor_bounds(scissor) {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y as usize * self.width as usize + x as usize) * 4;
+                    for c in 0..4 {
+                        if mask[c] {
+                            self.color[i + c] = rgba[c];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// `glClear(GL_DEPTH_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_depth(&mut self, value: f32, scissor: Option<(i32, i32, i32, i32)>) {
         match self.scissor_bounds(scissor) {
@@ -374,13 +402,14 @@ impl RenderTarget {
         &self,
         scissor: Option<(i32, i32, i32, i32)>,
     ) -> Option<(i32, i32, i32, i32)> {
-        let (w, h) = (self.width as i32, self.height as i32);
+        let (w, h) = (i64::from(self.width), i64::from(self.height));
         let Some((sx, sy, sw, sh)) = scissor else {
-            return Some((0, 0, w, h));
+            return Some((0, 0, w as i32, h as i32));
         };
         if sw <= 0 || sh <= 0 {
             return None;
         }
+        let (sx, sy, sw, sh) = (i64::from(sx), i64::from(sy), i64::from(sw), i64::from(sh));
         let x0 = sx.max(0);
         let x1 = (sx + sw).min(w);
         // GL's scissor Y is measured from the bottom; flip to rows.
@@ -390,7 +419,7 @@ impl RenderTarget {
         if x0 >= x1 || y0 >= y1 {
             return None;
         }
-        Some((x0, y0, x1, y1))
+        Some((x0 as i32, y0 as i32, x1 as i32, y1 as i32))
     }
 
     /// Convert the colour buffer to RGB565 little-endian, the format the

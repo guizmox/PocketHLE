@@ -689,13 +689,13 @@ fn gl_clear(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn gl_clear_colorf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let c = [argf(ctx, 0)?, argf(ctx, 1)?, argf(ctx, 2)?, argf(ctx, 3)?];
-    with_ctx(|g| g.clear_color = c);
+    with_ctx(|g| g.clear_color = c.map(|v| v.clamp(0.0, 1.0)));
     Ok(VOID)
 }
 
 fn gl_clear_colorx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let c = [argx(ctx, 0)?, argx(ctx, 1)?, argx(ctx, 2)?, argx(ctx, 3)?];
-    with_ctx(|g| g.clear_color = c);
+    with_ctx(|g| g.clear_color = c.map(|v| v.clamp(0.0, 1.0)));
     Ok(VOID)
 }
 
@@ -2938,6 +2938,48 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn clear_color_is_clamped_in_state_and_invalid_masks_do_not_clear() {
+        let _g = guard();
+        reset_for_test(2, 2);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        call(&mut cpu, &mut kernel, gl_get_floatv, &[0x0c22, SCRATCH]);
+        assert_eq!(cpu.read_mem(SCRATCH, 16).unwrap(), vec![0; 16]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_clear_colorf,
+            &[-1f32, 2., 0.25, 1.5].map(f32::to_bits),
+        );
+        call(&mut cpu, &mut kernel, gl_get_floatv, &[0x0c22, SCRATCH]);
+        for (i, value) in [0f32, 1., 0.25, 1.].into_iter().enumerate() {
+            assert_eq!(
+                cpu.read_u32_le(SCRATCH + i as u32 * 4).unwrap(),
+                value.to_bits()
+            );
+        }
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_clear_colorx,
+            &[(-65536i32) as u32, 131072, 16384, 98304],
+        );
+        with_ctx(|c| assert_eq!(c.clear_color, [0., 1., 0.25, 1.]));
+        with_ctx(|c| c.target.color.fill(123));
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_clear,
+            &[pocket_gles::GL_COLOR_BUFFER_BIT | 0x80000000],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_VALUE
+        );
+        with_ctx(|c| assert!(c.target.color.iter().all(|v| *v == 123)));
+    }
 
     #[test]
     fn logic_and_subimage_entry_points_use_guest_arguments() {

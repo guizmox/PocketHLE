@@ -1793,9 +1793,8 @@ impl Renderer {
                 state.color_mask[2] as u8,
                 state.color_mask[3] as u8,
             );
-            // Match the software HLE contract: explicit depth clears reset depth
-            // even after a HUD pass left depth writes disabled. Keep draw masks intact.
-            (self.gl.DepthMask)(1);
+            // Clear obeys the depth write mask, independently of DEPTH_TEST.
+            (self.gl.DepthMask)(state.depth_write as u8);
             (self.gl.ClearColor)(color[0], color[1], color[2], color[3]);
             let p = self.host.load(if self.host.es {
                 c"glClearDepthf"
@@ -4146,7 +4145,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[ignore = "requires native GL/GLES2; HLE depth clear compatibility with writes disabled"]
+    #[ignore = "requires native GL/GLES2; ES depth clear mask with writes disabled"]
     fn host_depth_clear_matches_software_with_depth_writes_disabled() {
         for es in [false, true] {
             let mut gpu = if es {
@@ -4184,7 +4183,7 @@ mod tests {
             raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], near);
             state.depth_write = false;
             cpu.clear_color([0; 4], None);
-            cpu.clear_depth(1., None);
+            // The previous near geometry must retain its depth.
             gpu.clear(
                 32,
                 32,
@@ -4208,7 +4207,12 @@ mod tests {
             gpu.read(&mut native).unwrap();
             raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], far);
             let i = (16 * 32 + 16) * 4;
-            assert_eq!(&cpu.color[i..i + 4], &native.color[i..i + 4], "es={es}");
+            assert_eq!(&cpu.color[i..i + 4], &[0; 4], "far geometry stays occluded");
+            assert_eq!(
+                &native.color[i..i + 4],
+                &[0; 4],
+                "es={es}: depth mask must protect the near depth"
+            );
         }
     }
 

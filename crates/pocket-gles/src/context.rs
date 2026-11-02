@@ -404,7 +404,7 @@ impl Context {
             element_array_buffer: 0,
             next_buffer_name: 1,
             state,
-            clear_color: [0.0, 0.0, 0.0, 1.0],
+            clear_color: [0.0, 0.0, 0.0, 0.0],
             clear_depth: 1.0,
             cull_enabled: false,
             scissor_enabled: false,
@@ -1835,6 +1835,15 @@ impl Context {
     // ---- clearing -------------------------------------------------------
 
     pub fn clear(&mut self, mask: u32) {
+        // ES 1.1 section 4.2.3: reject the whole command before changing buffers.
+        if mask & !(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT) != 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        // There is no stencil attachment in this configuration.
+        if mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT) == 0 {
+            return;
+        }
         if self.gpu_failed {
             return;
         }
@@ -1866,9 +1875,10 @@ impl Context {
                 (self.clear_color[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
                 (self.clear_color[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
             ];
-            self.target.clear_color(c, self.state.scissor);
+            self.target
+                .clear_color_masked(c, self.state.scissor, self.state.color_mask);
         }
-        if mask & GL_DEPTH_BUFFER_BIT != 0 {
+        if mask & GL_DEPTH_BUFFER_BIT != 0 && self.state.depth_write {
             let d = self.clear_depth;
             self.target.clear_depth(d, self.state.scissor);
         }
@@ -3514,7 +3524,7 @@ mod tests {
                 c.target.width,
                 c.target.height,
                 &c.state,
-                [0., 0., 0., 1.],
+                c.clear_color,
                 1.,
                 GL_COLOR_BUFFER_BIT,
             )
@@ -5047,5 +5057,159 @@ mod subimage_and_logic_tests {
         assert_eq!(c.take_error(), GL_INVALID_OPERATION);
         c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 8, 8, format, &[0; 33]);
         assert_eq!(c.take_error(), GL_INVALID_VALUE);
+    }
+}
+
+#[cfg(test)]
+mod clear_conformance_tests {
+    use super::*;
+    fn context() -> Context {
+        Context::new(4, 4)
+    }
+    fn color_cases(c: &mut Context) {
+        let old = [31, 63, 95, 127];
+        let new = [223, 191, 159, 255];
+        for bits in 0..16 {
+            c.state.color_mask = [true; 4];
+            c.state.scissor = None;
+            c.clear_color = old.map(|v| v as f32 / 255.);
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.state.color_mask = std::array::from_fn(|i| bits & (1 << i) != 0);
+            c.state.scissor = Some((1, 1, 2, 2));
+            c.clear_color = new.map(|v| v as f32 / 255.);
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.sync_gpu();
+            for y in 0..4 {
+                for x in 0..4 {
+                    for channel in 0..4 {
+                        let expected = if (1..3).contains(&x)
+                            && (1..3).contains(&y)
+                            && c.state.color_mask[channel]
+                        {
+                            new[channel]
+                        } else {
+                            old[channel]
+                        };
+                        assert_eq!(
+                            c.target.color[(y * 4 + x) * 4 + channel],
+                            expected,
+                            "mask={bits:x}, x={x}, y={y}, channel={channel}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+        c.state.scissor = None;
+        c.state.color_mask = [true; 4];
+        let before = c.target.color.clone();
+        c.clear_color = [1.; 4];
+        c.clear(GL_COLOR_BUFFER_BIT | 0x80000000);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(
+            c.target.color, before,
+            "invalid command must not partially clear"
+        );
+        c.clear(0);
+        c.clear(GL_STENCIL_BUFFER_BIT);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.target.color, before);
+    }
+    struct Memory(Vec<u8>);
+    impl GuestMemory for Memory {
+        fn read(&mut self, address: u32, length: usize, out: &mut Vec<u8>) -> bool {
+            let Some(start) = address.checked_sub(4096) else {
+                return false;
+            };
+            let Some(bytes) = self.0.get(start as usize..start as usize + length) else {
+                return false;
+            };
+            out.clear();
+            out.extend_from_slice(bytes);
+            true
+        }
+    }
+    fn depth_cases(c: &mut Context) {
+        c.state.scissor = None;
+        c.state.color_mask = [true; 4];
+        c.state.depth_test = false;
+        c.state.depth_write = true;
+        c.clear_color = [0.; 4];
+        c.clear_depth = 0.25;
+        c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        c.state.depth_write = false;
+        c.clear_depth = 1.;
+        c.clear(GL_DEPTH_BUFFER_BIT);
+        c.state.depth_test = true;
+        c.current_color = [0., 0., 1., 1.];
+        c.set_vertex_pointer(3, GL_FLOAT, 0, 4096);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        let bytes = [-1f32, -1., 0., 1., -1., 0., 0., 1., 0.]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let mut memory = Memory(bytes);
+        c.draw_arrays(&mut memory, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(
+            &c.target.color[36..40],
+            &[0; 4],
+            "disabled depth writes protect depth during Clear"
+        );
+        c.state.depth_test = false;
+        c.state.depth_write = true;
+        c.clear(GL_DEPTH_BUFFER_BIT);
+        c.state.depth_test = true;
+        c.state.depth_write = false;
+        c.draw_arrays(&mut memory, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(
+            &c.target.color[36..40],
+            &[0, 0, 255, 255],
+            "depth clear does not require DEPTH_TEST"
+        );
+        assert!(
+            !c.state.depth_write,
+            "Clear must not change the stored mask"
+        );
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    #[test]
+    fn software_clear_obeys_all_color_masks_scissor_depth_and_errors() {
+        let mut c = context();
+        color_cases(&mut c);
+        depth_cases(&mut c);
+    }
+    #[test]
+    fn default_clear_color_and_extreme_scissors_are_defined() {
+        let mut c = context();
+        assert_eq!(c.clear_color, [0.; 4]);
+        c.clear_color = [1.; 4];
+        c.state.scissor = Some((i32::MAX, i32::MAX, i32::MAX, i32::MAX));
+        c.clear(GL_COLOR_BUFFER_BIT);
+        assert!(c.target.color.iter().all(|v| *v == 0));
+        c.state.scissor = Some((-1, -1, i32::MAX, i32::MAX));
+        c.clear(GL_COLOR_BUFFER_BIT);
+        assert!(c.target.color.iter().all(|v| *v == 255));
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native OpenGL and GLES2; clear masks and scissor at both resolutions"]
+    fn native_clear_obeys_all_masks_scissor_depth_and_errors() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = context();
+                c.gpu = Some(if es {
+                    crate::gpu::Renderer::new_es_for_test(4, 4).unwrap()
+                } else {
+                    crate::gpu::Renderer::new(4, 4).unwrap()
+                });
+                c.set_internal_resolution(scale);
+                color_cases(&mut c);
+                depth_cases(&mut c);
+            }
+        }
     }
 }
