@@ -984,6 +984,10 @@ fn identity_revision() -> u8 {
 pub struct LauncherConfig {
     #[serde(default = "default_pocketpc_processor")]
     pub pocketpc_processor: String,
+    /// Reproduce the Intel 2700G WinCE driver's constant polygon depth bias.
+    /// All PocketPC applications may opt in; Gizmondo always keeps standard ES.
+    #[serde(default)]
+    pub pocketpc_intel2700g_depth_bias: bool,
     #[serde(default = "default_recording_format")]
     pub recording_format: String,
     /// Video recording JPEG quality preset: low, medium or high.
@@ -1278,6 +1282,7 @@ impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             pocketpc_processor: default_pocketpc_processor(),
+            pocketpc_intel2700g_depth_bias: false,
             recording_quality: default_recording_quality(),
             recording_format: default_recording_format(),
             device_preset_id: default_device_preset_id(),
@@ -4247,6 +4252,7 @@ mod tests {
         assert!(default.gpu_renderer);
         assert_eq!(default.anisotropic_filtering, 0);
         assert_eq!(default.gles_internal_resolution, 1);
+        assert!(!default.pocketpc_intel2700g_depth_bias);
         let mut old_config = serde_json::to_value(&default).unwrap();
         old_config
             .as_object_mut()
@@ -6918,4 +6924,27 @@ fn android_directional_control_size_is_global_and_round_trips() {
         .as_object()
         .unwrap()
         .contains_key("android_pocketpc_controls_size"));
+}
+
+#[test]
+fn intel2700g_compatibility_is_opt_in_and_round_trips() {
+    let mut config = LauncherConfig::default();
+    let mut old = serde_json::to_value(&config).unwrap();
+    old.as_object_mut()
+        .unwrap()
+        .remove("pocketpc_intel2700g_depth_bias");
+    assert!(
+        !serde_json::from_value::<LauncherConfig>(old)
+            .unwrap()
+            .pocketpc_intel2700g_depth_bias
+    );
+    config.pocketpc_intel2700g_depth_bias = true;
+    let restored: LauncherConfig =
+        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert!(restored.pocketpc_intel2700g_depth_bias);
+    assert_eq!(
+        restored.gles_internal_resolution,
+        config.gles_internal_resolution
+    );
+    assert_eq!(restored.gpu_renderer, config.gpu_renderer);
 }

@@ -137,6 +137,11 @@ impl Emulator {
         pocket_winceapi::gles::set_gpu_renderer(enabled);
     }
 
+    /// Opt-in Intel 2700G WinCE depth-bias semantics for the PocketPC profile.
+    pub fn set_intel2700g_depth_bias(&mut self, enabled: bool) {
+        pocket_winceapi::gles::set_intel2700g_depth_bias(enabled);
+    }
+
     pub fn set_gles_internal_resolution(&mut self, scale: u8) {
         pocket_winceapi::gles::set_internal_resolution(scale);
     }

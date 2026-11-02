@@ -151,6 +151,11 @@ fn flush_pixmap(ctx: &mut CallCtx<'_>, surface: u32) -> Result<(), KernelError> 
 }
 
 /// Host GPU pixel density. Guest geometry remains unchanged.
+/// Explicit legacy-driver compatibility, independent of CPU identity and game ID.
+pub fn set_intel2700g_depth_bias(enabled: bool) {
+    with_ctx(|c| c.state.intel2700g_depth_bias = enabled);
+}
+
 pub fn set_internal_resolution(scale: u8) {
     with_ctx(|c| c.set_internal_resolution(scale));
 }
@@ -1100,13 +1105,20 @@ fn gl_polygon_offset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 fn gl_polygon_offsetx(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let factor = ctx.arg_u32(0)? as i32 as f32 / 65536.;
-    let units = ctx.arg_u32(1)? as i32 as f32 / 65536.;
+    let units = ctx.arg_u32(1)? as i32;
     with_ctx(|c| {
         c.state.polygon_factor = factor;
-        c.state.polygon_units = units;
+        // Shift before float conversion: large fixed values just below an
+        // integer must not round across the original driver's integer step.
+        c.state.polygon_units = if c.state.intel2700g_depth_bias {
+            (units >> 16) as f32
+        } else {
+            units as f32 / 65536.
+        };
     });
     Ok(VOID)
 }
+
 fn gl_copy_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let target = ctx.arg_u32(0)?;
     let level = ctx.arg_u32(1)? as i32;
@@ -1375,7 +1387,7 @@ fn gl_capability(pname: u32) -> Option<Vec<f32>> {
         pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH
         | pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH
         | pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16.],
-        pocket_gles::GL_DEPTH_BITS => vec![16.],
+        pocket_gles::GL_DEPTH_BITS => vec![with_ctx(|c| c.state.depth_bits() as f32)],
         pocket_gles::GL_STENCIL_BITS | pocket_gles::GL_ALPHA_BITS => vec![0.],
         pocket_gles::GL_RED_BITS | pocket_gles::GL_BLUE_BITS => vec![5.],
         pocket_gles::GL_GREEN_BITS => vec![6.],
@@ -1761,7 +1773,7 @@ fn egl_get_config_attrib(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         EGL_GREEN_SIZE => 6,
         EGL_BLUE_SIZE => 5,
         EGL_ALPHA_SIZE => 0,
-        EGL_DEPTH_SIZE => 16,
+        EGL_DEPTH_SIZE => with_ctx(|c| c.state.depth_bits() as i32),
         pocket_gles::EGL_STENCIL_SIZE => 0,
         pocket_gles::EGL_SAMPLES | pocket_gles::EGL_SAMPLE_BUFFERS => 0,
         EGL_SURFACE_TYPE => {
@@ -4188,6 +4200,60 @@ mod tests {
             let cur = c.modelview.current();
             assert_eq!((cur[12], cur[13], cur[14]), (2.0, 3.0, 4.0));
         });
+    }
+
+    #[test]
+    fn intel2700g_profile_queries_and_session_reset_do_not_leak() {
+        let _g = guard();
+        reset_for_test(64, 64);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        set_intel2700g_depth_bias(true);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_polygon_offsetx,
+            &[0xfe000000, 0xfe000000],
+        );
+        with_ctx(|c| assert_eq!(c.state.polygon_offset_parameters(), (0., -512.)));
+        for (raw, expected) in [
+            (0x7fffffffu32, 32767.),
+            (0x8000ffff, -32768.),
+            (0xffffc000, -1.),
+        ] {
+            call(&mut cpu, &mut kernel, gl_polygon_offsetx, &[0x10000, raw]);
+            with_ctx(|c| assert_eq!(c.state.polygon_offset_parameters(), (0., expected)));
+        }
+
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_integerv,
+            &[pocket_gles::GL_DEPTH_BITS, SCRATCH],
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 24);
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_get_config_attrib,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, EGL_DEPTH_SIZE, SCRATCH],
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 24);
+        reset_for_test(64, 64);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_polygon_offsetx,
+            &[0xfe000000, 0xfe000000],
+        );
+        with_ctx(|c| assert_eq!(c.state.polygon_offset_parameters(), (-512., -512.)));
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_integerv,
+            &[pocket_gles::GL_DEPTH_BITS, SCRATCH],
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 16);
     }
 
     #[test]

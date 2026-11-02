@@ -486,6 +486,7 @@ fn run_process(
             .gpu_renderer
             .unwrap_or(launcher_config.gpu_renderer),
     );
+    emu.set_intel2700g_depth_bias(!is_gizmondo && launcher_config.pocketpc_intel2700g_depth_bias);
     emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
     emu.set_anisotropic_filtering(
         entry

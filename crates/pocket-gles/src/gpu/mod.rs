@@ -2180,7 +2180,13 @@ impl Renderer {
                     state.color_mask[3] as u8,
                 );
                 self.toggle(GL_POLYGON_OFFSET_FILL, state.polygon_offset);
-                (self.gl.PolygonOffset)(state.polygon_factor, state.polygon_units);
+                let (factor, mut units) = state.polygon_offset_parameters();
+                // Preserve the virtual 24-bit constant bias on ES2 hosts that
+                // only provide a 16-bit depth attachment.
+                if state.intel2700g_depth_bias && self.depth_format == 0x81a5 {
+                    units *= 65535. / 16777215.;
+                }
+                (self.gl.PolygonOffset)(factor, units);
                 self.pipeline = Some(state.clone());
             }
             let lighting = transforms.filter(|t| t.lighting.enabled);
@@ -4102,6 +4108,100 @@ mod tests {
             raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], far);
             let i = (16 * 32 + 16) * 4;
             assert_eq!(&cpu.color[i..i + 4], &native.color[i..i + 4], "es={es}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; Intel 2700G depth bias at both render scales"]
+    fn host_intel2700g_constant_bias_preserves_occlusion_and_coplanar_lighting() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+            } else {
+                Renderer::new(32, 32).unwrap()
+            };
+            for format in [0x81a5, 0x81a6] {
+                for scale in [1, 2] {
+                    gpu.depth_format = format;
+                    gpu.resize(16, 16).unwrap();
+                    gpu.resize(32, 32).unwrap();
+                    gpu.set_render_scale(scale).unwrap();
+                    let mut target = RenderTarget::new(32, 32);
+                    let mut state = PipelineState {
+                        viewport: (0, 0, 32, 32),
+                        depth_test: true,
+                        intel2700g_depth_bias: true,
+                        ..Default::default()
+                    };
+                    gpu.clear(
+                        32,
+                        32,
+                        &state,
+                        [0.; 4],
+                        1.,
+                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    )
+                    .unwrap();
+                    let foreground = triangle([0., 0., 1., 1.], -0.2);
+                    gpu.draw(
+                        &target,
+                        &state,
+                        GL_TRIANGLES,
+                        &foreground,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                    )
+                    .unwrap();
+                    let mut light = triangle([1., 0., 0., 1.], 0.3);
+                    light[0].pos[2] = 0.2;
+                    light[1].pos[2] = 0.4;
+                    state.polygon_offset = true;
+                    state.polygon_factor = -512.;
+                    state.polygon_units = -512.;
+                    state.blend = true;
+                    state.blend_src = BlendFactor::One;
+                    state.blend_dst = BlendFactor::One;
+                    gpu.draw(
+                        &target,
+                        &state,
+                        GL_TRIANGLES,
+                        &light,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                    )
+                    .unwrap();
+                    gpu.read(&mut target).unwrap();
+                    let pixel = (16 * 32 + 16) * 4;
+                    assert_eq!(
+                        &target.color[pixel..pixel + 4],
+                        &[0, 0, 255, 255],
+                        "es={es} format={format:x} scale={scale}"
+                    );
+                    // Bias remains active: an exactly coplanar light must pass
+                    // GL_LESS, rather than disappearing as when bias is disabled.
+                    let light = triangle([0., 1., 0., 1.], -0.2);
+                    state.blend = false;
+                    gpu.draw(
+                        &target,
+                        &state,
+                        GL_TRIANGLES,
+                        &light,
+                        &[],
+                        &HashMap::new(),
+                        [0; 4],
+                    )
+                    .unwrap();
+                    gpu.read(&mut target).unwrap();
+                    assert_eq!(
+                        &target.color[pixel..pixel + 4],
+                        &[0, 255, 0, 255],
+                        "coplanar es={es} format={format:x} scale={scale}"
+                    );
+                }
+            }
         }
     }
 

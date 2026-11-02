@@ -2311,6 +2311,11 @@ impl PocketLauncher {
                 ui.small("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.");
                 ui.end_row();
         });
+        ui.separator();
+        ui.heading("Graphics compatibility");
+        crate::controller_ui::checkbox(ui, &mut draft.pocketpc_intel2700g_depth_bias,
+            "Intel 2700G depth-bias compatibility");
+        ui.small("Use if projected lights or ground decals show through foreground objects. Reproduces the original WinCE driver's integer constant bias without its slope term, with 24-bit depth. Applies to PocketPC games on the next launch, in software and GPU modes.");
         } else {
         let library_root = self.library.root().display().to_string();
         ui.add_space(10.0);

@@ -231,6 +231,9 @@ pub struct PipelineState {
     pub polygon_offset: bool,
     pub polygon_factor: f32,
     pub polygon_units: f32,
+    /// Original Intel 2700G WinCE driver: integer constant bias, no slope term.
+    /// Opt-in driver compatibility; standard ES behavior is the default.
+    pub intel2700g_depth_bias: bool,
 }
 
 impl Default for PipelineState {
@@ -264,6 +267,27 @@ impl Default for PipelineState {
             polygon_offset: false,
             polygon_factor: 0.,
             polygon_units: 0.,
+            intel2700g_depth_bias: false,
+        }
+    }
+}
+
+impl PipelineState {
+    /// The reference WinCE CL driver ignores factor and arithmetic-shifts its
+    /// signed 16.16 units before encoding a sign + 16-bit magnitude register.
+    pub fn polygon_offset_parameters(&self) -> (f32, f32) {
+        if self.intel2700g_depth_bias {
+            (0., self.polygon_units.floor().clamp(-65535., 65535.))
+        } else {
+            (self.polygon_factor, self.polygon_units)
+        }
+    }
+
+    pub fn depth_bits(&self) -> u32 {
+        if self.intel2700g_depth_bias {
+            24
+        } else {
+            16
         }
     }
 }
@@ -678,7 +702,13 @@ fn raster_clipped(
         let dy = ((sv[1].x - sv[0].x) * (sv[2].z - sv[0].z)
             - (sv[2].x - sv[0].x) * (sv[1].z - sv[0].z))
             / area;
-        state.polygon_factor * dx.abs().max(dy.abs()) + state.polygon_units / 65535.
+        let (factor, units) = state.polygon_offset_parameters();
+        let resolution = if state.intel2700g_depth_bias {
+            16777215.
+        } else {
+            65535.
+        };
+        factor * dx.abs().max(dy.abs()) + units / resolution
     } else {
         0.
     };
@@ -1229,6 +1259,64 @@ mod tests {
             color,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn intel2700g_depth_bias_matches_original_driver_integer_vectors() {
+        let mut state = PipelineState::default();
+        assert!(!state.intel2700g_depth_bias);
+        state.polygon_factor = -512.;
+        state.polygon_units = -512.;
+        assert_eq!(state.polygon_offset_parameters(), (-512., -512.));
+        assert_eq!(state.depth_bits(), 16);
+        state.intel2700g_depth_bias = true;
+        assert_eq!(state.depth_bits(), 24);
+        // Observed by executing the original driver, including arithmetic
+        // shift of negative fractional 16.16 values (not truncation to zero).
+        for (factor, units, expected) in [
+            (-512., -512., -512.),
+            (0., -512., -512.),
+            (1., -512., -512.),
+            (256., -0.25, -1.),
+            (0., 1.5, 1.),
+            (0., -32768., -32768.),
+        ] {
+            state.polygon_factor = factor;
+            state.polygon_units = units;
+            assert_eq!(state.polygon_offset_parameters(), (0., expected));
+        }
+        state.intel2700g_depth_bias = false;
+        assert_eq!(state.polygon_offset_parameters(), (0., -32768.));
+    }
+
+    #[test]
+    fn intel2700g_constant_bias_keeps_projected_light_behind_foreground() {
+        fn scene(legacy: bool) -> [u8; 4] {
+            let mut target = RenderTarget::new(32, 32);
+            let mut state = PipelineState {
+                viewport: (0, 0, 32, 32),
+                depth_test: true,
+                intel2700g_depth_bias: legacy,
+                ..Default::default()
+            };
+            let foreground = [(-0.9, -0.9), (0.9, -0.9), (0., 0.9)]
+                .map(|(x, y)| primitive_vertex(x, y, -0.2, [0., 0., 1., 1.]));
+            draw_triangle(&mut target, &state, &|_, _, _| None, &[], foreground);
+            let light = [(-0.9, -0.9, 0.2), (0.9, -0.9, 0.4), (0., 0.9, 0.3)]
+                .map(|(x, y, z)| primitive_vertex(x, y, z, [1., 0., 0., 1.]));
+            state.polygon_offset = true;
+            state.polygon_factor = -512.;
+            state.polygon_units = -512.;
+            state.blend = true;
+            state.blend_src = BlendFactor::One;
+            state.blend_dst = BlendFactor::One;
+            draw_triangle(&mut target, &state, &|_, _, _| None, &[], light);
+            target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4]
+                .try_into()
+                .unwrap()
+        }
+        assert_eq!(scene(true), [0, 0, 255, 255]);
+        assert_eq!(scene(false), [255, 0, 255, 255]);
     }
 
     #[test]
