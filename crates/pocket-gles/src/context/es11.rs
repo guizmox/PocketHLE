@@ -16,6 +16,7 @@ pub(super) struct Es11State {
     pub attenuation: [f32; 3],
     pub pretransform: bool,
     pub point_draw: bool,
+    pub point_primitive: bool,
     pub texture_objects: HashSet<u32>,
     pub buffer_objects: HashSet<u32>,
     pub extra_enables: HashSet<u32>,
@@ -59,6 +60,7 @@ impl Default for Es11State {
             attenuation: [1., 0., 0.],
             pretransform: false,
             point_draw: false,
+            point_primitive: false,
             texture_objects: HashSet::new(),
             buffer_objects: HashSet::new(),
             extra_enables: [0x809d].into_iter().collect(),
@@ -181,6 +183,8 @@ impl Context {
     pub fn is_enabled(&mut self, cap: u32) -> Option<bool> {
         let result = match cap {
             GL_DEPTH_TEST => self.state.depth_test,
+            GL_POINT_SPRITE_OES => self.state.point_sprite,
+            GL_POINT_SIZE_ARRAY_OES => self.point_size_array.enabled,
             GL_ALPHA_TEST => self.state.alpha_test,
             GL_BLEND => self.state.blend,
             GL_COLOR_LOGIC_OP => self.state.logic_op,
@@ -218,6 +222,7 @@ impl Context {
     pub fn get_pointer(&mut self, pname: u32) -> Option<u32> {
         Some(match pname {
             0x808e => self.vertex_array.pointer,
+            GL_POINT_SIZE_ARRAY_POINTER_OES => self.point_size_array.pointer,
             0x808f => self.normal_array.pointer,
             0x8090 => self.color_array.pointer,
             0x8092 => {
@@ -301,6 +306,11 @@ impl Context {
         }))
     }
     pub fn get_tex_env(&mut self, target: u32, pname: u32) -> Option<StateValue> {
+        if target == GL_POINT_SPRITE_OES && pname == GL_COORD_REPLACE_OES {
+            return Some(number([u8::from(
+                self.state.point_coord_replace[self.active_texture as usize],
+            ) as f32]));
+        }
         if target == 0x8500 && pname == 0x8501 {
             return Some(number([
                 self.texture_units[self.active_texture as usize].lod_bias
@@ -411,6 +421,11 @@ impl Context {
             BlendFactor::SrcAlphaSaturate => 0x308,
         };
         let v = match pname {
+            GL_POINT_SIZE_ARRAY_TYPE_OES => enumeration(self.point_size_array.ty),
+            GL_POINT_SIZE_ARRAY_STRIDE_OES => number([self.point_size_array.stride as f32]),
+            GL_POINT_SIZE_ARRAY_BUFFER_BINDING_OES => {
+                StateValue::Number(vec![self.point_size_array.buffer as f64])
+            }
             0x0b74 => enumeration(self.state.depth_func as u32 + 0x200),
             0x0bc1 => enumeration(self.state.alpha_func as u32 + 0x200),
             0x0bc2 => number([self.state.alpha_ref]),
@@ -526,6 +541,9 @@ impl Context {
             .collect()
     }
     pub(super) fn derived_point_size(&self, eye: [f32; 4]) -> f32 {
+        self.derived_point_size_from(eye, self.state.point_size)
+    }
+    pub(super) fn derived_point_size_from(&self, eye: [f32; 4], size: f32) -> f32 {
         let w = if eye[3] != 0. { eye[3] } else { 1. };
         let d = eye[..3]
             .iter()
@@ -533,7 +551,7 @@ impl Context {
             .sum::<f32>()
             .sqrt();
         let [a, b, c] = self.es11.attenuation;
-        let raw = self.state.point_size / (a + b * d + c * d * d).sqrt();
+        let raw = size / (a + b * d + c * d * d).sqrt();
         raw.max(self.es11.point_min).min(self.es11.point_max)
     }
 }

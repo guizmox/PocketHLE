@@ -229,6 +229,9 @@ pub struct PipelineState {
     pub smooth_shading: bool,
     pub two_sided_lighting: bool,
     pub point_size: f32,
+    pub point_size_array: bool,
+    pub point_sprite: bool,
+    pub point_coord_replace: [bool; 4],
     pub line_width: f32,
     pub polygon_offset: bool,
     pub polygon_factor: f32,
@@ -267,6 +270,9 @@ impl Default for PipelineState {
             smooth_shading: true,
             two_sided_lighting: false,
             point_size: 1.0,
+            point_size_array: false,
+            point_sprite: false,
+            point_coord_replace: [false; 4],
             line_width: 1.0,
             polygon_offset: false,
             polygon_factor: 0.,
@@ -1056,6 +1062,7 @@ fn primitive_fragment(
     z: f32,
     v: &Vertex,
     gradients: &[[f32; 4]; MAX_TEXTURE_STAGES],
+    sprite: Option<([f32; 2], f32)>,
 ) -> bool {
     let idx = y as usize * target.width as usize + x as usize;
     if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
@@ -1063,12 +1070,20 @@ fn primitive_fragment(
     }
     let mut color = v.color;
     for stage in stages {
-        let uv = v.texcoord[stage.unit];
+        let (uv, gradient) = if state.point_coord_replace[stage.unit] {
+            if let Some((uv, inv_size)) = sprite {
+                ([uv[0], uv[1], 0., 1.], [inv_size, 0., 0., inv_size])
+            } else {
+                (v.texcoord[stage.unit], gradients[stage.unit])
+            }
+        } else {
+            (v.texcoord[stage.unit], gradients[stage.unit])
+        };
         if let Some(texel) = sample.sample_grad(
             stage.unit,
             if uv[3] != 0. { uv[0] / uv[3] } else { 0. },
             if uv[3] != 0. { uv[1] / uv[3] } else { 0. },
-            gradients[stage.unit],
+            gradient,
             stage.lod_bias,
         ) {
             color = apply_tex_env(stage, color, texel.map(to_unit), v.color);
@@ -1124,10 +1139,18 @@ pub fn draw_point(
             p.floor() + 0.5
         }
     };
-    let left = (center(pos[0]) - f64::from(size) / 2.) as i32;
-    let top = (f64::from(target.height)
-        - center(f64::from(target.height) - pos[1])
-        - f64::from(size) / 2.) as i32;
+    let left = if state.point_sprite {
+        (pos[0] - f64::from(size) / 2. - 0.5).ceil() as i32
+    } else {
+        (center(pos[0]) - f64::from(size) / 2.) as i32
+    };
+    let top = if state.point_sprite {
+        (pos[1] - f64::from(size) / 2. - 0.5).ceil() as i32
+    } else {
+        (f64::from(target.height)
+            - center(f64::from(target.height) - pos[1])
+            - f64::from(size) / 2.) as i32
+    };
     let mut written = 0;
     for y in top.max(y0)..top.saturating_add(size).min(y1) {
         for x in left.max(x0)..left.saturating_add(size).min(x1) {
@@ -1141,6 +1164,17 @@ pub fn draw_point(
                 pos[2] as f32,
                 &v,
                 &[[0.; 4]; MAX_TEXTURE_STAGES],
+                if state.point_sprite {
+                    Some((
+                        [
+                            (0.5 + (f64::from(x) + 0.5 - pos[0]) / f64::from(size)) as f32,
+                            (0.5 + (f64::from(y) + 0.5 - pos[1]) / f64::from(size)) as f32,
+                        ],
+                        1. / size as f32,
+                    ))
+                } else {
+                    None
+                },
             ) as usize;
         }
     }
@@ -1287,9 +1321,9 @@ pub fn draw_line(
                     }
                 }
                 let z = a[2] + f64::from(t) * (b[2] - a[2]);
-                written +=
-                    primitive_fragment(target, state, sample, stages, x, y, z as f32, &v, &grad)
-                        as usize;
+                written += primitive_fragment(
+                    target, state, sample, stages, x, y, z as f32, &v, &grad, None,
+                ) as usize;
             }
         }
     }
@@ -2683,5 +2717,87 @@ mod projective_coordinate_tests {
             assert_eq!(images[0], images[1]);
             assert_eq!(images[0], images[2]);
         }
+    }
+}
+
+#[cfg(test)]
+mod sprite_formula_tests {
+    use super::*;
+    use std::cell::RefCell;
+    struct Capture(RefCell<Vec<[f32; 4]>>);
+    impl TextureSampler for Capture {
+        fn sample(&self, _: usize, s: f32, t: f32) -> Option<[u8; 4]> {
+            Some([to_byte(s), to_byte(t), 0, 255])
+        }
+        fn needs_gradients(&self) -> bool {
+            true
+        }
+        fn sample_grad(
+            &self,
+            unit: usize,
+            s: f32,
+            t: f32,
+            gradient: [f32; 4],
+            _: f32,
+        ) -> Option<[u8; 4]> {
+            self.0.borrow_mut().push(gradient);
+            self.sample(unit, s, t)
+        }
+    }
+    #[test]
+    fn sprite_uses_unrounded_center_fixed_origin_and_unclipped_gradients() {
+        let mut target = RenderTarget::new(16, 16);
+        let mut state = PipelineState {
+            viewport: (0, 0, 16, 16),
+            point_sprite: true,
+            point_coord_replace: [true; 4],
+            point_size: 4.,
+            ..Default::default()
+        };
+        let stages = [TextureStage {
+            unit: 0,
+            env: TexEnvMode::Replace,
+            env_color: [0.; 4],
+            lod_bias: 0.,
+        }];
+        let samples = Capture(RefCell::new(Vec::new()));
+        let mut point = Vertex {
+            pos: [0.03125, 0.03125, 0., 1.],
+            ..Default::default()
+        };
+        assert_eq!(
+            draw_point(&mut target, &state, &samples, &stages, point),
+            16
+        );
+        for (x, y, color) in [
+            (6, 6, [16, 48, 0, 255]),
+            (9, 6, [207, 48, 0, 255]),
+            (6, 9, [16, 239, 0, 255]),
+            (9, 9, [207, 239, 0, 255]),
+        ] {
+            let i = (y * 16 + x) * 4;
+            assert_eq!(&target.color[i..i + 4], &color);
+        }
+        assert!(samples
+            .0
+            .borrow()
+            .iter()
+            .all(|g| *g == [0.25, 0., 0., 0.25]));
+        target.clear_color([0; 4], None);
+        point.pos = [-0.96875, 0.96875, 0., 1.];
+        state.scissor = Some((0, 15, 1, 1));
+        assert_eq!(draw_point(&mut target, &state, &samples, &stages, point), 1);
+        assert_eq!(
+            &target.color[..4],
+            &[143, 143, 0, 255],
+            "clipping must not stretch the visible part"
+        );
+        target.clear_color([0; 4], None);
+        point.pos[0] = -1.01;
+        assert_eq!(
+            draw_point(&mut target, &state, &samples, &stages, point),
+            0,
+            "clip the point center before expanding its square"
+        );
     }
 }

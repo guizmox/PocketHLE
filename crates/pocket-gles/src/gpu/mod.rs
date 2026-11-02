@@ -148,6 +148,7 @@ struct VertexLayout {
     attributes: [Option<(i32, usize)>; 8],
     floats: usize,
     prelit: bool,
+    point_sizes: bool,
 }
 impl VertexLayout {
     fn new(
@@ -168,6 +169,7 @@ impl VertexLayout {
             attributes: [None; 8],
             floats: 8,
             prelit: transforms.is_none(),
+            point_sizes: false,
         };
         layout.attributes[0] = Some((4, 0));
         layout.attributes[1] = Some((4, 4));
@@ -189,6 +191,15 @@ impl VertexLayout {
             }
         }
         layout
+    }
+    fn with_point_sizes(mut self) -> Self {
+        if self.attributes[7].is_some_and(|(_, offset)| offset != 0) {
+            self.floats -= 4;
+        }
+        self.attributes[7] = Some((1, self.floats));
+        self.floats += 1;
+        self.point_sizes = true;
+        self
     }
     fn pack(&self, out: &mut Vec<f32>, vertex: Vertex, provoking: Vertex, smooth: bool) {
         out.extend(vertex.pos);
@@ -215,7 +226,9 @@ impl VertexLayout {
             });
             out.push(vertex.fog_depth);
         }
-        if self.attributes[7].is_some_and(|(_, offset)| offset != 0) {
+        if self.point_sizes {
+            out.push(vertex.point_width);
+        } else if self.attributes[7].is_some_and(|(_, offset)| offset != 0) {
             out.extend(provoking.pos);
         }
     }
@@ -1222,6 +1235,8 @@ pub struct Renderer {
     vertex_keys: HashMap<[u32; 32], u16>,
     uniform_values: HashMap<i32, Vec<u32>>,
     pipeline: Option<PipelineState>,
+    point_sprite_mode: bool,
+    point_drawing: bool,
     texture_params: HashMap<u32, (Filter, Filter, Wrap, Wrap)>,
     texture_anisotropy: HashMap<u32, u8>,
     anisotropy: u8,
@@ -1387,6 +1402,8 @@ impl Renderer {
                 vertex_keys: HashMap::new(),
                 uniform_values: HashMap::new(),
                 pipeline: None,
+                point_sprite_mode: false,
+                point_drawing: false,
                 texture_params: HashMap::new(),
                 texture_anisotropy: HashMap::new(),
                 anisotropy: 1,
@@ -1541,6 +1558,9 @@ impl Renderer {
                 "textureMatrix3",
                 "depthRange",
                 "pointSize",
+                "pointArray",
+                "pointArrayParams",
+                "pointReplace",
                 "logicMode",
                 "logicDestination",
                 "logicSize",
@@ -1724,6 +1744,16 @@ impl Renderer {
             }
         }
         Ok(())
+    }
+
+    /// Logical point limits must fit the native target even at internal 2x.
+    pub fn logical_point_range(&self) -> [f32; 2] {
+        [
+            1.,
+            (self.point_range[1] / self.render_scale as f32)
+                .floor()
+                .max(1.),
+        ]
     }
 
     /// Policy 1=native, 2=double all, 3=double QVGA only. Guest sizes stay logical.
@@ -2100,10 +2130,16 @@ impl Renderer {
         } else {
             0
         };
+        let point_sizes = mode == GL_POINTS && state.point_size_array && transforms.is_some();
         let layout = if mask == 0 {
             VertexLayout::new(state, stages, transforms)
         } else {
             VertexLayout::with_projective_mask(state, stages, transforms, mask)
+        };
+        let layout = if point_sizes {
+            layout.with_point_sizes()
+        } else {
+            layout
         };
         let flat_direct = !state.logic_op
             && direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
@@ -2221,10 +2257,42 @@ impl Renderer {
         unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.UseProgram)(self.program);
+            let sprite = mode == GL_POINTS && state.point_sprite;
+            if mode == GL_POINTS || self.point_drawing {
+                if !self.host.es && self.point_sprite_mode != sprite {
+                    self.toggle(0x8861, sprite);
+                    self.point_sprite_mode = sprite;
+                }
+                self.uniform_1i(self.loc("pointArray"), i32::from(point_sizes));
+                let point_params = [
+                    self.render_scale as f32,
+                    self.point_range[0],
+                    self.logical_point_range()[1] * self.render_scale as f32,
+                    if sprite { 1. } else { 0. },
+                ];
+                self.uniform_4fv(self.loc("pointArrayParams"), 1, point_params.as_ptr());
+                let replacements =
+                    state
+                        .point_coord_replace
+                        .map(|enabled| if sprite && enabled { 1. } else { 0. });
+                self.uniform_4fv(self.loc("pointReplace"), 1, replacements.as_ptr());
+            }
+            self.point_drawing = mode == GL_POINTS;
             self.uniform_1f(
                 self.loc("pointSize"),
-                (state.point_size * self.render_scale as f32)
-                    .clamp(self.point_range[0], self.point_range[1]),
+                ((if sprite {
+                    state.point_size.round()
+                } else {
+                    state.point_size
+                }) * self.render_scale as f32)
+                    .clamp(
+                        self.point_range[0],
+                        if mode == GL_POINTS {
+                            self.logical_point_range()[1] * self.render_scale as f32
+                        } else {
+                            self.point_range[1]
+                        },
+                    ),
             );
             if self.pipeline.as_ref() != Some(state) {
                 (self.gl.LineWidth)(
@@ -2948,7 +3016,7 @@ VARYING vec4 vColor,vBackColor;VARYING vec4 uv0,uv1,uv2,uv3;VARYING float vFog;u
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
 uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
 uniform mat4 normalMatrix;
-uniform float normalRescale,shininess,pointSize;
+uniform float normalRescale,shininess,pointSize;uniform int pointArray;uniform vec4 pointArrayParams;
 uniform vec4 modelAmbient,materialAmbient,materialDiffuse,materialSpecular,materialEmission;
 uniform vec4 lightAmbient[8],lightDiffuse[8],lightSpecular[8],lightPositions[8],lightSpot[8],lightAttenuation[8];
 vec3 unit(vec3 v){float l=length(v);return l>0.0?v/l:vec3(0.0);}
@@ -2972,6 +3040,7 @@ vec4 illuminate(vec3 n,vec3 point){
 }
 void main(){
  gl_PointSize=pointSize;
+ if(pointArray!=0){float size=lightPosition.x;if(pointArrayParams.w>0.5)size=floor(size+0.5);gl_PointSize=clamp(size*pointArrayParams.x,pointArrayParams.y,pointArrayParams.z);}
  vec4 eye=modelviewMatrix*position;
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
@@ -2980,7 +3049,7 @@ void main(){
  if(lightingEnabled!=0){
   vec3 n=(normalMatrix*vec4(normalAndFog.xyz,0.0)).xyz;
   if(normalMode==1){n=unit(n);}else if(normalMode==2){n*=normalRescale;}
-  vec4 lightEye=modelviewMatrix*lightPosition;
+  vec4 lightEye=modelviewMatrix*(pointArray!=0?position:lightPosition);
   vec3 point=lightEye.w==0.0?lightEye.xyz:lightEye.xyz/lightEye.w;
   vColor=illuminate(n,point);vBackColor=twoSided!=0?illuminate(-n,point):vColor;
  }
@@ -3011,7 +3080,7 @@ vec4 logicalColor(vec4 source,vec4 destination){
 }
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
-uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
+uniform vec4 pointReplace;uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 uniform vec4 combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0;
 uniform vec4 combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1;
 uniform vec4 combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2;
@@ -3030,6 +3099,7 @@ vec4 combineStage(vec4 previous,vec4 t,vec4 k,vec4 primary,vec4 ops,vec4 rs,vec4
 }
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
 vec2 project(vec4 uv){return uv.w==0.0?vec2(0.0):uv.xy/uv.w;}
+vec2 pointCoordinate(vec4 uv,float replace){return replace>0.5?gl_PointCoord:project(uv);}
 float limitedBias(vec2 uv,float bias,vec4 limit){
 #ifdef LOD_DERIVATIVES
  if(limit.w>0.5){
@@ -3041,7 +3111,7 @@ float limitedBias(vec2 uv,float bias,vec4 limit){
 #endif
  return bias;
 }
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=texture2D(sampler0,project(uv0),limitedBias(project(uv0),lodBias0,lodLimit0));if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=texture2D(sampler1,project(uv1),limitedBias(project(uv1),lodBias1,lodLimit1));if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=texture2D(sampler2,project(uv2),limitedBias(project(uv2),lodBias2,lodLimit2));if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=texture2D(sampler3,project(uv3),limitedBias(project(uv3),lodBias3,lodLimit3));if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=texture2D(sampler0,pointCoordinate(uv0,pointReplace.x),limitedBias(pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0));if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=texture2D(sampler1,pointCoordinate(uv1,pointReplace.y),limitedBias(pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1));if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=texture2D(sampler2,pointCoordinate(uv2,pointReplace.z),limitedBias(pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2));if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=texture2D(sampler3,pointCoordinate(uv3,pointReplace.w),limitedBias(pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3));if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the

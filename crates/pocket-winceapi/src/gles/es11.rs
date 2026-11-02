@@ -351,6 +351,10 @@ pub(super) fn env_iv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 
 pub(super) fn valid_env_target(target: u32, pname: u32) -> bool {
+    if target == pocket_gles::GL_POINT_SPRITE_OES || pname == pocket_gles::GL_COORD_REPLACE_OES {
+        return target == pocket_gles::GL_POINT_SPRITE_OES
+            && pname == pocket_gles::GL_COORD_REPLACE_OES;
+    }
     if pname == 0x8501 {
         target == 0x8500
     } else {

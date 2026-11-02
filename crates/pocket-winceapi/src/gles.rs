@@ -1239,6 +1239,10 @@ fn gl_tex_envf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
         return Ok(VOID);
     }
+    if pname == pocket_gles::GL_COORD_REPLACE_OES && ![0., 1.].contains(&value) {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
     with_ctx(|c| {
         if pname == pocket_gles::GL_TEXTURE_LOD_BIAS_EXT {
             c.set_lod_bias(value)
@@ -1293,6 +1297,19 @@ fn tex_env_vector(
         let Ok(word) = ctx.cpu.read_u32_le(ptr) else {
             return Ok(VOID);
         };
+        if pname == pocket_gles::GL_COORD_REPLACE_OES {
+            let value = if std::ptr::fn_addr_eq(decode, word_to_f32 as fn(u32) -> f32) {
+                word as f32
+            } else {
+                decode(word)
+            };
+            if ![0., 1.].contains(&value) {
+                with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+                return Ok(VOID);
+            }
+            with_ctx(|c| c.tex_env(pname, value as u32));
+            return Ok(VOID);
+        }
         if matches!(pname, 0x8573 | 0x0d1c) {
             let v = decode(word);
             if ![1., 2., 4.].contains(&v) {
@@ -1424,7 +1441,7 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         }),
         pocket_gles::GL_VERSION => "OpenGL ES-CL 1.1",
         pocket_gles::GL_EXTENSIONS => {
-            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix"
+            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_s3tc GL_EXT_texture_compression_dxt1 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
         }
         _ => {
             with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
@@ -1607,6 +1624,14 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
         ctx.cpu.read_mem(data, size).unwrap_or_default()
     };
     with_ctx(|c| c.compressed_tex_image_2d(target, level, width, height, format, &bytes));
+    Ok(VOID)
+}
+
+fn gl_point_size_pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let ty = ctx.arg_u32(0)?;
+    let stride = ctx.arg_u32(1)?;
+    let pointer = ctx.arg_u32(2)?;
+    with_ctx(|c| c.set_point_size_pointer(ty, stride, pointer));
     Ok(VOID)
 }
 
@@ -2499,7 +2524,8 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         | "glWeightPointerOES"
         | "glCurrentPaletteMatrixOES"
         | "glLoadPaletteFromModelViewMatrixOES"
-        | "glPointSizePointerOES" => gl_ignored,
+        => gl_ignored,
+        "glPointSizePointerOES" => gl_point_size_pointer,
 
         "glLightf" => gl_lightf,
         "glLightfv" => gl_lightfv,
@@ -2938,6 +2964,180 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn point_array_api_validates_and_exposes_captured_binding() {
+        let _g = guard();
+        reset_for_test(32, 32);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        assert!(handler_for("glPointSizePointerOES").is_some());
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_bind_buffer,
+            &[pocket_gles::GL_ARRAY_BUFFER, 9],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_point_size_pointer,
+            &[pocket_gles::GL_FIXED, 8, 16],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_bind_buffer,
+            &[pocket_gles::GL_ARRAY_BUFFER, 0],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_enable_client_state,
+            &[pocket_gles::GL_POINT_SIZE_ARRAY_OES],
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                es11::is_enabled,
+                &[pocket_gles::GL_POINT_SIZE_ARRAY_OES]
+            ),
+            1
+        );
+        for (pname, value) in [
+            (
+                pocket_gles::GL_POINT_SIZE_ARRAY_TYPE_OES,
+                pocket_gles::GL_FIXED,
+            ),
+            (pocket_gles::GL_POINT_SIZE_ARRAY_STRIDE_OES, 8),
+            (pocket_gles::GL_POINT_SIZE_ARRAY_BUFFER_BINDING_OES, 9),
+        ] {
+            call(&mut cpu, &mut kernel, gl_get_integerv, &[pname, SCRATCH]);
+            assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), value);
+        }
+        call(
+            &mut cpu,
+            &mut kernel,
+            es11::get_pointer,
+            &[pocket_gles::GL_POINT_SIZE_ARRAY_POINTER_OES, SCRATCH],
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 16);
+        let before = with_ctx(|c| c.point_size_array);
+        for (ty, stride, error) in [
+            (
+                pocket_gles::GL_UNSIGNED_BYTE,
+                0,
+                pocket_gles::GL_INVALID_ENUM,
+            ),
+            (
+                pocket_gles::GL_FLOAT,
+                u32::MAX,
+                pocket_gles::GL_INVALID_VALUE,
+            ),
+        ] {
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_point_size_pointer,
+                &[ty, stride, 0],
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), error);
+            assert_eq!(with_ctx(|c| c.point_size_array), before);
+        }
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_NO_ERROR
+        );
+    }
+
+    #[test]
+    fn sprite_boolean_setters_queries_are_per_unit_and_reset_between_sessions() {
+        let _g = guard();
+        reset_for_test(32, 32);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let target = pocket_gles::GL_POINT_SPRITE_OES;
+        let pname = pocket_gles::GL_COORD_REPLACE_OES;
+        call(&mut cpu, &mut kernel, gl_enable, &[target]);
+        assert_eq!(call(&mut cpu, &mut kernel, es11::is_enabled, &[target]), 1);
+        for (setter, vector, floating) in [
+            (gl_tex_envf as crate::Handler, false, true),
+            (gl_tex_envx, false, false),
+            (es11::env_i, false, false),
+            (gl_tex_envfv, true, true),
+            (gl_tex_envxv, true, false),
+            (es11::env_iv, true, false),
+        ] {
+            for enabled in [0, 1] {
+                let word = if floating {
+                    (enabled as f32).to_bits()
+                } else {
+                    enabled
+                };
+                cpu.write_mem(SCRATCH, &word.to_le_bytes()).unwrap();
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    setter,
+                    &[target, pname, if vector { SCRATCH } else { word }],
+                );
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    es11::get_env_i,
+                    &[target, pname, SCRATCH + 32],
+                );
+                assert_eq!(cpu.read_u32_le(SCRATCH + 32).unwrap(), enabled);
+                assert_eq!(
+                    call(&mut cpu, &mut kernel, gl_get_error, &[]),
+                    pocket_gles::GL_NO_ERROR
+                );
+            }
+        }
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_active_texture,
+            &[pocket_gles::GL_TEXTURE0 + 3],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            es11::get_env_i,
+            &[target, pname, SCRATCH],
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 0);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_envf,
+            &[target, pname, 0.5f32.to_bits()],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_VALUE
+        );
+        call(&mut cpu, &mut kernel, gl_tex_envx, &[target, pname, 2]);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_VALUE
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_envf,
+            &[pocket_gles::GL_TEXTURE_ENV, pname, 1f32.to_bits()],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_ENUM
+        );
+        reset_for_session();
+        assert!(!with_ctx(|c| c.state.point_sprite));
+        assert!(!with_ctx(|c| c.point_size_array.enabled));
+        assert_eq!(with_ctx(|c| c.state.point_coord_replace), [false; 4]);
+    }
 
     #[test]
     fn clear_color_is_clamped_in_state_and_invalid_masks_do_not_clear() {

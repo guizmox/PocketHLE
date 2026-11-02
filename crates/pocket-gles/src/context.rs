@@ -311,6 +311,7 @@ pub struct Context {
 
     // ---- client arrays ----
     pub vertex_array: ArrayPointer,
+    pub point_size_array: ArrayPointer,
     pub color_array: ArrayPointer,
     /// Texture coordinate arrays live on [`TextureUnitState`], one per
     /// unit — there is deliberately no unit-0 copy here, because a stale
@@ -401,6 +402,10 @@ impl Context {
             current_normal: [0.0, 0.0, 1.0],
             lighting: Default::default(),
             vertex_array: ArrayPointer::default(),
+            point_size_array: ArrayPointer {
+                size: 1,
+                ..Default::default()
+            },
             color_array: ArrayPointer::default(),
             normal_array: ArrayPointer::default(),
             client_active_texture: 0,
@@ -444,6 +449,8 @@ impl Context {
             gpu.set_anisotropic_filtering(self.anisotropic_filtering);
             if let Err(e) = gpu.set_render_scale(self.internal_resolution) {
                 self.gpu_failure("surface resolution", e);
+            } else if !self.es11.point_max_changed {
+                self.es11.point_max = gpu.logical_point_range()[1];
             }
         }
         if self.gpu_requested && self.gpu.is_none() {
@@ -474,6 +481,8 @@ impl Context {
         if let Some(gpu) = self.gpu.as_mut() {
             if let Err(e) = gpu.set_render_scale(self.internal_resolution) {
                 self.gpu_failure("internal resolution", e);
+            } else if !self.es11.point_max_changed {
+                self.es11.point_max = gpu.logical_point_range()[1];
             }
         }
     }
@@ -494,7 +503,7 @@ impl Context {
             gpu.set_surface_rgb565(self.target.rgb565)?;
             gpu.set_render_scale(self.internal_resolution)?;
             if !self.es11.point_max_changed {
-                self.es11.point_max = gpu.point_range[1];
+                self.es11.point_max = gpu.logical_point_range()[1];
             }
             self.gpu = Some(gpu);
         }
@@ -675,6 +684,7 @@ impl Context {
     pub fn set_capability(&mut self, cap: u32, on: bool) {
         match cap {
             GL_DEPTH_TEST => self.state.depth_test = on,
+            GL_POINT_SPRITE_OES => self.state.point_sprite = on,
             GL_ALPHA_TEST => self.state.alpha_test = on,
             GL_BLEND => self.state.blend = on,
             GL_COLOR_LOGIC_OP => self.state.logic_op = on,
@@ -731,6 +741,10 @@ impl Context {
                 self.texture_units[unit].texcoord_array.enabled = on;
             }
             GL_NORMAL_ARRAY => self.normal_array.enabled = on,
+            GL_POINT_SIZE_ARRAY_OES => {
+                self.point_size_array.enabled = on;
+                self.state.point_size_array = on;
+            }
             _ => self.set_error(GL_INVALID_ENUM),
         }
     }
@@ -832,6 +846,9 @@ impl Context {
             }
             self.es11.buffer_objects.remove(&name);
             self.buffers.remove(&name);
+            if self.point_size_array.buffer == name {
+                self.point_size_array.buffer = 0;
+            }
             if self.array_buffer == name {
                 self.array_buffer = 0;
             }
@@ -921,8 +938,27 @@ impl Context {
         self.client_active_texture = unit;
     }
 
-    /// `glVertexPointer`. The enable flag is owned by
-    /// `glEnableClientState` and must survive a pointer change.
+    /// OES_point_size_array captures the ARRAY_BUFFER binding at specification time.
+    pub fn set_point_size_pointer(&mut self, ty: u32, stride: u32, pointer: u32) {
+        if !matches!(ty, GL_FLOAT | GL_FIXED) {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
+        if (stride as i32) < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        self.point_size_array = ArrayPointer {
+            enabled: self.point_size_array.enabled,
+            size: 1,
+            ty,
+            stride,
+            pointer,
+            buffer: self.array_buffer,
+        };
+    }
+
+    /// `glVertexPointer` preserves the enable flag owned by `glEnableClientState`.
     pub fn set_vertex_pointer(&mut self, size: u32, ty: u32, stride: u32, pointer: u32) {
         self.vertex_array = ArrayPointer {
             enabled: self.vertex_array.enabled,
@@ -1654,6 +1690,14 @@ impl Context {
     }
 
     pub fn tex_env(&mut self, pname: u32, value: u32) {
+        if pname == GL_COORD_REPLACE_OES {
+            if value > 1 {
+                self.set_error(GL_INVALID_VALUE);
+                return;
+            }
+            self.state.point_coord_replace[self.active_texture as usize] = value != 0;
+            return;
+        }
         if pname != GL_TEXTURE_ENV_MODE {
             let unit = self.active_texture as usize;
             match self.es11.combiners[unit].set(pname, value) {
@@ -1723,10 +1767,13 @@ impl Context {
         self.gpu.as_ref().map_or(4, |g| g.subpixel_bits)
     }
     pub fn primitive_size_range(&self, point: bool) -> [f32; 2] {
-        self.gpu.as_ref().map_or(
-            [1., 64.],
-            |g| if point { g.point_range } else { g.line_range },
-        )
+        self.gpu.as_ref().map_or([1., 64.], |g| {
+            if point {
+                g.logical_point_range()
+            } else {
+                g.line_range
+            }
+        })
     }
 
     pub fn set_depth_func(&mut self, func: u32) {
@@ -2111,12 +2158,21 @@ impl Context {
             } else {
                 (color, color)
             };
+        let array_size = if self.es11.point_primitive && self.point_size_array.enabled {
+            Some(self.fetch(mem, self.point_size_array, index, false)?[0])
+        } else {
+            None
+        };
         Some(Vertex {
             eye,
             point_width: if self.es11.point_draw {
-                self.derived_point_size(eye)
+                if let Some(size) = array_size {
+                    self.derived_point_size_from(eye, size)
+                } else {
+                    self.derived_point_size(eye)
+                }
             } else {
-                -1.
+                array_size.unwrap_or(-1.)
             },
             normal,
             back_color,
@@ -2309,6 +2365,7 @@ impl Context {
         count: usize,
         sequential: bool,
         stages: &[raster::TextureStage],
+        point_sizes: bool,
     ) -> bool {
         stream.flat_triangles = false;
         stream.bytes.clear();
@@ -2407,6 +2464,18 @@ impl Context {
                 }
                 stream.attributes[7] = stream.attributes[0];
             }
+            if point_sizes {
+                self.stream_array(
+                    stream,
+                    7,
+                    self.point_size_array,
+                    lo,
+                    stream.count,
+                    false,
+                    1,
+                    native_fixed,
+                )?;
+            }
             Some(())
         })()
         .is_some();
@@ -2428,8 +2497,10 @@ impl Context {
         if self.gpu_failed {
             return;
         }
+        self.es11.point_primitive = mode == GL_POINTS;
         self.es11.point_draw = mode == GL_POINTS
-            && (self.es11.attenuation != [1., 0., 0.]
+            && ((self.point_size_array.enabled && self.gpu.is_none())
+                || self.es11.attenuation != [1., 0., 0.]
                 || self.es11.point_min != 0.
                 || self.es11.point_max != self.primitive_size_range(true)[1]);
         self.es11.pretransform = self.es11.clip_enabled.iter().any(|v| *v) || self.es11.point_draw;
@@ -2455,7 +2526,7 @@ impl Context {
         let stages = &stage_storage[..stage_count];
         self.recycle_prepared_arrays();
         if let (Some(lo), Some(hi)) = (indices.clone().min(), indices.clone().max()) {
-            let mut arrays = [ArrayPointer::default(); MAX_TEXTURE_UNITS + 3];
+            let mut arrays = [ArrayPointer::default(); MAX_TEXTURE_UNITS + 4];
             arrays[0] = self.vertex_array;
             let mut array_count = 1;
             if self.color_array.enabled {
@@ -2466,6 +2537,10 @@ impl Context {
                 arrays[array_count] = self.normal_array;
                 array_count += 1;
             }
+            if mode == GL_POINTS && self.point_size_array.enabled {
+                arrays[array_count] = self.point_size_array;
+                array_count += 1;
+            }
             for stage in stages {
                 let array = self.texture_units[stage.unit].texcoord_array;
                 if array.enabled {
@@ -2473,7 +2548,7 @@ impl Context {
                     array_count += 1;
                 }
             }
-            let mut spans = [(0u32, 0u32); MAX_TEXTURE_UNITS + 3];
+            let mut spans = [(0u32, 0u32); MAX_TEXTURE_UNITS + 4];
             let mut span_count = 0;
             for &array in &arrays[..array_count] {
                 if array.buffer != 0 {
@@ -2545,8 +2620,14 @@ impl Context {
         {
             let mut stream = std::mem::take(&mut self.vertex_stream);
             let mut flat = std::mem::take(&mut self.flat_vertex_stream);
-            let mut ready =
-                self.prepare_vertex_stream(&mut stream, indices.clone(), count, sequential, stages);
+            let mut ready = self.prepare_vertex_stream(
+                &mut stream,
+                indices.clone(),
+                count,
+                sequential,
+                stages,
+                mode == GL_POINTS && self.point_size_array.enabled,
+            );
             if ready && !self.state.smooth_shading {
                 ready = stream.expand_flat_triangles(&mut flat);
             }
@@ -3714,15 +3795,15 @@ mod tests {
         let indices = [2, 0, 3, 3, 0, 1];
         let mut source = crate::gpu::VertexStream::default();
         let mut out = crate::gpu::VertexStream::default();
-        assert!(c.prepare_vertex_stream(&mut source, indices.into_iter(), 6, false, &[]));
+        assert!(c.prepare_vertex_stream(&mut source, indices.into_iter(), 6, false, &[], false));
         assert!(source.expand_flat_triangles(&mut out));
         let offset = out.attributes[1].unwrap().offset;
         assert_eq!(out.bytes[offset], 3);
         c.prepared_arrays[0].1[colors + 3 * 4] = 42;
-        assert!(c.prepare_vertex_stream(&mut source, indices.into_iter(), 6, false, &[]));
+        assert!(c.prepare_vertex_stream(&mut source, indices.into_iter(), 6, false, &[], false));
         assert!(source.expand_flat_triangles(&mut out));
         assert_eq!(out.bytes[offset], 42);
-        assert!(!c.prepare_vertex_stream(&mut source, [0, 0, 3].into_iter(), 3, false, &[]));
+        assert!(!c.prepare_vertex_stream(&mut source, [0, 0, 3].into_iter(), 3, false, &[], false));
         assert!(!source.flat_triangles);
     }
 
@@ -5566,6 +5647,382 @@ mod homogeneous_texture_tests {
                     c.set_internal_resolution(scale as u8);
                     cases(&mut c, &mut memory, scale, unit);
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod point_extension_tests {
+    use super::*;
+    struct Memory(Vec<u8>);
+    impl GuestMemory for Memory {
+        fn read(&mut self, address: u32, len: usize, out: &mut Vec<u8>) -> bool {
+            let Some(offset) = address.checked_sub(4096) else {
+                return false;
+            };
+            let Some(bytes) = self.0.get(offset as usize..offset as usize + len) else {
+                return false;
+            };
+            out.clear();
+            out.extend_from_slice(bytes);
+            true
+        }
+    }
+    fn positions(values: &[f32]) -> Memory {
+        Memory(values.iter().flat_map(|v| v.to_le_bytes()).collect())
+    }
+    fn pixel(c: &Context, x: u32, y: u32) -> [u8; 4] {
+        let i = (y * 32 + x) as usize * 4;
+        c.target.color[i..i + 4].try_into().unwrap()
+    }
+    fn count(c: &Context) -> usize {
+        c.target.color.chunks_exact(4).filter(|p| p[0] > 0).count()
+    }
+    fn draw(c: &mut Context, memory: &mut Memory, mode: u32, count: u32) {
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.draw_arrays(memory, mode, 0, count);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    fn sprite_cases(c: &mut Context, scale: u32) {
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        let data = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+        ];
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, &data);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        let mut memory = positions(&[0., 0., 0., -0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.]);
+        c.set_vertex_pointer(3, GL_FLOAT, 0, 4096);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_point_size(8.);
+        for unit in [0, 3] {
+            c.set_capability(GL_TEXTURE_2D, false);
+            c.set_active_texture(unit);
+            c.bind_texture(GL_TEXTURE_2D, 1);
+            c.set_capability(GL_TEXTURE_2D, true);
+            c.tex_env(GL_TEXTURE_ENV_MODE, GL_REPLACE);
+            c.set_capability(GL_POINT_SPRITE_OES, true);
+            c.tex_env(GL_COORD_REPLACE_OES, 1);
+            // Replacement is after the texture matrix, and t grows top to bottom.
+            c.texture_matrix[unit as usize].load(matrix::translate(0.75, 0.75, 0.));
+            draw(c, &mut memory, GL_POINTS, 1);
+            for (x, y, expected) in [
+                (13, 13, [255, 0, 0, 255]),
+                (18, 13, [0, 255, 0, 255]),
+                (13, 18, [0, 0, 255, 255]),
+                (18, 18, [255, 255, 0, 255]),
+            ] {
+                assert_eq!(pixel(c, x, y), expected, "sprite unit={unit} at {x},{y}");
+            }
+            c.tex_env(GL_COORD_REPLACE_OES, 0);
+            draw(c, &mut memory, GL_POINTS, 1);
+            assert_eq!(pixel(c, 13, 13), [255, 255, 0, 255]);
+            assert_eq!(pixel(c, 18, 18), [255, 255, 0, 255]);
+            c.tex_env(GL_COORD_REPLACE_OES, 1);
+            c.set_capability(GL_POINT_SPRITE_OES, false);
+            draw(c, &mut memory, GL_POINTS, 1);
+            assert_eq!(pixel(c, 13, 13), [255, 255, 0, 255]);
+            c.set_capability(GL_POINT_SPRITE_OES, true);
+            // The same state must not activate sprite replacement for triangles.
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.draw_arrays(&mut memory, GL_TRIANGLES, 1, 3);
+            c.sync_gpu();
+            assert_eq!(pixel(c, 16, 16), [255, 255, 0, 255]);
+            draw(c, &mut memory, GL_POINTS, 1);
+            assert_eq!(pixel(c, 13, 13), [255, 0, 0, 255]);
+        }
+        // Explicit mip levels: replacement coordinates must provide useful derivatives.
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            8,
+            8,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255].repeat(64),
+        );
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            4,
+            4,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 255, 0, 255].repeat(16),
+        );
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            2,
+            2,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 0, 255, 255].repeat(4),
+        );
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            3,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 255, 0, 255],
+        );
+        c.tex_parameter(
+            GL_TEXTURE_2D,
+            GL_TEXTURE_MIN_FILTER,
+            GL_NEAREST_MIPMAP_NEAREST,
+        );
+        c.set_point_size(4.);
+        draw(c, &mut memory, GL_POINTS, 1);
+        assert_eq!(
+            pixel(c, 16, 16),
+            if scale == 1 {
+                [0, 255, 0, 255]
+            } else {
+                [255, 0, 0, 255]
+            },
+            "sprite mipmap derivatives"
+        );
+        c.set_lod_bias(1.);
+        draw(c, &mut memory, GL_POINTS, 1);
+        assert_eq!(
+            pixel(c, 16, 16),
+            if scale == 1 {
+                [0, 0, 255, 255]
+            } else {
+                [0, 255, 0, 255]
+            },
+            "sprite LOD bias"
+        );
+        c.set_lod_bias(0.);
+        if scale == 1 {
+            let pixels = (0..8)
+                .flat_map(|y| (0..8).flat_map(move |x| [x * 32, y * 32, 0, 255]))
+                .collect::<Vec<u8>>();
+            c.tex_image_2d(GL_TEXTURE_2D, 0, 8, 8, GL_RGBA, GL_UNSIGNED_BYTE, &pixels);
+            c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            for (i, value) in [0.015625f32, 0.046875, 0.].into_iter().enumerate() {
+                memory.0[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            draw(c, &mut memory, GL_POINTS, 1);
+            assert_eq!(
+                pixel(c, 15, 14),
+                if c.target.rgb565 {
+                    raster::rgb565_pixel([64, 64, 0, 255])
+                } else {
+                    [64, 64, 0, 255]
+                },
+                "sprite texture coordinates use the unrounded center"
+            );
+        }
+        c.set_capability(GL_TEXTURE_2D, false);
+        c.set_active_texture(0);
+        c.set_capability(GL_POINT_SPRITE_OES, false);
+    }
+    fn size_cases(c: &mut Context) {
+        let mut memory = positions(&[-0.5, 0., 0., 0.5, 0., 0.]);
+        for v in [2f32, 91., 6., 92.] {
+            memory.0.extend(v.to_le_bytes());
+        }
+        c.set_vertex_pointer(3, GL_FLOAT, 0, 4096);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_point_size(19.);
+        c.set_point_size_pointer(GL_FLOAT, 8, 4096 + 24);
+        c.set_client_state(GL_POINT_SIZE_ARRAY_OES, true);
+        c.lighting.enabled = true;
+        c.lighting.model_ambient = [0.; 4];
+        c.lighting.ambient = [0.; 4];
+        c.lighting.diffuse = [1.; 4];
+        c.lighting.lights[0].enabled = true;
+        c.lighting.lights[0].position = [0., 0., 1., 1.];
+        c.lighting.lights[0].attenuation = [1., 0., 1.];
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(count(c), 40);
+        for x in [8, 24] {
+            assert!(
+                pixel(c, x, 16)[0].abs_diff(if c.target.rgb565 { 99 } else { 101 }) <= 1,
+                "point-size attribute must not replace lighting position"
+            );
+        }
+        if c.gpu.is_some() {
+            assert!(!c.es11.pretransform, "native array points stay batched");
+            assert_eq!(c.vertex_stream.attributes[7].unwrap().size, 1);
+            assert_eq!(c.vertex_stream.count, 2);
+        }
+        c.state.smooth_shading = false;
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(
+            count(c),
+            40,
+            "flat points retain individual sizes and lighting"
+        );
+        c.state.smooth_shading = true;
+        c.set_client_state(GL_POINT_SIZE_ARRAY_OES, false);
+        c.set_point_size(4.);
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(count(c), 32);
+        c.set_client_state(GL_POINT_SIZE_ARRAY_OES, true);
+        c.bind_buffer(GL_ARRAY_BUFFER, 9);
+        let data = [4i32 * 65536, 8 * 65536]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+        c.buffer_data(GL_ARRAY_BUFFER, data.len(), Some(&data), GL_DYNAMIC_DRAW);
+        c.set_point_size_pointer(GL_FIXED, 0, 0);
+        c.bind_buffer(GL_ARRAY_BUFFER, 0);
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(count(c), 80);
+        assert_eq!(
+            c.query_state(GL_POINT_SIZE_ARRAY_BUFFER_BINDING_OES)
+                .unwrap()
+                .numbers(),
+            vec![9.]
+        );
+        c.point_parameter(0x8129, &[4., 0., 0.]);
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(count(c), 20, "attenuation scales array values");
+        c.point_parameter(0x8129, &[1., 0., 0.]);
+        let maximum = c.primitive_size_range(true)[1];
+        c.point_parameter(0x8126, &[2.]);
+        c.point_parameter(0x8127, &[4.]);
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(count(c), 32, "point array sizes respect clamps");
+        c.point_parameter(0x8126, &[0.]);
+        c.point_parameter(0x8127, &[maximum]);
+        c.bind_buffer(GL_ARRAY_BUFFER, 9);
+        let updated = [6i32 * 65536, 2 * 65536]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+        c.buffer_sub_data(GL_ARRAY_BUFFER, 0, &updated);
+        c.bind_buffer(GL_ARRAY_BUFFER, 0);
+        draw(c, &mut memory, GL_POINTS, 2);
+        assert_eq!(count(c), 40);
+        assert!(pixel(c, 5, 16)[0] > 0);
+        assert_eq!(
+            pixel(c, 26, 16),
+            [0, 0, 0, if c.target.rgb565 { 255 } else { 0 }]
+        );
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.draw_elements(&mut memory, GL_POINTS, &[1]);
+        c.sync_gpu();
+        assert_eq!(count(c), 4);
+        assert_eq!(
+            pixel(c, 8, 16),
+            [0, 0, 0, if c.target.rgb565 { 255 } else { 0 }]
+        );
+        assert!(pixel(c, 24, 16)[0] > 0);
+        c.delete_buffers(&[9]);
+        assert_eq!(c.point_size_array.buffer, 0);
+        c.set_point_size_pointer(GL_FLOAT, 0, 0xdead0000);
+        memory = positions(&[-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.]);
+        draw(c, &mut memory, GL_TRIANGLES, 3);
+        assert!(
+            pixel(c, 16, 16)[0] > 0,
+            "triangles ignore point-size arrays"
+        );
+    }
+    #[test]
+    fn pointer_state_validation_and_per_unit_replacement_defaults() {
+        let mut c = Context::new(32, 32);
+        let before = c.point_size_array;
+        assert_eq!(c.is_enabled(GL_POINT_SIZE_ARRAY_OES), Some(false));
+        assert_eq!(c.is_enabled(GL_POINT_SPRITE_OES), Some(false));
+        assert_eq!(c.get_pointer(GL_POINT_SIZE_ARRAY_POINTER_OES), Some(0));
+        c.set_point_size_pointer(GL_UNSIGNED_BYTE, 0, 4096);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        assert_eq!(c.point_size_array, before);
+        c.set_point_size_pointer(GL_FLOAT, u32::MAX, 4096);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.point_size_array, before);
+        c.tex_env(GL_COORD_REPLACE_OES, 1);
+        c.set_active_texture(3);
+        assert_eq!(
+            c.get_tex_env(GL_POINT_SPRITE_OES, GL_COORD_REPLACE_OES)
+                .unwrap()
+                .numbers(),
+            vec![0.]
+        );
+        c.tex_env(GL_COORD_REPLACE_OES, 2);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+    }
+    #[test]
+    fn software_point_arrays_and_sprite_coordinates() {
+        for rgb565 in [false, true] {
+            let mut c = if rgb565 {
+                Context::new_rgb565(32, 32)
+            } else {
+                Context::new(32, 32)
+            };
+            sprite_cases(&mut c, 1);
+            size_cases(&mut c);
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native OpenGL/GLES2; point sprites and batched point-size arrays"]
+    fn native_point_arrays_and_sprite_coordinates() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                for rgb565 in [false, true] {
+                    let mut c = if rgb565 {
+                        Context::new_rgb565(32, 32)
+                    } else {
+                        Context::new(32, 32)
+                    };
+                    c.gpu = Some(if es {
+                        crate::gpu::Renderer::new_es_for_test(32, 32).unwrap()
+                    } else {
+                        crate::gpu::Renderer::new(32, 32).unwrap()
+                    });
+                    c.gpu.as_mut().unwrap().set_surface_rgb565(rgb565).unwrap();
+                    c.es11.point_max = c.primitive_size_range(true)[1];
+                    c.set_internal_resolution(scale as u8);
+                    sprite_cases(&mut c, scale);
+                    size_cases(&mut c);
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native OpenGL/GLES2; logical point limits at internal 2x"]
+    fn native_point_limit_queries_match_scaled_rasterization() {
+        for es in [false, true] {
+            let mut c = Context::new(64, 64);
+            let mut gpu = if es {
+                crate::gpu::Renderer::new_es_for_test(64, 64).unwrap()
+            } else {
+                crate::gpu::Renderer::new(64, 64).unwrap()
+            };
+            let physical = (gpu.point_range[1].min(64.) / 4.).floor() * 4.;
+            assert!(physical >= 4.);
+            gpu.point_range[1] = physical;
+            c.gpu = Some(gpu);
+            c.set_internal_resolution(2);
+            assert_eq!(c.primitive_size_range(true), [1., physical / 2.]);
+            let mut memory = positions(&[0., 0., 0., 1000.]);
+            c.set_vertex_pointer(3, GL_FLOAT, 0, 4096);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            c.set_point_size(128.);
+            for array in [false, true] {
+                c.set_point_size_pointer(GL_FLOAT, 0, 4096 + 12);
+                c.set_client_state(GL_POINT_SIZE_ARRAY_OES, array);
+                draw(&mut c, &mut memory, GL_POINTS, 1);
+                assert_eq!(
+                    count(&c),
+                    (physical as usize / 2).pow(2),
+                    "array={array}: clamp to the advertised logical maximum"
+                );
+                assert_eq!(
+                    c.state.point_size, 128.,
+                    "raster clamping does not modify requested state"
+                );
             }
         }
     }

@@ -311,3 +311,12 @@ pub const GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG: u32 = 0x8C03;
 pub const GL_COLOR_LOGIC_OP: u32 = 0x0bf2;
 pub const GL_LOGIC_OP_MODE: u32 = 0x0bf0;
 pub const GL_COPY: u32 = 0x1503;
+
+// Mandatory ES 1.1 point extensions.
+pub const GL_POINT_SPRITE_OES: u32 = 0x8861;
+pub const GL_COORD_REPLACE_OES: u32 = 0x8862;
+pub const GL_POINT_SIZE_ARRAY_OES: u32 = 0x8b9c;
+pub const GL_POINT_SIZE_ARRAY_TYPE_OES: u32 = 0x898a;
+pub const GL_POINT_SIZE_ARRAY_STRIDE_OES: u32 = 0x898b;
+pub const GL_POINT_SIZE_ARRAY_POINTER_OES: u32 = 0x898c;
+pub const GL_POINT_SIZE_ARRAY_BUFFER_BINDING_OES: u32 = 0x8b9f;
