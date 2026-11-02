@@ -1219,6 +1219,7 @@ pub struct Renderer {
     max_anisotropy: u8,
     fbo: u32,
     logic_destination: u32,
+    rgb565: bool,
     color: u32,
     depth: u32,
     depth_format: u32,
@@ -1383,6 +1384,7 @@ impl Renderer {
                 max_anisotropy,
                 fbo: 0,
                 logic_destination: 0,
+                rgb565: false,
                 color: 0,
                 depth: 0,
                 depth_format: if depth24 { 0x81a6 } else { 0x81a5 },
@@ -1533,6 +1535,7 @@ impl Renderer {
                 "logicMode",
                 "logicDestination",
                 "logicSize",
+                "logicLevels",
                 "alphaMode",
                 "alphaRef",
                 "fogMode",
@@ -1686,6 +1689,34 @@ impl Renderer {
             (self.gl.TexParameteri)(GL_TEXTURE_2D, p, v as i32);
         }
     }
+    /// Select at surface creation, before any rendering has been issued.
+    pub fn set_surface_rgb565(&mut self, rgb565: bool) -> Result<(), String> {
+        if self.rgb565 == rgb565 {
+            return Ok(());
+        }
+        self.rgb565 = rgb565;
+        let (w, h) = (
+            self.width / self.render_scale,
+            self.height / self.render_scale,
+        );
+        self.width = 0;
+        self.height = 0;
+        self.resize(w, h)?;
+        if rgb565 {
+            unsafe {
+                let mut bits = [0; 4];
+                for (i, pname) in [0x0d52, 0x0d53, 0x0d54, 0x0d55].into_iter().enumerate() {
+                    (self.gl.GetIntegerv)(pname, &mut bits[i]);
+                }
+                self.check()?;
+                if bits != [5, 6, 5, 0] {
+                    return Err(format!("host cannot provide an RGB565 surface: {bits:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Policy 1=native, 2=double all, 3=double QVGA only. Guest sizes stay logical.
     pub fn set_render_scale(&mut self, policy: u8) -> Result<(), String> {
         self.render_policy = policy;
@@ -1726,12 +1757,24 @@ impl Renderer {
             (self.gl.TexImage2D)(
                 GL_TEXTURE_2D,
                 0,
-                GL_RGBA as i32,
+                if self.rgb565 {
+                    if self.host.es {
+                        GL_RGB as i32
+                    } else {
+                        0x8d62
+                    }
+                } else {
+                    GL_RGBA as i32
+                },
                 w as i32,
                 h as i32,
                 0,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
+                if self.rgb565 { GL_RGB } else { GL_RGBA },
+                if self.rgb565 {
+                    GL_UNSIGNED_SHORT_5_6_5
+                } else {
+                    GL_UNSIGNED_BYTE
+                },
                 std::ptr::null(),
             );
             self.params(
@@ -2554,6 +2597,12 @@ impl Renderer {
                 },
             );
             if state.logic_op {
+                let levels = if self.rgb565 {
+                    [31., 63., 31., 255.]
+                } else {
+                    [255.; 4]
+                };
+                self.uniform_4fv(self.loc("logicLevels"), 1, levels.as_ptr());
                 self.uniform_1i(self.loc("logicDestination"), 4);
                 let loc = self.loc("logicSize");
                 (self.gl.Uniform2f)(loc, self.width as f32, self.height as f32);
@@ -2590,7 +2639,7 @@ impl Renderer {
                         (self.gl.CopyTexImage2D)(
                             GL_TEXTURE_2D,
                             0,
-                            GL_RGBA,
+                            if self.rgb565 { GL_RGB } else { GL_RGBA },
                             0,
                             0,
                             self.width as i32,
@@ -2624,7 +2673,7 @@ impl Renderer {
                         (self.gl.CopyTexImage2D)(
                             GL_TEXTURE_2D,
                             0,
-                            GL_RGBA,
+                            if self.rgb565 { GL_RGB } else { GL_RGBA },
                             0,
                             0,
                             self.width as i32,
@@ -2740,9 +2789,14 @@ impl Renderer {
                             }
                         }
                         let offset = (y * logical_w + x) * 4;
-                        for (channel, value) in sum.iter().enumerate() {
-                            target.color[offset + channel] = (value / (k * k) as u32) as u8;
-                        }
+                        let p =
+                            std::array::from_fn(|channel| (sum[channel] / (k * k) as u32) as u8);
+                        let p = if target.rgb565 {
+                            crate::raster::rgb565_pixel(p)
+                        } else {
+                            p
+                        };
+                        target.color[offset..offset + 4].copy_from_slice(&p);
                     }
                 }
                 if let Some(out) = rgb565 {
@@ -2910,21 +2964,21 @@ void main(){
 "#;
 const FRAGMENT: &str = r#"
 VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
-uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;
+uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;uniform vec4 logicLevels;
 // ES2 has no integer bitwise operators. All intermediates are exact 8-bit integers.
 vec4 logicalColor(vec4 source,vec4 destination){
- vec4 s=floor(clamp(source,0.0,1.0)*255.0+0.5),d=floor(destination*255.0+0.5),a=vec4(0.0);
+ vec4 s=floor(clamp(source,0.0,1.0)*logicLevels+0.5),d=floor(destination*logicLevels+0.5),a=vec4(0.0);
  float bit=1.0;
  for(int i=0;i<8;i++){a+=mod(s,2.0)*mod(d,2.0)*bit;s=floor(s/2.0);d=floor(d/2.0);bit*=2.0;}
- s=floor(clamp(source,0.0,1.0)*255.0+0.5);d=floor(destination*255.0+0.5);
+ s=floor(clamp(source,0.0,1.0)*logicLevels+0.5);d=floor(destination*logicLevels+0.5);
  vec4 r=vec4(0.0);
  if(logicMode==1)r=a;if(logicMode==2)r=s-a;if(logicMode==3)r=s;
  if(logicMode==4)r=d-a;if(logicMode==5)r=d;if(logicMode==6)r=s+d-2.0*a;
- if(logicMode==7)r=s+d-a;if(logicMode==8)r=255.0-(s+d-a);
- if(logicMode==9)r=255.0-(s+d-2.0*a);if(logicMode==10)r=255.0-d;
- if(logicMode==11)r=255.0-d+a;if(logicMode==12)r=255.0-s;
- if(logicMode==13)r=255.0-s+a;if(logicMode==14)r=255.0-a;if(logicMode==15)r=vec4(255.0);
- return r/255.0;
+ if(logicMode==7)r=s+d-a;if(logicMode==8)r=logicLevels-(s+d-a);
+ if(logicMode==9)r=logicLevels-(s+d-2.0*a);if(logicMode==10)r=logicLevels-d;
+ if(logicMode==11)r=logicLevels-d+a;if(logicMode==12)r=logicLevels-s;
+ if(logicMode==13)r=logicLevels-s+a;if(logicMode==14)r=logicLevels-a;if(logicMode==15)r=logicLevels;
+ return r/logicLevels;
 }
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;

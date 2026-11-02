@@ -258,6 +258,11 @@ pub struct SurfaceBuffers {
     failed: bool,
 }
 impl SurfaceBuffers {
+    pub fn new_rgb565(width: u32, height: u32) -> Self {
+        let mut surface = Self::new(width, height);
+        surface.target = RenderTarget::with_format(width, height, true);
+        surface
+    }
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             target: RenderTarget::new(width, height),
@@ -366,6 +371,12 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn new_rgb565(width: u32, height: u32) -> Self {
+        let mut context = Self::new(width, height);
+        context.target = RenderTarget::with_format(width, height, true);
+        context
+    }
+
     pub fn new(width: u32, height: u32) -> Self {
         let mut state = PipelineState {
             viewport: (0, 0, width as i32, height as i32),
@@ -480,6 +491,7 @@ impl Context {
         if self.gpu.is_none() {
             let mut gpu = crate::gpu::Renderer::new(self.target.width, self.target.height)?;
             gpu.set_anisotropic_filtering(self.anisotropic_filtering);
+            gpu.set_surface_rgb565(self.target.rgb565)?;
             gpu.set_render_scale(self.internal_resolution)?;
             if !self.es11.point_max_changed {
                 self.es11.point_max = gpu.point_range[1];
@@ -1081,6 +1093,10 @@ impl Context {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
+        if self.target.rgb565 && matches!(format, GL_ALPHA | GL_LUMINANCE_ALPHA | GL_RGBA) {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
         if width == 0 || height == 0 {
             return;
         }
@@ -1260,6 +1276,10 @@ impl Context {
         }
         if level > 10 || width > (1024 >> level) || height > (1024 >> level) {
             self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if self.target.rgb565 && matches!(format, GL_ALPHA | GL_LUMINANCE_ALPHA | GL_RGBA) {
+            self.set_error(GL_INVALID_OPERATION);
             return;
         }
         self.sync_gpu();
@@ -5209,6 +5229,162 @@ mod clear_conformance_tests {
                 c.set_internal_resolution(scale);
                 color_cases(&mut c);
                 depth_cases(&mut c);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod rgb565_surface_tests {
+    use super::*;
+    struct Memory(Vec<u8>);
+    impl GuestMemory for Memory {
+        fn read(&mut self, address: u32, length: usize, out: &mut Vec<u8>) -> bool {
+            let Some(offset) = address.checked_sub(4096) else {
+                return false;
+            };
+            let Some(bytes) = self.0.get(offset as usize..offset as usize + length) else {
+                return false;
+            };
+            out.clear();
+            out.extend_from_slice(bytes);
+            true
+        }
+    }
+    fn draw(c: &mut Context) {
+        let data = [-1f32, -1., 0., 1., -1., 0., 0., 1., 0.]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        c.set_vertex_pointer(3, GL_FLOAT, 0, 4096);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.draw_arrays(&mut Memory(data), GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    fn pixel(c: &Context) -> [u8; 4] {
+        c.target.color[36..40].try_into().unwrap()
+    }
+    fn alpha_cases(c: &mut Context) {
+        assert!(c.target.rgb565);
+        for (src, expected) in [
+            (GL_DST_ALPHA, [255, 0, 0, 255]),
+            (GL_ONE_MINUS_DST_ALPHA, [0, 0, 0, 255]),
+            (GL_SRC_ALPHA_SATURATE, [0, 0, 0, 255]),
+        ] {
+            c.clear_color = [0., 0., 1., 0.];
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.current_color = [1., 0., 0., 0.25];
+            c.state.blend = true;
+            c.set_blend_func(src, GL_ZERO);
+            draw(c);
+            assert_eq!(pixel(c), expected, "blend source={src:x}");
+        }
+        c.state.blend = false;
+        c.state.alpha_test = true;
+        c.state.alpha_ref = 0.5;
+        c.state.alpha_func = raster::CompareFunc::Greater;
+        c.clear_color = [0., 0., 1., 0.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        draw(c);
+        assert_eq!(
+            pixel(c),
+            [0, 0, 255, 255],
+            "fragment alpha remains available before storage"
+        );
+        c.state.alpha_test = false;
+    }
+    fn logic_cases(c: &mut Context) {
+        let source = [10u8, 21, 7];
+        let dest = [5u8, 34, 28];
+        let levels = [31u32, 63, 31];
+        c.state.logic_op = true;
+        for op in 0x1500..=0x150f {
+            c.clear_color = [
+                dest[0] as f32 / 31.,
+                dest[1] as f32 / 63.,
+                dest[2] as f32 / 31.,
+                0.,
+            ];
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.current_color = [
+                source[0] as f32 / 31.,
+                source[1] as f32 / 63.,
+                source[2] as f32 / 31.,
+                0.1,
+            ];
+            c.logic_op(op);
+            draw(c);
+            let result = pixel(c);
+            for i in 0..3 {
+                let bits = raster::logic_byte(op, source[i], dest[i]) & levels[i] as u8;
+                let expected = ((u32::from(bits) * 255 + levels[i] / 2) / levels[i]) as u8;
+                assert!(
+                    result[i].abs_diff(expected) <= 1,
+                    "op={op:x} channel={i}: {result:?}, expected {expected}"
+                );
+            }
+            assert_eq!(result[3], 255);
+        }
+        c.state.logic_op = false;
+    }
+    fn copies(c: &mut Context) {
+        c.clear_color = [1., 0., 0., 0.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGB, 0, 0, 2, 2, 0);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].rgba, [255, 0, 0, 255].repeat(4));
+        let revision = c.textures[&0].revision;
+        for format in [GL_RGBA, GL_ALPHA, GL_LUMINANCE_ALPHA] {
+            c.copy_tex_image_2d(GL_TEXTURE_2D, 0, format, 0, 0, 2, 2, 0);
+            assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+            assert_eq!(c.textures[&0].revision, revision);
+        }
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            2,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[123; 16],
+        );
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 1, 0, 0, 0, 0, 1, 1);
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        assert_eq!(c.textures[&0].mipmaps[&1].2, [123; 16]);
+        c.tex_image_2d(GL_TEXTURE_2D, 1, 2, 2, GL_RGB, GL_UNSIGNED_BYTE, &[0; 12]);
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 1, 0, 0, 0, 0, 1, 1);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(&c.textures[&0].mipmaps[&1].2[..4], &[255, 0, 0, 255]);
+    }
+    #[test]
+    fn software_rgb565_alpha_logic_and_copies() {
+        let mut c = Context::new_rgb565(4, 4);
+        alpha_cases(&mut c);
+        logic_cases(&mut c);
+        copies(&mut c);
+        c.target.resize(8, 8);
+        assert!(c.target.rgb565);
+        assert!(c.target.color.chunks_exact(4).all(|p| p[3] == 255));
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native OpenGL/GLES2; real RGB565 targets and fixed-function alpha"]
+    fn native_rgb565_alpha_logic_and_copies() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = Context::new_rgb565(4, 4);
+                let mut gpu = if es {
+                    crate::gpu::Renderer::new_es_for_test(4, 4).unwrap()
+                } else {
+                    crate::gpu::Renderer::new(4, 4).unwrap()
+                };
+                gpu.set_surface_rgb565(true).unwrap();
+                c.gpu = Some(gpu);
+                c.set_internal_resolution(scale);
+                alpha_cases(&mut c);
+                logic_cases(&mut c);
+                copies(&mut c);
             }
         }
     }

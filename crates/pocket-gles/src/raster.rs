@@ -298,6 +298,8 @@ impl PipelineState {
 
 /// Colour and depth attachments.
 pub struct RenderTarget {
+    /// RGB565 virtual surface; RGBA bytes are only its expanded CPU cache.
+    pub rgb565: bool,
     pub width: u32,
     pub height: u32,
     /// RGBA8888, row-major, top row first.
@@ -312,20 +314,37 @@ impl RenderTarget {
         Self {
             width,
             height,
+            rgb565: false,
             color: vec![0u8; px * 4],
             depth: vec![1.0f32; px],
         }
+    }
+
+    pub fn with_format(width: u32, height: u32, rgb565: bool) -> Self {
+        let mut target = Self::new(width, height);
+        target.rgb565 = rgb565;
+        if rgb565 {
+            for p in target.color.chunks_exact_mut(4) {
+                p[3] = 255;
+            }
+        }
+        target
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == self.width && height == self.height {
             return;
         }
-        *self = Self::new(width, height);
+        *self = Self::with_format(width, height, self.rgb565);
     }
 
     /// `glClear(GL_COLOR_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_color(&mut self, rgba: [u8; 4], scissor: Option<(i32, i32, i32, i32)>) {
+        let rgba = if self.rgb565 {
+            rgb565_pixel(rgba)
+        } else {
+            rgba
+        };
         match self.scissor_bounds(scissor) {
             None => {}
             Some((x0, y0, x1, y1)) if self.covers_all(x0, y0, x1, y1) => {
@@ -352,7 +371,13 @@ impl RenderTarget {
         scissor: Option<(i32, i32, i32, i32)>,
         mask: [bool; 4],
     ) {
-        if mask == [true; 4] {
+        let rgba = if self.rgb565 {
+            rgb565_pixel(rgba)
+        } else {
+            rgba
+        };
+        let mask = [mask[0], mask[1], mask[2], mask[3] && !self.rgb565];
+        if mask == [true; 4] || self.rgb565 && mask[..3] == [true; 3] {
             self.clear_color(rgba, scissor);
             return;
         }
@@ -923,7 +948,11 @@ fn write_fragment(
         to_unit(target.color[ci]),
         to_unit(target.color[ci + 1]),
         to_unit(target.color[ci + 2]),
-        to_unit(target.color[ci + 3]),
+        if target.rgb565 {
+            1.
+        } else {
+            to_unit(target.color[ci + 3])
+        },
     ];
     let out = if state.blend && !state.logic_op {
         let sf = state.blend_src.resolve(frag, dst);
@@ -939,18 +968,41 @@ fn write_fragment(
     };
 
     for (c, (&value, &masked)) in out.iter().zip(&state.color_mask).enumerate() {
-        if masked {
-            target.color[ci + c] = if state.logic_op {
+        if masked && !(target.rgb565 && c == 3) {
+            target.color[ci + c] = if target.rgb565 {
+                let max = if c == 1 { 63 } else { 31 };
+                let source = (value.clamp(0., 1.) * max as f32 + 0.5) as u8;
+                let bits = if state.logic_op {
+                    let dest = ((u32::from(target.color[ci + c]) * max + 127) / 255) as u8;
+                    logic_byte(state.logic_mode, source, dest) & max as u8
+                } else {
+                    source
+                };
+                ((u32::from(bits) * 255 + max / 2) / max) as u8
+            } else if state.logic_op {
                 logic_byte(state.logic_mode, to_byte(value), target.color[ci + c])
             } else {
                 to_byte(value)
             };
         }
     }
+    if target.rgb565 {
+        target.color[ci + 3] = 255;
+    }
     if state.depth_test && state.depth_write {
         target.depth[idx] = z;
     }
     true
+}
+
+/// Expand a virtual RGB565 pixel to the shared RGBA byte cache.
+pub fn rgb565_pixel(mut p: [u8; 4]) -> [u8; 4] {
+    for (i, max) in [31u32, 63, 31].into_iter().enumerate() {
+        let bits = (u32::from(p[i]) * max + 127) / 255;
+        p[i] = ((bits * 255 + max / 2) / max) as u8;
+    }
+    p[3] = 255;
+    p
 }
 
 /// ES 1.1 table 4.2. Operates on framebuffer component bits, before write masks.

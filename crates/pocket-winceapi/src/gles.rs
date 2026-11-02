@@ -34,7 +34,7 @@ use crate::{CallCtx, WinCeDispatcher};
 // concurrently running session's state).
 thread_local! {
     static SURFACES: RefCell<EglSurfaces> = RefCell::new(EglSurfaces::new());
-    static CTX: RefCell<Context> = RefCell::new(Context::new(240, 320));
+    static CTX: RefCell<Context> = RefCell::new(Context::new_rgb565(240, 320));
     static PACK_ALIGNMENT: Cell<usize> = const { Cell::new(4) };
     static UNPACK_ALIGNMENT: Cell<usize> = const { Cell::new(4) };
     static EGL_ERROR: Cell<u32> = const { Cell::new(EGL_SUCCESS) };
@@ -82,7 +82,7 @@ impl EglSurfaces {
             return;
         }
         if handle == 0 {
-            let mut destination = SurfaceBuffers::new(1, 1);
+            let mut destination = SurfaceBuffers::new_rgb565(1, 1);
             c.park_surface(&mut destination);
             if let Some(old) = self.images.get_mut(&self.active) {
                 old.buffers = Some(destination);
@@ -198,7 +198,7 @@ pub(crate) fn release_gpu() {
 /// runs reusing the same host thread. Dropping the old Context frees all
 /// host-side GL resources; guest memory belongs to the new kernel/CPU.
 pub(crate) fn reset_for_session() {
-    with_ctx(|c| *c = Context::new(240, 320));
+    with_ctx(|c| *c = Context::new_rgb565(240, 320));
     SURFACES.with(|s| *s.borrow_mut() = EglSurfaces::new());
     EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
     PACK_ALIGNMENT.with(|s| s.set(4));
@@ -215,7 +215,7 @@ pub(crate) struct SuspendedGles {
 
 pub(crate) fn suspend() -> SuspendedGles {
     let context =
-        CTX.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Context::new(240, 320)));
+        CTX.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Context::new_rgb565(240, 320)));
     let error = EGL_ERROR.with(|slot| slot.replace(EGL_SUCCESS));
     let pack = PACK_ALIGNMENT.with(|s| s.replace(4));
     let unpack = UNPACK_ALIGNMENT.with(|s| s.replace(4));
@@ -1737,7 +1737,7 @@ fn egl_terminate(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let (w, h) = with_ctx(|c| {
         let w = c.target.width;
         let h = c.target.height;
-        c.target = pocket_gles::raster::RenderTarget::new(w, h);
+        c.target = pocket_gles::raster::RenderTarget::with_format(w, h, true);
         (w, h)
     });
     SURFACES.with(|s| {
@@ -1864,7 +1864,7 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
             height: h,
             pixmap: None,
             deleted: false,
-            buffers: Some(SurfaceBuffers::new(w, h)),
+            buffers: Some(SurfaceBuffers::new_rgb565(w, h)),
         });
         image.width = w;
         image.height = h;
@@ -1922,7 +1922,7 @@ fn allocate_surface(width: u32, height: u32, pixmap: Option<u32>) -> u32 {
                 height,
                 pixmap,
                 deleted: false,
-                buffers: Some(SurfaceBuffers::new(width, height)),
+                buffers: Some(SurfaceBuffers::new_rgb565(width, height)),
             },
         );
         handle
@@ -2019,7 +2019,7 @@ fn egl_make_current(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     let ok = SURFACES.with(|s| {
         let mut s = s.borrow_mut();
         if context == 0 && draw == 0 && read == 0 {
-            let mut empty = SurfaceBuffers::new(1, 1);
+            let mut empty = SurfaceBuffers::new_rgb565(1, 1);
             with_ctx(|c| c.park_surface(&mut empty));
             let active = s.active;
             if let Some(image) = s.images.get_mut(&active) {
@@ -2592,7 +2592,7 @@ fn reset_for_test(width: u32, height: u32) {
         image.width = width;
         image.height = height;
     });
-    with_ctx(|c| *c = Context::new(width, height));
+    with_ctx(|c| *c = Context::new_rgb565(width, height));
     EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
 }
 
@@ -2832,7 +2832,7 @@ mod tests {
         // A fresh dispatcher is the actual production session boundary,
         // even if a caller runs the next game on the same host thread.
         let _dispatcher = WinCeDispatcher::new();
-        let defaults = Context::new(240, 320);
+        let defaults = Context::new_rgb565(240, 320);
         with_ctx(|c| {
             assert!(c.textures.is_empty());
             assert!(c.buffers.is_empty());
@@ -3002,9 +3002,9 @@ mod tests {
                 0,
                 2,
                 2,
-                pocket_gles::GL_RGBA,
+                pocket_gles::GL_RGB,
                 pocket_gles::GL_UNSIGNED_BYTE,
-                &[0; 16],
+                &[0; 12],
             );
         });
         call(
@@ -3015,7 +3015,7 @@ mod tests {
         );
         assert_eq!(
             with_ctx(|c| c.textures[&0].rgba[12..16].to_vec()),
-            vec![123; 4]
+            vec![123, 123, 123, 255]
         );
         let format = pocket_gles::GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
         with_ctx(|c| {
@@ -3095,7 +3095,7 @@ mod tests {
             &[
                 pocket_gles::GL_TEXTURE_2D,
                 0,
-                pocket_gles::GL_RGBA,
+                pocket_gles::GL_RGB,
                 0,
                 0,
                 2,
@@ -3107,7 +3107,7 @@ mod tests {
             call(&mut cpu, &mut kernel, gl_get_error, &[]),
             pocket_gles::GL_NO_ERROR
         );
-        with_ctx(|c| assert_eq!(c.textures[&7].rgba, vec![127; 16]));
+        with_ctx(|c| assert_eq!(c.textures[&7].rgba, [127, 127, 127, 255].repeat(4)));
         call(
             &mut cpu,
             &mut kernel,
@@ -3115,7 +3115,7 @@ mod tests {
             &[
                 pocket_gles::GL_TEXTURE_2D,
                 0,
-                pocket_gles::GL_RGBA,
+                pocket_gles::GL_RGB,
                 0,
                 0,
                 2,
@@ -3278,12 +3278,9 @@ mod tests {
                 gl_read_pixels,
                 &[0, 0, 1, 1, pocket_gles::GL_RGBA, GL_UNSIGNED_BYTE, SCRATCH],
             );
-            assert_eq!(cpu.read_mem(SCRATCH, 4).unwrap(), [0, 0, 254, 255]);
-            // Readback must not rewrite the renderer's alpha or RGB precision.
-            assert_eq!(
-                with_ctx(|c| c.target.color[3]),
-                ((alpha * 255 + 32768) / 65536) as u8
-            );
+            assert_eq!(cpu.read_mem(SCRATCH, 4).unwrap(), [0, 0, 255, 255]);
+            // RGB565 has no stored alpha, even before ReadPixels.
+            assert_eq!(with_ctx(|c| c.target.color[3]), 255);
         }
     }
 
@@ -4742,7 +4739,7 @@ mod tests {
             &[
                 pocket_gles::GL_TEXTURE_2D,
                 0,
-                pocket_gles::GL_RGBA,
+                pocket_gles::GL_RGB,
                 16,
                 16,
                 1,
