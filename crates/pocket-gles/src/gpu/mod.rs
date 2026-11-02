@@ -1124,11 +1124,13 @@ unsafe fn upload_texture(
     formats: &HashSet<u32>,
     tex: &Texture,
     mips: bool,
+    native_max_level: bool,
 ) -> Result<UploadRoute, String> {
     if !tex.is_complete() {
         return Err("incomplete guest texture must not reach GPU upload".into());
     }
-    let levels = tex.width.max(tex.height).ilog2() + 1;
+    let full_levels = tex.width.max(tex.height).ilog2() + 1;
+    let levels = full_levels.min(tex.max_level.saturating_add(1));
 
     if let Some(base) = tex.compressed.get(&0) {
         let format = native_compressed_format(base.format);
@@ -1139,7 +1141,9 @@ unsafe fn upload_texture(
                     && native_compressed_format(c.format) == format
             })
         });
-        if formats.contains(&format) && (!mips || complete) {
+        if formats.contains(&format)
+            && (!mips || (complete && (levels == full_levels || native_max_level)))
+        {
             if let Some(upload) = gl.CompressedTexImage2D {
                 for l in 0..if mips && complete { levels } else { 1 } {
                     let c = &tex.compressed[&l];
@@ -1178,7 +1182,12 @@ unsafe fn upload_texture(
         return Err(format!("native RGBA texture upload failed: 0x{error:04x}"));
     }
     if mips {
-        for (l, (w, h, pixels)) in tex.upload_levels().iter().enumerate().skip(1) {
+        let levels = if native_max_level {
+            tex.upload_levels()
+        } else {
+            host_mipmap_levels(tex)
+        };
+        for (l, (w, h, pixels)) in levels.iter().enumerate().skip(1) {
             (gl.TexImage2D)(
                 GL_TEXTURE_2D,
                 l as i32,
@@ -1193,6 +1202,35 @@ unsafe fn upload_texture(
         }
     }
     Ok(UploadRoute::Rgba)
+}
+
+/// ES2 needs a full host chain even when SGIS permits a shorter guest chain.
+/// Tail images are host-only padding: LOD stays clamped to the guest MAX_LEVEL.
+fn host_mipmap_levels(tex: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = tex.upload_levels();
+    while levels.last().is_some_and(|(w, h, _)| *w > 1 || *h > 1) {
+        let (w, h, src) = levels.last().unwrap();
+        let (nw, nh) = ((*w / 2).max(1), (*h / 2).max(1));
+        let mut dst = vec![0; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for channel in 0..4 {
+                    let mut sum = 0u32;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let i = (((y * 2 + dy).min(*h - 1) * *w + (x * 2 + dx).min(*w - 1)) * 4)
+                                as usize
+                                + channel;
+                            sum += src[i] as u32;
+                        }
+                    }
+                    dst[((y * nw + x) * 4) as usize + channel] = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+        levels.push((nw, nh, dst));
+    }
+    levels
 }
 
 pub struct Renderer {
@@ -2536,7 +2574,13 @@ impl Renderer {
                                     tex.max_level.min(last_level) as i32,
                                 );
                             }
-                            upload_texture(&self.gl, &self.compressed_formats, tex, needs_mips)?;
+                            upload_texture(
+                                &self.gl,
+                                &self.compressed_formats,
+                                tex,
+                                needs_mips,
+                                self.native_max_level,
+                            )?;
                             item.1 = tex.revision;
                         }
                         let params = if base_only {
@@ -3226,17 +3270,38 @@ mod tests {
                 let mut tex = Texture::default();
                 tex.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
                 assert!(!tex.is_complete());
-                assert!(upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).is_err());
+                assert!(upload_texture(
+                    &gpu.gl,
+                    &gpu.compressed_formats,
+                    &tex,
+                    true,
+                    gpu.native_max_level
+                )
+                .is_err());
                 tex.set_parameter(0x8191, 1);
                 tex.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
                 assert!(tex.is_complete());
                 assert!(matches!(
-                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
+                    upload_texture(
+                        &gpu.gl,
+                        &gpu.compressed_formats,
+                        &tex,
+                        true,
+                        gpu.native_max_level
+                    )
+                    .unwrap(),
                     UploadRoute::Rgba
                 ));
                 tex.set_level(1, 2, 2, [0, 255, 0, 255].repeat(4));
                 assert!(matches!(
-                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
+                    upload_texture(
+                        &gpu.gl,
+                        &gpu.compressed_formats,
+                        &tex,
+                        true,
+                        gpu.native_max_level
+                    )
+                    .unwrap(),
                     UploadRoute::Rgba
                 ));
                 let bytes = [0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0];
@@ -3254,17 +3319,32 @@ mod tests {
                 assert_eq!(&*tex.rgba_level(0).unwrap(), &[255, 0, 0, 255].repeat(16));
                 if gpu.supports_compressed(GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) {
                     assert!(matches!(
-                        upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, false).unwrap(),
+                        upload_texture(
+                            &gpu.gl,
+                            &gpu.compressed_formats,
+                            &tex,
+                            false,
+                            gpu.native_max_level
+                        )
+                        .unwrap(),
                         UploadRoute::Compressed
                     ));
                 }
                 assert!(matches!(
-                    upload_texture(&gpu.gl, &HashSet::new(), &tex, false).unwrap(),
+                    upload_texture(&gpu.gl, &HashSet::new(), &tex, false, gpu.native_max_level)
+                        .unwrap(),
                     UploadRoute::Rgba
                 ));
                 let upload = gpu.gl.CompressedTexImage2D.take();
                 assert!(matches!(
-                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, false).unwrap(),
+                    upload_texture(
+                        &gpu.gl,
+                        &gpu.compressed_formats,
+                        &tex,
+                        false,
+                        gpu.native_max_level
+                    )
+                    .unwrap(),
                     UploadRoute::Rgba
                 ));
                 gpu.gl.CompressedTexImage2D = upload;
@@ -3276,7 +3356,8 @@ mod tests {
                     refused.set_compressed(0, 4, 4, GL_ATC_RGB_AMD, &bytes, Vec::new());
                     let formats = HashSet::from([GL_ATC_RGB_AMD]);
                     assert!(matches!(
-                        upload_texture(&gpu.gl, &formats, &refused, false).unwrap(),
+                        upload_texture(&gpu.gl, &formats, &refused, false, gpu.native_max_level)
+                            .unwrap(),
                         UploadRoute::Rgba
                     ));
                     assert_eq!((gpu.gl.GetError)(), 0);
@@ -3425,6 +3506,9 @@ mod tests {
                     [0, 0, 255, 255].repeat((side * side) as usize),
                 );
             }
+            texture.set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, 2);
+            texture.mipmaps.retain(|level, _| *level <= 2);
+            texture.formats.retain(|level, _| *level <= 2);
             texture.min_filter = Filter::NearestMipmapNearest;
             texture.mag_filter = Filter::Nearest;
             let mut textures = HashMap::from([(1, texture)]);
@@ -3463,6 +3547,18 @@ mod tests {
             }
             // Native max-level and GLES2 derivative fallback must cap the
             // selected authored level, and permit it again when the cap grows.
+            // The earlier checks used only the three SGIS-required images.
+            // Supply the rest before testing a restored unlimited maximum.
+            assert_eq!(textures[&1].mipmaps.len(), 2);
+            for level in 3..=6 {
+                let side = 64 >> level;
+                textures.get_mut(&1).unwrap().set_level(
+                    level,
+                    side,
+                    side,
+                    [0, 0, 255, 255].repeat((side * side) as usize),
+                );
+            }
             let native_max_level = gpu.native_max_level;
             for native_cap in [true, false] {
                 gpu.native_max_level = native_cap;

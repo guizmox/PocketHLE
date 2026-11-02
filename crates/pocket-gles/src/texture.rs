@@ -173,7 +173,7 @@ impl Texture {
             return Vec::new();
         }
         let last = if self.min_filter.uses_mipmaps() {
-            self.width.max(self.height).ilog2()
+            self.width.max(self.height).ilog2().min(self.max_level)
         } else {
             0
         };
@@ -286,7 +286,8 @@ impl Texture {
             })
     }
 
-    /// ES 1.1 section 3.7.9: mip filters require every image through 1x1,
+    /// ES 1.1 section 3.7.9 with SGIS_texture_lod: mip filters require images
+    /// through min(MAX_LEVEL, log2(max(width,height))),
     /// with consistent dimensions and internal formats. Nonmip filters need base only.
     pub fn is_complete(&self) -> bool {
         if !self.image_defined(0, self.width, self.height) {
@@ -296,7 +297,7 @@ impl Texture {
             return true;
         }
         let base_format = self.formats.get(&0).copied().unwrap_or(GL_RGBA);
-        (1..=self.width.max(self.height).ilog2()).all(|level| {
+        (1..=self.width.max(self.height).ilog2().min(self.max_level)).all(|level| {
             self.formats.get(&level).copied().unwrap_or(GL_RGBA) == base_format
                 && self.image_defined(
                     level,
@@ -1627,5 +1628,33 @@ mod completeness_tests {
         t.set_format(0, GL_RGB);
         assert!(t.is_complete());
         assert_eq!(t.mipmaps[&1].2, [0, 255, 0, 255].repeat(2));
+    }
+}
+
+#[cfg(test)]
+mod truncated_mipmap_tests {
+    use super::*;
+    #[test]
+    fn max_level_controls_completeness_without_inventing_guest_images() {
+        let mut t = Texture::default();
+        t.set_level(0, 8, 4, [255; 4].repeat(32));
+        assert!(!t.is_complete());
+        t.set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, 0);
+        assert!(t.is_complete());
+        assert_eq!(t.upload_levels().len(), 1);
+        assert!(t.mipmaps.is_empty());
+        t.set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, 1);
+        assert!(!t.is_complete());
+        t.set_level(1, 4, 2, [0, 255, 0, 255].repeat(8));
+        assert!(t.is_complete());
+        assert_eq!(t.upload_levels().len(), 2);
+        assert_eq!(
+            t.sample_lod(&t.upload_levels(), 0.5, 0.5, 100.),
+            [0, 255, 0, 255]
+        );
+        t.set_level(2, 3, 1, [0; 4].repeat(3));
+        assert!(t.is_complete()); // outside active range.
+        t.set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, 2);
+        assert!(!t.is_complete());
     }
 }
