@@ -1951,6 +1951,24 @@ impl Renderer {
             self.check()
         }
     }
+    /// Begin the next window frame with fresh ancillary storage. This is an
+    /// EGL surface operation, not a guest glClear: guest masks do not apply.
+    pub fn discard_window_depth(
+        &mut self,
+        w: u32,
+        h: u32,
+        state: &PipelineState,
+    ) -> Result<(), String> {
+        let mut reset = state.clone();
+        reset.scissor = None;
+        reset.depth_write = true;
+        let color_dirty = self.dirty;
+        self.clear(w, h, &reset, [0.; 4], 1., GL_DEPTH_BUFFER_BIT)?;
+        // Only depth changed: keep both presentation color caches valid.
+        self.dirty = color_dirty;
+        Ok(())
+    }
+
     /// The choice is retained in Context; each native surface clamps independently.
     pub fn set_anisotropic_filtering(&mut self, level: u8) {
         self.anisotropy = match level {

@@ -2215,6 +2215,11 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     ctx.kernel.framebuffer.presentation_stats.record_present();
+    // Ancillary buffers are not preserved by a window swap. In particular a
+    // HUD may leave DepthMask(FALSE); that must not preserve previous-frame Z.
+    // Do this only after the actual presentation, never on cooperative retry
+    // or the pbuffer/pixmap synchronization path above.
+    with_ctx(|c| c.discard_window_depth());
     log::trace!(
         "eglSwapBuffers() -> frame {}",
         ctx.kernel.framebuffer.frame_counter
@@ -2961,6 +2966,87 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn only_a_completed_window_swap_discards_ancillary_depth() {
+        let _g = guard();
+        reset_for_test(240, 320);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        with_ctx(|c| {
+            c.target.depth.fill(0.125);
+            c.state.depth_write = false;
+            c.state.scissor = Some((0, 0, 1, 1));
+            c.clear_depth = 0.25;
+        });
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_swap_buffers,
+            &[DISPLAY_HANDLE, SURFACE_HANDLE],
+        );
+        with_ctx(|c| {
+            assert!(c.target.depth.iter().all(|d| *d == 1.));
+            assert!(!c.state.depth_write);
+            assert_eq!(c.state.scissor, Some((0, 0, 1, 1)));
+            assert_eq!(c.clear_depth, 0.25);
+            c.target.depth.fill(0.125);
+        });
+        // A cooperative retry has not presented anything yet.
+        kernel.framebuffer.directdraw.last_present =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        cpu.write_reg(ArmReg::R0, DISPLAY_HANDLE).unwrap();
+        cpu.write_reg(ArmReg::R1, SURFACE_HANDLE).unwrap();
+        let t = thunk();
+        {
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
+            assert_eq!(
+                egl_swap_buffers(&mut ctx).unwrap(),
+                DispatchOutcome::JumpTo(t.thunk_va)
+            );
+        }
+        assert!(with_ctx(|c| c.target.depth.iter().all(|d| *d == 0.125)));
+        let attrs = [
+            pocket_gles::EGL_WIDTH,
+            2,
+            pocket_gles::EGL_HEIGHT,
+            2,
+            EGL_NONE,
+        ];
+        cpu.write_mem(
+            SCRATCH,
+            &attrs
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let off = call(
+            &mut cpu,
+            &mut kernel,
+            egl_create_pbuffer,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, SCRATCH],
+        );
+        assert_ne!(off, 0);
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_make_current,
+            &[DISPLAY_HANDLE, off, off, CONTEXT_HANDLE],
+        );
+        with_ctx(|c| c.target.depth.fill(0.375));
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_swap_buffers,
+            &[DISPLAY_HANDLE, off],
+        );
+        assert!(with_ctx(|c| c.target.depth.iter().all(|d| *d == 0.375)));
+    }
 
     #[test]
     fn image_upload_bridge_checks_stack_parameters_before_unmapped_pixels() {

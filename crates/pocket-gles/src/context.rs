@@ -585,6 +585,21 @@ impl Context {
         self.target.to_rgb565(out);
     }
 
+    /// Window presentation does not preserve ancillary depth storage. Do not
+    /// use this for pbuffers, pixmaps, reads or a retried/failed presentation.
+    /// Guest clear values, masks, scissor and all other GL state stay unchanged.
+    pub fn discard_window_depth(&mut self) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(error) =
+                gpu.discard_window_depth(self.target.width, self.target.height, &self.state)
+            {
+                self.gpu_failure("window depth discard", error);
+                return;
+            }
+        }
+        self.target.clear_depth(1., None);
+    }
+
     // ---- error handling -------------------------------------------------
 
     /// Record an error. GL keeps the *first* error until it is read, so
@@ -6486,5 +6501,100 @@ mod image_validation_tests {
         assert_eq!(c.take_error(), GL_INVALID_VALUE);
         assert_eq!(c.textures[&0].revision, revision);
         assert_eq!(c.textures[&0].rgba, [71; 16]);
+    }
+}
+
+#[cfg(test)]
+mod window_depth_discard_tests {
+    use super::*;
+    fn exercise(c: &mut Context) {
+        let vertices = |z: f32, color: [f32; 4]| {
+            [[-1., -1., z, 1.], [1., -1., z, 1.], [0., 1., z, 1.]].map(|pos| raster::Vertex {
+                pos,
+                color,
+                back_color: color,
+                ..Default::default()
+            })
+        };
+        c.state.depth_test = true;
+        c.state.depth_func = CompareFunc::Lequal;
+        c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        let near = vertices(-0.5, [1., 0., 0., 1.]);
+        if let Some(g) = c.gpu.as_mut() {
+            g.draw(
+                &c.target,
+                &c.state,
+                GL_TRIANGLES,
+                &near,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+        } else {
+            raster::draw_triangle(&mut c.target, &c.state, &|_, _, _| None, &[], near);
+        }
+        c.sync_gpu();
+        let original = c.target.color.clone();
+        c.state.depth_write = false;
+        c.state.scissor = Some((0, 0, 1, 1));
+        c.state.color_mask = [false; 4];
+        c.clear_depth = 0.25;
+        let masks = c.state.color_mask;
+        let scissor = c.state.scissor;
+        c.discard_window_depth();
+        c.sync_gpu();
+        assert_eq!(c.target.color, original);
+        assert_eq!(c.state.color_mask, masks);
+        assert_eq!(c.state.scissor, scissor);
+        assert!(!c.state.depth_write);
+        assert_eq!(c.clear_depth, 0.25);
+        // A guest clear remains masked. The fresh depth is from presentation,
+        // not from overriding the semantics of that subsequent GL command.
+        c.clear(GL_DEPTH_BUFFER_BIT);
+        c.state.scissor = None;
+        c.state.color_mask = [true; 4];
+        let far = vertices(0.5, [0., 1., 0., 1.]);
+        if let Some(g) = c.gpu.as_mut() {
+            g.draw(
+                &c.target,
+                &c.state,
+                GL_TRIANGLES,
+                &far,
+                &[],
+                &HashMap::new(),
+                [0; 4],
+            )
+            .unwrap();
+        } else {
+            raster::draw_triangle(&mut c.target, &c.state, &|_, _, _| None, &[], far);
+        }
+        c.sync_gpu();
+        let at = (8 * 16 + 8) * 4;
+        assert_eq!(&c.target.color[at..at + 4], &[0, 255, 0, 255]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    #[test]
+    fn software_window_depth_discard_keeps_state_and_color() {
+        exercise(&mut Context::new_rgb565(16, 16));
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL/GLES2; ancillary discard across window frames"]
+    fn native_window_depth_discard_keeps_state_and_color() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = Context::new_rgb565(16, 16);
+                if es {
+                    let mut gpu = crate::gpu::Renderer::new_es_for_test(16, 16).unwrap();
+                    gpu.set_surface_rgb565(true).unwrap();
+                    c.gpu = Some(gpu);
+                } else {
+                    c.enable_gpu().unwrap();
+                }
+                c.set_internal_resolution(scale);
+                exercise(&mut c);
+            }
+        }
     }
 }
