@@ -2025,6 +2025,49 @@ impl Renderer {
             self.check()
         }
     }
+    /// Update native pixmap color without touching its depth attachment.
+    /// Source is top-down RGB565; the backing texture is bottom-up and may
+    /// have an internal scale. This path is used only for native/GL interop.
+    pub fn write_rgb565(&mut self, width: u32, height: u32, pixels: &[u8]) -> Result<(), String> {
+        if !self.rgb565
+            || width == 0
+            || height == 0
+            || pixels.len() != width as usize * height as usize * 2
+            || self.width != width * self.render_scale
+            || self.height != height * self.render_scale
+        {
+            return Err("incompatible native pixmap upload".into());
+        }
+        let mut upload = vec![0u8; self.width as usize * self.height as usize * 2];
+        for y in 0..self.height as usize {
+            let sy = height as usize - 1 - y / self.render_scale as usize;
+            for x in 0..self.width as usize {
+                let src = (sy * width as usize + x / self.render_scale as usize) * 2;
+                let dst = (y * self.width as usize + x) * 2;
+                upload[dst..dst + 2].copy_from_slice(&pixels[src..src + 2]);
+            }
+        }
+        self.host.make_current()?;
+        unsafe {
+            (self.gl.ActiveTexture)(GL_TEXTURE0);
+            (self.gl.BindTexture)(GL_TEXTURE_2D, self.color);
+            (self.gl.PixelStorei)(0x0cf5, 1);
+            (self.gl.TexImage2D)(
+                GL_TEXTURE_2D,
+                0,
+                if self.host.es { GL_RGB as i32 } else { 0x8d62 },
+                self.width as i32,
+                self.height as i32,
+                0,
+                GL_RGB,
+                GL_UNSIGNED_SHORT_5_6_5,
+                upload.as_ptr().cast(),
+            );
+        }
+        self.dirty = true;
+        unsafe { self.check() }
+    }
+
     pub fn clear(
         &mut self,
         w: u32,

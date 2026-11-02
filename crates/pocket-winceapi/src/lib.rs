@@ -594,6 +594,13 @@ impl Dispatcher for WinCeDispatcher {
                 log::trace!("call {}", thunk.label());
             }
             let mut ctx = CallCtx { cpu, thunk, kernel };
+            if gles::needs_thread_switch(ctx.kernel.current_thread)
+                && ["libgles_cm.dll", "libgles_cl.dll", "libegl.dll"]
+                    .iter()
+                    .any(|dll| thunk.dll.eq_ignore_ascii_case(dll))
+            {
+                gles::enter_thread(ctx.kernel.current_thread);
+            }
             match handler(&mut ctx) {
                 Ok(o) => Ok(o),
                 Err(e) => {

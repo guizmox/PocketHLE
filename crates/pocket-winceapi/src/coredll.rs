@@ -16500,6 +16500,21 @@ fn rgb565_to_888(px: u16) -> (u8, u8, u8) {
 /// from the guest. Both buffers persist across calls in
 /// [`pocket_kernel::KernelState`] so a chatty BitBlt loop doesn't
 /// allocate a fresh `Vec<u8>` per call.
+pub(crate) fn snapshot_bitmap_pixels(ctx: &mut CallCtx<'_>, handle: u32) -> Option<Vec<u8>> {
+    let bitmap = ctx.kernel.gdi.bitmap(handle)?.clone();
+    if bitmap.dib_bits_va.is_some() && !bitmap.host_dirty {
+        let mut raw = std::mem::take(&mut ctx.kernel.dib_decode_scratch);
+        let mut pixels = Vec::new();
+        let ok = snapshot_dib_into(ctx.cpu, &bitmap, &mut raw, &mut pixels);
+        ctx.kernel.dib_decode_scratch = raw;
+        if ok {
+            return Some(pixels);
+        }
+        return None;
+    }
+    Some(bitmap.pixels)
+}
+
 fn snapshot_dib_into(
     cpu: &mut dyn pocket_cpu::Cpu,
     bm: &pocket_kernel::gdi::Bitmap,

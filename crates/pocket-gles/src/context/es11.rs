@@ -175,10 +175,20 @@ impl Context {
         }
     }
     pub fn is_texture(&self, name: u32) -> bool {
-        name != 0 && self.es11.texture_objects.contains(&name)
+        name != 0
+            && self
+                .names
+                .textures
+                .get(&name)
+                .is_some_and(|id| self.es11.texture_objects.contains(id))
     }
     pub fn is_buffer(&self, name: u32) -> bool {
-        name != 0 && self.es11.buffer_objects.contains(&name)
+        name != 0
+            && self
+                .names
+                .buffers
+                .get(&name)
+                .is_some_and(|id| self.es11.buffer_objects.contains(id))
     }
     pub fn is_enabled(&mut self, cap: u32) -> Option<bool> {
         let result = match cap {
@@ -487,7 +497,7 @@ impl Context {
                 match pname {
                     0x807b | 0x807e | 0x8082 | 0x8089 => enumeration(a.ty),
                     0x8896 | 0x8897 | 0x8898 | 0x889a => {
-                        StateValue::Number(vec![f64::from(a.buffer)])
+                        StateValue::Number(vec![f64::from(self.buffer_object_name(a.buffer))])
                     }
                     0x807c | 0x807f | 0x8083 | 0x808a => number([a.stride as f32]),
                     _ => number([a.size as f32]),
@@ -531,15 +541,17 @@ impl Context {
                 MatrixMode::Projection => GL_PROJECTION,
                 MatrixMode::Texture => GL_TEXTURE,
             }),
-            0x8069 => StateValue::Number(vec![f64::from(
+            0x8069 => StateValue::Number(vec![f64::from(self.texture_object_name(
                 self.texture_units[self.active_texture as usize].bound_texture,
-            )]),
+            ))]),
             0x84e0 => enumeration(GL_TEXTURE0 + self.active_texture),
             0x84e1 => enumeration(GL_TEXTURE0 + self.client_active_texture),
-            GL_ARRAY_BUFFER_BINDING => StateValue::Number(vec![f64::from(self.array_buffer)]),
-            GL_ELEMENT_ARRAY_BUFFER_BINDING => {
-                StateValue::Number(vec![f64::from(self.element_array_buffer)])
+            GL_ARRAY_BUFFER_BINDING => {
+                StateValue::Number(vec![f64::from(self.buffer_object_name(self.array_buffer))])
             }
+            GL_ELEMENT_ARRAY_BUFFER_BINDING => StateValue::Number(vec![f64::from(
+                self.buffer_object_name(self.element_array_buffer),
+            )]),
             _ => return self.is_enabled(pname).map(|v| number([u8::from(v) as f32])),
         };
         Some(v)

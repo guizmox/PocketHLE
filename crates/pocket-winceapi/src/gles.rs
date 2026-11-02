@@ -5,9 +5,14 @@
 //! [`super::WinCeDispatcher::new`] does for `coredll.dll`.
 
 mod egl_config;
+mod egl_context;
 mod es11;
+#[cfg(test)]
+mod lifecycle_tests;
 
-use pocket_gles::context::SurfaceBuffers;
+pub(crate) use egl_context::{enter_thread, needs_thread_switch};
+use egl_context::{EglContext, EglThread};
+use pocket_gles::context::{ObjectReferences, SharedObjects, SurfaceBuffers};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 #[cfg(test)]
@@ -45,11 +50,22 @@ struct EglImage {
     width: u32,
     height: u32,
     pixmap: Option<u32>,
+    window: Option<u32>,
+    largest: bool,
+    mipmap: bool,
     deleted: bool,
     buffers: Option<SurfaceBuffers>,
 }
 struct EglSurfaces {
     initialized: bool,
+    contexts: HashMap<u32, EglContext>,
+    groups: HashMap<u32, SharedObjects>,
+    current: u32,
+    loaded: u32,
+    next_context: u32,
+    next_group: u32,
+    thread: usize,
+    threads: HashMap<usize, EglThread>,
     context_alive: bool,
     context_deleted: bool,
     context_ever_bound: bool,
@@ -59,6 +75,7 @@ struct EglSurfaces {
     read: u32,
     bound: bool,
     next: u32,
+    window_issued: bool,
 }
 impl EglSurfaces {
     fn new() -> Self {
@@ -69,12 +86,23 @@ impl EglSurfaces {
                 width: 240,
                 height: 320,
                 pixmap: None,
+                window: None,
+                largest: false,
+                mipmap: false,
                 deleted: false,
                 buffers: None,
             },
         );
         Self {
             initialized: false,
+            contexts: HashMap::new(),
+            groups: HashMap::new(),
+            current: 0,
+            loaded: 0,
+            next_context: CONTEXT_HANDLE,
+            next_group: 1,
+            thread: 0,
+            threads: HashMap::new(),
             context_alive: false,
             context_deleted: false,
             context_ever_bound: false,
@@ -84,6 +112,7 @@ impl EglSurfaces {
             read: 0,
             bound: false,
             next: 0x45471000,
+            window_issued: false,
         }
     }
     fn select(&mut self, c: &mut Context, handle: u32) {
@@ -116,8 +145,14 @@ impl EglSurfaces {
         let draw = self.draw;
         let read = self.read;
         let active = self.active;
-        self.images
-            .retain(|h, s| !s.deleted || (*h == draw || *h == read || *h == active));
+        let others: Vec<u32> = self
+            .threads
+            .values()
+            .flat_map(|t| [t.draw, t.read])
+            .collect();
+        self.images.retain(|h, s| {
+            !s.deleted || (*h == draw || *h == read || *h == active) || others.contains(h)
+        });
     }
 }
 
@@ -159,6 +194,16 @@ fn flush_pixmap(ctx: &mut CallCtx<'_>, surface: u32) -> Result<(), KernelError> 
     crate::coredll::sync_bitmap_to_guest(ctx, bitmap)
 }
 
+fn update_stored_contexts(mut f: impl FnMut(&mut Context)) {
+    SURFACES.with(|s| {
+        for record in s.borrow_mut().contexts.values_mut() {
+            if let Some(c) = record.state.as_mut() {
+                f(c);
+            }
+        }
+    });
+}
+
 /// Select the dated NVIDIA GoForce driver used by the Gizmondo platform.
 /// This belongs to the rendering session, independently of controls and audio.
 pub fn set_gizmondo_goforce_driver(enabled: bool) {
@@ -168,20 +213,34 @@ pub fn set_gizmondo_goforce_driver(enabled: bool) {
             tex.goforce_lod = enabled;
         }
     });
+    update_stored_contexts(|c| {
+        c.gizmondo_goforce_20051013 = enabled;
+        for tex in c.textures.values_mut() {
+            tex.goforce_lod = enabled;
+        }
+    });
+    SURFACES.with(|s| {
+        for group in s.borrow_mut().groups.values_mut() {
+            group.set_goforce_profile(enabled);
+        }
+    });
 }
 
 /// Explicit legacy-driver compatibility, independent of CPU identity and game ID.
 pub fn set_intel2700g_depth_bias(enabled: bool) {
     with_ctx(|c| c.state.intel2700g_depth_bias = enabled);
+    update_stored_contexts(|c| c.state.intel2700g_depth_bias = enabled);
 }
 
 /// Host GPU pixel density. Guest geometry remains unchanged.
 pub fn set_internal_resolution(scale: u8) {
     with_ctx(|c| c.set_internal_resolution(scale));
+    update_stored_contexts(|c| c.set_internal_resolution(scale));
 }
 
 pub fn set_anisotropic_filtering(level: u8) {
     with_ctx(|c| c.set_anisotropic_filtering(level));
+    update_stored_contexts(|c| c.set_anisotropic_filtering(level));
 }
 
 pub fn set_gpu_renderer(enabled: bool) {
@@ -201,6 +260,14 @@ pub fn set_gpu_renderer(enabled: bool) {
             });
         }
     });
+    update_stored_contexts(|c| c.set_egl_gpu_policy(enabled));
+    if !enabled {
+        SURFACES.with(|s| {
+            for group in s.borrow_mut().groups.values_mut() {
+                group.prepare_software();
+            }
+        });
+    }
 }
 
 pub(crate) fn release_gpu() {
@@ -218,6 +285,7 @@ pub(crate) fn release_gpu() {
 /// runs reusing the same host thread. Dropping the old Context frees all
 /// host-side GL resources; guest memory belongs to the new kernel/CPU.
 pub(crate) fn reset_for_session() {
+    egl_context::set_thread(0);
     with_ctx(|c| *c = Context::new_rgb565(240, 320));
     SURFACES.with(|s| *s.borrow_mut() = EglSurfaces::new());
     EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
@@ -234,6 +302,7 @@ pub(crate) struct SuspendedGles {
 }
 
 pub(crate) fn suspend() -> SuspendedGles {
+    egl_context::set_thread(0);
     let context =
         CTX.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), Context::new_rgb565(240, 320)));
     let error = EGL_ERROR.with(|slot| slot.replace(EGL_SUCCESS));
@@ -250,6 +319,7 @@ pub(crate) fn suspend() -> SuspendedGles {
 }
 
 pub(crate) fn resume(saved: SuspendedGles) {
+    egl_context::set_thread(saved.surfaces.thread);
     CTX.with(|slot| *slot.borrow_mut() = saved.context);
     SURFACES.with(|slot| *slot.borrow_mut() = saved.surfaces);
     EGL_ERROR.with(|slot| slot.set(saved.error));
@@ -1011,12 +1081,13 @@ fn gl_delete_textures(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
+    let ids = with_ctx(|c| c.texture_object_ids(&names));
     with_ctx(|c| c.delete_textures(&names));
     // All native surface contexts share the guest texture namespace.
     SURFACES.with(|s| {
         for image in s.borrow_mut().images.values_mut() {
             if let Some(buffers) = image.buffers.as_mut() {
-                buffers.delete_textures(&names);
+                buffers.delete_textures(&ids);
             }
         }
     });
@@ -1765,22 +1836,18 @@ fn gl_compressed_tex_sub_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 // ---- EGL -------------------------------------------------------------------
 //
-// There is exactly one display, one config, one surface and one
-// context, because there is exactly one software rasterizer behind
-// them. The handles are distinct non-zero constants so a guest that
-// compares them against `EGL_NO_*` — or against each other — sees what
-// it expects.
+// One display/config; context and offscreen-surface handles are unique per run.
 
 /// The single `EGLDisplay` we hand out.
 const DISPLAY_HANDLE: u32 = 0x4547_0001;
 /// The single `EGLConfig`.
 const CONFIG_HANDLE: u32 = 0x4547_0002;
-/// The single window `EGLSurface`.
+/// First window surface; later windows receive fresh handles.
 const SURFACE_HANDLE: u32 = 0x4547_0003;
-/// The single `EGLContext`.
+/// First context handle; subsequent creations receive distinct handles.
 const CONTEXT_HANDLE: u32 = 0x4547_0004;
 
-/// Sticky EGL error, independent of the GL one and scoped to the run.
+/// Sticky EGL error, independent of GL errors, scoped to the guest thread.
 fn set_egl_error(code: u32) {
     EGL_ERROR.with(|error| {
         if error.get() == EGL_SUCCESS {
@@ -1829,34 +1896,25 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 // Termination must not invalidate a context or framebuffer still current.
 // Its pending deletion is collected by the next successful unbind/rebind.
 fn egl_terminate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    egl_context::reap_finished_threads(ctx.kernel);
     if ctx.arg_u32(0)? != DISPLAY_HANDLE {
         set_egl_error(EGL_BAD_DISPLAY);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    let release = SURFACES.with(|s| {
+    SURFACES.with(|s| {
         let mut s = s.borrow_mut();
-        if !s.initialized {
-            return false;
-        }
-        s.initialized = false;
-        s.context_deleted = s.context_alive;
-        for image in s.images.values_mut() {
-            image.deleted = true;
-        }
-        s.collect();
-        if !s.bound {
-            s.context_alive = false;
-            s.active = 0;
-            s.images.clear();
-            true
-        } else {
-            false
+        if s.initialized {
+            s.initialized = false;
+            for record in s.contexts.values_mut() {
+                record.deleted = true;
+            }
+            for image in s.images.values_mut() {
+                image.deleted = true;
+            }
+            s.collect_contexts();
+            s.collect();
         }
     });
-    if release {
-        reset_client_context();
-        release_gpu();
-    }
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
@@ -1970,31 +2028,56 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         set_egl_error(pocket_gles::EGL_BAD_NATIVE_WINDOW);
         return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
     }
+    let window = ctx.arg_u32(2)?;
+    let goforce = with_ctx(|c| c.gizmondo_goforce_20051013);
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
-    SURFACES.with(|s| {
+    let handle = SURFACES.with(|s| {
         let mut s = s.borrow_mut();
+        if let Some((&handle, _)) = s.images.iter().find(|(_, i)| i.window == Some(window)) {
+            // Keep the historical repeated-window acceptance in the GoForce profile.
+            if goforce && !s.images[&handle].deleted {
+                return handle;
+            }
+            set_egl_error(pocket_gles::EGL_BAD_ALLOC);
+            return 0;
+        }
+        if s.images.len() >= 32 {
+            set_egl_error(pocket_gles::EGL_BAD_ALLOC);
+            return 0;
+        }
+        let handle = if !s.window_issued {
+            s.window_issued = true;
+            SURFACE_HANDLE
+        } else {
+            let h = s.next;
+            s.next += 1;
+            h
+        };
         let active = s.active;
-        let image = s.images.entry(SURFACE_HANDLE).or_insert(EglImage {
+        let image = s.images.entry(handle).or_insert(EglImage {
             width: w,
             height: h,
             pixmap: None,
+            window: Some(window),
+            largest: false,
+            mipmap: false,
             deleted: false,
             buffers: Some(SurfaceBuffers::new_rgb565(w, h)),
         });
         image.width = w;
         image.height = h;
-        image.deleted = false;
-        if active == SURFACE_HANDLE {
-            with_ctx(|c| {
-                c.target.resize(w, h);
-                c.set_viewport(0, 0, w as i32, h as i32);
-            });
+        image.window = Some(window);
+        if active == handle {
+            with_ctx(|c| c.target.resize(w, h));
         } else if let Some(b) = image.buffers.as_mut() {
             b.target.resize(w, h);
         }
+        handle
     });
-    log::info!("eglCreateWindowSurface() -> {w}×{h} RGB565");
-    Ok(DispatchOutcome::ReturnedR0(SURFACE_HANDLE))
+    if handle != 0 {
+        log::info!("eglCreateWindowSurface() -> {w}×{h} RGB565");
+    }
+    Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
 fn egl_create_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2009,33 +2092,16 @@ fn egl_create_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let share = ctx.arg_u32(2)?;
-    if share != 0 && (share != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive)) {
-        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    if SURFACES.with(|s| {
-        let s = s.borrow();
-        s.context_alive && s.context_deleted
-    }) {
-        set_egl_error(pocket_gles::EGL_BAD_ALLOC);
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    SURFACES.with(|s| {
-        let mut s = s.borrow_mut();
-        if !s.context_alive {
-            s.context_ever_bound = false;
-        }
-        s.context_alive = true;
-        s.context_deleted = false;
-    });
-    Ok(DispatchOutcome::ReturnedR0(CONTEXT_HANDLE))
+    let handle = SURFACES.with(|s| s.borrow_mut().create_context(share));
+    Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
 fn egl_query_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !egl_config_display(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    if ctx.arg_u32(1)? != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive) {
+    let handle = ctx.arg_u32(1)?;
+    if !SURFACES.with(|s| s.borrow().contexts.contains_key(&handle)) {
         set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
@@ -2063,8 +2129,8 @@ fn egl_surface_args(ctx: &mut CallCtx<'_>) -> Result<bool, KernelError> {
     Ok(true)
 }
 fn allocate_surface(width: u32, height: u32, pixmap: Option<u32>) -> u32 {
-    if width == 0 || height == 0 || width > 1024 || height > 1024 {
-        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+    if width > 1024 || height > 1024 {
+        set_egl_error(pocket_gles::EGL_BAD_ALLOC);
         return EGL_NO_SURFACE;
     }
     SURFACES.with(|s| {
@@ -2086,6 +2152,9 @@ fn allocate_surface(width: u32, height: u32, pixmap: Option<u32>) -> u32 {
                 width,
                 height,
                 pixmap,
+                window: None,
+                largest: false,
+                mipmap: false,
                 deleted: false,
                 buffers: Some(SurfaceBuffers::new_rgb565(width, height)),
             },
@@ -2097,38 +2166,51 @@ fn egl_create_pbuffer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let mut ptr = ctx.arg_u32(2)?;
-    let (mut w, mut h) = (0, 0);
-    let mut ended = ptr == 0;
-    for _ in 0..32 {
-        if ptr == 0 {
-            break;
-        }
-        let key = ctx.cpu.read_u32_le(ptr)?;
-        if key == EGL_NONE {
-            ended = true;
-            break;
-        }
-        let value = ctx.cpu.read_u32_le(ptr + 4)?;
+    let address = ctx.arg_u32(2)?;
+    let Ok(pairs) = egl_config::read_pairs(ctx, address) else {
+        set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let (mut w, mut h, mut largest) = (0i32, 0i32, false);
+    let (mut format, mut target, mut mipmap) = (0x305c, 0x305c, false);
+    for (key, value) in pairs {
         match key {
             pocket_gles::EGL_WIDTH => w = value,
             pocket_gles::EGL_HEIGHT => h = value,
-            pocket_gles::EGL_LARGEST_PBUFFER => {}
+            pocket_gles::EGL_LARGEST_PBUFFER => largest = value != 0,
+            0x3080 if matches!(value, 0x305c | 0x305d | 0x305e) => format = value,
+            0x3081 if matches!(value, 0x305c | 0x305f) => target = value,
+            0x3082 => mipmap = value != 0,
             _ => {
                 set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
                 return Ok(DispatchOutcome::ReturnedR0(0));
             }
         }
-        let Some(next) = ptr.checked_add(8) else {
-            break;
-        };
-        ptr = next;
     }
-    if !ended {
-        set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+    if w < 0 || h < 0 {
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    Ok(DispatchOutcome::ReturnedR0(allocate_surface(w, h, None)))
+    // Config explicitly reports BIND_TO_TEXTURE_{RGB,RGBA}=FALSE. Reject
+    // incompatible texture-bound requests, rather than pretending to bind.
+    if format != 0x305c || target != 0x305c {
+        set_egl_error(pocket_gles::EGL_BAD_MATCH);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if largest {
+        w = w.min(1024);
+        h = h.min(1024);
+    }
+    let handle = allocate_surface(w as u32, h as u32, None);
+    if handle != 0 {
+        SURFACES.with(|s| {
+            let mut s = s.borrow_mut();
+            let image = s.images.get_mut(&handle).unwrap();
+            image.largest = largest;
+            image.mipmap = mipmap;
+        });
+    }
+    Ok(DispatchOutcome::ReturnedR0(handle))
 }
 fn egl_create_pixmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !egl_surface_args(ctx)? {
@@ -2143,16 +2225,32 @@ fn egl_create_pixmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         }
     }
     let bitmap = ctx.arg_u32(2)?;
+    if SURFACES.with(|s| {
+        s.borrow()
+            .images
+            .values()
+            .any(|i| i.pixmap == Some(bitmap) && !i.deleted)
+    }) {
+        set_egl_error(pocket_gles::EGL_BAD_ALLOC);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let Some(bm) = ctx.kernel.gdi.bitmap(bitmap) else {
         set_egl_error(pocket_gles::EGL_BAD_NATIVE_PIXMAP);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     let (w, h) = (bm.width, bm.height);
-    Ok(DispatchOutcome::ReturnedR0(allocate_surface(
-        w,
-        h,
-        Some(bitmap),
-    )))
+    let handle = allocate_surface(w, h, Some(bitmap));
+    if handle != 0 {
+        if let Some(pixels) = crate::coredll::snapshot_bitmap_pixels(ctx, bitmap) {
+            SURFACES.with(|s| {
+                let mut s = s.borrow_mut();
+                if let Some(b) = s.images.get_mut(&handle).and_then(|i| i.buffers.as_mut()) {
+                    b.write_rgb565(&pixels);
+                }
+            });
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(handle))
 }
 fn egl_destroy_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !egl_config_display(ctx)? {
@@ -2175,42 +2273,24 @@ fn egl_destroy_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     }
     Ok(DispatchOutcome::ReturnedR0(ok as u32))
 }
-fn reset_client_context() {
-    let names: Vec<_> = with_ctx(|c| c.textures.keys().copied().collect());
-    SURFACES.with(|s| {
-        for image in s.borrow_mut().images.values_mut() {
-            if let Some(buffers) = image.buffers.as_mut() {
-                buffers.delete_textures(&names);
-            }
-        }
-    });
-    with_ctx(|c| c.reset_client_state());
-    PACK_ALIGNMENT.with(|a| a.set(4));
-    UNPACK_ALIGNMENT.with(|a| a.set(4));
-}
-
 fn egl_destroy_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !egl_config_display(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    if ctx.arg_u32(1)? != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive) {
-        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
-    let release = SURFACES.with(|s| {
+    let handle = ctx.arg_u32(1)?;
+    let ok = SURFACES.with(|s| {
         let mut s = s.borrow_mut();
-        s.context_deleted = true;
-        if !s.bound {
-            s.context_alive = false;
-            true
-        } else {
-            false
-        }
+        let Some(record) = s.contexts.get_mut(&handle) else {
+            return false;
+        };
+        record.deleted = true;
+        s.collect_contexts();
+        true
     });
-    if release {
-        reset_client_context();
+    if !ok {
+        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
     }
-    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
+    Ok(DispatchOutcome::ReturnedR0(ok as u32))
 }
 
 /// EGL 1.2+ compatibility export: detach this thread, not the display.
@@ -2223,36 +2303,28 @@ fn egl_release_thread(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 fn unbind_egl(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     let old = SURFACES.with(|s| s.borrow().draw);
     flush_pixmap(ctx, old)?;
-    let release = SURFACES.with(|s| {
+    SURFACES.with(|s| {
         let mut s = s.borrow_mut();
         with_ctx(|c| {
             c.flush();
-            let mut empty = SurfaceBuffers::new_rgb565(1, 1);
-            c.park_surface(&mut empty);
-            let active = s.active;
-            if let Some(image) = s.images.get_mut(&active) {
-                image.buffers = Some(empty);
-            }
+            s.select(c, 0);
         });
-        s.active = 0;
+        let current = s.current;
+        if let Some(record) = s.contexts.get_mut(&current) {
+            record.owner = None;
+        }
+        s.current = 0;
         s.bound = false;
         s.draw = 0;
         s.read = 0;
+        s.collect_contexts();
         s.collect();
-        if s.context_deleted {
-            s.context_alive = false;
-            true
-        } else {
-            false
-        }
     });
-    if release {
-        reset_client_context();
-    }
     Ok(())
 }
 fn egl_make_current(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (dpy, draw, read, context) = (
+    egl_context::reap_finished_threads(ctx.kernel);
+    let (dpy, draw, read, handle) = (
         ctx.arg_u32(0)?,
         ctx.arg_u32(1)?,
         ctx.arg_u32(2)?,
@@ -2262,62 +2334,75 @@ fn egl_make_current(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         set_egl_error(EGL_BAD_DISPLAY);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    if context == 0 && draw == 0 && read == 0 {
+    if handle == 0 && draw == 0 && read == 0 {
         unbind_egl(ctx)?;
         return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
     }
-    if !SURFACES.with(|s| s.borrow().initialized) {
-        set_egl_error(pocket_gles::EGL_NOT_INITIALIZED);
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
-    if context == 0 || draw == 0 || read == 0 {
-        set_egl_error(pocket_gles::EGL_BAD_MATCH);
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
-    if context != CONTEXT_HANDLE || !SURFACES.with(|s| s.borrow().context_alive) {
-        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
-    // Validate before flushing/altering the old binding. Failed calls are atomic.
     let valid = SURFACES.with(|s| {
         let s = s.borrow();
-        if [draw, read]
+        let error = if !s.initialized {
+            Some(pocket_gles::EGL_NOT_INITIALIZED)
+        } else if handle == 0 || draw == 0 || read == 0 {
+            Some(pocket_gles::EGL_BAD_MATCH)
+        } else if s.contexts.get(&handle).is_none_or(|c| c.deleted) {
+            Some(pocket_gles::EGL_BAD_CONTEXT)
+        } else if [draw, read]
             .iter()
             .any(|h| s.images.get(h).is_none_or(|i| i.deleted))
         {
-            set_egl_error(pocket_gles::EGL_BAD_SURFACE);
-            return false;
+            Some(pocket_gles::EGL_BAD_SURFACE)
+        } else if s.contexts[&handle].owner.is_some_and(|t| t != s.thread)
+            || s.threads.values().any(|t| {
+                t.context != 0 && [draw, read].iter().any(|h| *h == t.draw || *h == t.read)
+            })
+        {
+            Some(pocket_gles::EGL_BAD_ACCESS)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            set_egl_error(error);
+            false
+        } else {
+            true
         }
-        true
     });
     if !valid {
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    // A context marked for deletion cannot be resurrected by rebinding it.
-    if SURFACES.with(|s| s.borrow().context_deleted) {
-        set_egl_error(pocket_gles::EGL_BAD_CONTEXT);
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
     let old = SURFACES.with(|s| s.borrow().draw);
     flush_pixmap(ctx, old)?;
-    with_ctx(|c| c.flush());
-    let ok = SURFACES.with(|s| {
+    SURFACES.with(|s| {
         let mut s = s.borrow_mut();
         with_ctx(|c| {
+            c.flush();
+            s.select(c, 0);
+        });
+        let current = s.current;
+        if let Some(record) = s.contexts.get_mut(&current) {
+            record.owner = None;
+        }
+        s.activate(handle);
+        let first = !s.contexts[&handle].ever_bound;
+        with_ctx(|c| {
             s.select(c, draw);
-            if !s.context_ever_bound {
+            if first {
                 c.set_viewport(0, 0, c.target.width as i32, c.target.height as i32);
                 c.set_scissor(0, 0, c.target.width as i32, c.target.height as i32);
             }
         });
-        s.context_ever_bound = true;
+        let thread = s.thread;
+        let record = s.contexts.get_mut(&handle).unwrap();
+        record.ever_bound = true;
+        record.owner = Some(thread);
+        s.current = handle;
         s.draw = draw;
         s.read = read;
         s.bound = true;
+        s.collect_contexts();
         s.collect();
-        true
     });
-    Ok(DispatchOutcome::ReturnedR0(ok as u32))
+    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
 fn egl_get_current_display(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2333,7 +2418,7 @@ fn egl_get_current_display(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
 fn egl_get_current_context(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(SURFACES.with(|s| {
         if s.borrow().bound {
-            CONTEXT_HANDLE
+            s.borrow().current
         } else {
             0
         }
@@ -2385,8 +2470,18 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
     let surface = ctx.arg_u32(1)?;
-    let dims = SURFACES.with(|s| s.borrow().images.get(&surface).map(|i| (i.width, i.height)));
-    let Some((w, h)) = dims else {
+    let dims = SURFACES.with(|s| {
+        s.borrow().images.get(&surface).map(|i| {
+            (
+                i.width,
+                i.height,
+                i.largest,
+                i.mipmap,
+                i.window.is_none() && i.pixmap.is_none(),
+            )
+        })
+    });
+    let Some((w, h, largest, mipmap, pbuffer)) = dims else {
         set_egl_error(pocket_gles::EGL_BAD_SURFACE);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     };
@@ -2396,7 +2491,10 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         pocket_gles::EGL_WIDTH => w as i32,
         pocket_gles::EGL_HEIGHT => h as i32,
         EGL_CONFIG_ID => 1,
-        pocket_gles::EGL_LARGEST_PBUFFER => EGL_FALSE as i32,
+        pocket_gles::EGL_LARGEST_PBUFFER => largest as i32,
+        0x3080 | 0x3081 => 0x305c, // NO_TEXTURE
+        0x3082 => mipmap as i32,
+        0x3083 => 0, // MIPMAP_TEXTURE / MIPMAP_LEVEL
         _ => {
             set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
             return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
@@ -2406,6 +2504,14 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
+    if !pbuffer
+        && matches!(
+            attribute,
+            pocket_gles::EGL_LARGEST_PBUFFER | 0x3080..=0x3083
+        )
+    {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
+    }
     ctx.cpu.write_mem(out, &value.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
@@ -2414,8 +2520,20 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// Converts the RGBA8888 render target down to the kernel
 /// framebuffer's RGB565 and marks it dirty so the frontend picks it up.
 pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let draw = SURFACES.with(|s| s.borrow().draw);
-    if draw != SURFACE_HANDLE {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let surface = ctx.arg_u32(1)?;
+    let valid = SURFACES.with(|s| {
+        let s = s.borrow();
+        s.bound && s.images.contains_key(&surface) && (s.draw == surface || s.read == surface)
+    });
+    if !valid {
+        set_egl_error(pocket_gles::EGL_BAD_SURFACE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let draw = surface;
+    if !SURFACES.with(|s| s.borrow().images[&draw].window.is_some()) {
         flush_pixmap(ctx, draw)?;
         with_ctx(|c| c.sync_gpu());
         return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
@@ -2428,8 +2546,21 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
         return Ok(outcome);
     }
+    let active = SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        let active = s.active;
+        with_ctx(|c| s.select(c, surface));
+        active
+    });
     let fb_len = ctx.kernel.framebuffer.pixels.len();
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
+    SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some(image) = s.images.get_mut(&surface) {
+            image.width = w;
+            image.height = h;
+        }
+    });
     let mut rendered = ctx.kernel.framebuffer.take_render_pixels();
     let physical = with_ctx(|c| {
         // A guest that never called eglCreateWindowSurface — or a
@@ -2477,6 +2608,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         "eglSwapBuffers() -> frame {}",
         ctx.kernel.framebuffer.frame_counter
     );
+    SURFACES.with(|s| with_ctx(|c| s.borrow_mut().select(c, active)));
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
@@ -2486,6 +2618,11 @@ fn egl_wait(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
     }
     let surface = SURFACES.with(|s| s.borrow().draw);
+    let pixmap = SURFACES.with(|s| s.borrow().images.get(&surface).and_then(|i| i.pixmap));
+    if pixmap.is_some_and(|bitmap| ctx.kernel.gdi.bitmap(bitmap).is_none()) {
+        set_egl_error(pocket_gles::EGL_BAD_CURRENT_SURFACE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
     flush_pixmap(ctx, surface)?;
     with_ctx(|c| c.sync_gpu());
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
@@ -2497,6 +2634,20 @@ fn egl_wait_native(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         // EGL_CORE_NATIVE_ENGINE
         set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let bitmap = SURFACES.with(|s| {
+        let s = s.borrow();
+        s.images.get(&s.draw).and_then(|i| i.pixmap)
+    });
+    if let Some(bitmap) = bitmap {
+        let Some(pixels) = crate::coredll::snapshot_bitmap_pixels(ctx, bitmap) else {
+            set_egl_error(pocket_gles::EGL_BAD_CURRENT_SURFACE);
+            return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+        };
+        if !with_ctx(|c| c.write_rgb565(&pixels)) {
+            set_egl_error(pocket_gles::EGL_BAD_ALLOC);
+            return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
@@ -2533,6 +2684,22 @@ fn egl_swap_interval(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
+fn egl_texture_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let surface = ctx.arg_u32(1)?;
+    if !SURFACES.with(|s| s.borrow().images.contains_key(&surface)) {
+        set_egl_error(pocket_gles::EGL_BAD_SURFACE);
+    } else if ctx.arg_u32(2)? != 0x3084 {
+        // EGL_BACK_BUFFER
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+    } else {
+        set_egl_error(pocket_gles::EGL_BAD_MATCH);
+    }
+    Ok(DispatchOutcome::ReturnedR0(EGL_FALSE))
+}
+
 fn egl_bind_api(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.arg_u32(0)? != 0x30a0 {
         // EGL_OPENGL_ES_API
@@ -2547,7 +2714,17 @@ fn egl_query_api(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 fn egl_copy_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
     let surface = ctx.arg_u32(1)?;
+    if !SURFACES.with(|s| {
+        let s = s.borrow();
+        s.bound && (s.draw == surface || s.read == surface)
+    }) {
+        set_egl_error(pocket_gles::EGL_BAD_SURFACE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
     let bitmap = ctx.arg_u32(2)?;
     let dims = SURFACES.with(|s| s.borrow().images.get(&surface).map(|i| (i.width, i.height)));
     let Some((w, h)) = dims else {
@@ -2578,14 +2755,6 @@ fn egl_copy_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 
 fn egl_true(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
-}
-
-/// Entry points for functionality we do not provide (pbuffers, pixmaps,
-/// buffer copies). Returning the null handle plus `EGL_BAD_MATCH` is
-/// how a driver without the capability answers.
-fn egl_unsupported(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    set_egl_error(pocket_gles::EGL_BAD_MATCH);
-    Ok(DispatchOutcome::ReturnedR0(EGL_FALSE))
 }
 
 fn egl_no_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2917,7 +3086,7 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "eglReleaseThread" => egl_release_thread,
         "eglQueryContext" => egl_query_context,
         "eglCreatePbufferFromClientBuffer" => egl_no_surface,
-        "eglBindTexImage" | "eglReleaseTexImage" => egl_unsupported,
+        "eglBindTexImage" | "eglReleaseTexImage" => egl_texture_surface,
         "eglGetProcAddress" => egl_get_proc_address,
 
         _ => return None,
@@ -2932,6 +3101,7 @@ fn reset_for_test(width: u32, height: u32) {
         let mut s = s.borrow_mut();
         s.initialized = true;
         // Most GL bridge tests start with an already-created, current EGL setup.
+        s.adopt_test_context();
         s.context_alive = true;
         s.context_ever_bound = true;
         s.bound = true;
@@ -2940,6 +3110,8 @@ fn reset_for_test(width: u32, height: u32) {
         let image = s.images.get_mut(&SURFACE_HANDLE).unwrap();
         image.width = width;
         image.height = height;
+        image.window = Some(0x1234);
+        s.window_issued = true;
     });
     with_ctx(|c| *c = Context::new_rgb565(width, height));
     EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
@@ -3098,7 +3270,7 @@ mod tests {
     /// to each host execution thread, not shared through this lock.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn guard() -> std::sync::MutexGuard<'static, ()> {
         match TEST_LOCK.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -3247,7 +3419,7 @@ mod tests {
 
     /// Invoke `handler` with `args` in r0..r3 (plus a stack tail) and
     /// return its r0.
-    fn call(
+    pub(super) fn call(
         cpu: &mut StubCpu,
         kernel: &mut KernelState,
         handler: crate::Handler,
@@ -3286,7 +3458,7 @@ mod tests {
     }
 
     /// A CPU with a stack and a scratch data page mapped.
-    const SCRATCH: u32 = 0x2000_0000;
+    pub(super) const SCRATCH: u32 = 0x2000_0000;
 
     #[test]
     fn compressed_format_queries_and_extension_names_match_decoders() {
@@ -4944,7 +5116,7 @@ mod tests {
         offscreen_roundtrip(true);
     }
 
-    fn fresh_cpu() -> StubCpu {
+    pub(super) fn fresh_cpu() -> StubCpu {
         let mut cpu = StubCpu::new();
         cpu.map_region(SCRATCH, 0x4000, Prot::READ | Prot::WRITE)
             .unwrap();
@@ -5580,26 +5752,20 @@ mod tests {
             call(&mut cpu, &mut kernel, egl_get_error, &[]),
             pocket_gles::EGL_BAD_CONTEXT
         );
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                egl_create_context,
-                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0]
-            ),
-            CONTEXT_HANDLE
+        let replacement = call(
+            &mut cpu,
+            &mut kernel,
+            egl_create_context,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0],
         );
+        assert_ne!(replacement, 0);
+        assert_ne!(replacement, CONTEXT_HANDLE);
         assert_eq!(
             call(
                 &mut cpu,
                 &mut kernel,
                 egl_make_current,
-                &[
-                    DISPLAY_HANDLE,
-                    SURFACE_HANDLE,
-                    SURFACE_HANDLE,
-                    CONTEXT_HANDLE
-                ]
+                &[DISPLAY_HANDLE, SURFACE_HANDLE, SURFACE_HANDLE, replacement]
             ),
             EGL_TRUE
         );
@@ -5678,19 +5844,14 @@ mod tests {
             ),
             EGL_TRUE
         );
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                egl_create_context,
-                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0]
-            ),
-            0
+        let replacement = call(
+            &mut cpu,
+            &mut kernel,
+            egl_create_context,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0],
         );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, egl_get_error, &[]),
-            pocket_gles::EGL_BAD_ALLOC
-        );
+        assert_ne!(replacement, 0);
+        assert_ne!(replacement, CONTEXT_HANDLE);
         assert_eq!(
             call(
                 &mut cpu,
@@ -5964,9 +6125,21 @@ mod tests {
     #[test]
     fn create_window_surface_sizes_the_target_from_the_framebuffer() {
         let _g = guard();
-        reset_for_test(8, 8);
+        reset_for_session();
         let mut cpu = fresh_cpu();
         let mut kernel = fresh_kernel();
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_initialize,
+            &[DISPLAY_HANDLE, 0, 0],
+        );
+        let context = call(
+            &mut cpu,
+            &mut kernel,
+            egl_create_context,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0],
+        );
         let (w, h) = (kernel.framebuffer.width, kernel.framebuffer.height);
         let surf = call(
             &mut cpu,
@@ -5975,6 +6148,15 @@ mod tests {
             &[DISPLAY_HANDLE, CONFIG_HANDLE, 0x1234, 0],
         );
         assert_ne!(surf, EGL_NO_SURFACE);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[DISPLAY_HANDLE, surf, surf, context]
+            ),
+            EGL_TRUE
+        );
         with_ctx(|c| {
             assert_eq!((c.target.width, c.target.height), (w, h));
             assert_eq!(c.state.viewport, (0, 0, w as i32, h as i32));
@@ -6620,7 +6802,12 @@ mod tests {
                 px.copy_from_slice(&[0xff, 0x00, 0x00, 0xff]);
             }
         });
-        call(&mut cpu, &mut kernel, egl_swap_buffers, &[0, 0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_swap_buffers,
+            &[DISPLAY_HANDLE, SURFACE_HANDLE],
+        );
 
         let presented = kernel.framebuffer.pixels.clone();
         assert!(
@@ -6701,7 +6888,7 @@ mod tests {
             &mut cpu,
             &mut kernel,
             egl_swap_buffers,
-            &[DISPLAY_HANDLE, 0],
+            &[DISPLAY_HANDLE, SURFACE_HANDLE],
         );
         let pixel = ((16 * 32 + 16) * 2) as usize;
         assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[255, 255]);
@@ -6761,7 +6948,7 @@ mod tests {
             &mut cpu,
             &mut kernel,
             egl_swap_buffers,
-            &[DISPLAY_HANDLE, 0],
+            &[DISPLAY_HANDLE, SURFACE_HANDLE],
         );
         assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[0, 248]);
         call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]);

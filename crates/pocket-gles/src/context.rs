@@ -11,7 +11,9 @@
 //! and the tests back it with a plain byte vector.
 
 mod es11;
+mod sharing;
 pub use es11::StateValue;
+pub use sharing::{ObjectReferences, SharedObjects};
 
 use crate::consts::*;
 use crate::fixed;
@@ -275,6 +277,19 @@ impl SurfaceBuffers {
         self.gpu = None;
         self.failed = false;
     }
+    pub fn write_rgb565(&mut self, pixels: &[u8]) -> bool {
+        if !write_rgb565_target(&mut self.target, pixels) {
+            return false;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.write_rgb565(self.target.width, self.target.height, pixels) {
+                log::warn!("GLES native pixmap upload: {e}");
+                self.failed = true;
+                return false;
+            }
+        }
+        true
+    }
     pub fn delete_textures(&mut self, names: &[u32]) {
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.delete_textures(names);
@@ -288,6 +303,27 @@ impl SurfaceBuffers {
         }
         self.release_gpu();
     }
+}
+
+fn write_rgb565_target(target: &mut RenderTarget, pixels: &[u8]) -> bool {
+    if pixels.len() != target.width as usize * target.height as usize * 2 {
+        return false;
+    }
+    for (dst, src) in target.color.chunks_exact_mut(4).zip(pixels.chunks_exact(2)) {
+        let v = u16::from_le_bytes([src[0], src[1]]);
+        let (r, g, b) = (
+            ((v >> 11) & 31) as u8,
+            ((v >> 5) & 63) as u8,
+            (v & 31) as u8,
+        );
+        dst.copy_from_slice(&[
+            (r << 3) | (r >> 2),
+            (g << 2) | (g >> 4),
+            (b << 3) | (b >> 2),
+            255,
+        ]);
+    }
+    true
 }
 
 pub struct Context {
@@ -339,6 +375,8 @@ pub struct Context {
     /// `glDrawElements` at draw time, unlike the array binding.
     pub element_array_buffer: u32,
     next_buffer_name: u32,
+    names: sharing::ObjectNames,
+    external_references: ObjectReferences,
 
     // ---- fragment pipeline ----
     pub state: PipelineState,
@@ -423,6 +461,8 @@ impl Context {
             array_buffer: 0,
             element_array_buffer: 0,
             next_buffer_name: 1,
+            names: Default::default(),
+            external_references: Default::default(),
             state,
             clear_color: [0.0, 0.0, 0.0, 0.0],
             clear_depth: 1.0,
@@ -452,6 +492,18 @@ impl Context {
     /// Reset client state after the EGL context is destroyed, retaining the
     /// surface attachments and host rendering policy. Other EGL surfaces must
     /// also have their cached textures invalidated by the owner.
+    pub fn write_rgb565(&mut self, pixels: &[u8]) -> bool {
+        if !write_rgb565_target(&mut self.target, pixels) {
+            return false;
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
+            if let Err(e) = gpu.write_rgb565(self.target.width, self.target.height, pixels) {
+                self.gpu_failure("native pixmap upload", e);
+                return false;
+            }
+        }
+        true
+    }
     pub fn reset_client_state(&mut self) {
         let names: Vec<_> = self.textures.keys().copied().collect();
         if let Some(gpu) = self.gpu.as_mut() {
@@ -525,6 +577,9 @@ impl Context {
     /// Select before guest rendering begins. Initialization failure keeps software.
     pub fn enable_gpu(&mut self) -> Result<(), String> {
         self.gpu_requested = true;
+        if self.target.width == 0 || self.target.height == 0 {
+            return Ok(());
+        }
         if self.gpu.is_none() {
             let mut gpu = crate::gpu::Renderer::new(self.target.width, self.target.height)?;
             gpu.set_anisotropic_filtering(self.anisotropic_filtering);
@@ -532,6 +587,26 @@ impl Context {
             gpu.set_render_scale(self.internal_resolution)?;
             if !self.es11.point_max_changed {
                 self.es11.point_max = gpu.logical_point_range()[1];
+            }
+            if self.target.rgb565
+                && self
+                    .target
+                    .color
+                    .chunks_exact(4)
+                    .any(|p| p[..3] != [0, 0, 0])
+            {
+                let mut pixels =
+                    vec![0; self.target.width as usize * self.target.height as usize * 2];
+                for (dst, src) in pixels
+                    .chunks_exact_mut(2)
+                    .zip(self.target.color.chunks_exact(4))
+                {
+                    let v = ((src[0] as u16 >> 3) << 11)
+                        | ((src[1] as u16 >> 2) << 5)
+                        | (src[2] as u16 >> 3);
+                    dst.copy_from_slice(&v.to_le_bytes());
+                }
+                gpu.write_rgb565(self.target.width, self.target.height, &pixels)?;
             }
             self.gpu = Some(gpu);
         }
@@ -798,13 +873,15 @@ impl Context {
     pub fn gen_textures(&mut self, n: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            while self.next_texture_name == 0 || self.textures.contains_key(&self.next_texture_name)
+            while self.next_texture_name == 0
+                || self.names.textures.contains_key(&self.next_texture_name)
             {
                 self.next_texture_name = self.next_texture_name.wrapping_add(1);
             }
             let name = self.next_texture_name;
             self.next_texture_name = self.next_texture_name.wrapping_add(1);
-            self.textures.insert(name, Texture::default());
+            let id = self.ensure_texture_name(name);
+            self.textures.insert(id, Texture::default());
             out.push(name);
         }
         out
@@ -820,11 +897,12 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
-        // Binding an unseen name creates the object, as GL requires.
+        // Bindings retain the object, independently of namespace deletion.
+        self.next_texture_name = self.next_texture_name.max(name.saturating_add(1));
+        let name = self.ensure_texture_name(name);
         if name != 0 {
             self.es11.texture_objects.insert(name);
             self.textures.entry(name).or_default();
-            self.next_texture_name = self.next_texture_name.max(name.saturating_add(1));
         }
         self.texture_units[unit].bound_texture = name;
         if unit == 0 {
@@ -842,12 +920,15 @@ impl Context {
     pub fn gen_buffers(&mut self, n: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            while self.next_buffer_name == 0 || self.buffers.contains_key(&self.next_buffer_name) {
+            while self.next_buffer_name == 0
+                || self.names.buffers.contains_key(&self.next_buffer_name)
+            {
                 self.next_buffer_name = self.next_buffer_name.wrapping_add(1);
             }
             let name = self.next_buffer_name;
             self.next_buffer_name = self.next_buffer_name.wrapping_add(1);
-            self.buffers.insert(name, Buffer::default());
+            let id = self.ensure_buffer_name(name);
+            self.buffers.insert(id, Buffer::default());
             out.push(name);
         }
         out
@@ -861,10 +942,11 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
+        self.next_buffer_name = self.next_buffer_name.max(name.saturating_add(1));
+        let name = self.ensure_buffer_name(name);
         if name != 0 {
             self.es11.buffer_objects.insert(name);
             self.buffers.entry(name).or_default();
-            self.next_buffer_name = self.next_buffer_name.max(name.saturating_add(1));
         }
         match target {
             GL_ARRAY_BUFFER => self.array_buffer = name,
@@ -887,8 +969,9 @@ impl Context {
             if name == 0 {
                 continue;
             }
-            self.es11.buffer_objects.remove(&name);
-            self.buffers.remove(&name);
+            let Some(name) = self.names.buffers.remove(&name) else {
+                continue;
+            };
             for array in [
                 &mut self.vertex_array,
                 &mut self.normal_array,
@@ -910,6 +993,7 @@ impl Context {
             if self.element_array_buffer == name {
                 self.element_array_buffer = 0;
             }
+            self.release_unlinked_buffer(name);
         }
     }
 
@@ -1166,15 +1250,19 @@ impl Context {
 
     pub fn delete_textures(&mut self, names: &[u32]) {
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.delete_textures(names);
+            let ids: Vec<_> = names
+                .iter()
+                .filter_map(|n| self.names.textures.get(n).copied())
+                .collect();
+            gpu.delete_textures(&ids);
         }
         for &name in names {
             if name == 0 {
                 continue;
             }
-            self.es11.texture_objects.remove(&name);
-            self.textures.remove(&name);
-            self.software_mips.remove(&name);
+            let Some(name) = self.names.textures.remove(&name) else {
+                continue;
+            };
             for (unit, state) in self.texture_units.iter_mut().enumerate() {
                 if state.bound_texture == name {
                     state.bound_texture = 0;
@@ -1183,6 +1271,7 @@ impl Context {
                     }
                 }
             }
+            self.release_unlinked_texture(name);
         }
     }
 
@@ -4166,6 +4255,48 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native OpenGL/GLES; native pixmap interop"]
+    fn native_rgb565_upload_preserves_depth_odd_rows_and_internal_scale() {
+        for es in [false, true] {
+            let mut c = Context::new_rgb565(3, 2);
+            let mut renderer = if es {
+                crate::gpu::Renderer::new_es_for_test(3, 2).unwrap()
+            } else {
+                crate::gpu::Renderer::new(3, 2).unwrap()
+            };
+            renderer.set_surface_rgb565(true).unwrap();
+            c.gpu = Some(renderer);
+            c.gpu_requested = true;
+            c.set_internal_resolution(2);
+            c.clear_depth = 0.25;
+            c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            let values = [0xf800u16, 0x07e0, 0x001f, 0xffff, 0, 0xffe0];
+            let pixels: Vec<_> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            assert!(c.write_rgb565(&pixels));
+            c.sync_gpu();
+            let before = c.target.color.clone();
+            let mut presented = vec![0; 12];
+            c.present_rgb565(&mut presented);
+            assert_eq!(presented, pixels, "ES={es}");
+            c.set_capability(GL_DEPTH_TEST, true);
+            c.current_color = [1., 0., 1., 1.];
+            c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            let mut mem = FakeMem {
+                base: BASE,
+                bytes: quad_floats(),
+            };
+            c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            assert_eq!(
+                c.target.color, before,
+                "depth attachment changed on ES={es}"
+            );
+            assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), Some((6, 4)));
+        }
+    }
+
+    #[test]
     fn mipmapped_triangle_rendering_refreshes_cache_on_level_updates() {
         let mut c = Context::new(8, 8);
         let mut m = FakeMem {
@@ -4203,6 +4334,7 @@ mod tests {
         t.set_level(1, 2, 2, [0, 255, 0, 255].repeat(4));
         t.set_level(2, 1, 1, vec![0, 0, 255, 255]);
         t.min_filter = texture::Filter::LinearMipmapLinear;
+        c.bind_texture(GL_TEXTURE_2D, 1);
         c.textures.insert(1, t);
         c.draw_arrays(&mut m, GL_TRIANGLE_FAN, 0, 4);
         assert_eq!(
