@@ -53,7 +53,6 @@ impl Context {
     pub fn new_egl_context(&self) -> Self {
         let mut c = Self::new_rgb565(1, 1);
         c.gpu_requested = self.gpu_requested;
-        c.anisotropic_filtering = self.anisotropic_filtering;
         c.internal_resolution = self.internal_resolution;
         c.gizmondo_goforce_20051013 = self.gizmondo_goforce_20051013;
         c.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;

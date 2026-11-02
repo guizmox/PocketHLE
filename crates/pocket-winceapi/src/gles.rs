@@ -240,11 +240,6 @@ pub fn set_internal_resolution(scale: u8) {
     update_stored_contexts(|c| c.set_internal_resolution(scale));
 }
 
-pub fn set_anisotropic_filtering(level: u8) {
-    with_ctx(|c| c.set_anisotropic_filtering(level));
-    update_stored_contexts(|c| c.set_anisotropic_filtering(level));
-}
-
 pub fn set_gpu_renderer(enabled: bool) {
     with_ctx(|c| {
         if enabled {

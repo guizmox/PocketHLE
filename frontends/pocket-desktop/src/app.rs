@@ -81,6 +81,7 @@ fn library_title(ui: &mut egui::Ui, game_id: &str, title: &str) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpscaleFilter {
+    None,
     Reconstruction,
     Smaa,
     SmaaSoft,
@@ -91,7 +92,8 @@ enum UpscaleFilter {
     Nearest,
 }
 impl UpscaleFilter {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
+        Self::None,
         Self::Reconstruction,
         Self::Smaa,
         Self::SmaaSoft,
@@ -103,6 +105,7 @@ impl UpscaleFilter {
     ];
     fn id(self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::Reconstruction => "reconstruction",
             Self::Smaa => "smaa",
             Self::SmaaSoft => "smaa_soft",
@@ -121,6 +124,7 @@ impl UpscaleFilter {
     }
     fn label(self) -> &'static str {
         match self {
+            Self::None => "No filter",
             Self::Reconstruction => "GPU reconstruction (sharp contours; GPU)",
             Self::Smaa => "SMAA + reconstruction (anti-aliasing; GPU)",
             Self::SmaaSoft => "SMAA + bilinear (very soft; GPU)",
@@ -146,7 +150,7 @@ impl UpscaleFilter {
 
     fn gpu_filter(self) -> i32 {
         match self {
-            Self::Nearest => 0,
+            Self::None | Self::Nearest => 0,
             Self::Bilinear => 1,
             Self::Bicubic => 2,
             Self::Reconstruction => 3,
@@ -156,12 +160,7 @@ impl UpscaleFilter {
             Self::SmaaSoft => 7,
         }
     }
-    fn needs_gpu(self) -> bool {
-        matches!(
-            self,
-            Self::Reconstruction | Self::Smaa | Self::SmaaSoft | Self::Xbrz
-        )
-    }
+
     fn image_filter(self) -> image::imageops::FilterType {
         match self {
             Self::Reconstruction | Self::Smaa | Self::Xbrz | Self::Bicubic => {
@@ -169,7 +168,7 @@ impl UpscaleFilter {
             }
             Self::Lanczos => image::imageops::FilterType::Lanczos3,
             Self::Bilinear | Self::SmaaSoft => image::imageops::FilterType::Triangle,
-            Self::Nearest => image::imageops::FilterType::Nearest,
+            Self::None | Self::Nearest => image::imageops::FilterType::Nearest,
         }
     }
 }
@@ -1147,16 +1146,17 @@ impl PocketLauncher {
     }
 
     fn refresh_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
-        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let smooth_scale = self.upscale_x2 || fullscreen;
+        let smooth_scale = !matches!(
+            self.upscale_filter,
+            UpscaleFilter::None | UpscaleFilter::Nearest
+        );
         if let Some(renderer) = self.reconstruction.as_ref() {
             renderer
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .queue(frame, self.upscale_filter.gpu_filter());
         }
-        let gpu_scale =
-            self.reconstruction.is_some() && (fullscreen || self.upscale_filter.needs_gpu());
+        let gpu_scale = self.reconstruction.is_some();
         let factor = if smooth_scale && !gpu_scale { 2 } else { 1 };
         let source = match self.filtered_frame_image(frame, factor) {
             Ok(source) => source,
@@ -2353,18 +2353,21 @@ impl PocketLauncher {
                 ui.label("");
                 ui.small("2x/3x/4x increases the rendered resolution; display zoom then scales that image. Applies next launch.");
                 ui.end_row();
-
-                ui.label("Anisotropic filtering (GPU only)");
-                ui.add_enabled_ui(draft.gpu_renderer, |ui| {
-                    crate::controller_ui::ComboBox::from_id_source("global_anisotropy")
-                        .selected_text(match draft.anisotropic_filtering { 2 => "2×", 4 => "4×", 8 => "8×", _ => "Off" })
-                        .show_ui(ui, |ui| {
-                            for (value, label) in [(0,"Off"),(2,"2×"),(4,"4×"),(8,"8×")] {
-                                crate::controller_ui::selectable_value(ui, &mut draft.anisotropic_filtering, value, label);
-                            }
-                        });
-                }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
+                ui.label("Frame rate limit");
+                crate::controller_ui::ComboBox::from_id_source("global_frame_rate_limit")
+                    .selected_text(draft.frame_rate_limit.label())
+                    .show_ui(ui, |ui| {
+                        for value in pocket_library::FrameRateLimit::ALL {
+                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, value, value.label());
+                        }
+                    });
                 ui.end_row();
+                ui.label("");
+                ui.small("Default maximum game FPS. Games can inherit this limit or override it, including Unlimited. Applies next launch.");
+                ui.end_row();
+
+
+
 
 
         });
@@ -2936,10 +2939,11 @@ impl PocketLauncher {
                 ui.end_row();
                 ui.label("Frame rate limit");
                 crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
-                    .selected_text(draft.frame_rate_limit.label())
+                    .selected_text(draft.frame_rate_limit.map_or("Emulator default", |v| v.label()))
                     .show_ui(ui, |ui| {
+                        crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, None, "Emulator default");
                         for value in pocket_library::FrameRateLimit::ALL {
-                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, value, value.label());
+                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, Some(value), value.label());
                         }
                     });
                 ui.end_row();
@@ -2995,17 +2999,7 @@ impl PocketLauncher {
                 });
                 ui.end_row();
 
-                ui.label("Anisotropic filtering (GPU only)");
-                ui.add_enabled_ui(draft.gpu_renderer.unwrap_or(self.library.config().gpu_renderer), |ui| {
-                    crate::controller_ui::ComboBox::from_id_source("game_anisotropy")
-                        .selected_text(match draft.anisotropic_filtering { None => "Emulator default", Some(2) => "2×", Some(4) => "4×", Some(8) => "8×", _ => "Off" })
-                        .show_ui(ui, |ui| {
-                            for (value, label) in [(None,"Emulator default"),(Some(0),"Off"),(Some(2),"2×"),(Some(4),"4×"),(Some(8),"8×")] {
-                                crate::controller_ui::selectable_value(ui, &mut draft.anisotropic_filtering, value, label);
-                            }
-                        });
-                }).response.on_hover_text("Sharper textures at oblique angles. Limited by the GPU driver. Applies on the next launch.");
-                ui.end_row();
+
 
                 if !is_gizmondo {
                     ui.label("GAPI display compatibility");
@@ -3188,64 +3182,60 @@ impl PocketLauncher {
             }
             return;
         }
-        let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let use_gpu = fullscreen || self.upscale_filter.needs_gpu();
         let uv = rotation_uv(self.game_rotation);
-        if use_gpu {
-            if let Some(renderer) = self.reconstruction.as_ref() {
-                let renderer = std::sync::Arc::clone(renderer);
-                let filter = self.upscale_filter.gpu_filter();
-                let capture = std::sync::Arc::clone(&self.screenshot);
-                let recording = self.recording.clone();
-                let video_size = self
-                    .last_frame_snapshot
-                    .as_ref()
-                    .map(|f| (f.width, f.height))
-                    .unwrap_or((1, 1));
-                let video_turns = rotation_turns(self.game_rotation);
-                let ctx = ui.ctx().clone();
-                let transform = [
-                    uv[0].x,
-                    uv[0].y,
-                    uv[1].x - uv[0].x,
-                    uv[1].y - uv[0].y,
-                    uv[2].x - uv[0].x,
-                    uv[2].y - uv[0].y,
-                ];
-                ui.painter().add(egui::PaintCallback {
-                    rect,
-                    callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
-                        move |info, painter| {
-                            renderer.lock().unwrap_or_else(|e| e.into_inner()).paint(
-                                painter.gl(),
-                                transform,
-                                filter,
-                            );
-                            crate::screenshot::capture(
-                                painter.gl(),
-                                egui::PaintCallbackInfo {
-                                    viewport: info.viewport,
-                                    clip_rect: info.clip_rect,
-                                    pixels_per_point: info.pixels_per_point,
-                                    screen_size_px: info.screen_size_px,
-                                },
-                                &capture,
-                                &ctx,
-                            );
-                            crate::recording::capture(
-                                painter.gl(),
-                                info,
-                                &recording,
-                                video_size,
-                                video_turns,
-                            );
-                        },
-                    )),
-                });
-                self.paint_recording_indicator(ui, rect);
-                self.paint_fps_indicator(ui, rect);
-                return;
-            }
+        if let Some(renderer) = self.reconstruction.as_ref() {
+            let renderer = std::sync::Arc::clone(renderer);
+            let filter = self.upscale_filter.gpu_filter();
+            let capture = std::sync::Arc::clone(&self.screenshot);
+            let recording = self.recording.clone();
+            let video_size = self
+                .last_frame_snapshot
+                .as_ref()
+                .map(|f| (f.width, f.height))
+                .unwrap_or((1, 1));
+            let video_turns = rotation_turns(self.game_rotation);
+            let ctx = ui.ctx().clone();
+            let transform = [
+                uv[0].x,
+                uv[0].y,
+                uv[1].x - uv[0].x,
+                uv[1].y - uv[0].y,
+                uv[2].x - uv[0].x,
+                uv[2].y - uv[0].y,
+            ];
+            ui.painter().add(egui::PaintCallback {
+                rect,
+                callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
+                    move |info, painter| {
+                        renderer.lock().unwrap_or_else(|e| e.into_inner()).paint(
+                            painter.gl(),
+                            transform,
+                            filter,
+                        );
+                        crate::screenshot::capture(
+                            painter.gl(),
+                            egui::PaintCallbackInfo {
+                                viewport: info.viewport,
+                                clip_rect: info.clip_rect,
+                                pixels_per_point: info.pixels_per_point,
+                                screen_size_px: info.screen_size_px,
+                            },
+                            &capture,
+                            &ctx,
+                        );
+                        crate::recording::capture(
+                            painter.gl(),
+                            info,
+                            &recording,
+                            video_size,
+                            video_turns,
+                        );
+                    },
+                )),
+            });
+            self.paint_recording_indicator(ui, rect);
+            self.paint_fps_indicator(ui, rect);
+            return;
         }
         if let Some(tex) = self.last_frame_texture.as_ref() {
             let mut mesh = Mesh::with_texture(tex.id());
@@ -5858,14 +5848,8 @@ mod tests {
             }
             assert_eq!(current, filter);
         }
-        assert_eq!(
-            UpscaleFilter::Nearest.stepped(true),
-            UpscaleFilter::Reconstruction
-        );
-        assert_eq!(
-            UpscaleFilter::Reconstruction.stepped(false),
-            UpscaleFilter::Nearest
-        );
+        assert_eq!(UpscaleFilter::Nearest.stepped(true), UpscaleFilter::None);
+        assert_eq!(UpscaleFilter::None.stepped(false), UpscaleFilter::Nearest);
     }
 
     #[test]

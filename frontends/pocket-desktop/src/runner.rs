@@ -152,7 +152,7 @@ impl Runner {
         };
         summary_lines.push(format!("Backend: {}", effective_backend.label()));
         summary_lines.push(format!("Executable: {}", exe.display()));
-        emu.set_frame_rate_limit(game.settings.frame_rate_limit.fps());
+        emu.set_frame_rate_limit(game.settings.effective_frame_rate_limit(&launcher_config));
         emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
             library_root.join("pockethle-unimplemented-apis.log"),
             game.display_name.clone(),
@@ -260,11 +260,6 @@ impl Runner {
             !is_gizmondo && launcher_config.pocketpc_intel2700g_depth_bias,
         );
         emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
-        emu.set_anisotropic_filtering(
-            game.settings
-                .anisotropic_filtering
-                .unwrap_or(launcher_config.anisotropic_filtering),
-        );
         log::info!("Gizmondo GPS configuration: gizmondo={} host_enabled={} fixed_enabled={} latitude={} longitude={}",is_gizmondo,launcher_config.gps_enabled,launcher_config.gps_fixed_enabled,launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude);
         let hardware = (
             launcher_config.bluetooth_enabled,

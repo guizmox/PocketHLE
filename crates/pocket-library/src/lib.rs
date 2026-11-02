@@ -567,9 +567,9 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
-    /// No additional ceiling by default; display synchronization remains unchanged.
+    /// None inherits the emulator ceiling; Some(Unlimited) explicitly disables it.
     #[serde(default)]
-    pub frame_rate_limit: FrameRateLimit,
+    pub frame_rate_limit: Option<FrameRateLimit>,
     /// Display-relative arrows hold fixed touch zones; left-stick tilt controls position.
     #[serde(default)]
     pub pocketpc_touch_steering: bool,
@@ -606,9 +606,6 @@ pub struct GameSettings {
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
-    /// None inherits the global GPU-only anisotropic filter (0, 2, 4, 8).
-    #[serde(default)]
-    pub anisotropic_filtering: Option<u8>,
     /// Which CPU backend the user prefers for this game.
     #[serde(default)]
     pub cpu_backend: CpuBackendPref,
@@ -682,6 +679,12 @@ impl DpadDeadzone {
 }
 
 impl GameSettings {
+    pub fn effective_frame_rate_limit(&self, config: &LauncherConfig) -> Option<u32> {
+        self.frame_rate_limit
+            .unwrap_or(config.frame_rate_limit)
+            .fps()
+    }
+
     pub fn controls_mode(&self) -> stylus_grid::ControlsMode {
         self.pocketpc_controls
             .unwrap_or(if self.pocketpc_touch_steering {
@@ -743,7 +746,7 @@ impl GameSettings {
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
-            frame_rate_limit: FrameRateLimit::default(),
+            frame_rate_limit: None,
             pocketpc_touch_steering: false,
             pocketpc_controls: None,
             pocketpc_swap_button_groups: false,
@@ -757,7 +760,6 @@ impl Default for GameSettings {
             pocketpc_platform_type: String::new(),
             pocketpc_gapi_columns: false,
             gpu_renderer: None,
-            anisotropic_filtering: None,
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
             instructions_per_slice: default_instructions_per_slice(),
@@ -982,6 +984,10 @@ fn identity_revision() -> u8 {
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    /// Default presentation ceiling for games that inherit emulator settings.
+    #[serde(default)]
+    pub frame_rate_limit: FrameRateLimit,
+
     #[serde(default = "default_pocketpc_processor")]
     pub pocketpc_processor: String,
     /// Reproduce the Intel 2700G WinCE driver's constant polygon depth bias.
@@ -1006,9 +1012,6 @@ pub struct LauncherConfig {
     /// Host GPU rendering is enabled by default; games may override it.
     #[serde(default = "default_gpu_renderer")]
     pub gpu_renderer: bool,
-    /// GPU-only texture anisotropy. Zero disables it.
-    #[serde(default)]
-    pub anisotropic_filtering: u8,
     /// Host-only GLES resolution: 1=native, 2=double all, 3=double QVGA only, 4=triple QVGA only, 5=quadruple QVGA only.
     #[serde(default = "default_gles_internal_resolution")]
     pub gles_internal_resolution: u8,
@@ -1279,6 +1282,7 @@ fn default_pocketpc_processor() -> String {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            frame_rate_limit: FrameRateLimit::Unlimited,
             pocketpc_processor: default_pocketpc_processor(),
             pocketpc_intel2700g_depth_bias: false,
             recording_quality: default_recording_quality(),
@@ -1289,7 +1293,6 @@ impl Default for LauncherConfig {
             gizmondo_platform_id: default_gizmondo_platform_id(),
             gizmondo_identity_revision: identity_revision(),
             gpu_renderer: true,
-            anisotropic_filtering: 0,
             gles_internal_resolution: 1,
             schema_version: 1,
             default_cpu_backend: CpuBackendPref::default(),
@@ -4171,6 +4174,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_anisotropy_override_is_discarded_without_changing_filter_or_resolution() {
+        let mut value = serde_json::to_value(super::LauncherConfig::default()).unwrap();
+        value["anisotropic_filtering"] = serde_json::json!(8);
+        value["gles_internal_resolution"] = serde_json::json!(5);
+        value["upscale_filter"] = serde_json::json!("none");
+        let config: super::LauncherConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.gles_internal_resolution, 5);
+        assert_eq!(config.upscale_filter, "none");
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("anisotropic_filtering")
+            .is_none());
+    }
+
+    #[test]
     fn qvga_resolution_policies_preserve_saved_values() {
         for policy in [1, 2, 3, 4, 5] {
             let mut value = serde_json::to_value(super::LauncherConfig::default()).unwrap();
@@ -4200,7 +4218,6 @@ mod tests {
         use super::*;
         let default = LauncherConfig::default();
         assert!(default.gpu_renderer);
-        assert_eq!(default.anisotropic_filtering, 0);
         assert_eq!(default.gles_internal_resolution, 1);
         assert!(!default.pocketpc_intel2700g_depth_bias);
         let mut old_config = serde_json::to_value(&default).unwrap();
@@ -4245,7 +4262,6 @@ mod tests {
         let settings: GameSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.dpad_deadzone, DpadDeadzone::Large);
         assert_eq!(settings.gpu_renderer, None);
-        assert_eq!(settings.anisotropic_filtering, None);
         let gpu = GameSettings {
             gpu_renderer: Some(true),
             ..GameSettings::default()
@@ -4763,11 +4779,14 @@ mod tests {
                         .unwrap();
                     let reopened = Library::open(&root).unwrap();
                     assert_eq!(reopened.config().gpu_renderer, global);
-                    assert_eq!(reopened.config().anisotropic_filtering, 8);
-                    assert_eq!(
-                        reopened.get(&id).unwrap().settings.anisotropic_filtering,
-                        level
-                    );
+                    assert!(serde_json::to_value(reopened.config())
+                        .unwrap()
+                        .get("anisotropic_filtering")
+                        .is_none());
+                    assert!(serde_json::to_value(&reopened.get(&id).unwrap().settings)
+                        .unwrap()
+                        .get("anisotropic_filtering")
+                        .is_none());
                     assert_eq!(reopened.get(&id).unwrap().settings.gpu_renderer, game);
                 }
             }

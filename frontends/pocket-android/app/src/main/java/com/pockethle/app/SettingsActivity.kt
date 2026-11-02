@@ -145,8 +145,8 @@ class SettingsActivity : AppCompatActivity() {
             val display = findPreference<androidx.preference.PreferenceScreen>("display_options")!!
             display.addPreference(ListPreference(requireContext()).apply {
                 key = "upscale_filter"; title = "Filter"; isPersistent = false
-                entries = arrayOf("Reconstruction", "SMAA", "SMAA Soft", "xBRZ", "Bicubic", "Lanczos", "Bilinear", "Nearest")
-                entryValues = arrayOf("reconstruction", "smaa", "smaa_soft", "xbrz", "bicubic", "lanczos", "bilinear", "nearest")
+                entries = arrayOf("No filter", "Reconstruction", "SMAA", "SMAA Soft", "xBRZ", "Bicubic", "Lanczos", "Bilinear", "Nearest")
+                entryValues = arrayOf("none", "reconstruction", "smaa", "smaa_soft", "xbrz", "bicubic", "lanczos", "bilinear", "nearest")
                 value = current.upscaleFilter; summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, v -> current = current.copy(upscaleFilter = v.toString()); writeConfig(); true }
             })
@@ -345,7 +345,7 @@ class SettingsActivity : AppCompatActivity() {
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="gpu_renderer"; title="GPU rendering"; isPersistent=false; isChecked=current.gpuRenderer
                 summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
-                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("anisotropic_filtering")?.isEnabled=current.gpuRenderer;findPreference<ListPreference>("gles_internal_resolution")?.isEnabled=current.gpuRenderer;writeConfig();true }
+                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("gles_internal_resolution")?.isEnabled=current.gpuRenderer;writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="gles_internal_resolution"; title="OpenGLES internal resolution (GPU only)"; isPersistent=false
@@ -355,12 +355,15 @@ class SettingsActivity : AppCompatActivity() {
                 setOnPreferenceChangeListener { _, v -> current=current.copy(glesInternalResolution=v.toString().toInt());writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
-                key="anisotropic_filtering"; title="Anisotropic filtering (GPU only)"; isPersistent=false
-                entries=arrayOf("Off", "2×", "4×", "8×"); entryValues=arrayOf("0", "2", "4", "8")
-                value=current.anisotropicFiltering.toString(); isEnabled=current.gpuRenderer
-                summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, v -> current=current.copy(anisotropicFiltering=v.toString().toInt());writeConfig();true }
+                key="frame_rate_limit"; title="Frame rate limit"; isPersistent=false
+                entries=arrayOf("Unlimited", "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps")
+                entryValues=arrayOf("unlimited", "10", "15", "20", "30", "45", "60")
+                value=current.frameRateLimit
+                summaryProvider=Preference.SummaryProvider<ListPreference> { pref -> "${pref.entry ?: "Unlimited"}. Default maximum game FPS; each game can inherit or override it. Applies next launch." }
+                setOnPreferenceChangeListener { _, v -> current=current.copy(frameRateLimit=v.toString());writeConfig();true }
             })
+
+
             findPreference<androidx.preference.PreferenceCategory>("misc_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "show_fps"; title = "Show FPS"; isPersistent = false; isChecked = current.showFps
                 summary = "Shows a small counter of rendered frames on the game screen. Applies on the next launch."
@@ -443,7 +446,7 @@ class SettingsActivity : AppCompatActivity() {
                     saved.optBoolean("android_gizmondo_maximize_screen") != current.gizmondoMaximizeScreen)) {
                 android.widget.Toast.makeText(context, "Screen size setting was not saved. Rebuild the native libraries and APK together.", android.widget.Toast.LENGTH_LONG).show()
             }
-            val gpuSaved = saved != null && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("anisotropic_filtering") && saved.optInt("anisotropic_filtering") == current.anisotropicFiltering && saved.has("gles_internal_resolution") && saved.optInt("gles_internal_resolution") == current.glesInternalResolution
+            val gpuSaved = saved != null && saved.optString("frame_rate_limit", "") == current.frameRateLimit && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("gles_internal_resolution") && saved.optInt("gles_internal_resolution") == current.glesInternalResolution
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_gizmondo_controls_size", "") != current.gizmondoControlsSize) {
                 android.widget.Toast.makeText(context, "Control size could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
             }

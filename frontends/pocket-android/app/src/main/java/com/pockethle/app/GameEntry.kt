@@ -63,9 +63,8 @@ data class GameSettings(
      * keep the guest portrait and turn the *picture* instead.
      */
     val rotation: String,
-    val frameRateLimit: String = "unlimited",
+    val frameRateLimit: String? = null,
     val gpuRenderer: Boolean? = null,
-    val anisotropicFiltering: Int? = null,
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
     val pocketpcControls: String? = null,
@@ -83,9 +82,9 @@ data class GameSettings(
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
         remove("optimizations")
-        put("frame_rate_limit", frameRateLimit)
+        remove("anisotropic_filtering")
+        put("frame_rate_limit", frameRateLimit ?: JSONObject.NULL)
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
-        put("anisotropic_filtering", anisotropicFiltering ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
@@ -130,9 +129,8 @@ data class GameSettings(
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
-            frameRateLimit = obj.optString("frame_rate_limit", "unlimited"),
+            frameRateLimit = if (obj.isNull("frame_rate_limit")) null else obj.optString("frame_rate_limit", "unlimited"),
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
-            anisotropicFiltering = if (obj.isNull("anisotropic_filtering")) null else obj.optInt("anisotropic_filtering", 0),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
             pocketpcSwapButtonGroups = obj.optBoolean("pocketpc_swap_button_groups", false),
@@ -151,12 +149,12 @@ data class GameSettings(
 }
 
 data class LauncherConfig(
+    val frameRateLimit: String = "unlimited",
     val schemaVersion: Int,
     val defaultCpuBackend: String,
     val verbosity: Int,
     val logUnimplementedApis: Boolean = true,
     val gpuRenderer: Boolean = true,
-    val anisotropicFiltering: Int = 0,
     val glesInternalResolution: Int = 1,
     val lastImportDir: String?,
     val showFps: Boolean,
@@ -201,12 +199,13 @@ data class LauncherConfig(
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
         remove("optimizations")
+        remove("anisotropic_filtering")
+        put("frame_rate_limit", frameRateLimit)
         put("schema_version", schemaVersion)
         put("default_cpu_backend", defaultCpuBackend)
         put("verbosity", verbosity)
         put("log_unimplemented_apis", logUnimplementedApis)
         put("gpu_renderer", gpuRenderer)
-        put("anisotropic_filtering", anisotropicFiltering)
         put("gles_internal_resolution", glesInternalResolution)
         if (lastImportDir != null) put("last_import_dir", lastImportDir) else put("last_import_dir", JSONObject.NULL)
         put("show_fps", showFps)
@@ -258,7 +257,7 @@ data class LauncherConfig(
             verbosity = obj.optInt("verbosity", 1),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
-            anisotropicFiltering = obj.optInt("anisotropic_filtering", 0),
+            frameRateLimit = obj.optString("frame_rate_limit", "unlimited"),
             glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),

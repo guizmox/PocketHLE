@@ -80,7 +80,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
             glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,filtered)
             glUniform1i(glGetUniformLocation(program,"u_frame"),0)
             glUniform2f(glGetUniformLocation(program,"u_size"),textureW.toFloat(),textureH.toFloat())
-            val mode = when(filter) { "nearest" -> 0; "bilinear","xbrz","smaa_soft" -> 1; "bicubic" -> 2; "lanczos" -> 4; else -> 3 }
+            val mode = when(filter) { "none","nearest" -> 0; "bilinear","xbrz","smaa_soft" -> 1; "bicubic" -> 2; "lanczos" -> 4; else -> 3 }
             glUniform1i(glGetUniformLocation(program,"u_filter"),mode)
             val uv = when(turn) { 90 -> floatArrayOf(0f,1f,0f,-1f,1f,0f);180 -> floatArrayOf(1f,1f,-1f,0f,0f,-1f);270 -> floatArrayOf(1f,0f,0f,1f,-1f,0f);else -> floatArrayOf(0f,0f,1f,0f,0f,1f) }
             listOf("u_origin","u_dx","u_dy").forEachIndexed { i,name -> glUniform2f(glGetUniformLocation(program,name),uv[i*2],uv[i*2+1]) }

@@ -680,13 +680,7 @@ fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
                 .unwrap_or(lib.config().gpu_renderer),
         );
         emu.set_gles_internal_resolution(lib.config().gles_internal_resolution);
-        emu.set_anisotropic_filtering(
-            entry
-                .settings
-                .anisotropic_filtering
-                .unwrap_or(lib.config().anisotropic_filtering),
-        );
-        emu.set_frame_rate_limit(entry.settings.frame_rate_limit.fps());
+        emu.set_frame_rate_limit(entry.settings.effective_frame_rate_limit(lib.config()));
         emu.max_slices = entry.settings.max_slices;
         emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
         emu.load_pe(&exe)?;

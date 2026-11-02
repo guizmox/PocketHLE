@@ -409,7 +409,7 @@ fn run_process(
         },
     };
     summary_lines.push(format!("Effective backend: {}", effective_backend.label()));
-    emu.set_frame_rate_limit(entry.settings.frame_rate_limit.fps());
+    emu.set_frame_rate_limit(entry.settings.effective_frame_rate_limit(&launcher_config));
     emu.max_slices = entry.settings.max_slices;
     emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
 
@@ -485,12 +485,6 @@ fn run_process(
     emu.set_gizmondo_goforce_driver(is_gizmondo);
     emu.set_intel2700g_depth_bias(!is_gizmondo && launcher_config.pocketpc_intel2700g_depth_bias);
     emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
-    emu.set_anisotropic_filtering(
-        entry
-            .settings
-            .anisotropic_filtering
-            .unwrap_or(launcher_config.anisotropic_filtering),
-    );
     emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
         library_root.join("pockethle-unimplemented.log"),
         entry.display_name.clone(),

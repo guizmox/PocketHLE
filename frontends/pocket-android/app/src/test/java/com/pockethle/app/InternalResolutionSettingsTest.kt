@@ -5,6 +5,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class InternalResolutionSettingsTest {
+    @Test fun globalFrameLimitAndOptionalGameLimitRemainIndependent() {
+        assertEquals("unlimited", LauncherConfig.fromJson(JSONObject()).frameRateLimit)
+        assertNull(GameSettings.fromJson(JSONObject()).frameRateLimit)
+        for (limit in listOf("unlimited","10","15","20","30","45","60")) {
+            val global=LauncherConfig.default().copy(frameRateLimit=limit,upscaleFilter="none")
+            val restored=LauncherConfig.fromJson(global.toJson())
+            assertEquals(limit,restored.frameRateLimit)
+            assertEquals("none",restored.upscaleFilter)
+            val game=GameSettings.default().copy(frameRateLimit=limit)
+            assertEquals(limit,GameSettings.fromJson(game.toJson()).frameRateLimit)
+            assertNull(GameSettings.fromJson(game.copy(frameRateLimit=null).toJson()).frameRateLimit)
+        }
+        val legacy=JSONObject().put("anisotropic_filtering",8).put("frame_rate_limit","unlimited")
+        assertEquals("unlimited",GameSettings.fromJson(legacy).frameRateLimit)
+        assertFalse(GameSettings.fromJson(legacy).toJson().has("anisotropic_filtering"))
+        assertFalse(LauncherConfig.fromJson(legacy).toJson().has("anisotropic_filtering"))
+    }
+
     @Test fun allResolutionPoliciesRoundtripWithoutChangingOtherSettings() {
         for (policy in listOf(1,2,3,4,5)) {
             val original=LauncherConfig.default().copy(glesInternalResolution=policy)

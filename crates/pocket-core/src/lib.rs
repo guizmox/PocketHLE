@@ -143,10 +143,6 @@ impl Emulator {
         pocket_winceapi::gles::set_internal_resolution(scale);
     }
 
-    pub fn set_anisotropic_filtering(&mut self, level: u8) {
-        pocket_winceapi::gles::set_anisotropic_filtering(level);
-    }
-
     /// Halt the emulator the first time an unimplemented API is hit.
     /// Useful for the tracing CLI mode.
     pub fn set_halt_on_unimplemented(&mut self, halt: bool) {

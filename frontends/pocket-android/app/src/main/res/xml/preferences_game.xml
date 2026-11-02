@@ -8,7 +8,6 @@
         <ListPreference android:key="screen" android:title="@string/pref_screen_title" android:entries="@array/screen_entries" android:entryValues="@array/screen_values" android:defaultValue="portrait" />
         <ListPreference android:key="rotation" android:title="@string/pref_rotation_title" android:summary="@string/pref_rotation_summary" android:entries="@array/rotation_entries" android:entryValues="@array/rotation_values" android:defaultValue="none" />
         <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering" android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
-        <ListPreference android:key="anisotropic_filtering" android:title="Anisotropic filtering (GPU only)" android:summary="Sharper textures at oblique angles; limited by the GPU driver." android:persistent="false" />
     </PreferenceCategory>
     <PreferenceCategory android:key="sound_category" android:title="Sound">
         <Preference android:title="No per-game sound options yet." android:selectable="false" android:persistent="false" />

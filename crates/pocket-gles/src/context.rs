@@ -330,7 +330,6 @@ pub struct Context {
     es11: es11::Es11State,
     gpu: Option<crate::gpu::Renderer>,
     gpu_requested: bool,
-    anisotropic_filtering: u8,
     internal_resolution: u8,
     gpu_failed: bool,
     // ---- transform state ----
@@ -432,7 +431,6 @@ impl Context {
             es11: Default::default(),
             gpu: None,
             gpu_requested: false,
-            anisotropic_filtering: 0,
             internal_resolution: 1,
             gpu_failed: false,
             matrix_mode: MatrixMode::Modelview,
@@ -511,7 +509,6 @@ impl Context {
         }
         let mut fresh = Self::new(self.target.width, self.target.height);
         fresh.gpu_requested = self.gpu_requested;
-        fresh.anisotropic_filtering = self.anisotropic_filtering;
         fresh.internal_resolution = self.internal_resolution;
         fresh.gizmondo_goforce_20051013 = self.gizmondo_goforce_20051013;
         fresh.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
@@ -526,7 +523,6 @@ impl Context {
     pub fn exchange_surface(&mut self, surface: &mut SurfaceBuffers) {
         self.park_surface(surface);
         if let Some(gpu) = &mut self.gpu {
-            gpu.set_anisotropic_filtering(self.anisotropic_filtering);
             if let Err(e) = gpu.set_render_scale(self.internal_resolution) {
                 self.gpu_failure("surface resolution", e);
             } else if !self.es11.point_max_changed {
@@ -537,17 +533,6 @@ impl Context {
             if let Err(e) = self.enable_gpu() {
                 self.gpu_failure("surface", e);
             }
-        }
-    }
-
-    /// Configuration alone never initializes GPU rendering.
-    pub fn set_anisotropic_filtering(&mut self, level: u8) {
-        self.anisotropic_filtering = match level {
-            2 | 4 | 8 => level,
-            _ => 0,
-        };
-        if let Some(gpu) = &mut self.gpu {
-            gpu.set_anisotropic_filtering(self.anisotropic_filtering);
         }
     }
 
@@ -582,7 +567,6 @@ impl Context {
         }
         if self.gpu.is_none() {
             let mut gpu = crate::gpu::Renderer::new(self.target.width, self.target.height)?;
-            gpu.set_anisotropic_filtering(self.anisotropic_filtering);
             gpu.set_surface_rgb565(self.target.rgb565)?;
             gpu.set_render_scale(self.internal_resolution)?;
             if !self.es11.point_max_changed {
@@ -3617,17 +3601,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn anisotropy_setting_does_not_enable_software_context_gpu() {
-        let mut c = Context::new(4, 4);
-        c.set_anisotropic_filtering(8);
-        assert_eq!(c.anisotropic_filtering, 8);
-        assert!(!c.gpu_requested());
-        assert!(!c.gpu_active());
-        c.set_anisotropic_filtering(3);
-        assert_eq!(c.anisotropic_filtering, 0);
-        assert_eq!(c.take_error(), GL_NO_ERROR);
-    }
     use super::*;
 
     #[test]
@@ -4242,7 +4215,6 @@ mod tests {
                 c.enable_gpu().unwrap();
             }
             c.set_internal_resolution(2);
-            c.set_anisotropic_filtering(4);
             c.gizmondo_goforce_20051013 = true;
             c.state.intel2700g_depth_bias = true;
             let mut mem = FakeMem {
@@ -4275,7 +4247,6 @@ mod tests {
                 assert!(c.target.rgb565);
                 assert!(c.gpu_active());
                 assert_eq!(c.internal_resolution, 2);
-                assert_eq!(c.anisotropic_filtering, 4);
                 assert!(c.gizmondo_goforce_20051013);
                 assert!(c.state.intel2700g_depth_bias);
             }
