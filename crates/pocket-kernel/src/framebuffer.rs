@@ -285,8 +285,12 @@ impl Framebuffer {
     pub fn set_render_presentation(&mut self, width: u32, height: u32, pixels: Vec<u8>) {
         let valid = width > 0
             && height > 0
-            && self.width.checked_mul(2) == Some(width)
-            && self.height.checked_mul(2) == Some(height)
+            && self.width > 0
+            && self.height > 0
+            && width % self.width == 0
+            && height % self.height == 0
+            && width / self.width >= 2
+            && width / self.width == height / self.height
             && (width as usize)
                 .checked_mul(height as usize)
                 .and_then(|n| n.checked_mul(2))
@@ -582,6 +586,30 @@ mod tests {
         assert_eq!(high, fb.snapshot_rgba8888());
         fb.set_render_presentation(3, 2, vec![0; 12]);
         assert_eq!(fb.presentation_size(), (2, 1));
+    }
+
+    #[test]
+    fn host_presentation_accepts_every_uniform_render_scale() {
+        for (w, h) in [(320, 240), (240, 320), (640, 480)] {
+            let mut fb = Framebuffer::new(w, h);
+            let guest = fb.pixels.clone();
+            for scale in [2, 3, 4] {
+                let (rw, rh) = (w * scale, h * scale);
+                fb.set_render_presentation(rw, rh, vec![0; (rw * rh * 2) as usize]);
+                assert_eq!(fb.presentation_size(), (rw, rh));
+                assert_eq!((fb.width, fb.height), (w, h));
+                assert_eq!(fb.pixels, guest);
+                let mut pixels = Vec::new();
+                fb.snapshot_presentation_rgba8888_into(&mut pixels);
+                assert_eq!(pixels.len(), (rw * rh * 4) as usize);
+                fb.mark_dirty();
+                assert_eq!(fb.presentation_size(), (w, h));
+            }
+            for (rw, rh, len) in [(w * 3, h * 2, w * h * 12), (w * 4, h * 4, 2), (0, h, 0)] {
+                fb.set_render_presentation(rw, rh, vec![0; len as usize]);
+                assert_eq!(fb.presentation_size(), (w, h));
+            }
+        }
     }
 
     #[test]

@@ -26,6 +26,16 @@ pub fn integer_fit_capped(available: [u32; 2], native: [u32; 2], maximum: u32) -
         top: available[1].saturating_sub(height) / 2,
     }
 }
+/// Preserve integer zoom when the source fits, otherwise reduce proportionally.
+pub fn presentation_fit_capped(available: [u32; 2], rendered: [u32; 2], maximum: u32) -> [u32; 4] {
+    let fit = integer_fit_capped(available, rendered, maximum);
+    if fit.width > available[0] || fit.height > available[1] {
+        aspect_fit(available, rendered)
+    } else {
+        [fit.left, fit.top, fit.width, fit.height]
+    }
+}
+
 /// Fullscreen zoom uses whole QVGA steps for QVGA-family images, including
 /// internally doubled/tripled renders. Other aspect ratios keep native steps.
 pub fn qvga_fullscreen_fit(available: [u32; 2], rendered: [u32; 2]) -> IntegerFit {
@@ -94,6 +104,30 @@ mod tests {
         );
         assert_eq!(aspect_fit([200, 150], [640, 480]), [0, 0, 200, 150]);
         assert_eq!(aspect_fit([0, 0], [320, 240]), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn oversized_rendered_images_downscale_without_clipping_or_stretching() {
+        for rendered in [[640, 480], [960, 720], [1280, 960], [1920, 1440]] {
+            assert_eq!(
+                presentation_fit_capped([600, 400], rendered, 4),
+                [33, 0, 533, 400]
+            );
+        }
+        for rendered in [[480, 640], [720, 960], [960, 1280]] {
+            assert_eq!(
+                presentation_fit_capped([400, 600], rendered, 4),
+                [0, 33, 400, 533]
+            );
+        }
+        assert_eq!(
+            presentation_fit_capped([2000, 1500], [1280, 960], 4),
+            [360, 270, 1280, 960]
+        );
+        assert_eq!(
+            presentation_fit_capped([1280, 800], [320, 240], 4),
+            [160, 40, 960, 720]
+        );
     }
 
     #[test]

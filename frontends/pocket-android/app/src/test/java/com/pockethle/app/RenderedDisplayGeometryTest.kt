@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RenderedDisplayGeometryTest {
+    @org.junit.Test fun oversizedRenderScalesDownWithoutCroppingAndMapsTouch() {
+        for (scale in listOf(2,3,4)) {
+            val rect=renderedDisplayRect(600,400,320,240,320*scale,240*scale,0,0,true)
+            org.junit.Assert.assertEquals(DisplayRect(33,0,533,400),rect)
+            org.junit.Assert.assertEquals(160 to 120,displayPointToGuest(rect.left+rect.width/2f,rect.top+rect.height/2f,600,400,320,240,0,0,true,false,320*scale,240*scale))
+            val portrait=renderedDisplayRect(400,600,320,240,320*scale,240*scale,90,0,true)
+            org.junit.Assert.assertEquals(DisplayRect(0,33,400,533),portrait)
+        }
+    }
+
     @Test fun internalResolutionIsTheBaseForDisplayZoom() {
         for (pocketPc in listOf(false,true)) {
             val native=renderedDisplayRect(1920,1440,320,240,320,240,0,2,pocketPc)

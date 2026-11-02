@@ -3397,7 +3397,11 @@ impl PocketLauncher {
             (available.height() * dpi).floor() as u32,
         ];
         let fit = crate::fullscreen_layout::qvga_fullscreen_fit(physical, native);
-        let [left, top, width, height] = [fit.left, fit.top, fit.width, fit.height];
+        let [left, top, width, height] = if fit.width > physical[0] || fit.height > physical[1] {
+            crate::fullscreen_layout::aspect_fit(physical, native)
+        } else {
+            [fit.left, fit.top, fit.width, fit.height]
+        };
         let rect = Rect::from_min_size(
             available.min + Vec2::new(left as f32, top as f32) / dpi,
             Vec2::new(width as f32, height as f32) / dpi,
@@ -3557,7 +3561,7 @@ impl PocketLauncher {
                 [frame.texture_width, frame.texture_height]
             };
             let dpi = ui.ctx().pixels_per_point();
-            let fit = crate::fullscreen_layout::integer_fit_capped(
+            let [left, top, width, height] = crate::fullscreen_layout::presentation_fit_capped(
                 [
                     (room.width().max(1.0) * dpi).floor() as u32,
                     (room.height().max(1.0) * dpi).floor() as u32,
@@ -3571,8 +3575,8 @@ impl PocketLauncher {
                 (room.top() * dpi).round() / dpi,
             );
             let rect = Rect::from_min_size(
-                origin + Vec2::new(fit.left as f32, fit.top as f32) / dpi,
-                Vec2::new(fit.width as f32, fit.height as f32) / dpi,
+                origin + Vec2::new(left as f32, top as f32) / dpi,
+                Vec2::new(width as f32, height as f32) / dpi,
             );
             ui.allocate_ui_at_rect(room, |ui| {
                 ui.set_clip_rect(room.intersect(ui.clip_rect()));

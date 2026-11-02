@@ -5,8 +5,9 @@ internal data class DisplayRect(val left: Int, val top: Int, val width: Int, val
 /** Pixel-exact rectangle, shared with inverse touch mapping and GL readback. */
 internal fun displayRect(viewW: Int, viewH: Int, shownW: Int, shownH: Int, factor: Int): DisplayRect {
     require(shownW > 0 && shownH > 0)
-    // Auto uses the largest whole-pixel scale that fits. A viewport smaller
-    // than the native screen clips at x1; it never introduces fractional scaling.
+    // Keep integer enlargement when possible; oversized images downscale
+    // proportionally. Rendering, readback and inverse touch share this rectangle.
+    if (shownW > viewW || shownH > viewH) return aspectDisplayRect(viewW,viewH,shownW,shownH)
     val fit=minOf(viewW/shownW,viewH/shownH).coerceAtLeast(1)
     val scale=if(factor<=0) fit else minOf(fit,factor)
     val w=shownW*scale

@@ -23,7 +23,7 @@ class DisplayScalePolicyTest {
         assertEquals(1280,doubled.width);assertEquals(960,doubled.height)
         val fitted=pocketPcDisplayRect(1000,800,640,480,2)
         assertEquals(640,fitted.width);assertEquals(480,fitted.height)
-        val clipped=displayRect(200,150,320,240,1)
-        assertEquals(320,clipped.width);assertTrue(clipped.left<0)
+        val reduced=displayRect(200,150,320,240,1)
+        assertEquals(DisplayRect(0,0,200,150),reduced)
     }
 }

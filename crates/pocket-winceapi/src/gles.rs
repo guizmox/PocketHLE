@@ -3961,6 +3961,46 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native OpenGL"]
+    fn window_swap_exports_all_internal_resolution_scales_to_host_framebuffer() {
+        let _g = guard();
+        for (policy, scale) in [(3, 2), (4, 3), (5, 4)] {
+            reset_for_test(240, 320);
+            let mut cpu = fresh_cpu();
+            let mut kernel = fresh_kernel();
+            set_internal_resolution(policy);
+            set_gpu_renderer(true);
+            with_ctx(|c| {
+                c.clear_color = [1., 0., 0., 1.];
+                c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
+            });
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_swap_buffers,
+                    &[DISPLAY_HANDLE, SURFACE_HANDLE]
+                ),
+                EGL_TRUE
+            );
+            assert_eq!(
+                kernel.framebuffer.presentation_size(),
+                (240 * scale, 320 * scale)
+            );
+            assert_eq!(
+                (kernel.framebuffer.width, kernel.framebuffer.height),
+                (240, 320)
+            );
+            let mut image = Vec::new();
+            kernel
+                .framebuffer
+                .snapshot_presentation_rgba8888_into(&mut image);
+            assert_eq!(image.len(), (240 * 320 * scale * scale * 4) as usize);
+            assert_eq!(&image[..4], &[255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
     fn only_a_completed_window_swap_discards_ancillary_depth() {
         let _g = guard();
         reset_for_test(240, 320);
