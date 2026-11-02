@@ -1611,20 +1611,26 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     let format = ctx.arg_u32(2)?;
     let width = ctx.arg_u32(3)?;
     let height = ctx.arg_u32(4)?;
-    if (pocket_gles::GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG
-        ..=pocket_gles::GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
-        .contains(&format)
-        && ctx.arg_u32(5)? != 0
-    {
+    let border = ctx.arg_u32(5)? as i32;
+    let size = ctx.arg_u32(6)?;
+    let data = ctx.arg_u32(7)?;
+    let Some(needed) = with_ctx(|c| {
+        c.validate_compressed_tex_image_2d(target, level, width, height, format, border)
+    }) else {
+        return Ok(VOID);
+    };
+    if size as usize != needed {
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
         return Ok(VOID);
     }
-    let size = ctx.arg_u32(6)?;
-    let data = ctx.arg_u32(7)?;
     let bytes = if data == 0 || size == 0 {
         Vec::new()
     } else {
-        ctx.cpu.read_mem(data, size).unwrap_or_default()
+        let Ok(bytes) = ctx.cpu.read_mem(data, size) else {
+            with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_OPERATION));
+            return Ok(VOID);
+        };
+        bytes
     };
     with_ctx(|c| c.compressed_tex_image_2d(target, level, width, height, format, &bytes));
     Ok(VOID)
@@ -2972,6 +2978,64 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn compressed_upload_bridge_checks_size_and_border_before_guest_reads() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.write_mem(SCRATCH, &[0; 8]).unwrap();
+        let good = [
+            GL_TEXTURE_2D,
+            0,
+            GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+            4,
+            4,
+            0,
+            8,
+            SCRATCH,
+        ];
+        call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &good);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        let revision = with_ctx(|c| c.textures[&0].revision);
+        for (field, value, error) in [
+            (6, 7, GL_INVALID_VALUE),
+            (6, 9, GL_INVALID_VALUE),
+            (5, 1, GL_INVALID_VALUE),
+            (7, 0xdeadbeef, GL_INVALID_OPERATION),
+            (1, (-1i32) as u32, GL_INVALID_VALUE),
+        ] {
+            let mut args = good;
+            args[field] = value;
+            call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &args);
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), error);
+            assert_eq!(with_ctx(|c| c.textures[&0].revision), revision);
+        }
+        // NULL storage still requires the exact imageSize.
+        let mut args = good;
+        args[7] = 0;
+        args[6] = 0;
+        call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_VALUE
+        );
+        args[6] = 8;
+        call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &args);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        let mut args = good;
+        args[2] = GL_PALETTE4_RGBA8_OES;
+        args[5] = 1;
+        args[6] = 72;
+        args[7] = 0xdeadbeef;
+        call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+    }
 
     #[test]
     fn gizmondo_bgra_uploads_preserve_alpha_and_unpack_alignment() {

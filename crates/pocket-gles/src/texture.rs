@@ -748,8 +748,60 @@ fn block_counts(width: u32, height: u32) -> (usize, usize) {
     (width.div_ceil(4) as usize, height.div_ceil(4) as usize)
 }
 
-/// Bytes `glCompressedTexImage2D` needs for an image in `format`, or
-/// `None` if the format is not one we decode.
+/// Whether the source contains a shared OES color palette.
+pub fn is_paletted(format: u32) -> bool {
+    (GL_PALETTE4_RGB8_OES..=GL_PALETTE8_RGB5_A1_OES).contains(&format)
+}
+pub fn palette_bytes(format: u32) -> Option<usize> {
+    if !is_paletted(format) {
+        return None;
+    }
+    let entries = if format >= GL_PALETTE8_RGB8_OES {
+        256
+    } else {
+        16
+    };
+    let bytes = match format {
+        GL_PALETTE4_RGB8_OES | GL_PALETTE8_RGB8_OES => 3,
+        GL_PALETTE4_RGBA8_OES | GL_PALETTE8_RGBA8_OES => 4,
+        _ => 2,
+    };
+    Some(entries * bytes)
+}
+
+/// A paletted chain contains one shared palette, not one palette per level.
+pub fn compressed_upload_size(format: u32, level: i32, width: u32, height: u32) -> Option<usize> {
+    if !(-31..=31).contains(&level)
+        || (is_paletted(format) && level > 0)
+        || (!is_paletted(format) && level < 0)
+    {
+        return None;
+    }
+    // PVRTC retains its format-specific minimum allocation, even for an
+    // empty image; block formats instead have zero blocks on an empty axis.
+    if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG).contains(&format)
+    {
+        return compressed_image_size(format, width.max(1), height.max(1));
+    }
+    if let Some(palette) = palette_bytes(format) {
+        let mut size = palette;
+        for l in 0..=level.unsigned_abs() {
+            let (w, h) = ((width >> l).max(1), (height >> l).max(1));
+            if width != 0 && height != 0 {
+                size =
+                    size.checked_add(compressed_image_size(format, w, h)?.checked_sub(palette)?)?;
+            }
+        }
+        Some(size)
+    } else if width == 0 || height == 0 {
+        compressed_image_size(format, 1, 1)?;
+        Some(0)
+    } else {
+        compressed_image_size(format, width, height)
+    }
+}
+
+/// Bytes for a single encoded image, including its palette when present.
 pub fn compressed_image_size(format: u32, width: u32, height: u32) -> Option<usize> {
     if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG).contains(&format)
     {
@@ -807,7 +859,7 @@ pub fn compressed_image_size(format: u32, width: u32, height: u32) -> Option<usi
         let index_bytes = if format >= GL_PALETTE8_RGB8_OES {
             (width as usize).checked_mul(height as usize)?
         } else {
-            (width as usize).div_ceil(2).checked_mul(height as usize)?
+            (width as usize).checked_mul(height as usize)?.div_ceil(2)
         };
         return entries.checked_mul(entry_bytes)?.checked_add(index_bytes);
     }
@@ -944,7 +996,7 @@ fn decode_paletted(data: &[u8], width: u32, height: u32, format: u32) -> Option<
     let indices_len = if is8 {
         (width as usize).checked_mul(height as usize)?
     } else {
-        (width as usize).div_ceil(2).checked_mul(height as usize)?
+        (width as usize).checked_mul(height as usize)?.div_ceil(2)
     };
     if data.len() < palette_len + indices_len {
         return None;
@@ -960,8 +1012,9 @@ fn decode_paletted(data: &[u8], width: u32, height: u32, format: u32) -> Option<
             let idx = if is8 {
                 data[palette_len + y * width as usize + x] as usize
             } else {
-                let b = data[palette_len + y * (width as usize).div_ceil(2) + x / 2];
-                if x & 1 == 0 {
+                let pixel = y * width as usize + x;
+                let b = data[palette_len + pixel / 2];
+                if pixel & 1 == 0 {
                     (b >> 4) as usize
                 } else {
                     (b & 0x0f) as usize
@@ -1656,5 +1709,47 @@ mod truncated_mipmap_tests {
         assert!(t.is_complete()); // outside active range.
         t.set_parameter(GL_TEXTURE_MAX_LEVEL_SGIS, 2);
         assert!(!t.is_complete());
+    }
+}
+
+#[cfg(test)]
+mod compressed_upload_tests {
+    use super::*;
+    #[test]
+    fn palette_sizes_match_driver_shared_chain_and_linear_nibbles() {
+        assert_eq!(
+            compressed_upload_size(GL_PALETTE4_RGBA8_OES, -2, 4, 4),
+            Some(75)
+        );
+        assert_eq!(
+            compressed_upload_size(GL_PALETTE8_RGBA8_OES, -2, 4, 4),
+            Some(1045)
+        );
+        assert_eq!(compressed_image_size(GL_PALETTE4_RGBA8_OES, 1, 4), Some(66));
+        assert_eq!(
+            compressed_upload_size(GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG, 0, 0, 0),
+            Some(32)
+        );
+        assert_eq!(
+            compressed_upload_size(GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 0, 4),
+            Some(0)
+        );
+
+        let mut data = vec![0; 64];
+        for i in 1..=4 {
+            data[i * 4..i * 4 + 4].copy_from_slice(&[i as u8, 20, 30, 255]);
+        }
+        data.extend_from_slice(&[0x12, 0x34]);
+        let decoded = decode_compressed_to_rgba(&data, 1, 4, GL_PALETTE4_RGBA8_OES).unwrap();
+        assert_eq!(
+            decoded,
+            [1, 20, 30, 255, 2, 20, 30, 255, 3, 20, 30, 255, 4, 20, 30, 255]
+        );
+        for level in [i32::MIN, -32, 1, 32, i32::MAX] {
+            assert_eq!(
+                compressed_upload_size(GL_PALETTE4_RGBA8_OES, level, 4, 4),
+                None
+            );
+        }
     }
 }

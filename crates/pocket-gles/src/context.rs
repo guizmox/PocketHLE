@@ -1590,10 +1590,47 @@ impl Context {
         );
     }
 
-    /// `glCompressedTexImage2D` for the ATC formats.
-    ///
-    /// Decoded to RGBA at upload time like every other format, so the
-    /// rasterizer never learns that compression exists.
+    /// Validate the complete compressed image before the bridge reads guest memory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_compressed_tex_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        width: u32,
+        height: u32,
+        format: u32,
+        border: i32,
+    ) -> Option<usize> {
+        if target != GL_TEXTURE_2D || texture::compressed_image_size(format, 1, 1).is_none() {
+            self.set_error(GL_INVALID_ENUM);
+            return None;
+        }
+        let paletted = texture::is_paletted(format);
+        if paletted && border != 0 {
+            self.set_error(GL_INVALID_OPERATION);
+            return None;
+        }
+        if !(-10..=10).contains(&level)
+            || (paletted && level > 0)
+            || (!paletted && level < 0)
+            || border != 0
+            || width > (1024u32 >> level.max(0))
+            || height > (1024u32 >> level.max(0))
+            || (width != 0 && !width.is_power_of_two())
+            || (height != 0 && !height.is_power_of_two())
+            || (level < 0 && level.unsigned_abs() > width.max(height).max(1).ilog2())
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return None;
+        }
+        let size = texture::compressed_upload_size(format, level, width, height);
+        if size.is_none() {
+            self.set_error(GL_INVALID_VALUE);
+        }
+        size
+    }
+
+    /// Complete block-compressed image or a shared-palette mipmap chain.
     pub fn compressed_tex_image_2d(
         &mut self,
         target: u32,
@@ -1603,168 +1640,90 @@ impl Context {
         format: u32,
         data: &[u8],
     ) {
-        if target != GL_TEXTURE_2D {
-            self.set_error(GL_INVALID_ENUM);
+        let Some(needed) =
+            self.validate_compressed_tex_image_2d(target, level, width, height, format, 0)
+        else {
             return;
-        }
-        if (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
-            .contains(&format)
-            && (!width.is_power_of_two() || !height.is_power_of_two())
-        {
+        };
+        // Empty is the direct-call representation of a NULL client pointer.
+        // The ABI bridge independently checks imageSize, including for NULL.
+        if !data.is_empty() && data.len() != needed {
             self.set_error(GL_INVALID_VALUE);
             return;
-        }
-        if texture::compressed_image_size(format, width, height).is_none() {
-            self.set_error(GL_INVALID_ENUM);
-            return;
-        }
-        // Chicane packs a shared palette followed by base/mip index rows.
-        // Ordinary DDS levels (including RBR DXT3) are uploaded separately.
-        let paletted = matches!(
-            format,
-            GL_PALETTE4_RGB8_OES
-                | GL_PALETTE4_RGBA8_OES
-                | GL_PALETTE4_R5_G6_B5_OES
-                | GL_PALETTE4_RGBA4_OES
-                | GL_PALETTE4_RGB5_A1_OES
-                | GL_PALETTE8_RGB8_OES
-                | GL_PALETTE8_RGBA8_OES
-                | GL_PALETTE8_R5_G6_B5_OES
-                | GL_PALETTE8_RGBA4_OES
-                | GL_PALETTE8_RGB5_A1_OES
-        );
-        if !(-10..=10).contains(&level)
-            || (level < 0 && !paletted)
-            || width > (1024u32 >> level.max(0))
-            || height > (1024u32 >> level.max(0))
-        {
-            self.set_error(GL_INVALID_VALUE);
-            return;
-        }
-        if level < 0 {
-            if (-level) as u32 > width.max(height).max(1).ilog2() {
-                self.set_error(GL_INVALID_VALUE);
-                return;
-            }
-            if !data.is_empty() {
-                let entries = if format >= GL_PALETTE8_RGB8_OES {
-                    256
-                } else {
-                    16
-                };
-                let entry_bytes = if matches!(format, GL_PALETTE4_RGB8_OES | GL_PALETTE8_RGB8_OES) {
-                    3
-                } else if matches!(format, GL_PALETTE4_RGBA8_OES | GL_PALETTE8_RGBA8_OES) {
-                    4
-                } else {
-                    2
-                };
-                let palette_len = entries * entry_bytes;
-                let mut needed = palette_len;
-                for l in 0..=(-level) as u32 {
-                    needed += texture::compressed_image_size(
-                        format,
-                        (width >> l).max(1),
-                        (height >> l).max(1),
-                    )
-                    .unwrap()
-                        - palette_len;
-                }
-                if data.len() < needed {
-                    self.set_error(GL_INVALID_VALUE);
-                    return;
-                }
-            }
         }
         let unit = self.active_texture as usize;
         if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
-        let defer = !paletted
-            && !data.is_empty()
-            && self
-                .gpu
-                .as_ref()
-                .is_some_and(|g| g.supports_compressed(format));
-        if !data.is_empty()
-            && data.len() < texture::compressed_image_size(format, width, height).unwrap()
-        {
-            self.set_error(GL_INVALID_VALUE);
-            return;
-        }
-        let rgba = if defer {
-            Vec::new()
-        } else if data.is_empty() {
-            vec![0u8; (width as usize) * (height as usize) * 4]
+        let name = self.texture_units[unit].bound_texture;
+        if let Some(palette_len) = texture::palette_bytes(format) {
+            let mut images = Vec::new();
+            let mut offset = palette_len;
+            for l in 0..=level.unsigned_abs() {
+                let (w, h) = if width == 0 || height == 0 {
+                    (width, height)
+                } else {
+                    ((width >> l).max(1), (height >> l).max(1))
+                };
+                let rgba = if data.is_empty() || w == 0 || h == 0 {
+                    vec![0; (w * h * 4) as usize]
+                } else {
+                    let size = texture::compressed_image_size(format, w, h).unwrap() - palette_len;
+                    let mut packed = data[..palette_len].to_vec();
+                    packed.extend_from_slice(&data[offset..offset + size]);
+                    offset += size;
+                    let Some(rgba) = texture::decode_compressed_to_rgba(&packed, w, h, format)
+                    else {
+                        self.set_error(GL_INVALID_VALUE);
+                        return;
+                    };
+                    rgba
+                };
+                images.push((l, w, h, rgba));
+            }
+            // Decode every image before committing any. Compressed uploads do
+            // not trigger GENERATE_MIPMAP, even when decoded for host storage.
+            let tex = self.textures.entry(name).or_default();
+            let generate = tex.generate_mipmap;
+            tex.generate_mipmap = false;
+            for (l, w, h, rgba) in images {
+                tex.set_level(l, w, h, rgba);
+                tex.formats.insert(l, format);
+            }
+            tex.generate_mipmap = generate;
         } else {
-            match texture::decode_compressed_to_rgba(data, width, height, format) {
-                Some(v) => v,
-                None => {
-                    // Right size for the format but the guest gave us
-                    // short data — `GL_INVALID_VALUE` is what GL
-                    // specifies for a mismatched `imageSize`.
+            let defer = !data.is_empty()
+                && self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|g| g.supports_compressed(format));
+            let rgba = if defer {
+                Vec::new()
+            } else if data.is_empty() || needed == 0 {
+                vec![0; (width * height * 4) as usize]
+            } else {
+                let Some(rgba) = texture::decode_compressed_to_rgba(data, width, height, format)
+                else {
                     self.set_error(GL_INVALID_VALUE);
                     return;
-                }
-            }
-        };
-        let name = self.texture_units[self.active_texture as usize].bound_texture;
-        let tex = self.textures.entry(name).or_default();
-        if !paletted {
-            let needed = texture::compressed_image_size(format, width, height).unwrap();
-            tex.set_compressed(
-                level.max(0) as u32,
+                };
+                rgba
+            };
+            let bytes = if data.is_empty() {
+                vec![0; needed]
+            } else {
+                data.to_vec()
+            };
+            self.textures.entry(name).or_default().set_compressed(
+                level as u32,
                 width,
                 height,
                 format,
-                &if data.is_empty() {
-                    vec![0; needed]
-                } else {
-                    data[..needed].to_vec()
-                },
+                &bytes,
                 rgba,
             );
-        } else {
-            tex.set_level(level.max(0) as u32, width, height, rgba);
         }
-        if level < 0 && !data.is_empty() {
-            let entries = if format >= GL_PALETTE8_RGB8_OES {
-                256
-            } else {
-                16
-            };
-            let entry_bytes = if matches!(format, GL_PALETTE4_RGB8_OES | GL_PALETTE8_RGB8_OES) {
-                3
-            } else if matches!(format, GL_PALETTE4_RGBA8_OES | GL_PALETTE8_RGBA8_OES) {
-                4
-            } else {
-                2
-            };
-            let palette_len = entries * entry_bytes;
-            let mut offset = texture::compressed_image_size(format, width, height).unwrap();
-            for l in 1..=(-level) as u32 {
-                let (w, h) = ((width >> l).max(1), (height >> l).max(1));
-                let size = texture::compressed_image_size(format, w, h).unwrap() - palette_len;
-                if offset + size > data.len() {
-                    self.set_error(GL_INVALID_VALUE);
-                    return;
-                }
-                let mut packed = data[..palette_len].to_vec();
-                packed.extend_from_slice(&data[offset..offset + size]);
-                if let Some(rgba) = texture::decode_compressed_to_rgba(&packed, w, h, format) {
-                    tex.set_level(l, w, h, rgba);
-                }
-                offset += size;
-            }
-        }
-
-        log::debug!(
-            "GLES compressed tex image texture={name} {width}x{height} \
-             format=0x{format:04x} bytes={} complete={}",
-            data.len(),
-            tex.is_complete(),
-        );
     }
 
     /// `glTexSubImage2D`: patch a rectangle of the bound texture.
@@ -6740,6 +6699,185 @@ mod goforce_driver_tests {
                 }
                 c.set_internal_resolution(scale);
                 exercise(&mut c);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod compressed_validation_tests {
+    use super::*;
+    fn palette() -> Vec<u8> {
+        let mut data = vec![0; 64];
+        data[4..8].copy_from_slice(&[255, 0, 0, 255]);
+        data[8..12].copy_from_slice(&[0, 255, 0, 255]);
+        data[12..16].copy_from_slice(&[0, 0, 255, 255]);
+        data.extend_from_slice(&[0x11; 8]);
+        data.extend_from_slice(&[0x22; 2]);
+        data.push(0x30);
+        data
+    }
+    #[test]
+    fn shared_palette_chain_is_atomic_and_preserves_explicit_mips() {
+        for profile in [false, true] {
+            let mut c = Context::new(8, 8);
+            c.gizmondo_goforce_20051013 = profile;
+            c.tex_image_2d(GL_TEXTURE_2D, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, &[7; 64]);
+            let revision = c.textures[&0].revision;
+            let data = palette();
+            for len in [74, 76] {
+                let mut bad = data.clone();
+                bad.resize(len, 0);
+                c.compressed_tex_image_2d(GL_TEXTURE_2D, -2, 4, 4, GL_PALETTE4_RGBA8_OES, &bad);
+                assert_eq!(c.take_error(), GL_INVALID_VALUE);
+                assert_eq!(c.textures[&0].revision, revision);
+                assert_eq!(c.textures[&0].rgba, vec![7; 64]);
+            }
+            c.tex_parameter(GL_TEXTURE_2D, 0x8191, 1);
+            c.compressed_tex_image_2d(GL_TEXTURE_2D, -2, 4, 4, GL_PALETTE4_RGBA8_OES, &data);
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+            let t = &c.textures[&0];
+            assert!(t.is_complete());
+            assert!(t.generate_mipmap);
+            assert_eq!(t.rgba, [255, 0, 0, 255].repeat(16));
+            assert_eq!(t.mipmaps[&1].2, [0, 255, 0, 255].repeat(4));
+            assert_eq!(t.mipmaps[&2].2, [0, 0, 255, 255]);
+            assert_eq!(t.formats[&0], GL_PALETTE4_RGBA8_OES);
+            c.tex_parameter(GL_TEXTURE_2D, 0x8191, 1);
+            assert_eq!(c.textures[&0].mipmaps[&2].2, [0, 0, 255, 255]);
+            c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 1, 1);
+            assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        }
+    }
+    #[test]
+    fn compressed_validation_handles_levels_dimensions_and_storage_only() {
+        let mut c = Context::new(8, 8);
+        for (level, w, h, format, border, error) in [
+            (1, 4, 4, GL_PALETTE4_RGBA8_OES, 0, GL_INVALID_VALUE),
+            (
+                -1,
+                4,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                0,
+                GL_INVALID_VALUE,
+            ),
+            (-3, 4, 4, GL_PALETTE4_RGBA8_OES, 0, GL_INVALID_VALUE),
+            (
+                0,
+                3,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                0,
+                GL_INVALID_VALUE,
+            ),
+            (0, 4, 4, GL_PALETTE4_RGBA8_OES, 1, GL_INVALID_OPERATION),
+            (
+                0,
+                4,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                1,
+                GL_INVALID_VALUE,
+            ),
+            (i32::MIN, 4, 4, GL_PALETTE4_RGBA8_OES, 0, GL_INVALID_VALUE),
+        ] {
+            assert_eq!(
+                c.validate_compressed_tex_image_2d(GL_TEXTURE_2D, level, w, h, format, border),
+                None
+            );
+            assert_eq!(c.take_error(), error);
+        }
+        c.compressed_tex_image_2d(GL_TEXTURE_2D, -2, 4, 4, GL_PALETTE4_RGBA8_OES, &[]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert!(c.textures[&0].is_complete());
+        assert_eq!(
+            c.validate_compressed_tex_image_2d(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                0
+            ),
+            Some(0)
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; shared palette mips and cache replacement"]
+    fn native_palette_chain_survives_failed_replacement_and_respects_max_level() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = Context::new(8, 8);
+                if es {
+                    c.gpu = Some(crate::gpu::Renderer::new_es_for_test(8, 8).unwrap());
+                } else {
+                    c.enable_gpu().unwrap();
+                }
+                c.set_internal_resolution(scale);
+                c.tex_parameter(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_MIN_FILTER,
+                    GL_NEAREST_MIPMAP_NEAREST,
+                );
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL_SGIS, 1);
+                let data = palette();
+                c.compressed_tex_image_2d(GL_TEXTURE_2D, -2, 4, 4, GL_PALETTE4_RGBA8_OES, &data);
+                let stages = [raster::TextureStage {
+                    unit: 0,
+                    env: TexEnvMode::Replace,
+                    env_color: [0.; 4],
+                    lod_bias: 0.,
+                }];
+                let tri = [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| {
+                    raster::Vertex {
+                        pos,
+                        ..Default::default()
+                    }
+                });
+                for (minify, bad) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let mut tri = tri;
+                    if minify {
+                        for v in &mut tri {
+                            v.texcoord[0] = [(v.pos[0] + 1.) * 64., (v.pos[1] + 1.) * 64., 0., 1.];
+                        }
+                    }
+                    if bad {
+                        c.compressed_tex_image_2d(
+                            GL_TEXTURE_2D,
+                            -2,
+                            4,
+                            4,
+                            GL_PALETTE4_RGBA8_OES,
+                            &data[..74],
+                        );
+                        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+                    }
+                    c.gpu
+                        .as_mut()
+                        .unwrap()
+                        .draw(
+                            &c.target,
+                            &c.state,
+                            GL_TRIANGLES,
+                            &tri,
+                            &stages,
+                            &c.textures,
+                            [0; 4],
+                        )
+                        .unwrap();
+                    c.sync_gpu();
+                    assert_eq!(
+                        &c.target.color[(4 * 8 + 3) * 4..(4 * 8 + 3) * 4 + 4],
+                        if minify {
+                            &[0, 255, 0, 255]
+                        } else {
+                            &[255, 0, 0, 255]
+                        }
+                    );
+                }
             }
         }
     }
