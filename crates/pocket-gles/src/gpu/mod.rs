@@ -1246,6 +1246,8 @@ pub struct Renderer {
     affine_program: bool,
     range_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
     range_active: bool,
+    untextured_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
+    untextured_active: bool,
     buffer: u32,
     index_buffer: u32,
     indices: Vec<u16>,
@@ -1417,6 +1419,8 @@ impl Renderer {
                 affine_program: false,
                 range_program: None,
                 range_active: false,
+                untextured_program: None,
+                untextured_active: false,
                 buffer: 0,
                 index_buffer: 0,
                 indices: Vec::new(),
@@ -1564,6 +1568,12 @@ impl Renderer {
                 .collect();
             r.alternate_program = Some((affine, locations, HashMap::new()));
             r.program = generic;
+            // Prepare the no-texture variant now, avoiding a first-use hitch.
+            r.select_affine_program(true);
+            r.select_untextured_program(true)?;
+            r.select_untextured_program(false)?;
+            r.select_affine_program(false);
+            r.point_drawing = false;
             let p = (r.gl.GetString)(0x1f01);
             let label = if p.is_null() {
                 "unknown".into()
@@ -1672,6 +1682,43 @@ impl Renderer {
         }
         Ok(program)
     }
+    /// No sampled stage means that texture-coordinate transforms and samplers
+    /// have no effect. Keep their shader work out of this common draw path.
+    fn select_untextured_program(&mut self, enabled: bool) -> Result<(), String> {
+        if self.untextured_active == enabled {
+            return Ok(());
+        }
+        if enabled && self.untextured_program.is_none() {
+            unsafe {
+                let program = self.compile_program(
+                    &format!("#define AFFINE_TEXTURES\n#define UNTEXTURED_DRAW\n{VERTEX}"),
+                    &format!("#define AFFINE_TEXTURES\n#define UNTEXTURED_DRAW\n{FRAGMENT}"),
+                )?;
+                let locations = self
+                    .uniforms
+                    .keys()
+                    .map(|n| {
+                        (
+                            n.clone(),
+                            (self.gl.GetUniformLocation)(
+                                program,
+                                CString::new(n.as_str()).unwrap().as_ptr(),
+                            ),
+                        )
+                    })
+                    .collect();
+                self.untextured_program = Some((program, locations, HashMap::new()));
+            }
+        }
+        let alternate = self.untextured_program.as_mut().unwrap();
+        std::mem::swap(&mut self.program, &mut alternate.0);
+        std::mem::swap(&mut self.uniforms, &mut alternate.1);
+        std::mem::swap(&mut self.uniform_values, &mut alternate.2);
+        self.untextured_active = enabled;
+        self.point_drawing = true;
+        Ok(())
+    }
+
     fn select_range_program(&mut self, enabled: bool) -> Result<(), String> {
         if self.range_active == enabled {
             return Ok(());
@@ -2272,6 +2319,20 @@ impl Renderer {
         } else {
             0
         };
+        // Small mixed batches do not amortize switching shader programs. Once
+        // selected, keep this program for subsequent untextured small batches.
+        let vertex_count = stream.map_or(vertices.len(), |s| s.count);
+        let untextured = stages.is_empty()
+            && target.rgb565
+            && mode != GL_POINTS
+            && !state.logic_op
+            && !state.alpha_test
+            && !state.blend
+            && (vertex_count >= 128 || self.untextured_active);
+        // Restore the ordinary affine program before changing shader families.
+        if self.untextured_active && !untextured {
+            self.select_untextured_program(false)?;
+        }
         let range = stages.iter().any(|stage| {
             textures.get(&names[stage.unit]).is_some_and(|tex| {
                 let (lo, hi) = tex.lod_bounds();
@@ -2286,6 +2347,9 @@ impl Renderer {
             && affine_texture_coordinates(vertices, stages, transforms, stream);
         if !range {
             self.select_affine_program(affine);
+        }
+        if untextured && !self.untextured_active {
+            self.select_untextured_program(true)?;
         }
         let point_sizes = mode == GL_POINTS && state.point_size_array && transforms.is_some();
         let layout = if mask == 0 {
@@ -2590,9 +2654,11 @@ impl Renderer {
             let modelview = transforms.map(|t| &t.modelview).unwrap_or(&IDENTITY);
             self.uniform_matrix4fv(self.loc("projectionMatrix"), 1, 0, projection.as_ptr());
             self.uniform_matrix4fv(self.loc("modelviewMatrix"), 1, 0, modelview.as_ptr());
-            for (i, name) in TEXTURE_MATRICES.iter().enumerate() {
-                let matrix = transforms.map(|t| &t.textures[i]).unwrap_or(&IDENTITY);
-                self.uniform_matrix4fv(self.loc(name), 1, 0, matrix.as_ptr());
+            if !self.untextured_active {
+                for (i, name) in TEXTURE_MATRICES.iter().enumerate() {
+                    let matrix = transforms.map(|t| &t.textures[i]).unwrap_or(&IDENTITY);
+                    self.uniform_matrix4fv(self.loc(name), 1, 0, matrix.as_ptr());
+                }
             }
             self.uniform_2f(
                 self.loc("depthRange"),
@@ -3148,6 +3214,9 @@ impl Drop for Renderer {
             (self.gl.DeleteFramebuffers)(1, &self.fbo);
             (self.gl.DeleteBuffers)(1, &self.buffer);
             (self.gl.DeleteBuffers)(1, &self.index_buffer);
+            if let Some((program, _, _)) = &self.untextured_program {
+                (self.gl.DeleteProgram)(*program);
+            }
             if let Some((program, _, _)) = &self.range_program {
                 (self.gl.DeleteProgram)(*program);
             }
@@ -3291,10 +3360,12 @@ void main(){
   vec3 point=lightEye.w==0.0?lightEye.xyz:lightEye.xyz/lightEye.w;
   vColor=illuminate(n,point);vBackColor=twoSided!=0?illuminate(-n,point):vColor;
  }
+#ifndef UNTEXTURED_DRAW
  uv0=UV_VALUE(textureMatrix0*tex0);
  uv1=UV_VALUE(textureMatrix1*tex1);
  uv2=UV_VALUE(textureMatrix2*tex2);
  uv3=UV_VALUE(textureMatrix3*tex3);
+#endif
  vFog=objectSpace!=0?abs(eye.z):normalAndFog.w;
 }
 "#;
@@ -3377,7 +3448,10 @@ vec4 sampleRange(sampler2D tex,vec2 uv,float bias,vec4 limit,vec2 bounds){
 #else
 #define sampleRange(tex,uv,bias,lim,ran) texture2D(tex,uv,limitedBias(uv,bias,lim,ran))
 #endif
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=sampleRange(sampler0,pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0,lodRange0);if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=sampleRange(sampler1,pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1,lodRange1);if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=sampleRange(sampler2,pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2,lodRange2);if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=sampleRange(sampler3,pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3,lodRange3);if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;
+#ifndef UNTEXTURED_DRAW
+if(env0>=0){vec4 t=sampleRange(sampler0,pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0,lodRange0);if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=sampleRange(sampler1,pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1,lodRange1);if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=sampleRange(sampler2,pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2,lodRange2);if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=sampleRange(sampler3,pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3,lodRange3);if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
+#endif
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the
@@ -3393,6 +3467,294 @@ gl_FragColor=c;}
 mod tests {
     use super::*;
     use crate::raster;
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES; shared and specialized shader color precision"]
+    fn untextured_shader_preserves_rgba_and_rgb565_color_precision() {
+        for es in [false, true] {
+            for rgb565 in [false, true] {
+                let mut gpu = if es {
+                    Renderer::with_host(Host::es_for_test().unwrap(), 8, 8).unwrap()
+                } else {
+                    Renderer::new(8, 8).unwrap()
+                };
+                gpu.set_surface_rgb565(rgb565).unwrap();
+                let mut target = RenderTarget::with_format(8, 8, rgb565);
+                let state = PipelineState {
+                    viewport: (0, 0, 8, 8),
+                    ..Default::default()
+                };
+                let triangle =
+                    [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
+                        pos,
+                        color: [0.61, 0.39, 0.23, 0.7],
+                        ..Default::default()
+                    });
+                let vertices = triangle.repeat(64);
+                let textures = HashMap::new();
+                let at = (4 * 8 + 4) * 4;
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &triangle,
+                    &[],
+                    &textures,
+                    [0; 4],
+                )
+                .unwrap();
+                gpu.read(&mut target).unwrap();
+                assert!(!gpu.untextured_active);
+                let reference = target.color[at..at + 4].to_vec();
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &vertices,
+                    &[],
+                    &textures,
+                    [0; 4],
+                )
+                .unwrap();
+                gpu.read(&mut target).unwrap();
+                assert_eq!(gpu.untextured_active, rgb565);
+                assert_eq!(
+                    &target.color[at..at + 4],
+                    reference.as_slice(),
+                    "es={es} rgb565={rgb565}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES; untextured shader and live matrix/cache transitions"]
+    fn untextured_draws_skip_texture_work_and_restore_other_shader_families() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::with_host(Host::es_for_test().unwrap(), 8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            gpu.set_surface_rgb565(true).unwrap();
+            let mut target = RenderTarget::with_format(8, 8, true);
+            let mut state = PipelineState {
+                viewport: (0, 0, 8, 8),
+                ..Default::default()
+            };
+            let vertices =
+                [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
+                    pos,
+                    color: [1., 0., 0., 1.],
+                    texcoord: [[0.125, 0.125, 0., 1.]; 4],
+                    ..Default::default()
+                });
+            let mut vertices = vertices.repeat(64);
+            let mut transforms = VertexTransforms {
+                projection: IDENTITY,
+                modelview: IDENTITY,
+                normal_matrix: IDENTITY,
+                textures: [IDENTITY; 4],
+                lighting: Default::default(),
+            };
+            let mut tex = Texture::default();
+            tex.min_filter = Filter::Nearest;
+            tex.mag_filter = Filter::Nearest;
+            let pixels = (0..16)
+                .flat_map(|i| {
+                    if i % 4 < 2 {
+                        [255u8, 0, 0, 255]
+                    } else {
+                        [0, 255, 0, 255]
+                    }
+                })
+                .collect();
+            tex.set_level(0, 4, 4, pixels);
+            let textures = HashMap::from([(1, tex)]);
+            let stages = [TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            }];
+            let at = (4 * 8 + 4) * 4;
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices[..3],
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            assert!(!gpu.untextured_active);
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert!(gpu.untextured_active);
+            let program = gpu.program;
+            assert_eq!(&target.color[at..at + 4], &[255, 0, 0, 255]);
+            for name in [
+                "textureMatrix0",
+                "textureMatrix1",
+                "textureMatrix2",
+                "textureMatrix3",
+                "sampler0",
+                "env0",
+            ] {
+                assert_eq!(
+                    gpu.loc(name),
+                    -1,
+                    "unused texture work must be removed by the shader linker: {name}"
+                );
+            }
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &stages,
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert!(!gpu.untextured_active);
+            assert_eq!(&target.color[at..at + 4], &[255, 0, 0, 255]);
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices[..3],
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            assert!(!gpu.untextured_active);
+            for v in &mut vertices {
+                v.color = [0., 0., 1., 1.];
+            }
+            transforms.textures[0] = crate::matrix::translate(0.5, 0., 0.);
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(gpu.program, program);
+            assert_eq!(&target.color[at..at + 4], &[0, 0, 255, 255]);
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &stages,
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert!(!gpu.untextured_active);
+            assert_eq!(
+                &target.color[at..at + 4],
+                &[0, 255, 0, 255],
+                "texture matrix updates while untextured must survive switching"
+            );
+            state.blend = true;
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            assert!(!gpu.untextured_active);
+            state.blend = false;
+            state.alpha_test = true;
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            assert!(!gpu.untextured_active);
+            state.alpha_test = false;
+            state.logic_op = true;
+            state.logic_mode = crate::GL_COPY;
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert!(!gpu.untextured_active);
+            assert_eq!(&target.color[at..at + 4], &[0, 0, 255, 255]);
+            state.logic_op = false;
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_POINTS,
+                &vertices[..1],
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            assert!(!gpu.untextured_active);
+            gpu.draw_object_space(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[],
+                &textures,
+                [1, 0, 0, 0],
+                &transforms,
+            )
+            .unwrap();
+            assert!(gpu.untextured_active);
+            assert_eq!(gpu.program, program);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "requires native GL/GLES; DXT5 native uploads and forced decoded fallback"]
