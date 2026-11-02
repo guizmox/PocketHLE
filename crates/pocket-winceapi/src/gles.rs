@@ -23,11 +23,13 @@ use pocket_gles::fixed::{word_to_f32, word_to_f32_bits};
 use pocket_gles::matrix::Matrix4;
 use pocket_gles::ordinals as gles_ord;
 use pocket_gles::{
-    EGL_BAD_DISPLAY, EGL_CONFIG_ID, EGL_EXTENSIONS, EGL_FALSE, EGL_NONE, EGL_NO_SURFACE,
-    EGL_SUCCESS, EGL_TRUE, EGL_VENDOR, EGL_VERSION, GL_UNSIGNED_BYTE,
+    EGL_BAD_DISPLAY, EGL_CONFIG_ID, EGL_EXTENSIONS, EGL_FALSE, EGL_NO_SURFACE, EGL_SUCCESS,
+    EGL_TRUE, EGL_VENDOR, EGL_VERSION, GL_UNSIGNED_BYTE,
 };
 #[cfg(test)]
-use pocket_gles::{EGL_BLUE_SIZE, EGL_BUFFER_SIZE, EGL_DEPTH_SIZE, EGL_GREEN_SIZE, EGL_RED_SIZE};
+use pocket_gles::{
+    EGL_BLUE_SIZE, EGL_BUFFER_SIZE, EGL_DEPTH_SIZE, EGL_GREEN_SIZE, EGL_NONE, EGL_RED_SIZE,
+};
 
 use pocket_kernel::{DispatchOutcome, KernelError};
 
