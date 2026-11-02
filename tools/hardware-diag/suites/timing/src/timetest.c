@@ -65,7 +65,8 @@ static void egl(void){
  BIND(getdisplay,"eglGetDisplay");BIND(initialize,"eglInitialize");BIND(choose,"eglChooseConfig");BIND(window,"eglCreateWindowSurface");BIND(create,"eglCreateContext");BIND(current,"eglMakeCurrent");BIND(swap,"eglSwapBuffers");BIND(destroySurface,"eglDestroySurface");BIND(destroyContext,"eglDestroyContext");BIND(terminate,"eglTerminate");
  dpy=getdisplay(0);check("egl.initialize",dpy&&initialize(dpy,&major,&minor));
  check("egl.config",choose(dpy,attr,&cfg,1,&num)&&cfg&&num==1);
- surface=window(dpy,cfg,0,attr);context=create(dpy,cfg,0,attr);check("egl.make_current",surface&&context&&current(dpy,surface,surface,context));
+ check("egl.native_window",GetDesktopWindow()!=0);
+ surface=window(dpy,cfg,GetDesktopWindow(),attr);check("egl.window_surface",surface!=0);context=create(dpy,cfg,0,attr);check("egl.make_current",surface&&context&&current(dpy,surface,surface,context));
  start=GetTickCount();for(i=0;i<12;i++)if(!swap(dpy,surface)){good=0;break;}
  check("egl.identical_window_frames_paced",good&&i==12&&elapsed(start)>=150);measure("egl12_swaps",elapsed(start));
  /* Measure the pair BEFORE emitting progress or report I/O. A console

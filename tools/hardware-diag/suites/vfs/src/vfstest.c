@@ -180,7 +180,7 @@ __attribute__((section(".text.entry"))) U32 entry(void){
  SetLastError(123);check("delete.missing_error",!DeleteFileW(FILE)&&GetLastError()==2);check("delete.success",DeleteFileW(OTHER));
  check("directories.remove_real",RemoveDirectoryW(ROOT)&&GetFileAttributesW(ROOT)==BAD);check("directories.recreate",CreateDirectoryW(ROOT,0));
  h=open_file(ASSET,R,3,3);check("paths.case_insensitive",h!=BAD);CloseHandle(h);
- h=open_file(L"\\sd card\\gzvt999998\\ASSET.BIN",R,3,3);check("paths.case_insensitive_again",h!=BAD);CloseHandle(h);
+ h=open_file(L"\\sd card\\gzhd999989\\VFS\\ASSET.BIN",R,3,3);check("paths.case_insensitive_again",h!=BAD);CloseHandle(h);
  SetLastError(123);check("paths.readonly_card_cannot_create_read_handle",open_file(L"\\SD Card\\GZHD999989\\vfs\\new.bin",R,3,4)==BAD&&GetLastError()==5);
  j=FindFirstFileW(ASSET,found);check("attributes.card_readonly",j!=BAD&&(found[0]&1)==1);FindClose(j);
  SetLastError(123);check("paths.readonly_card_write_refused",open_file(ASSET,W,3,3)==BAD&&GetLastError()==5);

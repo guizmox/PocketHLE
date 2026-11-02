@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('pe_builder', ROOT.parent/'ram/build.py')
 b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
 SIG = {**b.SIGNATURES,
+       'GetDesktopWindow': ('unsigned int', 'void'),
        'GetTickCount': ('unsigned int', 'void'),
        'SetTimer': ('unsigned int', 'unsigned int,unsigned int,unsigned int,void*'),
        'KillTimer': ('unsigned int', 'unsigned int,unsigned int'),
@@ -23,7 +24,7 @@ NAMES = ['CreateFileW','WriteFile','CloseHandle','GetLastError','MessageBoxW',
          'GetExitCodeThread','TerminateThread','SetTimer','KillTimer','PeekMessageW',
          'DispatchMessageW','waveOutOpen','waveOutPrepareHeader','waveOutWrite',
          'waveOutUnprepareHeader','waveOutReset','waveOutClose',
-         'LoadLibraryW','FreeLibrary','GetProcAddressA']
+         'LoadLibraryW','FreeLibrary','GetProcAddressA','GetDesktopWindow']
 for api in ('SetLastError', 'SetFilePointer'):
     if api not in NAMES: NAMES.append(api)
 
