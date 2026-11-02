@@ -150,12 +150,18 @@ fn flush_pixmap(ctx: &mut CallCtx<'_>, surface: u32) -> Result<(), KernelError> 
     crate::coredll::sync_bitmap_to_guest(ctx, bitmap)
 }
 
-/// Host GPU pixel density. Guest geometry remains unchanged.
+/// Select the dated NVIDIA GoForce driver used by the Gizmondo platform.
+/// This belongs to the rendering session, independently of controls and audio.
+pub fn set_gizmondo_goforce_driver(enabled: bool) {
+    with_ctx(|c| c.gizmondo_goforce_20051013 = enabled);
+}
+
 /// Explicit legacy-driver compatibility, independent of CPU identity and game ID.
 pub fn set_intel2700g_depth_bias(enabled: bool) {
     with_ctx(|c| c.state.intel2700g_depth_bias = enabled);
 }
 
+/// Host GPU pixel density. Guest geometry remains unchanged.
 pub fn set_internal_resolution(scale: u8) {
     with_ctx(|c| c.set_internal_resolution(scale));
 }
@@ -2966,6 +2972,60 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn gizmondo_driver_accepts_carmageddon_source_format_without_losing_alpha() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let pixels = [255, 255, 255, 0].repeat(4);
+        cpu.write_mem(SCRATCH, &pixels).unwrap();
+        let args = [
+            GL_TEXTURE_2D,
+            0,
+            GL_RGB,
+            2,
+            2,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            SCRATCH,
+        ];
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+        set_gizmondo_goforce_driver(true);
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        assert_eq!(with_ctx(|c| c.textures[&0].rgba.clone()), pixels);
+        assert_eq!(with_ctx(|c| c.textures[&0].formats[&0]), GL_RGBA);
+        // No blanket relaxation of dimensions or packed formats.
+        let mut bad = args;
+        bad[3] = 3;
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &bad);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_VALUE
+        );
+        let mut bad = args;
+        bad[7] = GL_UNSIGNED_SHORT_5_6_5;
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &bad);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+        reset_for_session();
+        assert!(!with_ctx(|c| c.gizmondo_goforce_20051013));
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+    }
 
     #[test]
     fn only_a_completed_window_swap_discards_ancillary_depth() {

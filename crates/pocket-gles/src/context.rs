@@ -343,6 +343,9 @@ pub struct Context {
     pub state: PipelineState,
     pub clear_color: [f32; 4],
     pub clear_depth: f32,
+    /// Driver behavior observed in Gizmondo libgles_cm_20051013.dll, not
+    /// a hardware claim or an ES-wide relaxation. Standard profile is default.
+    pub gizmondo_goforce_20051013: bool,
     /// `GL_CULL_FACE` enable, tracked separately from the face mode so
     /// `glCullFace` before `glEnable` is not lost.
     cull_enabled: bool,
@@ -422,6 +425,7 @@ impl Context {
             state,
             clear_color: [0.0, 0.0, 0.0, 0.0],
             clear_depth: 1.0,
+            gizmondo_goforce_20051013: false,
             cull_enabled: false,
             scissor_enabled: false,
             scissor_box: None,
@@ -1416,7 +1420,7 @@ impl Context {
             Some(GL_INVALID_VALUE)
         } else if let Err(error) = texture::pixel_layout(format, ty) {
             Some(error)
-        } else if internalformat != format {
+        } else if internalformat != format && !self.gizmondo_goforce_20051013 {
             Some(GL_INVALID_OPERATION)
         } else {
             None
@@ -2053,11 +2057,22 @@ impl Context {
         if self.gpu_failed {
             return;
         }
+        // The dated GoForce driver submits a full depth clear even when
+        // its guest depth-write state is false. Other drivers keep ES semantics.
+        let driver_depth_write = self.state.depth_write || self.gizmondo_goforce_20051013;
+        let mut clear_state;
+        let state = if driver_depth_write != self.state.depth_write {
+            clear_state = self.state.clone();
+            clear_state.depth_write = true;
+            &clear_state
+        } else {
+            &self.state
+        };
         if let Some(gpu) = self.gpu.as_mut() {
             if let Err(e) = gpu.clear(
                 self.target.width,
                 self.target.height,
-                &self.state,
+                state,
                 self.clear_color,
                 self.clear_depth,
                 mask,
@@ -2084,7 +2099,7 @@ impl Context {
             self.target
                 .clear_color_masked(c, self.state.scissor, self.state.color_mask);
         }
-        if mask & GL_DEPTH_BUFFER_BIT != 0 && self.state.depth_write {
+        if mask & GL_DEPTH_BUFFER_BIT != 0 && driver_depth_write {
             let d = self.clear_depth;
             self.target.clear_depth(d, self.state.scissor);
         }
@@ -6582,6 +6597,91 @@ mod window_depth_discard_tests {
     #[test]
     #[ignore = "requires native desktop GL/GLES2; ancillary discard across window frames"]
     fn native_window_depth_discard_keeps_state_and_color() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = Context::new_rgb565(16, 16);
+                if es {
+                    let mut gpu = crate::gpu::Renderer::new_es_for_test(16, 16).unwrap();
+                    gpu.set_surface_rgb565(true).unwrap();
+                    c.gpu = Some(gpu);
+                } else {
+                    c.enable_gpu().unwrap();
+                }
+                c.set_internal_resolution(scale);
+                exercise(&mut c);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod goforce_driver_tests {
+    use super::*;
+    fn exercise(c: &mut Context) {
+        let tri = |z, color| {
+            [[-1., -1., z, 1.], [1., -1., z, 1.], [0., 1., z, 1.]].map(|pos| raster::Vertex {
+                pos,
+                color,
+                back_color: color,
+                ..Default::default()
+            })
+        };
+        let near = tri(-0.5, [1., 0., 0., 1.]);
+        let far = tri(0.5, [0., 1., 0., 1.]);
+        let draw = |c: &mut Context, v: [raster::Vertex; 3]| {
+            if let Some(g) = c.gpu.as_mut() {
+                g.draw(
+                    &c.target,
+                    &c.state,
+                    GL_TRIANGLES,
+                    &v,
+                    &[],
+                    &HashMap::new(),
+                    [0; 4],
+                )
+                .unwrap();
+            } else {
+                raster::draw_triangle(&mut c.target, &c.state, &|_, _, _| None, &[], v);
+            }
+        };
+        for profile in [false, true, false] {
+            c.gizmondo_goforce_20051013 = profile;
+            c.state.depth_test = true;
+            c.state.depth_func = CompareFunc::Lequal;
+            c.state.depth_write = true;
+            c.state.scissor = None;
+            c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            draw(c, near);
+            c.state.depth_write = false;
+            c.state.scissor = Some((0, 0, 8, 16));
+            c.clear(GL_DEPTH_BUFFER_BIT);
+            assert!(!c.state.depth_write);
+            assert_eq!(c.state.scissor, Some((0, 0, 8, 16)));
+            c.state.scissor = None;
+            draw(c, far);
+            c.sync_gpu();
+            let at = |x: usize| &c.target.color[(8 * 16 + x) * 4..(8 * 16 + x) * 4 + 4];
+            assert_eq!(
+                at(6),
+                if profile {
+                    &[0, 255, 0, 255]
+                } else {
+                    &[255, 0, 0, 255]
+                }
+            );
+            assert_eq!(at(9), &[255, 0, 0, 255]);
+            c.clear(GL_DEPTH_BUFFER_BIT | 1);
+            assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        }
+    }
+    #[test]
+    fn software_dated_driver_clear_is_distinct_from_standard_es() {
+        exercise(&mut Context::new_rgb565(16, 16));
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL/GLES2; NVIDIA masked depth clear and scissor"]
+    fn native_dated_driver_clear_is_distinct_from_standard_es() {
         for es in [false, true] {
             for scale in [1, 2] {
                 let mut c = Context::new_rgb565(16, 16);
