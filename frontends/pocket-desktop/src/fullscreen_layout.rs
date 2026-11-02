@@ -26,8 +26,30 @@ pub fn integer_fit_capped(available: [u32; 2], native: [u32; 2], maximum: u32) -
         top: available[1].saturating_sub(height) / 2,
     }
 }
+/// Fullscreen zoom uses whole QVGA steps for QVGA-family images, including
+/// internally doubled/tripled renders. Other aspect ratios keep native steps.
+pub fn qvga_fullscreen_fit(available: [u32; 2], rendered: [u32; 2]) -> IntegerFit {
+    let base = if rendered[0] != 0
+        && rendered[1] != 0
+        && rendered[0] % 320 == 0
+        && rendered[1] % 240 == 0
+        && rendered[0] / 320 == rendered[1] / 240
+    {
+        [320, 240]
+    } else if rendered[0] != 0
+        && rendered[1] != 0
+        && rendered[0] % 240 == 0
+        && rendered[1] % 320 == 0
+        && rendered[0] / 240 == rendered[1] / 320
+    {
+        [240, 320]
+    } else {
+        rendered
+    };
+    integer_fit(available, base)
+}
 /// Largest aspect-preserving rectangle, including fractional up/downscaling.
-/// Steam Deck's physical screen need not be a whole multiple of guest pixels.
+/// Used only when a window is too small to contain the native image.
 pub fn aspect_fit(available: [u32; 2], native: [u32; 2]) -> [u32; 4] {
     let [w, h] = [native[0].max(1) as u64, native[1].max(1) as u64];
     let [aw, ah] = available.map(u64::from);
@@ -48,13 +70,28 @@ pub fn aspect_fit(available: [u32; 2], native: [u32; 2]) -> [u32; 4] {
 mod tests {
     use super::*;
     #[test]
-    fn deck_fullscreen_uses_available_height_for_qvga_and_vga() {
-        for native in [[320, 240], [640, 480]] {
-            assert_eq!(aspect_fit([1280, 800], native), [107, 0, 1066, 800]);
+    fn deck_fullscreen_uses_whole_qvga_steps_at_every_render_resolution() {
+        for rendered in [[320, 240], [640, 480], [960, 720], [1280, 960]] {
+            let fit = qvga_fullscreen_fit([1280, 800], rendered);
+            assert_eq!(
+                [fit.left, fit.top, fit.width, fit.height],
+                [160, 40, 960, 720]
+            );
+            assert_eq!(fit.factor, 3);
         }
-        for native in [[240, 320], [480, 640]] {
-            assert_eq!(aspect_fit([1280, 800], native), [340, 0, 600, 800]);
+        for rendered in [[240, 320], [480, 640], [720, 960]] {
+            let fit = qvga_fullscreen_fit([1280, 800], rendered);
+            assert_eq!(
+                [fit.left, fit.top, fit.width, fit.height],
+                [400, 80, 480, 640]
+            );
         }
+        let fit = qvga_fullscreen_fit([1920, 1080], [640, 480]);
+        assert_eq!([fit.width, fit.height], [1280, 960]);
+        assert_eq!(
+            qvga_fullscreen_fit([1280, 800], [400, 240]),
+            integer_fit([1280, 800], [400, 240])
+        );
         assert_eq!(aspect_fit([200, 150], [640, 480]), [0, 0, 200, 150]);
         assert_eq!(aspect_fit([0, 0], [320, 240]), [0, 0, 0, 0]);
     }

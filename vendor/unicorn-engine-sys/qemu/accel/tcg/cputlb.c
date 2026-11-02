@@ -164,7 +164,7 @@ static void tlb_mmu_resize_locked(struct uc_struct *uc, CPUTLBDesc *desc, CPUTLB
         /* Preserve the preferred capacity under normal operation. A small
          * observed working set can still have costly direct-map conflicts.
          * Allocation failures below retain the original hard minimum. */
-        new_size = MAX(ceil, 1 << uc->pockethle_tlb_floor_bits);
+        new_size = MAX(ceil, 1 << 12);
     }
 
     if (new_size == old_size) {
@@ -230,7 +230,7 @@ static void tlb_flush_one_mmuidx_locked(CPUArchState *env, int mmu_idx,
 
 static void tlb_mmu_init(struct uc_struct *uc, CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
 {
-    size_t n_entries = 1 << uc->pockethle_tlb_initial_bits;
+    size_t n_entries = 1 << 12;
 
     tlb_window_reset(desc, now, 0);
     desc->n_used_entries = 0;
@@ -1219,7 +1219,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
             (tlbe->addr_code == (target_ulong)-1 ||
              (!page_has_code && mr->ram_block &&
-              !(mr->ram_block->flags & (RAM_PREALLOC | RAM_POCKETHLE_CONSERVATIVE)))) &&
+              !(mr->ram_block->flags & RAM_PREALLOC))) &&
             !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
         /* Other MMU modes may map this VA to different physical code.
          * Clear only the entry whose physical page was checked above. */

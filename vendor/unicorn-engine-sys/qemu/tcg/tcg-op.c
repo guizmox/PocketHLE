@@ -2778,7 +2778,7 @@ void tcg_gen_lookup_and_goto_ptr(TCGContext *tcg_ctx)
         ptr = tcg_temp_new_ptr(tcg_ctx);
         /* Resolve the fixed helper while translating, not in generated code. */
         TCGTemp *args[1] = { tcgv_ptr_temp(tcg_ctx, tcg_ctx->cpu_env) };
-        tcg_gen_callN(tcg_ctx, tcg_ctx->uc->pockethle_jump_helper,
+        tcg_gen_callN(tcg_ctx, HELPER(lookup_tb_ptr),
                       tcgv_ptr_temp(tcg_ctx, ptr), 1, args);
         tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, ptr));
         tcg_temp_free_ptr(tcg_ctx, ptr);

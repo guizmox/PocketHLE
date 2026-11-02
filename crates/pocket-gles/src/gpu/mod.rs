@@ -1248,6 +1248,10 @@ pub struct Renderer {
     range_active: bool,
     untextured_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
     untextured_active: bool,
+    simple_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
+    simple_active: bool,
+    simple_available: bool,
+    simple_run: u8,
     buffer: u32,
     index_buffer: u32,
     indices: Vec<u16>,
@@ -1293,6 +1297,8 @@ fn render_scale_for(policy: u8, width: u32, height: u32) -> u32 {
     match policy {
         2 => 2,
         3 if matches!((width, height), (320, 240) | (240, 320)) => 2,
+        4 if matches!((width, height), (320, 240) | (240, 320)) => 3,
+        5 if matches!((width, height), (320, 240) | (240, 320)) => 4,
         _ => 1,
     }
 }
@@ -1421,6 +1427,10 @@ impl Renderer {
                 range_active: false,
                 untextured_program: None,
                 untextured_active: false,
+                simple_program: None,
+                simple_active: false,
+                simple_available: true,
+                simple_run: 0,
                 buffer: 0,
                 index_buffer: 0,
                 indices: Vec::new(),
@@ -1570,6 +1580,13 @@ impl Renderer {
             r.program = generic;
             // Prepare the no-texture variant now, avoiding a first-use hitch.
             r.select_affine_program(true);
+            if let Err(error) = r.select_simple_program(true) {
+                log::warn!("Simple GPU shader unavailable; keeping complete shaders: {error}");
+                r.simple_available = false;
+            }
+            if r.simple_active {
+                r.select_simple_program(false)?;
+            }
             r.select_untextured_program(true)?;
             r.select_untextured_program(false)?;
             r.select_affine_program(false);
@@ -1715,6 +1732,43 @@ impl Renderer {
         std::mem::swap(&mut self.uniforms, &mut alternate.1);
         std::mem::swap(&mut self.uniform_values, &mut alternate.2);
         self.untextured_active = enabled;
+        self.point_drawing = true;
+        Ok(())
+    }
+
+    /// Both untextured and unit-zero MODULATE draws use this program, so
+    /// alternating between them does not cause a program switch.
+    fn select_simple_program(&mut self, enabled: bool) -> Result<(), String> {
+        if self.simple_active == enabled {
+            return Ok(());
+        }
+        if enabled && self.simple_program.is_none() {
+            unsafe {
+                let program = self.compile_program(
+                    &format!("#define AFFINE_TEXTURES\n{VERTEX}"),
+                    SIMPLE_FRAGMENT,
+                )?;
+                let locations = self
+                    .uniforms
+                    .keys()
+                    .map(|n| {
+                        (
+                            n.clone(),
+                            (self.gl.GetUniformLocation)(
+                                program,
+                                CString::new(n.as_str()).unwrap().as_ptr(),
+                            ),
+                        )
+                    })
+                    .collect();
+                self.simple_program = Some((program, locations, HashMap::new()));
+            }
+        }
+        let alternate = self.simple_program.as_mut().unwrap();
+        std::mem::swap(&mut self.program, &mut alternate.0);
+        std::mem::swap(&mut self.uniforms, &mut alternate.1);
+        std::mem::swap(&mut self.uniform_values, &mut alternate.2);
+        self.simple_active = enabled;
         self.point_drawing = true;
         Ok(())
     }
@@ -1927,7 +1981,7 @@ impl Renderer {
         ]
     }
 
-    /// Policy 1=native, 2=double all, 3=double QVGA only. Guest sizes stay logical.
+    /// Policy 1=native, 2=double all, 3=double QVGA only, 4=triple QVGA only, 5=quadruple QVGA only. Guest sizes stay logical.
     pub fn set_render_scale(&mut self, policy: u8) -> Result<(), String> {
         self.render_policy = policy;
         let (w, h) = (
@@ -2362,20 +2416,7 @@ impl Renderer {
         } else {
             0
         };
-        // Small mixed batches do not amortize switching shader programs. Once
-        // selected, keep this program for subsequent untextured small batches.
         let vertex_count = stream.map_or(vertices.len(), |s| s.count);
-        let untextured = stages.is_empty()
-            && target.rgb565
-            && mode != GL_POINTS
-            && !state.logic_op
-            && !state.alpha_test
-            && !state.blend
-            && (vertex_count >= 128 || self.untextured_active);
-        // Restore the ordinary affine program before changing shader families.
-        if self.untextured_active && !untextured {
-            self.select_untextured_program(false)?;
-        }
         let range = stages.iter().any(|stage| {
             textures.get(&names[stage.unit]).is_some_and(|tex| {
                 let (lo, hi) = tex.lod_bounds();
@@ -2383,13 +2424,57 @@ impl Renderer {
                 (lo > 0. || hi < w.max(h).checked_ilog2().unwrap_or(0) as f32) && tex.is_complete()
             })
         });
-        self.select_range_program(range)?;
         let affine = !range
             && mode != GL_POINTS
             && !state.logic_op
             && affine_texture_coordinates(vertices, stages, transforms, stream);
+        let simple_eligible = self.simple_available
+            && affine
+            && target.rgb565
+            && !state.fog
+            && !state.alpha_test
+            && !state.logic_op
+            && !state.two_sided_lighting
+            && !transforms.is_some_and(|t| t.lighting.enabled && t.lighting.two_sided)
+            && (stages.is_empty()
+                || (stages.len() == 1
+                    && stages[0].unit == 0
+                    && matches!(stages[0].env, TexEnvMode::Modulate)
+                    && stages[0].lod_bias == 0.
+                    && textures.get(&names[0]).is_some_and(|t| {
+                        t.is_complete()
+                            && !t.min_filter.uses_mipmaps()
+                            && t.min_lod == -1000.
+                            && t.max_lod == 1000.
+                    })));
+        // Do not oscillate for isolated simple draws between complex states.
+        // Texture ON/OFF is deliberately not a change of shader family here.
+        self.simple_run = if simple_eligible {
+            self.simple_run.saturating_add(1)
+        } else {
+            0
+        };
+        let simple = simple_eligible && (self.simple_active || self.simple_run >= 8);
+        if self.simple_active && !simple {
+            self.select_simple_program(false)?;
+        }
+        let untextured = !simple
+            && stages.is_empty()
+            && target.rgb565
+            && mode != GL_POINTS
+            && !state.logic_op
+            && !state.alpha_test
+            && !state.blend
+            && (vertex_count >= 128 || self.untextured_active);
+        if self.untextured_active && !untextured {
+            self.select_untextured_program(false)?;
+        }
+        self.select_range_program(range)?;
         if !range {
             self.select_affine_program(affine);
+        }
+        if simple && !self.simple_active {
+            self.select_simple_program(true)?;
         }
         if untextured && !self.untextured_active {
             self.select_untextured_program(true)?;
@@ -3257,6 +3342,9 @@ impl Drop for Renderer {
             (self.gl.DeleteFramebuffers)(1, &self.fbo);
             (self.gl.DeleteBuffers)(1, &self.buffer);
             (self.gl.DeleteBuffers)(1, &self.index_buffer);
+            if let Some((program, _, _)) = &self.simple_program {
+                (self.gl.DeleteProgram)(*program);
+            }
             if let Some((program, _, _)) = &self.untextured_program {
                 (self.gl.DeleteProgram)(*program);
             }
@@ -3412,6 +3500,14 @@ void main(){
  vFog=objectSpace!=0?abs(eye.z):normalAndFog.w;
 }
 "#;
+// Only selected under simple_eligible. All transforms, lighting and fixed
+// pipeline blending/depth/scissor stay on their original paths. The real
+// RGB565 attachment still quantizes every write, including blended writes.
+const SIMPLE_FRAGMENT: &str = r#"
+VARYING vec4 vColor;VARYING vec2 uv0;
+uniform sampler2D sampler0;uniform int env0;
+void main(){vec4 c=vColor;if(env0>=0)c*=texture2D(sampler0,uv0);gl_FragColor=c;}
+"#;
 const FRAGMENT: &str = r#"
 VARYING vec4 vColor,vBackColor;
 #ifdef AFFINE_TEXTURES
@@ -3510,6 +3606,292 @@ gl_FragColor=c;}
 mod tests {
     use super::*;
     use crate::raster;
+    #[test]
+    #[ignore = "requires native OpenGL/GLES; specialized fragment equivalence"]
+    fn simple_fragment_matches_complete_rgb565_for_textures_alpha_and_blending() {
+        for es in [false, true] {
+            let make = || {
+                let mut g = if es {
+                    Renderer::new_es_for_test(8, 8).unwrap()
+                } else {
+                    Renderer::new(8, 8).unwrap()
+                };
+                g.set_surface_rgb565(true).unwrap();
+                g
+            };
+            let (mut fast, mut reference) = (make(), make());
+            reference.simple_available = false;
+            assert!(fast.simple_available);
+            let (mut a, mut b) = (
+                RenderTarget::with_format(8, 8, true),
+                RenderTarget::with_format(8, 8, true),
+            );
+            let mut tex = Texture::default();
+            tex.set_level(
+                0,
+                2,
+                2,
+                vec![
+                    240, 120, 200, 91, 32, 120, 200, 255, 80, 231, 40, 137, 200, 23, 167, 199,
+                ],
+            );
+            let stage = TextureStage {
+                unit: 0,
+                env: TexEnvMode::Modulate,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            };
+            for filter in [Filter::Nearest, Filter::Linear] {
+                tex.min_filter = filter;
+                tex.mag_filter = filter;
+                let textures = HashMap::from([(1, tex.clone())]);
+                for textured in [false, true] {
+                    for alpha in [0., 0.1, 0.5, 0.7, 1.] {
+                        for blend_on in [false, true] {
+                            let state = PipelineState {
+                                viewport: (0, 0, 8, 8),
+                                blend: blend_on,
+                                blend_src: BlendFactor::SrcAlpha,
+                                blend_dst: BlendFactor::OneMinusSrcAlpha,
+                                ..Default::default()
+                            };
+                            let vertices =
+                                [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(
+                                    |pos| Vertex {
+                                        pos,
+                                        color: [0.61, 0.39, 0.23, alpha],
+                                        texcoord: [[0.37, 0.63, 0., 1.]; 4],
+                                        ..Default::default()
+                                    },
+                                );
+                            let stages = if textured {
+                                std::slice::from_ref(&stage)
+                            } else {
+                                &[]
+                            };
+                            for gpu in [&mut fast, &mut reference] {
+                                gpu.clear(
+                                    8,
+                                    8,
+                                    &state,
+                                    [0.13, 0.27, 0.41, 1.],
+                                    1.,
+                                    GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                                )
+                                .unwrap();
+                            }
+                            for _ in 0..10 {
+                                fast.draw(
+                                    &a,
+                                    &state,
+                                    GL_TRIANGLES,
+                                    &vertices,
+                                    stages,
+                                    &textures,
+                                    [1, 0, 0, 0],
+                                )
+                                .unwrap();
+                                reference
+                                    .draw(
+                                        &b,
+                                        &state,
+                                        GL_TRIANGLES,
+                                        &vertices,
+                                        stages,
+                                        &textures,
+                                        [1, 0, 0, 0],
+                                    )
+                                    .unwrap();
+                            }
+                            fast.read(&mut a).unwrap();
+                            reference.read(&mut b).unwrap();
+                            assert!(fast.simple_active);
+                            assert_eq!(a.color,b.color,"ES={es} textured={textured} alpha={alpha} blend={blend_on} filter={filter:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL/GLES; shader fallback and mixed transitions"]
+    fn simple_fragment_restores_complex_states_and_avoids_mixed_program_churn() {
+        for es in [false, true] {
+            let make = || {
+                let mut g = if es {
+                    Renderer::new_es_for_test(8, 8).unwrap()
+                } else {
+                    Renderer::new(8, 8).unwrap()
+                };
+                g.set_surface_rgb565(true).unwrap();
+                g
+            };
+            let (mut fast, mut reference) = (make(), make());
+            reference.simple_available = false;
+            let (mut a, mut b) = (
+                RenderTarget::with_format(8, 8, true),
+                RenderTarget::with_format(8, 8, true),
+            );
+            let base = PipelineState {
+                viewport: (0, 0, 8, 8),
+                ..Default::default()
+            };
+            let vertices =
+                [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
+                    pos,
+                    color: [0.61, 0.39, 0.23, 0.7],
+                    ..Default::default()
+                });
+            let mut t = Texture::default();
+            t.set_level(
+                0,
+                2,
+                2,
+                vec![
+                    240, 120, 200, 255, 32, 120, 200, 255, 60, 220, 30, 255, 128, 40, 231, 255,
+                ],
+            );
+            t.min_filter = Filter::Nearest;
+            t.mag_filter = Filter::Nearest;
+            let mut textures = HashMap::from([(1, t)]);
+            let stage = TextureStage {
+                unit: 0,
+                env: TexEnvMode::Modulate,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            };
+            let mut program = 0;
+            for i in 0..24 {
+                let stages = if i % 2 == 0 {
+                    std::slice::from_ref(&stage)
+                } else {
+                    &[]
+                };
+                fast.draw(
+                    &a,
+                    &base,
+                    GL_TRIANGLES,
+                    &vertices,
+                    stages,
+                    &textures,
+                    [1; 4],
+                )
+                .unwrap();
+                reference
+                    .draw(
+                        &b,
+                        &base,
+                        GL_TRIANGLES,
+                        &vertices,
+                        stages,
+                        &textures,
+                        [1; 4],
+                    )
+                    .unwrap();
+                if i >= 7 {
+                    assert!(fast.simple_active);
+                    if program == 0 {
+                        program = fast.program;
+                    }
+                    assert_eq!(program, fast.program);
+                }
+            }
+            fast.read(&mut a).unwrap();
+            reference.read(&mut b).unwrap();
+            assert_eq!(a.color, b.color);
+            // Every complex draw must immediately restore the complete shader.
+            for feature in 0..12 {
+                let mut state = base.clone();
+                let mut stages = vec![stage.clone()];
+                let mut mode = GL_TRIANGLES;
+                let mut coordinates = vertices;
+                match feature {
+                    0 => {
+                        state.fog = true;
+                        state.fog_mode = FogMode::Linear;
+                        state.fog_end = 2.;
+                    }
+                    1 => {
+                        state.alpha_test = true;
+                        state.alpha_ref = 0.8;
+                    }
+                    2 => {
+                        state.logic_op = true;
+                        state.logic_mode = 0x1506;
+                    }
+                    3 => mode = GL_POINTS,
+                    4 => state.two_sided_lighting = true,
+                    5 => stages[0].env = TexEnvMode::Replace,
+                    6 => stages.push(TextureStage {
+                        unit: 1,
+                        ..stage.clone()
+                    }),
+                    7 => stages[0].unit = 1,
+                    8 => stages[0].lod_bias = 1.,
+                    9 => {
+                        textures.get_mut(&1).unwrap().min_lod = 1.;
+                    }
+                    10 => {
+                        for v in &mut coordinates {
+                            v.texcoord[0] = [0.5, 0.5, 0., 2.];
+                        }
+                    }
+                    _ => {
+                        let t = textures.get_mut(&1).unwrap();
+                        t.set_level(1, 1, 1, vec![0, 255, 0, 255]);
+                        t.min_filter = Filter::LinearMipmapLinear;
+                    }
+                }
+                fast.draw(&a, &state, mode, &coordinates, &stages, &textures, [1; 4])
+                    .unwrap();
+                reference
+                    .draw(&b, &state, mode, &coordinates, &stages, &textures, [1; 4])
+                    .unwrap();
+                assert!(!fast.simple_active, "feature {feature}");
+                fast.read(&mut a).unwrap();
+                reference.read(&mut b).unwrap();
+                assert_eq!(a.color, b.color, "feature {feature} ES={es}");
+                textures.get_mut(&1).unwrap().min_lod = -1000.;
+                textures.get_mut(&1).unwrap().min_filter = Filter::Nearest;
+                for _ in 0..8 {
+                    fast.draw(
+                        &a,
+                        &base,
+                        GL_TRIANGLES,
+                        &vertices,
+                        &[stage.clone()],
+                        &textures,
+                        [1; 4],
+                    )
+                    .unwrap();
+                    reference
+                        .draw(
+                            &b,
+                            &base,
+                            GL_TRIANGLES,
+                            &vertices,
+                            &[stage.clone()],
+                            &textures,
+                            [1; 4],
+                        )
+                        .unwrap();
+                }
+                assert!(fast.simple_active);
+            }
+            // Isolated eligible draws cannot enable the optimized program.
+            for i in 0..16 {
+                let state = PipelineState {
+                    fog: i % 2 == 0,
+                    ..base.clone()
+                };
+                fast.draw(&a, &state, GL_TRIANGLES, &vertices, &[], &textures, [1; 4])
+                    .unwrap();
+                assert!(!fast.simple_active);
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "requires native GL/GLES; shared and specialized shader color precision"]
@@ -6305,6 +6687,22 @@ mod resolution_policy_tests {
                 render_scale_for(3, size.0, size.1),
                 if matches!(size, (320, 240) | (240, 320)) {
                     2
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                render_scale_for(4, size.0, size.1),
+                if matches!(size, (320, 240) | (240, 320)) {
+                    3
+                } else {
+                    1
+                }
+            );
+            assert_eq!(
+                render_scale_for(5, size.0, size.1),
+                if matches!(size, (320, 240) | (240, 320)) {
+                    4
                 } else {
                     1
                 }

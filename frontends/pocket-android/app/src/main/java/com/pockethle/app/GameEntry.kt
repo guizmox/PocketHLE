@@ -82,6 +82,7 @@ data class GameSettings(
     val originalJson: String = "{}",
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        remove("optimizations")
         put("frame_rate_limit", frameRateLimit)
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
         put("anisotropic_filtering", anisotropicFiltering ?: JSONObject.NULL)
@@ -199,6 +200,7 @@ data class LauncherConfig(
     val keybindingsJson: String?,
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        remove("optimizations")
         put("schema_version", schemaVersion)
         put("default_cpu_backend", defaultCpuBackend)
         put("verbosity", verbosity)
@@ -257,7 +259,7 @@ data class LauncherConfig(
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
             anisotropicFiltering = obj.optInt("anisotropic_filtering", 0),
-            glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 } ?: 1,
+            glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
             fullscreen = obj.optBoolean("fullscreen", false),

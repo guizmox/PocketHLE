@@ -24,8 +24,6 @@ impl Drop for ImagePage {
 #[derive(Default)]
 pub(crate) struct ImagePages {
     pub pages: BTreeMap<u32, ImagePage>,
-    #[cfg(feature = "unicorn")]
-    pub batch_loading: bool,
 }
 impl ImagePages {
     pub fn reserve(
@@ -230,44 +228,16 @@ pub(crate) mod tests {
     #[cfg(feature = "unicorn")]
     #[test]
     fn batched_unicorn_lifecycle_permissions_and_out_of_ram() {
-        let options = crate::Optimizations {
-            batch_image_loading: true,
-            ..Default::default()
-        };
-        host_accesses(
-            &mut crate::unicorn::UnicornCpu::new_for_arch_with_optimizations(
-                crate::Arch::Arm,
-                options,
-            )
-            .unwrap(),
-        );
-        out_of_ram(
-            &mut crate::unicorn::UnicornCpu::new_for_arch_with_optimizations(
-                crate::Arch::Arm,
-                options,
-            )
-            .unwrap(),
-        );
-        api_permissions(
-            &mut crate::unicorn::UnicornCpu::new_for_arch_with_optimizations(
-                crate::Arch::Arm,
-                options,
-            )
-            .unwrap(),
-        );
+        host_accesses(&mut crate::unicorn::UnicornCpu::new_for_arch(crate::Arch::Arm).unwrap());
+        out_of_ram(&mut crate::unicorn::UnicornCpu::new_for_arch(crate::Arch::Arm).unwrap());
+        api_permissions(&mut crate::unicorn::UnicornCpu::new_for_arch(crate::Arch::Arm).unwrap());
     }
     #[cfg(feature = "unicorn")]
     #[test]
     fn batched_unicorn_mapping_keeps_partial_protection_and_unload_working() {
         use crate::Cpu;
         // Deferred image pages are currently supported by the ARM backend only.
-        let options = crate::Optimizations {
-            batch_image_loading: true,
-            ..Default::default()
-        };
-        let mut cpu =
-            crate::unicorn::UnicornCpu::new_for_arch_with_optimizations(crate::Arch::Arm, options)
-                .unwrap();
+        let mut cpu = crate::unicorn::UnicornCpu::new_for_arch(crate::Arch::Arm).unwrap();
         let budget = Budget::new(3);
         cpu.map_image_region(0x1000, 0x3000, Prot::ALL, vec![7; 0x3000], budget.clone())
             .unwrap();

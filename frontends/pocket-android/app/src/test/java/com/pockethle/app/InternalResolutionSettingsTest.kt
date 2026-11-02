@@ -6,7 +6,7 @@ import org.junit.Test
 
 class InternalResolutionSettingsTest {
     @Test fun allResolutionPoliciesRoundtripWithoutChangingOtherSettings() {
-        for (policy in listOf(1,2,3)) {
+        for (policy in listOf(1,2,3,4,5)) {
             val original=LauncherConfig.default().copy(glesInternalResolution=policy)
             val decoded=LauncherConfig.fromJson(original.toJson())
             assertEquals(policy,decoded.glesInternalResolution)

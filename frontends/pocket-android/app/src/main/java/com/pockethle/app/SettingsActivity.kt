@@ -86,28 +86,6 @@ class SettingsActivity : AppCompatActivity() {
                     }
                 })
             }
-            val emulator = findPreference<androidx.preference.PreferenceScreen>("emulator_options")!!
-            val optimizations=androidx.preference.PreferenceCategory(requireContext()).apply { title="Optimizations" }
-            optimizations.order = 10000
-            emulator.addPreference(optimizations)
-            fun optimization(name: String, label: String, help: String, enabledByDefault: Boolean = true) {
-                optimizations.addPreference(SwitchPreferenceCompat(requireContext()).apply {
-                    key="optimization_$name"; title=label; isPersistent=false
-                    isChecked=current.toJson().optJSONObject("optimizations")?.optBoolean(name,enabledByDefault) ?: enabledByDefault
-                    summary="$help ${if (enabledByDefault) "Enabled" else "Disabled"} by default; applies next launch."
-                    setOnPreferenceChangeListener { _, value ->
-                        val config=current.toJson()
-                        val settings=config.optJSONObject("optimizations") ?: JSONObject()
-                        settings.put(name,value as Boolean)
-                        current=current.copy(originalJson=config.put("optimizations",settings).toString())
-                        writeConfig();true
-                    }
-                })
-            }
-            optimization("fast_memory_access","Fast memory access","Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.")
-            optimization("extended_tlb_cache","Extended memory translation cache","Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.")
-            optimization("responsive_scheduling","Responsive thread scheduling","Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.")
-            optimization("extended_jump_cache","Extended jump cache","Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.")
             val touch = androidx.preference.PreferenceCategory(requireContext()).apply { title = "Touch controls" }
             ppc.addPreference(touch)
             touch.addPreference(ListPreference(requireContext()).apply {
@@ -371,9 +349,9 @@ class SettingsActivity : AppCompatActivity() {
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="gles_internal_resolution"; title="OpenGLES internal resolution (GPU only)"; isPersistent=false
-                entries=arrayOf("Native (1×)", "2x - only for 320x240 games", "2x - also for 640x480 games"); entryValues=arrayOf("1", "3", "2")
+                entries=arrayOf("Native (1×)", "2x - only for 320x240 games", "3x - only for 320x240 games", "4x - only for 320x240 games", "2x - also for 640x480 games"); entryValues=arrayOf("1", "3", "4", "5", "2")
                 value=current.glesInternalResolution.toString(); isEnabled=current.gpuRenderer
-                summary="Includes portrait equivalents (240x320 and 480x640). The second 2x mode also doubles larger native surfaces. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch."
+                summary="Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch."
                 setOnPreferenceChangeListener { _, v -> current=current.copy(glesInternalResolution=v.toString().toInt());writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
@@ -459,13 +437,6 @@ class SettingsActivity : AppCompatActivity() {
             val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_touch_layout", "") != current.pocketpcTouchLayout) {
                 android.widget.Toast.makeText(context, "Touch layout could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
-            }
-            val wantedOptimizations=current.toJson().optJSONObject("optimizations")
-            if (result?.optBoolean("ok", false) == true && wantedOptimizations != null) {
-                val actual=saved?.optJSONObject("optimizations")
-                if(listOf("fast_memory_access","extended_tlb_cache","responsive_scheduling","extended_jump_cache").any {
-                    actual == null || !actual.has(it) || actual.optBoolean(it,true) != wantedOptimizations.optBoolean(it,true)
-                }) android.widget.Toast.makeText(context,"Optimization settings were not saved. Rebuild the native libraries and APK together.",android.widget.Toast.LENGTH_LONG).show()
             }
             if (result?.optBoolean("ok", false) == true &&
                 (saved == null || !saved.has("android_gizmondo_maximize_screen") ||

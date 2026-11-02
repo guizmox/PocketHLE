@@ -1009,7 +1009,7 @@ pub struct LauncherConfig {
     /// GPU-only texture anisotropy. Zero disables it.
     #[serde(default)]
     pub anisotropic_filtering: u8,
-    /// Host-only GLES resolution: 1=native, 2=double all, 3=double QVGA only.
+    /// Host-only GLES resolution: 1=native, 2=double all, 3=double QVGA only, 4=triple QVGA only, 5=quadruple QVGA only.
     #[serde(default = "default_gles_internal_resolution")]
     pub gles_internal_resolution: u8,
     #[serde(default = "default_schema_version")]
@@ -1120,8 +1120,6 @@ pub struct LauncherConfig {
     /// Allow Android Gizmondo controls to overlay the full game viewport.
     #[serde(default)]
     pub android_gizmondo_maximize_screen: bool,
-    #[serde(default)]
-    pub optimizations: OptimizationSettings,
 }
 
 fn default_log_unimplemented_apis() -> bool {
@@ -1325,27 +1323,6 @@ impl Default for LauncherConfig {
             android_pocketpc_touch_layout: PocketPcTouchLayout::Classic,
             android_gizmondo_controls_size: PocketPcControlsSize::Normal,
             android_gizmondo_maximize_screen: false,
-            optimizations: OptimizationSettings::default(),
-        }
-    }
-}
-
-/// Host performance policies. These are not emulated ARM hardware features.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OptimizationSettings {
-    pub fast_memory_access: bool,
-    pub extended_tlb_cache: bool,
-    pub responsive_scheduling: bool,
-    pub extended_jump_cache: bool,
-}
-impl Default for OptimizationSettings {
-    fn default() -> Self {
-        Self {
-            fast_memory_access: true,
-            extended_tlb_cache: true,
-            responsive_scheduling: true,
-            extended_jump_cache: true,
         }
     }
 }
@@ -4142,7 +4119,6 @@ mod tests {
                     loaded.android_gizmondo_controls_size,
                     PocketPcControlsSize::Normal
                 );
-                assert_eq!(loaded.optimizations, OptimizationSettings::default());
             }
         }
     }
@@ -4166,7 +4142,6 @@ mod tests {
                 restored.android_gizmondo_controls_size,
                 PocketPcControlsSize::Normal
             );
-            assert_eq!(restored.optimizations, OptimizationSettings::default());
         }
     }
 
@@ -4193,56 +4168,31 @@ mod tests {
             restored.android_pocketpc_controls_size,
             PocketPcControlsSize::Normal
         );
-        assert_eq!(restored.optimizations, OptimizationSettings::default());
     }
 
     #[test]
-    fn optimization_defaults_and_independent_roundtrip() {
-        use super::*;
-        let defaults = OptimizationSettings::default();
-        let mut legacy = serde_json::to_value(LauncherConfig::default()).unwrap();
-        legacy.as_object_mut().unwrap().remove("optimizations");
-        assert_eq!(
-            serde_json::from_value::<LauncherConfig>(legacy.clone())
-                .unwrap()
-                .optimizations,
-            defaults
-        );
-        legacy["optimizations"] = serde_json::json!({"fast_memory_access": false});
-        let partial = serde_json::from_value::<LauncherConfig>(legacy).unwrap();
-        assert_eq!(
-            partial.optimizations,
-            OptimizationSettings {
-                fast_memory_access: false,
-                ..defaults
-            }
-        );
-        for previous in [false, true] {
-            let legacy = serde_json::json!({"batch_image_loading": previous});
-            let restored: OptimizationSettings = serde_json::from_value(legacy).unwrap();
-            assert_eq!(restored, defaults);
-            assert!(serde_json::to_value(restored)
-                .unwrap()
-                .get("batch_image_loading")
-                .is_none());
-        }
-        for bits in 0..16 {
-            let settings = OptimizationSettings {
-                fast_memory_access: bits & 1 != 0,
-                extended_tlb_cache: bits & 2 != 0,
-                responsive_scheduling: bits & 4 != 0,
-                extended_jump_cache: bits & 8 != 0,
-            };
-            let mut config = LauncherConfig::default();
-            config.optimizations = settings;
-            let encoded = serde_json::to_string(&config).unwrap();
+    fn qvga_resolution_policies_preserve_saved_values() {
+        for policy in [1, 2, 3, 4, 5] {
+            let mut value = serde_json::to_value(super::LauncherConfig::default()).unwrap();
+            value["gles_internal_resolution"] = serde_json::json!(policy);
+            let config: super::LauncherConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.gles_internal_resolution, policy);
             assert_eq!(
-                serde_json::from_str::<LauncherConfig>(&encoded)
-                    .unwrap()
-                    .optimizations,
-                settings
+                serde_json::to_value(config).unwrap()["gles_internal_resolution"],
+                policy
             );
         }
+    }
+
+    #[test]
+    fn legacy_optimization_switches_are_ignored_and_removed() {
+        let mut value = serde_json::to_value(super::LauncherConfig::default()).unwrap();
+        value["optimizations"] = serde_json::json!({"fast_memory_access":false,"extended_tlb_cache":false,"responsive_scheduling":false,"extended_jump_cache":false});
+        let config: super::LauncherConfig = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("optimizations")
+            .is_none());
     }
 
     #[test]

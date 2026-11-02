@@ -9,7 +9,6 @@
 #include <unicorn/unicorn.h>
 #include <unicorn/arm.h>
 
-#define OPTIONS UC_CTL_POCKETHLE_OPTIMIZATIONS
 static void ok(uc_err error) { assert(error == UC_ERR_OK); }
 static void reg(uc_engine *uc, int id, uint32_t value) {
     ok(uc_reg_write(uc, id, &value));
@@ -23,17 +22,10 @@ static void writes(uc_engine *uc, uc_mem_type type, uint64_t address,
     ++*(unsigned *)opaque;
 }
 int main(void) {
-    for (unsigned flags = 0; flags < 8; ++flags) {
-        uc_engine *uc; uint32_t reported = 0;
+    {
+        uc_engine *uc;
         ok(uc_open(UC_ARCH_ARM, UC_MODE_ARM, &uc));
-        ok(uc_ctl(uc, UC_CTL_READ(OPTIONS, 1), &reported));
-        assert(reported == 7);
-        assert(uc_ctl(uc, UC_CTL_WRITE(OPTIONS, 1), 8u) == UC_ERR_ARG);
-        ok(uc_ctl(uc, UC_CTL_WRITE(OPTIONS, 1), flags));
-        ok(uc_ctl(uc, UC_CTL_READ(OPTIONS, 1), &reported));
-        assert(reported == flags);
         ok(uc_mem_map(uc, 0x1000, 0x4000, UC_PROT_ALL));
-        assert(uc_ctl(uc, UC_CTL_WRITE(OPTIONS, 1), flags) == UC_ERR_ARG);
         /* Private executable RAM data writes still invoke the write hook. */
         uint32_t store[] = {0xe5810000, 0xe12fff1e}; /* str r0,[r1]; bx lr */
         ok(uc_mem_write(uc, 0x1000, store, sizeof(store)));
@@ -80,6 +72,6 @@ int main(void) {
         ok(uc_emu_start(uc, 0x6000, 0x6008, 0, 0)); assert(r0(uc) == 4);
         ok(uc_close(uc)); free(shared);
     }
-    puts("All 8 native optimization combinations passed.");
+    puts("Fixed native optimizations: hooks, permissions, invalidation and shared aliases passed.");
     return 0;
 }

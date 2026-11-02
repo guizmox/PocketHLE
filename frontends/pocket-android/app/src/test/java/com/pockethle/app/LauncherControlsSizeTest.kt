@@ -27,7 +27,7 @@ class LauncherControlsSizeTest {
         assertEquals("big", reloaded.gizmondoControlsSize)
         assertEquals("normal", reloaded.pocketpcControlsSize)
         assertEquals(42, reloaded.toJson().getInt("untouched"))
-        assertFalse(reloaded.toJson().getJSONObject("optimizations").getBoolean("fast_memory_access"))
+        assertFalse(reloaded.toJson().has("optimizations"))
     }
     @Test fun unknownSizeFallsBackToNormalInTheAndroidModel() {
         val config = LauncherConfig.fromJson(JSONObject("{\"android_gizmondo_controls_size\":\"future\"}"))

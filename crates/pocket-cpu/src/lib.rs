@@ -16,25 +16,6 @@
 
 use thiserror::Error;
 
-/// Host emulation policies chosen before any guest CPU initialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Optimizations {
-    pub fast_memory_access: bool,
-    pub extended_tlb_cache: bool,
-    pub extended_jump_cache: bool,
-    pub batch_image_loading: bool,
-}
-impl Default for Optimizations {
-    fn default() -> Self {
-        Self {
-            fast_memory_access: true,
-            extended_tlb_cache: true,
-            extended_jump_cache: true,
-            batch_image_loading: true,
-        }
-    }
-}
-
 pub mod arithmetic64;
 #[cfg(any(feature = "unicorn", test))]
 mod image_batch;

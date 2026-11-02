@@ -2340,16 +2340,18 @@ impl PocketLauncher {
                 ui.label("OpenGLES internal resolution (GPU only)");
                 ui.add_enabled_ui(draft.gpu_renderer, |ui| {
                     crate::controller_ui::ComboBox::from_id_source("gles_internal_resolution")
-                        .selected_text(match draft.gles_internal_resolution { 3 => "2x - only for 320x240 games", 2 => "2x - also for 640x480 games", _ => "Native (1×)" })
+                        .selected_text(match draft.gles_internal_resolution { 5 => "4x - only for 320x240 games", 4 => "3x - only for 320x240 games", 3 => "2x - only for 320x240 games", 2 => "2x - also for 640x480 games", _ => "Native (1×)" })
                         .show_ui(ui, |ui| {
                             crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 1, "Native (1×)");
                             crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 3, "2x - only for 320x240 games");
+                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 4, "3x - only for 320x240 games");
+                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 5, "4x - only for 320x240 games");
                             crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 2, "2x - also for 640x480 games");
                         });
-                }).response.on_hover_text("Includes portrait equivalents (240x320 and 480x640). The second 2x mode also doubles larger native surfaces. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch.");
+                }).response.on_hover_text("Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch.");
                 ui.end_row();
                 ui.label("");
-                ui.small("2x increases the rendered resolution; display zoom then scales that image. Applies next launch.");
+                ui.small("2x/3x/4x increases the rendered resolution; display zoom then scales that image. Applies next launch.");
                 ui.end_row();
 
                 ui.label("Anisotropic filtering (GPU only)");
@@ -2444,21 +2446,7 @@ impl PocketLauncher {
         crate::controller_ui::text_edit(ui, platform, "");
         ui.label("Device names are encoded automatically. Changes apply at the next launch.");
         }
-        if !gizmondo && !pocketpc {
-        ui.add_space(10.0);
-        ui.separator();
-        ui.heading("Optimizations");
-        ui.small("Changes apply on the next game launch. These settings do not change the emulated CPU speed or FPS limit.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.fast_memory_access, "Fast memory access");
-        ui.small("Reduce overhead when writing to private RAM. Code invalidation, memory hooks and permissions remain active.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_tlb_cache, "Extended memory translation cache");
-        ui.small("Remember more guest-to-host address translations to avoid repeated lookups. Uses additional host memory.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.responsive_scheduling, "Responsive thread scheduling");
-        ui.small("Resume ready guest workers sooner while the main thread waits for messages. Disable for compatibility comparisons.");
-        crate::controller_ui::checkbox(ui, &mut draft.optimizations.extended_jump_cache, "Extended jump cache");
-        ui.small("Remember more translated-code destinations to reduce jump lookups. Disabling restores the smaller active cache; allocated storage stays unchanged.");
-        ui.separator();
-        }
+
         }
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -3408,16 +3396,8 @@ impl PocketLauncher {
             (available.width() * dpi).floor() as u32,
             (available.height() * dpi).floor() as u32,
         ];
-        let [left, top, width, height] = if cfg!(feature = "steam-deck") {
-            crate::fullscreen_layout::aspect_fit(physical, native)
-        } else {
-            let fit = if self.running_is_gizmondo {
-                crate::fullscreen_layout::integer_fit(physical, native)
-            } else {
-                crate::fullscreen_layout::integer_fit_capped(physical, native, 4)
-            };
-            [fit.left, fit.top, fit.width, fit.height]
-        };
+        let fit = crate::fullscreen_layout::qvga_fullscreen_fit(physical, native);
+        let [left, top, width, height] = [fit.left, fit.top, fit.width, fit.height];
         let rect = Rect::from_min_size(
             available.min + Vec2::new(left as f32, top as f32) / dpi,
             Vec2::new(width as f32, height as f32) / dpi,
@@ -3815,20 +3795,6 @@ impl PocketLauncher {
                 button,
                 true,
             );
-        }
-        let orange = Color32::from_rgb(207, 139, 88);
-        let host = |name: &str| {
-            egui::Button::new(egui::RichText::new(name).color(orange))
-                .fill(Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(1., orange))
-                .rounding(7.)
-        };
-        if ui.put(rect(layout.host[0]), host("EXIT")).clicked() {
-            self.return_to_library(ui.ctx());
-            return;
-        }
-        if ui.put(rect(layout.host[1]), host("FULL")).clicked() {
-            self.set_fullscreen(ui.ctx(), !fullscreen);
         }
     }
 

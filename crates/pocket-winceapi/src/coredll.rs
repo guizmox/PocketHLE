@@ -14545,28 +14545,7 @@ fn get_message_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     ))
 }
 
-pub(crate) fn configure_message_pump(dispatcher: &mut WinCeDispatcher, responsive: bool) {
-    dispatcher.register_handler(
-        "coredll.dll",
-        "GetMessageW",
-        if responsive {
-            get_message_w
-        } else {
-            get_message_w_legacy
-        },
-    );
-}
-
 fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    get_message_w_policy::<true>(ctx)
-}
-fn get_message_w_legacy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    get_message_w_policy::<false>(ctx)
-}
-#[inline(always)]
-fn get_message_w_policy<const RESPONSIVE: bool>(
-    ctx: &mut CallCtx<'_>,
-) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.sync_power_notifications();
     crate::shell::service(ctx);
     // A real driver retires wave buffers on its own thread; the
@@ -14674,8 +14653,7 @@ fn get_message_w_policy<const RESPONSIVE: bool>(
     if let Some(outcome) = resume_worker_reenter(ctx)? {
         return Ok(outcome);
     }
-    if RESPONSIVE
-        && ctx.kernel.current_thread == 0
+    if ctx.kernel.current_thread == 0
         && ctx
             .kernel
             .threads

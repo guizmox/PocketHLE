@@ -551,11 +551,11 @@ impl Context {
         }
     }
 
-    /// Host-only GPU resolution policy: 1=native, 2=all 2x, 3=QVGA-only 2x.
+    /// Host-only GPU resolution policy: 1=native, 2=all 2x, 3=QVGA-only 2x, 4=QVGA-only 3x, 5=QVGA-only 4x.
     /// Guest surfaces, queries and reads stay logical.
     pub fn set_internal_resolution(&mut self, scale: u8) {
         self.internal_resolution = match scale {
-            2 | 3 => scale,
+            2 | 3 | 4 | 5 => scale,
             _ => 1,
         };
         if let Some(gpu) = self.gpu.as_mut() {
@@ -3479,6 +3479,31 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native OpenGL"]
+    fn higher_qvga_resolution_keeps_guest_coordinates_and_leaves_vga_native() {
+        for (policy, scale) in [(4, 3), (5, 4)] {
+            for (w, h) in [(320, 240), (240, 320), (640, 480), (480, 640)] {
+                let expected = if w * h == 320 * 240 {
+                    Some((w * scale, h * scale))
+                } else {
+                    None
+                };
+                let mut c = Context::new(w, h);
+                c.set_internal_resolution(policy);
+                c.enable_gpu().unwrap();
+                c.clear_color = [1., 0., 0., 1.];
+                c.clear(GL_COLOR_BUFFER_BIT);
+                let mut guest = vec![0; (w * h * 2) as usize];
+                c.present_rgb565(&mut guest);
+                assert_eq!((c.target.width, c.target.height), (w, h));
+                assert_eq!(c.state.viewport, (0, 0, w as i32, h as i32));
+                assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), expected);
+                assert_eq!(&guest[..2], &0xf800u16.to_le_bytes());
+            }
+        }
+    }
+
+    #[test]
     fn internal_resolution_never_changes_software_geometry_or_creates_a_gpu() {
         let mut c = Context::new(240, 320);
         c.set_internal_resolution(2);
@@ -3488,6 +3513,9 @@ mod tests {
         assert_eq!(c.scaled_rgb565_into(&mut Vec::new()), None);
         c.set_internal_resolution(3);
         assert_eq!(c.internal_resolution, 3);
+        assert!(!c.gpu_active());
+        c.set_internal_resolution(4);
+        assert_eq!(c.internal_resolution, 4);
         assert!(!c.gpu_active());
         c.set_internal_resolution(99);
         assert_eq!(c.internal_resolution, 1);

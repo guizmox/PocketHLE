@@ -35,7 +35,6 @@ pub struct Layout {
     pub directions: [BoxRect; 4], // N,W,E,S
     pub dpad: BoxRect,
     pub actions: [BoxRect; 4], // Stop,Rewind,Forward,Play
-    pub host: [BoxRect; 2],    // Exit,Full
 }
 pub fn window_body(native: [u32; 2], factor: u32, dpi: f32) -> [f32; 2] {
     let dpi = dpi.max(0.25);
@@ -55,7 +54,7 @@ pub fn calculate(
     native: [u32; 2],
     dpi: f32,
     maximum: Option<u32>,
-    deck: bool,
+    _deck: bool,
 ) -> Layout {
     let w = size[0].max(1.0);
     let h = size[1].max(1.0);
@@ -77,12 +76,11 @@ pub fn calculate(
     ];
     let fit =
         crate::fullscreen_layout::integer_fit_capped(physical, native, maximum.unwrap_or(u32::MAX));
-    let fitted =
-        if (deck && maximum.is_none()) || fit.width > physical[0] || fit.height > physical[1] {
-            crate::fullscreen_layout::aspect_fit(physical, native)
-        } else {
-            [fit.left, fit.top, fit.width, fit.height]
-        };
+    let fitted = if fit.width > physical[0] || fit.height > physical[1] {
+        crate::fullscreen_layout::aspect_fit(physical, native)
+    } else {
+        [fit.left, fit.top, fit.width, fit.height]
+    };
     let screen = BoxRect::new(
         (room.x * dpi).round() / dpi + fitted[0] as f32 / dpi,
         (room.y * dpi).round() / dpi + fitted[1] as f32 / dpi,
@@ -129,10 +127,6 @@ pub fn calculate(
         BoxRect::new(rx + step - d / 2.0, cy - d / 2.0, d, d),
         BoxRect::new(rx - d / 2.0, cy + step - d / 2.0, d, d),
     ];
-    let host = [
-        BoxRect::new(w - 156.0 * unit, 6.0 * unit, 68.0 * unit, 26.0 * unit),
-        BoxRect::new(w - 80.0 * unit, 6.0 * unit, 68.0 * unit, 26.0 * unit),
-    ];
     Layout {
         screen,
         functions,
@@ -140,7 +134,6 @@ pub fn calculate(
         directions,
         dpad,
         actions,
-        host,
     }
 }
 #[cfg(test)]
@@ -172,8 +165,7 @@ mod tests {
                             .iter()
                             .chain(g.shoulders.iter())
                             .chain(g.directions.iter())
-                            .chain(g.actions.iter())
-                            .chain(g.host.iter());
+                            .chain(g.actions.iter());
                         for r in controls {
                             assert!(
                                 !overlaps(*r, g.screen),
