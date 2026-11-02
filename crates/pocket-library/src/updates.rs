@@ -1,8 +1,9 @@
 //! Published stable releases only; no installation or access to the game library.
 use serde::Deserialize;
 
-pub const API_URL: &str = "https://api.github.com/repos/guizmox/PocketHLE/releases/latest";
-const RELEASES: &str = "https://github.com/guizmox/PocketHLE/releases/";
+pub const API_URL: &str =
+    "https://api.github.com/repos/Katamaran21/PocketHLE-GTShell/releases/latest";
+const RELEASES: &str = "https://github.com/Katamaran21/PocketHLE-GTShell/releases/";
 
 #[derive(Clone, Copy, Debug)]
 pub enum Platform {

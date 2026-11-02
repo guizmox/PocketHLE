@@ -1,5 +1,93 @@
 # PocketHLE — architecture reference for coding agents
 
+## Separate SD Card configuration and GTShell profiles (2026-11-02)
+
+GameSettings.storage_card_dir optionally selects a host folder for desktop and
+Android runners. Kotlin explicitly preserves it when game settings are edited.
+It supplies the Gizmondo SD Card and Storage Card aliases. Absolute paths are used directly;
+relative paths are resolved against the library root. Missing folders fail the
+launch with a concrete error. None retains the existing imported-card layout.
+GameEntry.gizmondo_storage_card_root chooses the mount; gizmondo_card_root stays
+the executable's original installation layout so GTShell still reports
+\\Flash Disk2\\GTShell.exe while another folder supplies the SD card.
+
+Explicit cards own their actual directory tree; do not hide their Game directory
+with the imported application's compatibility aliases. The selected root is
+passed through the existing child-process launch context. Both aliases use the
+normal read-only card mount, marker/serial and VFS path-isolation contracts.
+The external GTShell SD profile attaches the supplied Sticky-Balls_Gizmondo_EN
+root (autorun.exe and gzga200014), while retaining both Flash Disk volumes.
+
+Foreground SDCreateProcess children are restricted to the canonical selected
+card root, not the parent game's installation directory. GTShell in Flash Disk2
+must be able to launch autorun.exe on an external SD Card. Use the common
+child_executable_reference after the card boundary check: internal children keep
+their relative install/save namespace, external children keep an absolute host
+reference and the requested guest module path. Refusals log the guest path,
+host executable, selected card root and actual reason; do not bypass canonical
+boundaries to make a separate card launch work.
+
+tools/make-gtshell-profile.py creates the existing version-1 PocketHLE backup
+format from physical user-provided Flash Disk/Flash Disk2/card folders, keeping
+the correct executable bytes, empty directories and a relative cards/sd-card
+mount. The archive is restored through normal PC/Android backup menus; do not
+put user firmware, Microsoft DLLs or games in the source tree or APK.
+Zero max_slices is explicitly unlimited and must survive legacy migration,
+including a simultaneous Stub-to-Unicorn upgrade. Nonzero legacy limits still
+migrate. The optional pockethleGtshell Gradle property selects a separately
+installed com.pockethle.app.gtshell app, retaining the original JNI namespace.
+POCKETHLE_GTSHELL_BUILD=1 selects that variant in the APK build script.
+
+Library::open persists missing library.json/config.json before returning a new
+empty library. Both backup Merge modes require the existing on-disk catalogue;
+first restore on a fresh Android/PC install must not need a prior game import.
+Existing metadata is not rewritten merely to seed a missing file. Release
+checks and project metadata refer to Katamaran21/PocketHLE-GTShell; upstream
+attribution remains in README and the Android banner. Native build fingerprints
+normalize CRLF and sort relative POSIX strings identically on Windows/Linux.
+
+## GTShell local XML DOM (2026-11-02)
+
+OLE32 recognizes the MSXML DOMDocument classes used by the supplied GTShell
+skin/language loader. The process-owned DOM lives in kernel::msxml; the WinCE
+glue provides synthetic IXMLDOMDocument/Node/NodeList/NamedNodeMap vtables with
+the MSXML3 slot order. NamedNodeMap nextNode/reset are at 0x38/0x3c. load takes
+a 16-byte VARIANT by value: BSTR is arg3 and the VARIANT_BOOL output is arg5,
+writing two bytes. BSTR lengths are UTF-16 units, preserving raw surrogates.
+AddRef/Release retain returned nodes across document release/reload and reclaim
+the last tree and all vtables. Do not replace these methods with constant thunks.
+
+Loads are synchronous local VFS reads honoring mounts, overlays and sharing.
+UTF-8 and BOM UTF-16 are supported within 8 MiB, 65536 nodes and depth 256;
+malformed XML/unsupported encodings fail, and DTDs/external entities are rejected.
+Only read-only DOM methods are currently supported; other slots and async TRUE
+return E_NOTIMPL, while unrelated COM classes retain their existing OLE path.
+Regression tests cover ARM VARIANT/BOOL sizes, Unicode skin content, BSTR
+ownership, retained nodes, 100 full release cycles and share-denied reads.
+
+The corrected user executable has SHA256
+8E8766071B38AAA0D304FB6105E137F657249E3626B0C57275CF014CFDF01367.
+CLI validation now renders the actual language/theme selection screen, including
+its globe, theme preview and English label; this does not establish completion
+of first-run setup or all main-menu actions. Both supplied Flash Disk folders
+are required. The external GUI test profile uses platform=gizmondo,
+install_dir/save_prefix=\\Flash Disk2\\ and executable=extracted/GTShell.exe;
+its extracted junction points to device/flash disk2 and library/flash points
+to device/flash disk. This preserves the module path through the existing GUI
+card-path logic, with Flash Disk2 writes in the normal per-game save overlay.
+The initial GTShell GUI build enables unicorn,audio-cpal without video-static;
+it is not a validation of media playback.
+
+## GTShell PMS DLL entry mode (2026-11-02)
+
+The user-supplied GTShell PMS compatibility DLLs have a THUMB PE machine tag
+but an ARM DllMain consisting of `mov r0, #constant; bx lr`. The common EXE/DLL
+entry classifier recognizes that complete leaf sequence as ARM, retaining the
+existing fallback for genuine Thumb code. Do not change the PE files or force
+an execution mode for a whole DLL family. Native MFCCE400 uses the existing
+dependency/attach/IAT path. Both `\\Flash Disk\\` and `\\Flash Disk2\\` must be
+mounted for the supplied shell; the latter owns its executable and skin data.
+
 ## Modal progress dialogs and guest scheduling (2026-10-21)
 
 An idle DialogBoxIndirectParamW loop is a guest scheduling point, just like

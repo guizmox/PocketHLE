@@ -426,6 +426,17 @@ impl GameEntry {
         }
     }
 
+    /// Desktop and Android may attach a separate SD card while the executable remains
+    /// installed in Flash Disk2 (GTShell). Keep this distinct from the original
+    /// card layout used to derive the executable's guest module path.
+    pub fn gizmondo_storage_card_root(&self, library_root: &Path) -> PathBuf {
+        match self.settings.storage_card_dir.as_ref() {
+            Some(directory) if directory.is_absolute() => directory.clone(),
+            Some(directory) => library_root.join(directory),
+            None => self.gizmondo_card_root(library_root),
+        }
+    }
+
     /// Preserve the executable's actual directory on a Gizmondo card.
     /// A flattened import can still use its declared install alias.
     pub fn gizmondo_guest_exe_path(&self, library_root: &Path) -> Option<String> {
@@ -567,6 +578,10 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
+    /// Optional Gizmondo SD Card/Storage Card host directory for both frontends.
+    /// Relative paths resolve against the library root; None keeps the imported card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_card_dir: Option<PathBuf>,
     /// No additional ceiling by default; display synchronization remains unchanged.
     #[serde(default)]
     pub frame_rate_limit: FrameRateLimit,
@@ -743,6 +758,7 @@ impl GameSettings {
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
+            storage_card_dir: None,
             frame_rate_limit: FrameRateLimit::default(),
             pocketpc_touch_steering: false,
             pocketpc_controls: None,
@@ -1636,6 +1652,15 @@ impl Library {
 
         let library = read_or_default::<LibraryFile>(&root.join("library.json"))?;
         let mut config = read_or_default::<LauncherConfig>(&root.join(CONFIG_FILE_NAME))?;
+        // A fresh Android/PC library must support Merge backup restore before
+        // its first game import. Restore reads the on-disk catalogue, while
+        // read_or_default alone only supplies an in-memory empty library.
+        if !root.join("library.json").exists() {
+            write_json(&root.join("library.json"), &library)?;
+        }
+        if !root.join(CONFIG_FILE_NAME).exists() {
+            write_json(&root.join(CONFIG_FILE_NAME), &config)?;
+        }
         if config.gizmondo_identity_revision == 0 {
             config.gizmondo_platform_id = default_gizmondo_platform_id();
             config.gizmondo_identity_revision = identity_revision();
@@ -1664,9 +1689,10 @@ impl Library {
     ///   pre-#8 game crashes with "guest jumped to unmapped address
     ///   0x00000000" out of the box, which is exactly the failure
     ///   mode users hit before this migration existed.
-    /// * `max_slices <= 1_048_576` is bumped to the current default
+    /// * Nonzero `max_slices <= 1_048_576` is bumped to the current default
     ///   (50M). The legacy 1024 default was effectively a smoke
-    ///   test and timed out long before the title screen.
+    ///   test and timed out long before the title screen. Zero explicitly
+    ///   means unlimited and must survive reopening a GTShell profile.
     /// * The global `default_cpu_backend` is also flipped from
     ///   `Stub` to `Unicorn` so freshly imported games pick a
     ///   backend that actually runs.
@@ -1705,7 +1731,7 @@ impl Library {
                 game.settings.cpu_backend = CpuBackendPref::Unicorn;
                 migrated = true;
             }
-            if game.settings.max_slices <= 1_048_576 {
+            if game.settings.max_slices != 0 && game.settings.max_slices <= 1_048_576 {
                 game.settings.max_slices = default_max_slices();
                 migrated = true;
             }
@@ -4558,6 +4584,48 @@ mod tests {
     }
 
     #[test]
+    fn external_sd_card_keeps_the_shell_install_path_and_round_trips_settings() {
+        let library = tempfile::tempdir().unwrap();
+        let card = tempfile::tempdir().unwrap();
+        fs::write(card.path().join("autorun.exe"), b"card fixture").unwrap();
+        let mut entry = entry_with_install_dir(Some("\\Flash Disk2\\"));
+        entry.platform = Some(GamePlatform::Gizmondo);
+        entry.executable = "extracted/GTShell.exe".into();
+        let original_card = entry.gizmondo_card_root(library.path());
+        entry.settings.storage_card_dir = Some(card.path().into());
+        let saved = serde_json::to_string(&entry).unwrap();
+        let restored: GameEntry = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            restored.gizmondo_storage_card_root(library.path()),
+            card.path()
+        );
+        assert_eq!(
+            fs::read(
+                restored
+                    .gizmondo_storage_card_root(library.path())
+                    .join("autorun.exe")
+            )
+            .unwrap(),
+            b"card fixture"
+        );
+        assert_eq!(
+            restored.gizmondo_guest_exe_path(library.path()).as_deref(),
+            Some("\\Flash Disk2\\GTShell.exe")
+        );
+        assert_eq!(restored.gizmondo_card_root(library.path()), original_card);
+        entry.settings.storage_card_dir = Some("SD Card".into());
+        assert_eq!(
+            entry.gizmondo_storage_card_root(library.path()),
+            library.path().join("SD Card")
+        );
+        entry.settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            entry.gizmondo_storage_card_root(library.path()),
+            original_card
+        );
+    }
+
+    #[test]
     fn guest_paths_follow_the_cabinet_install_dir() {
         let entry = entry_with_install_dir(Some("\\Program Files\\EA\\Spore v1.0.4\\"));
         assert_eq!(
@@ -4886,6 +4954,38 @@ mod tests {
         let game2 = lib2.get("legacy").unwrap();
         assert_eq!(game2.settings.cpu_backend, CpuBackendPref::Unicorn);
         assert_eq!(game2.settings.max_slices, default_max_slices());
+    }
+
+    #[test]
+    fn unlimited_shell_profile_survives_backend_migration_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = serde_json::json!({
+            "platform": "gizmondo", "id": "gtshell", "display_name": "GTShell",
+            "executable": "extracted/GTShell.exe", "source_cab": "manual:GTShell.exe",
+            "settings": {"cpu_backend": "stub", "max_slices": 0, "storage_card_dir": "cards/sd-card"}
+        });
+        fs::create_dir_all(root.path().join("games/gtshell")).unwrap();
+        fs::write(
+            root.path().join("games/gtshell/game.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("library.json"),
+            serde_json::to_vec(&serde_json::json!({"schema_version": 1, "games": [manifest]}))
+                .unwrap(),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let library = Library::open(root.path()).unwrap();
+            let game = library.get("gtshell").unwrap();
+            assert_eq!(game.settings.cpu_backend, CpuBackendPref::Unicorn);
+            assert_eq!(game.settings.max_slices, 0);
+            assert_eq!(
+                game.gizmondo_storage_card_root(root.path()),
+                root.path().join("cards/sd-card")
+            );
+        }
     }
 
     /// Write a PE that is just enough header for [`sniff_pe`]: an `MZ`

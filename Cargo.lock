@@ -2976,6 +2976,7 @@ dependencies = [
  "png 0.17.16",
  "pocket-cpu",
  "pocket-pe",
+ "quick-xml",
  "rmp3",
  "serde",
  "serde_json",

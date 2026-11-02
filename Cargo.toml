@@ -18,8 +18,8 @@ members = [
 version = "0.4.1"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/j92580498-max/PocketHLE"
-homepage = "https://github.com/j92580498-max/PocketHLE"
+repository = "https://github.com/Katamaran21/PocketHLE-GTShell"
+homepage = "https://github.com/Katamaran21/PocketHLE-GTShell"
 authors = ["PocketHLE Contributors"]
 rust-version = "1.75"
 

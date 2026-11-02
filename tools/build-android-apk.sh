@@ -43,7 +43,13 @@ if [[ ! -x "$android_gradle_dir/bin/gradle" ]]; then
     unzip -q -o "$android_download" -d "$android_root/target/tools"
 fi
 python3 "$android_root/tools/check-android-native.py"
-"$android_gradle_dir/bin/gradle" -p "$android_root/frontends/pocket-android" --no-daemon testDebugUnitTest "$android_gradle_task"
+android_variant_args=()
+android_variant_label=
+if [[ "${POCKETHLE_GTSHELL_BUILD:-0}" == 1 ]]; then
+    android_variant_args=(-PpockethleGtshell=true)
+    android_variant_label=-gtshell
+fi
+"$android_gradle_dir/bin/gradle" -p "$android_root/frontends/pocket-android" --no-daemon "${android_variant_args[@]}" testDebugUnitTest "$android_gradle_task"
 android_apk_dir="$android_root/frontends/pocket-android/app/build/outputs/apk/$android_build_type"
 android_version="$(python3 - "$android_root/Cargo.toml" <<'PYVERSION'
 import pathlib, re, sys
@@ -53,16 +59,16 @@ PYVERSION
 mkdir -p "$android_root/dist/android"
 if [[ "$android_build_type" == debug ]]; then
     android_apk="$android_apk_dir/app-debug.apk"
-    android_output="$android_root/dist/android/PocketHLE-$android_version-android-debug.apk"
+    android_output="$android_root/dist/android/PocketHLE-$android_version-android${android_variant_label}-debug.apk"
     "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$android_apk"
     echo 'Local debug APK: signed with the persistent Android SDK debug key.'
 elif [[ -n "${POCKETHLE_KEYSTORE:-}" ]]; then
     android_apk="$android_apk_dir/app-release.apk"
-    android_output="$android_root/dist/android/PocketHLE-$android_version-android-universal.apk"
+    android_output="$android_root/dist/android/PocketHLE-$android_version-android${android_variant_label}-universal.apk"
     "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$android_apk"
 else
     android_apk="$android_apk_dir/app-release-unsigned.apk"
-    android_output="$android_root/dist/android/PocketHLE-$android_version-android-universal-unsigned.apk"
+    android_output="$android_root/dist/android/PocketHLE-$android_version-android${android_variant_label}-universal-unsigned.apk"
     echo "No signing secrets: producing an explicitly unsigned APK. No temporary debug key is used."
 fi
 LD_LIBRARY_PATH="$ANDROID_HOME/build-tools/35.0.0/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \

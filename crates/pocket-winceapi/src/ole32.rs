@@ -131,6 +131,9 @@ fn co_create_instance(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if clsid_bytes == crate::directshow::CLASS {
         return crate::directshow::create(ctx, &iid_bytes, out);
     }
+    if let Some(outcome) = crate::msxml::try_co_create(ctx, &clsid_bytes, &iid_bytes, out)? {
+        return Ok(outcome);
+    }
     if clsid_bytes != CLSID_WMP || iid_bytes != IID_WMP_PLAYER {
         ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
         return Ok(DispatchOutcome::ReturnedR0(0x8000_4002));

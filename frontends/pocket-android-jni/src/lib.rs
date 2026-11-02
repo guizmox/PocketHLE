@@ -96,7 +96,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_banner<'local>(
     _class: JClass<'local>,
 ) -> jstring {
     init_logger();
-    let banner = format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE", env!("CARGO_PKG_VERSION"));
+    let banner = format!("PocketHLE v{} (Android)\nGTShell fork: https://github.com/Katamaran21/PocketHLE-GTShell\nBased on: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE", env!("CARGO_PKG_VERSION"));
     new_jstring(&env, banner)
 }
 

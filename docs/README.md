@@ -2,6 +2,8 @@
 
 - [Project overview and desktop build](../README.md)
 - [Android build and packaging](ANDROID-BUILD.md)
+- [GTShell on Windows and Android](GTSHELL.md)
+- [Запуск GTShell на Android и ПК](GTSHELL-RU.md)
 - [GPU rendering, optimizations and lifetime contracts](GPU.md)
 - [Gizmondo options, hardware and diagnostics](GIZMONDO.md)
 - [Gizmondo compatibility](GIZMONDO-COMPATIBILITY.md)

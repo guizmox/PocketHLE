@@ -3,7 +3,22 @@ Copyright (C) 2026 PocketHLE Emulator Project
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# PocketHLE
+# PocketHLE — GTShell fork
+
+GTShell support for Windows and Android: theme/language XML, the supplied native
+MFC/PMS libraries, both Flash Disk volumes and a separately attached SD Card.
+The Android GTShell preview installs as its own application.
+
+[GTShell setup guide](docs/GTSHELL.md) · [Инструкция на русском](docs/GTSHELL-RU.md)
+
+Download the Android APK and Windows x64 package from
+[this fork's releases](https://github.com/Katamaran21/PocketHLE-GTShell/releases).
+GTShell, system DLLs and SD Card games are supplied separately by the user.
+
+Create a portable profile from your files with `tools/make-gtshell-profile.py`,
+then restore it through the launcher. Source changes are based on
+[guizmox/PocketHLE](https://github.com/guizmox/PocketHLE), a fork of
+[j92580498-max/PocketHLE](https://github.com/j92580498-max/PocketHLE).
 
 <p align="center">
   <img src="./frontends/pocket-desktop/assets/pockethle_logo.png" width="25%" alt="PocketHLE logo" />

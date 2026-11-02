@@ -7,8 +7,8 @@ import java.net.URL
 
 /** One bounded, background request per process; never retains an Activity. */
 object ReleaseUpdates {
-    private const val RELEASES = "https://github.com/guizmox/PocketHLE/releases/"
-    private const val API = "https://api.github.com/repos/guizmox/PocketHLE/releases/latest"
+    private const val RELEASES = "https://github.com/Katamaran21/PocketHLE-GTShell/releases/"
+    private const val API = "https://api.github.com/repos/Katamaran21/PocketHLE-GTShell/releases/latest"
     private var checked = false
     private var cached: Update? = null
     @Volatile var announced = false

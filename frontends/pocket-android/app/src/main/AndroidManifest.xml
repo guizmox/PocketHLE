@@ -26,7 +26,7 @@
 
     <application android:usesCleartextTraffic="true"
         android:allowBackup="false"
-        android:label="@string/app_name"
+        android:label="${pockethleAppLabel}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
@@ -37,7 +37,7 @@
             android:name=".MainActivity"
             android:screenOrientation="portrait"
             android:exported="true"
-            android:label="@string/app_name">
+            android:label="${pockethleAppLabel}">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -48,7 +48,7 @@
             android:exported="false"
             android:configChanges="orientation|keyboardHidden|screenSize"
             android:screenOrientation="sensorLandscape"
-            android:label="@string/app_name" />
+            android:label="${pockethleAppLabel}" />
         <activity
             android:name=".SettingsActivity"
             android:screenOrientation="portrait"

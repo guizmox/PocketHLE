@@ -72,7 +72,16 @@ impl Runner {
         let mut hook = RunHook::new(live_tx, input_rx);
         hook.gps_notice_tx = gps_notice_tx;
         hook.dependency_notice_tx = dependency_notice_tx;
-        let card_root = game.gizmondo_card_root(&library_root);
+        let card_root = game.gizmondo_storage_card_root(&library_root);
+        if is_gizmondo_game(&game, &library_root)
+            && game.settings.storage_card_dir.is_some()
+            && !card_root.is_dir()
+        {
+            return RunOutcome {
+                summary: format!("SD Card folder does not exist: {}", card_root.display()),
+                framebuffer: None,
+            };
+        }
         self.run_process(
             &library_root,
             &game,
@@ -485,11 +494,14 @@ impl Runner {
 
             emu.mount_read_only_dir("\\SD Card\\", card_root);
             emu.mount_read_only_dir("\\Storage Card\\", card_root);
-            emu.mount_read_only_dir("\\SD Card\\Game\\", &extracted);
-            emu.mount_read_only_dir("\\Storage Card\\Game\\", &extracted);
+            if game.settings.storage_card_dir.is_none() {
+                emu.mount_read_only_dir("\\SD Card\\Game\\", &extracted);
+                emu.mount_read_only_dir("\\Storage Card\\Game\\", &extracted);
+            }
+            log::info!("Gizmondo SD Card directory: {}", card_root.display());
             summary_lines.push(format!(
                 "Mounted Gizmondo SD-card layout at {}",
-                extracted.display()
+                card_root.display()
             ));
         }
         // A game that keeps its assets in one archive opens it by
@@ -751,6 +763,35 @@ struct LaunchContext {
     card_root: PathBuf,
 }
 
+impl LaunchContext {
+    fn child_executable_reference(
+        &self,
+        request: &pocket_core::kernel::ProcessLaunch,
+    ) -> Result<PathBuf, String> {
+        let child = request
+            .executable
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve executable: {error}"))?;
+        // CreateProcess already resolved its path through the guest VFS.
+        // SDCreateProcess still restricts foreground launches to this card.
+        if !request.concurrent {
+            let root = self
+                .card_root
+                .canonicalize()
+                .map_err(|error| format!("cannot resolve SD Card root: {error}"))?;
+            if !child.starts_with(&root) {
+                return Err("executable is outside the mounted SD Card".into());
+            }
+        }
+        // GTShell lives in Flash Disk2 while its selected SD Card can be
+        // outside the library. Keep internal children relative for their
+        // install/save mounts, and external card executables absolute.
+        Ok(self
+            .game
+            .child_executable_reference(&self.library_root, &child))
+    }
+}
+
 struct ProcessStartup {
     ack: Option<Sender<Result<(), u32>>>,
     table: pocket_core::kernel::handles::HandleTable,
@@ -809,32 +850,24 @@ impl RunHook {
             return;
         };
         let context = self.launch_context.clone();
-        let relative = context.as_ref().and_then(|context| {
-            let child = request.executable.canonicalize().ok()?;
-            // CreateProcess uses a path already resolved through the guest VFS.
-            // SDCreateProcess keeps its validated foreground card restriction.
-            if request.concurrent {
-                return Some(
-                    context
-                        .game
-                        .child_executable_reference(&context.library_root, &child),
-                );
-            }
-            let root = context.card_root.canonicalize().ok()?;
-            if !child.starts_with(root) {
-                return None;
-            }
-            let game_dir = context
-                .library_root
-                .join(context.game.relative_dir())
-                .canonicalize()
-                .ok()?;
-            child.strip_prefix(game_dir).ok().map(PathBuf::from)
-        });
+        let executable_reference = context
+            .as_ref()
+            .ok_or_else(|| "missing runner context".to_string())
+            .and_then(|context| context.child_executable_reference(&request));
+        if let Err(reason) = &executable_reference {
+            log::warn!(
+                "child launch refused: guest={:?}, executable={}, card_root={:?}: {reason}",
+                request.guest_path,
+                request.executable.display(),
+                context.as_ref().map(|context| &context.card_root),
+            );
+        }
         if request.concurrent {
-            let result = if let (Some(context), Some(relative)) = (context, relative) {
+            let result = if let (Some(context), Ok(executable_reference)) =
+                (context, executable_reference)
+            {
                 let mut child_game = context.game.clone();
-                child_game.executable = relative;
+                child_game.executable = executable_reference;
                 let handle_context = state.child_handle_context(request.process_handle).unwrap();
                 let table = handle_context.table.clone();
                 let child_table = table.clone();
@@ -918,9 +951,9 @@ impl RunHook {
             return;
         }
         let mut exit_code = 0xc0000135;
-        if let (Some(context), Some(relative)) = (context, relative) {
+        if let (Some(context), Ok(executable_reference)) = (context, executable_reference) {
             let mut child_game = context.game.clone();
-            child_game.executable = relative;
+            child_game.executable = executable_reference;
             state.audio.suspend_output();
             let saved = pocket_core::suspend_host_session();
             let mut child_hook = self.child_hook();
@@ -961,8 +994,6 @@ impl RunHook {
             state.pressed_keys.fill(false);
             state.held_keys.clear();
             state.key_repeat_next_ms = None;
-        } else {
-            log::warn!("child launch refused: path outside card or missing runner context");
         }
         if let Some(table) = state.object_handles.child(request.process_handle) {
             table.complete_process_exit(exit_code);
@@ -1192,6 +1223,125 @@ impl FrameHook for RunHook {
         } else {
             FrameAction::Continue
         }
+    }
+}
+
+#[cfg(test)]
+mod child_card_tests {
+    use super::*;
+
+    fn with_shell_and_external_card(test: impl FnOnce(LaunchContext)) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pockethle-runner-card-{}-{nonce}",
+            std::process::id()
+        ));
+        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
+            "platform": "gizmondo",
+            "id": "shell",
+            "display_name": "Shell with external card",
+            "executable": "extracted/GTShell.exe",
+            "source_cab": "manual:GTShell.exe",
+            "install_dir": "\\Flash Disk2\\",
+            "install_dirs": ["\\Flash Disk2\\"],
+            "save_prefix": "\\Flash Disk2\\"
+        }))
+        .unwrap();
+        let extracted = game.extracted_dir(&root);
+        let card = root.join("sd-card");
+        std::fs::create_dir_all(&extracted).unwrap();
+        std::fs::create_dir_all(&card).unwrap();
+        std::fs::write(extracted.join("GTShell.exe"), b"shell").unwrap();
+        std::fs::write(extracted.join("worker.exe"), b"worker").unwrap();
+        std::fs::write(card.join("autorun.exe"), b"card game").unwrap();
+        game.settings.storage_card_dir = Some(card.clone());
+        test(LaunchContext {
+            runner: Runner::new(),
+            library_root: root.clone(),
+            game,
+            card_root: card,
+        });
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn request(executable: PathBuf, concurrent: bool) -> pocket_core::kernel::ProcessLaunch {
+        pocket_core::kernel::ProcessLaunch {
+            executable,
+            guest_path: "\\SD Card\\autorun.exe".into(),
+            process_handle: 1,
+            thread_handle: 2,
+            concurrent,
+            command_line: String::new(),
+            creation_flags: 0,
+            call_key: (0, 0, 0),
+        }
+    }
+
+    #[test]
+    fn shell_launches_card_executable_outside_its_installation() {
+        with_shell_and_external_card(|context| {
+            let executable = context.card_root.join("autorun.exe");
+            assert!(!executable.starts_with(context.game.extracted_dir(&context.library_root)));
+            for concurrent in [false, true] {
+                let mut child = context.game.clone();
+                child.executable = context
+                    .child_executable_reference(&request(executable.clone(), concurrent))
+                    .unwrap();
+                assert!(child.executable.is_absolute());
+                assert_eq!(
+                    std::fs::read(child.executable_path(&context.library_root)).unwrap(),
+                    b"card game"
+                );
+            }
+            assert_eq!(
+                context
+                    .game
+                    .gizmondo_guest_exe_path(&context.library_root)
+                    .as_deref(),
+                Some("\\Flash Disk2\\GTShell.exe")
+            );
+        });
+    }
+
+    #[test]
+    fn foreground_launch_rejects_sibling_card_and_parent_directory_escape() {
+        with_shell_and_external_card(|context| {
+            let sibling = context.library_root.join("sd-card-copy");
+            std::fs::create_dir(&sibling).unwrap();
+            std::fs::write(sibling.join("outside.exe"), b"outside").unwrap();
+            for executable in [
+                sibling.join("outside.exe"),
+                context.card_root.join("../sd-card-copy/outside.exe"),
+            ] {
+                assert!(context
+                    .child_executable_reference(&request(executable, false))
+                    .unwrap_err()
+                    .contains("outside the mounted SD Card"));
+            }
+        });
+    }
+
+    #[test]
+    fn internal_child_keeps_installation_and_save_paths() {
+        with_shell_and_external_card(|context| {
+            let mut child = context.game.clone();
+            child.executable = context
+                .child_executable_reference(&request(
+                    context
+                        .game
+                        .extracted_dir(&context.library_root)
+                        .join("worker.exe"),
+                    true,
+                ))
+                .unwrap();
+            assert_eq!(child.executable, PathBuf::from("extracted/worker.exe"));
+            let paths = child.guest_launch_paths(&context.library_root).unwrap();
+            assert_eq!(paths.module_path, "\\Flash Disk2\\worker.exe");
+            assert_eq!(paths.save_prefix, "\\Flash Disk2\\");
+        });
     }
 }
 

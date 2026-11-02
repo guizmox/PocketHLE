@@ -9,7 +9,7 @@
       "assets": []
     },
     "available": true,
-    "url": "https://github.com/guizmox/PocketHLE/releases/tag/v0.10.0"
+    "url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/tag/v0.10.0"
   },
   {
     "name": "same version",
@@ -76,7 +76,7 @@
       "assets": []
     },
     "available": true,
-    "url": "https://github.com/guizmox/PocketHLE/releases/tag/v0.3.1"
+    "url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/tag/v0.3.1"
   },
   {
     "name": "ignore build metadata",
@@ -121,7 +121,7 @@
       "assets": []
     },
     "available": true,
-    "url": "https://github.com/guizmox/PocketHLE/releases/tag/v0.4.0"
+    "url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/tag/v0.4.0"
   },
   {
     "name": "foreign download rejected",
@@ -138,7 +138,7 @@
       ]
     },
     "available": true,
-    "url": "https://github.com/guizmox/PocketHLE/releases/tag/v0.4.0"
+    "url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/tag/v0.4.0"
   },
   {
     "name": "single Android download",
@@ -150,12 +150,12 @@
       "assets": [
         {
           "name": "app.apk",
-          "browser_download_url": "https://github.com/guizmox/PocketHLE/releases/download/v0.4.0/PocketHLE-android.apk"
+          "browser_download_url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/download/v0.4.0/PocketHLE-android.apk"
         }
       ]
     },
     "available": true,
-    "url": "https://github.com/guizmox/PocketHLE/releases/download/v0.4.0/PocketHLE-android.apk"
+    "url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/download/v0.4.0/PocketHLE-android.apk"
   },
   {
     "name": "ambiguous APKs",
@@ -167,15 +167,15 @@
       "assets": [
         {
           "name": "arm.apk",
-          "browser_download_url": "https://github.com/guizmox/PocketHLE/releases/download/v0.4.0/PocketHLE-android.apk"
+          "browser_download_url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/download/v0.4.0/PocketHLE-android.apk"
         },
         {
           "name": "other.apk",
-          "browser_download_url": "https://github.com/guizmox/PocketHLE/releases/download/v0.4.0/PocketHLE-android.apk"
+          "browser_download_url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/download/v0.4.0/PocketHLE-android.apk"
         }
       ]
     },
     "available": true,
-    "url": "https://github.com/guizmox/PocketHLE/releases/tag/v0.4.0"
+    "url": "https://github.com/Katamaran21/PocketHLE-GTShell/releases/tag/v0.4.0"
   }
 ]
