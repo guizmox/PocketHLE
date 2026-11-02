@@ -56,7 +56,7 @@ pub struct Texture {
     /// Decoded RGBA8888 texels, row-major, `width * height * 4` bytes.
     /// Empty before upload or while a compressed native upload is deferred.
     pub rgba: Vec<u8>,
-    /// Explicit guest levels; missing levels use the shared GPU/software generation policy.
+    /// Defined levels only: explicit uploads or requested automatic generation.
     pub mipmaps: std::collections::BTreeMap<u32, (u32, u32, Vec<u8>)>,
     pub compressed: std::collections::BTreeMap<u32, CompressedLevel>,
     pub max_level: u32,
@@ -75,12 +75,10 @@ impl Default for Texture {
             width: 0,
             height: 0,
             rgba: Vec::new(),
-            // Retain the legacy base-linear default; explicit mip filters
-            // now preserve all four native level-selection modes.
             mipmaps: Default::default(),
             compressed: Default::default(),
             max_level: 1000,
-            min_filter: Filter::Linear,
+            min_filter: Filter::NearestMipmapLinear,
             mag_filter: Filter::Linear,
             wrap_s: Wrap::Repeat,
             wrap_t: Wrap::Repeat,
@@ -133,8 +131,9 @@ impl Texture {
     /// Internal formats survive RGBA decoding and automatic mip generation.
     pub fn set_format(&mut self, level: u32, format: u32) {
         self.formats.insert(level, format);
-        if level == 0 && self.generate_mipmap {
-            for &level in self.mipmaps.keys() {
+        if level == 0 && self.generate_mipmap && !self.compressed.contains_key(&0) {
+            let q = self.width.max(self.height).checked_ilog2().unwrap_or(0);
+            for level in 1..=q {
                 self.formats.insert(level, format);
             }
         }
@@ -149,8 +148,11 @@ impl Texture {
         bytes: &[u8],
         rgba: Vec<u8>,
     ) {
+        let generate = self.generate_mipmap;
+        self.generate_mipmap = false;
         self.set_level(level, width, height, rgba);
-        self.set_format(level, format);
+        self.generate_mipmap = generate;
+        self.formats.insert(level, format);
         self.compressed.insert(
             level,
             CompressedLevel {
@@ -165,10 +167,31 @@ impl Texture {
         }
     }
 
-    /// Preserve explicit levels (RBR DXT3), deriving missing ones once per
-    /// upload. This keeps legacy base-only assets usable with mip filters.
+    /// Snapshot defined images without silently inventing missing mip levels.
     pub fn upload_levels(&self) -> Vec<(u32, u32, Vec<u8>)> {
         if !self.is_complete() {
+            return Vec::new();
+        }
+        let last = if self.min_filter.uses_mipmaps() {
+            self.width.max(self.height).ilog2()
+        } else {
+            0
+        };
+        (0..=last)
+            .map(|level| {
+                let (w, h) = if level == 0 {
+                    (self.width, self.height)
+                } else {
+                    let image = &self.mipmaps[&level];
+                    (image.0, image.1)
+                };
+                (w, h, self.rgba_level(level).unwrap().into_owned())
+            })
+            .collect()
+    }
+
+    fn generated_levels(&self) -> Vec<(u32, u32, Vec<u8>)> {
+        if !self.image_defined(0, self.width, self.height) {
             return Vec::new();
         }
         let mut levels = vec![(
@@ -179,18 +202,6 @@ impl Texture {
         while levels.last().is_some_and(|(w, h, _)| *w > 1 || *h > 1) {
             let (w, h, src) = levels.last().unwrap();
             let (nw, nh) = ((*w / 2).max(1), (*h / 2).max(1));
-            if let Some((ew, eh, pixels)) = self.mipmaps.get(&(levels.len() as u32)) {
-                if *ew == nw && *eh == nh {
-                    let pixels = self
-                        .rgba_level(levels.len() as u32)
-                        .unwrap_or(std::borrow::Cow::Borrowed(pixels));
-                    if pixels.len() != (nw * nh * 4) as usize {
-                        return Vec::new();
-                    }
-                    levels.push((nw, nh, pixels.into_owned()));
-                    continue;
-                }
-            }
             let mut dst = vec![0; (nw * nh * 4) as usize];
             for y in 0..nh {
                 for x in 0..nw {
@@ -216,12 +227,6 @@ impl Texture {
         self.compressed.remove(&level);
         self.formats.insert(level, GL_RGBA);
         if level == 0 {
-            // A resize cannot retain an unrelated previous mip chain.
-            if self.generate_mipmap || self.width != width || self.height != height {
-                self.mipmaps.clear();
-                self.compressed.clear();
-                self.formats.retain(|l, _| *l == 0);
-            }
             self.width = width;
             self.height = height;
             self.rgba = rgba;
@@ -237,13 +242,18 @@ impl Texture {
     /// GL_GENERATE_MIPMAP creates actual level storage, not only a sampler
     /// approximation: subsequent glTexSubImage2D can address the new levels.
     pub fn regenerate_mipmaps(&mut self) {
-        if !self.generate_mipmap {
+        if !self.generate_mipmap
+            || self.compressed.contains_key(&0)
+            || !matches!(
+                self.formats.get(&0).copied().unwrap_or(GL_RGBA),
+                GL_RGBA | GL_RGB | GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA
+            )
+        {
             return;
         }
-        self.mipmaps.clear();
-        self.compressed.retain(|level, _| *level == 0);
-        let levels = self.upload_levels();
+        let levels = self.generated_levels();
         for (level, (width, height, pixels)) in levels.into_iter().enumerate().skip(1) {
+            self.compressed.remove(&(level as u32));
             self.mipmaps.insert(level as u32, (width, height, pixels));
             self.formats.insert(
                 level as u32,
@@ -252,17 +262,48 @@ impl Texture {
         }
     }
 
-    /// Is this texture complete enough to sample?
+    fn image_defined(&self, level: u32, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let Some(size) = width.checked_mul(height).and_then(|n| n.checked_mul(4)) else {
+            return false;
+        };
+        let pixels = if level == 0 {
+            Some(self.rgba.as_slice())
+        } else {
+            self.mipmaps
+                .get(&level)
+                .filter(|m| m.0 == width && m.1 == height)
+                .map(|m| m.2.as_slice())
+        };
+        pixels.is_some_and(|p| p.len() >= size as usize)
+            || self.compressed.get(&level).is_some_and(|c| {
+                c.width == width
+                    && c.height == height
+                    && compressed_image_size(c.format, width, height)
+                        .is_some_and(|n| c.bytes.len() >= n)
+            })
+    }
+
+    /// ES 1.1 section 3.7.9: mip filters require every image through 1x1,
+    /// with consistent dimensions and internal formats. Nonmip filters need base only.
     pub fn is_complete(&self) -> bool {
-        self.width > 0
-            && self.height > 0
-            && (self.rgba.len() >= (self.width * self.height * 4) as usize
-                || self.compressed.get(&0).is_some_and(|c| {
-                    c.width == self.width
-                        && c.height == self.height
-                        && compressed_image_size(c.format, c.width, c.height)
-                            .is_some_and(|n| c.bytes.len() >= n)
-                }))
+        if !self.image_defined(0, self.width, self.height) {
+            return false;
+        }
+        if !self.min_filter.uses_mipmaps() {
+            return true;
+        }
+        let base_format = self.formats.get(&0).copied().unwrap_or(GL_RGBA);
+        (1..=self.width.max(self.height).ilog2()).all(|level| {
+            self.formats.get(&level).copied().unwrap_or(GL_RGBA) == base_format
+                && self.image_defined(
+                    level,
+                    (self.width >> level).max(1),
+                    (self.height >> level).max(1),
+                )
+        })
     }
 
     /// Sample a texel with nearest-neighbour filtering.
@@ -346,9 +387,22 @@ impl Texture {
         if !self.is_complete() {
             return [255; 4];
         }
+        self.sample_lod_complete(levels, s, t, lambda)
+    }
+
+    /// Caller has checked completeness once when constructing the active stages.
+    pub(crate) fn sample_lod_complete(
+        &self,
+        levels: &[(u32, u32, Vec<u8>)],
+        s: f32,
+        t: f32,
+        lambda: f32,
+    ) -> [u8; 4] {
         let threshold = if self.mag_filter == Filter::Linear
-            && self.min_filter == Filter::NearestMipmapNearest
-        {
+            && matches!(
+                self.min_filter,
+                Filter::NearestMipmapNearest | Filter::NearestMipmapLinear
+            ) {
             0.5
         } else {
             0.0
@@ -1081,19 +1135,22 @@ mod tests {
         );
     }
     #[test]
-    fn mip_chain_preserves_explicit_levels_and_regenerates_missing_children() {
+    fn mip_chain_requires_defined_children_and_preserves_independent_images() {
         let mut t = Texture::default();
         t.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
         t.set_level(1, 2, 2, [0, 255, 0, 255].repeat(4));
+        assert!(!t.is_complete());
+        assert!(t.upload_levels().is_empty());
+        t.set_level(2, 1, 1, vec![0, 0, 255, 255]);
         let chain = t.upload_levels();
         assert_eq!(chain.len(), 3);
         assert_eq!(chain[1].2, [0, 255, 0, 255].repeat(4));
-        assert_eq!(chain[2].2, [0, 255, 0, 255]);
-        t.set_level(1, 2, 2, [0, 0, 255, 255].repeat(4));
-        assert_eq!(t.upload_levels()[2].2, [0, 0, 255, 255]);
-        t.set_level(0, 2, 2, [255, 255, 255, 255].repeat(4));
-        assert!(t.mipmaps.is_empty());
-        assert_eq!(t.upload_levels()[1].2, [255; 4]);
+        assert_eq!(chain[2].2, [0, 0, 255, 255]);
+        t.set_level(0, 2, 2, [255; 4].repeat(4));
+        assert_eq!(t.mipmaps.len(), 2);
+        assert!(!t.is_complete()); // former 2x2 level 1 no longer matches the base.
+        t.set_level(1, 1, 1, vec![255; 4]);
+        assert!(t.is_complete()); // unused level 2 does not affect completeness.
     }
 
     #[test]
@@ -1209,6 +1266,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: vec![0, 0, 0, 0, 255, 255, 255, 255],
+            min_filter: Filter::Linear,
             wrap_s: Wrap::ClampToEdge,
             wrap_t: Wrap::ClampToEdge,
             ..Default::default()
@@ -1432,7 +1490,7 @@ mod pvrtc_tests {
         assert_eq!(tex.sample_lod(&levels, 0.5, 0.5, -2.), [255, 0, 0, 255]);
     }
     #[test]
-    fn min_and_mag_filters_remain_distinct_and_base_only_assets_generate_levels() {
+    fn min_and_mag_filters_remain_distinct_and_generation_requires_a_request() {
         let mut tex = Texture::default();
         tex.set_level(
             0,
@@ -1447,6 +1505,12 @@ mod pvrtc_tests {
         assert_eq!(tex.sample_lod(&[], 0.5, 0.5, -1.), [0, 0, 255, 255]);
         assert_eq!(tex.sample_lod(&[], 0.5, 0.5, 1.), [128, 0, 128, 255]);
         tex.min_filter = Filter::LinearMipmapLinear;
+        assert!(!tex.is_complete());
+        assert!(tex.upload_levels().is_empty());
+        tex.set_parameter(0x8191, 1);
+        assert!(!tex.is_complete()); // toggling the flag alone changes no image.
+        let base = tex.rgba.clone();
+        tex.set_level(0, 2, 2, base);
         let levels = tex.upload_levels();
         assert_eq!(levels.len(), 2);
         assert_eq!(tex.sample_lod(&levels, 0.5, 0.5, 1.), [128, 0, 128, 255]);
@@ -1467,5 +1531,92 @@ mod pvrtc_tests {
             &(2, 2, [0, 255, 0, 255].repeat(4))
         );
         assert_eq!(t.mipmaps.get(&2).unwrap(), &(1, 1, vec![0, 255, 0, 255]));
+    }
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+    #[test]
+    fn initial_state_and_all_minification_modes_require_the_correct_images() {
+        let mut t = Texture::default();
+        assert_eq!(t.min_filter, Filter::NearestMipmapLinear);
+        assert_eq!(t.mag_filter, Filter::Linear);
+        assert_eq!((t.wrap_s, t.wrap_t), (Wrap::Repeat, Wrap::Repeat));
+        assert!(!t.generate_mipmap);
+        t.set_level(0, 8, 2, [255; 4].repeat(16));
+        for f in [
+            Filter::Nearest,
+            Filter::Linear,
+            Filter::NearestMipmapNearest,
+            Filter::NearestMipmapLinear,
+            Filter::LinearMipmapNearest,
+            Filter::LinearMipmapLinear,
+        ] {
+            t.min_filter = f;
+            assert_eq!(t.is_complete(), !f.uses_mipmaps());
+        }
+        t.set_level(1, 4, 1, [0; 4].repeat(4));
+        t.set_level(3, 1, 1, vec![0; 4]);
+        assert!(!t.is_complete());
+        t.set_level(2, 2, 1, [0; 4].repeat(2));
+        assert!(t.is_complete());
+        t.set_format(2, GL_RGB);
+        assert!(!t.is_complete());
+        t.set_format(2, GL_RGBA);
+        assert!(t.is_complete());
+        t.set_level(1, 2, 2, [0; 4].repeat(4));
+        assert!(!t.is_complete());
+        t.min_filter = Filter::Linear;
+        assert!(t.is_complete());
+    }
+    #[test]
+    fn compressed_images_do_not_trigger_automatic_generation() {
+        let mut t = Texture::default();
+        t.generate_mipmap = true;
+        let bytes = [0u8; 8];
+        t.set_compressed(
+            0,
+            4,
+            4,
+            GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+            &bytes,
+            Vec::new(),
+        );
+        assert!(t.mipmaps.is_empty());
+        assert!(!t.is_complete());
+        for (level, side) in [(1, 2), (2, 1)] {
+            t.set_compressed(
+                level,
+                side,
+                side,
+                GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+                &bytes,
+                Vec::new(),
+            );
+        }
+        assert!(t.is_complete());
+        assert_eq!(t.upload_levels().len(), 3);
+        t.set_compressed(0, 4, 4, GL_COMPRESSED_RGB_S3TC_DXT1_EXT, &bytes, Vec::new());
+        assert!(!t.is_complete()); // independent RGBA child formats were preserved.
+    }
+    #[test]
+    fn generated_levels_replace_required_children_without_touching_higher_images() {
+        let mut t = Texture::default();
+        t.set_level(5, 1, 1, vec![12; 4]);
+        t.generate_mipmap = true;
+        t.set_level(0, 4, 2, [255, 0, 0, 255].repeat(8));
+        t.set_format(0, GL_RGB);
+        assert!(t.is_complete());
+        assert_eq!(t.mipmaps[&1], (2, 1, [255, 0, 0, 255].repeat(2)));
+        assert_eq!(t.mipmaps[&2], (1, 1, vec![255, 0, 0, 255]));
+        assert_eq!(t.mipmaps[&5].2, vec![12; 4]);
+        assert_eq!(t.formats[&1], GL_RGB);
+        t.set_level(1, 2, 1, [0; 4].repeat(2));
+        assert!(!t.is_complete()); // this explicit child is RGBA.
+        t.set_level(0, 4, 2, [0, 255, 0, 255].repeat(8));
+        t.set_format(0, GL_RGB);
+        assert!(t.is_complete());
+        assert_eq!(t.mipmaps[&1].2, [0, 255, 0, 255].repeat(2));
     }
 }

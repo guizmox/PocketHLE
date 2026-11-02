@@ -36,7 +36,7 @@ impl raster::TextureSampler for SoftwareSampler<'_> {
             .cache
             .get(&self.names[unit])
             .map_or(&[][..], |c| c.2.as_slice());
-        Some(tex.sample_lod(levels, s, t, 0.))
+        Some(tex.sample_lod_complete(levels, s, t, 0.))
     }
     fn needs_gradients(&self) -> bool {
         self.textures
@@ -56,7 +56,7 @@ impl raster::TextureSampler for SoftwareSampler<'_> {
             .cache
             .get(&self.names[unit])
             .map_or(&[][..], |c| c.2.as_slice());
-        Some(tex.sample_lod(levels, s, t, lod))
+        Some(tex.sample_lod_complete(levels, s, t, lod))
     }
 }
 
@@ -4234,6 +4234,7 @@ mod tests {
         // opaque and the right half clear.
         c.set_active_texture(2);
         c.bind_texture(GL_TEXTURE_2D, names[1]);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         c.tex_image_2d(
             GL_TEXTURE_2D,
             0,
@@ -5053,6 +5054,7 @@ mod subimage_and_logic_tests {
     #[ignore = "requires native OpenGL; framebuffer copy and compressed GPU cache refresh"]
     fn native_subimages_refresh_uploaded_textures_and_copy_rendered_pixels() {
         let mut c = Context::new(4, 4);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         c.enable_gpu().unwrap();
         c.set_internal_resolution(2);
         c.clear_color = [0.2, 0.4, 0.6, 0.8];
@@ -6023,6 +6025,127 @@ mod point_extension_tests {
                     c.state.point_size, 128.,
                     "raster clamping does not modify requested state"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod texture_completeness_tests {
+    use super::*;
+    struct Memory(Vec<u8>);
+    impl GuestMemory for Memory {
+        fn read(&mut self, addr: u32, len: usize, out: &mut Vec<u8>) -> bool {
+            if let Some(p) = self.0.get(addr as usize..addr as usize + len) {
+                out.clear();
+                out.extend_from_slice(p);
+                true
+            } else {
+                false
+            }
+        }
+    }
+    fn exercise(c: &mut Context) {
+        let mut bytes = vec![0; 16];
+        for v in [-1f32, -1., 1., -1., 1., 1., -1., 1.] {
+            bytes.extend(v.to_le_bytes());
+        }
+        let mut memory = Memory(bytes);
+        c.set_vertex_pointer(2, GL_FLOAT, 0, 16);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.current_color = [0., 1., 0., 1.];
+        c.set_capability(GL_TEXTURE_2D, true);
+        c.tex_env(GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            4,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255].repeat(8),
+        );
+        let draw = |c: &mut Context, m: &mut Memory, expected: [u8; 4]| {
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.draw_arrays(m, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            let offset = (8 * 16 + 8) * 4;
+            assert_eq!(&c.target.color[offset..offset + 4], &expected);
+        };
+        assert_eq!(c.texture_stages().1, 0);
+        draw(c, &mut memory, [0, 255, 0, 255]);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            2,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255].repeat(2),
+        );
+        draw(c, &mut memory, [0, 255, 0, 255]);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            2,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255],
+        );
+        assert_eq!(c.texture_stages().1, 1);
+        draw(c, &mut memory, [255, 0, 0, 255]);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            2,
+            1,
+            GL_RGB,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0].repeat(2),
+        );
+        draw(c, &mut memory, [0, 255, 0, 255]);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        draw(c, &mut memory, [255, 0, 0, 255]);
+        c.tex_parameter(
+            GL_TEXTURE_2D,
+            GL_TEXTURE_MIN_FILTER,
+            GL_NEAREST_MIPMAP_LINEAR,
+        );
+        draw(c, &mut memory, [0, 255, 0, 255]);
+        c.tex_parameter(GL_TEXTURE_2D, 0x8191, 1);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            4,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 0, 255, 255].repeat(8),
+        );
+        draw(c, &mut memory, [0, 0, 255, 255]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    #[test]
+    fn software_incomplete_units_and_filter_transitions() {
+        exercise(&mut Context::new_rgb565(16, 16));
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2; completeness and cache transitions"]
+    fn native_incomplete_units_and_filter_transitions() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut c = Context::new_rgb565(16, 16);
+                if es {
+                    let mut gpu = crate::gpu::Renderer::new_es_for_test(16, 16).unwrap();
+                    gpu.set_surface_rgb565(true).unwrap();
+                    c.gpu = Some(gpu);
+                } else {
+                    c.enable_gpu().unwrap();
+                }
+                c.set_internal_resolution(scale);
+                exercise(&mut c);
             }
         }
     }

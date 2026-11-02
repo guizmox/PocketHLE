@@ -292,7 +292,6 @@ struct Gl {
     CopyTexImage2D: unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, i32),
     CompressedTexImage2D:
         Option<unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void)>,
-    GenerateMipmap: Option<unsafe extern "system" fn(u32)>,
     GetString: unsafe extern "system" fn(u32) -> *const u8,
     GetError: unsafe extern "system" fn() -> u32,
     Finish: unsafe extern "system" fn(),
@@ -386,20 +385,6 @@ impl Gl {
                     Some(std::mem::transmute::<
                         *mut c_void,
                         unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void),
-                    >(p))
-                }
-            },
-            GenerateMipmap: {
-                let mut p = host.load(c"glGenerateMipmap");
-                if p.is_null() {
-                    p = host.load(c"glGenerateMipmapEXT");
-                }
-                if p.is_null() {
-                    None
-                } else {
-                    Some(std::mem::transmute::<
-                        *mut c_void,
-                        unsafe extern "system" fn(u32),
                     >(p))
                 }
             },
@@ -1116,7 +1101,6 @@ fn native_compressed_format(format: u32) -> u32 {
 #[derive(Debug, PartialEq, Eq)]
 enum UploadRoute {
     Compressed,
-    Generated,
     Rgba,
 }
 unsafe fn upload_error(gl: &Gl) -> Result<u32, String> {
@@ -1141,8 +1125,11 @@ unsafe fn upload_texture(
     tex: &Texture,
     mips: bool,
 ) -> Result<UploadRoute, String> {
+    if !tex.is_complete() {
+        return Err("incomplete guest texture must not reach GPU upload".into());
+    }
     let levels = tex.width.max(tex.height).ilog2() + 1;
-    let has_explicit = !tex.mipmaps.is_empty();
+
     if let Some(base) = tex.compressed.get(&0) {
         let format = native_compressed_format(base.format);
         let complete = (0..if mips { levels } else { 1 }).all(|l| {
@@ -1152,7 +1139,7 @@ unsafe fn upload_texture(
                     && native_compressed_format(c.format) == format
             })
         });
-        if formats.contains(&format) && (!mips || complete || !has_explicit) {
+        if formats.contains(&format) && (!mips || complete) {
             if let Some(upload) = gl.CompressedTexImage2D {
                 for l in 0..if mips && complete { levels } else { 1 } {
                     let c = &tex.compressed[&l];
@@ -1167,15 +1154,7 @@ unsafe fn upload_texture(
                         c.bytes.as_ptr().cast(),
                     );
                 }
-                let mut ok = upload_error(gl)? == 0;
-                if ok && mips && !complete {
-                    if let Some(generate) = gl.GenerateMipmap {
-                        generate(GL_TEXTURE_2D);
-                        ok = upload_error(gl)? == 0;
-                    } else {
-                        ok = false;
-                    }
-                }
+                let ok = upload_error(gl)? == 0;
                 if ok {
                     return Ok(UploadRoute::Compressed);
                 }
@@ -1197,14 +1176,6 @@ unsafe fn upload_texture(
     let error = upload_error(gl)?;
     if error != 0 {
         return Err(format!("native RGBA texture upload failed: 0x{error:04x}"));
-    }
-    if mips && !has_explicit {
-        if let Some(generate) = gl.GenerateMipmap {
-            generate(GL_TEXTURE_2D);
-            if upload_error(gl)? == 0 {
-                return Ok(UploadRoute::Generated);
-            }
-        }
     }
     if mips {
         for (l, (w, h, pixels)) in tex.upload_levels().iter().enumerate().skip(1) {
@@ -3254,16 +3225,15 @@ mod tests {
                 (gpu.gl.BindTexture)(GL_TEXTURE_2D, name);
                 let mut tex = Texture::default();
                 tex.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
-                assert!(matches!(
-                    upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
-                    UploadRoute::Generated
-                ));
-                let generate = gpu.gl.GenerateMipmap.take();
+                assert!(!tex.is_complete());
+                assert!(upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).is_err());
+                tex.set_parameter(0x8191, 1);
+                tex.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
+                assert!(tex.is_complete());
                 assert!(matches!(
                     upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
                     UploadRoute::Rgba
                 ));
-                gpu.gl.GenerateMipmap = generate;
                 tex.set_level(1, 2, 2, [0, 255, 0, 255].repeat(4));
                 assert!(matches!(
                     upload_texture(&gpu.gl, &gpu.compressed_formats, &tex, true).unwrap(),
@@ -3271,6 +3241,7 @@ mod tests {
                 ));
                 let bytes = [0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0];
                 tex = Texture::default();
+                tex.min_filter = Filter::Linear;
                 tex.set_compressed(
                     0,
                     4,
@@ -3301,6 +3272,7 @@ mod tests {
                 // A refused upload must fall back without leaving a GL error.
                 if !gpu.supports_compressed(GL_ATC_RGB_AMD) {
                     let mut refused = Texture::default();
+                    refused.min_filter = Filter::Linear;
                     refused.set_compressed(0, 4, 4, GL_ATC_RGB_AMD, &bytes, Vec::new());
                     let formats = HashSet::from([GL_ATC_RGB_AMD]);
                     assert!(matches!(
@@ -3329,6 +3301,7 @@ mod tests {
                 Renderer::new(8, 8).unwrap()
             };
             let mut texture = Texture::default();
+            texture.min_filter = Filter::Linear;
             texture.set_level(0, 4, 4, [255, 0, 0, 255].repeat(16));
             let textures = HashMap::from([(1, texture)]);
             let stage = TextureStage {
@@ -3443,6 +3416,15 @@ mod tests {
             texture.set_level(0, 64, 64, [255, 0, 0, 255].repeat(64 * 64));
             texture.set_level(1, 32, 32, [0, 255, 0, 255].repeat(32 * 32));
             texture.set_level(2, 16, 16, [0, 0, 255, 255].repeat(16 * 16));
+            for level in 3..=6 {
+                let side = 64 >> level;
+                texture.set_level(
+                    level,
+                    side,
+                    side,
+                    [0, 0, 255, 255].repeat((side * side) as usize),
+                );
+            }
             texture.min_filter = Filter::NearestMipmapNearest;
             texture.mag_filter = Filter::Nearest;
             let mut textures = HashMap::from([(1, texture)]);
@@ -3614,6 +3596,8 @@ mod tests {
             );
             if es {
                 gpu.full_npot = false; // Exercise core-ES2 fallback even on a capable Mesa driver.
+                                       // This host-fallback test intentionally supplies only the base.
+                textures.get_mut(&1).unwrap().min_filter = Filter::Nearest;
                 textures
                     .get_mut(&1)
                     .unwrap()
