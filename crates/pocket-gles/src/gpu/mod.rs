@@ -1228,6 +1228,8 @@ pub struct Renderer {
     host: Host,
     gl: Gl,
     program: u32,
+    alternate_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
+    affine_program: bool,
     buffer: u32,
     index_buffer: u32,
     indices: Vec<u16>,
@@ -1395,6 +1397,8 @@ impl Renderer {
                 host,
                 gl,
                 program: 0,
+                alternate_program: None,
+                affine_program: false,
                 buffer: 0,
                 index_buffer: 0,
                 indices: Vec::new(),
@@ -1436,74 +1440,7 @@ impl Renderer {
                 max_viewport,
                 subpixel_bits,
             };
-            r.program = (r.gl.CreateProgram)();
-            if r.program == 0 {
-                return Err("OpenGL program allocation failed".into());
-            }
-            let prefix = if r.host.es {
-                "#version 100\nprecision mediump float;\nprecision mediump int;\n#define VARYING varying mediump\n"
-            } else {
-                "#version 120\n#define VARYING varying\n"
-            };
-            let vs = r.shader(
-                0x8b31,
-                &format!(
-                    "{}{VERTEX}",
-                    prefix.replace("precision mediump float", "precision highp float")
-                ),
-            )?;
-            let fragment_prefix = if r.lod_derivatives {
-                if r.host.es {
-                    prefix.replace("#version 100\n", "#version 100\n#extension GL_OES_standard_derivatives : enable\n#define LOD_DERIVATIVES\n")
-                } else {
-                    format!("{prefix}#define LOD_DERIVATIVES\n")
-                }
-            } else {
-                prefix.to_owned()
-            };
-            let fs = match r.shader(0x8b30, &format!("{fragment_prefix}{FRAGMENT}")) {
-                Ok(s) => s,
-                Err(e) => {
-                    (r.gl.DeleteShader)(vs);
-                    return Err(e);
-                }
-            };
-            (r.gl.AttachShader)(r.program, vs);
-            (r.gl.AttachShader)(r.program, fs);
-            for (i, name) in [
-                "position",
-                "color",
-                "tex0",
-                "tex1",
-                "tex2",
-                "tex3",
-                "normalAndFog",
-                "lightPosition",
-            ]
-            .iter()
-            .enumerate()
-            {
-                (r.gl.BindAttribLocation)(
-                    r.program,
-                    i as u32,
-                    CString::new(*name).unwrap().as_ptr(),
-                );
-            }
-            (r.gl.LinkProgram)(r.program);
-            (r.gl.DeleteShader)(vs);
-            (r.gl.DeleteShader)(fs);
-            let mut ok = 0;
-            (r.gl.GetProgramiv)(r.program, 0x8b82, &mut ok);
-            if ok == 0 {
-                let mut msg = vec![0u8; 4096];
-                (r.gl.GetProgramInfoLog)(
-                    r.program,
-                    4096,
-                    std::ptr::null_mut(),
-                    msg.as_mut_ptr().cast(),
-                );
-                return Err(String::from_utf8_lossy(&msg).trim_end_matches('\0').into());
-            }
+            r.program = r.compile_program(VERTEX, FRAGMENT)?;
             (r.gl.GenBuffers)(1, &mut r.buffer);
             (r.gl.GenBuffers)(1, &mut r.index_buffer);
             (r.gl.GenFramebuffers)(1, &mut r.fbo);
@@ -1591,6 +1528,23 @@ impl Renderer {
                     r.cache_uniform(&format!("{name}{i}"));
                 }
             }
+            // Compile once at startup; switching never compiles or reallocates shaders.
+            let generic = r.program;
+            let (vertex, fragment) = affine_shader_sources();
+            let affine = r.compile_program(&vertex, &fragment)?;
+            let locations = r
+                .uniforms
+                .keys()
+                .map(|name| {
+                    let location = (r.gl.GetUniformLocation)(
+                        affine,
+                        CString::new(name.as_str()).unwrap().as_ptr(),
+                    );
+                    (name.clone(), location)
+                })
+                .collect();
+            r.alternate_program = Some((affine, locations, HashMap::new()));
+            r.program = generic;
             let p = (r.gl.GetString)(0x1f01);
             let label = if p.is_null() {
                 "unknown".into()
@@ -1601,6 +1555,95 @@ impl Renderer {
             r.check()?;
             Ok(r)
         }
+    }
+    unsafe fn compile_program(&mut self, vertex: &str, fragment: &str) -> Result<u32, String> {
+        let program = (self.gl.CreateProgram)();
+        if program == 0 {
+            return Err("OpenGL program allocation failed".into());
+        }
+        let prefix = if self.host.es {
+            "#version 100\nprecision mediump float;\nprecision mediump int;\n#define VARYING varying mediump\n"
+        } else {
+            "#version 120\n#define VARYING varying\n"
+        };
+        let vs = match self.shader(
+            0x8b31,
+            &format!(
+                "{}{}",
+                prefix.replace("precision mediump float", "precision highp float"),
+                vertex
+            ),
+        ) {
+            Ok(shader) => shader,
+            Err(error) => {
+                (self.gl.DeleteProgram)(program);
+                return Err(error);
+            }
+        };
+        let fragment_prefix = if self.lod_derivatives {
+            if self.host.es {
+                prefix.replace("#version 100\n", "#version 100\n#extension GL_OES_standard_derivatives : enable\n#define LOD_DERIVATIVES\n")
+            } else {
+                format!("{prefix}#define LOD_DERIVATIVES\n")
+            }
+        } else {
+            prefix.to_owned()
+        };
+        let fs = match self.shader(0x8b30, &format!("{fragment_prefix}{fragment}")) {
+            Ok(s) => s,
+            Err(e) => {
+                (self.gl.DeleteShader)(vs);
+                (self.gl.DeleteProgram)(program);
+                return Err(e);
+            }
+        };
+        (self.gl.AttachShader)(program, vs);
+        (self.gl.AttachShader)(program, fs);
+        for (i, name) in [
+            "position",
+            "color",
+            "tex0",
+            "tex1",
+            "tex2",
+            "tex3",
+            "normalAndFog",
+            "lightPosition",
+        ]
+        .iter()
+        .enumerate()
+        {
+            (self.gl.BindAttribLocation)(program, i as u32, CString::new(*name).unwrap().as_ptr());
+        }
+        (self.gl.LinkProgram)(program);
+        (self.gl.DeleteShader)(vs);
+        (self.gl.DeleteShader)(fs);
+        let mut ok = 0;
+        (self.gl.GetProgramiv)(program, 0x8b82, &mut ok);
+        if ok == 0 {
+            let mut msg = vec![0u8; 4096];
+            (self.gl.GetProgramInfoLog)(
+                program,
+                4096,
+                std::ptr::null_mut(),
+                msg.as_mut_ptr().cast(),
+            );
+            (self.gl.DeleteProgram)(program);
+            return Err(String::from_utf8_lossy(&msg).trim_end_matches('\0').into());
+        }
+        Ok(program)
+    }
+    fn select_affine_program(&mut self, affine: bool) {
+        if self.affine_program == affine {
+            return;
+        }
+        let alternate = self.alternate_program.as_mut().unwrap();
+        std::mem::swap(&mut self.program, &mut alternate.0);
+        std::mem::swap(&mut self.uniforms, &mut alternate.1);
+        std::mem::swap(&mut self.uniform_values, &mut alternate.2);
+        self.affine_program = affine;
+        // The other program may still hold point-sprite/array uniforms from
+        // an earlier draw. Refresh them even if the last draw was a triangle.
+        self.point_drawing = true;
     }
     unsafe fn shader(&self, ty: u32, source: &str) -> Result<u32, String> {
         let s = (self.gl.CreateShader)(ty);
@@ -2130,6 +2173,10 @@ impl Renderer {
         } else {
             0
         };
+        let affine = mode != GL_POINTS
+            && !state.logic_op
+            && affine_texture_coordinates(vertices, stages, transforms, stream);
+        self.select_affine_program(affine);
         let point_sizes = mode == GL_POINTS && state.point_size_array && transforms.is_some();
         let layout = if mask == 0 {
             VertexLayout::new(state, stages, transforms)
@@ -2963,6 +3010,9 @@ impl Drop for Renderer {
             (self.gl.DeleteBuffers)(1, &self.buffer);
             (self.gl.DeleteBuffers)(1, &self.index_buffer);
             (self.gl.DeleteProgram)(self.program);
+            if let Some((program, _, _)) = &self.alternate_program {
+                (self.gl.DeleteProgram)(*program);
+            }
         }
     }
 }
@@ -3010,9 +3060,47 @@ fn wrap(v: Wrap) -> u32 {
         Wrap::ClampToEdge => GL_CLAMP_TO_EDGE,
     }
 }
+// Conservative, draw-level proof: no per-fragment branch is needed for q=1.
+fn affine_texture_coordinates(
+    vertices: &[Vertex],
+    stages: &[TextureStage],
+    transforms: Option<&VertexTransforms>,
+    stream: Option<&VertexStream>,
+) -> bool {
+    stages.iter().all(|stage| {
+        if let Some(t) = transforms {
+            let m = &t.textures[stage.unit];
+            if [m[3], m[7], m[11], m[15]] != [0., 0., 0., 1.] {
+                return false;
+            }
+        }
+        if let Some(stream) = stream {
+            match stream.attributes[stage.unit + 2] {
+                Some(a) => a.size < 4,
+                None => stream.constants[stage.unit + 2][3] == 1.,
+            }
+        } else {
+            vertices.iter().all(|v| v.texcoord[stage.unit][3] == 1.)
+        }
+    })
+}
+fn affine_shader_sources() -> (String, String) {
+    (
+        format!("#define AFFINE_TEXTURES\n{VERTEX}"),
+        format!("#define AFFINE_TEXTURES\n{FRAGMENT}"),
+    )
+}
 const VERTEX: &str = r#"
 attribute vec4 position,color;attribute vec4 tex0,tex1,tex2,tex3;attribute vec4 normalAndFog,lightPosition;
-VARYING vec4 vColor,vBackColor;VARYING vec4 uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
+VARYING vec4 vColor,vBackColor;
+#ifdef AFFINE_TEXTURES
+#define UV_TYPE vec2
+#define UV_VALUE(v) (v).xy
+#else
+#define UV_TYPE vec4
+#define UV_VALUE(v) (v)
+#endif
+VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
 uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
 uniform mat4 normalMatrix;
@@ -3040,7 +3128,11 @@ vec4 illuminate(vec3 n,vec3 point){
 }
 void main(){
  gl_PointSize=pointSize;
+
+#ifndef AFFINE_TEXTURES
  if(pointArray!=0){float size=lightPosition.x;if(pointArrayParams.w>0.5)size=floor(size+0.5);gl_PointSize=clamp(size*pointArrayParams.x,pointArrayParams.y,pointArrayParams.z);}
+
+#endif
  vec4 eye=modelviewMatrix*position;
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
@@ -3049,21 +3141,34 @@ void main(){
  if(lightingEnabled!=0){
   vec3 n=(normalMatrix*vec4(normalAndFog.xyz,0.0)).xyz;
   if(normalMode==1){n=unit(n);}else if(normalMode==2){n*=normalRescale;}
+#ifdef AFFINE_TEXTURES
+  vec4 lightEye=modelviewMatrix*lightPosition;
+#else
   vec4 lightEye=modelviewMatrix*(pointArray!=0?position:lightPosition);
+#endif
   vec3 point=lightEye.w==0.0?lightEye.xyz:lightEye.xyz/lightEye.w;
   vColor=illuminate(n,point);vBackColor=twoSided!=0?illuminate(-n,point):vColor;
  }
- uv0=textureMatrix0*tex0;
- uv1=textureMatrix1*tex1;
- uv2=textureMatrix2*tex2;
- uv3=textureMatrix3*tex3;
+ uv0=UV_VALUE(textureMatrix0*tex0);
+ uv1=UV_VALUE(textureMatrix1*tex1);
+ uv2=UV_VALUE(textureMatrix2*tex2);
+ uv3=UV_VALUE(textureMatrix3*tex3);
  vFog=objectSpace!=0?abs(eye.z):normalAndFog.w;
 }
 "#;
 const FRAGMENT: &str = r#"
-VARYING vec4 vColor,vBackColor;VARYING vec4 uv0,uv1,uv2,uv3;VARYING float vFog;
+VARYING vec4 vColor,vBackColor;
+#ifdef AFFINE_TEXTURES
+#define UV_TYPE vec2
+#define UV_VALUE(v) (v).xy
+#else
+#define UV_TYPE vec4
+#define UV_VALUE(v) (v)
+#endif
+VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;
 uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;uniform vec4 logicLevels;
 // ES2 has no integer bitwise operators. All intermediates are exact 8-bit integers.
+#ifndef AFFINE_TEXTURES
 vec4 logicalColor(vec4 source,vec4 destination){
  vec4 s=floor(clamp(source,0.0,1.0)*logicLevels+0.5),d=floor(destination*logicLevels+0.5),a=vec4(0.0);
  float bit=1.0;
@@ -3078,6 +3183,7 @@ vec4 logicalColor(vec4 source,vec4 destination){
  if(logicMode==13)r=logicLevels-s+a;if(logicMode==14)r=logicLevels-a;if(logicMode==15)r=logicLevels;
  return r/logicLevels;
 }
+#endif
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform vec4 pointReplace;uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
@@ -3098,8 +3204,12 @@ vec4 combineStage(vec4 previous,vec4 t,vec4 k,vec4 primary,vec4 ops,vec4 rs,vec4
  return clamp(vec4(rgb*ops.z,alpha),0.0,1.0);
 }
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
+#ifdef AFFINE_TEXTURES
+vec2 pointCoordinate(vec2 uv,float replace){return uv;}
+#else
 vec2 project(vec4 uv){return uv.w==0.0?vec2(0.0):uv.xy/uv.w;}
 vec2 pointCoordinate(vec4 uv,float replace){return replace>0.5?gl_PointCoord:project(uv);}
+#endif
 float limitedBias(vec2 uv,float bias,vec4 limit){
 #ifdef LOD_DERIVATIVES
  if(limit.w>0.5){
@@ -3116,7 +3226,11 @@ float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the
 // signed span, and match software's unfogged result for a degenerate range.
-float f=1.0;if(fogMode==1){float span=fogEnd-fogStart;if(span!=0.0 && abs(span)>=0.000000001)f=(fogEnd-vFog)/span;}if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));if(logicMode>=0)c=logicalColor(c,texture2D(logicDestination,gl_FragCoord.xy/logicSize));gl_FragColor=c;}
+float f=1.0;if(fogMode==1){float span=fogEnd-fogStart;if(span!=0.0 && abs(span)>=0.000000001)f=(fogEnd-vFog)/span;}if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));
+#ifndef AFFINE_TEXTURES
+if(logicMode>=0)c=logicalColor(c,texture2D(logicDestination,gl_FragCoord.xy/logicSize));
+#endif
+gl_FragColor=c;}
 "#;
 
 #[cfg(test)]
@@ -3694,6 +3808,183 @@ mod tests {
             GL_POINTS,
         ] {
             assert!(!direct_flat_triangles(mode, false, false));
+        }
+    }
+
+    #[test]
+    fn affine_shader_selection_requires_a_proof_for_every_texture_unit() {
+        let stages = [TextureStage {
+            unit: 3,
+            env: TexEnvMode::Replace,
+            env_color: [0.; 4],
+            lod_bias: 0.,
+        }];
+        let mut vertices = triangle([1.; 4], 0.);
+        let mut transforms = identity_transforms();
+        assert!(affine_texture_coordinates(
+            &vertices,
+            &stages,
+            Some(&transforms),
+            None
+        ));
+        vertices[1].texcoord[3][3] = 2.;
+        assert!(!affine_texture_coordinates(&vertices, &stages, None, None));
+        assert!(affine_texture_coordinates(&vertices, &[], None, None));
+        vertices[1].texcoord[3][3] = 1.;
+        for index in [3, 7, 11, 15] {
+            transforms.textures[3][index] += 1.;
+            assert!(!affine_texture_coordinates(
+                &vertices,
+                &stages,
+                Some(&transforms),
+                None
+            ));
+            transforms.textures[3] = IDENTITY;
+        }
+        let mut stream = VertexStream::default();
+        stream.constants[5] = [0., 0., 0., 1.];
+        assert!(affine_texture_coordinates(
+            &vertices,
+            &stages,
+            None,
+            Some(&stream)
+        ));
+        stream.constants[5][3] = 0.;
+        assert!(!affine_texture_coordinates(
+            &vertices,
+            &stages,
+            None,
+            Some(&stream)
+        ));
+        for size in [2, 3, 4] {
+            stream.attributes[5] = Some(StreamAttribute {
+                size,
+                ty: GL_FLOAT,
+                normalized: 0,
+                stride: 0,
+                offset: 0,
+            });
+            assert_eq!(
+                affine_texture_coordinates(&vertices, &stages, None, Some(&stream)),
+                size < 4
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2; affine/general shader switching"]
+    fn host_affine_shader_matches_general_and_preserves_program_uniform_caches() {
+        for es in [false, true] {
+            for rgb565 in [false, true] {
+                for scale in [1, 2] {
+                    let mut gpu = if es {
+                        Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+                    } else {
+                        Renderer::new(32, 32).unwrap()
+                    };
+                    gpu.set_surface_rgb565(rgb565).unwrap();
+                    gpu.set_render_scale(scale).unwrap();
+                    let mut target = RenderTarget::new(32, 32);
+                    let mut state = PipelineState::default();
+                    state.viewport = (0, 0, 32, 32);
+                    let mut texture = Texture::default();
+                    texture.set_level(
+                        0,
+                        2,
+                        2,
+                        vec![
+                            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+                        ],
+                    );
+                    texture.min_filter = Filter::Linear;
+                    texture.mag_filter = Filter::Linear;
+                    let textures = HashMap::from([(1, texture)]);
+                    let stages = [TextureStage {
+                        unit: 0,
+                        env: TexEnvMode::Modulate,
+                        env_color: [0.; 4],
+                        lod_bias: 0.,
+                    }];
+                    let mut transforms = identity_transforms();
+                    let mut vertices = triangle([1.; 4], 0.);
+                    vertices[0].texcoord[0] = [0., 0., 0., 1.];
+                    vertices[1].texcoord[0] = [1., 0., 0., 1.];
+                    vertices[2].texcoord[0] = [0.5, 1., 0., 1.];
+                    let mut programs = [0; 2];
+                    for color in [
+                        [1., 0.25, 0.5, 1.],
+                        [0.2, 0.8, 0.1, 0.5],
+                        [1., 0.25, 0.5, 1.],
+                    ] {
+                        for v in &mut vertices {
+                            v.color = color;
+                            v.back_color = color;
+                        }
+                        let mut reference = Vec::new();
+                        // Leave point-only uniforms enabled in the general
+                        // program, then visit affine triangles before returning.
+                        let mut points = state.clone();
+                        points.point_size_array = true;
+                        points.point_sprite = true;
+                        points.point_coord_replace[0] = true;
+                        gpu.draw_object_space(
+                            &target,
+                            &points,
+                            GL_POINTS,
+                            &vertices,
+                            &stages,
+                            &textures,
+                            [1, 0, 0, 0],
+                            &transforms,
+                        )
+                        .unwrap();
+                        for general in [false, true, false] {
+                            // r=0 for every corner, so adding r to q changes no coordinate.
+                            // The conservative selector must nevertheless use the general shader.
+                            transforms.textures[0][11] = if general { 1. } else { 0. };
+                            gpu.clear(
+                                32,
+                                32,
+                                &state,
+                                [0.; 4],
+                                1.,
+                                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                            )
+                            .unwrap();
+                            gpu.draw_object_space(
+                                &target,
+                                &state,
+                                GL_TRIANGLES,
+                                &vertices,
+                                &stages,
+                                &textures,
+                                [1, 0, 0, 0],
+                                &transforms,
+                            )
+                            .unwrap();
+                            assert_eq!(gpu.affine_program, !general);
+                            let slot = usize::from(general);
+                            if programs[slot] == 0 {
+                                programs[slot] = gpu.program;
+                            }
+                            assert_eq!(programs[slot], gpu.program);
+                            gpu.read(&mut target).unwrap();
+                            if reference.is_empty() {
+                                reference = target.color.clone();
+                            } else {
+                                for (a, b) in reference.iter().zip(&target.color) {
+                                    assert!(
+                                        a.abs_diff(*b) <= 1,
+                                        "es={es} rgb565={rgb565} scale={scale}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    assert_ne!(programs[0], programs[1]);
+                }
+            }
         }
     }
 
