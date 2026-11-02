@@ -614,18 +614,27 @@ fn wrap_from_enum(value: u32) -> Option<Wrap> {
 }
 
 /// Number of bytes one texel occupies in the guest's buffer.
-pub fn bytes_per_texel(format: u32, ty: u32) -> Option<usize> {
+/// Validate enum membership separately from packed format/type compatibility.
+pub fn pixel_layout(format: u32, ty: u32) -> Result<usize, u32> {
+    let components = match format {
+        GL_ALPHA | GL_LUMINANCE => 1,
+        GL_LUMINANCE_ALPHA => 2,
+        GL_RGB => 3,
+        GL_RGBA => 4,
+        _ => return Err(GL_INVALID_ENUM),
+    };
     match ty {
-        GL_UNSIGNED_SHORT_5_6_5 | GL_UNSIGNED_SHORT_4_4_4_4 | GL_UNSIGNED_SHORT_5_5_5_1 => Some(2),
-        GL_UNSIGNED_BYTE => match format {
-            GL_ALPHA | GL_LUMINANCE => Some(1),
-            GL_LUMINANCE_ALPHA => Some(2),
-            GL_RGB => Some(3),
-            GL_RGBA => Some(4),
-            _ => None,
-        },
-        _ => None,
+        GL_UNSIGNED_BYTE => Ok(components),
+        GL_UNSIGNED_SHORT_5_6_5 if format == GL_RGB => Ok(2),
+        GL_UNSIGNED_SHORT_4_4_4_4 | GL_UNSIGNED_SHORT_5_5_5_1 if format == GL_RGBA => Ok(2),
+        GL_UNSIGNED_SHORT_5_6_5 | GL_UNSIGNED_SHORT_4_4_4_4 | GL_UNSIGNED_SHORT_5_5_5_1 => {
+            Err(GL_INVALID_OPERATION)
+        }
+        _ => Err(GL_INVALID_ENUM),
     }
+}
+pub fn bytes_per_texel(format: u32, ty: u32) -> Option<usize> {
+    pixel_layout(format, ty).ok()
 }
 
 /// Expand a 5-bit channel to 8 bits, replicating the high bits so that
@@ -650,8 +659,8 @@ fn expand4(v: u16) -> u8 {
 
 /// Decode a guest texel buffer into RGBA8888.
 ///
-/// Returns `None` if the format/type combination is not one OpenGL ES
-/// 1.1 permits, which the caller reports as `GL_INVALID_ENUM`.
+/// Returns `None` for an unsupported format/type pair or a short snapshot.
+/// Callers use `pixel_layout` first to distinguish the GL error categories.
 pub fn decode_to_rgba(
     data: &[u8],
     width: u32,

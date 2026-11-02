@@ -1077,23 +1077,6 @@ fn gl_buffer_sub_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     Ok(VOID)
 }
 
-/// Bytes one texel of `(format, type)` occupies in the guest's upload.
-fn texel_bytes(format: u32, ty: u32) -> Option<u32> {
-    Some(match ty {
-        GL_UNSIGNED_BYTE => match format {
-            pocket_gles::GL_ALPHA | pocket_gles::GL_LUMINANCE => 1,
-            pocket_gles::GL_LUMINANCE_ALPHA => 2,
-            pocket_gles::GL_RGB => 3,
-            pocket_gles::GL_RGBA => 4,
-            _ => return None,
-        },
-        pocket_gles::GL_UNSIGNED_SHORT_5_6_5
-        | pocket_gles::GL_UNSIGNED_SHORT_4_4_4_4
-        | pocket_gles::GL_UNSIGNED_SHORT_5_5_5_1 => 2,
-        _ => return None,
-    })
-}
-
 fn gl_polygon_offset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let factor = f32::from_bits(ctx.arg_u32(0)?);
     let units = f32::from_bits(ctx.arg_u32(1)?);
@@ -1133,37 +1116,51 @@ fn gl_copy_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
 }
 
 fn gl_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // (target, level, internalformat, width, height, border, format,
-    //  type, pixels) — nine arguments, five of them on the stack.
     let target = ctx.arg_u32(0)?;
     let level = ctx.arg_u32(1)? as i32;
+    let internalformat = ctx.arg_u32(2)?;
     let width = ctx.arg_u32(3)?;
     let height = ctx.arg_u32(4)?;
+    let border = ctx.arg_u32(5)? as i32;
     let format = ctx.arg_u32(6)?;
     let ty = ctx.arg_u32(7)?;
     let pixels = ctx.arg_u32(8)?;
-    let data = load_texels(ctx, pixels, width, height, format, ty)?;
-    with_ctx(|c| c.tex_image_2d(target, level, width, height, format, ty, &data));
+    if !with_ctx(|c| {
+        c.validate_tex_image_2d(
+            target,
+            level,
+            internalformat,
+            width,
+            height,
+            border,
+            format,
+            ty,
+        )
+    }) {
+        return Ok(VOID);
+    }
+    if let Some(data) = load_texels(ctx, pixels, width, height, format, ty)? {
+        with_ctx(|c| c.tex_image_2d(target, level, width, height, format, ty, &data));
+    }
     Ok(VOID)
 }
 
 fn gl_tex_sub_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // (target, level, xoffset, yoffset, width, height, format, type,
-    //  pixels)
     let target = ctx.arg_u32(0)?;
     let level = ctx.arg_u32(1)? as i32;
-    let xoff = ctx.arg_u32(2)?;
-    let yoff = ctx.arg_u32(3)?;
+    let x = ctx.arg_u32(2)?;
+    let y = ctx.arg_u32(3)?;
     let width = ctx.arg_u32(4)?;
     let height = ctx.arg_u32(5)?;
     let format = ctx.arg_u32(6)?;
     let ty = ctx.arg_u32(7)?;
     let pixels = ctx.arg_u32(8)?;
-    let data = load_texels(ctx, pixels, width, height, format, ty)?;
-    if data.is_empty() {
+    if !with_ctx(|c| c.validate_tex_sub_image_2d(target, level, x, y, width, height, format, ty)) {
         return Ok(VOID);
     }
-    with_ctx(|c| c.tex_sub_image_2d(target, level, xoff, yoff, width, height, format, ty, &data));
+    if let Some(data) = load_texels(ctx, pixels, width, height, format, ty)? {
+        with_ctx(|c| c.tex_sub_image_2d(target, level, x, y, width, height, format, ty, &data));
+    }
     Ok(VOID)
 }
 
@@ -1177,16 +1174,15 @@ fn load_texels(
     height: u32,
     format: u32,
     ty: u32,
-) -> Result<Vec<u8>, KernelError> {
-    if pixels == 0 {
-        return Ok(Vec::new());
+) -> Result<Option<Vec<u8>>, KernelError> {
+    if pixels == 0 || width == 0 || height == 0 {
+        return Ok(Some(Vec::new()));
     }
-    let Some(bpp) = texel_bytes(format, ty) else {
-        return Ok(Vec::new());
-    };
+    let bpp =
+        pocket_gles::texture::pixel_layout(format, ty).expect("validated pixel layout") as u32;
     if width > 1024 || height > 1024 {
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let row = width as usize * bpp as usize;
     let align = UNPACK_ALIGNMENT.with(Cell::get);
@@ -1197,13 +1193,14 @@ fn load_texels(
         stride * (height as usize - 1) + row
     };
     let Ok(bytes) = ctx.cpu.read_mem(pixels, len as u32) else {
-        return Ok(Vec::new());
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_OPERATION));
+        return Ok(None);
     };
     let mut tight = Vec::with_capacity(row * height as usize);
     for y in 0..height as usize {
         tight.extend_from_slice(&bytes[y * stride..y * stride + row]);
     }
-    Ok(tight)
+    Ok(Some(tight))
 }
 
 fn gl_tex_parameterf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2964,6 +2961,123 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn image_upload_bridge_checks_stack_parameters_before_unmapped_pixels() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(4, 4);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let args = [
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            2,
+            2,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            0,
+        ];
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &args);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        let saved = with_ctx(|c| c.textures[&0].clone());
+        for (index, value, error) in [
+            (0, 0, GL_INVALID_ENUM),
+            (2, 4, GL_INVALID_VALUE),
+            (5, 1, GL_INVALID_VALUE),
+            (3, 3, GL_INVALID_VALUE),
+            (6, GL_RGB, GL_INVALID_OPERATION),
+            (7, GL_UNSIGNED_SHORT_5_6_5, GL_INVALID_OPERATION),
+        ] {
+            let mut bad = args;
+            bad[index] = value;
+            bad[8] = 0xdead0000;
+            call(&mut cpu, &mut kernel, gl_tex_image_2d, &bad);
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), error);
+            assert_eq!(with_ctx(|c| c.textures[&0].revision), saved.revision);
+        }
+        let mut unreadable = args;
+        unreadable[8] = 0xdead0000;
+        call(&mut cpu, &mut kernel, gl_tex_image_2d, &unreadable);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+        assert_eq!(with_ctx(|c| c.textures[&0].rgba.clone()), saved.rgba);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_sub_image_2d,
+            &[GL_TEXTURE_2D, 0, 0, 0, 0, 0, 0xdead, GL_UNSIGNED_BYTE, 0],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_ENUM
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_tex_sub_image_2d,
+            &[
+                GL_TEXTURE_2D,
+                0,
+                2,
+                2,
+                0,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                0xdead0000,
+            ],
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        assert_eq!(with_ctx(|c| c.textures[&0].revision), saved.revision);
+    }
+    #[test]
+    fn image_upload_bridge_preserves_all_supported_formats_and_unpack_alignments() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(4, 4);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        for (format, ty) in [
+            (GL_ALPHA, GL_UNSIGNED_BYTE),
+            (GL_LUMINANCE, GL_UNSIGNED_BYTE),
+            (GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE),
+            (GL_RGB, GL_UNSIGNED_BYTE),
+            (GL_RGBA, GL_UNSIGNED_BYTE),
+            (GL_RGB, GL_UNSIGNED_SHORT_5_6_5),
+            (GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4),
+            (GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1),
+        ] {
+            let row = pocket_gles::texture::bytes_per_texel(format, ty).unwrap() * 2;
+            let tight: Vec<u8> = (0..row * 2).map(|i| (i * 17 + 3) as u8).collect();
+            let expected = pocket_gles::texture::decode_to_rgba(&tight, 2, 2, format, ty).unwrap();
+            for align in [1usize, 2, 4, 8] {
+                let stride = row.div_ceil(align) * align;
+                let mut padded = vec![0xcc; stride + row];
+                padded[..row].copy_from_slice(&tight[..row]);
+                padded[stride..].copy_from_slice(&tight[row..]);
+                cpu.write_mem(SCRATCH, &padded).unwrap();
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    gl_pixel_store,
+                    &[0x0cf5, align as u32],
+                );
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    gl_tex_image_2d,
+                    &[GL_TEXTURE_2D, 0, format, 2, 2, 0, format, ty, SCRATCH],
+                );
+                assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+                assert_eq!(with_ctx(|c| c.textures[&0].rgba.clone()), expected);
+            }
+        }
+    }
 
     #[test]
     fn point_array_api_validates_and_exposes_captured_binding() {

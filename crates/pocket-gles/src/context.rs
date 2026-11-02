@@ -1169,15 +1169,12 @@ impl Context {
                 });
             }
         }
-        self.tex_sub_image_2d(
-            target,
+        self.apply_texture_patch(
             level,
             xo as u32,
             yo as u32,
             width as u32,
             height as u32,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
             &patch,
         );
     }
@@ -1318,6 +1315,12 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
+        if (width != 0 && !(width as u32).is_power_of_two())
+            || (height != 0 && !(height as u32).is_power_of_two())
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
         if self.target.rgb565 && matches!(format, GL_ALPHA | GL_LUMINANCE_ALPHA | GL_RGBA) {
             self.set_error(GL_INVALID_OPERATION);
             return;
@@ -1368,6 +1371,115 @@ impl Context {
         }
     }
 
+    /// Validate before the bridge touches guest pixel memory, including NULL uploads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_tex_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        internalformat: u32,
+        width: u32,
+        height: u32,
+        border: i32,
+        format: u32,
+        ty: u32,
+    ) -> bool {
+        let error = if target != GL_TEXTURE_2D {
+            Some(GL_INVALID_ENUM)
+        } else if !matches!(
+            internalformat,
+            GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA | GL_RGB | GL_RGBA
+        ) {
+            Some(GL_INVALID_VALUE)
+        } else if !(0..=10).contains(&level)
+            || border != 0
+            || width > (1024u32 >> level)
+            || height > (1024u32 >> level)
+            || (width != 0 && !width.is_power_of_two())
+            || (height != 0 && !height.is_power_of_two())
+        {
+            Some(GL_INVALID_VALUE)
+        } else if let Err(error) = texture::pixel_layout(format, ty) {
+            Some(error)
+        } else if internalformat != format {
+            Some(GL_INVALID_OPERATION)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.set_error(error);
+            false
+        } else {
+            true
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_tex_sub_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        format: u32,
+        ty: u32,
+    ) -> bool {
+        if target != GL_TEXTURE_2D {
+            self.set_error(GL_INVALID_ENUM);
+            return false;
+        }
+        if !(0..=10).contains(&level)
+            || width > 1024
+            || height > 1024
+            || x > i32::MAX as u32
+            || y > i32::MAX as u32
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return false;
+        }
+        if let Err(error) = texture::pixel_layout(format, ty) {
+            self.set_error(error);
+            return false;
+        }
+        let unit = self.active_texture as usize;
+        let image = self
+            .texture_units
+            .get(unit)
+            .and_then(|u| self.textures.get(&u.bound_texture));
+        let Some(tex) = image else {
+            self.set_error(GL_INVALID_OPERATION);
+            return false;
+        };
+        let dims = if level == 0 && tex.formats.contains_key(&0) {
+            Some((tex.width, tex.height))
+        } else {
+            tex.mipmaps.get(&(level as u32)).map(|m| (m.0, m.1))
+        };
+        let Some((tw, th)) = dims else {
+            self.set_error(GL_INVALID_OPERATION);
+            return false;
+        };
+        if x.checked_add(width).is_none_or(|n| n > tw)
+            || y.checked_add(height).is_none_or(|n| n > th)
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return false;
+        }
+        let internal = tex.formats.get(&(level as u32)).copied().unwrap_or(GL_RGBA);
+        // Compressed-image update restrictions belong to their format-specific path.
+        if matches!(
+            internal,
+            GL_ALPHA | GL_LUMINANCE | GL_LUMINANCE_ALPHA | GL_RGB | GL_RGBA
+        ) && internal != format
+        {
+            self.set_error(GL_INVALID_OPERATION);
+            return false;
+        }
+        true
+    }
+
     pub fn tex_image_2d(
         &mut self,
         target: u32,
@@ -1378,12 +1490,7 @@ impl Context {
         ty: u32,
         data: &[u8],
     ) {
-        if target != GL_TEXTURE_2D {
-            self.set_error(GL_INVALID_ENUM);
-            return;
-        }
-        if !(0..=10).contains(&level) || width > (1024u32 >> level) || height > (1024u32 >> level) {
-            self.set_error(GL_INVALID_VALUE);
+        if !self.validate_tex_image_2d(target, level, format, width, height, 0, format, ty) {
             return;
         }
         let unit = self.active_texture as usize;
@@ -1397,7 +1504,7 @@ impl Context {
             match texture::decode_to_rgba(data, width, height, format, ty) {
                 Some(v) => v,
                 None => {
-                    self.set_error(GL_INVALID_ENUM);
+                    self.set_error(GL_INVALID_OPERATION);
                     return;
                 }
             }
@@ -1610,18 +1717,31 @@ impl Context {
         ty: u32,
         data: &[u8],
     ) {
-        if target != GL_TEXTURE_2D {
-            self.set_error(GL_INVALID_ENUM);
+        if !self
+            .validate_tex_sub_image_2d(target, level, xoffset, yoffset, width, height, format, ty)
+        {
             return;
         }
-        if !(0..=10).contains(&level) || width > 1024 || height > 1024 {
-            self.set_error(GL_INVALID_VALUE);
+        if width == 0 || height == 0 || data.is_empty() {
             return;
         }
         let Some(patch) = texture::decode_to_rgba(data, width, height, format, ty) else {
-            self.set_error(GL_INVALID_ENUM);
+            self.set_error(GL_INVALID_OPERATION);
             return;
         };
+        self.apply_texture_patch(level, xoffset, yoffset, width, height, &patch);
+    }
+
+    /// Canonical RGBA patch from a validated upload or framebuffer copy.
+    fn apply_texture_patch(
+        &mut self,
+        level: i32,
+        xoffset: u32,
+        yoffset: u32,
+        width: u32,
+        height: u32,
+        patch: &[u8],
+    ) {
         let unit = self.active_texture as usize;
         if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_ENUM);
@@ -6148,5 +6268,223 @@ mod texture_completeness_tests {
                 exercise(&mut c);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod image_validation_tests {
+    use super::*;
+    #[test]
+    fn null_uploads_validate_all_parameters_and_invalid_calls_are_atomic() {
+        let mut c = Context::new(4, 4);
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, &[23; 16]);
+        let saved = c.textures[&0].clone();
+        for (target, level, internal, w, h, border, format, ty, error) in [
+            (
+                0,
+                0,
+                GL_RGBA,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_ENUM,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                4,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                2,
+                2,
+                1,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                3,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (
+                GL_TEXTURE_2D,
+                -1,
+                GL_RGBA,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (
+                GL_TEXTURE_2D,
+                11,
+                GL_RGBA,
+                1,
+                1,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (
+                GL_TEXTURE_2D,
+                1,
+                GL_RGBA,
+                1024,
+                1,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                2,
+                2,
+                0,
+                0xdead,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_ENUM,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                0xdead,
+                GL_INVALID_ENUM,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_SHORT_5_6_5,
+                GL_INVALID_OPERATION,
+            ),
+            (
+                GL_TEXTURE_2D,
+                0,
+                GL_RGB,
+                2,
+                2,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_OPERATION,
+            ),
+        ] {
+            assert!(!c.validate_tex_image_2d(target, level, internal, w, h, border, format, ty));
+            assert_eq!(c.take_error(), error);
+            assert_eq!(c.textures[&0].revision, saved.revision);
+            assert_eq!(c.textures[&0].rgba, saved.rgba);
+        }
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            2,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_SHORT_5_6_5,
+            &[],
+        );
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        assert_eq!(c.textures[&0].rgba, saved.rgba);
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 0, 4, GL_RGBA, GL_UNSIGNED_BYTE, &[]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!((c.textures[&0].width, c.textures[&0].height), (0, 4));
+        assert!(!c.textures[&0].is_complete());
+    }
+    #[test]
+    fn subimage_bounds_format_and_empty_rectangles_preserve_storage() {
+        let mut c = Context::new(4, 4);
+        c.tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE, &[]);
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 4, 2, GL_RGB, GL_UNSIGNED_BYTE, &[20; 24]);
+        let saved = c.textures[&0].clone();
+        for (x, y, w, h, format, ty, error) in [
+            (0, 0, 0, 0, 0xdead, GL_UNSIGNED_BYTE, GL_INVALID_ENUM),
+            (
+                0,
+                0,
+                0,
+                0,
+                GL_RGB,
+                GL_UNSIGNED_SHORT_4_4_4_4,
+                GL_INVALID_OPERATION,
+            ),
+            (0, 0, 0, 0, GL_RGBA, GL_UNSIGNED_BYTE, GL_INVALID_OPERATION),
+            (
+                u32::MAX,
+                0,
+                1,
+                1,
+                GL_RGB,
+                GL_UNSIGNED_BYTE,
+                GL_INVALID_VALUE,
+            ),
+            (3, 0, 2, 1, GL_RGB, GL_UNSIGNED_BYTE, GL_INVALID_VALUE),
+            (0, 2, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, GL_INVALID_VALUE),
+        ] {
+            c.tex_sub_image_2d(GL_TEXTURE_2D, 0, x, y, w, h, format, ty, &[]);
+            assert_eq!(c.take_error(), error);
+            assert_eq!(c.textures[&0].rgba, saved.rgba);
+            assert_eq!(c.textures[&0].revision, saved.revision);
+        }
+        c.tex_sub_image_2d(GL_TEXTURE_2D, 0, 4, 2, 0, 0, GL_RGB, GL_UNSIGNED_BYTE, &[]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].revision, saved.revision);
+        // Subimages may be non-power-of-two even though complete images may not.
+        c.tex_sub_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            1,
+            0,
+            3,
+            1,
+            GL_RGB,
+            GL_UNSIGNED_BYTE,
+            &[100; 9],
+        );
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(&c.textures[&0].rgba[4..16], &[100, 100, 100, 255].repeat(3));
+    }
+    #[test]
+    fn invalid_copy_image_does_not_read_back_or_change_texture() {
+        let mut c = Context::new(4, 4);
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, &[71; 16]);
+        let revision = c.textures[&0].revision;
+        c.copy_tex_image_2d(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, 3, 2, 0);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        assert_eq!(c.textures[&0].revision, revision);
+        assert_eq!(c.textures[&0].rgba, [71; 16]);
     }
 }
