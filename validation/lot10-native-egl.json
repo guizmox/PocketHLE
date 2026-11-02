@@ -1,0 +1,410 @@
+{
+  "synthetic_config_table": {
+    "0": 16,
+    "4": 0,
+    "8": 5,
+    "12": 6,
+    "16": 5,
+    "20": 16,
+    "24": 0,
+    "28": 12344,
+    "32": 1,
+    "76": 7
+  },
+  "probes": [
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "0100000001000000"
+      },
+      "case": "empty"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "0100000001000000"
+      },
+      "case": "rgb565"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "red8"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "alpha1"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "depth24"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "stencil8"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "0100000001000000"
+      },
+      "case": "all_surfaces"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "0100000001000000"
+      },
+      "case": "id_override"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "missing_id"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x0",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "04300000",
+        "0x27000100": "aaaa0000bbbb0000"
+      },
+      "case": "unknown_attribute"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x27000000",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "0100000001000000"
+      },
+      "case": "dont_care_red"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0xdead",
+        "0x0",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x0",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "08300000",
+        "0x27000100": "aaaa0000bbbb0000"
+      },
+      "case": "bad_display"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x0",
+        "0x27000100",
+        "0x1",
+        "0x0"
+      ],
+      "r0": "0x0",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "0c300000",
+        "0x27000100": "aaaa0000bbbb0000"
+      },
+      "case": "null_count"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x0",
+        "0x27000100",
+        "0x1",
+        "0x27000104"
+      ],
+      "r0": "0x0",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "01300000",
+        "0x27000100": "aaaa0000bbbb0000"
+      },
+      "case": "uninitialized"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000001000000"
+      },
+      "case": "count_only"
+    },
+    {
+      "api": "eglChooseConfig",
+      "args": [
+        "0x1",
+        "0x0",
+        "0x27000100",
+        "0x0",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "zero_capacity"
+    },
+    {
+      "api": "eglGetConfigs",
+      "args": [
+        "0x1",
+        "0x27000100",
+        "0x0",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000000000000"
+      },
+      "case": "get_zero_capacity"
+    },
+    {
+      "api": "eglGetConfigs",
+      "args": [
+        "0x1",
+        "0x0",
+        "0x0",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000001000000"
+      },
+      "case": "get_count_only"
+    },
+    {
+      "api": "eglGetConfigAttrib",
+      "args": [
+        "0x1",
+        "0x1",
+        "0x3025",
+        "0x27000104"
+      ],
+      "r0": "0x1",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "00300000",
+        "0x27000100": "aaaa000010000000"
+      },
+      "case": "get_depth"
+    },
+    {
+      "api": "eglGetConfigAttrib",
+      "args": [
+        "0x1",
+        "0x63",
+        "0x3025",
+        "0x27000104"
+      ],
+      "r0": "0x0",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "05300000",
+        "0x27000100": "aaaa0000bbbb0000"
+      },
+      "case": "bad_config"
+    },
+    {
+      "api": "eglGetConfigAttrib",
+      "args": [
+        "0x1",
+        "0x1",
+        "0xdead",
+        "0x27000104"
+      ],
+      "r0": "0x0",
+      "log": [],
+      "backend_skipped": [],
+      "fault": null,
+      "inspect": {
+        "0x1d9c4bc": "04300000",
+        "0x27000100": "aaaa0000bbbb0000"
+      },
+      "case": "bad_attribute"
+    }
+  ]
+}

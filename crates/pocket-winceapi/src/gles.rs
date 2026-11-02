@@ -4,6 +4,7 @@
 //! in [`register`] by iterating the ordinal tables, mirroring what
 //! [`super::WinCeDispatcher::new`] does for `coredll.dll`.
 
+mod egl_config;
 mod es11;
 
 use pocket_gles::context::SurfaceBuffers;
@@ -17,11 +18,11 @@ use pocket_gles::fixed::{word_to_f32, word_to_f32_bits};
 use pocket_gles::matrix::Matrix4;
 use pocket_gles::ordinals as gles_ord;
 use pocket_gles::{
-    EGL_ALPHA_SIZE, EGL_BAD_DISPLAY, EGL_BLUE_SIZE, EGL_BUFFER_SIZE, EGL_CONFIG_ID, EGL_DEPTH_SIZE,
-    EGL_EXTENSIONS, EGL_FALSE, EGL_GREEN_SIZE, EGL_NONE, EGL_NO_SURFACE, EGL_RED_SIZE,
-    EGL_RENDERABLE_TYPE, EGL_SUCCESS, EGL_SURFACE_TYPE, EGL_TRUE, EGL_VENDOR, EGL_VERSION,
-    EGL_WINDOW_BIT, GL_UNSIGNED_BYTE,
+    EGL_BAD_DISPLAY, EGL_CONFIG_ID, EGL_EXTENSIONS, EGL_FALSE, EGL_NONE, EGL_NO_SURFACE,
+    EGL_SUCCESS, EGL_TRUE, EGL_VENDOR, EGL_VERSION, GL_UNSIGNED_BYTE,
 };
+#[cfg(test)]
+use pocket_gles::{EGL_BLUE_SIZE, EGL_BUFFER_SIZE, EGL_DEPTH_SIZE, EGL_GREEN_SIZE, EGL_RED_SIZE};
 
 use pocket_kernel::{DispatchOutcome, KernelError};
 
@@ -48,6 +49,7 @@ struct EglImage {
     buffers: Option<SurfaceBuffers>,
 }
 struct EglSurfaces {
+    initialized: bool,
     images: HashMap<u32, EglImage>,
     active: u32,
     draw: u32,
@@ -69,6 +71,7 @@ impl EglSurfaces {
             },
         );
         Self {
+            initialized: false,
             images,
             active: SURFACE_HANDLE,
             draw: SURFACE_HANDLE,
@@ -1802,6 +1805,7 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if minor != 0 {
         ctx.cpu.write_mem(minor, &1i32.to_le_bytes())?;
     }
+    SURFACES.with(|s| s.borrow_mut().initialized = true);
     if with_ctx(|c| c.gpu_requested()) {
         set_gpu_renderer(true);
     }
@@ -1834,104 +1838,89 @@ fn egl_terminate(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
-/// `eglGetConfigs(dpy, configs, config_size, *num_config)` — we have
-/// exactly one config to offer.
-fn egl_get_configs(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let configs = ctx.arg_u32(1)?;
-    let size = ctx.arg_u32(2)? as i32;
-    let num = ctx.arg_u32(3)?;
-    let written: i32 = if configs != 0 && size > 0 {
-        ctx.cpu.write_mem(configs, &CONFIG_HANDLE.to_le_bytes())?;
-        1
+/// Configuration entry points share the same virtual attachment description.
+fn egl_config_display(ctx: &mut CallCtx<'_>) -> Result<bool, KernelError> {
+    if ctx.arg_u32(0)? != DISPLAY_HANDLE {
+        set_egl_error(EGL_BAD_DISPLAY);
+        return Ok(false);
+    }
+    if !SURFACES.with(|s| s.borrow().initialized) {
+        set_egl_error(pocket_gles::EGL_NOT_INITIALIZED);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn egl_config_output(
+    ctx: &mut CallCtx<'_>,
+    configs: u32,
+    size: i32,
+    num: u32,
+    matched: bool,
+) -> Result<DispatchOutcome, KernelError> {
+    let count: i32 = if configs == 0 {
+        matched as i32
     } else {
-        // A null `configs` is the "how many are there?" query.
-        1
+        (matched && size > 0) as i32
     };
-    if num != 0 {
-        ctx.cpu.write_mem(num, &written.to_le_bytes())?;
-    }
-    Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
-}
-
-/// `eglChooseConfig(dpy, attrib_list, configs, config_size,
-/// *num_config)`. The attribute list is read for logging but not
-/// honoured: there is one config, and refusing to return it would
-/// leave the guest with nothing to render into.
-fn egl_choose_config(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let attribs = ctx.arg_u32(1)?;
-    let configs = ctx.arg_u32(2)?;
-    let size = ctx.arg_u32(3)? as i32;
-    let num = ctx.arg_u32(4)?;
-    if attribs != 0 {
-        log_attrib_list(ctx, attribs);
-    }
-    if configs != 0 && size > 0 {
+    if configs != 0 && count != 0 {
         ctx.cpu.write_mem(configs, &CONFIG_HANDLE.to_le_bytes())?;
     }
-    if num != 0 {
-        let count: i32 = if configs != 0 && size <= 0 { 0 } else { 1 };
-        ctx.cpu.write_mem(num, &count.to_le_bytes())?;
-    }
+    ctx.cpu.write_mem(num, &count.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
-/// Walk an `EGL_NONE`-terminated attribute list and log it. Helps when
-/// a game silently refuses to start because it wanted a config we
-/// don't describe accurately.
-fn log_attrib_list(ctx: &mut CallCtx<'_>, mut ptr: u32) {
-    if !log::log_enabled!(log::Level::Debug) {
-        return;
+fn egl_get_configs(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    let mut pairs = Vec::new();
-    for _ in 0..32 {
-        let Ok(key) = ctx.cpu.read_u32_le(ptr) else {
-            break;
-        };
-        if key == EGL_NONE {
-            break;
-        }
-        let Ok(value) = ctx.cpu.read_u32_le(ptr + 4) else {
-            break;
-        };
-        pairs.push(format!("0x{key:04x}={value}"));
-        ptr += 8;
+    let (configs, size, num) = (ctx.arg_u32(1)?, ctx.arg_u32(2)? as i32, ctx.arg_u32(3)?);
+    if num == 0 || configs != 0 && size < 0 {
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    log::debug!("eglChooseConfig attribs: [{}]", pairs.join(", "));
+    egl_config_output(ctx, configs, size, num, true)
 }
 
-/// `eglGetConfigAttrib(dpy, config, attribute, *value)`. The numbers
-/// describe the RGB565 window surface the rasterizer actually presents.
-fn egl_get_config_attrib(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let attribute = ctx.arg_u32(2)?;
-    let out = ctx.arg_u32(3)?;
-    let value: i32 = match attribute {
-        EGL_BUFFER_SIZE => 16,
-        EGL_RED_SIZE => 5,
-        EGL_GREEN_SIZE => 6,
-        EGL_BLUE_SIZE => 5,
-        EGL_ALPHA_SIZE => 0,
-        EGL_DEPTH_SIZE => with_ctx(|c| c.state.depth_bits() as i32),
-        pocket_gles::EGL_STENCIL_SIZE => 0,
-        pocket_gles::EGL_SAMPLES | pocket_gles::EGL_SAMPLE_BUFFERS => 0,
-        EGL_SURFACE_TYPE => {
-            (EGL_WINDOW_BIT | pocket_gles::EGL_PBUFFER_BIT | pocket_gles::EGL_PIXMAP_BIT) as i32
-        }
-        EGL_CONFIG_ID => 1,
-        EGL_RENDERABLE_TYPE => 1, // EGL_OPENGL_ES_BIT
-        pocket_gles::EGL_CONFIG_CAVEAT | pocket_gles::EGL_TRANSPARENT_TYPE => EGL_NONE as i32,
-        pocket_gles::EGL_NATIVE_RENDERABLE => EGL_FALSE as i32,
-        pocket_gles::EGL_LEVEL => 0,
-        pocket_gles::EGL_MAX_PBUFFER_WIDTH => 1024,
-        pocket_gles::EGL_MAX_PBUFFER_HEIGHT => 1024,
-        pocket_gles::EGL_MAX_PBUFFER_PIXELS => 1024 * 1024,
-        _ => {
-            set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
-            return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-        }
-    };
-    if out != 0 {
-        ctx.cpu.write_mem(out, &value.to_le_bytes())?;
+fn egl_choose_config(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
+    let (attribs, configs, size, num) = (
+        ctx.arg_u32(1)?,
+        ctx.arg_u32(2)?,
+        ctx.arg_u32(3)? as i32,
+        ctx.arg_u32(4)?,
+    );
+    if num == 0 || configs != 0 && size < 0 {
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let matched = egl_config::read_pairs(ctx, attribs)
+        .and_then(|pairs| egl_config::Config::current().matches(&pairs));
+    match matched {
+        Ok(matched) => egl_config_output(ctx, configs, size, num, matched),
+        Err(error) => {
+            set_egl_error(error);
+            Ok(DispatchOutcome::ReturnedR0(EGL_FALSE))
+        }
+    }
+}
+
+fn egl_get_config_attrib(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_surface_args(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let (attribute, out) = (ctx.arg_u32(2)?, ctx.arg_u32(3)?);
+    let Some(value) = egl_config::Config::current().attribute(attribute) else {
+        set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    };
+    if out == 0 {
+        set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    ctx.cpu.write_mem(out, &value.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
@@ -1939,6 +1928,21 @@ fn egl_get_config_attrib(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 /// surface is sized from the kernel framebuffer, which is what the
 /// frontend actually shows.
 fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_surface_args(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+    }
+    let attribs = ctx.arg_u32(3)?;
+    match egl_config::read_pairs(ctx, attribs) {
+        Ok(pairs) if pairs.is_empty() => {}
+        _ => {
+            set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+            return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+        }
+    }
+    if ctx.arg_u32(2)? == 0 {
+        set_egl_error(pocket_gles::EGL_BAD_NATIVE_WINDOW);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+    }
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
     SURFACES.with(|s| {
         let mut s = s.borrow_mut();
@@ -1966,13 +1970,15 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     Ok(DispatchOutcome::ReturnedR0(SURFACE_HANDLE))
 }
 
-fn egl_create_context(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+fn egl_create_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !egl_surface_args(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     Ok(DispatchOutcome::ReturnedR0(CONTEXT_HANDLE))
 }
 
 fn egl_surface_args(ctx: &mut CallCtx<'_>) -> Result<bool, KernelError> {
-    if ctx.arg_u32(0)? != DISPLAY_HANDLE {
-        set_egl_error(EGL_BAD_DISPLAY);
+    if !egl_config_display(ctx)? {
         return Ok(false);
     }
     if ctx.arg_u32(1)? != CONFIG_HANDLE {
@@ -2052,6 +2058,14 @@ fn egl_create_pbuffer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 fn egl_create_pixmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let attribs = ctx.arg_u32(3)?;
+    match egl_config::read_pairs(ctx, attribs) {
+        Ok(pairs) if pairs.is_empty() => {}
+        _ => {
+            set_egl_error(pocket_gles::EGL_BAD_ATTRIBUTE);
+            return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+        }
     }
     let bitmap = ctx.arg_u32(2)?;
     let Some(bm) = ctx.kernel.gdi.bitmap(bitmap) else {
@@ -2679,6 +2693,7 @@ fn reset_for_test(width: u32, height: u32) {
     reset_for_session();
     SURFACES.with(|s| {
         let mut s = s.borrow_mut();
+        s.initialized = true;
         let image = s.images.get_mut(&SURFACE_HANDLE).unwrap();
         image.width = width;
         image.height = height;
@@ -4868,9 +4883,265 @@ mod tests {
         assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), EGL_SUCCESS);
     }
 
+    fn write_egl_attributes(cpu: &mut StubCpu, pairs: &[(u32, u32)]) {
+        let mut bytes = Vec::new();
+        for &(key, value) in pairs {
+            bytes.extend(key.to_le_bytes());
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend(EGL_NONE.to_le_bytes());
+        cpu.write_mem(SCRATCH, &bytes).unwrap();
+    }
+
+    #[test]
+    fn egl_selection_filters_actual_attachments_without_writing_nonmatches() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(8, 8);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        for (attrs, count) in [
+            (vec![], 1),
+            (
+                vec![(EGL_RED_SIZE, 5), (EGL_GREEN_SIZE, 6), (EGL_DEPTH_SIZE, 16)],
+                1,
+            ),
+            (vec![(EGL_ALPHA_SIZE, 8)], 0),
+            (vec![(EGL_STENCIL_SIZE, 8)], 0),
+            (vec![(EGL_SAMPLE_BUFFERS, 1)], 0),
+            (vec![(EGL_RENDERABLE_TYPE, 4)], 0),
+            (vec![(EGL_CONFIG_ID, 1), (EGL_STENCIL_SIZE, 8)], 1),
+            (vec![(EGL_CONFIG_ID, 2)], 0),
+        ] {
+            write_egl_attributes(&mut cpu, &attrs);
+            cpu.write_mem(SCRATCH + 0x100, &0xaaaaaaaau32.to_le_bytes())
+                .unwrap();
+            let ok = call(
+                &mut cpu,
+                &mut kernel,
+                egl_choose_config,
+                &[DISPLAY_HANDLE, SCRATCH, SCRATCH + 0x100, 1, SCRATCH + 0x104],
+            );
+            assert_eq!(ok, EGL_TRUE, "{attrs:?}");
+            assert_eq!(cpu.read_u32_le(SCRATCH + 0x104).unwrap(), count);
+            assert_eq!(
+                cpu.read_u32_le(SCRATCH + 0x100).unwrap(),
+                if count == 1 {
+                    CONFIG_HANDLE
+                } else {
+                    0xaaaaaaaa
+                }
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), EGL_SUCCESS);
+        }
+    }
+
+    #[test]
+    fn egl_configuration_enumeration_checks_capacity_display_and_initialization() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(8, 8);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let out = SCRATCH + 0x100;
+        let num = out + 4;
+        for (configs, size, count) in [(0, 0, 1), (out, 0, 0), (out, 1, 1), (0, u32::MAX, 1)] {
+            cpu.write_mem(out, &0xaaaaaaaau32.to_le_bytes()).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_get_configs,
+                    &[DISPLAY_HANDLE, configs, size, num]
+                ),
+                EGL_TRUE
+            );
+            assert_eq!(cpu.read_u32_le(num).unwrap(), count);
+            assert_eq!(
+                cpu.read_u32_le(out).unwrap(),
+                if configs != 0 && size == 1 {
+                    CONFIG_HANDLE
+                } else {
+                    0xaaaaaaaa
+                }
+            );
+        }
+        for (args, error) in [
+            ([0xdead, out, 1, num], EGL_BAD_DISPLAY),
+            ([DISPLAY_HANDLE, out, u32::MAX, num], EGL_BAD_PARAMETER),
+            ([DISPLAY_HANDLE, out, 1, 0], EGL_BAD_PARAMETER),
+        ] {
+            cpu.write_mem(num, &0xbbbbbbbbu32.to_le_bytes()).unwrap();
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_configs, &args),
+                EGL_FALSE
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), error);
+            assert_eq!(cpu.read_u32_le(num).unwrap(), 0xbbbbbbbb);
+        }
+        call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_choose_config,
+                &[DISPLAY_HANDLE, 0xdeadbeef, out, 1, num]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_NOT_INITIALIZED
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_initialize,
+                &[DISPLAY_HANDLE, 0, 0]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_get_configs,
+                &[DISPLAY_HANDLE, 0, 0, num]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(cpu.read_u32_le(num).unwrap(), 1);
+    }
+
+    #[test]
+    fn egl_bad_attributes_leave_config_outputs_untouched() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(8, 8);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        for attrs in [
+            vec![(0xdead, 0)],
+            vec![(EGL_RED_SIZE, u32::MAX - 1)],
+            vec![(EGL_LEVEL, u32::MAX)],
+        ] {
+            write_egl_attributes(&mut cpu, &attrs);
+            cpu.write_mem(SCRATCH + 0x100, &[0xaa; 8]).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_choose_config,
+                    &[DISPLAY_HANDLE, SCRATCH, SCRATCH + 0x100, 1, SCRATCH + 0x104]
+                ),
+                EGL_FALSE
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_error, &[]),
+                EGL_BAD_ATTRIBUTE
+            );
+            assert_eq!(cpu.read_mem(SCRATCH + 0x100, 8).unwrap(), [0xaa; 8]);
+        }
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_choose_config,
+                &[
+                    DISPLAY_HANDLE,
+                    0xdeadbeef,
+                    SCRATCH + 0x100,
+                    1,
+                    SCRATCH + 0x104
+                ]
+            ),
+            EGL_FALSE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_BAD_ATTRIBUTE
+        );
+        assert_eq!(cpu.read_mem(SCRATCH + 0x100, 8).unwrap(), [0xaa; 8]);
+    }
+
+    #[test]
+    fn egl_config_validation_applies_to_queries_and_resource_creation() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(8, 8);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let surfaces = SURFACES.with(|s| s.borrow().images.len());
+        for handler in [
+            egl_create_window_surface as crate::Handler,
+            egl_create_context,
+            egl_create_pixmap,
+            egl_create_pbuffer,
+        ] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    handler,
+                    &[DISPLAY_HANDLE, 0xdead, 0xdeadbeef, 0]
+                ),
+                0
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_error, &[]),
+                EGL_BAD_CONFIG
+            );
+            assert_eq!(SURFACES.with(|s| s.borrow().images.len()), surfaces);
+        }
+        cpu.write_mem(SCRATCH + 0x100, &0xaaaaaaaau32.to_le_bytes())
+            .unwrap();
+        for (args, error) in [
+            (
+                [DISPLAY_HANDLE, 0xdead, EGL_RED_SIZE, SCRATCH + 0x100],
+                EGL_BAD_CONFIG,
+            ),
+            (
+                [0xdead, CONFIG_HANDLE, EGL_RED_SIZE, SCRATCH + 0x100],
+                EGL_BAD_DISPLAY,
+            ),
+            (
+                [DISPLAY_HANDLE, CONFIG_HANDLE, 0xdead, SCRATCH + 0x100],
+                EGL_BAD_ATTRIBUTE,
+            ),
+            (
+                [DISPLAY_HANDLE, CONFIG_HANDLE, EGL_RED_SIZE, 0],
+                EGL_BAD_PARAMETER,
+            ),
+        ] {
+            assert_eq!(
+                call(&mut cpu, &mut kernel, egl_get_config_attrib, &args),
+                EGL_FALSE
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), error);
+            assert_eq!(cpu.read_u32_le(SCRATCH + 0x100).unwrap(), 0xaaaaaaaa);
+        }
+        write_egl_attributes(&mut cpu, &[(0xdead, 0)]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_window_surface,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0x1234, SCRATCH]
+            ),
+            0
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_BAD_ATTRIBUTE
+        );
+        assert_eq!(SURFACES.with(|s| s.borrow().images.len()), surfaces);
+    }
+
     #[test]
     fn choose_config_yields_one_config_and_describes_it_as_rgb565() {
         let _g = guard();
+        reset_for_test(64, 64);
         let mut cpu = fresh_cpu();
         let mut kernel = fresh_kernel();
         // An EGL_NONE-terminated empty attribute list.
@@ -4911,6 +5182,7 @@ mod tests {
     #[test]
     fn an_unknown_config_attribute_is_a_bad_attribute_not_a_zero() {
         let _g = guard();
+        reset_for_test(64, 64);
         let mut cpu = fresh_cpu();
         let mut kernel = fresh_kernel();
         let ok = call(
