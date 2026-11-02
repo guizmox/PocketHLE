@@ -222,7 +222,7 @@ pub struct TextureUnitState {
     pub bound_texture: u32,
     pub texture_enabled: bool,
     pub texcoord_array: ArrayPointer,
-    pub current_texcoord: [f32; 2],
+    pub current_texcoord: [f32; 4],
     /// `glTexEnv(GL_TEXTURE_ENV_MODE)` is per-unit state in GL, so a
     /// game that configures two stages leaves two different modes
     /// behind. Keeping one global would mean the stage we actually
@@ -241,7 +241,7 @@ impl Default for TextureUnitState {
             bound_texture: 0,
             texture_enabled: false,
             texcoord_array: ArrayPointer::default(),
-            current_texcoord: [0.0, 0.0],
+            current_texcoord: [0.0, 0.0, 0.0, 1.0],
             tex_env: TexEnvMode::Modulate,
             tex_env_color: [0.0; 4],
             lod_bias: 0.0,
@@ -305,7 +305,7 @@ pub struct Context {
 
     // ---- per-vertex defaults, used when the array is disabled ----
     pub current_color: [f32; 4],
-    pub current_texcoord: [f32; 2],
+    pub current_texcoord: [f32; 4],
     pub current_normal: [f32; 3],
     pub lighting: crate::lighting::LightingState,
 
@@ -397,7 +397,7 @@ impl Context {
             projection: MatrixStack::new(16),
             texture_matrix: std::array::from_fn(|_| MatrixStack::new(16)),
             current_color: [1.0, 1.0, 1.0, 1.0],
-            current_texcoord: [0.0, 0.0],
+            current_texcoord: [0.0, 0.0, 0.0, 1.0],
             current_normal: [0.0, 0.0, 1.0],
             lighting: Default::default(),
             vertex_array: ArrayPointer::default(),
@@ -985,9 +985,9 @@ impl Context {
             return;
         }
         self.es11.current_texcoords[unit] = [s, t, 0., 1.];
-        self.texture_units[unit].current_texcoord = [s, t];
+        self.texture_units[unit].current_texcoord = [s, t, 0., 1.];
         if unit == 0 {
-            self.current_texcoord = [s, t];
+            self.current_texcoord = [s, t, 0., 1.];
         }
     }
 
@@ -998,6 +998,10 @@ impl Context {
             .filter(|i| (*i as usize) < MAX_TEXTURE_UNITS)
         {
             self.es11.current_texcoords[index as usize] = values;
+            self.texture_units[index as usize].current_texcoord = values;
+            if index == 0 {
+                self.current_texcoord = values;
+            }
         }
     }
 
@@ -2058,25 +2062,19 @@ impl Context {
             self.current_color
         };
 
-        let mut texcoord = [[0.0f32; 2]; raster::MAX_TEXTURE_STAGES];
+        let mut texcoord = [[0., 0., 0., 1.]; raster::MAX_TEXTURE_STAGES];
         for stage in stages {
             let unit = self.texture_units[stage.unit];
-            texcoord[stage.unit] = if unit.texcoord_array.enabled {
-                let t = self
-                    .fetch(mem, unit.texcoord_array, index, false)
-                    .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-                // The texture matrix applies to incoming coordinates.
-                let m = if self.gpu.is_some() && !self.es11.pretransform {
-                    t
-                } else {
-                    matrix::transform(
-                        self.texture_matrix[stage.unit].current(),
-                        [t[0], t[1], 0.0, 1.0],
-                    )
-                };
-                [m[0], m[1]]
+            let input = if unit.texcoord_array.enabled {
+                self.fetch(mem, unit.texcoord_array, index, false)
+                    .unwrap_or([0., 0., 0., 1.])
             } else {
                 unit.current_texcoord
+            };
+            texcoord[stage.unit] = if self.gpu.is_some() && !self.es11.pretransform {
+                input
+            } else {
+                matrix::transform(self.texture_matrix[stage.unit].current(), input)
             };
         }
 
@@ -2387,12 +2385,11 @@ impl Context {
                         lo,
                         stream.count,
                         false,
-                        2,
+                        4,
                         native_fixed,
                     )?;
                 } else {
-                    stream.constants[stage.unit + 2] =
-                        [unit.current_texcoord[0], unit.current_texcoord[1], 0., 1.];
+                    stream.constants[stage.unit + 2] = unit.current_texcoord;
                 }
             }
             if self.lighting.enabled {
@@ -2534,13 +2531,7 @@ impl Context {
             normal_matrix,
             projection: *self.projection.current(),
             modelview: *self.modelview.current(),
-            textures: std::array::from_fn(|i| {
-                if self.texture_units[i].texcoord_array.enabled {
-                    *self.texture_matrix[i].current()
-                } else {
-                    matrix::IDENTITY
-                }
-            }),
+            textures: std::array::from_fn(|i| *self.texture_matrix[i].current()),
         };
         if self.gpu.is_some()
             && !self.state.logic_op
@@ -5385,6 +5376,196 @@ mod rgb565_surface_tests {
                 alpha_cases(&mut c);
                 logic_cases(&mut c);
                 copies(&mut c);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod homogeneous_texture_tests {
+    use super::*;
+    struct Memory(Vec<u8>);
+    impl GuestMemory for Memory {
+        fn read(&mut self, address: u32, len: usize, out: &mut Vec<u8>) -> bool {
+            let Some(offset) = address.checked_sub(4096) else {
+                return false;
+            };
+            let Some(bytes) = self.0.get(offset as usize..offset as usize + len) else {
+                return false;
+            };
+            out.clear();
+            out.extend_from_slice(bytes);
+            true
+        }
+    }
+    fn setup() -> (Context, Memory) {
+        let mut c = Context::new(32, 32);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        let pixels = (0..4)
+            .flat_map(|y| (0..4).flat_map(move |x| [x * 60, y * 60, 0, 255]))
+            .collect::<Vec<u8>>();
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, &pixels);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        c.set_capability(GL_TEXTURE_2D, true);
+        c.tex_env(GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        let mut matrix = matrix::IDENTITY;
+        matrix[8] = 0.75;
+        matrix[11] = 0.5;
+        c.texture_matrix[0].load(matrix);
+        let positions = [-0.9f32, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.];
+        let memory = Memory(positions.into_iter().flat_map(f32::to_le_bytes).collect());
+        c.set_vertex_pointer(3, GL_FLOAT, 0, 4096);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        (c, memory)
+    }
+    fn render(c: &mut Context, memory: &mut Memory) {
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.draw_arrays(memory, GL_TRIANGLES, 0, 3);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    fn at(c: &Context, x: u32, y: u32) -> [u8; 4] {
+        let i = (y * c.target.width + x) as usize * 4;
+        c.target.color[i..i + 4].try_into().unwrap()
+    }
+    fn cases(c: &mut Context, memory: &mut Memory, scale: u32, unit: u32) {
+        if unit != 0 {
+            let texture_matrix = *c.texture_matrix[0].current();
+            c.set_capability(GL_TEXTURE_2D, false);
+            c.set_active_texture(unit);
+            c.set_client_active_texture(unit);
+            c.bind_texture(GL_TEXTURE_2D, 1);
+            c.set_capability(GL_TEXTURE_2D, true);
+            c.tex_env(GL_TEXTURE_ENV_MODE, GL_REPLACE);
+            c.texture_matrix[unit as usize].load(texture_matrix);
+        }
+        let input = [0.25f32, 0.6, 2., 2.];
+        c.set_multi_texcoord4(GL_TEXTURE0 + unit, input);
+        render(c, memory);
+        assert_eq!(
+            at(c, 16, 16),
+            [120, 0, 0, 255],
+            "current coordinates and complete texture matrix"
+        );
+        assert_eq!(
+            c.query_state(0x0b03).unwrap().numbers(),
+            input.map(f64::from)
+        );
+        c.set_client_state(GL_TEXTURE_COORD_ARRAY, true);
+        for size in [2, 3, 4] {
+            memory.0.truncate(36);
+            for _ in 0..3 {
+                for v in &input[..size] {
+                    memory.0.extend(v.to_le_bytes());
+                }
+            }
+            c.set_texcoord_pointer(size as u32, GL_FLOAT, 0, 4096 + 36);
+            render(c, memory);
+            let expected = match size {
+                2 => [60, 120, 0, 255],
+                3 => [180, 60, 0, 255],
+                _ => [120, 0, 0, 255],
+            };
+            assert_eq!(at(c, 16, 16), expected, "array size={size}");
+        }
+        // A native fixed-point VBO retains q; mutating it must refresh the draw.
+        c.bind_buffer(GL_ARRAY_BUFFER, 9);
+        for (q, expected) in [(2., [120, 0, 0, 255]), (4., [60, 0, 0, 255])] {
+            let mut data = Vec::new();
+            for _ in 0..3 {
+                for v in [input[0], input[1], input[2], q] {
+                    data.extend(((v * 65536.) as i32).to_le_bytes());
+                }
+            }
+            c.buffer_data(GL_ARRAY_BUFFER, data.len(), Some(&data), GL_DYNAMIC_DRAW);
+            c.set_texcoord_pointer(4, GL_FIXED, 0, 0);
+            c.bind_buffer(GL_ARRAY_BUFFER, 0);
+            render(c, memory);
+            assert_eq!(at(c, 16, 16), expected, "fixed VBO q={q}");
+            c.bind_buffer(GL_ARRAY_BUFFER, 9);
+        }
+        c.bind_buffer(GL_ARRAY_BUFFER, 0);
+        let uv = [
+            [0.1f32, 0.2, 0.5, 1.3],
+            [1.4, 0.3, 1.1, 2.1],
+            [0.8, 1.4, 2., 3.2],
+        ];
+        memory.0.truncate(36);
+        for coord in uv {
+            for v in coord {
+                memory.0.extend(v.to_le_bytes());
+            }
+        }
+        c.set_texcoord_pointer(4, GL_FLOAT, 0, 4096 + 36);
+        c.clip_plane(0x3000, [1., 0., 0., 0.]);
+        for clipped in [false, true] {
+            c.set_capability(0x3000, clipped);
+            for flat in [false, true] {
+                c.state.smooth_shading = !flat;
+                render(c, memory);
+                for (x, y) in [(16, 16), (12, 18), (18, 22)] {
+                    if clipped && x < 16 {
+                        assert_eq!(at(c, x, y), [0; 4]);
+                        continue;
+                    }
+                    // Independent window-space barycentrics, full matrix, then division by q.
+                    let mut sum = [0u32; 4];
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            let nx = 2. * (x as f64 + (dx as f64 + 0.5) / scale as f64) / 32. - 1.;
+                            let ny = 1. - 2. * (y as f64 + (dy as f64 + 0.5) / scale as f64) / 32.;
+                            let b2 = (ny + 0.9) / 1.8;
+                            let b1 = (nx + 0.9 - 0.9 * b2) / 1.8;
+                            let weights = [1. - b1 - b2, b1, b2];
+                            let s = (0..3)
+                                .map(|i| weights[i] * (uv[i][0] as f64 + 0.75 * uv[i][2] as f64))
+                                .sum::<f64>();
+                            let t = (0..3).map(|i| weights[i] * uv[i][1] as f64).sum::<f64>();
+                            let q = (0..3)
+                                .map(|i| weights[i] * (uv[i][3] as f64 + 0.5 * uv[i][2] as f64))
+                                .sum::<f64>();
+                            let tx = ((s / q * 4.).floor() as i32).clamp(0, 3) as u32;
+                            let ty = ((t / q * 4.).floor() as i32).clamp(0, 3) as u32;
+                            sum[0] += tx * 60;
+                            sum[1] += ty * 60;
+                            sum[3] += 255;
+                        }
+                    }
+                    assert_eq!(
+                        at(c, x, y),
+                        sum.map(|v| (v / (scale * scale)) as u8),
+                        "variable q x={x} y={y} flat={flat}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn software_current_arrays_fixed_vbo_and_varying_q() {
+        for unit in [0, 3] {
+            let (mut c, mut memory) = setup();
+            cases(&mut c, &mut memory, 1, unit);
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native OpenGL/GLES2; projective arrays, constants, VBOs and flat streams"]
+    fn native_current_arrays_fixed_vbo_and_varying_q() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                for unit in [0, 3] {
+                    let (mut c, mut memory) = setup();
+                    c.gpu = Some(if es {
+                        crate::gpu::Renderer::new_es_for_test(32, 32).unwrap()
+                    } else {
+                        crate::gpu::Renderer::new(32, 32).unwrap()
+                    });
+                    c.set_internal_resolution(scale as u8);
+                    cases(&mut c, &mut memory, scale, unit);
+                }
             }
         }
     }

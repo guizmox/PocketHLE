@@ -155,6 +155,14 @@ impl VertexLayout {
         stages: &[TextureStage],
         transforms: Option<&VertexTransforms>,
     ) -> Self {
+        Self::with_projective_mask(state, stages, transforms, 0)
+    }
+    fn with_projective_mask(
+        state: &PipelineState,
+        stages: &[TextureStage],
+        transforms: Option<&VertexTransforms>,
+        mask: u8,
+    ) -> Self {
         let lighting = transforms.is_some_and(|t| t.lighting.enabled);
         let mut layout = Self {
             attributes: [None; 8],
@@ -164,8 +172,9 @@ impl VertexLayout {
         layout.attributes[0] = Some((4, 0));
         layout.attributes[1] = Some((4, 4));
         for stage in stages {
-            layout.attributes[stage.unit + 2] = Some((2, layout.floats));
-            layout.floats += 2;
+            let size = if mask & (1 << stage.unit) != 0 { 4 } else { 2 };
+            layout.attributes[stage.unit + 2] = Some((size, layout.floats));
+            layout.floats += size as usize;
         }
         if lighting || (transforms.is_none() && (state.fog || state.two_sided_lighting)) {
             layout.attributes[6] = Some((4, layout.floats));
@@ -189,8 +198,8 @@ impl VertexLayout {
             provoking.color
         });
         for unit in 0..4 {
-            if self.attributes[unit + 2].is_some() {
-                out.extend(vertex.texcoord[unit]);
+            if let Some((size, _)) = self.attributes[unit + 2] {
+                out.extend_from_slice(&vertex.texcoord[unit][..size as usize]);
             }
         }
         if self.attributes[6].is_some() {
@@ -1210,7 +1219,7 @@ pub struct Renderer {
     index_buffer: u32,
     indices: Vec<u16>,
     packed_scratch: Vec<f32>,
-    vertex_keys: HashMap<[u32; 24], u16>,
+    vertex_keys: HashMap<[u32; 32], u16>,
     uniform_values: HashMap<i32, Vec<u32>>,
     pipeline: Option<PipelineState>,
     texture_params: HashMap<u32, (Filter, Filter, Wrap, Wrap)>,
@@ -2075,7 +2084,27 @@ impl Renderer {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
         self.scratch.clear();
-        let layout = VertexLayout::new(state, stages, transforms);
+        // Packed guest streams already retain their native component count.
+        // Only expanded vertices carrying nondefault r/q need a larger payload.
+        let mask = if stream.is_none() {
+            stages.iter().fold(0, |mask, stage| {
+                if vertices
+                    .iter()
+                    .any(|v| v.texcoord[stage.unit][2] != 0. || v.texcoord[stage.unit][3] != 1.)
+                {
+                    mask | (1 << stage.unit)
+                } else {
+                    mask
+                }
+            })
+        } else {
+            0
+        };
+        let layout = if mask == 0 {
+            VertexLayout::new(state, stages, transforms)
+        } else {
+            VertexLayout::with_projective_mask(state, stages, transforms, mask)
+        };
         let flat_direct = !state.logic_op
             && direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
         let direct = flat_direct
@@ -2914,8 +2943,8 @@ fn wrap(v: Wrap) -> u32 {
     }
 }
 const VERTEX: &str = r#"
-attribute vec4 position,color;attribute vec2 tex0,tex1,tex2,tex3;attribute vec4 normalAndFog,lightPosition;
-VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
+attribute vec4 position,color;attribute vec4 tex0,tex1,tex2,tex3;attribute vec4 normalAndFog,lightPosition;
+VARYING vec4 vColor,vBackColor;VARYING vec4 uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
 uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
 uniform mat4 normalMatrix;
@@ -2955,15 +2984,15 @@ void main(){
   vec3 point=lightEye.w==0.0?lightEye.xyz:lightEye.xyz/lightEye.w;
   vColor=illuminate(n,point);vBackColor=twoSided!=0?illuminate(-n,point):vColor;
  }
- uv0=(textureMatrix0*vec4(tex0,0.0,1.0)).xy;
- uv1=(textureMatrix1*vec4(tex1,0.0,1.0)).xy;
- uv2=(textureMatrix2*vec4(tex2,0.0,1.0)).xy;
- uv3=(textureMatrix3*vec4(tex3,0.0,1.0)).xy;
+ uv0=textureMatrix0*tex0;
+ uv1=textureMatrix1*tex1;
+ uv2=textureMatrix2*tex2;
+ uv3=textureMatrix3*tex3;
  vFog=objectSpace!=0?abs(eye.z):normalAndFog.w;
 }
 "#;
 const FRAGMENT: &str = r#"
-VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
+VARYING vec4 vColor,vBackColor;VARYING vec4 uv0,uv1,uv2,uv3;VARYING float vFog;
 uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;uniform vec4 logicLevels;
 // ES2 has no integer bitwise operators. All intermediates are exact 8-bit integers.
 vec4 logicalColor(vec4 source,vec4 destination){
@@ -3000,6 +3029,7 @@ vec4 combineStage(vec4 previous,vec4 t,vec4 k,vec4 primary,vec4 ops,vec4 rs,vec4
  return clamp(vec4(rgb*ops.z,alpha),0.0,1.0);
 }
 vec4 stage(vec4 c,vec4 t,int e,vec4 k){if(e==0)return c*t;if(e==1)return t;if(e==2)return vec4(mix(c.rgb,t.rgb,t.a),c.a);if(e==3)return vec4(mix(c.rgb,k.rgb,t.rgb),c.a*t.a);if(e==4)return vec4(min(c.rgb+t.rgb,vec3(1.0)),c.a*t.a);return c;}
+vec2 project(vec4 uv){return uv.w==0.0?vec2(0.0):uv.xy/uv.w;}
 float limitedBias(vec2 uv,float bias,vec4 limit){
 #ifdef LOD_DERIVATIVES
  if(limit.w>0.5){
@@ -3011,7 +3041,7 @@ float limitedBias(vec2 uv,float bias,vec4 limit){
 #endif
  return bias;
 }
-void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=texture2D(sampler0,uv0,limitedBias(uv0,lodBias0,lodLimit0));if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=texture2D(sampler1,uv1,limitedBias(uv1,lodBias1,lodLimit1));if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=texture2D(sampler2,uv2,limitedBias(uv2,lodBias2,lodLimit2));if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=texture2D(sampler3,uv3,limitedBias(uv3,lodBias3,lodLimit3));if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
+void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;if(env0>=0){vec4 t=texture2D(sampler0,project(uv0),limitedBias(project(uv0),lodBias0,lodLimit0));if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=texture2D(sampler1,project(uv1),limitedBias(project(uv1),lodBias1,lodLimit1));if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=texture2D(sampler2,project(uv2),limitedBias(project(uv2),lodBias2,lodLimit2));if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=texture2D(sampler3,project(uv3),limitedBias(project(uv3),lodBias3,lodLimit3));if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the
@@ -3221,7 +3251,7 @@ mod tests {
                 .map(|(p, t)| {
                     let mut v = triangle([1.; 4], 0.)[0];
                     v.pos = *p;
-                    v.texcoord[0] = t;
+                    v.texcoord[0] = [t[0], t[1], 0., 1.];
                     v
                 })
                 .collect();
@@ -3598,6 +3628,30 @@ mod tests {
     }
 
     #[test]
+    fn expanded_projective_attributes_keep_all_components_without_growing_affine_payloads() {
+        let state = PipelineState::default();
+        let stages = [TextureStage {
+            unit: 0,
+            env: TexEnvMode::Replace,
+            env_color: [0.; 4],
+            lod_bias: 0.,
+        }];
+        let affine = VertexLayout::new(&state, &stages, None);
+        let projective = VertexLayout::with_projective_mask(&state, &stages, None, 1);
+        assert_eq!(affine.attributes[2], Some((2, 8)));
+        assert_eq!(affine.floats, 10);
+        assert_eq!(projective.attributes[2], Some((4, 8)));
+        assert_eq!(projective.floats, 12);
+        let vertex = Vertex {
+            texcoord: [[0.25, 0.5, 2., 3.]; 4],
+            ..Default::default()
+        };
+        let mut packed = Vec::new();
+        projective.pack(&mut packed, vertex, vertex, true);
+        assert_eq!(&packed[8..12], &[0.25, 0.5, 2., 3.]);
+    }
+
+    #[test]
     fn direct_flat_triangles_preserve_all_provoking_and_interpolated_attributes() {
         let mut state = PipelineState::default();
         state.smooth_shading = false;
@@ -3617,7 +3671,7 @@ mod tests {
                 pos: [i as f32, 1., 2., 1.],
                 color: [i as f32 / 6., 0.5, 0.25, 1.],
                 normal: [i as f32, 0., 1.],
-                texcoord: [[i as f32, 0.5]; 4],
+                texcoord: [[i as f32, 0.5, 0., 1.]; 4],
                 fog_depth: i as f32 + 0.25,
                 ..Default::default()
             })
@@ -3630,8 +3684,11 @@ mod tests {
             assert_eq!(&record[..4], &vertices[i].pos);
             assert_eq!(&record[4..8], &provoking.color);
             for unit in 0..4 {
-                let (_, offset) = layout.attributes[unit + 2].unwrap();
-                assert_eq!(&record[offset..offset + 2], &vertices[i].texcoord[unit]);
+                let (size, offset) = layout.attributes[unit + 2].unwrap();
+                assert_eq!(
+                    &record[offset..offset + size as usize],
+                    &vertices[i].texcoord[unit][..size as usize]
+                );
             }
             let (_, offset) = layout.attributes[6].unwrap();
             assert_eq!(&record[offset..offset + 3], &provoking.normal);
@@ -4699,9 +4756,9 @@ mod tests {
                     }),
                 };
                 let mut raw = triangle([0.9, 0.75, 0.5, 1.], 0.);
-                raw[0].texcoord = [[0.1, 0.1]; 4];
-                raw[1].texcoord = [[0.8, 0.1]; 4];
-                raw[2].texcoord = [[0.4, 0.9]; 4];
+                raw[0].texcoord = [[0.1, 0.1, 0., 1.]; 4];
+                raw[1].texcoord = [[0.8, 0.1, 0., 1.]; 4];
+                raw[2].texcoord = [[0.4, 0.9, 0., 1.]; 4];
                 let mut cpu = raw;
                 let mvp = matrix::multiply(&transforms.projection, &transforms.modelview);
                 for vertex in &mut cpu {
@@ -4710,8 +4767,8 @@ mod tests {
                     vertex.pos = matrix::transform(&mvp, vertex.pos);
                     for i in 0..4 {
                         let uv = vertex.texcoord[i];
-                        let t = matrix::transform(&transforms.textures[i], [uv[0], uv[1], 0., 1.]);
-                        vertex.texcoord[i] = [t[0], t[1]];
+                        let t = matrix::transform(&transforms.textures[i], uv);
+                        vertex.texcoord[i] = t;
                     }
                 }
                 let texture = Texture {

@@ -38,7 +38,7 @@ pub struct Vertex {
     pub color: [f32; 4],
     pub back_color: [f32; 4],
     /// Texture coordinates, one set per texture unit.
-    pub texcoord: [[f32; 2]; MAX_TEXTURE_STAGES],
+    pub texcoord: [[f32; 4]; MAX_TEXTURE_STAGES],
     /// Eye-space Z used for fog. OpenGL defines fog distance from the
     /// eye-space depth, not clip-space or NDC Z.
     pub fog_depth: f32,
@@ -53,7 +53,7 @@ impl Default for Vertex {
             normal: [0.0, 0.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
             back_color: [1.0; 4],
-            texcoord: [[0.0, 0.0]; MAX_TEXTURE_STAGES],
+            texcoord: [[0.0, 0.0, 0.0, 1.0]; MAX_TEXTURE_STAGES],
             fog_depth: 0.0,
         }
     }
@@ -531,7 +531,7 @@ struct ScreenVertex {
     /// Reciprocal of clip `w`, for perspective-correct interpolation.
     inv_w: f32,
     color: [f32; 4],
-    texcoord: [[f32; 2]; MAX_TEXTURE_STAGES],
+    texcoord: [[f32; 4]; MAX_TEXTURE_STAGES],
     fog_depth: f32,
 }
 
@@ -652,10 +652,7 @@ fn lerp_vertex(a: &Vertex, b: &Vertex, t: f32) -> Vertex {
             mix(a.color[3], b.color[3]),
         ],
         texcoord: std::array::from_fn(|u| {
-            [
-                mix(a.texcoord[u][0], b.texcoord[u][0]),
-                mix(a.texcoord[u][1], b.texcoord[u][1]),
-            ]
+            std::array::from_fn(|c| mix(a.texcoord[u][c], b.texcoord[u][c]))
         }),
         back_color: std::array::from_fn(|i| mix(a.back_color[i], b.back_color[i])),
         normal: std::array::from_fn(|i| mix(a.normal[i], b.normal[i])),
@@ -685,7 +682,7 @@ fn raster_clipped(
         z: 0.0,
         inv_w: 1.0,
         color: [0.0; 4],
-        texcoord: [[0.0; 2]; MAX_TEXTURE_STAGES],
+        texcoord: [[0.0, 0.0, 0.0, 1.0]; MAX_TEXTURE_STAGES],
         fog_depth: 0.0,
     }; 3];
     for (i, v) in tri.iter().enumerate() {
@@ -772,7 +769,14 @@ fn raster_clipped(
     };
     let inv_area = 1.0 / area;
     let gradients = sample.needs_gradients();
-    let (qx, qy, uv_grad) = if gradients {
+    let projective_units = stages.iter().fold(0u8, |mask, stage| {
+        if sv.iter().any(|v| v.texcoord[stage.unit][3] != 1.) {
+            mask | (1 << stage.unit)
+        } else {
+            mask
+        }
+    });
+    let (q_grad, uv_grad) = if gradients {
         let dx = [
             -(sv[2].y - sv[1].y) * inv_area,
             -(sv[0].y - sv[2].y) * inv_area,
@@ -783,11 +787,13 @@ fn raster_clipped(
             (sv[0].x - sv[2].x) * inv_area,
             (sv[1].x - sv[0].x) * inv_area,
         ];
-        let qx = (0..3).map(|i| dx[i] * sv[i].inv_w).sum::<f32>();
-        let qy = (0..3).map(|i| dy[i] * sv[i].inv_w).sum::<f32>();
+        let mut q_grad = [[0.; 2]; MAX_TEXTURE_STAGES];
         let mut uv_grad = [[0.; 4]; MAX_TEXTURE_STAGES];
         for stage in stages {
             for (axis, weights) in [dx, dy].iter().enumerate() {
+                q_grad[stage.unit][axis] = (0..3)
+                    .map(|i| weights[i] * sv[i].inv_w * sv[i].texcoord[stage.unit][3])
+                    .sum();
                 for c in 0..2 {
                     uv_grad[stage.unit][axis * 2 + c] = (0..3)
                         .map(|i| weights[i] * sv[i].inv_w * sv[i].texcoord[stage.unit][c])
@@ -795,9 +801,9 @@ fn raster_clipped(
                 }
             }
         }
-        (qx, qy, uv_grad)
+        (q_grad, uv_grad)
     } else {
-        (0., 0., [[0.; 4]; MAX_TEXTURE_STAGES])
+        ([[0.; 2]; MAX_TEXTURE_STAGES], [[0.; 4]; MAX_TEXTURE_STAGES])
     };
     // Flat shading takes the provoking vertex, which for a triangle is
     // the last one.
@@ -872,9 +878,21 @@ fn raster_clipped(
                         + p1 * sv[1].texcoord[stage.unit][c]
                         + p2 * sv[2].texcoord[stage.unit][c]
                 };
-                let (u, v) = (uv(0), uv(1));
+                let inv_q = if projective_units & (1 << stage.unit) == 0 {
+                    1.
+                } else {
+                    let q = uv(3);
+                    if q != 0. && q.is_finite() {
+                        1. / q
+                    } else {
+                        0.
+                    }
+                };
+                let (u, v) = (uv(0) * inv_q, uv(1) * inv_q);
                 let texel = if gradients {
                     let g = uv_grad[stage.unit];
+                    let [qx, qy] = q_grad[stage.unit];
+                    let rec = rec * inv_q;
                     sample.sample_grad(
                         stage.unit,
                         u,
@@ -1048,8 +1066,8 @@ fn primitive_fragment(
         let uv = v.texcoord[stage.unit];
         if let Some(texel) = sample.sample_grad(
             stage.unit,
-            uv[0],
-            uv[1],
+            if uv[3] != 0. { uv[0] / uv[3] } else { 0. },
+            if uv[3] != 0. { uv[1] / uv[3] } else { 0. },
             gradients[stage.unit],
             stage.lod_bias,
         ) {
@@ -1254,10 +1272,16 @@ pub fn draw_line(
                         let unit = stage.unit;
                         for axis in 0..2 {
                             for c in 0..2 {
-                                grad[unit][axis * 2 + c] = (ends[1].texcoord[unit][c]
-                                    - ends[0].texcoord[unit][c])
-                                    * dpdt
-                                    * (delta[axis] / length) as f32;
+                                let q = v.texcoord[unit][3];
+                                let ds = ends[1].texcoord[unit][c] - ends[0].texcoord[unit][c];
+                                let dq = ends[1].texcoord[unit][3] - ends[0].texcoord[unit][3];
+                                grad[unit][axis * 2 + c] = if q != 0. {
+                                    (ds * q - v.texcoord[unit][c] * dq) / (q * q)
+                                        * dpdt
+                                        * (delta[axis] / length) as f32
+                                } else {
+                                    0.
+                                };
                             }
                         }
                     }
@@ -2297,7 +2321,7 @@ mod tests {
         let uv = [[0., 0.], [8., 0.], [0., 8.]];
         let vertices = std::array::from_fn(|i| Vertex {
             pos: positions[i],
-            texcoord: [uv[i]; 4],
+            texcoord: [[uv[i][0], uv[i][1], 0., 1.]; 4],
             ..Default::default()
         });
         let stage = TextureStage {
@@ -2349,7 +2373,7 @@ mod tests {
         let uv = [[0., 0.], [8., 0.], [0., 8.]];
         let vertices = std::array::from_fn(|i| Vertex {
             pos: positions[i],
-            texcoord: [uv[i]; 4],
+            texcoord: [[uv[i][0], uv[i][1], 0., 1.]; 4],
             ..Default::default()
         });
         let stage = TextureStage {
@@ -2516,6 +2540,148 @@ mod logical_truth_table_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod projective_coordinate_tests {
+    use super::*;
+    use std::cell::RefCell;
+    struct Samples(RefCell<Vec<(f32, f32, [f32; 4])>>);
+    impl TextureSampler for Samples {
+        fn sample(&self, _: usize, u: f32, v: f32) -> Option<[u8; 4]> {
+            Some([to_byte(u), to_byte(v), 255, 255])
+        }
+        fn needs_gradients(&self) -> bool {
+            true
+        }
+        fn sample_grad(&self, unit: usize, u: f32, v: f32, g: [f32; 4], _: f32) -> Option<[u8; 4]> {
+            self.0.borrow_mut().push((u, v, g));
+            self.sample(unit, u, v)
+        }
+    }
+    #[test]
+    fn clipped_projective_triangles_match_independent_quotient_and_derivatives() {
+        const N: u32 = 8;
+        for clip_w in [[1., 1., 1.], [1., 2., 4.]] {
+            let xy = [[-1., -1.], [3., -1.], [-1., 3.]];
+            let uv = [[0., 1., 0.2, 1.], [2., 1., 0.4, 3.], [0., -1., 0.6, 1.]];
+            let vertices = std::array::from_fn(|i| Vertex {
+                pos: [xy[i][0] * clip_w[i], xy[i][1] * clip_w[i], 0., clip_w[i]],
+                texcoord: [uv[i]; 4],
+                ..Default::default()
+            });
+            let mut target = RenderTarget::new(N, N);
+            // Unequal viewport dimensions keep triangulation edges off sample centers.
+            let state = PipelineState {
+                viewport: (0, 0, N as i32 + 1, N as i32),
+                ..Default::default()
+            };
+            let stages = [TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            }];
+            let samples = Samples(RefCell::new(Vec::new()));
+            draw_triangle(&mut target, &state, &samples, &stages, vertices);
+            let values = samples.0.borrow();
+            assert_eq!(values.len(), (N * N) as usize);
+            for y in 0..N {
+                for x in 0..N {
+                    let lx = (x as f32 + 0.5) / (2. * (N + 1) as f32);
+                    let ly = (N as f32 - y as f32 - 0.5) / (2. * N as f32);
+                    let l = [1. - lx - ly, lx, ly];
+                    let mut a = [0.; 4];
+                    let mut dx = [0.; 4];
+                    let mut dy = [0.; 4];
+                    let step_x = 1. / (2. * (N + 1) as f32);
+                    let step_y = 1. / (2. * N as f32);
+                    for component in 0..4 {
+                        for i in 0..3 {
+                            a[component] += l[i] * uv[i][component] / clip_w[i];
+                            dx[component] +=
+                                [-step_x, step_x, 0.][i] * uv[i][component] / clip_w[i];
+                            dy[component] +=
+                                [step_y, 0., -step_y][i] * uv[i][component] / clip_w[i];
+                        }
+                    }
+                    let (u, v) = (a[0] / a[3], a[1] / a[3]);
+                    let expected = [
+                        (dx[0] * a[3] - a[0] * dx[3]) / (a[3] * a[3]),
+                        (dx[1] * a[3] - a[1] * dx[3]) / (a[3] * a[3]),
+                        (dy[0] * a[3] - a[0] * dy[3]) / (a[3] * a[3]),
+                        (dy[1] * a[3] - a[1] * dy[3]) / (a[3] * a[3]),
+                    ];
+                    let found = values
+                        .iter()
+                        .find(|(s, t, _)| (*s - u).abs() < 1e-5 && (*t - v).abs() < 1e-5)
+                        .expect("pixel sample follows s/q,t/q");
+                    for i in 0..4 {
+                        assert!(
+                            (found.2[i] - expected[i]).abs() < 1e-5,
+                            "x={x} y={y} derivative={i}: {:?} vs {expected:?}",
+                            found.2
+                        );
+                    }
+                    let offset = (y * N + x) as usize * 4;
+                    assert!(target.color[offset].abs_diff(to_byte(u)) <= 1);
+                    assert!(target.color[offset + 1].abs_diff(to_byte(v)) <= 1);
+                }
+            }
+        }
+    }
+    #[test]
+    fn clipping_interpolates_all_four_coordinates_before_projection() {
+        let a = Vertex {
+            texcoord: [[1., 2., 3., 4.]; 4],
+            ..Default::default()
+        };
+        let b = Vertex {
+            texcoord: [[5., 6., 7., 8.]; 4],
+            ..Default::default()
+        };
+        assert_eq!(lerp_vertex(&a, &b, 0.25).texcoord, [[2., 3., 4., 5.]; 4]);
+    }
+    #[test]
+    fn points_and_lines_preserve_homogeneous_coordinate_equivalence() {
+        for line in [false, true] {
+            let mut images = Vec::new();
+            let state = PipelineState {
+                viewport: (0, 0, 16, 16),
+                point_size: 3.,
+                ..Default::default()
+            };
+            let stages = [TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            }];
+            for q in [1., 2., 4.] {
+                let mut target = RenderTarget::new(16, 16);
+                let sampler = Samples(RefCell::new(Vec::new()));
+                let vertices = std::array::from_fn(|i| Vertex {
+                    pos: [if i == 0 { -0.75 } else { 0.75 }, 0., 0., 1.],
+                    texcoord: [[
+                        if i == 0 { 0.25 * q } else { 0.75 * q },
+                        0.25 * q,
+                        0.5 * q,
+                        q,
+                    ]; 4],
+                    ..Default::default()
+                });
+                let written = if line {
+                    draw_line(&mut target, &state, &sampler, &stages, vertices)
+                } else {
+                    draw_point(&mut target, &state, &sampler, &stages, vertices[0])
+                };
+                assert!(written > 0);
+                images.push(target.color);
+            }
+            assert_eq!(images[0], images[1]);
+            assert_eq!(images[0], images[2]);
         }
     }
 }
