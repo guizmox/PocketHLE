@@ -1024,6 +1024,10 @@ fn gl_bind_texture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 fn gl_gen_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let n = ctx.arg_u32(0)? as i32;
     let out = ctx.arg_u32(1)?;
+    if n < 0 {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
     if n <= 0 || out == 0 {
         return Ok(VOID);
     }
@@ -1036,6 +1040,10 @@ fn gl_gen_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 fn gl_delete_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let n = ctx.arg_u32(0)? as i32;
     let ptr = ctx.arg_u32(1)?;
+    if n < 0 {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
     if n <= 0 || ptr == 0 {
         return Ok(VOID);
     }
@@ -1066,6 +1074,9 @@ fn gl_buffer_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
         return Ok(VOID);
     }
+    if !with_ctx(|c| c.validate_buffer_data(target, size as usize, usage)) {
+        return Ok(VOID);
+    }
     let bytes = if data != 0 {
         Some(ctx.cpu.read_mem(data, size as u32)?)
     } else {
@@ -1080,7 +1091,14 @@ fn gl_buffer_sub_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     let offset = ctx.arg_u32(1)?;
     let size = ctx.arg_u32(2)? as i32;
     let data = ctx.arg_u32(3)?;
-    if size <= 0 || data == 0 {
+    if size < 0 {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
+    if !with_ctx(|c| c.validate_buffer_sub_data(target, offset, size as usize)) {
+        return Ok(VOID);
+    }
+    if size == 0 {
         return Ok(VOID);
     }
     let bytes = ctx.cpu.read_mem(data, size as u32)?;
@@ -2992,6 +3010,76 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn buffer_validation_precedes_guest_reads_and_preserves_store() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        call(&mut cpu, &mut kernel, gl_bind_buffer, &[GL_ARRAY_BUFFER, 7]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_buffer_data,
+            &[GL_ARRAY_BUFFER, 8, 0, GL_STATIC_DRAW],
+        );
+        for (handler, args, error) in [
+            (
+                gl_buffer_data as crate::Handler,
+                [GL_ARRAY_BUFFER, 8, 0xdeadbeef, 0x88e0],
+                GL_INVALID_ENUM,
+            ),
+            (
+                gl_buffer_data,
+                [0xdead, 8, 0xdeadbeef, GL_STATIC_DRAW],
+                GL_INVALID_ENUM,
+            ),
+            (
+                gl_buffer_sub_data,
+                [GL_ARRAY_BUFFER, 0, u32::MAX, 0xdeadbeef],
+                GL_INVALID_VALUE,
+            ),
+            (
+                gl_buffer_sub_data,
+                [GL_ARRAY_BUFFER, u32::MAX, 1, 0xdeadbeef],
+                GL_INVALID_VALUE,
+            ),
+            (
+                gl_buffer_sub_data,
+                [GL_ARRAY_BUFFER, 7, 2, 0xdeadbeef],
+                GL_INVALID_VALUE,
+            ),
+            (
+                gl_buffer_sub_data,
+                [0xdead, 0, 1, 0xdeadbeef],
+                GL_INVALID_ENUM,
+            ),
+        ] {
+            call(&mut cpu, &mut kernel, handler, &args);
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), error);
+            assert_eq!(with_ctx(|c| c.buffers[&7].data.len()), 8);
+        }
+        for handler in [gl_gen_buffers as crate::Handler, gl_delete_buffers] {
+            call(&mut cpu, &mut kernel, handler, &[u32::MAX, 0xdeadbeef]);
+            assert_eq!(
+                call(&mut cpu, &mut kernel, gl_get_error, &[]),
+                GL_INVALID_VALUE
+            );
+        }
+        call(&mut cpu, &mut kernel, gl_bind_buffer, &[GL_ARRAY_BUFFER, 0]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_buffer_data,
+            &[GL_ARRAY_BUFFER, 8, 0xdeadbeef, GL_STATIC_DRAW],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_OPERATION
+        );
+    }
 
     #[test]
     fn compressed_upload_bridge_checks_size_and_border_before_guest_reads() {

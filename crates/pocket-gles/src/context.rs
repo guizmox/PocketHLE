@@ -866,8 +866,20 @@ impl Context {
             }
             self.es11.buffer_objects.remove(&name);
             self.buffers.remove(&name);
-            if self.point_size_array.buffer == name {
-                self.point_size_array.buffer = 0;
+            for array in [
+                &mut self.vertex_array,
+                &mut self.normal_array,
+                &mut self.color_array,
+                &mut self.point_size_array,
+            ] {
+                if array.buffer == name {
+                    array.buffer = 0;
+                }
+            }
+            for unit in &mut self.texture_units {
+                if unit.texcoord_array.buffer == name {
+                    unit.texcoord_array.buffer = 0;
+                }
             }
             if self.array_buffer == name {
                 self.array_buffer = 0;
@@ -892,28 +904,29 @@ impl Context {
     /// A null `data` pointer allocates without initialising, which is
     /// legal and common — the guest follows up with `glBufferSubData`.
     pub fn buffer_data(&mut self, target: u32, size: usize, data: Option<&[u8]>, usage: u32) {
-        let Some(name) = self.bound_buffer_name(target) else {
-            // Uploading with no buffer bound is an error, not a no-op:
-            // GL has nowhere to put the data.
-            self.set_error(
-                if target == GL_ARRAY_BUFFER || target == GL_ELEMENT_ARRAY_BUFFER {
-                    GL_INVALID_OPERATION
-                } else {
-                    GL_INVALID_ENUM
-                },
-            );
+        if !self.validate_buffer_data(target, size, usage) {
             return;
-        };
-        let Some(buf) = self.buffers.get_mut(&name) else {
+        }
+        if data.is_some_and(|src| src.len() < size) {
+            self.set_error(GL_INVALID_VALUE);
             return;
-        };
-        buf.usage = usage;
+        }
+        let name = self.bound_buffer_name(target).unwrap();
+        let buf = self.buffers.get_mut(&name).unwrap();
+        if buf
+            .data
+            .try_reserve_exact(size.saturating_sub(buf.data.len()))
+            .is_err()
+        {
+            self.set_error(GL_OUT_OF_MEMORY);
+            return;
+        }
         buf.data.clear();
         buf.data.resize(size, 0);
         if let Some(src) = data {
-            let n = src.len().min(size);
-            buf.data[..n].copy_from_slice(&src[..n]);
+            buf.data.copy_from_slice(&src[..size]);
         }
+        buf.usage = usage;
         log::debug!(
             "GLES buffer data target=0x{target:04x} name={name} size={size} usage=0x{usage:04x} initialised={}",
             data.is_some()
@@ -923,23 +936,56 @@ impl Context {
     /// `glBufferSubData`: overwrite part of an existing store. A range
     /// that runs past the end is an error and writes nothing.
     pub fn buffer_sub_data(&mut self, target: u32, offset: u32, data: &[u8]) {
-        let Some(name) = self.bound_buffer_name(target) else {
-            self.set_error(GL_INVALID_OPERATION);
-            return;
-        };
-        let Some(buf) = self.buffers.get_mut(&name) else {
-            return;
-        };
-        let start = offset as usize;
-        let Some(end) = start.checked_add(data.len()) else {
-            self.set_error(GL_INVALID_VALUE);
-            return;
-        };
-        if end > buf.data.len() {
-            self.set_error(GL_INVALID_VALUE);
+        if !self.validate_buffer_sub_data(target, offset, data.len()) {
             return;
         }
-        buf.data[start..end].copy_from_slice(data);
+        let name = self.bound_buffer_name(target).unwrap();
+        let buf = self.buffers.get_mut(&name).unwrap();
+        let start = offset as usize;
+        buf.data[start..start + data.len()].copy_from_slice(data);
+    }
+
+    /// Validate before the bridge reads guest data or mutates the store.
+    pub fn validate_buffer_data(&mut self, target: u32, size: usize, usage: u32) -> bool {
+        if !matches!(target, GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER)
+            || !matches!(usage, GL_STATIC_DRAW | GL_DYNAMIC_DRAW)
+        {
+            self.set_error(GL_INVALID_ENUM);
+            return false;
+        }
+        if size > i32::MAX as usize {
+            self.set_error(GL_INVALID_VALUE);
+            return false;
+        }
+        if self.bound_buffer_name(target).is_none() {
+            self.set_error(GL_INVALID_OPERATION);
+            return false;
+        }
+        true
+    }
+
+    pub fn validate_buffer_sub_data(&mut self, target: u32, offset: u32, size: usize) -> bool {
+        if !matches!(target, GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER) {
+            self.set_error(GL_INVALID_ENUM);
+            return false;
+        }
+        if (offset as i32) < 0 || size > i32::MAX as usize {
+            self.set_error(GL_INVALID_VALUE);
+            return false;
+        }
+        let Some(name) = self.bound_buffer_name(target) else {
+            self.set_error(GL_INVALID_OPERATION);
+            return false;
+        };
+        let valid = self.buffers.get(&name).is_some_and(|buf| {
+            (offset as usize)
+                .checked_add(size)
+                .is_some_and(|end| end <= buf.data.len())
+        });
+        if !valid {
+            self.set_error(GL_INVALID_VALUE);
+        }
+        valid
     }
 
     pub fn set_active_texture(&mut self, unit: u32) {
@@ -980,6 +1026,14 @@ impl Context {
 
     /// `glVertexPointer` preserves the enable flag owned by `glEnableClientState`.
     pub fn set_vertex_pointer(&mut self, size: u32, ty: u32, stride: u32, pointer: u32) {
+        if !(2..=4).contains(&size) || (stride as i32) < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if !matches!(ty, GL_BYTE | GL_SHORT | GL_FIXED | GL_FLOAT) {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
         self.vertex_array = ArrayPointer {
             enabled: self.vertex_array.enabled,
             size,
@@ -992,6 +1046,14 @@ impl Context {
 
     /// `glColorPointer`.
     pub fn set_color_pointer(&mut self, size: u32, ty: u32, stride: u32, pointer: u32) {
+        if !(size == 4 || (self.gizmondo_goforce_20051013 && size == 3)) || (stride as i32) < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if !matches!(ty, GL_UNSIGNED_BYTE | GL_FIXED | GL_FLOAT) {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
         self.color_array = ArrayPointer {
             enabled: self.color_array.enabled,
             size,
@@ -1004,6 +1066,14 @@ impl Context {
 
     /// `glNormalPointer`. Normals are always three components.
     pub fn set_normal_pointer(&mut self, ty: u32, stride: u32, pointer: u32) {
+        if (stride as i32) < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if !matches!(ty, GL_BYTE | GL_SHORT | GL_FIXED | GL_FLOAT) {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
         self.normal_array = ArrayPointer {
             enabled: self.normal_array.enabled,
             size: 3,
@@ -1015,6 +1085,16 @@ impl Context {
     }
 
     pub fn set_texcoord_pointer(&mut self, size: u32, ty: u32, stride: u32, pointer: u32) {
+        if !((2..=4).contains(&size) || (self.gizmondo_goforce_20051013 && size == 1))
+            || (stride as i32) < 0
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if !matches!(ty, GL_BYTE | GL_SHORT | GL_FIXED | GL_FLOAT) {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
         let unit = self.client_active_texture as usize;
         if unit >= MAX_TEXTURE_UNITS {
             self.set_error(GL_INVALID_ENUM);
@@ -2415,20 +2495,39 @@ impl Context {
 
     /// `glDrawArrays`.
     pub fn draw_arrays(&mut self, mem: &mut dyn GuestMemory, mode: u32, first: u32, count: u32) {
-        if !self.vertex_source_ready() {
+        if !self.validate_draw(mode, count) {
             return;
         }
-        let end = first.saturating_add(count);
+        if (first as i32) < 0 || first.checked_add(count).is_none() {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if count == 0 || !self.vertex_source_ready() {
+            return;
+        }
+        let end = first + count;
         self.draw_indexed(mem, mode, first..end, (end - first) as usize, true);
     }
 
     /// `glDrawElements`. `indices` has already been read out of guest
     /// memory and widened to `u32`.
     pub fn draw_elements(&mut self, mem: &mut dyn GuestMemory, mode: u32, indices: &[u32]) {
-        if !self.vertex_source_ready() {
+        if !self.validate_draw(mode, indices.len() as u32) || !self.vertex_source_ready() {
             return;
         }
         self.draw_indexed(mem, mode, indices.iter().copied(), indices.len(), false);
+    }
+
+    fn validate_draw(&mut self, mode: u32, count: u32) -> bool {
+        if mode > GL_TRIANGLE_FAN {
+            self.set_error(GL_INVALID_ENUM);
+            return false;
+        }
+        if (count as i32) < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return false;
+        }
+        true
     }
 
     /// Read an index buffer out of guest memory and draw with it.
@@ -2440,6 +2539,9 @@ impl Context {
         ty: u32,
         pointer: u32,
     ) {
+        if !self.validate_draw(mode, count) {
+            return;
+        }
         let width = match ty {
             GL_UNSIGNED_BYTE => 1usize,
             GL_UNSIGNED_SHORT => 2usize,
@@ -2448,6 +2550,9 @@ impl Context {
                 return;
             }
         };
+        if count == 0 || !self.vertex_source_ready() {
+            return;
+        }
         let Some(len) = (count as usize).checked_mul(width) else {
             self.set_error(GL_INVALID_VALUE);
             return;
@@ -3420,6 +3525,9 @@ mod tests {
         ];
         for es in [false, true] {
             let mut c = native_ctx(es);
+            // Three-component colors are a measured GoForce driver variant.
+            // Keep exercising their typed fast path under the appropriate profile.
+            c.gizmondo_goforce_20051013 = true;
             let mut bytes = Vec::new();
             for i in 0..8 {
                 bytes.extend(fixeds(&[
@@ -7216,5 +7324,156 @@ mod retrospective_texture_tests {
                 draw(&mut c, 0., [255, 0, 0, 255]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod array_validation_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_array_descriptors_preserve_captured_state() {
+        let mut c = Context::new(8, 8);
+        c.bind_buffer(GL_ARRAY_BUFFER, 7);
+        c.vertex_array.enabled = true;
+        c.set_vertex_pointer(3, GL_FLOAT, 12, 16);
+        let saved = c.vertex_array;
+        c.bind_buffer(GL_ARRAY_BUFFER, 8);
+        for (size, ty, stride, error) in [
+            (1, GL_FLOAT, 0, GL_INVALID_VALUE),
+            (5, GL_FLOAT, 0, GL_INVALID_VALUE),
+            (3, GL_UNSIGNED_BYTE, 0, GL_INVALID_ENUM),
+            (3, GL_FLOAT, u32::MAX, GL_INVALID_VALUE),
+        ] {
+            c.set_vertex_pointer(size, ty, stride, 99);
+            assert_eq!(c.take_error(), error);
+            assert_eq!(c.vertex_array, saved);
+        }
+        let normal = c.normal_array;
+        c.set_normal_pointer(GL_UNSIGNED_BYTE, 0, 99);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        assert_eq!(c.normal_array, normal);
+        c.set_color_pointer(4, GL_UNSIGNED_BYTE, 0, 20);
+        let color = c.color_array;
+        for ty in [GL_BYTE, GL_SHORT, 0xdead] {
+            c.set_color_pointer(4, ty, 0, 99);
+            assert_eq!(c.take_error(), GL_INVALID_ENUM);
+            assert_eq!(c.color_array, color);
+        }
+    }
+
+    #[test]
+    fn native_goforce_array_exceptions_are_profile_scoped() {
+        let mut c = Context::new(8, 8);
+        for profile in [false, true, false] {
+            c.gizmondo_goforce_20051013 = profile;
+            c.set_color_pointer(3, GL_FLOAT, 0, 16);
+            assert_eq!(
+                c.take_error(),
+                if profile {
+                    GL_NO_ERROR
+                } else {
+                    GL_INVALID_VALUE
+                }
+            );
+            c.set_client_active_texture(2);
+            c.set_texcoord_pointer(1, GL_SHORT, 0, 32);
+            assert_eq!(
+                c.take_error(),
+                if profile {
+                    GL_NO_ERROR
+                } else {
+                    GL_INVALID_VALUE
+                }
+            );
+            if profile {
+                assert_eq!(c.color_array.size, 3);
+                assert_eq!(c.texture_units[2].texcoord_array.size, 1);
+            }
+            c.set_texcoord_pointer(2, GL_UNSIGNED_BYTE, 0, 32);
+            assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        }
+    }
+
+    #[test]
+    fn deletion_detaches_all_arrays_without_resetting_descriptors() {
+        let mut c = Context::new(8, 8);
+        c.bind_buffer(GL_ARRAY_BUFFER, 9);
+        c.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 9);
+        c.set_vertex_pointer(3, GL_FLOAT, 12, 24);
+        c.set_color_pointer(4, GL_UNSIGNED_BYTE, 4, 48);
+        c.set_normal_pointer(GL_FIXED, 12, 64);
+        c.set_point_size_pointer(GL_FLOAT, 4, 80);
+        for unit in 0..MAX_TEXTURE_UNITS as u32 {
+            c.set_client_active_texture(unit);
+            c.set_texcoord_pointer(2, GL_FLOAT, 8, 96 + unit * 8);
+        }
+        c.delete_buffers(&[0, 99, 9, 9]);
+        assert_eq!(c.array_buffer, 0);
+        assert_eq!(c.element_array_buffer, 0);
+        for a in [
+            c.vertex_array,
+            c.normal_array,
+            c.color_array,
+            c.point_size_array,
+        ] {
+            assert_eq!(a.buffer, 0);
+            assert_ne!(a.pointer, 0);
+        }
+        for unit in &c.texture_units {
+            assert_eq!(unit.texcoord_array.buffer, 0);
+        }
+        c.bind_buffer(GL_ARRAY_BUFFER, 9);
+        assert!(c.buffers[&9].data.is_empty());
+        assert_eq!(
+            c.vertex_array.buffer, 0,
+            "name reuse must not recapture old arrays"
+        );
+    }
+
+    #[test]
+    fn invalid_buffer_updates_preserve_store_and_usage() {
+        let mut c = Context::new(8, 8);
+        c.bind_buffer(GL_ARRAY_BUFFER, 1);
+        c.buffer_data(GL_ARRAY_BUFFER, 4, Some(&[1, 2, 3, 4]), GL_DYNAMIC_DRAW);
+        c.buffer_data(GL_ARRAY_BUFFER, 8, None, 0x88e0);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        c.buffer_sub_data(0xdead, 0, &[9]);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        for (offset, bytes) in [(u32::MAX, &[9][..]), (3, &[9, 8][..])] {
+            c.buffer_sub_data(GL_ARRAY_BUFFER, offset, bytes);
+            assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        }
+        assert_eq!(c.buffers[&1].data, [1, 2, 3, 4]);
+        assert_eq!(c.buffers[&1].usage, GL_DYNAMIC_DRAW);
+        c.buffer_sub_data(GL_ARRAY_BUFFER, 4, &[]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        c.buffer_sub_data(GL_ARRAY_BUFFER, 5, &[]);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+    }
+
+    struct NoRead;
+    impl GuestMemory for NoRead {
+        fn read(&mut self, _: u32, _: usize, _: &mut Vec<u8>) -> bool {
+            panic!("invalid or empty draw must not read guest memory")
+        }
+    }
+    #[test]
+    fn invalid_and_empty_draws_are_checked_before_memory_access() {
+        let mut c = Context::new(8, 8);
+        c.vertex_array.enabled = true;
+        c.set_vertex_pointer(3, GL_FLOAT, 0, 16);
+        c.draw_arrays(&mut NoRead, GL_TRIANGLES, 0, u32::MAX);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.draw_arrays(&mut NoRead, 0xdead, 0, 0);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        c.draw_arrays(&mut NoRead, GL_TRIANGLES, u32::MAX, 1);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.draw_elements_from_guest(&mut NoRead, GL_TRIANGLES, u32::MAX, GL_UNSIGNED_SHORT, 0);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
+        c.draw_elements_from_guest(&mut NoRead, 0xdead, 1, GL_UNSIGNED_SHORT, 0);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        c.draw_elements_from_guest(&mut NoRead, GL_TRIANGLES, 0, GL_UNSIGNED_SHORT, 0);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
     }
 }

@@ -1,0 +1,673 @@
+[
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x1",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x2",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x5",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x4",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x9",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x5",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x1400",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x4",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x1401",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x1402",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x4",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x140c",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0xdead",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glVertexPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0xffffffff",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x1",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x3",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x2",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x5",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x4",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x9",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x5",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x1400",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x4",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x1401",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x1402",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x4",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x140c",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0xdead",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glTexCoordPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0xffffffff",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x1",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x2",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x3",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x9",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x5",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x1400",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x1401",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x3",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x1402",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x140c",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x9",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x9",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0xdead",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glColorPointer",
+    "args": [
+      "0x4",
+      "0x1406",
+      "0xffffffff",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0x1400",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x4",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0x1401",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0x1402",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x4",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0x140c",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0x1406",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x7",
+    "log": [],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0xdead",
+      "0x0",
+      "0x27000000"
+    ],
+    "r0": "0x500",
+    "log": [
+      {
+        "error": "0x500"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  },
+  {
+    "api": "glNormalPointer",
+    "args": [
+      "0x1406",
+      "0xffffffff",
+      "0x27000000"
+    ],
+    "r0": "0x501",
+    "log": [
+      {
+        "error": "0x501"
+      }
+    ],
+    "backend_skipped": [],
+    "fault": null,
+    "inspect": {}
+  }
+]
