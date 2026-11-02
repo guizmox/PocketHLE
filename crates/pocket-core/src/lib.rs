@@ -390,6 +390,20 @@ impl Emulator {
         }
     }
 
+    /// Mount save backing at one guest path without leaking its host location
+    /// through a parent save overlay.
+    pub fn mount_isolated_save_dir(
+        &mut self,
+        guest_prefix: &str,
+        host_dir: impl Into<std::path::PathBuf>,
+    ) {
+        if let Some(p) = self.process.as_mut() {
+            p.state.vfs.mount_isolated_save_dir(guest_prefix, host_dir);
+        } else {
+            log::warn!("mount_isolated_save_dir called before load_pe; ignored");
+        }
+    }
+
     /// Set the guest path `GetModuleFileNameW` reports for the running
     /// executable.
     ///

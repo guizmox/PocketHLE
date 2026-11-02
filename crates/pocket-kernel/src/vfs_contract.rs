@@ -177,6 +177,7 @@ impl Vfs {
         let normal = self.normalise_guest_path(path);
         let mounts = self.matching_mounts(&normal);
         let first = *mounts.first().ok_or(3u32)?;
+        let spelling = self.spelled_guest_path(path);
         // A more specific read-only mount cannot be bypassed through a broader writable root.
         let mount = if write {
             mounts
@@ -184,10 +185,14 @@ impl Vfs {
                 .find(|m| m.prefix == first.prefix && !m.read_only)
                 .ok_or(5u32)?
         } else {
-            first
+            // Private backing inside a save overlay must not hide installed
+            // assets at the same guest path, or expose the private host files.
+            mounts
+                .into_iter()
+                .find(|mount| self.host_path_for_mount(mount, &spelling).is_some())
+                .ok_or(5u32)?
         };
         // Case folding is a lookup key, never the spelling of a newly created file.
-        let spelling = self.spelled_guest_path(path);
         let host = self.host_path_for_mount(mount, &spelling).ok_or(5u32)?;
         let root = mount.host_dir.canonicalize().map_err(|e| io_error(&e))?;
         let ancestor = host

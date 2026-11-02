@@ -241,6 +241,8 @@ impl OpenVolume {
 #[derive(Debug, Clone)]
 struct Mount {
     storage_card: bool,
+    /// Host backing belongs only to this guest mount, even inside another overlay.
+    isolated: bool,
     prefix: String,
     /// `prefix` with its original capitalisation. Enumerating a parent
     /// directory reports a nested mount point by name, and a guest that
@@ -714,6 +716,21 @@ impl Vfs {
         self.restore_overlay_spelling(guest_prefix, &host_dir);
     }
 
+    /// Mount private backing storage without exposing its host location through
+    /// another mount. Existing save bytes stay in place; only the guest namespace
+    /// changes. Use this for per-game documents stored inside the save directory.
+    pub fn mount_isolated_save_dir(&mut self, guest_prefix: &str, host_dir: impl Into<PathBuf>) {
+        self.mount_save_dir(guest_prefix, host_dir);
+        self.mounts.last_mut().unwrap().isolated = true;
+    }
+
+    /// Whether a host path belongs to another mount's private backing subtree.
+    fn hidden_backing(&self, mount: &Mount, path: &Path) -> bool {
+        self.mounts.iter().any(|other| {
+            other.isolated && !std::ptr::eq(mount, other) && path.starts_with(&other.host_dir)
+        })
+    }
+
     /// Recover names case-folded by older writable overlays. Only an unambiguous
     /// installed file at the same guest path supplies spelling; saved bytes win.
     /// Run before guest execution, without touching file contents or new assets.
@@ -828,6 +845,7 @@ impl Vfs {
         let storage_card = matches!(p.as_str(), "/sd card/" | "/storage card/");
         self.mounts.push(Mount {
             storage_card,
+            isolated: false,
             prefix: p,
             display_prefix: display,
             host_dir: host_dir.into(),
@@ -917,7 +935,7 @@ impl Vfs {
     fn host_path_for_mount(&self, mount: &Mount, normalised: &str) -> Option<PathBuf> {
         let root = mount.prefix.trim_end_matches('/');
         if normalised.eq_ignore_ascii_case(root) {
-            return Some(mount.host_dir.clone());
+            return (!self.hidden_backing(mount, &mount.host_dir)).then(|| mount.host_dir.clone());
         }
         let rel = &normalised[mount.prefix.len()..];
         let mut p = mount.host_dir.clone();
@@ -966,7 +984,7 @@ impl Vfs {
                 }
             }
         }
-        Some(p)
+        (!self.hidden_backing(mount, &p)).then_some(p)
     }
 
     /// Rank fallback files by matching trailing path components. A basename
@@ -993,14 +1011,18 @@ impl Vfs {
     }
 
     fn rank_fallback_files(
-        root: &Path,
+        &self,
+        mount: &Mount,
         wanted: &[&str],
         files: &[PathBuf],
     ) -> (usize, Vec<PathBuf>) {
         let mut best = 0;
         let mut found = Vec::new();
         for path in files {
-            let Ok(relative) = path.strip_prefix(root) else {
+            if self.hidden_backing(mount, path) {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(&mount.host_dir) else {
                 continue;
             };
             let score = relative
@@ -1025,14 +1047,14 @@ impl Vfs {
         (best, found)
     }
 
-    fn find_path_recursive(mount: &Mount, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
+    fn find_path_recursive(&self, mount: &Mount, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
         if mount.read_only {
             let mut files = mount.fallback_files.borrow_mut();
             let files = files.get_or_insert_with(|| Self::collect_fallback_files(&mount.host_dir));
-            Self::rank_fallback_files(&mount.host_dir, wanted, files)
+            self.rank_fallback_files(mount, wanted, files)
         } else {
             let files = Self::collect_fallback_files(&mount.host_dir);
-            Self::rank_fallback_files(&mount.host_dir, wanted, &files)
+            self.rank_fallback_files(mount, wanted, &files)
         }
     }
 
@@ -1135,7 +1157,7 @@ impl Vfs {
         let mut best = 0;
         let mut candidates = Vec::new();
         for mount in mounts.into_iter().filter(|mount| mount.resource_fallback) {
-            let (score, found) = Self::find_path_recursive(mount, &wanted);
+            let (score, found) = self.find_path_recursive(mount, &wanted);
             if score > best {
                 best = score;
                 candidates.clear();
@@ -1215,6 +1237,9 @@ impl Vfs {
                 continue;
             };
             for entry in entries.flatten() {
+                if self.hidden_backing(mount, &entry.path()) {
+                    continue;
+                }
                 let Ok(meta) = entry.metadata() else { continue };
                 let name = entry.file_name().to_string_lossy().to_string();
                 merged.entry(name.to_ascii_lowercase()).or_insert((
@@ -2791,6 +2816,102 @@ mod tests {
             .open_file("SD Card/Save/trip.dat", 2, 3, 2, false, 0)
             .is_ok());
         assert!(writable.path().join("trip.dat").is_file());
+    }
+
+    #[test]
+    fn isolated_documents_do_not_leak_through_parent_overlay() {
+        let installed = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        let documents = saves.path().join("my-documents");
+        std::fs::create_dir_all(documents.join("nested")).unwrap();
+        std::fs::write(documents.join("nested/private.sav"), b"old documents").unwrap();
+        std::fs::write(saves.path().join("progress.sav"), b"old save").unwrap();
+        // Installed assets with the same directory name must remain visible.
+        std::fs::create_dir(installed.path().join("my-documents")).unwrap();
+        std::fs::write(installed.path().join("my-documents/asset.dat"), b"asset").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("/Program Files/Example/", installed.path());
+        v.mount_save_dir("/Program Files/Example/", saves.path());
+        v.mount_isolated_save_dir("/My Documents/", &documents);
+        assert_eq!(
+            v.resolve("/My Documents/nested/private.sav"),
+            Some(documents.join("nested/private.sav"))
+        );
+        assert!(v
+            .open("/My Documents/nested/private.sav", Access::Read, false)
+            .is_some());
+        assert!(v
+            .open_file(
+                "/Program Files/Example/my-documents/nested/private.sav",
+                1,
+                3,
+                3,
+                false,
+                0
+            )
+            .is_err());
+        assert!(v
+            .open_file(
+                "/Program Files/Example/my-documents/new.sav",
+                2,
+                3,
+                2,
+                false,
+                0
+            )
+            .is_err());
+        assert!(v
+            .open(
+                "/Program Files/Example/my-documents/asset.dat",
+                Access::Read,
+                false
+            )
+            .is_some());
+        let listing = v.list_dir("/Program Files/Example/my-documents").unwrap();
+        assert_eq!(
+            listing.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(),
+            ["asset.dat"]
+        );
+        let handle = v
+            .open("/My Documents/new.sav", Access::Write, true)
+            .unwrap();
+        assert_eq!(v.write(handle, b"new documents"), Some(13));
+        v.close(handle);
+        assert_eq!(
+            std::fs::read(documents.join("new.sav")).unwrap(),
+            b"new documents"
+        );
+        assert_eq!(
+            std::fs::read(documents.join("nested/private.sav")).unwrap(),
+            b"old documents"
+        );
+        assert_eq!(
+            std::fs::read(saves.path().join("progress.sav")).unwrap(),
+            b"old save"
+        );
+    }
+
+    #[test]
+    fn isolated_empty_backing_is_not_a_game_subdirectory() {
+        let saves = tempfile::tempdir().unwrap();
+        let mut v = Vfs::new();
+        v.mount_save_dir("/Game/", saves.path());
+        v.mount_isolated_save_dir("/My Documents/", saves.path().join("my-documents"));
+        std::fs::write(saves.path().join("data.dat"), b"data").unwrap();
+        let listing = v.list_dir("/Game/").unwrap();
+        assert_eq!(
+            listing.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(),
+            ["data.dat"]
+        );
+        assert!(v.list_dir("/Game/my-documents").is_none());
+        assert!(v.attributes("/Game/my-documents").is_err());
+        assert!(v.open("/Game/private.sav", Access::Read, false).is_none());
+        std::fs::write(saves.path().join("my-documents/private.sav"), b"private").unwrap();
+        // Recursive basename fallback must not bypass the isolation either.
+        assert!(v.open("/Game/private.sav", Access::Read, false).is_none());
+        assert!(v
+            .open("/My Documents/private.sav", Access::Read, false)
+            .is_some());
     }
 
     #[test]

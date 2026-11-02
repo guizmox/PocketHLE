@@ -677,7 +677,7 @@ fn run_process(
                 .trim_end_matches('\\')
                 .eq_ignore_ascii_case(r"\My Documents")
         {
-            emu.mount_save_dir(r"\My Documents\", save_dir.join("my-documents"));
+            emu.mount_isolated_save_dir(r"\My Documents\", save_dir.join("my-documents"));
         }
         summary_lines.push(format!(
             "Save data: {} -> {:?}",
