@@ -39,6 +39,16 @@ pub(super) struct Lease {
     share: u32,
     pub(super) volume: Option<(PathBuf, u64)>,
 }
+/// Metadata query independent of open handles and their sharing mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInfo {
+    pub attributes: u32,
+    /// Creation, last access and last write, in 100 ns ticks since 1601.
+    /// Zero means the backing store does not provide that timestamp.
+    pub times: [u64; 3],
+    pub size: u64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct OpenResult {
     pub handle: u32,
@@ -938,6 +948,39 @@ impl Vfs {
         };
         Ok((total, total.saturating_sub(occupied)))
     }
+    pub fn file_information(&self, path: &str) -> Result<FileInfo, u32> {
+        let attributes = self.attributes(path)?;
+        if self.is_ram_path(path) {
+            return Ok(FileInfo {
+                attributes,
+                times: [0; 3],
+                size: self.ram_file_size(path).unwrap_or(0),
+            });
+        }
+        let (exact, _) = self.exact_path(path, false)?;
+        let host = self.resolve(path).unwrap_or(exact);
+        let metadata = host.metadata().map_err(|e| io_error(&e))?;
+        let convert = |time: std::io::Result<std::time::SystemTime>| -> u64 {
+            let Ok(time) = time else {
+                return 0;
+            };
+            let epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(11_644_473_600);
+            time.duration_since(epoch)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_nanos() / 100).ok())
+                .unwrap_or(0)
+        };
+        Ok(FileInfo {
+            attributes,
+            times: [
+                convert(metadata.created()),
+                convert(metadata.accessed()),
+                convert(metadata.modified()),
+            ],
+            size: if metadata.is_dir() { 0 } else { metadata.len() },
+        })
+    }
+
     pub fn attributes(&self, path: &str) -> Result<u32, u32> {
         if self.is_ram_path(path) {
             let key = self.file_key(path, false)?;
@@ -1097,6 +1140,37 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_queries_cover_overlay_directories_ram_and_exclusive_handles() {
+        let installed = tempfile::tempdir().unwrap();
+        let saved = tempfile::tempdir().unwrap();
+        std::fs::write(installed.path().join("same.dat"), b"installed").unwrap();
+        std::fs::write(saved.path().join("same.dat"), b"save").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only("/App/", installed.path());
+        v.mount_save_dir("/App/", saved.path());
+        let exclusive = v
+            .open_file("/App/same.dat", 3, 0, 3, false, 0)
+            .unwrap()
+            .handle;
+        let info = v.file_information("/App/same.dat").unwrap();
+        assert_eq!(info.size, 4);
+        assert_eq!(info.attributes, v.attributes("/App/same.dat").unwrap());
+        assert_ne!(info.times[2], 0);
+        assert_eq!(v.file_information("/App/").unwrap().attributes & 0x10, 0x10);
+        assert_eq!(v.file_information("/App/").unwrap().size, 0);
+        v.close(exclusive);
+        let ram = crate::memory_division::MemoryDivision::new(64 * 4096, 16).unwrap();
+        v.attach_ram(Some(ram));
+        let h = v.open("/ram.dat", Access::Write, true).unwrap();
+        assert_eq!(v.write(h, b"ram"), Some(3));
+        v.close(h);
+        let info = v.file_information("/ram.dat").unwrap();
+        assert_eq!(info.size, 3);
+        assert_eq!(info.times, [0; 3]);
+        assert_eq!(v.file_information("/absent.dat").unwrap_err(), 2);
+    }
+
     use super::*;
     #[test]
     fn new_files_keep_requested_case_and_old_overlays_recover_without_losing_bytes() {

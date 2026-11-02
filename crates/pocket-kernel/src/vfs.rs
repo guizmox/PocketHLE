@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 mod contracts;
 #[path = "vfs_mapping.rs"]
 mod mapping;
-pub use contracts::{OpenResult, VfsShared};
+pub use contracts::{FileInfo, OpenResult, VfsShared};
 pub use mapping::MappedFile;
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.

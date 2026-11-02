@@ -402,6 +402,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     );
     d.register_handler(dll, "DeleteFileW", delete_file_w);
     d.register_handler(dll, "GetFileAttributesW", get_file_attributes_w);
+    d.register_handler(dll, "GetFileAttributesExW", get_file_attributes_ex_w);
     d.register_handler(dll, "SetFileAttributesW", set_file_attributes_w);
     d.register_handler(dll, "CreateDirectoryW", create_directory_w);
     d.register_handler(dll, "RemoveDirectoryW", remove_directory_w);
@@ -9112,6 +9113,35 @@ fn get_file_attributes_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
             Ok(DispatchOutcome::ReturnedR0(u32::MAX))
         }
     }
+}
+
+/// GetFileExInfoStandard returns WIN32_FILE_ATTRIBUTE_DATA (36 bytes on CE).
+fn get_file_attributes_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let level = ctx.arg_u32(1)?;
+    let out = ctx.arg_u32(2)?;
+    if level != 0 || !vfs_probe_output(ctx, out, 36) {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let info = match vfs_api_path(ctx, 0).and_then(|path| ctx.kernel.vfs.file_information(&path)) {
+        Ok(info) => info,
+        Err(error) => {
+            set_thread_error(ctx, error);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+    };
+    let mut data = [0u8; 36];
+    data[..4].copy_from_slice(&info.attributes.to_le_bytes());
+    for (index, time) in info.times.iter().enumerate() {
+        data[4 + index * 8..12 + index * 8].copy_from_slice(&time.to_le_bytes());
+    }
+    data[28..32].copy_from_slice(&((info.size >> 32) as u32).to_le_bytes());
+    data[32..36].copy_from_slice(&(info.size as u32).to_le_bytes());
+    if ctx.cpu.write_mem(out, &data).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 /// `DWORD SetFilePointer(HANDLE h, LONG distance, LONG* hi, DWORD whence)`
@@ -32812,6 +32842,94 @@ mod tests {
         );
         assert_eq!(cpu.read_u32_le(0x1000).unwrap(), 64 * 1024 * 1024);
         assert_eq!(cpu.read_u32_le(0x1004).unwrap(), 48 * 1024 * 1024);
+    }
+
+    #[test]
+    fn get_file_attributes_ex_returns_ce_layout_and_preserves_last_error() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("asset.dat"), b"ten bytes!").unwrap();
+        kernel.vfs.mount_read_only("/App/", dir.path());
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let path: Vec<u8> = "/App/asset.dat\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x1000, &path).unwrap();
+        cpu.write_mem(0x1100, &[0x5a; 40]).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1100).unwrap();
+        kernel.thread_last_errors.insert(kernel.current_thread, 123);
+        let t = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &t,
+            kernel: &mut kernel,
+        };
+        assert_eq!(
+            get_file_attributes_ex_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x1100).unwrap(), 0x81);
+        assert_eq!(ctx.cpu.read_u32_le(0x111c).unwrap(), 0);
+        assert_eq!(ctx.cpu.read_u32_le(0x1120).unwrap(), 10);
+        assert_eq!(ctx.cpu.read_mem(0x1124, 4).unwrap(), [0x5a; 4]);
+        assert_ne!(ctx.cpu.read_mem(0x1114, 8).unwrap(), [0; 8]);
+        assert_eq!(
+            ctx.kernel.thread_last_errors[&ctx.kernel.current_thread],
+            123
+        );
+        let dispatcher = crate::WinCeDispatcher::new();
+        assert!(dispatcher.supports_import("COREDLL.dll", &pocket_pe::ImportBinding::Ordinal(1237)));
+        assert!(dispatcher
+            .registered_iter()
+            .any(|(dll, name)| dll.eq_ignore_ascii_case("coredll.dll")
+                && name == "GetFileAttributesExW"));
+    }
+
+    #[test]
+    fn get_file_attributes_ex_rejects_invalid_queries_without_touching_output() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let dir = tempfile::tempdir().unwrap();
+        kernel.vfs.mount("/App/", dir.path());
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let path: Vec<u8> = "/App/missing.dat\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x1000, &path).unwrap();
+        let t = dummy_thunk();
+        for (path, level, out, error) in [
+            (0x1000, 1, 0x1100, 87),
+            (0x1000, 0, 0, 87),
+            (0x1000, 0, 0x1ff0, 87),
+            (0, 0, 0x1100, 87),
+            (0x1000, 0, 0x1100, 2),
+        ] {
+            cpu.write_mem(0x1100, &[0x5a; 36]).unwrap();
+            cpu.write_reg(ArmReg::R0, path).unwrap();
+            cpu.write_reg(ArmReg::R1, level).unwrap();
+            cpu.write_reg(ArmReg::R2, out).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(
+                get_file_attributes_ex_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                ctx.kernel.thread_last_errors[&ctx.kernel.current_thread],
+                error
+            );
+            assert_eq!(ctx.cpu.read_mem(0x1100, 36).unwrap(), [0x5a; 36]);
+        }
     }
 
     #[test]

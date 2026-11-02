@@ -1,3 +1,6 @@
-frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\controller_ui.rs
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcGeometryTest.kt
+crates\pocket-core\src\lib.rs
+crates\pocket-kernel\src\vfs.rs
+crates\pocket-kernel\src\vfs_contract.rs
+crates\pocket-winceapi\src\coredll.rs
+frontends\pocket-desktop\src\runner.rs
+frontends\pocket-android-jni\src\runner.rs
