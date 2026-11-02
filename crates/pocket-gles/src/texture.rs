@@ -49,6 +49,7 @@ pub struct CompressedLevel {
 pub struct Texture {
     /// Incremented on pixel updates; used by the host GPU upload cache.
     pub revision: u64,
+    pub formats: std::collections::BTreeMap<u32, u32>,
     pub generate_mipmap: bool,
     pub width: u32,
     pub height: u32,
@@ -69,6 +70,7 @@ impl Default for Texture {
     fn default() -> Self {
         Self {
             revision: 0,
+            formats: Default::default(),
             generate_mipmap: false,
             width: 0,
             height: 0,
@@ -128,6 +130,16 @@ impl Texture {
             }
         }
     }
+    /// Internal formats survive RGBA decoding and automatic mip generation.
+    pub fn set_format(&mut self, level: u32, format: u32) {
+        self.formats.insert(level, format);
+        if level == 0 && self.generate_mipmap {
+            for &level in self.mipmaps.keys() {
+                self.formats.insert(level, format);
+            }
+        }
+    }
+
     pub fn set_compressed(
         &mut self,
         level: u32,
@@ -138,6 +150,7 @@ impl Texture {
         rgba: Vec<u8>,
     ) {
         self.set_level(level, width, height, rgba);
+        self.set_format(level, format);
         self.compressed.insert(
             level,
             CompressedLevel {
@@ -201,11 +214,13 @@ impl Texture {
 
     pub fn set_level(&mut self, level: u32, width: u32, height: u32, rgba: Vec<u8>) {
         self.compressed.remove(&level);
+        self.formats.insert(level, GL_RGBA);
         if level == 0 {
             // A resize cannot retain an unrelated previous mip chain.
             if self.generate_mipmap || self.width != width || self.height != height {
                 self.mipmaps.clear();
                 self.compressed.clear();
+                self.formats.retain(|l, _| *l == 0);
             }
             self.width = width;
             self.height = height;
@@ -230,6 +245,10 @@ impl Texture {
         let levels = self.upload_levels();
         for (level, (width, height, pixels)) in levels.into_iter().enumerate().skip(1) {
             self.mipmaps.insert(level as u32, (width, height, pixels));
+            self.formats.insert(
+                level as u32,
+                self.formats.get(&0).copied().unwrap_or(GL_RGBA),
+            );
         }
     }
 

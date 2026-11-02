@@ -34,7 +34,6 @@ impl Default for Es11State {
                 (0x0b96, enumeration(0x1e00)),
                 (0x0b97, StateValue::Number(vec![0.])),
                 (0x0b98, StateValue::Number(vec![4294967295.])),
-                (0x0bf0, enumeration(0x1503)),
                 (0x80aa, StateValue::Number(vec![1.])),
                 (0x80ab, StateValue::Number(vec![0.])),
                 (0x0c50, enumeration(0x1100)),
@@ -184,6 +183,7 @@ impl Context {
             GL_DEPTH_TEST => self.state.depth_test,
             GL_ALPHA_TEST => self.state.alpha_test,
             GL_BLEND => self.state.blend,
+            GL_COLOR_LOGIC_OP => self.state.logic_op,
             GL_CULL_FACE => self.cull_enabled,
             GL_SCISSOR_TEST => self.scissor_enabled,
             GL_TEXTURE_2D => self.texture_units[self.active_texture as usize].texture_enabled,
@@ -197,7 +197,7 @@ impl Context {
             GL_STENCIL_TEST => self.es11.stencil,
             0x3000..=0x3005 => self.es11.clip_enabled[(cap - 0x3000) as usize],
             0x4000..=0x4007 => self.lighting.lights[(cap - 0x4000) as usize].enabled,
-            0x0b10 | 0x0b20 | 0x0bf2 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
+            0x0b10 | 0x0b20 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
                 self.es11.extra_enables.contains(&cap)
             }
             GL_VERTEX_ARRAY => self.vertex_array.enabled,
@@ -370,7 +370,8 @@ impl Context {
                     self.set_error(GL_INVALID_ENUM);
                     return;
                 }
-                vec![(pname, enumeration(values[0]))]
+                self.logic_op(values[0]);
+                return;
             }
             0x80aa => vec![
                 (pname, number([f32::from_bits(values[0]).clamp(0., 1.)])),
@@ -413,6 +414,8 @@ impl Context {
             0x0b74 => enumeration(self.state.depth_func as u32 + 0x200),
             0x0bc1 => enumeration(self.state.alpha_func as u32 + 0x200),
             0x0bc2 => number([self.state.alpha_ref]),
+            GL_LOGIC_OP_MODE => enumeration(self.state.logic_mode),
+            GL_COLOR_LOGIC_OP => number([if self.state.logic_op { 1. } else { 0. }]),
             0x0be0 => enumeration(blend(self.state.blend_dst)),
             0x0be1 => enumeration(blend(self.state.blend_src)),
             0x0b44 => enumeration(match self.cull_mode {

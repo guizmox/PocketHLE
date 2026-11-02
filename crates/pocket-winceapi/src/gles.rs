@@ -1610,10 +1610,63 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     Ok(VOID)
 }
 
-/// Compressed subimages and framebuffer-copy subimages remain unsupported.
-/// Full framebuffer copies are handled by gl_copy_tex_image_2d.
-fn gl_unsupported_format(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+fn gl_logic_op(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let op = ctx.arg_u32(0)?;
+    with_ctx(|c| c.logic_op(op));
+    Ok(VOID)
+}
+
+fn gl_copy_tex_sub_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let a = (0..8)
+        .map(|i| ctx.arg_u32(i))
+        .collect::<Result<Vec<_>, _>>()?;
+    with_read_ctx(|c| {
+        c.copy_tex_sub_image_2d(
+            a[0],
+            a[1] as i32,
+            a[2] as i32,
+            a[3] as i32,
+            a[4] as i32,
+            a[5] as i32,
+            a[6] as i32,
+            a[7] as i32,
+        )
+    });
+    Ok(VOID)
+}
+
+fn gl_compressed_tex_sub_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let a = (0..9)
+        .map(|i| ctx.arg_u32(i))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Validate size before touching guest memory; dimensions above GL limits cannot be valid.
+    if (a[7] as i32) < 0 || a[7] > 1024 * 1024 * 4 {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+        return Ok(VOID);
+    }
+    let bytes = if a[7] == 0 {
+        Vec::new()
+    } else {
+        match ctx.cpu.read_mem(a[8], a[7]) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
+                return Ok(VOID);
+            }
+        }
+    };
+    with_ctx(|c| {
+        c.compressed_tex_sub_image_2d(
+            a[0],
+            a[1] as i32,
+            a[2] as i32,
+            a[3] as i32,
+            a[4] as i32,
+            a[5] as i32,
+            a[6],
+            &bytes,
+        )
+    });
     Ok(VOID)
 }
 
@@ -2474,13 +2527,12 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glFlush" => gl_flush,
 
         // No stencil/multisample attachments, but their API parameter state
-        // and implementation hints must remain queryable. Logic-op rendering
-        // is an existing, separate limitation.
+        // and implementation hints must remain queryable.
         "glStencilFunc" => es11::stencil_func,
         "glStencilMask" => es11::stencil_mask,
         "glStencilOp" => es11::stencil_op,
         "glClearStencil" => es11::clear_stencil,
-        "glLogicOp" => gl_ignored,
+        "glLogicOp" => gl_logic_op,
         "glSampleCoverage" => es11::sample_f,
         "glSampleCoveragex" => es11::sample_x,
         "glHint" => es11::hint,
@@ -2488,9 +2540,8 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
 
         // Compressed and copy-from-framebuffer texture paths.
         "glCompressedTexImage2D" => gl_compressed_tex_image_2d,
-        "glCompressedTexSubImage2D" | "glCopyTexSubImage2D" => {
-            gl_unsupported_format
-        }
+        "glCompressedTexSubImage2D" => gl_compressed_tex_sub_image_2d,
+        "glCopyTexSubImage2D" => gl_copy_tex_sub_image_2d,
 
         // EGL
         "eglGetDisplay" => egl_get_display,
@@ -2887,6 +2938,93 @@ mod tests {
 
     /// A CPU with a stack and a scratch data page mapped.
     const SCRATCH: u32 = 0x2000_0000;
+
+    #[test]
+    fn logic_and_subimage_entry_points_use_guest_arguments() {
+        let _g = guard();
+        reset_for_test(2, 2);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        call(&mut cpu, &mut kernel, gl_logic_op, &[0x1506]);
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_integerv,
+            &[pocket_gles::GL_LOGIC_OP_MODE, SCRATCH],
+        );
+        assert_eq!(cpu.read_u32_le(SCRATCH).unwrap(), 0x1506);
+        with_ctx(|c| {
+            c.target.color.fill(123);
+            c.tex_image_2d(
+                pocket_gles::GL_TEXTURE_2D,
+                0,
+                2,
+                2,
+                pocket_gles::GL_RGBA,
+                pocket_gles::GL_UNSIGNED_BYTE,
+                &[0; 16],
+            );
+        });
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_copy_tex_sub_image_2d,
+            &[pocket_gles::GL_TEXTURE_2D, 0, 1, 1, 0, 0, 1, 1],
+        );
+        assert_eq!(
+            with_ctx(|c| c.textures[&0].rgba[12..16].to_vec()),
+            vec![123; 4]
+        );
+        let format = pocket_gles::GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+        with_ctx(|c| {
+            c.compressed_tex_image_2d(pocket_gles::GL_TEXTURE_2D, 0, 4, 4, format, &[0; 8])
+        });
+        cpu.write_mem(SCRATCH, &[0, 248, 0, 0, 0, 0, 0, 0]).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_compressed_tex_sub_image_2d,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                4,
+                4,
+                format,
+                8,
+                SCRATCH,
+            ],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_NO_ERROR
+        );
+        assert_eq!(
+            with_ctx(|c| c.textures[&0].rgba[..4].to_vec()),
+            vec![255, 0, 0, 255]
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            gl_compressed_tex_sub_image_2d,
+            &[
+                pocket_gles::GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                4,
+                4,
+                format,
+                u32::MAX,
+                SCRATCH,
+            ],
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            pocket_gles::GL_INVALID_VALUE
+        );
+    }
 
     #[test]
     fn polygon_offset_fixed_queries_and_copy_texture_stack_arguments() {

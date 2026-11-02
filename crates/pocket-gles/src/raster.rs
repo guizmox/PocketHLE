@@ -210,6 +210,8 @@ pub struct PipelineState {
     pub alpha_test: bool,
     pub alpha_func: CompareFunc,
     pub alpha_ref: f32,
+    pub logic_op: bool,
+    pub logic_mode: u32,
     pub blend: bool,
     pub blend_src: BlendFactor,
     pub blend_dst: BlendFactor,
@@ -248,6 +250,8 @@ impl Default for PipelineState {
             alpha_test: false,
             alpha_func: CompareFunc::Always,
             alpha_ref: 0.0,
+            logic_op: false,
+            logic_mode: crate::GL_COPY,
             blend: false,
             blend_src: BlendFactor::One,
             blend_dst: BlendFactor::Zero,
@@ -892,7 +896,7 @@ fn write_fragment(
         to_unit(target.color[ci + 2]),
         to_unit(target.color[ci + 3]),
     ];
-    let out = if state.blend {
+    let out = if state.blend && !state.logic_op {
         let sf = state.blend_src.resolve(frag, dst);
         let df = state.blend_dst.resolve(frag, dst);
         [
@@ -907,13 +911,40 @@ fn write_fragment(
 
     for (c, (&value, &masked)) in out.iter().zip(&state.color_mask).enumerate() {
         if masked {
-            target.color[ci + c] = to_byte(value);
+            target.color[ci + c] = if state.logic_op {
+                logic_byte(state.logic_mode, to_byte(value), target.color[ci + c])
+            } else {
+                to_byte(value)
+            };
         }
     }
     if state.depth_test && state.depth_write {
         target.depth[idx] = z;
     }
     true
+}
+
+/// ES 1.1 table 4.2. Operates on framebuffer component bits, before write masks.
+pub(crate) fn logic_byte(op: u32, s: u8, d: u8) -> u8 {
+    match op {
+        0x1500 => 0,
+        0x1501 => s & d,
+        0x1502 => s & !d,
+        0x1503 => s,
+        0x1504 => !s & d,
+        0x1505 => d,
+        0x1506 => s ^ d,
+        0x1507 => s | d,
+        0x1508 => !(s | d),
+        0x1509 => !(s ^ d),
+        0x150a => !d,
+        0x150b => s | !d,
+        0x150c => !s,
+        0x150d => !s | d,
+        0x150e => !(s & d),
+        0x150f => 255,
+        _ => unreachable!(),
+    }
 }
 
 fn primitive_fragment(
@@ -2381,4 +2412,29 @@ pub fn clip_user_primitives(
         },
         out,
     )
+}
+
+#[cfg(test)]
+mod logical_truth_table_tests {
+    #[test]
+    fn all_operations_match_the_spec_truth_tables_for_every_byte_pair() {
+        let tables = [
+            0x0u8, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe, 0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf,
+        ];
+        for (op, table) in tables.into_iter().enumerate() {
+            for source in 0..=255u8 {
+                for destination in 0..=255u8 {
+                    let mut expected = 0;
+                    for bit in 0..8 {
+                        let index = (((source >> bit) & 1) << 1) | ((destination >> bit) & 1);
+                        expected |= ((table >> index) & 1) << bit;
+                    }
+                    assert_eq!(
+                        super::logic_byte(0x1500 + op as u32, source, destination),
+                        expected
+                    );
+                }
+            }
+        }
+    }
 }

@@ -267,6 +267,7 @@ const COMBINE_UNIFORMS: [[&str; 4]; 5] = [
 ];
 #[allow(non_snake_case)]
 struct Gl {
+    CopyTexImage2D: unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, i32),
     CompressedTexImage2D:
         Option<unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void)>,
     GenerateMipmap: Option<unsafe extern "system" fn(u32)>,
@@ -342,6 +343,16 @@ struct Gl {
 impl Gl {
     unsafe fn load(host: &Host) -> Result<Self, String> {
         Ok(Self {
+            CopyTexImage2D: {
+                let p = host.load(c"glCopyTexImage2D");
+                if p.is_null() {
+                    return Err("driver lacks glCopyTexImage2D".into());
+                }
+                std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, i32),
+                >(p)
+            },
             CompressedTexImage2D: {
                 let mut p = host.load(c"glCompressedTexImage2D");
                 if p.is_null() {
@@ -1207,6 +1218,7 @@ pub struct Renderer {
     anisotropy: u8,
     max_anisotropy: u8,
     fbo: u32,
+    logic_destination: u32,
     color: u32,
     depth: u32,
     depth_format: u32,
@@ -1370,6 +1382,7 @@ impl Renderer {
                 anisotropy: 1,
                 max_anisotropy,
                 fbo: 0,
+                logic_destination: 0,
                 color: 0,
                 depth: 0,
                 depth_format: if depth24 { 0x81a6 } else { 0x81a5 },
@@ -1517,6 +1530,9 @@ impl Renderer {
                 "textureMatrix3",
                 "depthRange",
                 "pointSize",
+                "logicMode",
+                "logicDestination",
+                "logicSize",
                 "alphaMode",
                 "alphaRef",
                 "fogMode",
@@ -2018,10 +2034,11 @@ impl Renderer {
         self.host.make_current()?;
         self.scratch.clear();
         let layout = VertexLayout::new(state, stages, transforms);
-        let flat_direct =
-            direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
+        let flat_direct = !state.logic_op
+            && direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
         let direct = flat_direct
-            || (sequential
+            || (!state.logic_op
+                && sequential
                 && state.smooth_shading
                 && matches!(
                     mode,
@@ -2158,7 +2175,7 @@ impl Renderer {
                 self.toggle(GL_DEPTH_TEST, state.depth_test);
                 (self.gl.DepthFunc)(compare(state.depth_func));
                 (self.gl.DepthMask)(state.depth_write as u8);
-                self.toggle(GL_BLEND, state.blend);
+                self.toggle(GL_BLEND, state.blend && !state.logic_op);
                 (self.gl.BlendFunc)(blend(state.blend_src), blend(state.blend_dst));
                 self.toggle(GL_CULL_FACE, state.cull.is_some());
                 if let Some(c) = state.cull {
@@ -2529,6 +2546,30 @@ impl Renderer {
                 }
                 self.stream_layout = None;
             }
+            self.uniform_1i(
+                self.loc("logicMode"),
+                if state.logic_op {
+                    (state.logic_mode - 0x1500) as i32
+                } else {
+                    -1
+                },
+            );
+            if state.logic_op {
+                self.uniform_1i(self.loc("logicDestination"), 4);
+                let loc = self.loc("logicSize");
+                (self.gl.Uniform2f)(loc, self.width as f32, self.height as f32);
+                (self.gl.ActiveTexture)(GL_TEXTURE0 + 4);
+                if self.logic_destination == 0 {
+                    (self.gl.GenTextures)(1, &mut self.logic_destination);
+                }
+                (self.gl.BindTexture)(GL_TEXTURE_2D, self.logic_destination);
+                self.params(
+                    Filter::Nearest,
+                    Filter::Nearest,
+                    Wrap::ClampToEdge,
+                    Wrap::ClampToEdge,
+                );
+            }
             if indexed {
                 let indices = stream
                     .map(|s| s.indices.as_slice())
@@ -2540,18 +2581,62 @@ impl Renderer {
                     indices.as_ptr().cast(),
                     0x88e0,
                 );
-                (self.gl.DrawElements)(
-                    draw_mode,
-                    indices.len() as i32,
-                    GL_UNSIGNED_SHORT,
-                    std::ptr::null(),
-                );
+                if state.logic_op {
+                    let step = match draw_mode {
+                        GL_POINTS => 1,
+                        GL_LINES => 2,
+                        _ => 3,
+                    };
+                    for first in (0..indices.len() / step * step).step_by(step) {
+                        (self.gl.CopyTexImage2D)(
+                            GL_TEXTURE_2D,
+                            0,
+                            GL_RGBA,
+                            0,
+                            0,
+                            self.width as i32,
+                            self.height as i32,
+                            0,
+                        );
+                        (self.gl.DrawElements)(
+                            draw_mode,
+                            step as i32,
+                            GL_UNSIGNED_SHORT,
+                            (first * 2) as *const c_void,
+                        );
+                    }
+                } else {
+                    (self.gl.DrawElements)(
+                        draw_mode,
+                        indices.len() as i32,
+                        GL_UNSIGNED_SHORT,
+                        std::ptr::null(),
+                    );
+                }
             } else {
-                (self.gl.DrawArrays)(
-                    draw_mode,
-                    0,
-                    stream.map_or(self.scratch.len() / layout.floats, |s| s.count) as i32,
-                );
+                let count = stream.map_or(self.scratch.len() / layout.floats, |s| s.count);
+                if state.logic_op {
+                    let step = match draw_mode {
+                        GL_POINTS => 1,
+                        GL_LINES => 2,
+                        _ => 3,
+                    };
+                    for first in (0..count / step * step).step_by(step) {
+                        (self.gl.CopyTexImage2D)(
+                            GL_TEXTURE_2D,
+                            0,
+                            GL_RGBA,
+                            0,
+                            0,
+                            self.width as i32,
+                            self.height as i32,
+                            0,
+                        );
+                        (self.gl.DrawArrays)(draw_mode, first as i32, step as i32);
+                    }
+                } else {
+                    (self.gl.DrawArrays)(draw_mode, 0, count as i32);
+                }
             }
             self.dirty = true;
             self.check()
@@ -2720,7 +2805,7 @@ impl Drop for Renderer {
             for (id, _) in self.textures.values() {
                 (self.gl.DeleteTextures)(1, id);
             }
-            for id in [self.color, self.white] {
+            for id in [self.color, self.white, self.logic_destination] {
                 (self.gl.DeleteTextures)(1, &id);
             }
             (self.gl.DeleteRenderbuffers)(1, &self.depth);
@@ -2826,6 +2911,22 @@ void main(){
 "#;
 const FRAGMENT: &str = r#"
 VARYING vec4 vColor,vBackColor;VARYING vec2 uv0,uv1,uv2,uv3;VARYING float vFog;
+uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;
+// ES2 has no integer bitwise operators. All intermediates are exact 8-bit integers.
+vec4 logicalColor(vec4 source,vec4 destination){
+ vec4 s=floor(clamp(source,0.0,1.0)*255.0+0.5),d=floor(destination*255.0+0.5),a=vec4(0.0);
+ float bit=1.0;
+ for(int i=0;i<8;i++){a+=mod(s,2.0)*mod(d,2.0)*bit;s=floor(s/2.0);d=floor(d/2.0);bit*=2.0;}
+ s=floor(clamp(source,0.0,1.0)*255.0+0.5);d=floor(destination*255.0+0.5);
+ vec4 r=vec4(0.0);
+ if(logicMode==1)r=a;if(logicMode==2)r=s-a;if(logicMode==3)r=s;
+ if(logicMode==4)r=d-a;if(logicMode==5)r=d;if(logicMode==6)r=s+d-2.0*a;
+ if(logicMode==7)r=s+d-a;if(logicMode==8)r=255.0-(s+d-a);
+ if(logicMode==9)r=255.0-(s+d-2.0*a);if(logicMode==10)r=255.0-d;
+ if(logicMode==11)r=255.0-d+a;if(logicMode==12)r=255.0-s;
+ if(logicMode==13)r=255.0-s+a;if(logicMode==14)r=255.0-a;if(logicMode==15)r=vec4(255.0);
+ return r/255.0;
+}
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
 uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
@@ -2862,7 +2963,7 @@ float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
 // Carmageddon uses decreasing negative linear-fog endpoints. Preserve the
 // signed span, and match software's unfogged result for a degenerate range.
-float f=1.0;if(fogMode==1){float span=fogEnd-fogStart;if(span!=0.0 && abs(span)>=0.000000001)f=(fogEnd-vFog)/span;}if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));gl_FragColor=c;}
+float f=1.0;if(fogMode==1){float span=fogEnd-fogStart;if(span!=0.0 && abs(span)>=0.000000001)f=(fogEnd-vFog)/span;}if(fogMode==2)f=exp(-fogDensity*vFog);if(fogMode==3){float d=fogDensity*vFog;f=exp(-d*d);}c.rgb=mix(fogColor.rgb,c.rgb,clamp(f,0.0,1.0));if(logicMode>=0)c=logicalColor(c,texture2D(logicDestination,gl_FragCoord.xy/logicSize));gl_FragColor=c;}
 "#;
 
 #[cfg(test)]
@@ -4396,6 +4497,105 @@ mod tests {
             gpu.set_render_scale(1).unwrap();
             assert_eq!((gpu.width, gpu.height), (24, 16));
             assert_eq!(gpu.scaled_rgb565_into(&mut high), None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native OpenGL and GLES2; ordered color logic operations"]
+    fn host_logic_ops_match_software_with_overlapping_primitives() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut gpu = if es {
+                    Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+                } else {
+                    Renderer::new(32, 32).unwrap()
+                };
+                gpu.set_render_scale(scale).unwrap();
+                let textures = HashMap::new();
+                let src = [0x69u8, 0xb4, 0xe1, 0x93];
+                let dst = [0xa5u8, 0x3c, 0x72, 0xc6];
+                for op in 0x1500..=0x150f {
+                    let mut state = PipelineState {
+                        viewport: (0, 0, 32, 32),
+                        logic_op: true,
+                        logic_mode: op,
+                        blend: true,
+                        blend_src: BlendFactor::Zero,
+                        blend_dst: BlendFactor::Zero,
+                        color_mask: [true, false, true, true],
+                        ..Default::default()
+                    };
+                    let clear = dst.map(|v| v as f32 / 255.);
+                    let mut native = RenderTarget::new(32, 32);
+                    let mut cpu = RenderTarget::new(32, 32);
+                    cpu.clear_color(dst, None);
+                    gpu.clear(
+                        32,
+                        32,
+                        &PipelineState::default(),
+                        clear,
+                        1.,
+                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    )
+                    .unwrap();
+                    let tri = triangle(src.map(|v| v as f32 / 255.), 0.);
+                    gpu.draw(&native, &state, GL_TRIANGLES, &tri, &[], &textures, [0; 4])
+                        .unwrap();
+                    gpu.read(&mut native).unwrap();
+                    let i = (16 * 32 + 16) * 4;
+                    let expected = std::array::from_fn::<_, 4, _>(|channel| {
+                        if state.color_mask[channel] {
+                            raster::logic_byte(op, src[channel], dst[channel])
+                        } else {
+                            dst[channel]
+                        }
+                    });
+                    assert_eq!(
+                        &native.color[i..i + 4],
+                        &expected,
+                        "single es={es} scale={scale} op={op:x}"
+                    );
+                    gpu.clear(
+                        32,
+                        32,
+                        &PipelineState::default(),
+                        clear,
+                        1.,
+                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    )
+                    .unwrap();
+                    let mut vertices = tri.to_vec();
+                    vertices.extend(tri);
+                    gpu.draw(
+                        &native,
+                        &state,
+                        GL_TRIANGLES,
+                        &vertices,
+                        &[],
+                        &textures,
+                        [0; 4],
+                    )
+                    .unwrap();
+                    for _ in 0..2 {
+                        raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], tri);
+                    }
+                    gpu.read(&mut native).unwrap();
+                    let i = (16 * 32 + 16) * 4;
+                    assert_eq!(
+                        &native.color[i..i + 4],
+                        &cpu.color[i..i + 4],
+                        "es={es} scale={scale} op={op:x}"
+                    );
+                    // Switching back must restore blending and normal batched draws.
+                    state.logic_op = false;
+                    state.color_mask = [true; 4];
+                    gpu.draw(&native, &state, GL_TRIANGLES, &tri, &[], &textures, [0; 4])
+                        .unwrap();
+                    gpu.read(&mut native).unwrap();
+                    assert_eq!(&native.color[i..i + 4], &[0; 4]);
+                }
+            }
         }
     }
 

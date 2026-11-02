@@ -306,3 +306,8 @@ pub const GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG: u32 = 0x8C00;
 pub const GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG: u32 = 0x8C01;
 pub const GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG: u32 = 0x8C02;
 pub const GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG: u32 = 0x8C03;
+
+// ES 1.1 section 4.1.7: color logical operations.
+pub const GL_COLOR_LOGIC_OP: u32 = 0x0bf2;
+pub const GL_LOGIC_OP_MODE: u32 = 0x0bf0;
+pub const GL_COPY: u32 = 0x1503;

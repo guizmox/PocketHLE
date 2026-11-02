@@ -665,6 +665,7 @@ impl Context {
             GL_DEPTH_TEST => self.state.depth_test = on,
             GL_ALPHA_TEST => self.state.alpha_test = on,
             GL_BLEND => self.state.blend = on,
+            GL_COLOR_LOGIC_OP => self.state.logic_op = on,
             GL_CULL_FACE => {
                 self.cull_enabled = on;
                 self.sync_cull();
@@ -690,7 +691,7 @@ impl Context {
             GL_COLOR_MATERIAL => self.lighting.color_material = on,
             crate::lighting::RESCALE_NORMAL => self.lighting.rescale = on,
             GL_POLYGON_OFFSET_FILL => self.state.polygon_offset = on,
-            0x0b10 | 0x0b20 | 0x0bf2 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
+            0x0b10 | 0x0b20 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
                 if on {
                     self.es11.extra_enables.insert(cap);
                 } else {
@@ -1019,6 +1020,220 @@ impl Context {
     #[allow(clippy::too_many_arguments)]
     /// Copy framebuffer pixels into the canonical texture image. GL's source
     /// origin is bottom-left, while the framebuffer cache is stored top-down.
+    /// ES 1.1 section 4.1.7. The initial operation is COPY.
+    pub fn logic_op(&mut self, op: u32) {
+        if (0x1500..=0x150f).contains(&op) {
+            self.state.logic_mode = op;
+        } else {
+            self.set_error(GL_INVALID_ENUM);
+        }
+    }
+
+    /// ES 1.1 section 3.7.2. Source coordinates use GL's lower-left origin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_tex_sub_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        xo: i32,
+        yo: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        if target != GL_TEXTURE_2D {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
+        if !(0..=10).contains(&level) || xo < 0 || yo < 0 || width < 0 || height < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        let name = self.texture_units[self.active_texture as usize].bound_texture;
+        let Some(tex) = self.textures.get(&name) else {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        };
+        let Some(&format) = tex.formats.get(&(level as u32)) else {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        };
+        let (tw, th) = if level == 0 {
+            (tex.width, tex.height)
+        } else if let Some((w, h, _)) = tex.mipmaps.get(&(level as u32)) {
+            (*w, *h)
+        } else {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        };
+        if i64::from(xo) + i64::from(width) > i64::from(tw)
+            || i64::from(yo) + i64::from(height) > i64::from(th)
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        // Compressed formats announced here do not provide framebuffer compression.
+        if !matches!(
+            format,
+            GL_ALPHA | GL_RGB | GL_RGBA | GL_LUMINANCE | GL_LUMINANCE_ALPHA
+        ) {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.sync_gpu();
+        if self.gpu_failed {
+            return;
+        }
+        let mut patch = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in 0..height {
+            for col in 0..width {
+                let (sx, sy) = (i64::from(x) + i64::from(col), i64::from(y) + i64::from(row));
+                let mut p = [0; 4]; // Out-of-framebuffer source values are undefined by GL.
+                if sx >= 0
+                    && sy >= 0
+                    && sx < i64::from(self.target.width)
+                    && sy < i64::from(self.target.height)
+                {
+                    let i = ((i64::from(self.target.height) - 1 - sy)
+                        * i64::from(self.target.width)
+                        + sx) as usize
+                        * 4;
+                    p.copy_from_slice(&self.target.color[i..i + 4]);
+                }
+                patch.extend(match format {
+                    GL_ALPHA => [255, 255, 255, p[3]],
+                    GL_RGB => [p[0], p[1], p[2], 255],
+                    GL_LUMINANCE => [p[0], p[0], p[0], 255],
+                    GL_LUMINANCE_ALPHA => [p[0], p[0], p[0], p[3]],
+                    _ => p,
+                });
+            }
+        }
+        self.tex_sub_image_2d(
+            target,
+            level,
+            xo as u32,
+            yo as u32,
+            width as u32,
+            height as u32,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &patch,
+        );
+    }
+
+    /// ES 1.1 section 3.7.3 plus IMG PVRTC, EXT S3TC and AMD ATC restrictions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compressed_tex_sub_image_2d(
+        &mut self,
+        target: u32,
+        level: i32,
+        xo: i32,
+        yo: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        data: &[u8],
+    ) {
+        if target != GL_TEXTURE_2D || texture::compressed_image_size(format, 4, 4).is_none() {
+            self.set_error(GL_INVALID_ENUM);
+            return;
+        }
+        if !(0..=10).contains(&level) || xo < 0 || yo < 0 || width < 0 || height < 0 {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        // Paletted subimages and all ATC subimages are explicitly forbidden.
+        if (GL_PALETTE4_RGB8_OES..=GL_PALETTE8_RGB5_A1_OES).contains(&format)
+            || matches!(
+                format,
+                GL_ATC_RGB_AMD
+                    | GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
+                    | GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD
+            )
+        {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        let name = self.texture_units[self.active_texture as usize].bound_texture;
+        let Some(old) = self
+            .textures
+            .get(&name)
+            .and_then(|t| t.compressed.get(&(level as u32)))
+            .cloned()
+        else {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        };
+        if old.format != format {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        let (xo, yo, w, h) = (xo as u32, yo as u32, width as u32, height as u32);
+        if u64::from(xo) + u64::from(w) > u64::from(old.width)
+            || u64::from(yo) + u64::from(h) > u64::from(old.height)
+        {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        let pvrtc = (GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG..=GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG)
+            .contains(&format);
+        if pvrtc && (xo != 0 || yo != 0 || w != old.width || h != old.height)
+            || !pvrtc
+                && (xo % 4 != 0
+                    || yo % 4 != 0
+                    || w % 4 != 0 && xo + w != old.width
+                    || h % 4 != 0 && yo + h != old.height)
+        {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        let needed = texture::compressed_image_size(format, w, h).unwrap();
+        if data.len() != needed {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut packed = old.bytes.to_vec();
+        if pvrtc {
+            packed.copy_from_slice(data);
+        } else {
+            let block = if matches!(
+                format,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT | GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+            ) {
+                8
+            } else {
+                16
+            };
+            let stride = old.width.div_ceil(4) as usize * block;
+            let count = w.div_ceil(4) as usize * block;
+            for row in 0..h.div_ceil(4) as usize {
+                let dst = (yo as usize / 4 + row) * stride + xo as usize / 4 * block;
+                packed[dst..dst + count].copy_from_slice(&data[row * count..(row + 1) * count]);
+            }
+        }
+        let Some(rgba) = texture::decode_compressed_to_rgba(&packed, old.width, old.height, format)
+        else {
+            self.set_error(GL_INVALID_VALUE);
+            return;
+        };
+        self.textures.get_mut(&name).unwrap().set_compressed(
+            level as u32,
+            old.width,
+            old.height,
+            format,
+            &packed,
+            rgba,
+        );
+    }
+
     pub fn copy_tex_image_2d(
         &mut self,
         target: u32,
@@ -1043,7 +1258,7 @@ impl Context {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
-        if level > 10 {
+        if level > 10 || width > (1024 >> level) || height > (1024 >> level) {
             self.set_error(GL_INVALID_VALUE);
             return;
         }
@@ -1087,6 +1302,10 @@ impl Context {
             GL_UNSIGNED_BYTE,
             &rgba,
         );
+        let name = self.texture_units[self.active_texture as usize].bound_texture;
+        if let Some(tex) = self.textures.get_mut(&name) {
+            tex.set_format(level as u32, format);
+        }
     }
 
     pub fn tex_image_2d(
@@ -1126,6 +1345,7 @@ impl Context {
         let name = self.texture_units[self.active_texture as usize].bound_texture;
         let tex = self.textures.entry(name).or_default();
         tex.set_level(level as u32, width, height, rgba);
+        tex.set_format(level as u32, format);
         log::debug!(
             "GLES tex image texture={} level={} {}x{} format=0x{format:04x} type=0x{ty:04x} bytes={} complete={} first={:02x?}",
             name,
@@ -1259,14 +1479,18 @@ impl Context {
         };
         let name = self.texture_units[self.active_texture as usize].bound_texture;
         let tex = self.textures.entry(name).or_default();
-        if defer {
+        if !paletted {
             let needed = texture::compressed_image_size(format, width, height).unwrap();
             tex.set_compressed(
                 level.max(0) as u32,
                 width,
                 height,
                 format,
-                &data[..needed],
+                &if data.is_empty() {
+                    vec![0; needed]
+                } else {
+                    data[..needed].to_vec()
+                },
                 rgba,
             );
         } else {
@@ -2289,6 +2513,7 @@ impl Context {
             }),
         };
         if self.gpu.is_some()
+            && !self.state.logic_op
             && !self.es11.pretransform
             && ((self.state.smooth_shading
                 && matches!(
@@ -2334,7 +2559,8 @@ impl Context {
         }
         // Native smooth draws retain the topology and prepare each unique
         // guest vertex directly, instead of expanding then hashing float records.
-        let native_indices = !sequential
+        let native_indices = !self.state.logic_op
+            && !sequential
             && self.gpu.is_some()
             && !self.es11.pretransform
             && self.state.smooth_shading
@@ -4581,5 +4807,245 @@ mod pvrtc_upload_tests {
         c.set_viewport(3, 4, i32::MAX, i32::MAX);
         assert_eq!(c.state.viewport, (3, 4, dims[0], dims[1]));
         assert!(c.subpixel_bits() > 0);
+    }
+}
+
+#[cfg(test)]
+mod subimage_and_logic_tests {
+    use super::*;
+
+    #[test]
+    fn logic_state_defaults_queries_and_invalid_enum() {
+        let mut c = Context::new(4, 4);
+        assert_eq!(
+            c.query_state(GL_LOGIC_OP_MODE).unwrap().fixed(),
+            vec![GL_COPY as i32]
+        );
+        assert_eq!(c.is_enabled(GL_COLOR_LOGIC_OP), Some(false));
+        c.logic_op(0x1506);
+        c.set_capability(GL_COLOR_LOGIC_OP, true);
+        assert_eq!(
+            c.query_state(GL_LOGIC_OP_MODE).unwrap().fixed(),
+            vec![0x1506]
+        );
+        assert_eq!(
+            c.query_state(GL_COLOR_LOGIC_OP).unwrap().fixed(),
+            vec![65536]
+        );
+        c.logic_op(0x1234);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        assert_eq!(c.state.logic_mode, 0x1506);
+    }
+
+    #[test]
+    fn copy_subimage_origin_format_mip_and_atomic_errors() {
+        let mut c = Context::new(2, 2);
+        c.target.color = vec![
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            2,
+            2,
+            GL_LUMINANCE_ALPHA,
+            GL_UNSIGNED_BYTE,
+            &[0; 8],
+        );
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 1, 1, 0, 0, 0, 1, 2);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        let tex = &c.textures[&0];
+        assert_eq!(
+            tex.mipmaps[&1].2,
+            vec![0, 0, 0, 0, 90, 90, 90, 120, 0, 0, 0, 0, 10, 10, 10, 40]
+        );
+        let saved = tex.mipmaps[&1].2.clone();
+        let revision = tex.revision;
+        for args in [(1, 0, 2, 1), (-1, 0, 1, 1), (i32::MAX, 0, 1, 1)] {
+            c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 1, args.0, args.1, 0, 0, args.2, args.3);
+            assert_eq!(c.take_error(), GL_INVALID_VALUE);
+            assert_eq!(c.textures[&0].mipmaps[&1].2, saved);
+            assert_eq!(c.textures[&0].revision, revision);
+        }
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 2, 0, 0, 0, 0, 1, 1);
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 1, 0, 0, 0, 0, 0, 0);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].revision, revision);
+        c.tex_parameter(GL_TEXTURE_2D, 0x8191, 1);
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 2, 2, GL_RGB, GL_UNSIGNED_BYTE, &[0; 12]);
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 1, 0, 0, 0, 0, 1, 1);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].mipmaps[&1].2, vec![90, 100, 110, 255]);
+    }
+
+    #[test]
+    fn compressed_subimages_preserve_other_blocks_and_reject_bad_calls() {
+        let mut c = Context::new(4, 4);
+        let red = [0x00, 0xf8, 0, 0, 0, 0, 0, 0];
+        let green = [0xe0, 0x07, 0, 0, 0, 0, 0, 0];
+        let bytes = [red, red, red, red].concat();
+        c.compressed_tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            8,
+            8,
+            GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+            &bytes,
+        );
+        c.compressed_tex_sub_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            4,
+            0,
+            4,
+            4,
+            GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+            &green,
+        );
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        let tex = &c.textures[&0];
+        assert_eq!(&tex.rgba[..4], &[255, 0, 0, 255]);
+        assert_eq!(&tex.rgba[16..20], &[0, 255, 0, 255]);
+        assert_eq!(&tex.compressed[&0].bytes[8..16], &green);
+        let saved = tex.compressed[&0].bytes.clone();
+        let revision = tex.revision;
+        for (xo, w, data, error) in [
+            (1, 4, green.as_slice(), GL_INVALID_OPERATION),
+            (4, 3, green.as_slice(), GL_INVALID_OPERATION),
+            (4, 4, &green[..7], GL_INVALID_VALUE),
+            (8, 4, green.as_slice(), GL_INVALID_VALUE),
+        ] {
+            c.compressed_tex_sub_image_2d(
+                GL_TEXTURE_2D,
+                0,
+                xo,
+                0,
+                w,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                data,
+            );
+            assert_eq!(c.take_error(), error);
+            assert_eq!(c.textures[&0].compressed[&0].bytes, saved);
+            assert_eq!(c.textures[&0].revision, revision);
+        }
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_ATC_RGB_AMD, &bytes);
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 8, 8, GL_PALETTE4_RGB8_OES, &bytes);
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        c.compressed_tex_sub_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            8,
+            8,
+            GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+            &bytes,
+        );
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL; framebuffer copy and compressed GPU cache refresh"]
+    fn native_subimages_refresh_uploaded_textures_and_copy_rendered_pixels() {
+        let mut c = Context::new(4, 4);
+        c.enable_gpu().unwrap();
+        c.set_internal_resolution(2);
+        c.clear_color = [0.2, 0.4, 0.6, 0.8];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.tex_image_2d(GL_TEXTURE_2D, 0, 2, 2, GL_RGB, GL_UNSIGNED_BYTE, &[0; 12]);
+        c.copy_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 2, 2);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].rgba, [51, 102, 153, 255].repeat(4));
+        c.compressed_tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            4,
+            4,
+            GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+            &[0, 248, 0, 0, 0, 0, 0, 0],
+        );
+        let stages = [raster::TextureStage {
+            unit: 0,
+            env: raster::TexEnvMode::Replace,
+            env_color: [0.; 4],
+            lod_bias: 0.,
+        }];
+        let tri =
+            [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| raster::Vertex {
+                pos,
+                color: [1.; 4],
+                ..Default::default()
+            });
+        for (data, expected) in [
+            ([0, 248, 0, 0, 0, 0, 0, 0], [255, 0, 0, 255]),
+            ([224, 7, 0, 0, 0, 0, 0, 0], [0, 255, 0, 255]),
+        ] {
+            c.compressed_tex_sub_image_2d(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                4,
+                4,
+                GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                &data,
+            );
+            c.gpu
+                .as_mut()
+                .unwrap()
+                .draw(
+                    &c.target,
+                    &c.state,
+                    GL_TRIANGLES,
+                    &tri,
+                    &stages,
+                    &c.textures,
+                    [0; 4],
+                )
+                .unwrap();
+            c.sync_gpu();
+            assert_eq!(&c.target.color[36..40], &expected);
+        }
+        // Explicit nonbase levels are also stored and may be replaced at small block edges.
+        c.compressed_tex_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            2,
+            2,
+            GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+            &[0; 8],
+        );
+        c.compressed_tex_sub_image_2d(
+            GL_TEXTURE_2D,
+            1,
+            0,
+            0,
+            2,
+            2,
+            GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+            &[0, 248, 0, 0, 0, 0, 0, 0],
+        );
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(
+            c.textures[&0].rgba_level(1).unwrap().as_ref(),
+            [255, 0, 0, 255].repeat(4)
+        );
+    }
+
+    #[test]
+    fn pvrtc_subimage_requires_whole_level_and_exact_size() {
+        let mut c = Context::new(4, 4);
+        let format = GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG;
+        c.compressed_tex_image_2d(GL_TEXTURE_2D, 0, 8, 8, format, &[0; 32]);
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 8, 8, format, &[255; 32]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        assert_eq!(c.textures[&0].compressed[&0].bytes.as_ref(), &[255; 32]);
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 4, 8, format, &[0; 32]);
+        assert_eq!(c.take_error(), GL_INVALID_OPERATION);
+        c.compressed_tex_sub_image_2d(GL_TEXTURE_2D, 0, 0, 0, 8, 8, format, &[0; 33]);
+        assert_eq!(c.take_error(), GL_INVALID_VALUE);
     }
 }
