@@ -89,6 +89,7 @@ struct GlutinWindowContext {
 
     max_texture_side: Option<usize>,
 
+    wgl_read_dc_proc: WglReadDcProc,
     current_gl_context: Option<glutin::context::PossiblyCurrentContext>,
     not_current_gl_context: Option<glutin::context::NotCurrentContext>,
 
@@ -584,6 +585,7 @@ impl GlowWinitRunning {
             let GlutinWindowContext {
                 viewports,
                 current_gl_context,
+                wgl_read_dc_proc,
                 ..
             } = &mut *glutin;
             let viewport = &viewports[&viewport_id];
@@ -598,7 +600,7 @@ impl GlowWinitRunning {
 
             {
                 frame_timer.pause();
-                change_gl_context(current_gl_context, gl_surface);
+                change_gl_context(current_gl_context, gl_surface, wgl_read_dc_proc);
                 frame_timer.resume();
             }
 
@@ -611,9 +613,10 @@ impl GlowWinitRunning {
         // The update function, which could call immediate viewports,
         // so make sure we don't hold any locks here required by the immediate viewports rendeer.
 
-        let full_output =
+        let full_output = {
             self.integration
-                .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input);
+                .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input)
+        };
 
         // ------------------------------------------------------------
 
@@ -639,6 +642,7 @@ impl GlowWinitRunning {
         let GlutinWindowContext {
             viewports,
             current_gl_context,
+            wgl_read_dc_proc,
             ..
         } = &mut *glutin;
 
@@ -657,7 +661,7 @@ impl GlowWinitRunning {
         {
             // We may need to switch contexts again, because of immediate viewports:
             frame_timer.pause();
-            change_gl_context(current_gl_context, gl_surface);
+            change_gl_context(current_gl_context, gl_surface, wgl_read_dc_proc);
             frame_timer.resume();
         }
 
@@ -667,12 +671,14 @@ impl GlowWinitRunning {
             painter.clear(screen_size_in_pixels, clear_color);
         }
 
-        painter.paint_and_update_textures(
-            screen_size_in_pixels,
-            pixels_per_point,
-            &clipped_primitives,
-            &textures_delta,
-        );
+        {
+            painter.paint_and_update_textures(
+                screen_size_in_pixels,
+                pixels_per_point,
+                &clipped_primitives,
+                &textures_delta,
+            );
+        }
 
         {
             let screenshot_requested = std::mem::take(&mut viewport.screenshot_requested);
@@ -836,9 +842,36 @@ impl GlowWinitRunning {
     }
 }
 
+// Owned by the UI context container, never a process-wide HGLRC cache. A new
+// container starts empty even if Windows reuses an old context handle.
+#[derive(Default)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+struct WglReadDcProc {
+    resolved: Option<(usize, usize)>,
+}
+impl WglReadDcProc {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn get_or_resolve(&mut self, context: usize, resolve: impl FnOnce() -> usize) -> usize {
+        if let Some((owner, address)) = self.resolved {
+            if owner == context {
+                return address;
+            }
+        }
+        let address = resolve();
+        let address = if matches!(address, 0 | 1 | 2 | 3 | usize::MAX) {
+            0
+        } else {
+            address
+        };
+        self.resolved = Some((context, address));
+        address
+    }
+}
+
 fn ui_context_is_current<T: glutin::surface::SurfaceTypeTrait>(
     context: &glutin::context::PossiblyCurrentContext,
     surface: &glutin::surface::Surface<T>,
+    wgl_read_dc_proc: &mut WglReadDcProc,
 ) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -863,24 +896,38 @@ fn ui_context_is_current<T: glutin::surface::SurfaceTypeTrait>(
             // Glutin 0.31's WGL Surface::is_current only checks HGLRC; also
             // verify its drawable window so switching viewports still binds.
             return unsafe {
-                let dc = wglGetCurrentDC();
-                if dc.is_null() || wglGetCurrentContext() != target || WindowFromDC(dc) != window {
+                let dc = { wglGetCurrentDC() };
+                if dc.is_null() {
+                    return false;
+                }
+                let current = { wglGetCurrentContext() };
+                if current != target {
+                    return false;
+                }
+                let draw_window = { WindowFromDC(dc) };
+                if draw_window != window {
                     return false;
                 }
                 // WGL_ARB_make_current_read can bind a distinct read drawable.
                 // Only skip the transition when that drawable is also the UI.
-                let proc = wglGetProcAddress(b"wglGetCurrentReadDCARB\0".as_ptr().cast());
-                let read_dc = if proc.is_null() || matches!(proc as usize, 1 | 2 | 3 | usize::MAX) {
+                let proc = wgl_read_dc_proc.get_or_resolve(target as usize, || {
+                    wglGetProcAddress(b"wglGetCurrentReadDCARB\0".as_ptr().cast()) as usize
+                });
+                let read_dc = if proc == 0 {
                     dc
                 } else {
                     let get: unsafe extern "system" fn() -> *const c_void =
                         std::mem::transmute(proc);
                     get()
                 };
-                !read_dc.is_null() && WindowFromDC(read_dc) == window
+                if read_dc.is_null() {
+                    return false;
+                }
+                WindowFromDC(read_dc) == window
             };
         }
     }
+    let _ = wgl_read_dc_proc;
     // EGL/GLX surface checks alone do not compare the context handle.
     context.is_current() && surface.is_current(context)
 }
@@ -888,6 +935,7 @@ fn ui_context_is_current<T: glutin::surface::SurfaceTypeTrait>(
 fn change_gl_context<T: glutin::surface::SurfaceTypeTrait>(
     current_gl_context: &mut Option<glutin::context::PossiblyCurrentContext>,
     gl_surface: &glutin::surface::Surface<T>,
+    wgl_read_dc_proc: &mut WglReadDcProc,
 ) -> bool {
     crate::profile_function!();
 
@@ -897,7 +945,7 @@ fn change_gl_context<T: glutin::surface::SurfaceTypeTrait>(
     // callbacks/readback and immediate viewports may have changed the binding.
     if current_gl_context
         .as_ref()
-        .is_some_and(|context| ui_context_is_current(context, gl_surface))
+        .is_some_and(|context| ui_context_is_current(context, gl_surface, wgl_read_dc_proc))
     {
         return false;
     }
@@ -1076,6 +1124,7 @@ impl GlutinWindowContext {
             egui_ctx: egui_ctx.clone(),
             swap_interval,
             gl_config,
+            wgl_read_dc_proc: WglReadDcProc::default(),
             current_gl_context: None,
             not_current_gl_context,
             viewports,
@@ -1613,17 +1662,22 @@ mod pocket_context_binding_tests {
             let a = glutin::surface::Surface::Egl(a);
             let b = glutin::surface::Surface::Egl(b);
             let mut current = Some(glutin::context::PossiblyCurrentContext::Egl(context));
+            let mut proc_cache = WglReadDcProc::default();
             for _ in 0..1000 {
                 assert!(
-                    !change_gl_context(&mut current, &a),
+                    !change_gl_context(&mut current, &a, &mut proc_cache),
                     "unchanged input repaint detached the context"
                 );
             }
             assert!(
-                change_gl_context(&mut current, &b),
+                change_gl_context(&mut current, &b, &mut proc_cache),
                 "different drawable must rebind"
             );
-            assert!(ui_context_is_current(current.as_ref().unwrap(), &b));
+            assert!(ui_context_is_current(
+                current.as_ref().unwrap(),
+                &b,
+                &mut proc_cache
+            ));
             let external = display.create_context(&config, &attributes).unwrap();
             let external = external
                 .make_current(match &b {
@@ -1632,11 +1686,43 @@ mod pocket_context_binding_tests {
                 })
                 .unwrap();
             assert!(
-                change_gl_context(&mut current, &b),
+                change_gl_context(&mut current, &b, &mut proc_cache),
                 "external callback binding must be restored"
             );
-            assert!(ui_context_is_current(current.as_ref().unwrap(), &b));
+            assert!(ui_context_is_current(
+                current.as_ref().unwrap(),
+                &b,
+                &mut proc_cache
+            ));
             drop(external);
+        }
+    }
+}
+
+#[cfg(test)]
+mod wgl_proc_cache_tests {
+    use super::WglReadDcProc;
+    #[test]
+    fn repeated_checks_resolve_once_and_new_context_resolves_again() {
+        let mut cache = WglReadDcProc::default();
+        assert_eq!(cache.get_or_resolve(10, || 100), 100);
+        for _ in 0..1000 {
+            assert_eq!(cache.get_or_resolve(10, || panic!("lookup repeated")), 100);
+        }
+        assert_eq!(cache.get_or_resolve(20, || 200), 200);
+        assert_eq!(cache.get_or_resolve(10, || 300), 300);
+        // Recreated container must resolve even for a reused native handle.
+        assert_eq!(WglReadDcProc::default().get_or_resolve(10, || 400), 400);
+    }
+    #[test]
+    fn unavailable_extension_is_cached_without_calling_invalid_pointers() {
+        for invalid in [0, 1, 2, 3, usize::MAX] {
+            let mut cache = WglReadDcProc::default();
+            assert_eq!(cache.get_or_resolve(10, || invalid), 0);
+            assert_eq!(
+                cache.get_or_resolve(10, || panic!("negative lookup repeated")),
+                0
+            );
         }
     }
 }
