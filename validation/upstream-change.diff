@@ -1,0 +1,162 @@
+--- upstream/glow_integration.rs
+
++++ PocketHLE/glow_integration.rs
+
+@@ -835,13 +835,73 @@
+
+         }
+     }
+ }
+ 
+-fn change_gl_context(
++fn ui_context_is_current<T: glutin::surface::SurfaceTypeTrait>(
++    context: &glutin::context::PossiblyCurrentContext,
++    surface: &glutin::surface::Surface<T>,
++) -> bool {
++    #[cfg(target_os = "windows")]
++    {
++        use glutin::{
++            context::{AsRawContext, RawContext},
++            surface::{AsRawSurface, RawSurface},
++        };
++        if let (RawContext::Wgl(target), RawSurface::Wgl(window)) =
++            (context.raw_context(), surface.raw_surface())
++        {
++            use std::ffi::c_void;
++            #[link(name = "opengl32")]
++            extern "system" {
++                fn wglGetCurrentContext() -> *const c_void;
++                fn wglGetCurrentDC() -> *const c_void;
++                fn wglGetProcAddress(name: *const std::ffi::c_char) -> *const c_void;
++            }
++            #[link(name = "user32")]
++            extern "system" {
++                fn WindowFromDC(dc: *const c_void) -> *const c_void;
++            }
++            // Glutin 0.31's WGL Surface::is_current only checks HGLRC; also
++            // verify its drawable window so switching viewports still binds.
++            return unsafe {
++                let dc = wglGetCurrentDC();
++                if dc.is_null() || wglGetCurrentContext() != target || WindowFromDC(dc) != window {
++                    return false;
++                }
++                // WGL_ARB_make_current_read can bind a distinct read drawable.
++                // Only skip the transition when that drawable is also the UI.
++                let proc = wglGetProcAddress(b"wglGetCurrentReadDCARB\0".as_ptr().cast());
++                let read_dc = if proc.is_null() || matches!(proc as usize, 1 | 2 | 3 | usize::MAX) {
++                    dc
++                } else {
++                    let get: unsafe extern "system" fn() -> *const c_void =
++                        std::mem::transmute(proc);
++                    get()
++                };
++                !read_dc.is_null() && WindowFromDC(read_dc) == window
++            };
++        }
++    }
++    // EGL/GLX surface checks alone do not compare the context handle.
++    context.is_current() && surface.is_current(context)
++}
++
++fn change_gl_context<T: glutin::surface::SurfaceTypeTrait>(
+     current_gl_context: &mut Option<glutin::context::PossiblyCurrentContext>,
+-    gl_surface: &glutin::surface::Surface<glutin::surface::WindowSurface>,
+-) {
++    gl_surface: &glutin::surface::Surface<T>,
++) -> bool {
+     crate::profile_function!();
++
++    // Input-triggered repaints must not detach and reattach an already current
++    // UI context. On hybrid NVIDIA systems those transitions can serialize the
++    // UI and the shared renderer. Check actual native state, not a cached flag:
++    // callbacks/readback and immediate viewports may have changed the binding.
++    if current_gl_context
++        .as_ref()
++        .is_some_and(|context| ui_context_is_current(context, gl_surface))
++    {
++        return false;
++    }
+ 
+     let not_current = {
+         crate::profile_scope!("make_not_current");
+         current_gl_context
+@@ -851,8 +911,9 @@
+
+             .unwrap()
+     };
+     crate::profile_scope!("make_current");
+     *current_gl_context = Some(not_current.make_current(gl_surface).unwrap());
++    true
+ }
+ 
+ impl GlutinWindowContext {
+     #[allow(unsafe_code)]
+@@ -1515,4 +1576,67 @@
+
+ 
+     #[allow(clippy::exit)]
+     std::process::exit(0);
+ }
++
++#[cfg(all(test, target_os = "linux", feature = "glow"))]
++mod pocket_context_binding_tests {
++    use super::*;
++    use glutin::{
++        config::{ConfigSurfaceTypes, ConfigTemplateBuilder},
++        context::ContextAttributesBuilder,
++        surface::{PbufferSurface, SurfaceAttributesBuilder},
++    };
++
++    #[test]
++    #[ignore = "requires EGL device/headless native driver"]
++    fn input_repaint_keeps_current_context_but_viewport_and_external_switches_rebind() {
++        unsafe {
++            let device = glutin::api::egl::device::Device::query_devices()
++                .unwrap()
++                .next()
++                .unwrap();
++            let display = glutin::api::egl::display::Display::with_device(&device, None).unwrap();
++            let template = ConfigTemplateBuilder::new()
++                .with_surface_type(ConfigSurfaceTypes::PBUFFER)
++                .build();
++            let config = display.find_configs(template).unwrap().next().unwrap();
++            let attrs = SurfaceAttributesBuilder::<PbufferSurface>::new()
++                .build(NonZeroU32::new(8).unwrap(), NonZeroU32::new(8).unwrap());
++            let a = display.create_pbuffer_surface(&config, &attrs).unwrap();
++            let b = display.create_pbuffer_surface(&config, &attrs).unwrap();
++            let attributes = ContextAttributesBuilder::new().build(None);
++            let context = display
++                .create_context(&config, &attributes)
++                .unwrap()
++                .make_current(&a)
++                .unwrap();
++            let a = glutin::surface::Surface::Egl(a);
++            let b = glutin::surface::Surface::Egl(b);
++            let mut current = Some(glutin::context::PossiblyCurrentContext::Egl(context));
++            for _ in 0..1000 {
++                assert!(
++                    !change_gl_context(&mut current, &a),
++                    "unchanged input repaint detached the context"
++                );
++            }
++            assert!(
++                change_gl_context(&mut current, &b),
++                "different drawable must rebind"
++            );
++            assert!(ui_context_is_current(current.as_ref().unwrap(), &b));
++            let external = display.create_context(&config, &attributes).unwrap();
++            let external = external
++                .make_current(match &b {
++                    glutin::surface::Surface::Egl(s) => s,
++                    _ => unreachable!(),
++                })
++                .unwrap();
++            assert!(
++                change_gl_context(&mut current, &b),
++                "external callback binding must be restored"
++            );
++            assert!(ui_context_is_current(current.as_ref().unwrap(), &b));
++            drop(external);
++        }
++    }
++}

@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/eframe"]
 resolver = "2"
 members = [
     "crates/pocket-cab",
@@ -59,3 +60,6 @@ opt-level = 1
 [patch.crates-io]
 unicorn-engine-sys = { path = "vendor/unicorn-engine-sys" }
 newtua-nsis = { path = "vendor/newtua-nsis" }
+
+# Avoid redundant UI context rebinding on input-triggered redraws.
+eframe = { path = "vendor/eframe" }

@@ -1,5 +1,25 @@
 # GPU rendering
 
+## UI redraw context reuse (2026-11-03)
+
+The supplied NVIDIA reproduction is host input: moving an unused mouse or
+holding a key causes severe stutter. Desktop pointer routing already ignores
+movement without an active guest stylus stroke, and OS keyboard repeats are
+not forwarded as new game key presses. Host UI redraws remain a separate path.
+
+The exact locked eframe 0.27.2 glow backend unconditionally detaches/reattaches
+its UI context twice per normal repaint. A local source patch skips these
+transitions only when actual context and requested draw/read drawable match.
+This removes unnecessary transitions during input-triggered repaints while
+preserving real viewport/context switches and restoration after callbacks.
+See vendor/eframe/POCKETHLE-PATCH.md for provenance, licenses and validation.
+
+The change does not suppress input, alter VSync, throttle rendering, change
+limits or disable FullGPU. Linux native tests pass; its effect on NVIDIA input
+stutters requires the user's GTX1650 test. This is not an established fix for
+Intel image artifacts or shared snapshot pool pressure.
+
+
 ## Displayed game FPS (2026-11-03)
 
 The game-screen overlay now counts new images drawn by the frontend, not guest
