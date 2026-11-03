@@ -669,6 +669,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "SendMessageW", send_message_w);
     d.register_handler(dll, "GetUpdateRect", get_update_rect);
     d.register_handler(dll, "InvalidateRect", invalidate_rect);
+    d.register_handler(dll, "InvalidateRgn", invalidate_rgn);
     d.register_constant(dll, "ValidateRect", 1, one_returning);
     d.register_handler(dll, "GetSystemMetrics", get_system_metrics);
     d.register_handler(dll, "GetClientRect", get_client_rect);
@@ -18880,6 +18881,46 @@ fn invalidate_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         ctx.kernel.gdi.pending_window_erases.insert(hwnd);
     }
     if ctx.arg_u32(2)? != 0 && (hwnd == 0 || hwnd == FAKE_HWND) {
+        ctx.kernel.window_background_erase_pending = true;
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+/// `BOOL InvalidateRgn(HWND, HRGN, BOOL)`.
+/// Agaju calls this with NULL window/region: invalidate known visible windows,
+/// without drawing or manufacturing a presented frame. The existing update
+/// pipeline repaints the full client (as InvalidateRect/GetUpdateRect do);
+/// region handles are GDI objects, never guest RECT pointers. Empty regions
+/// have no effect and erasure remains deferred until BeginPaint.
+fn invalidate_rgn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    let region = ctx.arg_u32(1)?;
+    let erase = ctx.arg_u32(2)? != 0;
+    if region != 0 {
+        let Some(rects) = ctx.kernel.gdi.regions.get(&region) else {
+            set_thread_error(ctx, 6); // ERROR_INVALID_HANDLE
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        if !rects.iter().any(|r| r[0] < r[2] && r[1] < r[3]) {
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
+    }
+    if hwnd == 0 {
+        let mut windows: Vec<_> = ctx.kernel.window_procs.keys().copied().collect();
+        windows.sort_unstable();
+        for window in windows {
+            queue_window_paint(ctx.kernel, window);
+            if erase {
+                ctx.kernel.gdi.pending_window_erases.insert(window);
+            }
+        }
+    } else {
+        queue_window_paint(ctx.kernel, hwnd);
+        if erase {
+            ctx.kernel.gdi.pending_window_erases.insert(hwnd);
+        }
+    }
+    if erase && (hwnd == 0 || hwnd == FAKE_HWND) {
         ctx.kernel.window_background_erase_pending = true;
     }
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -37692,6 +37733,77 @@ mod tests {
             kernel.framebuffer.frame_counter, before,
             "invalidating a region must not fabricate frames"
         );
+    }
+
+    #[test]
+    fn invalidate_rgn_null_window_and_region_queue_paints_without_drawing() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        for hwnd in [FAKE_HWND, FAKE_HWND + 1, FAKE_HWND + 2] {
+            kernel.window_procs.insert(hwnd, 0x10000);
+            kernel.window_visibility.insert(hwnd, hwnd != FAKE_HWND + 2);
+        }
+        let pixels = kernel.framebuffer.pixels.clone();
+        let counter = kernel.framebuffer.frame_counter;
+        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        cpu.write_reg(ArmReg::R1, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 0).unwrap();
+        let t = dummy_thunk();
+        for _ in 0..1000 {
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
+            assert_eq!(
+                invalidate_rgn(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+        }
+        assert_eq!(kernel.posted_messages.len(), 2);
+        assert!(kernel
+            .posted_messages
+            .iter()
+            .all(|m| m.1 == WM_PAINT && m.0 != FAKE_HWND + 2));
+        assert!(kernel.gdi.pending_window_erases.is_empty());
+        assert!(!kernel.window_background_erase_pending);
+        assert_eq!(kernel.framebuffer.pixels, pixels);
+        assert_eq!(kernel.framebuffer.frame_counter, counter);
+    }
+
+    #[test]
+    fn invalidate_rgn_uses_region_handles_and_defers_erasure() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        kernel.window_procs.insert(FAKE_HWND, 0x10000);
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        let empty = kernel.gdi.create_region(vec![]);
+        let nonempty = kernel.gdi.create_region(vec![[1, 2, 9, 10]]);
+        let before = kernel.framebuffer.frame_counter;
+        let t = dummy_thunk();
+        for (region, expected, paints) in [(empty, 1, 0), (0xabcdef, 0, 0), (nonempty, 1, 1)] {
+            cpu.write_reg(ArmReg::R0, FAKE_HWND).unwrap();
+            cpu.write_reg(ArmReg::R1, region).unwrap();
+            cpu.write_reg(ArmReg::R2, 1).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
+            assert_eq!(
+                invalidate_rgn(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+            assert_eq!(ctx.kernel.posted_messages.len(), paints);
+            assert_eq!(ctx.kernel.window_background_erase_pending, paints != 0);
+        }
+        assert!(kernel.gdi.pending_window_erases.contains(&FAKE_HWND));
+        assert_eq!(kernel.framebuffer.frame_counter, before);
+        assert!(kernel.gdi.regions.contains_key(&nonempty));
+        let dispatcher = WinCeDispatcher::new();
+        assert!(dispatcher
+            .registered_iter()
+            .any(|(dll, name)| dll == "coredll.dll" && name == "InvalidateRgn"));
     }
 
     /// Call a handler with `args` already in r0.. and return r0.
