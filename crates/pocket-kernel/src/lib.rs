@@ -1140,7 +1140,7 @@ pub struct KernelState {
     pub mapped_views: file_mapping::MappedViews,
     pub random_seed: u32,
     /// Software-rendered display the GDI/GAPI handlers paint into.
-    pub framebuffer: Framebuffer,
+    pub framebuffer: framebuffer::deferred::DeferredFramebuffer,
     /// Tracked GDI objects (DCs, bitmaps, brushes, pens, fonts).
     pub gdi: GdiState,
     /// Flat resource table for `FindResourceW` / `LoadResource`.
@@ -1992,13 +1992,15 @@ impl KernelState {
     /// forever.
     /// Host-owned SIP overlay. Never write its pixels into the guest's GDI/GAPI
     /// framebuffer: hiding or rotating the keyboard must not leave stale pixels.
-    pub fn presentation_framebuffer(&self) -> std::borrow::Cow<'_, Framebuffer> {
+    pub fn presentation_framebuffer(
+        &mut self,
+    ) -> Result<std::borrow::Cow<'_, Framebuffer>, String> {
         if (!self.shell_keyboard.sip || !self.shell_keyboard.visible)
             && self.gdi.shell_menus.tracking.is_none()
         {
-            return std::borrow::Cow::Borrowed(&self.framebuffer);
+            return Ok(std::borrow::Cow::Borrowed(self.framebuffer.cpu()?));
         }
-        let mut frame = self.framebuffer.clone();
+        let mut frame = self.framebuffer.cpu()?.clone();
         // Native GDI/SIP overlays use guest coordinates and take precedence.
         frame.clear_render_presentation();
         if self.gdi.shell_menus.tracking.is_some() {
@@ -2012,7 +2014,7 @@ impl KernelState {
         }
         self.shell_keyboard
             .render(&mut gdi::Surface::Screen(&mut frame));
-        std::borrow::Cow::Owned(frame)
+        Ok(std::borrow::Cow::Owned(frame))
     }
 
     /// Walk child parents, never popup owners. The fallback preserves the
@@ -2338,7 +2340,14 @@ impl KernelState {
             .get(&title_owner)
             .map(String::as_str)
             .unwrap_or("");
-        let mut surf = gdi::Surface::Screen(&mut self.framebuffer);
+        let frame = match self.framebuffer.cpu_mut() {
+            Ok(frame) => frame,
+            Err(error) => {
+                log::error!("CPU compositor could not access GPU pixels: {error}");
+                return;
+            }
+        };
+        let mut surf = gdi::Surface::Screen(frame);
         let mut layers = Vec::new();
         let mut native_paint_changed = false;
         for (&hwnd, &dc) in &self.window_dcs {
@@ -4204,7 +4213,7 @@ impl Process {
                 object_handles: handles::HandleTable::default(),
                 mapped_views: Default::default(),
                 random_seed: 0x1234_abcd,
-                framebuffer: Framebuffer::default(),
+                framebuffer: framebuffer::deferred::DeferredFramebuffer::default(),
                 gdi: GdiState::new(),
                 resources,
                 image_base: img_base,
@@ -4447,7 +4456,7 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
     }
     let pitch = state.guest_fb_pitch.max(state.framebuffer.stride_bytes()) as usize;
     let row_bytes = state.framebuffer.stride_bytes() as usize;
-    let len = state.framebuffer.pixels.len();
+    let len = state.framebuffer.byte_size() as usize;
     if state.gx_readback_scratch.len() != len {
         state.gx_readback_scratch.resize(len, 0);
     }
@@ -4485,13 +4494,20 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
             }
         }
     }
-    if state.gx_readback_scratch != state.framebuffer.pixels {
-        state
-            .framebuffer
-            .pixels
-            .copy_from_slice(&state.gx_readback_scratch);
-        state.framebuffer.mark_dirty();
-        state.gx_last_pushed_counter = state.framebuffer.frame_counter;
+    let frame = match state.framebuffer.cpu() {
+        Ok(frame) => frame,
+        Err(error) => {
+            log::error!("GAPI synchronization could not access GPU pixels: {error}");
+            return;
+        }
+    };
+    if state.gx_readback_scratch != frame.pixels {
+        // The image is resident, so this second access cannot invoke a reader.
+        if let Ok(frame) = state.framebuffer.cpu_mut() {
+            frame.pixels.copy_from_slice(&state.gx_readback_scratch);
+            frame.mark_dirty();
+            state.gx_last_pushed_counter = frame.frame_counter;
+        }
     }
 }
 
@@ -5181,6 +5197,98 @@ mod tests {
     use pocket_cpu::stub::StubCpu;
     use pocket_pe::{LoadedImage, LoadedSection};
 
+    #[derive(Debug)]
+    struct RetainedTestImage {
+        reads: std::sync::atomic::AtomicUsize,
+        fail: std::sync::atomic::AtomicBool,
+    }
+    impl framebuffer::deferred::CpuPixelSource for RetainedTestImage {
+        fn logical_size(&self) -> (u32, u32) {
+            (3, 2)
+        }
+        fn native_size(&self) -> (u32, u32) {
+            (3, 2)
+        }
+        fn materialize(&self) -> Result<framebuffer::deferred::MaterializedPixels, String> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("lost test context".into());
+            }
+            Ok(framebuffer::deferred::MaterializedPixels {
+                logical_size: (3, 2),
+                native_size: (3, 2),
+                rgb565: vec![0, 0xf8, 0, 0xf8, 0, 0xf8, 0, 0xf8, 0, 0xf8, 0, 0xf8],
+                native_rgba: None,
+            })
+        }
+    }
+    #[test]
+    fn active_kernel_materializes_only_at_cpu_boundaries_and_keeps_gapi_coherent() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let k = &mut process.state;
+        k.framebuffer.resize(3, 2);
+        let source = std::sync::Arc::new(RetainedTestImage {
+            reads: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        });
+        k.framebuffer.publish_gpu(source.clone()).unwrap();
+        let revision = k.framebuffer.frame_counter;
+        assert_eq!(
+            (
+                k.framebuffer.width,
+                k.framebuffer.height,
+                k.framebuffer.stride_bytes()
+            ),
+            (3, 2, 6)
+        );
+        assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+        assert!(k.framebuffer.resident_cpu().is_none());
+        let frame = k.presentation_framebuffer().unwrap();
+        assert_eq!(&frame.pixels[..2], &[0, 0xf8]);
+        drop(frame);
+        assert_eq!(k.framebuffer.frame_counter, revision);
+        assert!(k.framebuffer.gpu_source().is_some());
+        assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+        k.fb_mapped = true;
+        k.gx_last_pushed_counter = revision;
+        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(
+            SYNTHETIC_FRAMEBUFFER_BASE,
+            &[0x1f, 0, 0x1f, 0, 0x1f, 0, 0x1f, 0, 0x1f, 0, 0x1f, 0],
+        )
+        .unwrap();
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &[0x1f, 0]
+        );
+        assert!(k.framebuffer.gpu_source().is_none());
+        assert_ne!(k.framebuffer.frame_counter, revision);
+        assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+        k.framebuffer.publish_gpu(source.clone()).unwrap();
+        source.fail.store(true, Ordering::Relaxed);
+        let revision = k.framebuffer.frame_counter;
+        assert!(k.presentation_framebuffer().is_err());
+        assert!(k.framebuffer.resident_cpu().is_none());
+        assert!(k.framebuffer.gpu_source().is_some());
+        assert_eq!(k.framebuffer.frame_counter, revision);
+        source.fail.store(false, Ordering::Relaxed);
+        assert_eq!(
+            &k.presentation_framebuffer().unwrap().pixels[..2],
+            &[0, 0xf8]
+        );
+    }
+
     #[test]
     fn physical_columns_are_decoded_when_a_guest_retains_its_framebuffer_pointer() {
         let mut cpu = StubCpu::new();
@@ -5204,7 +5312,10 @@ mod tests {
         )
         .unwrap();
         sync_guest_framebuffer(&mut cpu, k);
-        assert_eq!(k.framebuffer.pixels, [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
+        assert_eq!(
+            k.framebuffer.resident_cpu().unwrap().pixels,
+            [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]
+        );
     }
 
     #[test]
@@ -5230,7 +5341,10 @@ mod tests {
         cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes())
             .unwrap();
         sync_guest_framebuffer(&mut cpu, k);
-        assert_eq!(&k.framebuffer.pixels[..2], &0xf800u16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0xf800u16.to_le_bytes()
+        );
         k.registry.set_value(
             r"HKCU\ControlPanel\Backlight",
             "OnLevel",
@@ -5240,7 +5354,10 @@ mod tests {
         cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0x001fu16.to_le_bytes())
             .unwrap();
         sync_guest_framebuffer(&mut cpu, k);
-        assert_eq!(&k.framebuffer.pixels[..2], &0x001fu16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0x001fu16.to_le_bytes()
+        );
         // A real host/GDI draw still owns unsynchronized pixels. A rotation
         // must not allow stale guest memory to overwrite that drawing.
         let last_guest = k.gx_last_pushed_counter;
@@ -5248,7 +5365,10 @@ mod tests {
         k.invalidate_presentation();
         assert_eq!(k.gx_last_pushed_counter, last_guest);
         sync_guest_framebuffer(&mut cpu, k);
-        assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0x07e0u16.to_le_bytes()
+        );
     }
 
     #[test]
@@ -5283,16 +5403,19 @@ mod tests {
         k.composite_controls();
         let offset = ((k.framebuffer.height - 3) * k.framebuffer.width * 2) as usize;
         assert_eq!(
-            &k.framebuffer.pixels[offset..offset + 2],
+            &k.framebuffer.resident_cpu().unwrap().pixels[offset..offset + 2],
             &0xf800u16.to_le_bytes()
         );
-        assert_eq!(&k.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0x07e0u16.to_le_bytes()
+        );
         assert_eq!(k.framebuffer.frame_counter, counter);
         k.window_visibility.insert(bar, false);
         k.framebuffer.fill(0x001f);
         k.composite_controls();
         assert_eq!(
-            &k.framebuffer.pixels[offset..offset + 2],
+            &k.framebuffer.resident_cpu().unwrap().pixels[offset..offset + 2],
             &0x001fu16.to_le_bytes()
         );
     }
@@ -5317,18 +5440,21 @@ mod tests {
         k.fb_mapped = true;
         k.guest_fb_pitch = k.framebuffer.stride_bytes();
         k.gx_last_pushed_counter = k.framebuffer.frame_counter;
-        let before = k.framebuffer.pixels.clone();
+        let before = k.framebuffer.resident_cpu().unwrap().pixels.clone();
         let counter = k.framebuffer.frame_counter;
         k.gx_draw_active = true;
         cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes())
             .unwrap();
         sync_guest_framebuffer(&mut cpu, k);
-        assert_eq!(k.framebuffer.pixels, before);
+        assert_eq!(k.framebuffer.resident_cpu().unwrap().pixels, before);
         assert_eq!(k.framebuffer.frame_counter, counter);
         // Direct framebuffer users outside a GX draw retain polling support.
         k.gx_draw_active = false;
         sync_guest_framebuffer(&mut cpu, k);
-        assert_eq!(&k.framebuffer.pixels[..2], &0xf800u16.to_le_bytes());
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0xf800u16.to_le_bytes()
+        );
     }
 
     /// `SB_SETPARTS` hands us right-hand edges, with a trailing -1
@@ -5413,7 +5539,7 @@ mod tests {
         assert_eq!(state.framebuffer.frame_counter, initial.wrapping_add(1));
         let offset = ((55 * state.framebuffer.width + 45) * 2) as usize;
         assert_eq!(
-            &state.framebuffer.pixels[offset..offset + 2],
+            &state.framebuffer.resident_cpu().unwrap().pixels[offset..offset + 2],
             &0xf800u16.to_le_bytes()
         );
         let presented = state.framebuffer.frame_counter;
@@ -5425,7 +5551,7 @@ mod tests {
         state.present_window_surfaces(); // BeginPaint/EndPaint with no drawing
         assert_eq!(state.framebuffer.frame_counter, direct_frame);
         assert_eq!(
-            &state.framebuffer.pixels[offset..offset + 2],
+            &state.framebuffer.resident_cpu().unwrap().pixels[offset..offset + 2],
             &0x001fu16.to_le_bytes()
         );
         let presented = direct_frame;
@@ -5433,7 +5559,7 @@ mod tests {
         state.present_window_surfaces();
         assert_eq!(state.framebuffer.frame_counter, presented.wrapping_add(1));
         assert_eq!(
-            &state.framebuffer.pixels[offset..offset + 2],
+            &state.framebuffer.resident_cpu().unwrap().pixels[offset..offset + 2],
             &0x07e0u16.to_le_bytes()
         );
         state.window_visibility.insert(hwnd, false);
@@ -5497,8 +5623,8 @@ mod tests {
         let pixel = |x: usize, y: usize| {
             let offset = (y * state.framebuffer.width as usize + x) * 2;
             u16::from_le_bytes([
-                state.framebuffer.pixels[offset],
-                state.framebuffer.pixels[offset + 1],
+                state.framebuffer.resident_cpu().unwrap().pixels[offset],
+                state.framebuffer.resident_cpu().unwrap().pixels[offset + 1],
             ])
         };
         // Client origin is (21,45), not the screen origin or window origin.

@@ -59,9 +59,9 @@ fn colors_slider_registry_and_event_drive_host_brightness() {
     // CreateEvent reports whether the named event already existed. Registry
     // writes and successful event/wait calls preserve the error set afterwards.
     api!("SetLastError", &[0x1234]);
-    kernel.framebuffer.pixels[0..2].copy_from_slice(&0x7befu16.to_le_bytes());
-    let pixels = kernel.framebuffer.pixels.clone();
-    let normal = kernel.framebuffer.snapshot_rgba8888();
+    kernel.framebuffer.cpu_mut().unwrap().pixels[0..2].copy_from_slice(&0x7befu16.to_le_bytes());
+    let pixels = kernel.framebuffer.cpu_mut().unwrap().pixels.clone();
+    let normal = kernel.framebuffer.cpu_mut().unwrap().snapshot_rgba8888();
     for (level, dim) in [(1u32, 0u32), (11, 0), (21, 10), (31, 20)] {
         cpu.write_mem(0x1600, &level.to_le_bytes()).unwrap();
         cpu.write_mem(0x1604, &dim.to_le_bytes()).unwrap();
@@ -71,8 +71,8 @@ fn colors_slider_registry_and_event_drive_host_brightness() {
         assert_eq!(api!("WaitForSingleObject", &[event, 0]), 0);
         kernel.sync_backlight();
         assert_eq!(kernel.framebuffer.backlight_level(), level);
-        let displayed = kernel.framebuffer.snapshot_rgba8888();
-        assert_eq!(kernel.framebuffer.pixels, pixels);
+        let displayed = kernel.framebuffer.cpu().unwrap().snapshot_rgba8888();
+        assert_eq!(kernel.framebuffer.resident_cpu().unwrap().pixels, pixels);
         if level < 11 {
             assert!(displayed[0] < normal[0]);
         } else if level == 11 {
@@ -88,16 +88,25 @@ fn colors_slider_registry_and_event_drive_host_brightness() {
         assert_eq!(api!("RegSetValueExW", &[key, 0x1100, 0, 4, 0x1600, 4]), 0);
         kernel.sync_backlight();
         assert_eq!(kernel.framebuffer.backlight_level(), 11);
-        assert_eq!(kernel.framebuffer.snapshot_rgba8888(), normal);
+        assert_eq!(
+            kernel.framebuffer.cpu().unwrap().snapshot_rgba8888(),
+            normal
+        );
     }
     assert_eq!(api!("RegSetValueExW", &[key, 0x1100, 0, 3, 0x1600, 4]), 0);
     kernel.sync_backlight();
-    assert_eq!(kernel.framebuffer.snapshot_rgba8888(), normal);
+    assert_eq!(
+        kernel.framebuffer.cpu().unwrap().snapshot_rgba8888(),
+        normal
+    );
     assert_eq!(api!("RegDeleteValueW", &[key, 0x1100]), 0);
     kernel.framebuffer.set_backlight_level(1);
     kernel.sync_backlight();
     assert_eq!(kernel.framebuffer.backlight_level(), 11);
-    assert_eq!(kernel.framebuffer.snapshot_rgba8888(), normal);
+    assert_eq!(
+        kernel.framebuffer.cpu().unwrap().snapshot_rgba8888(),
+        normal
+    );
     assert_eq!(api!("GetLastError", &[]), 0x1234);
     assert_eq!(api!("RegCloseKey", &[key]), 0);
     assert_eq!(api!("CloseHandle", &[event]), 1);

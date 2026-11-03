@@ -189,10 +189,9 @@ fn main() -> anyhow::Result<()> {
                     .map(|t| (t.id, t.finished, t.worker_regs[15], t.messages.len()))
                     .collect::<Vec<_>>()
             );
-            let _ = std::fs::write(
-                out.join(format!("frame-{stage:02}.ppm")),
-                state.framebuffer.snapshot_ppm(),
-            );
+            let _ = state
+                .framebuffer
+                .write_ppm(out.join(format!("frame-{stage:02}.ppm")));
         }
         if elapsed >= Duration::from_secs(limit) {
             FrameAction::Stop
@@ -201,7 +200,7 @@ fn main() -> anyhow::Result<()> {
         }
     });
     eprintln!("END {:?} result={result:?}", start.elapsed());
-    let state = &emu.process().unwrap().state;
+    let state = &mut emu.process_mut().unwrap().state;
     eprintln!(
         "SURFACES rects={:?} visible={:?} dcs={:?}",
         state.window_rects, state.window_visibility, state.window_dcs

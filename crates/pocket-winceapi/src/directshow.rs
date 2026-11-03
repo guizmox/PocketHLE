@@ -950,7 +950,7 @@ mod tests {
             crate::gles::egl_swap_buffers(&mut ctx).unwrap();
             let pixel = ((80 * ctx.kernel.framebuffer.width + 250) * 2) as usize;
             assert_eq!(
-                &ctx.kernel.framebuffer.pixels[pixel..pixel + 2],
+                &ctx.kernel.framebuffer.resident_cpu().unwrap().pixels[pixel..pixel + 2],
                 &[0xff, 0xff]
             );
         }
@@ -1023,7 +1023,7 @@ mod tests {
             cpu.write_mem(0x1008, &1u32.to_le_bytes()).unwrap();
             let mut kernel = crate::gx::tests::fresh_kernel();
             kernel.framebuffer.resize(2, 2);
-            kernel.framebuffer.pixels.fill(0x55);
+            kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0x55);
             let mut movie = Movie::new();
             movie.info.width = 2;
             movie.info.height = 2;
@@ -1044,7 +1044,7 @@ mod tests {
             })
             .unwrap();
             assert_eq!(
-                kernel.framebuffer.pixels,
+                kernel.framebuffer.resident_cpu().unwrap().pixels,
                 vec![if enabled { 0xff } else { 0x55 }; 8]
             );
             // Repeating Run is not a state transition and must not undo an
@@ -1254,8 +1254,16 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 2);
-        tx.send(Packet::Frame(vec![0; kernel.framebuffer.pixels.len()]))
-            .unwrap();
+        tx.send(Packet::Frame(vec![
+            0;
+            kernel
+                .framebuffer
+                .resident_cpu()
+                .unwrap()
+                .pixels
+                .len()
+        ]))
+        .unwrap();
         tx.send(Packet::End).unwrap();
         {
             let mut movies = MOVIES.lock().unwrap();

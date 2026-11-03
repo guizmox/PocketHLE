@@ -1064,8 +1064,14 @@ fn ensure_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
         let size = pocket_cpu::round_up_to_page(ctx.kernel.framebuffer.byte_size());
         ctx.cpu
             .map_region(SYNTHETIC_FRAMEBUFFER_BASE, size, Prot::READ | Prot::WRITE)?;
-        ctx.cpu
-            .write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &ctx.kernel.framebuffer.pixels)?;
+        ctx.cpu.write_mem(
+            SYNTHETIC_FRAMEBUFFER_BASE,
+            &ctx.kernel
+                .framebuffer
+                .cpu()
+                .map_err(KernelError::Dispatch)?
+                .pixels,
+        )?;
         ctx.kernel.fb_mapped = true;
     }
     Ok(())
@@ -1157,11 +1163,23 @@ fn surface_ce_palette_or_legacy_lock(
 /// actually changed, per invariant 10.
 fn publish_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     ensure_framebuffer(ctx)?;
-    let mut pixels = vec![0u8; ctx.kernel.framebuffer.pixels.len()];
+    let mut pixels = vec![0u8; ctx.kernel.framebuffer.byte_size() as usize];
     ctx.cpu
         .read_mem_into(SYNTHETIC_FRAMEBUFFER_BASE, &mut pixels)?;
-    if pixels != ctx.kernel.framebuffer.pixels {
-        ctx.kernel.framebuffer.pixels.copy_from_slice(&pixels);
+    if pixels
+        != ctx
+            .kernel
+            .framebuffer
+            .cpu()
+            .map_err(KernelError::Dispatch)?
+            .pixels
+    {
+        ctx.kernel
+            .framebuffer
+            .cpu_mut()
+            .map_err(KernelError::Dispatch)?
+            .pixels
+            .copy_from_slice(&pixels);
         ctx.kernel.framebuffer.mark_dirty();
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
         ctx.kernel.direct_fb_frames = ctx.kernel.direct_fb_frames.saturating_add(1);
@@ -1805,7 +1823,10 @@ mod tests {
         call(&mut cpu, &mut kernel, surface_unlock, [legacy, 0, 0, 0]);
         assert_eq!(kernel.framebuffer.frame_counter, before + 1);
         assert!(kernel.framebuffer.directdraw.primary_locks.is_empty());
-        assert_eq!(&kernel.framebuffer.pixels[..2], &0xffffu16.to_le_bytes());
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0xffffu16.to_le_bytes()
+        );
 
         // DXPAK callers may leave the Lock output uninitialized, including
         // on their first call. Select its ABI from the write-only Lock
@@ -1856,7 +1877,10 @@ mod tests {
             surface_ce_flip_or_legacy_blt_fast,
             [blit_view, 0, 0, offscreen],
         );
-        assert_eq!(&kernel.framebuffer.pixels[..2], &0x07e0u16.to_le_bytes());
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0x07e0u16.to_le_bytes()
+        );
         let table = cpu.read_u32_le(blit_view).unwrap();
         assert_eq!(
             cpu.read_u32_le(table + 7 * 4).unwrap(),

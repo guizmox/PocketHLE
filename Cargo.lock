@@ -2938,6 +2938,7 @@ dependencies = [
  "image 0.25.10",
  "log",
  "pocket-core",
+ "pocket-gles",
  "pocket-library",
  "pocket-pe",
  "rfd",

@@ -755,14 +755,15 @@ fn run_process(
 
     // Push one last framebuffer so the UI ends up showing whatever
     // the guest left on screen even if it stopped between frames.
-    if let Some(p) = emu.process() {
-        if !p.state.framebuffer.is_all_black() {
-            if hook.foreground.load(Ordering::Acquire) == hook.pid {
-                push_frame(
-                    &state,
-                    FrameSnapshot::from_framebuffer(&p.state.presentation_framebuffer()),
-                );
+    if let Some(p) = emu.process_mut() {
+        match p.state.presentation_framebuffer() {
+            Ok(frame)
+                if !frame.is_all_black() && hook.foreground.load(Ordering::Acquire) == hook.pid =>
+            {
+                push_frame(&state, FrameSnapshot::from_framebuffer(&frame));
             }
+            Err(error) => log::error!("final presentation failed: {error}"),
+            _ => {}
         }
     }
 
@@ -777,6 +778,7 @@ fn run_process(
     // Refund private RAM and publish parent completion BEFORE joining children.
     let table = emu.process().map(|p| p.state.object_handles.clone());
     drop(emu);
+    pocket_core::winceapi::gles::deferred_frame::release_reader();
     if let Some(table) = table {
         table.complete_process_exit(code);
     }
@@ -1146,23 +1148,37 @@ impl FrameHook for SessionHook {
         }
         let counter = kernel.framebuffer.frame_counter;
         if self.foreground.load(Ordering::Acquire) == self.pid && counter != self.last_frame {
-            if kernel.framebuffer.is_all_black() && self.saw_non_black {
-                return if stop_requested {
-                    kernel.should_stop = true;
-                    FrameAction::Stop
-                } else {
-                    FrameAction::Continue
-                };
-            }
-            self.saw_non_black = !kernel.framebuffer.is_all_black();
             let now = Instant::now();
             if let Some(phase) = presentation_phase(self.last_emit_at, now) {
+                let black = match kernel.framebuffer.cpu() {
+                    Ok(frame) => frame.is_all_black(),
+                    Err(error) => {
+                        log::error!("framebuffer read failed: {error}");
+                        kernel.should_stop = true;
+                        return FrameAction::Stop;
+                    }
+                };
+                if black && self.saw_non_black {
+                    return if stop_requested {
+                        kernel.should_stop = true;
+                        FrameAction::Stop
+                    } else {
+                        FrameAction::Continue
+                    };
+                }
+                self.saw_non_black = !black;
+
                 self.last_frame = counter;
                 self.last_emit_at = Some(phase);
-                let frame = FrameSnapshot::from_framebuffer_into(
-                    &kernel.presentation_framebuffer(),
-                    &mut self.scratch,
-                );
+                let presentation = match kernel.presentation_framebuffer() {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        log::error!("presentation read failed: {error}");
+                        kernel.should_stop = true;
+                        return FrameAction::Stop;
+                    }
+                };
+                let frame = FrameSnapshot::from_framebuffer_into(&presentation, &mut self.scratch);
                 push_frame(&self.state, frame);
             }
         }
@@ -1256,5 +1272,103 @@ mod internal_resolution_tests {
         let frame = FrameSnapshot::from_framebuffer(&fb);
         assert_eq!((frame.texture_width, frame.texture_height), (2, 1));
         assert_eq!(frame.rgba.len(), 2 * 1 * 4);
+    }
+}
+
+#[cfg(test)]
+mod deferred_read_tests {
+    use super::*;
+    use pocket_core::kernel::framebuffer::deferred::{CpuPixelSource, MaterializedPixels};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Debug)]
+    struct Image {
+        reads: AtomicUsize,
+        fail: AtomicBool,
+    }
+    impl CpuPixelSource for Image {
+        fn logical_size(&self) -> (u32, u32) {
+            (3, 2)
+        }
+        fn native_size(&self) -> (u32, u32) {
+            (3, 2)
+        }
+        fn materialize(&self) -> Result<MaterializedPixels, String> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail.load(Ordering::Relaxed) {
+                return Err("test read failure".into());
+            }
+            Ok(MaterializedPixels {
+                logical_size: (3, 2),
+                native_size: (3, 2),
+                rgb565: vec![0, 0xf8, 0, 0xf8, 0, 0xf8, 0, 0xf8, 0, 0xf8, 0, 0xf8],
+                native_rgba: None,
+            })
+        }
+    }
+    fn process() -> pocket_core::kernel::Process {
+        use pocket_core::{
+            cpu::stub::StubCpu,
+            pe::{LoadedImage, LoadedSection},
+        };
+        let mut cpu = StubCpu::new();
+        let image = LoadedImage {
+            source_path: "hook-test".into(),
+            machine: pocket_core::pe::machine::ARM,
+            subsystem: pocket_core::pe::subsystem::WINDOWS_CE_GUI,
+            image_base: 0x10000,
+            stack_reserve: 0x10000,
+            size_of_image: 0x2000,
+            entry_point: 0x1000,
+            sections: vec![LoadedSection {
+                name: ".text".into(),
+                virtual_address: 0x1000,
+                virtual_size: 0x1000,
+                characteristics: 0x60000020,
+                data: vec![0; 0x1000],
+            }],
+            imports: vec![],
+            exports: Default::default(),
+            resources: vec![],
+            managed_runtime: None,
+        };
+        pocket_core::kernel::Process::map_into(
+            image,
+            &mut cpu,
+            &|_, _| None,
+            &pocket_core::kernel::NullDispatcher,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn throttled_frames_never_read_gpu_and_due_read_failures_stop_without_stale_pixels() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let state = Arc::new(SessionState::new());
+        let mut hook = SessionHook::new(state.clone(), rx);
+        let mut process = process();
+        let kernel = &mut process.state;
+        kernel.framebuffer.resize(3, 2);
+        let source = Arc::new(Image {
+            reads: AtomicUsize::new(0),
+            fail: AtomicBool::new(true),
+        });
+        kernel.framebuffer.publish_gpu(source.clone()).unwrap();
+        hook.last_emit_at = Some(Instant::now() + Duration::from_secs(60));
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
+        assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+        assert!(!kernel.framebuffer.cpu_resident());
+        hook.last_emit_at = None;
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Stop));
+        assert!(kernel.should_stop);
+        assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+        assert!(!kernel.framebuffer.cpu_resident());
+        kernel.should_stop = false;
+        source.fail.store(false, Ordering::Relaxed);
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
+        assert_eq!(source.reads.load(Ordering::Relaxed), 2);
+        assert!(kernel.framebuffer.cpu_resident());
+        assert_eq!(
+            &state.latest_frame.lock().unwrap().as_ref().unwrap().rgba[..4],
+            &[255, 0, 0, 255]
+        );
     }
 }

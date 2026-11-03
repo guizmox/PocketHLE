@@ -471,14 +471,14 @@ mod sip_tests {
             25,
         );
         k.controls.focus = edit;
-        let raw = k.framebuffer.pixels.clone();
+        let raw = k.framebuffer.resident_cpu().unwrap().pixels.clone();
         call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[1]);
         let counter = k.framebuffer.frame_counter;
-        assert_ne!(k.presentation_framebuffer().pixels, raw);
-        assert_eq!(k.framebuffer.pixels, raw);
+        assert_ne!(k.presentation_framebuffer().unwrap().pixels, raw);
+        assert_eq!(k.framebuffer.resident_cpu().unwrap().pixels, raw);
         assert_eq!(k.framebuffer.frame_counter, counter);
         call(&mut cpu, &mut k, &mut d, "coredll.dll", "SipShowIM", &[0]);
-        assert_eq!(k.presentation_framebuffer().pixels, raw);
+        assert_eq!(k.presentation_framebuffer().unwrap().pixels, raw);
     }
     fn pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         let x = ctx.arg_u32(0)? as u16;

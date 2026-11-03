@@ -1,0 +1,584 @@
+//! Bounded native snapshots. No GL operation runs from a frame token's Drop.
+use super::*;
+/// Modern GLSL body for a pre-filter pass into top-down RGB565 display pixels.
+pub const SHARED_DISPLAY_FRAGMENT: &str = include_str!("shaders/shared_display.frag");
+use std::sync::{Arc, Mutex};
+
+#[derive(Default, Debug)]
+pub(crate) struct ShareGroup {
+    retired: Mutex<Vec<Retired>>,
+}
+#[derive(Debug)]
+struct Retired {
+    texture: u32,
+    ready: usize,
+    done: usize,
+}
+type Fence = unsafe extern "system" fn(u32, u32) -> *mut c_void;
+type Wait = unsafe extern "system" fn(*mut c_void, u32, u64);
+type Delete = unsafe extern "system" fn(*mut c_void);
+#[derive(Clone, Copy)]
+pub(super) struct SyncApi {
+    fence: Fence,
+    wait: Wait,
+    delete: Delete,
+}
+impl SyncApi {
+    pub(super) unsafe fn load(load: impl Fn(&CStr) -> *mut c_void) -> Result<Self, String> {
+        let get = load(c"glGetString");
+        if get.is_null() {
+            return Err("native GL version unavailable".into());
+        }
+        let get: unsafe extern "system" fn(u32) -> *const c_char = std::mem::transmute(get);
+        let version = get(0x1f02);
+        if version.is_null() {
+            return Err("native GL version unavailable".into());
+        }
+        let version = CStr::from_ptr(version).to_string_lossy();
+        let es = version.starts_with("OpenGL ES");
+        let number = version
+            .split_whitespace()
+            .find(|s| s.starts_with(|c: char| c.is_ascii_digit()))
+            .unwrap_or("");
+        let mut numbers = number.split('.').filter_map(|s| s.parse::<u32>().ok());
+        let (major, minor) = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+        let core_sync = if es {
+            major >= 3
+        } else {
+            major > 3 || (major == 3 && minor >= 2)
+        };
+        if !core_sync {
+            let mut arb_sync = false;
+            if !es && major < 3 {
+                let extensions = get(0x1f03);
+                arb_sync = !extensions.is_null()
+                    && CStr::from_ptr(extensions)
+                        .to_string_lossy()
+                        .split_whitespace()
+                        .any(|s| s == "GL_ARB_sync");
+            } else if !es {
+                let get_i = load(c"glGetStringi");
+                let get_n = load(c"glGetIntegerv");
+                if !get_i.is_null() && !get_n.is_null() {
+                    let get_i: unsafe extern "system" fn(u32, u32) -> *const c_char =
+                        std::mem::transmute(get_i);
+                    let get_n: unsafe extern "system" fn(u32, *mut i32) =
+                        std::mem::transmute(get_n);
+                    let mut count = 0;
+                    get_n(0x821d, &mut count);
+                    for i in 0..count.max(0) as u32 {
+                        let extension = get_i(0x1f03, i);
+                        if !extension.is_null()
+                            && CStr::from_ptr(extension).to_bytes() == b"GL_ARB_sync"
+                        {
+                            arb_sync = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !arb_sync {
+                return Err("shared frames require GL 3.2/ARB_sync or GLES3".into());
+            }
+        }
+        let fence = load(c"glFenceSync");
+        let wait = load(c"glWaitSync");
+        let delete = load(c"glDeleteSync");
+        if fence.is_null() || wait.is_null() || delete.is_null() {
+            return Err("shared frames require native GL sync".into());
+        }
+        Ok(Self {
+            fence: std::mem::transmute::<*mut c_void, Fence>(fence),
+            wait: std::mem::transmute::<*mut c_void, Wait>(wait),
+            delete: std::mem::transmute::<*mut c_void, Delete>(delete),
+        })
+    }
+    unsafe fn publish(&self, flush: unsafe extern "system" fn()) -> usize {
+        let fence = (self.fence)(0x9117, 0) as usize;
+        flush();
+        fence
+    }
+    pub(super) unsafe fn wait(&self, fence: usize) {
+        if fence != 0 {
+            (self.wait)(fence as *mut c_void, 0, u64::MAX);
+        }
+    }
+    unsafe fn delete(&self, fence: usize) {
+        if fence != 0 {
+            (self.delete)(fence as *mut c_void);
+        }
+    }
+}
+impl ShareGroup {
+    unsafe fn collect(&self, load: impl Fn(&CStr) -> *mut c_void) -> Result<(), String> {
+        if self
+            .retired
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let sync = SyncApi::load(&load)?;
+        let delete = load(c"glDeleteTextures");
+        if delete.is_null() {
+            return Err("shared texture deletion unavailable".into());
+        }
+        let delete: unsafe extern "system" fn(i32, *const u32) = std::mem::transmute(delete);
+        let retired = std::mem::take(&mut *self.retired.lock().unwrap_or_else(|e| e.into_inner()));
+        for r in retired {
+            // Deletion itself is ordered/deferred by GL for already submitted
+            // commands. Reuse requires a wait; retirement never reuses a name.
+            sync.delete(r.ready);
+            sync.delete(r.done);
+            delete(1, &r.texture);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Debug)]
+struct SlotSync {
+    ready: usize,
+    done: usize,
+    poisoned: bool,
+}
+#[derive(Debug)]
+struct Slot {
+    texture: u32,
+    width: u32,
+    height: u32,
+    rgb565: bool,
+    group: Arc<ShareGroup>,
+    sync: Mutex<SlotSync>,
+}
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let s = self.sync.get_mut().unwrap_or_else(|e| e.into_inner());
+        self.group
+            .retired
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Retired {
+                texture: self.texture,
+                ready: s.ready,
+                done: s.done,
+            });
+    }
+}
+
+/// Immutable raw native snapshot. Coordinates are GL bottom-up; consumer must
+/// apply the established RGB565 display quantization, rotation and brightness.
+/// Clones retain the slot; dropping an unpainted frame returns it without any GL
+/// work. The producer cannot overwrite a retained frame, including after resize.
+#[derive(Clone, Debug)]
+pub struct SharedFrame(Arc<Slot>);
+impl SharedFrame {
+    pub(super) fn read_source(
+        &self,
+        group: &Arc<ShareGroup>,
+    ) -> Result<(u32, usize, bool), String> {
+        if !Arc::ptr_eq(group, &self.0.group) {
+            return Err("readback uses a different share group".into());
+        }
+        let sync = self.0.sync.lock().unwrap_or_else(|e| e.into_inner());
+        if sync.poisoned || sync.ready == 0 {
+            return Err("snapshot synchronization unavailable".into());
+        }
+        Ok((self.0.texture, sync.ready, self.0.rgb565))
+    }
+    pub(super) fn same_snapshot(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub fn belongs_to_source(&self, source: &SharedContextSource) -> bool {
+        Arc::ptr_eq(&self.0.group, &source.1)
+    }
+    pub fn size(&self) -> (u32, u32) {
+        (self.0.width, self.0.height)
+    }
+
+    /// Sample only through the original external UI context generation.
+    /// A completion fence is recorded even if the drawing closure unwinds.
+    ///
+    /// # Safety
+    /// Do not change current context inside `draw`, retain the texture name,
+    /// delete or modify its contents, or use it after the closure returns.
+    pub unsafe fn with_texture<R>(
+        &self,
+        ui: &mut ExternalGpuContext,
+        draw: impl FnOnce(u32) -> R,
+    ) -> Result<R, String> {
+        self.with_consumer(&mut ui.consumer(), draw)
+    }
+    /// Consume through sendable UI metadata while its native owner stays on UI.
+    ///
+    /// # Safety
+    /// As with `with_texture`, keep the context current, do not retain the
+    /// texture name, and do not delete or modify the texture inside `draw`.
+    pub unsafe fn with_consumer<R>(
+        &self,
+        ui: &mut SharedConsumer,
+        draw: impl FnOnce(u32) -> R,
+    ) -> Result<R, String> {
+        if !Arc::ptr_eq(&self.0.group, &ui.source().1) || !ui.is_current() {
+            return Err(
+                "shared frame belongs to a different or closed UI context generation".into(),
+            );
+        }
+        ui.collect_retired_frames()?;
+        let api = SyncApi::load(|n| ui.load(n))?;
+        let flush = ui.load(c"glFlush");
+        if flush.is_null() {
+            return Err("shared frame flush unavailable".into());
+        }
+        let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
+        let mut s = self.0.sync.lock().unwrap_or_else(|e| e.into_inner());
+        if s.poisoned {
+            return Err("shared frame synchronization failed".into());
+        }
+        api.wait(s.ready);
+        struct Release<'a> {
+            s: &'a mut SlotSync,
+            api: SyncApi,
+            flush: unsafe extern "system" fn(),
+        }
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                unsafe {
+                    let done = self.api.publish(self.flush);
+                    self.api.delete(self.s.done);
+                    self.s.done = done;
+                    self.s.poisoned |= done == 0;
+                }
+            }
+        }
+        let release = Release {
+            s: &mut s,
+            api,
+            flush,
+        };
+        let result = draw(self.0.texture);
+        drop(release);
+        if s.poisoned {
+            Err("shared frame completion fence failed".into())
+        } else {
+            Ok(result)
+        }
+    }
+}
+impl ExternalGpuContext {
+    /// Call on the current UI GL thread after replacing/dropping GPU snapshots.
+    /// Never deletes objects from an unrelated/recreated context generation.
+    pub fn collect_retired_frames(&mut self) -> Result<(), String> {
+        if !self.is_current() {
+            return Err("UI context is not current".into());
+        }
+        unsafe { self.source().1.collect(|n| self.load(n)) }
+    }
+}
+
+impl SharedConsumer {
+    /// Call on the current UI GL thread after replacing/dropping GPU snapshots.
+    /// Never deletes objects from an unrelated/recreated context generation.
+    pub fn collect_retired_frames(&mut self) -> Result<(), String> {
+        if !self.is_current() {
+            return Err("UI context is not current".into());
+        }
+        unsafe { self.source().1.collect(|n| self.load(n)) }
+    }
+}
+
+pub(super) struct FramePool {
+    sync: SyncApi,
+    copy: unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32),
+    slots: Vec<Arc<Slot>>,
+    pressure_events: u64,
+}
+impl FramePool {
+    unsafe fn new(host: &Host) -> Result<Self, String> {
+        let sync = SyncApi::load(|n| host.load(n))?;
+        let copy = host.load(c"glCopyTexSubImage2D");
+        if copy.is_null() {
+            return Err("native texture copy unavailable".into());
+        }
+        Ok(Self {
+            sync,
+            copy: std::mem::transmute::<
+                *mut c_void,
+                unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32),
+            >(copy),
+            slots: Vec::new(),
+            pressure_events: 0,
+        })
+    }
+    unsafe fn capture(&mut self, r: &mut Renderer) -> Result<Option<SharedFrame>, String> {
+        let group = r.host.shared_source().1;
+        group.collect(|n| r.host.load(n))?;
+        let index = self.slots.iter().position(|s| Arc::strong_count(s) == 1);
+        let index = match index {
+            Some(i) => i,
+            None if self.slots.len() < 3 => {
+                let mut texture = 0;
+                (r.gl.GenTextures)(1, &mut texture);
+                if texture == 0 {
+                    return Err("shared snapshot allocation failed".into());
+                }
+                self.slots.push(Arc::new(Slot {
+                    texture,
+                    width: 0,
+                    height: 0,
+                    rgb565: false,
+                    group,
+                    sync: Mutex::new(SlotSync::default()),
+                }));
+                self.slots.len() - 1
+            }
+            None => {
+                // Temporary diagnosis: distinguish lease pressure from a driver
+                // failure without a per-frame trace or any extra GL query.
+                self.pressure_events = self.pressure_events.saturating_add(1);
+                if self.pressure_events == 1 || self.pressure_events % 64 == 0 {
+                    let leases: Vec<_> = self.slots.iter().map(Arc::strong_count).collect();
+                    log::info!(
+                        "SHARED_EXPORT=CPU reason=snapshot_pool_full slots={} lease_counts={leases:?} pressure_events={}",
+                        self.slots.len(), self.pressure_events
+                    );
+                }
+                return Ok(None);
+            }
+        };
+        let slot = Arc::get_mut(&mut self.slots[index]).unwrap();
+        slot.rgb565 = r.rgb565;
+        let s = slot.sync.get_mut().unwrap_or_else(|e| e.into_inner());
+        if s.poisoned {
+            return Err("shared snapshot slot is poisoned".into());
+        }
+        self.sync.wait(s.done);
+        self.sync.delete(s.done);
+        self.sync.delete(s.ready);
+        s.done = 0;
+        s.ready = 0;
+        (r.gl.BindFramebuffer)(0x8d40, r.fbo);
+        (r.gl.ActiveTexture)(GL_TEXTURE0);
+        (r.gl.BindTexture)(GL_TEXTURE_2D, slot.texture);
+        if (slot.width, slot.height) != (r.width, r.height) {
+            (r.gl.TexImage2D)(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA as i32,
+                r.width as i32,
+                r.height as i32,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                std::ptr::null(),
+            );
+            r.params(
+                Filter::Nearest,
+                Filter::Nearest,
+                Wrap::ClampToEdge,
+                Wrap::ClampToEdge,
+            );
+            slot.width = r.width;
+            slot.height = r.height;
+        }
+        (self.copy)(
+            GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            0,
+            0,
+            r.width as i32,
+            r.height as i32,
+        );
+        s.ready = self.sync.publish(r.gl.Flush);
+        let result = r.check();
+        s.poisoned = result.is_err() || s.ready == 0;
+        result?;
+        if s.poisoned {
+            return Err("shared snapshot ready fence failed".into());
+        }
+        Ok(Some(SharedFrame(self.slots[index].clone())))
+    }
+}
+impl Renderer {
+    /// Snapshot without readback. Returns None when all three slots are leased.
+    /// This alone does not make a window swap visible or update guest memory.
+    pub fn snapshot_shared_frame(&mut self) -> Result<Option<SharedFrame>, String> {
+        self.host.make_current()?;
+        let mut pool = match self.shared_frames.take() {
+            Some(p) => p,
+            None => unsafe { FramePool::new(&self.host)? },
+        };
+        let result = unsafe { pool.capture(self) };
+        self.shared_frames = Some(pool);
+        self.pipeline = None;
+        result
+    }
+    /// Optional frontend export; a private fallback renderer cannot publish
+    /// names into the UI's unrelated share group.
+    pub fn snapshot_configured_shared_frame(&mut self) -> Option<SharedFrame> {
+        if self.shared_export_failed {
+            return None;
+        }
+        let source = SHARED_CONTEXT_SOURCE.with(|s| s.borrow().clone())?;
+        if !Arc::ptr_eq(&source.1, &self.host.shared_source().1) {
+            return None;
+        }
+        match self.snapshot_shared_frame() {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.shared_export_failed = true;
+                log::warn!("Shared frame export unavailable; retaining CPU presentation: {error}");
+                None
+            }
+        }
+    }
+    pub(super) fn retire_shared_frames(&mut self) {
+        self.shared_frames.take();
+        unsafe {
+            let _ = self.host.shared_source().1.collect(|n| self.host.load(n));
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    unsafe fn read_sample(
+        ui: &Renderer,
+        external: &mut ExternalGpuContext,
+        frame: &SharedFrame,
+    ) -> ([u8; 4], u32) {
+        frame
+            .with_texture(external, |texture| {
+                (ui.gl.BindFramebuffer)(0x8d40, ui.fbo);
+                (ui.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, texture, 0);
+                (ui.gl.FramebufferRenderbuffer)(0x8d40, 0x8d00, 0x8d41, 0);
+                assert_eq!((ui.gl.CheckFramebufferStatus)(0x8d40), 0x8cd5);
+                let mut pixel = [0; 4];
+                // Consumer-side read is a pixel oracle, never the transport.
+                (ui.gl.ReadPixels)(
+                    0,
+                    0,
+                    1,
+                    1,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    pixel.as_mut_ptr().cast(),
+                );
+                (ui.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, ui.color, 0);
+                ui.check().unwrap();
+                (pixel, texture)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires shared EGL desktop GL/GLES and native sync"]
+    fn retained_frames_backpressure_resize_abandon_and_outlive_producer() {
+        for es in [false, true] {
+            let ui = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let mut external = unsafe { ExternalGpuContext::capture_current().unwrap() };
+            let source = external.source();
+            std::thread::scope(|scope| {
+                let (send, frames) = mpsc::sync_channel(1);
+                let (command, commands) = mpsc::sync_channel(1);
+                let worker = scope.spawn(move || {
+                    let mut producer = Renderer::new_shared(&source, 8, 8).unwrap();
+                    let mut retained = Vec::new();
+                    for color in [[1., 0., 0., 1.], [0., 1., 0., 1.], [0., 0., 1., 1.]] {
+                        let state = PipelineState {
+                            viewport: (0, 0, 8, 8),
+                            ..Default::default()
+                        };
+                        producer
+                            .clear(8, 8, &state, color, 1., GL_COLOR_BUFFER_BIT)
+                            .unwrap();
+                        retained.push(producer.snapshot_shared_frame().unwrap().unwrap());
+                    }
+                    assert!(producer.snapshot_shared_frame().unwrap().is_none());
+                    assert_eq!(producer.shared_frames.as_ref().unwrap().slots.len(), 3);
+                    send.send(retained).unwrap();
+                    commands.recv_timeout(Duration::from_secs(10)).unwrap();
+                    // The consumer abandons exactly one unpainted slot. Other
+                    // retained snapshots must stay intact across this resize.
+                    let state = PipelineState {
+                        viewport: (0, 0, 6, 10),
+                        ..Default::default()
+                    };
+                    producer
+                        .clear(6, 10, &state, [1., 1., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                        .unwrap();
+                    let replacement = producer.snapshot_shared_frame().unwrap().unwrap();
+                    assert!(producer.snapshot_shared_frame().unwrap().is_none());
+                    assert!(producer.readback.is_empty());
+                    send.send(vec![replacement]).unwrap();
+                    commands.recv_timeout(Duration::from_secs(10)).unwrap();
+                    assert!(producer.readback.is_empty());
+                });
+                let mut initial = frames.recv_timeout(Duration::from_secs(10)).unwrap();
+                let blue = initial.pop().unwrap();
+                let abandoned = initial.pop().unwrap();
+                let red = initial.pop().unwrap();
+                let red_clone = red.clone();
+                drop(red);
+                drop(abandoned);
+                command.send(()).unwrap();
+                let yellow = frames
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap()
+                    .pop()
+                    .unwrap();
+                assert_eq!(red_clone.size(), (8, 8));
+                assert_eq!(yellow.size(), (6, 10));
+                let (red_pixel, red_name) = unsafe { read_sample(&ui, &mut external, &red_clone) };
+                let (blue_pixel, blue_name) = unsafe { read_sample(&ui, &mut external, &blue) };
+                assert_eq!(red_pixel, [255, 0, 0, 255]);
+                assert_eq!(blue_pixel, [0, 0, 255, 255]);
+                let mut wrong_generation =
+                    unsafe { ExternalGpuContext::capture_current().unwrap() };
+                assert!(unsafe {
+                    yellow.with_texture(&mut wrong_generation, |_| {
+                        panic!("wrong generation sampled a texture")
+                    })
+                }
+                .is_err());
+                drop(wrong_generation);
+                command.send(()).unwrap();
+                worker.join().unwrap();
+                // The worker and its pool/context are gone. UI share-group
+                // ownership and frame leases still preserve the three images.
+                let (yellow_pixel, yellow_name) =
+                    unsafe { read_sample(&ui, &mut external, &yellow) };
+                assert_eq!(yellow_pixel, [255, 255, 0, 255]);
+                assert_eq!(
+                    unsafe { read_sample(&ui, &mut external, &blue) }.0,
+                    [0, 0, 255, 255]
+                );
+                assert!(external.source().1.retired.lock().unwrap().is_empty());
+                drop(red_clone);
+                drop(blue);
+                std::thread::spawn(move || drop(yellow)).join().unwrap();
+                assert_eq!(external.source().1.retired.lock().unwrap().len(), 3);
+                external.collect_retired_frames().unwrap();
+                assert!(external.source().1.retired.lock().unwrap().is_empty());
+                unsafe {
+                    let is_texture: unsafe extern "system" fn(u32) -> u8 =
+                        std::mem::transmute(ui.host.load(c"glIsTexture"));
+                    for name in [red_name, blue_name, yellow_name] {
+                        assert_eq!(is_texture(name), 0, "retired shared texture leaked");
+                    }
+                    ui.check().unwrap();
+                }
+            });
+        }
+    }
+}

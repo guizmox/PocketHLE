@@ -184,6 +184,10 @@ impl UpscaleFilter {
 // `pocket_core::kernel::gapi` — the table `gx.dll`'s `GXGetDefaultKeys`
 // hands the guest — by `guest_button_vks_match_the_gapi_table` below.
 
+// Prefer retained GPU frames when the UI and guest contexts can share them.
+// Unsupported sharing and consumers requiring CPU pixels keep the CPU path.
+const SHARED_PRESENTATION_READY: bool = true;
+
 /// Top-level egui app.
 pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, egui::TextureHandle>,
@@ -235,6 +239,8 @@ pub struct PocketLauncher {
     colors_startup_notice: Option<(String, String)>,
     screen: Screen,
     runner: Runner,
+    shared_gpu_context: Option<pocket_core::winceapi::gles::ExternalGpuContext>,
+    run_thread: Option<std::thread::JoinHandle<()>>,
     events_rx: Receiver<UiEvent>,
     events_tx: Sender<UiEvent>,
     release_update: Option<pocket_library::updates::Update>,
@@ -731,6 +737,25 @@ impl FrameStats {
     }
 }
 
+/// CPU-owned capture data is detached from any UI share group.
+pub(crate) fn filtered_snapshot_image(
+    frame: &FrameSnapshot,
+    factor: u32,
+    filter: image::imageops::FilterType,
+) -> Result<image::RgbaImage, String> {
+    let frame = frame.cpu_only()?;
+    let source = image::RgbaImage::from_raw(frame.texture_width, frame.texture_height, frame.rgba)
+        .ok_or_else(|| "invalid RGBA framebuffer size".to_string())?;
+    if factor == 1 {
+        return Ok(source);
+    }
+    Ok(image::imageops::resize(
+        &source,
+        frame.texture_width * factor,
+        frame.texture_height * factor,
+        filter,
+    ))
+}
 impl PocketLauncher {
     pub fn new(cc: &eframe::CreationContext<'_>, mut library: Library) -> Self {
         let migrated = {
@@ -771,7 +796,21 @@ impl PocketLauncher {
                 updates_ctx.request_repaint();
             }
         });
+        // CreationContext runs on the UI GL thread. The framework keeps its
+        // context alive until on_exit, where we close this capability and join
+        // the emulation worker before returning ownership to the framework.
+        let shared_gpu_context = if SHARED_PRESENTATION_READY {
+            cc.gl.as_ref().and_then(|_| unsafe {
+                match pocket_core::winceapi::gles::ExternalGpuContext::capture_current(){
+                    Ok(context)=>Some(context),
+                    Err(error)=>{log::warn!("UI GPU sharing capability unavailable; using CPU presentation: {error}");None}
+                }
+            })
+        } else {
+            None
+        };
         let runner = Runner::new();
+        runner.set_shared_context_source(shared_gpu_context.as_ref().map(|c| c.source()));
         runner.set_missing_api_logging(library.config().log_unimplemented_apis);
         let upscale_filter = UpscaleFilter::from_id(&library.config().upscale_filter);
         let library_gizmondo = library
@@ -808,7 +847,12 @@ impl PocketLauncher {
             startup_fullscreen: None,
             fullscreen_window_size: None,
             reconstruction: cc.gl.as_ref().and_then(|gl| {
-                match crate::reconstruction::Reconstruction::new(gl) {
+                match crate::reconstruction::Reconstruction::new(
+                    gl,
+                    shared_gpu_context.as_ref().map(|c| c.consumer()),
+                    runner.shared_export_policy(),
+                    SHARED_PRESENTATION_READY,
+                ) {
                     Ok(renderer) => Some(std::sync::Arc::new(std::sync::Mutex::new(renderer))),
                     Err(error) => {
                         log::warn!("GPU reconstruction unavailable: {error}");
@@ -834,6 +878,8 @@ impl PocketLauncher {
             colors_startup_prompt: None,
             screen: Screen::Library,
             runner,
+            shared_gpu_context,
+            run_thread: None,
             events_rx: rx,
             events_tx: tx,
             release_update: None,
@@ -1022,6 +1068,9 @@ impl PocketLauncher {
                     }
                 }
                 UiEvent::RunFinished(outcome) => {
+                    if let Some(worker) = self.run_thread.take() {
+                        let _ = worker.join();
+                    }
                     self.last_frame_status = Some(outcome.summary.clone());
                     if let Some(frame) = outcome.framebuffer {
                         self.upload_frame_texture(ctx, &frame);
@@ -1128,21 +1177,7 @@ impl PocketLauncher {
         frame: &FrameSnapshot,
         factor: u32,
     ) -> Result<image::RgbaImage, String> {
-        let source = image::RgbaImage::from_raw(
-            frame.texture_width,
-            frame.texture_height,
-            frame.rgba.clone(),
-        )
-        .ok_or_else(|| "invalid RGBA framebuffer size".to_string())?;
-        if factor == 1 {
-            return Ok(source);
-        }
-        Ok(image::imageops::resize(
-            &source,
-            frame.texture_width * factor,
-            frame.texture_height * factor,
-            self.upscale_filter.image_filter(),
-        ))
+        filtered_snapshot_image(frame, factor, self.upscale_filter.image_filter())
     }
 
     fn refresh_frame_texture(&mut self, ctx: &egui::Context, frame: &FrameSnapshot) {
@@ -1155,6 +1190,16 @@ impl PocketLauncher {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .queue(frame, self.upscale_filter.gpu_filter());
+        }
+        if self.reconstruction.is_some() {
+            if self.last_frame_texture.is_none() {
+                self.last_frame_texture = Some(ctx.load_texture(
+                    "pockethle-frame-ready",
+                    egui::ColorImage::new([1, 1], Color32::BLACK),
+                    egui::TextureOptions::NEAREST,
+                ));
+            }
+            return;
         }
         let gpu_scale = self.reconstruction.is_some();
         let factor = if smooth_scale && !gpu_scale { 2 } else { 1 };
@@ -2363,7 +2408,7 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 ui.label("");
-                ui.small("Default maximum game FPS. Games can inherit this limit or choose another value up to 60 fps. Applies next launch.");
+                ui.small("Default maximum game FPS. Games can inherit this limit or choose another value, including Unlimited. Applies next launch.");
                 ui.end_row();
 
 
@@ -2951,7 +2996,7 @@ impl PocketLauncher {
                 ui.label("");
                 ui.vertical(|ui| {
                     ui.set_max_width(380.0);
-                    ui.add(egui::Label::new("Maximum game FPS, up to 60. Emulator default inherits the global limit; an explicit value overrides it. Restart the game to apply.").wrap(true))
+                    ui.add(egui::Label::new("Maximum game FPS, or Unlimited. Emulator default inherits the global limit; an explicit value overrides it. Restart the game to apply.").wrap(true))
                         .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
                 });
                 ui.end_row();
@@ -5287,6 +5332,12 @@ impl PocketLauncher {
         self.last_frame_snapshot = None;
         self.last_frame_status = None;
         self.frame_stats.reset();
+        if let Some(renderer) = self.reconstruction.as_ref() {
+            renderer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reset_presentation_log();
+        }
         // Start turned the way this game was saved: a portrait-rendered
         // landscape title is unplayable until it is turned, and the user
         // should not have to re-pick that on every launch.
@@ -5326,7 +5377,7 @@ impl PocketLauncher {
         let game = game.clone();
         let tx = self.events_tx.clone();
         let runner = self.runner.clone();
-        std::thread::spawn(move || {
+        self.run_thread = Some(std::thread::spawn(move || {
             let outcome = runner.run_game(
                 library_root,
                 game,
@@ -5336,7 +5387,7 @@ impl PocketLauncher {
                 Some(dependency_notice_tx),
             );
             let _ = tx.send(UiEvent::RunFinished(outcome));
-        });
+        }));
         self.status = "Starting emulator...".to_string();
     }
 }
@@ -5384,8 +5435,25 @@ fn rotated_pointer_to_game(
     )
 }
 
+impl PocketLauncher {
+    fn finish_shared_gpu_worker(&mut self) {
+        self.runner.stop_shared_worker(
+            &mut self.shared_gpu_context,
+            &mut self.input_tx,
+            &mut self.frame_rx,
+            &mut self.run_thread,
+        );
+    }
+}
+impl Drop for PocketLauncher {
+    fn drop(&mut self) {
+        self.finish_shared_gpu_worker();
+    }
+}
+
 impl eframe::App for PocketLauncher {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.finish_shared_gpu_worker();
         self.recording
             .lock()
             .unwrap_or_else(|e| e.into_inner())

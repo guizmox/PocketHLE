@@ -29,6 +29,7 @@ pub struct DirectDrawTiming {
     pub epoch: std::time::Instant,
     pub last_present: Option<std::time::Instant>,
     /// Optional user ceiling, separate from the modeled LCD/vblank clock.
+    /// None = native LCD timing; Some(0) = unlimited; other values = FPS cap.
     pub frame_rate_limit: Option<u32>,
     pub pending: std::collections::HashMap<(usize, u32, u32), std::time::Instant>,
     pub recent_blank: std::collections::HashMap<usize, std::time::Instant>,
@@ -79,6 +80,9 @@ impl DirectDrawTiming {
         }
     }
     pub fn present_deadline(&self, now: std::time::Instant) -> std::time::Instant {
+        if self.frame_rate_limit == Some(0) {
+            return now; // Unlimited bypasses implicit pacing, not explicit vblank waits.
+        }
         self.last_present
             .map_or(now, |last| (last + Self::PERIOD).max(now))
             .max(self.frame_limit_deadline(now))
@@ -169,23 +173,34 @@ struct RenderPresentation {
     pixels: Vec<u8>,
 }
 
-/// A simple RGB565 framebuffer.
+/// Presentation metadata contains no pixels and never triggers a GPU readback.
 #[derive(Debug, Clone)]
-pub struct Framebuffer {
+pub struct FramebufferMetadata {
     pub width: u32,
     pub height: u32,
     pub bpp: u32,
-    /// Row-major RGB565 little-endian pixels. Length is
-    /// `width * height * (bpp/8)`.
-    pub pixels: Vec<u8>,
-    /// Incremented every time the framebuffer is mutated. Hosts use
-    /// it to decide whether they need to re-upload the surface.
     pub frame_counter: u64,
     pub presentation_stats: PresentationStats,
     pub directdraw: DirectDrawTiming,
-    /// Host presentation only; RGB565 guest pixels remain unchanged.
+}
+/// An eager RGB565 image. Pixel storage is separate from presentation metadata.
+#[derive(Debug, Clone)]
+pub struct Framebuffer {
+    metadata: FramebufferMetadata,
+    pub pixels: Vec<u8>,
     backlight_level: u32,
     render_presentation: Option<RenderPresentation>,
+}
+impl std::ops::Deref for Framebuffer {
+    type Target = FramebufferMetadata;
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+impl std::ops::DerefMut for Framebuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.metadata
+    }
 }
 
 impl Default for Framebuffer {
@@ -197,13 +212,15 @@ impl Default for Framebuffer {
 impl Framebuffer {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            width,
-            height,
-            bpp: FB_BPP,
+            metadata: FramebufferMetadata {
+                width,
+                height,
+                bpp: FB_BPP,
+                frame_counter: 0,
+                presentation_stats: PresentationStats::default(),
+                directdraw: DirectDrawTiming::default(),
+            },
             pixels: vec![0u8; (width * height * 2) as usize],
-            frame_counter: 0,
-            presentation_stats: PresentationStats::default(),
-            directdraw: DirectDrawTiming::default(),
             backlight_level: 11,
             render_presentation: None,
         }
@@ -397,8 +414,8 @@ impl Framebuffer {
         // the previous per-byte loop showed up high in the perf
         // profile when games like Derby do many `FillRect` calls per
         // frame to clear the background.
-        let words: &mut [u16] = bytemuck::cast_slice_mut(&mut self.pixels);
         let stride = self.width as usize;
+        let words: &mut [u16] = bytemuck::cast_slice_mut(&mut self.pixels);
         let row_len = (cx1 - cx0) as usize;
         let color_le = color.to_le();
         for row in cy0..cy1 {
@@ -846,9 +863,14 @@ mod display_timing_tests {
             clock.last_present = Some(late);
             assert_eq!(clock.present_deadline(late), late + period);
         }
-        // Unlimited/invalid values add no extra cap; existing LCD pacing remains.
+        clock.frame_rate_limit = Some(0);
         clock.last_present = Some(start);
-        for value in [None, Some(0), Some(17), Some(u32::MAX)] {
+        assert_eq!(clock.present_deadline(start), start);
+        assert_eq!(clock.frame_limit_deadline(start), start);
+        assert_eq!(clock.blank_deadline(start, true), blank);
+        // Unconfigured/invalid values keep the native LCD pacing.
+        clock.last_present = Some(start);
+        for value in [None, Some(17), Some(u32::MAX)] {
             clock.frame_rate_limit = value;
             assert_eq!(clock.frame_limit_deadline(start), start);
             assert_eq!(
@@ -901,3 +923,6 @@ mod presentation_stats_tests {
         );
     }
 }
+
+/// Checked GPU/CPU authority facade, not yet installed in KernelState.
+pub mod deferred;

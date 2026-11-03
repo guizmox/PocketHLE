@@ -79,15 +79,17 @@ fn icon_group(id: u16, bytes: usize) -> Vec<u8> {
 fn pixel(kernel: &KernelState, x: u32, y: u32) -> u16 {
     let i = ((y * kernel.framebuffer.width + x) * 2) as usize;
     u16::from_le_bytes([
-        kernel.framebuffer.pixels[i],
-        kernel.framebuffer.pixels[i + 1],
+        kernel.framebuffer.resident_cpu().unwrap().pixels[i],
+        kernel.framebuffer.resident_cpu().unwrap().pixels[i + 1],
     ])
 }
 #[test]
 fn image_list_resource_strip_draws_transparent_tiles_and_drawex_crops() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(8, 4);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(8, 4))
+            .unwrap();
     kernel.framebuffer.fill(0xffff);
     let bitmap = dib24(
         4,
@@ -230,7 +232,9 @@ fn image_list_storage_is_independent_and_invalid_replace_never_succeeds() {
 fn list_view_renders_its_livitem_image_and_hit_testing_uses_image_height() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(80, 50);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(80, 50))
+            .unwrap();
     let hwnd = kernel.controls.create(
         FAKE_HWND,
         ControlClass::ListView,
@@ -330,8 +334,17 @@ fn image_list_draw_flushes_a_guest_dib_after_clipped_drawing() {
 fn scroll_window_preserves_overlapping_pixels_and_reports_the_uncovered_region() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(4, 3);
-    for (i, p) in kernel.framebuffer.pixels.chunks_exact_mut(2).enumerate() {
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(4, 3))
+            .unwrap();
+    for (i, p) in kernel
+        .framebuffer
+        .cpu_mut()
+        .unwrap()
+        .pixels
+        .chunks_exact_mut(2)
+        .enumerate()
+    {
         p.copy_from_slice(&(i as u16 + 1).to_le_bytes());
     }
     let region = kernel.gdi.create_region(vec![]);
@@ -361,7 +374,13 @@ fn scroll_window_preserves_overlapping_pixels_and_reports_the_uncovered_region()
             .flat_map(i32::to_le_bytes)
             .collect::<Vec<_>>()
     );
-    let before = ctx.kernel.framebuffer.pixels.clone();
+    let before = ctx
+        .kernel
+        .framebuffer
+        .resident_cpu()
+        .unwrap()
+        .pixels
+        .clone();
     let counter = ctx.kernel.framebuffer.frame_counter;
     assert_eq!(
         call(
@@ -371,7 +390,10 @@ fn scroll_window_preserves_overlapping_pixels_and_reports_the_uncovered_region()
         ),
         1
     );
-    assert_eq!(ctx.kernel.framebuffer.pixels, before);
+    assert_eq!(
+        ctx.kernel.framebuffer.resident_cpu().unwrap().pixels,
+        before
+    );
     assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
     assert!(ctx.kernel.gdi.regions[&region].is_empty());
 }
@@ -379,8 +401,17 @@ fn scroll_window_preserves_overlapping_pixels_and_reports_the_uncovered_region()
 fn scroll_window_clip_can_receive_pixels_from_outside_clip_and_moves_own_children() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(4, 4);
-    for (i, p) in kernel.framebuffer.pixels.chunks_exact_mut(2).enumerate() {
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(4, 4))
+            .unwrap();
+    for (i, p) in kernel
+        .framebuffer
+        .cpu_mut()
+        .unwrap()
+        .pixels
+        .chunks_exact_mut(2)
+        .enumerate()
+    {
         p.copy_from_slice(&(i as u16 + 1).to_le_bytes());
     }
     let child = kernel.controls.create(
@@ -443,7 +474,9 @@ fn scroll_window_clip_can_receive_pixels_from_outside_clip_and_moves_own_childre
 fn scroll_erase_is_deferred_and_does_not_erase_retained_pixels() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(4, 3);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(4, 3))
+            .unwrap();
     kernel.framebuffer.fill(0xf800);
     kernel.window_background = Some(0xffffff);
     kernel.window_background_erase_pending = false;
@@ -595,7 +628,9 @@ fn rgb565_bitfield_icon_reads_external_masks_before_the_xor_and_and_planes() {
 fn icon_list_messages_attach_images_and_grid_navigation_matches_hit_testing() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(160, 100);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(160, 100))
+            .unwrap();
     let hwnd = kernel.controls.create(
         FAKE_HWND,
         ControlClass::ListView,
@@ -686,7 +721,9 @@ fn owner_draw_button_notifies_its_parent_with_a_real_child_dc_and_restores_the_c
     cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
         .unwrap();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(80, 50);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(80, 50))
+            .unwrap();
     let hwnd = kernel.controls.create(
         FAKE_HWND,
         ControlClass::Button,
@@ -1019,7 +1056,7 @@ fn showing_an_existing_dialog_brings_its_pixels_above_newer_dialogs() {
         kernel.controls.get_mut(h).unwrap().style |= 0x00000800;
     }
     kernel.composite_controls();
-    let newer_pixels = kernel.framebuffer.snapshot_ppm();
+    let newer_pixels = kernel.framebuffer.cpu().unwrap().snapshot_ppm();
     let thunk = thunk_at(0x70000100);
     let mut ctx = CallCtx {
         cpu: &mut cpu,
@@ -1028,14 +1065,20 @@ fn showing_an_existing_dialog_brings_its_pixels_above_newer_dialogs() {
     };
     call(&mut ctx, show_window, &[older, 5]);
     ctx.kernel.composite_controls();
-    let older_pixels = ctx.kernel.framebuffer.snapshot_ppm();
+    let older_pixels = ctx.kernel.framebuffer.cpu().unwrap().snapshot_ppm();
     assert_ne!(newer_pixels, older_pixels);
     call(&mut ctx, show_window, &[newer, 8]); // SW_SHOWNA must not raise it.
     ctx.kernel.composite_controls();
-    assert_eq!(older_pixels, ctx.kernel.framebuffer.snapshot_ppm());
+    assert_eq!(
+        older_pixels,
+        ctx.kernel.framebuffer.cpu().unwrap().snapshot_ppm()
+    );
     call(&mut ctx, set_active_window, &[newer]);
     ctx.kernel.composite_controls();
-    assert_eq!(newer_pixels, ctx.kernel.framebuffer.snapshot_ppm());
+    assert_eq!(
+        newer_pixels,
+        ctx.kernel.framebuffer.cpu().unwrap().snapshot_ppm()
+    );
 }
 
 #[test]
@@ -1058,7 +1101,7 @@ fn transparent_image_preserves_keyed_pixels_and_scales_bitmap_or_dc_sources() {
         thunk: &thunk,
     };
     for src in [bitmap, dc] {
-        ctx.kernel.framebuffer.pixels.fill(0);
+        ctx.kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0);
         if let Some(mut surface) = surface_for_dc(ctx.kernel, GDI_SCREEN_DC) {
             surface.fill_rect(0, 0, 8, 4, 0x07e0);
         }
@@ -1135,6 +1178,8 @@ fn window_paint_keyed_corners_reveal_current_map_but_painted_black_stays_opaque(
     for map in [0x07e0u16, 0xf800] {
         ctx.kernel
             .framebuffer
+            .cpu_mut()
+            .unwrap()
             .pixels
             .chunks_exact_mut(2)
             .for_each(|p| p.copy_from_slice(&map.to_le_bytes()));
@@ -1153,7 +1198,7 @@ fn window_paint_keyed_corners_reveal_current_map_but_painted_black_stays_opaque(
         ),
         1
     );
-    ctx.kernel.framebuffer.pixels.fill(255);
+    ctx.kernel.framebuffer.cpu_mut().unwrap().pixels.fill(255);
     ctx.kernel.composite_controls();
     assert_eq!(pixel(ctx.kernel, 3, 4), 0);
 }
@@ -1162,7 +1207,9 @@ fn window_paint_keyed_corners_reveal_current_map_but_painted_black_stays_opaque(
 fn static_bitmap_uses_image_size_instead_of_clipping_to_dialog_units() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(320, 240);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(320, 240))
+            .unwrap();
     let child = kernel.controls.create(
         FAKE_HWND,
         ControlClass::Static,
@@ -1282,10 +1329,10 @@ fn ellipse_is_curved_and_null_brush_preserves_the_interior() {
     assert_eq!(pixel(ctx.kernel, 7, 7), 0x07e0);
     let null = call(&mut ctx, create_pen, &[5, 10, 0xff00ff]);
     ctx.kernel.gdi.select_into(GDI_SCREEN_DC, null);
-    let before = ctx.kernel.framebuffer.snapshot_ppm();
+    let before = ctx.kernel.framebuffer.cpu().unwrap().snapshot_ppm();
     call(&mut ctx, ellipse, &[GDI_SCREEN_DC, 0, 0, 20, 20]);
     call(&mut ctx, rectangle, &[GDI_SCREEN_DC, 0, 0, 20, 20]);
-    assert_eq!(before, ctx.kernel.framebuffer.snapshot_ppm());
+    assert_eq!(before, ctx.kernel.framebuffer.cpu().unwrap().snapshot_ppm());
 }
 
 #[test]
@@ -1619,7 +1666,7 @@ fn default_child_erase_uses_its_class_brush_without_clearing_the_screen() {
         .gdi
         .class_values
         .insert(("child".into(), -10), STOCK_BLACK_BRUSH);
-    kernel.framebuffer.pixels.fill(0x5a);
+    kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0x5a);
     let thunk = thunk_at(0x70000100);
     let mut ctx = CallCtx {
         cpu: &mut cpu,
@@ -1641,7 +1688,14 @@ fn default_child_erase_uses_its_class_brush_without_clearing_the_screen() {
         .pixels
         .iter()
         .all(|p| *p == 0));
-    assert!(ctx.kernel.framebuffer.pixels.iter().all(|p| *p == 0x5a));
+    assert!(ctx
+        .kernel
+        .framebuffer
+        .resident_cpu()
+        .unwrap()
+        .pixels
+        .iter()
+        .all(|p| *p == 0x5a));
     ctx.kernel.gdi.class_values.remove(&("child".into(), -10));
     assert_eq!(
         call(&mut ctx, def_window_proc_w, &[hwnd, WM_ERASEBKGND, dc, 0]),
@@ -1655,7 +1709,9 @@ fn default_overlapped_geometry_reaches_create_size_and_window_rect() {
     cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
         .unwrap();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(320, 240);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(320, 240))
+            .unwrap();
     kernel
         .window_class_procs
         .insert("Fathammer X-Forge".into(), 0x3100);
@@ -1794,7 +1850,7 @@ fn activating_dialog_keeps_child_dialogs_above_parent_background() {
         vec![owned, other, parent, child, grandchild]
     );
     let mut layers = Vec::new();
-    let mut surf = Surface::Screen(&mut ctx.kernel.framebuffer);
+    let mut surf = Surface::Screen(ctx.kernel.framebuffer.cpu_mut().unwrap());
     ctx.kernel
         .controls
         .render_composited(&mut surf, |h, _| layers.push(h));
@@ -2681,7 +2737,9 @@ fn changing_an_owner_drawn_caption_invalidates_its_native_cached_paint() {
 fn custom_native_child_surface_survives_dialog_and_control_compositing() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(320, 240);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(320, 240))
+            .unwrap();
     let panel = 0xdead1000;
     let map = 0xdead1001;
     kernel
@@ -3091,7 +3149,9 @@ fn synthetic_paints_skip_hidden_primary_and_child_windows() {
 fn selected_clip_is_copied_and_limits_drawing_until_reset() {
     let mut cpu = scanf_cpu();
     let mut kernel = fresh_kernel();
-    kernel.framebuffer = Framebuffer::new(8, 4);
+    kernel.framebuffer =
+        pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(Framebuffer::new(8, 4))
+            .unwrap();
     kernel.framebuffer.fill(0xffff);
     let dc = pocket_kernel::gdi::GDI_SCREEN_DC;
     let region = kernel.gdi.create_region(vec![[1, 1, 3, 3], [5, 0, 7, 2]]);

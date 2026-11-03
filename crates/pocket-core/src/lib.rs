@@ -114,9 +114,10 @@ impl Emulator {
 
     /// Add an optional presentation ceiling without changing the guest clock.
     /// May be called before or after loading. None retains existing display sync.
+    /// Some(0) disables implicit pacing; explicit guest vblank waits stay active.
     pub fn set_frame_rate_limit(&mut self, fps: Option<u32>) {
         self.requested_frame_rate_limit =
-            fps.filter(|fps| matches!(fps, 10 | 15 | 20 | 30 | 45 | 60));
+            fps.filter(|fps| matches!(fps, 0 | 10 | 15 | 20 | 30 | 45 | 60));
         if let Some(process) = self.process.as_mut() {
             let clock = &mut process.state.framebuffer.directdraw;
             clock.frame_rate_limit = self.requested_frame_rate_limit;
@@ -665,7 +666,13 @@ impl Emulator {
         let Some(p) = self.process.as_mut() else {
             return;
         };
-        p.state.framebuffer = pocket_kernel::Framebuffer::new(width, height);
+        let Ok(framebuffer) = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::Framebuffer::new(width, height),
+        ) else {
+            log::error!("invalid framebuffer dimensions {width}x{height}");
+            return;
+        };
+        p.state.framebuffer = framebuffer;
         p.state.framebuffer.directdraw.frame_rate_limit = self.requested_frame_rate_limit;
         // The GAPI mapping is sized from the framebuffer, so drop it;
         // the next GXOpenDisplay/GXBeginDraw re-maps at the new size.
@@ -692,7 +699,7 @@ mod tests {
         emu.set_screen_size(640, 480);
         assert_eq!(emu.requested_frame_rate_limit, Some(20));
         emu.set_frame_rate_limit(Some(0));
-        assert_eq!(emu.requested_frame_rate_limit, None);
+        assert_eq!(emu.requested_frame_rate_limit, Some(0));
         emu.set_frame_rate_limit(Some(60));
         emu.set_frame_rate_limit(None);
         assert_eq!(emu.requested_frame_rate_limit, None);

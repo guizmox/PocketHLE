@@ -20,6 +20,10 @@ use std::sync::Mutex;
 
 use pocket_gles::context::{Context, GuestMemory};
 use pocket_gles::fixed::{word_to_f32, word_to_f32_bits};
+pub use pocket_gles::gpu::{
+    with_shared_context_source, ExternalGpuContext, SharedConsumer, SharedContextSource,
+    SharedFrame, SHARED_DISPLAY_FRAGMENT,
+};
 use pocket_gles::matrix::Matrix4;
 use pocket_gles::ordinals as gles_ord;
 use pocket_gles::{
@@ -40,12 +44,105 @@ use crate::{CallCtx, WinCeDispatcher};
 // resources local to it so a later game cannot inherit textures, guest
 // array pointers, matrices, depth buffers or pipeline state (nor another
 // concurrently running session's state).
+type SharedWindowFrame = (
+    u64,
+    u64,
+    SharedFrame,
+    std::sync::Weak<dyn pocket_kernel::framebuffer::deferred::CpuPixelSource>,
+);
 thread_local! {
+    static SHARED_EXPORT: RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { RefCell::new(None) };
+    static SHARED_WINDOW: RefCell<Option<SharedWindowFrame>> = const { RefCell::new(None) };
+    // Temporary handoff diagnostics: one message per distinct cause/session.
+    static SHARED_HANDOFF_SEEN: Cell<u16> = const { Cell::new(0) };
+    static SHARED_SWAP_REASON: Cell<Option<&'static str>> = const { Cell::new(None) };
+
     static SURFACES: RefCell<EglSurfaces> = RefCell::new(EglSurfaces::new());
     static CTX: RefCell<Context> = RefCell::new(Context::new_rgb565(240, 320));
     static PACK_ALIGNMENT: Cell<usize> = const { Cell::new(4) };
     static UNPACK_ALIGNMENT: Cell<usize> = const { Cell::new(4) };
     static EGL_ERROR: Cell<u32> = const { Cell::new(EGL_SUCCESS) };
+}
+
+/// Frontend capability, never a user setting. The UI can switch this off after
+/// a conversion failure. Scope cleanup releases any unpublished texture token.
+pub fn with_shared_frame_export<R>(
+    enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct Restore(
+        Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        Option<SharedWindowFrame>,
+    );
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SHARED_EXPORT.with(|s| {
+                s.replace(self.0.take());
+            });
+            SHARED_WINDOW.with(|s| {
+                s.replace(self.1.take());
+            });
+        }
+    }
+    let _restore = Restore(
+        SHARED_EXPORT.with(|s| s.replace(Some(enabled))),
+        SHARED_WINDOW.with(|s| s.take()),
+    );
+    run()
+}
+fn report_shared_handoff(reason: &'static str, bit: u16) {
+    SHARED_HANDOFF_SEEN.with(|seen| {
+        if seen.get() & bit == 0 {
+            seen.set(seen.get() | bit);
+            log::info!("SHARED_HANDOFF=CPU reason={reason} (first occurrence this session)");
+        }
+    });
+}
+pub fn take_shared_window_frame(
+    framebuffer: &pocket_kernel::framebuffer::deferred::DeferredFramebuffer,
+) -> Option<SharedFrame> {
+    let entry = SHARED_WINDOW.with(|s| s.take());
+    let Some((revision, epoch, frame, source)) = entry else {
+        if framebuffer.gpu_source().is_some() {
+            report_shared_handoff("shared_publication_already_taken", 1);
+        } else if let Some(reason) = SHARED_SWAP_REASON.with(Cell::get) {
+            let bit = match reason {
+                "shared_export_policy_disabled" => 2,
+                "mapped_gapi_requires_cpu_pixels" => 256,
+                "no_ui_shared_context_source" => 512,
+                _ => 1024,
+            };
+            report_shared_handoff(reason, bit);
+        }
+        return None;
+    };
+    let Some(current) = framebuffer.gpu_source() else {
+        report_shared_handoff("cpu_authority_after_shared_swap", 4);
+        return None;
+    };
+    let Some(source) = source.upgrade() else {
+        report_shared_handoff("published_pixel_source_released", 8);
+        return None;
+    };
+    let reason = if epoch != framebuffer.authority_epoch() {
+        Some(("authority_epoch_changed", 16))
+    } else if !std::sync::Arc::ptr_eq(current, &source) {
+        Some(("pixel_source_replaced", 32))
+    } else if revision != framebuffer.revision() {
+        Some(("frame_revision_changed", 64))
+    } else if source.logical_size() != framebuffer.logical_size()
+        || frame.size() != framebuffer.presentation_size()
+    {
+        Some(("presentation_geometry_changed", 128))
+    } else {
+        None
+    };
+    if let Some((reason, bit)) = reason {
+        report_shared_handoff(reason, bit);
+        None
+    } else {
+        Some(frame)
+    }
 }
 
 struct EglImage {
@@ -283,6 +380,9 @@ pub(crate) fn release_gpu() {
 /// host-side GL resources; guest memory belongs to the new kernel/CPU.
 pub(crate) fn reset_for_session() {
     egl_context::set_thread(0);
+    SHARED_WINDOW.with(|s| s.take());
+    SHARED_HANDOFF_SEEN.with(|s| s.set(0));
+    SHARED_SWAP_REASON.with(|s| s.set(None));
     with_ctx(|c| *c = Context::new_rgb565(240, 320));
     SURFACES.with(|s| *s.borrow_mut() = EglSurfaces::new());
     EGL_ERROR.with(|error| error.set(EGL_SUCCESS));
@@ -2549,32 +2649,77 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         with_ctx(|c| s.select(c, surface));
         active
     });
-    let fb_len = ctx.kernel.framebuffer.pixels.len();
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
     SURFACES.with(|s| {
-        let mut s = s.borrow_mut();
-        if let Some(image) = s.images.get_mut(&surface) {
+        if let Some(image) = s.borrow_mut().images.get_mut(&surface) {
             image.width = w;
             image.height = h;
         }
     });
-    let mut rendered = ctx.kernel.framebuffer.take_render_pixels();
-    let physical = with_ctx(|c| {
-        // A guest that never called eglCreateWindowSurface — or a
-        // frontend that resized the window since — leaves the two out
-        // of step. Match the framebuffer, since that is what is shown.
-        if c.target.width != w || c.target.height != h {
+    with_ctx(|c| {
+        if (c.target.width, c.target.height) != (w, h) {
             c.target.resize(w, h);
         }
-        c.present_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
-        c.scaled_display_rgba_into(&mut rendered)
     });
-    ctx.kernel.framebuffer.mark_dirty();
-    if let Some((width, height)) = physical {
-        ctx.kernel
-            .framebuffer
-            .set_render_presentation_rgba(width, height, rendered);
+    let enabled = SHARED_EXPORT.with(|s| {
+        s.borrow()
+            .as_ref()
+            .is_some_and(|p| p.load(std::sync::atomic::Ordering::Relaxed))
+    });
+    // Mapped GAPI needs canonical guest bytes at this very swap. Otherwise
+    // retain the immutable image and defer CPU readback until an actual read.
+    let shared = if enabled && !ctx.kernel.fb_mapped {
+        pocket_gles::gpu::configured_shared_context_source().and_then(|source| {
+            let frame = with_ctx(|c| c.snapshot_shared_frame())?;
+            let provider =
+                deferred_frame::GlesCpuPixelSource::new(frame.clone(), source, (w, h)).ok()?;
+            let provider: std::sync::Arc<dyn pocket_kernel::framebuffer::deferred::CpuPixelSource> =
+                std::sync::Arc::new(provider);
+            let identity = std::sync::Arc::downgrade(&provider);
+            match ctx.kernel.framebuffer.publish_gpu(provider) {
+                Ok(()) => Some((frame, identity)),
+                Err(error) => {
+                    log::warn!("Shared swap publication unavailable: {error}");
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    SHARED_SWAP_REASON.with(|reason| {
+        reason.set(if shared.is_some() {
+            None
+        } else if !enabled {
+            Some("shared_export_policy_disabled")
+        } else if ctx.kernel.fb_mapped {
+            Some("mapped_gapi_requires_cpu_pixels")
+        } else if pocket_gles::gpu::configured_shared_context_source().is_none() {
+            Some("no_ui_shared_context_source")
+        } else {
+            Some("swap_snapshot_unavailable_or_publication_rejected")
+        });
+    });
+    if shared.is_none() {
+        // Full replacement: never materialize a previous retained image only
+        // to overwrite it with this new swap (disabled policy/backpressure).
+        ctx.kernel.framebuffer.overwrite_rgb565(|pixels, native| {
+            with_ctx(|c| {
+                c.present_rgb565(pixels);
+                c.scaled_display_rgba_into(native)
+            })
+        });
     }
+    SHARED_WINDOW.with(|s| {
+        s.replace(shared.map(|(frame, identity)| {
+            (
+                ctx.kernel.framebuffer.frame_counter,
+                ctx.kernel.framebuffer.authority_epoch(),
+                frame,
+                identity,
+            )
+        }));
+    });
     // The conversion above replaces the framebuffer, including any video
     // composed by the message pump. Invalidate that presentation before
     // DirectShow checks its cached frame, even if no new video frame is due.
@@ -2590,7 +2735,11 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     if ctx.kernel.fb_mapped {
         ctx.cpu.write_mem(
             pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
-            &ctx.kernel.framebuffer.pixels,
+            &ctx.kernel
+                .framebuffer
+                .cpu()
+                .map_err(KernelError::Dispatch)?
+                .pixels,
         )?;
     }
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
@@ -3272,6 +3421,231 @@ mod tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL shared contexts"]
+    fn native_shared_swap_defers_cpu_pixels_and_rejects_stale_authority() {
+        let _g = guard();
+        let ui = pocket_gles::gpu::Renderer::new(8, 8).unwrap();
+        let source = ui.shared_context_source();
+        with_shared_context_source(Some(source), || {
+            for policy in [1, 3, 4, 5] {
+                for mapped in [false, true] {
+                    let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    with_shared_frame_export(enabled.clone(), || {
+                        let mut cpu = fresh_cpu();
+                        let mut kernel = fresh_kernel();
+                        let (w, h) = (kernel.framebuffer.width, kernel.framebuffer.height);
+                        reset_for_test(w, h);
+                        if mapped {
+                            cpu.map_region(
+                                pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
+                                kernel.framebuffer.resident_cpu().unwrap().pixels.len() as u32,
+                                Prot::READ | Prot::WRITE,
+                            )
+                            .unwrap();
+                            kernel.fb_mapped = true;
+                        }
+                        set_internal_resolution(policy);
+                        set_gpu_renderer(true);
+                        call(
+                            &mut cpu,
+                            &mut kernel,
+                            gl_clear_colorx,
+                            &[65536, 0, 0, 65536],
+                        );
+                        call(
+                            &mut cpu,
+                            &mut kernel,
+                            gl_clear,
+                            &[pocket_gles::GL_COLOR_BUFFER_BIT],
+                        );
+                        assert_eq!(
+                            call(
+                                &mut cpu,
+                                &mut kernel,
+                                egl_swap_buffers,
+                                &[DISPLAY_HANDLE, SURFACE_HANDLE]
+                            ),
+                            EGL_TRUE
+                        );
+                        assert_eq!(
+                            kernel.framebuffer.cpu_resident(),
+                            mapped,
+                            "swap must defer CPU materialization unless GAPI is mapped"
+                        );
+                        assert_eq!(kernel.framebuffer.gpu_source().is_some(), !mapped);
+                        assert_eq!(&kernel.framebuffer.cpu().unwrap().pixels[..2], &[0, 0xf8]);
+                        let revision = kernel.framebuffer.frame_counter;
+                        let size = kernel.framebuffer.presentation_size();
+                        let epoch = kernel.framebuffer.authority_epoch();
+                        let frame = take_shared_window_frame(&kernel.framebuffer);
+                        assert_eq!(frame.is_some(), !mapped, "policy={policy} mapped={mapped}");
+                        if mapped {
+                            assert_eq!(
+                                cpu.read_mem(
+                                    pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
+                                    kernel.framebuffer.resident_cpu().unwrap().pixels.len() as u32
+                                )
+                                .unwrap(),
+                                kernel.framebuffer.resident_cpu().unwrap().pixels
+                            );
+                        }
+                        if let Some(frame) = frame {
+                            assert_eq!(frame.size(), size);
+                            let retained_source = kernel.framebuffer.gpu_source().cloned().unwrap();
+                            let duplicate = frame.clone();
+                            SHARED_WINDOW.with(|s| {
+                                s.replace(Some((
+                                    revision,
+                                    epoch,
+                                    frame,
+                                    std::sync::Arc::downgrade(
+                                        kernel.framebuffer.gpu_source().unwrap(),
+                                    ),
+                                )))
+                            });
+                            // A CPU compositor may intentionally preserve the guest counter.
+                            // The independent authority epoch must still reject its old texture.
+                            kernel
+                                .framebuffer
+                                .cpu_mut()
+                                .unwrap()
+                                .put_pixel(0, 0, 0xffff);
+                            assert_eq!(kernel.framebuffer.frame_counter, revision);
+                            assert!(take_shared_window_frame(&kernel.framebuffer).is_none());
+                            // Replacing a framebuffer can restart its counters. Matching
+                            // counters/epoch alone must never identify another provider.
+                            let provider = deferred_frame::GlesCpuPixelSource::new(
+                                duplicate.clone(),
+                                pocket_gles::gpu::configured_shared_context_source().unwrap(),
+                                (w, h),
+                            )
+                            .unwrap();
+                            let mut replacement =
+                                pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+                                    pocket_kernel::Framebuffer::new(w, h),
+                                )
+                                .unwrap();
+                            replacement
+                                .publish_gpu(std::sync::Arc::new(provider))
+                                .unwrap();
+                            assert_eq!(replacement.revision(), revision);
+                            assert_eq!(replacement.authority_epoch(), epoch);
+                            kernel.framebuffer = replacement;
+                            SHARED_WINDOW.with(|s| {
+                                s.replace(Some((
+                                    revision,
+                                    epoch,
+                                    duplicate,
+                                    std::sync::Arc::downgrade(&retained_source),
+                                )))
+                            });
+                            assert!(take_shared_window_frame(&kernel.framebuffer).is_none());
+                        }
+                        enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                        assert!(!SHARED_EXPORT.with(|s| s
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .load(std::sync::atomic::Ordering::Relaxed)));
+                        deferred_frame::release_reader();
+                        release_gpu();
+                        reset_for_session();
+                    });
+                    assert!(SHARED_WINDOW.with(|s| s.borrow().is_none()));
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires native shared OpenGL"]
+    fn native_deferred_swap_falls_back_on_pool_pressure_and_policy_changes() {
+        let ui = pocket_gles::gpu::Renderer::new(8, 8).unwrap();
+        let source = ui.shared_context_source();
+        with_shared_context_source(Some(source), || {
+            for policy in [1, 5] {
+                for disable in [false, true] {
+                    let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    with_shared_frame_export(enabled.clone(), || {
+                        let mut cpu = fresh_cpu();
+                        let mut kernel = fresh_kernel();
+                        let (w, h) = (kernel.framebuffer.width, kernel.framebuffer.height);
+                        reset_for_test(w, h);
+                        set_internal_resolution(policy);
+                        set_gpu_renderer(true);
+                        let mut retained = Vec::new();
+                        let mut first_source = None;
+                        let swaps = if disable { 2 } else { 4 };
+                        for index in 0..swaps {
+                            let final_swap = index + 1 == swaps;
+                            if final_swap && disable {
+                                enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            // First retained image red; fallback image green.
+                            let color = if final_swap {
+                                [0, 65536, 0, 65536]
+                            } else {
+                                [65536, 0, 0, 65536]
+                            };
+                            call(&mut cpu, &mut kernel, gl_clear_colorx, &color);
+                            call(
+                                &mut cpu,
+                                &mut kernel,
+                                gl_clear,
+                                &[pocket_gles::GL_COLOR_BUFFER_BIT],
+                            );
+                            let before = kernel.framebuffer.frame_counter;
+                            let presented = kernel.framebuffer.presentation_stats.completed();
+                            assert_eq!(
+                                call(
+                                    &mut cpu,
+                                    &mut kernel,
+                                    egl_swap_buffers,
+                                    &[DISPLAY_HANDLE, SURFACE_HANDLE]
+                                ),
+                                EGL_TRUE
+                            );
+                            assert_eq!(kernel.framebuffer.frame_counter, before.wrapping_add(1));
+                            assert_eq!(
+                                kernel.framebuffer.presentation_stats.completed(),
+                                presented + 1
+                            );
+                            if final_swap {
+                                assert!(kernel.framebuffer.cpu_resident());
+                                assert!(kernel.framebuffer.gpu_source().is_none());
+                                assert_eq!(
+                                    &kernel.framebuffer.cpu().unwrap().pixels[..2],
+                                    &[0xe0, 7]
+                                );
+                                let scale = if policy == 5 { 4 } else { 1 };
+                                assert_eq!(
+                                    kernel.framebuffer.presentation_size(),
+                                    (w * scale, h * scale)
+                                );
+                                assert!(take_shared_window_frame(&kernel.framebuffer).is_none());
+                            } else {
+                                assert!(!kernel.framebuffer.cpu_resident());
+                                if first_source.is_none() {
+                                    first_source = kernel.framebuffer.gpu_source().cloned();
+                                }
+                                retained
+                                    .push(take_shared_window_frame(&kernel.framebuffer).unwrap());
+                            }
+                        }
+                        // Fallback must not modify or accidentally relabel a retained image.
+                        let pixels = first_source.unwrap().materialize().unwrap();
+                        assert_eq!(&pixels.rgb565[..2], &[0, 0xf8]);
+                        drop(retained);
+                        deferred_frame::release_reader();
+                        release_gpu();
+                        reset_for_session();
+                    });
+                }
+            }
+        });
     }
 
     #[test]
@@ -3989,6 +4363,8 @@ mod tests {
             let mut image = Vec::new();
             kernel
                 .framebuffer
+                .cpu()
+                .unwrap()
                 .snapshot_presentation_rgba8888_into(&mut image);
             assert_eq!(image.len(), (240 * 320 * scale * scale * 4) as usize);
             assert_eq!(&image[..4], &[255, 0, 0, 255]);
@@ -6226,7 +6602,7 @@ mod tests {
         // Force a future anchor: even a slow CI runner must exercise retry.
         let anchor = std::time::Instant::now() + std::time::Duration::from_millis(5);
         kernel.framebuffer.directdraw.last_present = Some(anchor);
-        let before = kernel.framebuffer.pixels.clone();
+        let before = kernel.framebuffer.resident_cpu().unwrap().pixels.clone();
         let counter = kernel.framebuffer.frame_counter;
         cpu.write_reg(ArmReg::R0, DISPLAY_HANDLE).unwrap();
         cpu.write_reg(ArmReg::R1, SURFACE_HANDLE).unwrap();
@@ -6242,7 +6618,7 @@ mod tests {
         );
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), DISPLAY_HANDLE);
         assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), SURFACE_HANDLE);
-        assert_eq!(ctx.kernel.framebuffer.pixels, before);
+        assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels, before);
         assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
         let key = (0, t.thunk_va, ctx.cpu.read_reg(ArmReg::Sp).unwrap());
         assert_eq!(
@@ -6270,7 +6646,10 @@ mod tests {
         );
         assert!(ctx.kernel.framebuffer.directdraw.last_present.unwrap() >= deadline);
         assert!(ctx.kernel.framebuffer.directdraw.last_present.unwrap() > previous);
-        assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0, 0xf8]);
+        assert_eq!(
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
+            &[0, 0xf8]
+        );
         // Identical frames are still paced; pixel changes cannot be the clock.
         let first = ctx.kernel.framebuffer.directdraw.last_present.unwrap();
         let started = std::time::Instant::now();
@@ -6422,7 +6801,7 @@ mod tests {
         );
         // Pure red in RGB565 little-endian is 0xF800.
         assert_eq!(
-            &kernel.framebuffer.pixels[0..2],
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
             &[0x00, 0xF8],
             "framebuffer should hold red"
         );
@@ -6496,13 +6875,16 @@ mod tests {
         // The triangle's centroid is at the middle of the screen.
         let mid = ((h / 2) * w + w / 2) as usize * 2;
         let px = u16::from_le_bytes([
-            kernel.framebuffer.pixels[mid],
-            kernel.framebuffer.pixels[mid + 1],
+            kernel.framebuffer.resident_cpu().unwrap().pixels[mid],
+            kernel.framebuffer.resident_cpu().unwrap().pixels[mid + 1],
         ]);
         assert_eq!(px, 0x07E0, "centre pixel should be pure green in RGB565");
         // A corner is outside the triangle and must stay cleared.
         assert_eq!(
-            u16::from_le_bytes([kernel.framebuffer.pixels[0], kernel.framebuffer.pixels[1]]),
+            u16::from_le_bytes([
+                kernel.framebuffer.resident_cpu().unwrap().pixels[0],
+                kernel.framebuffer.resident_cpu().unwrap().pixels[1]
+            ]),
             0,
             "corner should still be black"
         );
@@ -6877,7 +7259,7 @@ mod tests {
         let (w, h) = (kernel.framebuffer.width, kernel.framebuffer.height);
         cpu.map_region(
             pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
-            kernel.framebuffer.pixels.len() as u32,
+            kernel.framebuffer.resident_cpu().unwrap().pixels.len() as u32,
             Prot::READ | Prot::WRITE,
         )
         .unwrap();
@@ -6897,7 +7279,7 @@ mod tests {
             &[DISPLAY_HANDLE, SURFACE_HANDLE],
         );
 
-        let presented = kernel.framebuffer.pixels.clone();
+        let presented = kernel.framebuffer.resident_cpu().unwrap().pixels.clone();
         assert!(
             presented.iter().any(|&b| b != 0),
             "swap should have presented non-black pixels"
@@ -6923,7 +7305,7 @@ mod tests {
         kernel.framebuffer.resize(32, 32);
         cpu.map_region(
             pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
-            kernel.framebuffer.pixels.len() as u32,
+            kernel.framebuffer.resident_cpu().unwrap().pixels.len() as u32,
             Prot::READ | Prot::WRITE,
         )
         .unwrap();
@@ -6979,14 +7361,17 @@ mod tests {
             &[DISPLAY_HANDLE, SURFACE_HANDLE],
         );
         let pixel = ((16 * 32 + 16) * 2) as usize;
-        assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[255, 255]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[pixel..pixel + 2],
+            &[255, 255]
+        );
         assert_eq!(
             cpu.read_mem(
                 pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
-                kernel.framebuffer.pixels.len() as u32
+                kernel.framebuffer.resident_cpu().unwrap().pixels.len() as u32
             )
             .unwrap(),
-            kernel.framebuffer.pixels
+            kernel.framebuffer.resident_cpu().unwrap().pixels
         );
         call(
             &mut cpu,
@@ -7038,7 +7423,10 @@ mod tests {
             egl_swap_buffers,
             &[DISPLAY_HANDLE, SURFACE_HANDLE],
         );
-        assert_eq!(&kernel.framebuffer.pixels[pixel..pixel + 2], &[0, 248]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[pixel..pixel + 2],
+            &[0, 248]
+        );
         call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]);
         // EGL 1.1 retains current resources until the next valid unbind.
         assert!(with_ctx(|c| c.gpu_active()));
@@ -7103,3 +7491,6 @@ mod tests {
         }
     }
 }
+
+/// Deferred kernel image adapter; not active in the main framebuffer yet.
+pub mod deferred_frame;

@@ -711,13 +711,18 @@ fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
             Err(e) => format!("Emulator stopped: {e:#}"),
         };
         summary_lines.push(run_status);
-        let frame = emu.process().map(|p| {
-            let fb = &p.state.framebuffer;
-            FrameJson {
+        let frame = emu.process_mut().and_then(|p| {
+            let fb = p
+                .state
+                .framebuffer
+                .cpu()
+                .map_err(|error| log::error!("legacy presentation read failed: {error}"))
+                .ok()?;
+            Some(FrameJson {
                 width: fb.width,
                 height: fb.height,
                 rgba_b64: base64_encode(&fb.snapshot_rgba8888()),
-            }
+            })
         });
         Ok(RunOutcomeJson {
             ok: true,

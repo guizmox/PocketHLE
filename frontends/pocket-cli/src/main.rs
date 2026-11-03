@@ -957,8 +957,12 @@ fn cmd_run(
         }
     }
 
-    if let Some(p) = emu.process() {
-        let ppm = p.state.presentation_framebuffer().snapshot_ppm();
+    if let Some(p) = emu.process_mut() {
+        let ppm = p
+            .state
+            .presentation_framebuffer()
+            .map_err(anyhow::Error::msg)?
+            .snapshot_ppm();
         let final_path = std::env::temp_dir().join("pockethle-final.ppm");
         if let Err(e) = std::fs::write(&final_path, &ppm) {
             eprintln!("warn: could not write {} ({e})", final_path.display());
@@ -1325,10 +1329,12 @@ impl pocket_core::kernel::FrameHook for LiveInputHook {
                                 continue;
                             }
                             if let Some(path) = line.strip_prefix("snapshot ") {
-                                match std::fs::write(
-                                    path.trim(),
-                                    state.presentation_framebuffer().snapshot_ppm(),
-                                ) {
+                                match state
+                                    .presentation_framebuffer()
+                                    .map_err(std::io::Error::other)
+                                    .and_then(|frame| {
+                                        std::fs::write(path.trim(), frame.snapshot_ppm())
+                                    }) {
                                     Ok(()) => {
                                         log::info!("live framebuffer snapshot: {}", path.trim())
                                     }
@@ -1603,17 +1609,31 @@ impl pocket_core::kernel::FrameHook for DumpFrameHook {
             return pocket_core::kernel::FrameAction::Continue;
         }
         self.last_dumped_frame = counter;
-        if state.framebuffer.is_all_black() && self.saw_non_black {
+        let black = match state.framebuffer.cpu() {
+            Ok(frame) => frame.is_all_black(),
+            Err(error) => {
+                log::error!("dump read failed: {error}");
+                state.should_stop = true;
+                return pocket_core::kernel::FrameAction::Stop;
+            }
+        };
+        if black && self.saw_non_black {
             return pocket_core::kernel::FrameAction::Continue;
         }
-        self.saw_non_black = !state.framebuffer.is_all_black();
+        self.saw_non_black = !black;
         let index = self.seen;
         self.seen += 1;
         if !index.is_multiple_of(self.stride) {
             return pocket_core::kernel::FrameAction::Continue;
         }
         let path = self.dir.join(format!("frame_{:06}.ppm", self.written));
-        let ppm = state.presentation_framebuffer().snapshot_ppm();
+        let ppm = match state.presentation_framebuffer() {
+            Ok(frame) => frame.snapshot_ppm(),
+            Err(error) => {
+                log::error!("dump presentation failed: {error}");
+                return pocket_core::kernel::FrameAction::Stop;
+            }
+        };
         if let Err(e) = std::fs::write(&path, ppm) {
             log::warn!("failed to write {}: {e}", path.display());
             return pocket_core::kernel::FrameAction::Continue;
@@ -1698,12 +1718,14 @@ mod display_window {
             if dirty && due {
                 self.last_frame = counter;
                 self.last_emit_at = Some(Instant::now());
-                for (src, px) in state
-                    .presentation_framebuffer()
-                    .pixels
-                    .chunks_exact(2)
-                    .zip(self.buffer.iter_mut())
-                {
+                let frame = match state.presentation_framebuffer() {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        log::error!("window presentation failed: {error}");
+                        return pocket_core::kernel::FrameAction::Stop;
+                    }
+                };
+                for (src, px) in frame.pixels.chunks_exact(2).zip(self.buffer.iter_mut()) {
                     *px = rgb565_to_minifb(u16::from_le_bytes([src[0], src[1]]));
                 }
                 let w = self.width;

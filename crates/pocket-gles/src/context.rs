@@ -689,6 +689,19 @@ impl Context {
         self.target.to_rgb565(out);
     }
 
+    pub fn snapshot_shared_frame(&mut self) -> Option<crate::gpu::SharedFrame> {
+        if self.gpu_failed {
+            return None;
+        }
+        let gpu = self.gpu.as_mut()?;
+        // Match read_present's geometry preparation even when no readback runs.
+        if let Err(error) = gpu.resize(self.target.width, self.target.height) {
+            self.gpu_failure("shared snapshot geometry", error);
+            return None;
+        }
+        self.gpu.as_mut()?.snapshot_configured_shared_frame()
+    }
+
     /// Window presentation does not preserve ancillary depth storage. Do not
     /// use this for pbuffers, pixmaps, reads or a retried/failed presentation.
     /// Guest clear values, masks, scissor and all other GL state stay unchanged.

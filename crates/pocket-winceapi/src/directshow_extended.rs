@@ -470,7 +470,11 @@ fn current_image(ctx: &mut CallCtx<'_>, m: &Movie) -> Result<u32, KernelError> {
     write_output(ctx, dst, &dib)
 }
 pub(super) fn present(ctx: &mut CallCtx<'_>, m: &Movie, frame: &[u8]) -> Result<(), KernelError> {
-    let fb = &mut ctx.kernel.framebuffer;
+    let fb = ctx
+        .kernel
+        .framebuffer
+        .cpu_mut()
+        .map_err(KernelError::Dispatch)?;
     let (width, height) = if m.info.width > 0 && m.info.height > 0 {
         (m.info.width, m.info.height)
     } else {
@@ -647,7 +651,7 @@ mod tests {
     fn video_window_composites_only_its_rectangle_and_visibility_is_respected() {
         let (mut cpu, mut k, t) = context();
         k.framebuffer.resize(4, 4);
-        k.framebuffer.pixels.fill(0x55);
+        k.framebuffer.cpu_mut().unwrap().pixels.fill(0x55);
         let mut m = Movie::new();
         m.info = Info {
             width: 2,
@@ -662,8 +666,14 @@ mod tests {
             thunk: &t,
         };
         present(&mut ctx, &m, &frame).unwrap();
-        assert_eq!(&ctx.kernel.framebuffer.pixels[10..14], &frame[..4]);
-        assert_eq!(&ctx.kernel.framebuffer.pixels[..8], &[0x55; 8]);
+        assert_eq!(
+            &ctx.kernel.framebuffer.resident_cpu().unwrap().pixels[10..14],
+            &frame[..4]
+        );
+        assert_eq!(
+            &ctx.kernel.framebuffer.resident_cpu().unwrap().pixels[..8],
+            &[0x55; 8]
+        );
         let counter = ctx.kernel.framebuffer.frame_counter;
         present(&mut ctx, &m, &frame).unwrap();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);

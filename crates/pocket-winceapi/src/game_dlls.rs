@@ -91,8 +91,14 @@ fn ensure_surface(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     let bytes = (ctx.kernel.framebuffer.byte_size() + 0xfff) & !0xfff;
     ctx.cpu
         .map_region(SYNTHETIC_FRAMEBUFFER_BASE, bytes, Prot::READ | Prot::WRITE)?;
-    ctx.cpu
-        .write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &ctx.kernel.framebuffer.pixels)?;
+    ctx.cpu.write_mem(
+        SYNTHETIC_FRAMEBUFFER_BASE,
+        &ctx.kernel
+            .framebuffer
+            .cpu()
+            .map_err(KernelError::Dispatch)?
+            .pixels,
+    )?;
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     ctx.kernel.fb_mapped = true;
     Ok(())

@@ -626,7 +626,10 @@ mod memory_tests {
     fn shell_empty_bar_has_real_geometry_visibility_and_destruction() {
         use pocket_cpu::Cpu;
         let (mut cpu, mut k, mut d) = setup();
-        k.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        k.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::Framebuffer::new(240, 320),
+        )
+        .unwrap();
         k.active_window = 7;
         k.window_classes.insert(7, "Frame".into());
         k.window_visibility.insert(7, true);
@@ -788,7 +791,10 @@ mod taskbar_tests {
         use pocket_cpu::Cpu;
         let (mut cpu, mut k, mut d) = setup();
         k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
-        k.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        k.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::Framebuffer::new(240, 320),
+        )
+        .unwrap();
         k.active_window = 0xdead0001;
         k.window_rects.insert(k.active_window, (0, 26, 240, 268));
         k.window_visibility.insert(k.active_window, true);
@@ -804,9 +810,11 @@ mod taskbar_tests {
             DispatchOutcome::ReturnedR0(1)
         );
         assert!(k.pocket_pc_taskbar_visible());
-        assert!(k.framebuffer.pixels[..26 * 240 * 2].iter().any(|b| *b != 0));
+        assert!(k.framebuffer.resident_cpu().unwrap().pixels[..26 * 240 * 2]
+            .iter()
+            .any(|b| *b != 0));
         if let Some(path) = std::env::var_os("POCKETHLE_TASKBAR_PREVIEW") {
-            let rgb: Vec<_> = k.framebuffer.pixels[..26 * 240 * 2]
+            let rgb: Vec<_> = k.framebuffer.resident_cpu().unwrap().pixels[..26 * 240 * 2]
                 .chunks_exact(2)
                 .flat_map(|p| {
                     let v = u16::from_le_bytes([p[0], p[1]]);
@@ -886,7 +894,10 @@ mod fullscreen_dialog_layout_tests {
         for (width, height) in [(240, 320), (320, 240), (480, 640)] {
             let (mut cpu, mut k, mut d) = setup();
             k.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
-            k.framebuffer = pocket_kernel::Framebuffer::new(width, height);
+            k.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+                pocket_kernel::Framebuffer::new(width, height),
+            )
+            .unwrap();
             k.active_window = 7;
             k.window_classes.insert(7, "Dialog".into());
             k.window_styles.insert(7, (0x90000000, 0));

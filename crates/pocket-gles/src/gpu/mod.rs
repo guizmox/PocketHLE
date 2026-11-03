@@ -1,6 +1,17 @@
 //! OpenGL 2.1 / GLES 2 offscreen rasterizer. Guest pointers never reach a driver.
 mod platform;
+mod readback;
 mod resolve;
+mod shared;
+pub use platform::SharedConsumer;
+pub use readback::SharedReadback;
+pub use shared::{SharedFrame, SHARED_DISPLAY_FRAGMENT};
+#[cfg(all(test, unix))]
+mod shared_display_tests;
+#[cfg(all(test, unix))]
+mod shared_present_ring_tests;
+#[cfg(all(test, unix))]
+mod shared_present_tests;
 use crate::{
     consts::*,
     matrix::{Matrix4, IDENTITY},
@@ -10,7 +21,37 @@ use crate::{
     },
     texture::{Filter, Texture, Wrap},
 };
+pub use platform::ExternalContext as ExternalGpuContext;
+#[cfg(unix)]
+pub use platform::ExternalContext as ExternalEglContext;
 use platform::Host;
+use std::cell::RefCell;
+thread_local! {
+    static SHARED_CONTEXT_SOURCE: RefCell<Option<SharedContextSource>> = const { RefCell::new(None) };
+}
+/// Apply the UI's context-creation capability only on the calling emulation
+/// thread. Nested child launches and unwinding restore the preceding source.
+pub fn with_shared_context_source<R>(
+    source: Option<SharedContextSource>,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<SharedContextSource>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SHARED_CONTEXT_SOURCE.with(|s| {
+                s.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(SHARED_CONTEXT_SOURCE.with(|s| s.replace(source)));
+    run()
+}
+/// Creation capability selected for this execution thread, if any.
+/// It does not expose a context or permit issuing GL calls on another thread.
+pub fn configured_shared_context_source() -> Option<SharedContextSource> {
+    SHARED_CONTEXT_SOURCE.with(|source| source.borrow().clone())
+}
+pub use platform::SharedSource as SharedContextSource;
 use std::{
     collections::{HashMap, HashSet},
     ffi::{c_char, c_void, CStr, CString},
@@ -1279,6 +1320,8 @@ pub struct Renderer {
     scratch: Vec<f32>,
     readback: Vec<u8>,
     logical_resolve: Option<resolve::LogicalResolve>,
+    shared_frames: Option<shared::FramePool>,
+    shared_export_failed: bool,
     logical_resolve_disabled: bool,
     dirty: bool,
     full_npot: bool,
@@ -1305,7 +1348,36 @@ fn render_scale_for(policy: u8, width: u32, height: u32) -> u32 {
 
 impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
-        Self::with_host(Host::new()?, width, height)
+        let source = SHARED_CONTEXT_SOURCE.with(|s| s.borrow().clone());
+        let host = if let Some(source) = source {
+            match Host::shared(&source) {
+                Ok(host) => host,
+                Err(error) => {
+                    log::warn!(
+                        "UI context sharing unavailable; retaining CPU presentation: {error}"
+                    );
+                    Host::new()?
+                }
+            }
+        } else {
+            Host::new()?
+        };
+        Self::with_host(host, width, height)
+    }
+    /// Create an independent renderer in an existing renderer's native share
+    /// group. This does not share guest GL state or publish a presentation.
+    /// A closed source returns an error; the non-Send renderer never moves.
+    pub fn new_shared(
+        source: &SharedContextSource,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        Self::with_host(Host::shared(source)?, width, height)
+    }
+    /// Sendable creation capability, invalidated when this renderer closes.
+    /// Already-created children remain valid and can issue their own source.
+    pub fn shared_context_source(&self) -> SharedContextSource {
+        self.host.shared_source()
     }
     #[cfg(all(test, unix))]
     pub(crate) fn new_es_for_test(width: u32, height: u32) -> Result<Self, String> {
@@ -1441,6 +1513,8 @@ impl Renderer {
                 scratch: Vec::new(),
                 readback: Vec::new(),
                 logical_resolve: None,
+                shared_frames: None,
+                shared_export_failed: false,
                 logical_resolve_disabled: false,
                 render_scale: 1,
                 render_policy: 1,
@@ -3355,6 +3429,7 @@ impl Drop for Renderer {
         if self.host.make_current().is_err() {
             return;
         }
+        self.retire_shared_frames();
         unsafe {
             if let Some(resolve) = self.logical_resolve.take() {
                 resolve.delete(&self.gl);

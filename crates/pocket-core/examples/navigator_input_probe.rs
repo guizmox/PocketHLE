@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
                         return FrameAction::Stop;
                     }
                     if let Some(path) = line.strip_prefix("snapshot ") {
-                        let _ = std::fs::write(path, state.framebuffer.snapshot_ppm());
+                        let _ = state.framebuffer.write_ppm(path);
                     }
                     if let Some(value) = line.strip_prefix("tap ") {
                         if let Some((x, y)) = value.split_once(' ') {
@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         let _ = std::fs::write(format!("{path}.txt"), details);
-                        let _ = std::fs::write(format!("{path}.ppm"), state.framebuffer.snapshot_ppm());
+                        let _ = state.framebuffer.write_ppm(format!("{path}.ppm"));
                     }
                     if *line == "windows" {
                         log::info!(
@@ -157,14 +157,14 @@ fn main() -> anyhow::Result<()> {
             FrameAction::Continue
         }
     })?;
-    let state = &emu.process().unwrap().state;
+    let state = &mut emu.process_mut().unwrap().state;
     println!(
         "requested_stop={stopped} modules={} framebuffer={} active=0x{:08x}",
         state.modules.len(),
         state.framebuffer.frame_counter,
         state.active_window
     );
-    std::fs::write(out, state.framebuffer.snapshot_ppm())?;
+    state.framebuffer.write_ppm(out)?;
     if legacy {
         anyhow::ensure!(!stopped, "legacy failure did not reproduce");
     } else {

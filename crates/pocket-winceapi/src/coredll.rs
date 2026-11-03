@@ -5916,7 +5916,7 @@ fn memcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if complete_gapi_transfer(ctx, dst, len)
         && ctx.kernel.framebuffer.directdraw.primary_locks.is_empty()
         && ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some()
-        && gapi_transfer_changes(ctx, len)
+        && gapi_transfer_changes(ctx, len)?
     {
         if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
             return Ok(outcome);
@@ -5927,7 +5927,7 @@ fn memcpy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(dst))
 }
 
-fn gapi_transfer_changes(ctx: &mut CallCtx<'_>, len: usize) -> bool {
+fn gapi_transfer_changes(ctx: &mut CallCtx<'_>, len: usize) -> Result<bool, KernelError> {
     if pocket_kernel::gapi_uses_columns(ctx.kernel) {
         ctx.kernel.gx_layout_scratch.resize(len, 0);
         pocket_kernel::gapi_copy_columns(
@@ -5937,9 +5937,21 @@ fn gapi_transfer_changes(ctx: &mut CallCtx<'_>, len: usize) -> bool {
             &mut ctx.kernel.gx_layout_scratch,
             false,
         );
-        ctx.kernel.gx_layout_scratch != ctx.kernel.framebuffer.pixels
+        Ok(ctx.kernel.gx_layout_scratch
+            != ctx
+                .kernel
+                .framebuffer
+                .cpu()
+                .map_err(KernelError::Dispatch)?
+                .pixels)
     } else {
-        ctx.kernel.mem_op_scratch[..len] != ctx.kernel.framebuffer.pixels
+        Ok(ctx.kernel.mem_op_scratch[..len]
+            != ctx
+                .kernel
+                .framebuffer
+                .cpu()
+                .map_err(KernelError::Dispatch)?
+                .pixels)
     }
 }
 
@@ -5950,7 +5962,7 @@ fn complete_gapi_transfer(ctx: &CallCtx<'_>, dst: u32, len: usize) -> bool {
     !ctx.kernel.gx_explicit_present
         && ctx.kernel.fb_mapped
         && dst == SYNTHETIC_FRAMEBUFFER_BASE
-        && len == ctx.kernel.framebuffer.pixels.len()
+        && len == ctx.kernel.framebuffer.byte_size() as usize
         && (ctx.kernel.guest_fb_pitch == 0
             || ctx.kernel.guest_fb_pitch == ctx.kernel.framebuffer.stride_bytes())
 }
@@ -5979,7 +5991,7 @@ fn sync_direct_framebuffer_write(
     if dst >= end || write_end <= base {
         return Ok(());
     }
-    let fb_len = ctx.kernel.framebuffer.pixels.len();
+    let fb_len = ctx.kernel.framebuffer.byte_size() as usize;
     if ctx.kernel.gx_readback_scratch.len() != fb_len {
         ctx.kernel.gx_readback_scratch.resize(fb_len, 0);
     }
@@ -5987,9 +5999,18 @@ fn sync_direct_framebuffer_write(
     if complete_gapi_transfer {
         ctx.kernel.framebuffer.presentation_stats.record_present();
     }
-    if ctx.kernel.gx_readback_scratch != ctx.kernel.framebuffer.pixels {
+    if ctx.kernel.gx_readback_scratch
+        != ctx
+            .kernel
+            .framebuffer
+            .cpu()
+            .map_err(KernelError::Dispatch)?
+            .pixels
+    {
         ctx.kernel
             .framebuffer
+            .cpu_mut()
+            .map_err(KernelError::Dispatch)?
             .pixels
             .copy_from_slice(&ctx.kernel.gx_readback_scratch);
         ctx.kernel.framebuffer.mark_dirty();
@@ -11694,7 +11715,15 @@ fn repaint_status_bar(ctx: &mut CallCtx<'_>) {
     let Some(bar) = ctx.kernel.status_bar.clone() else {
         return;
     };
-    let mut surf = Surface::Screen(&mut ctx.kernel.framebuffer);
+    let Ok(frame) = ctx
+        .kernel
+        .framebuffer
+        .cpu_mut()
+        .map_err(|error| log::error!("GDI repaint access: {error}"))
+    else {
+        return;
+    };
+    let mut surf = Surface::Screen(frame);
     bar.render(&mut surf);
     ctx.kernel.framebuffer.mark_dirty();
 }
@@ -11711,7 +11740,15 @@ fn repaint_controls(ctx: &mut CallCtx<'_>) {
         return;
     }
     let controls = ctx.kernel.controls.clone();
-    let mut surf = Surface::Screen(&mut ctx.kernel.framebuffer);
+    let Ok(frame) = ctx
+        .kernel
+        .framebuffer
+        .cpu_mut()
+        .map_err(|error| log::error!("GDI repaint access: {error}"))
+    else {
+        return;
+    };
+    let mut surf = Surface::Screen(frame);
     controls.render_with_images(&mut surf, &ctx.kernel.gdi);
     ctx.kernel.framebuffer.mark_dirty();
 }
@@ -15826,7 +15863,15 @@ fn erase_window_background(ctx: &mut CallCtx<'_>) {
         ctx.kernel.framebuffer.height as i32,
     );
     {
-        let mut surf = Surface::Screen(&mut ctx.kernel.framebuffer);
+        let Ok(frame) = ctx
+            .kernel
+            .framebuffer
+            .cpu_mut()
+            .map_err(|error| log::error!("GDI repaint access: {error}"))
+        else {
+            return;
+        };
+        let mut surf = Surface::Screen(frame);
         surf.fill_rect(0, 0, w, h, rgb);
     }
     repaint_controls(ctx);
@@ -16329,7 +16374,13 @@ fn surface_for_dc<'a>(
 ) -> Option<clipping::ClippedSurface<'a>> {
     let dc_meta = state.gdi.dc(dc)?.clone();
     let surface = match dc_meta.surface {
-        pocket_kernel::gdi::DcSurface::Screen => Surface::Screen(&mut state.framebuffer),
+        pocket_kernel::gdi::DcSurface::Screen => Surface::Screen(
+            state
+                .framebuffer
+                .cpu_mut()
+                .map_err(|error| log::error!("GDI screen access: {error}"))
+                .ok()?,
+        ),
         pocket_kernel::gdi::DcSurface::Memory => {
             let bm = dc_meta.selected_bitmap?;
             Surface::Bitmap(state.gdi.bitmap_mut(bm)?)
@@ -16894,7 +16945,15 @@ fn read_blit_source_window(
     let row_bytes = copy_w as usize * 2;
     match dc.surface {
         pocket_kernel::gdi::DcSurface::Screen => {
-            let fb = &ctx.kernel.framebuffer;
+            let Ok(fb) = ctx
+                .kernel
+                .framebuffer
+                .cpu()
+                .map_err(|error| log::error!("GDI blit read: {error}"))
+            else {
+                scratch.clear();
+                return false;
+            };
             let fb_stride = fb.width as usize * 2;
             if scratch.len() != row_bytes * copy_h as usize {
                 scratch.resize(row_bytes * copy_h as usize, 0);
@@ -17150,7 +17209,15 @@ fn read_blit_source(
     };
     match dc.surface {
         pocket_kernel::gdi::DcSurface::Screen => {
-            let fb = &ctx.kernel.framebuffer;
+            let Ok(fb) = ctx
+                .kernel
+                .framebuffer
+                .cpu()
+                .map_err(|error| log::error!("GDI blit read: {error}"))
+            else {
+                scratch.clear();
+                return (0, 0, false);
+            };
             let needed = fb.pixels.len();
             if scratch.len() != needed {
                 scratch.resize(needed, 0);
@@ -20752,8 +20819,14 @@ fn ext_escape(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         for row in 0..ctx.kernel.framebuffer.height as usize {
             let src = row * row_bytes;
             let dst = SYNTHETIC_FRAMEBUFFER_BASE + (row * pitch as usize) as u32;
-            ctx.cpu
-                .write_mem(dst, &ctx.kernel.framebuffer.pixels[src..src + row_bytes])?;
+            ctx.cpu.write_mem(
+                dst,
+                &ctx.kernel
+                    .framebuffer
+                    .cpu()
+                    .map_err(KernelError::Dispatch)?
+                    .pixels[src..src + row_bytes],
+            )?;
         }
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
         ctx.kernel.fb_mapped = true;
@@ -25965,7 +26038,7 @@ mod tests {
                     ctx.kernel.framebuffer.directdraw.pending[&key],
                     anchor + Duration::from_millis(50)
                 );
-                assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0, 0]);
+                assert_eq!(&ctx.kernel.framebuffer.cpu().unwrap().pixels[..2], &[0, 0]);
                 if boundary == 2 {
                     let deadline = ctx.kernel.wait_deadlines[&key];
                     if let Some(saved) = sleep_deadline {
@@ -25986,7 +26059,10 @@ mod tests {
                     .pending
                     .insert(key, Instant::now() - Duration::from_secs(1));
                 assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
-                assert_eq!(&ctx.kernel.framebuffer.pixels[..2], &[0x1f, 0xf8]);
+                assert_eq!(
+                    &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
+                    &[0x1f, 0xf8]
+                );
                 assert!(!ctx.kernel.wait_deadlines.contains_key(&key));
                 assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
             }
@@ -25998,7 +26074,10 @@ mod tests {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
         let thunk = dummy_thunk();
-        kernel.framebuffer = pocket_kernel::Framebuffer::new(480, 640);
+        kernel.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::Framebuffer::new(480, 640),
+        )
+        .unwrap();
         let mut ctx = CallCtx {
             cpu: &mut cpu,
             kernel: &mut kernel,
@@ -26647,8 +26726,8 @@ mod tests {
             }
             let sp = cpu.read_reg(ArmReg::Sp).unwrap();
             cpu.write_mem(sp, &0u32.to_le_bytes()).unwrap();
-            kernel.framebuffer.pixels.fill(0x55);
-            let previous = kernel.framebuffer.pixels.clone();
+            kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0x55);
+            let previous = kernel.framebuffer.cpu_mut().unwrap().pixels.clone();
             let thunk = dummy_thunk();
             let mut ctx = CallCtx {
                 cpu: &mut cpu,
@@ -26662,7 +26741,7 @@ mod tests {
             let hwnd = ctx.kernel.dialog_frame_hwnd;
             assert!(!window_is_visible(ctx.kernel, hwnd));
             ctx.kernel.composite_controls();
-            assert_eq!(ctx.kernel.framebuffer.pixels, previous);
+            assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels, previous);
             if let Some(show) = explicit_show {
                 ctx.cpu.write_reg(ArmReg::R0, hwnd).unwrap();
                 ctx.cpu.write_reg(ArmReg::R1, u32::from(show)).unwrap();
@@ -27327,9 +27406,15 @@ mod tests {
         kernel.controls.pointer_down(10, 10);
         assert!(kernel.controls.get(child).unwrap().pressed);
         kernel.window_visibility.insert(FAKE_HWND, false);
-        kernel.framebuffer.pixels.fill(0x17);
+        kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0x17);
         kernel.composite_controls();
-        assert!(kernel.framebuffer.pixels.iter().all(|b| *b == 0x17));
+        assert!(kernel
+            .framebuffer
+            .cpu_mut()
+            .unwrap()
+            .pixels
+            .iter()
+            .all(|b| *b == 0x17));
         assert_eq!(kernel.controls.hit_test(10, 10), None);
         assert_eq!(kernel.controls.key_down(13), None);
         assert!(!kernel.controls.get(child).unwrap().pressed);
@@ -27340,7 +27425,13 @@ mod tests {
         assert!(window_is_visible(&kernel, child));
         kernel.composite_controls();
         assert_eq!(kernel.controls.hit_test(10, 10), Some(child));
-        assert!(kernel.framebuffer.pixels.iter().any(|b| *b != 0x17));
+        assert!(kernel
+            .framebuffer
+            .resident_cpu()
+            .unwrap()
+            .pixels
+            .iter()
+            .any(|b| *b != 0x17));
         kernel.controls.get_mut(child).unwrap().visible = false;
         kernel.window_visibility.insert(FAKE_HWND, false);
         kernel.refresh_control_visibility();
@@ -30883,7 +30974,7 @@ mod tests {
 
     pub(super) fn fresh_kernel() -> KernelState {
         use pocket_kernel::audio::{AudioEngine, GuestFormat};
-        use pocket_kernel::{Framebuffer, GdiState};
+        use pocket_kernel::GdiState;
 
         KernelState {
             heap: Heap::new(0x5000_0000, 0x10000),
@@ -30907,7 +30998,7 @@ mod tests {
             mapped_views: Default::default(),
             random_seed: 0x1234_abcd,
             pending_startup: std::collections::VecDeque::new(),
-            framebuffer: Framebuffer::default(),
+            framebuffer: pocket_kernel::framebuffer::deferred::DeferredFramebuffer::default(),
             gdi: GdiState::new(),
             resources: vec![],
             image_base: 0,
@@ -33110,11 +33201,14 @@ mod tests {
             );
         }
         // White, little-endian RGB565.
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0xff, 0xff]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0xff, 0xff]
+        );
 
         // A guest holding the GAPI framebuffer owns every pixel, so the
         // erase has to stay out of its way.
-        kernel.framebuffer.pixels[0..2].copy_from_slice(&[0x00, 0x00]);
+        kernel.framebuffer.cpu_mut().unwrap().pixels[0..2].copy_from_slice(&[0x00, 0x00]);
         kernel.fb_mapped = true;
         kernel.window_background_erase_pending = true;
         cpu.write_reg(ArmReg::R1, WM_PAINT).unwrap();
@@ -33129,7 +33223,10 @@ mod tests {
                 DispatchOutcome::ReturnedR0(0)
             );
         }
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0x00, 0x00]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0x00, 0x00]
+        );
     }
 
     #[test]
@@ -33154,7 +33251,10 @@ mod tests {
                 DispatchOutcome::ReturnedR0(0)
             );
         }
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0xff, 0xff]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0xff, 0xff]
+        );
         assert!(!kernel.window_background_erase_pending);
 
         kernel.framebuffer.fill(0xf800);
@@ -33170,7 +33270,10 @@ mod tests {
                 DispatchOutcome::ReturnedR0(0)
             );
         }
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0x00, 0xf8]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0x00, 0xf8]
+        );
         assert_eq!(kernel.framebuffer.frame_counter, rendered_frame);
 
         cpu.write_reg(ArmReg::R0, 0xDEAD_0001).unwrap();
@@ -33201,7 +33304,10 @@ mod tests {
                 DispatchOutcome::ReturnedR0(0)
             );
         }
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0xff, 0xff]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0xff, 0xff]
+        );
         assert!(!kernel.window_background_erase_pending);
     }
 
@@ -33227,7 +33333,10 @@ mod tests {
                 DispatchOutcome::ReturnedR0(GDI_SCREEN_DC)
             );
         }
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0x00, 0xf8]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0x00, 0xf8]
+        );
         assert_eq!(cpu.read_u32_le(0x1004).unwrap(), 0);
 
         kernel.window_background_erase_pending = true;
@@ -33242,7 +33351,10 @@ mod tests {
                 DispatchOutcome::ReturnedR0(GDI_SCREEN_DC)
             );
         }
-        assert_eq!(&kernel.framebuffer.pixels[0..2], &[0xff, 0xff]);
+        assert_eq!(
+            &kernel.framebuffer.resident_cpu().unwrap().pixels[0..2],
+            &[0xff, 0xff]
+        );
         assert_eq!(cpu.read_u32_le(0x1004).unwrap(), 1);
         assert!(!kernel.window_background_erase_pending);
     }
@@ -33407,7 +33519,7 @@ mod tests {
         // Pixel at (5,7) must now be non-zero (red 0xF800 in RGB565,
         // little-endian on the wire).
         let off = (7 * pocket_kernel::framebuffer::FB_WIDTH as usize + 5) * 2;
-        assert_ne!(kernel.framebuffer.pixels[off], 0);
+        assert_ne!(kernel.framebuffer.resident_cpu().unwrap().pixels[off], 0);
     }
 
     #[test]
@@ -33450,7 +33562,7 @@ mod tests {
         ctx.kernel.composite_controls();
         let at = ((20 * ctx.kernel.framebuffer.width + 10) * 2) as usize;
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[at..at + 2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[at..at + 2],
             &0xf800u16.to_le_bytes()
         );
     }
@@ -35809,18 +35921,19 @@ mod tests {
         ctx.cpu.write_reg(ArmReg::R1, dc).unwrap();
         release_dc(&mut ctx).unwrap();
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[..2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0xf800u16.to_le_bytes()
         );
         // An unrelated direct presentation is not overwritten by an empty
         // ReleaseDC or an idle hook, just as for an empty EndPaint.
-        ctx.kernel.framebuffer.pixels[..2].copy_from_slice(&0x07e0u16.to_le_bytes());
+        ctx.kernel.framebuffer.cpu_mut().unwrap().pixels[..2]
+            .copy_from_slice(&0x07e0u16.to_le_bytes());
         let counter = ctx.kernel.framebuffer.frame_counter;
         release_dc(&mut ctx).unwrap();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
         ctx.kernel.composite_controls();
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[..2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0x07e0u16.to_le_bytes()
         );
     }
@@ -35850,17 +35963,18 @@ mod tests {
         end_paint(&mut ctx).unwrap();
         assert!(ctx.kernel.framebuffer.frame_counter > before);
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[..2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0xf800u16.to_le_bytes()
         );
         // A later direct presentation replaces the image. An empty native
         // paint must leave both that image and its presentation count alone.
-        ctx.kernel.framebuffer.pixels[..2].copy_from_slice(&0x07e0u16.to_le_bytes());
+        ctx.kernel.framebuffer.cpu_mut().unwrap().pixels[..2]
+            .copy_from_slice(&0x07e0u16.to_le_bytes());
         let before = ctx.kernel.framebuffer.frame_counter;
         end_paint(&mut ctx).unwrap();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[..2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0x07e0u16.to_le_bytes()
         );
         // Switching back to GDI again must still work.
@@ -35869,7 +35983,7 @@ mod tests {
             .fill_rect(0, 0, 4, 4, 0x001f);
         end_paint(&mut ctx).unwrap();
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[..2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0x001fu16.to_le_bytes()
         );
     }
@@ -36426,7 +36540,7 @@ mod tests {
             != DispatchOutcome::ReturnedR0(1)
         {}
         assert_eq!(
-            kernel.framebuffer.pixels,
+            kernel.framebuffer.resident_cpu().unwrap().pixels,
             [vec![0x11; 6], vec![0x22; 2]].concat()
         );
         assert_eq!(kernel.framebuffer.frame_counter, before + 1);
@@ -36479,7 +36593,7 @@ mod tests {
         ctx.cpu.write_reg(ArmReg::R2, 12).unwrap();
         memcpy(&mut ctx).unwrap();
         assert_eq!(
-            ctx.kernel.framebuffer.pixels,
+            ctx.kernel.framebuffer.cpu().unwrap().pixels,
             [1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]
         );
         let before = ctx.kernel.framebuffer.frame_counter;
@@ -36515,7 +36629,10 @@ mod tests {
         for value in 1..=4 {
             ctx.cpu.write_mem(source, &vec![value; len]).unwrap();
             while memcpy(&mut ctx).unwrap() != DispatchOutcome::ReturnedR0(base) {}
-            assert_eq!(ctx.kernel.framebuffer.pixels, vec![value; len]);
+            assert_eq!(
+                ctx.kernel.framebuffer.cpu().unwrap().pixels,
+                vec![value; len]
+            );
         }
         assert!(start.elapsed() >= std::time::Duration::from_millis(150));
         assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 4);
@@ -36556,13 +36673,13 @@ mod tests {
                 before + u64::from(size == len)
             );
         }
-        assert_eq!(ctx.kernel.framebuffer.pixels, frame);
+        assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels, frame);
         assert!(ctx.kernel.gx_draw_active);
         memcpy(&mut ctx).unwrap(); // identical completed copy is not another frame
         assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
         memset(&mut ctx).unwrap(); // clearing the held display is not a frame commit
-        assert_eq!(ctx.kernel.framebuffer.pixels, frame);
+        assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels, frame);
         for padded in [false, true] {
             ctx.kernel.guest_fb_pitch =
                 ctx.kernel.framebuffer.stride_bytes() + if padded { 2 } else { 0 };
@@ -36574,7 +36691,7 @@ mod tests {
                 .write_mem(source, &vec![0x55; len as usize])
                 .unwrap();
             memcpy(&mut ctx).unwrap();
-            assert_eq!(ctx.kernel.framebuffer.pixels, frame);
+            assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels, frame);
             assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
             ctx.kernel.framebuffer.directdraw.primary_locks.clear();
         }
@@ -37743,7 +37860,7 @@ mod tests {
             kernel.window_procs.insert(hwnd, 0x10000);
             kernel.window_visibility.insert(hwnd, hwnd != FAKE_HWND + 2);
         }
-        let pixels = kernel.framebuffer.pixels.clone();
+        let pixels = kernel.framebuffer.resident_cpu().unwrap().pixels.clone();
         let counter = kernel.framebuffer.frame_counter;
         cpu.write_reg(ArmReg::R0, 0).unwrap();
         cpu.write_reg(ArmReg::R1, 0).unwrap();
@@ -37767,7 +37884,7 @@ mod tests {
             .all(|m| m.1 == WM_PAINT && m.0 != FAKE_HWND + 2));
         assert!(kernel.gdi.pending_window_erases.is_empty());
         assert!(!kernel.window_background_erase_pending);
-        assert_eq!(kernel.framebuffer.pixels, pixels);
+        assert_eq!(kernel.framebuffer.resident_cpu().unwrap().pixels, pixels);
         assert_eq!(kernel.framebuffer.frame_counter, counter);
     }
 
@@ -40043,9 +40160,9 @@ mod pocket_menu_tests {
                 call(&mut cpu, &mut k, &mut d, "coredll.dll", name, &args),
                 DispatchOutcome::JumpTo(_)
             ));
-            let raw = k.framebuffer.pixels.clone();
-            assert_ne!(k.presentation_framebuffer().pixels, raw);
-            assert_eq!(k.framebuffer.pixels, raw);
+            let raw = k.framebuffer.resident_cpu().unwrap().pixels.clone();
+            assert_ne!(k.presentation_framebuffer().unwrap().pixels, raw);
+            assert_eq!(k.framebuffer.resident_cpu().unwrap().pixels, raw);
             k.pending_input
                 .push_back(InputEvent::PointerDown { x: 20, y: 55 });
             k.pending_input
@@ -40878,7 +40995,10 @@ mod pocket_shell_geometry_tests {
     fn moved_primary_window_uses_local_dc_coordinates_and_real_client_size() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
-        kernel.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        kernel.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::Framebuffer::new(240, 320),
+        )
+        .unwrap();
         kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
         kernel.window_visibility.insert(FAKE_HWND, true);
         let thunk = dummy_thunk();
@@ -40919,11 +41039,11 @@ mod pocket_shell_geometry_tests {
         ctx.kernel.present_window_surfaces();
         let offset = (26 * 240) * 2;
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[offset..offset + 2],
             &0xf800u16.to_le_bytes()
         );
         assert_ne!(
-            &ctx.kernel.framebuffer.pixels[..2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0xf800u16.to_le_bytes()
         );
         let (_, msg, _, lp) =
@@ -41483,7 +41603,10 @@ mod retained_window_dc_tests {
     fn bitblt_to_retained_window_dc_is_visible_without_release_or_endpaint() {
         let mut cpu = scanf_cpu();
         let mut kernel = fresh_kernel();
-        kernel.framebuffer = pocket_kernel::Framebuffer::new(240, 320);
+        kernel.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::Framebuffer::new(240, 320),
+        )
+        .unwrap();
         kernel.window_rects.insert(FAKE_HWND, (0, 0, 240, 320));
         kernel.window_visibility.insert(FAKE_HWND, true);
         let thunk = dummy_thunk();
@@ -41500,7 +41623,7 @@ mod retained_window_dc_tests {
             .fill_rect(0, 0, 240, 320, 0x07e0);
         let offset = (100 * 240 + 50) * 2;
         assert_ne!(
-            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[offset..offset + 2],
             &0x07e0u16.to_le_bytes()
         );
         for (reg, value) in [
@@ -41519,7 +41642,7 @@ mod retained_window_dc_tests {
         }
         assert_eq!(bit_blt(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[offset..offset + 2],
             &0x07e0u16.to_le_bytes()
         );
         assert_eq!(window_dc(&mut ctx, FAKE_HWND), destination);
@@ -41532,7 +41655,7 @@ mod retained_window_dc_tests {
         ctx.kernel.present_window_surfaces();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, direct_frame);
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[offset..offset + 2],
             &0x001fu16.to_le_bytes()
         );
         // Painting a hidden window changes its backing, not the visible frame.
@@ -41541,7 +41664,7 @@ mod retained_window_dc_tests {
         bit_blt(&mut ctx).unwrap();
         assert_eq!(ctx.kernel.framebuffer.frame_counter, direct_frame);
         assert_eq!(
-            &ctx.kernel.framebuffer.pixels[offset..offset + 2],
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[offset..offset + 2],
             &0x001fu16.to_le_bytes()
         );
     }

@@ -14,20 +14,24 @@ pub enum FrameRateLimit {
     #[serde(rename = "45")]
     Fps45,
     #[default]
-    #[serde(rename = "60", alias = "unlimited")]
+    #[serde(rename = "60")]
     Fps60,
+    #[serde(rename = "unlimited")]
+    Unlimited,
 }
 
 impl FrameRateLimit {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Fps10,
         Self::Fps15,
         Self::Fps20,
         Self::Fps30,
         Self::Fps45,
         Self::Fps60,
+        Self::Unlimited,
     ];
 
+    /// Some(0) disables implicit presentation pacing; None retains native LCD timing.
     pub fn fps(self) -> Option<u32> {
         match self {
             Self::Fps10 => Some(10),
@@ -36,6 +40,7 @@ impl FrameRateLimit {
             Self::Fps30 => Some(30),
             Self::Fps45 => Some(45),
             Self::Fps60 => Some(60),
+            Self::Unlimited => Some(0),
         }
     }
 
@@ -47,17 +52,18 @@ impl FrameRateLimit {
             Self::Fps30 => "30 fps",
             Self::Fps45 => "45 fps",
             Self::Fps60 => "60 fps",
+            Self::Unlimited => "Unlimited",
         }
     }
 }
 
-/// Old explicit unlimited game values now inherit the emulator's bounded limit.
+/// Missing/null/inherit select the emulator setting; unlimited is an explicit override.
 pub fn deserialize_game_limit<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<FrameRateLimit>, D::Error> {
     match Option::<String>::deserialize(deserializer)? {
         None => Ok(None),
-        Some(value) if value == "unlimited" || value == "inherit" => Ok(None),
+        Some(value) if value == "inherit" => Ok(None),
         Some(value) => FrameRateLimit::deserialize(
             serde::de::value::StringDeserializer::<D::Error>::new(value),
         )
@@ -81,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn all_games_inherit_the_global_limit_unless_they_choose_a_bounded_override() {
+    fn games_inherit_global_limit_or_choose_explicit_bounded_or_unlimited_override() {
         for global in FrameRateLimit::ALL {
             let mut config = crate::LauncherConfig::default();
             config.frame_rate_limit = global;
@@ -93,8 +99,8 @@ mod tests {
             }
             let explicit: GameSettings =
                 serde_json::from_str(r#"{"frame_rate_limit":"unlimited"}"#).unwrap();
-            assert_eq!(explicit.frame_rate_limit, None);
-            assert_eq!(explicit.effective_frame_rate_limit(&config), global.fps());
+            assert_eq!(explicit.frame_rate_limit, Some(FrameRateLimit::Unlimited));
+            assert_eq!(explicit.effective_frame_rate_limit(&config), Some(0));
             let inherit: GameSettings =
                 serde_json::from_str(r#"{"frame_rate_limit":null}"#).unwrap();
             assert_eq!(inherit.effective_frame_rate_limit(&config), global.fps());
@@ -102,19 +108,18 @@ mod tests {
     }
 
     #[test]
-    fn global_default_and_legacy_unlimited_are_capped_at_sixty() {
+    fn unlimited_is_explicit_and_default_stays_sixty() {
         assert_eq!(FrameRateLimit::default(), FrameRateLimit::Fps60);
-        for legacy in ["{}", r#"{"frame_rate_limit":"unlimited"}"#] {
-            let config: crate::LauncherConfig = serde_json::from_str(legacy).unwrap();
-            assert_eq!(config.frame_rate_limit, FrameRateLimit::Fps60);
-            assert_eq!(
-                serde_json::to_value(config).unwrap()["frame_rate_limit"],
-                "60"
-            );
-        }
-        for value in FrameRateLimit::ALL {
-            assert!(value.fps().is_some_and(|fps| fps <= 60));
-        }
+        let default: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.frame_rate_limit, FrameRateLimit::Fps60);
+        let config: crate::LauncherConfig =
+            serde_json::from_str(r#"{"frame_rate_limit":"unlimited"}"#).unwrap();
+        assert_eq!(config.frame_rate_limit, FrameRateLimit::Unlimited);
+        assert_eq!(config.frame_rate_limit.fps(), Some(0));
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["frame_rate_limit"],
+            "unlimited"
+        );
     }
 
     #[test]

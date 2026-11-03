@@ -87,10 +87,9 @@ fn main() -> anyhow::Result<()> {
                 state.window_rects.len(),
                 state.threads.len()
             );
-            let _ = std::fs::write(
-                out.join(format!("frame-{stage:02}.ppm")),
-                state.framebuffer.snapshot_ppm(),
-            );
+            let _ = state
+                .framebuffer
+                .write_ppm(out.join(format!("frame-{stage:02}.ppm")));
         }
         if elapsed >= Duration::from_secs(limit) {
             FrameAction::Stop

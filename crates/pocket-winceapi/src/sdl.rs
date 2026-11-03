@@ -362,6 +362,11 @@ fn flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.kernel.framebuffer.width != s.width || ctx.kernel.framebuffer.height != s.height {
         ctx.kernel.framebuffer.resize(s.width, s.height);
     }
+    let frame = ctx
+        .kernel
+        .framebuffer
+        .cpu_mut()
+        .map_err(KernelError::Dispatch)?;
     for y in 0..s.height {
         for x in 0..s.width {
             let offset = (y * s.pitch + x * s.bytes) as usize;
@@ -371,7 +376,7 @@ fn flip(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             let b = component(p, s.masks[2]);
             let out = ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
             let i = ((y * s.width + x) * 2) as usize;
-            ctx.kernel.framebuffer.pixels[i..i + 2].copy_from_slice(&out.to_le_bytes());
+            frame.pixels[i..i + 2].copy_from_slice(&out.to_le_bytes());
         }
     }
     ctx.kernel.framebuffer.mark_dirty();
@@ -827,6 +832,8 @@ mod tests {
         assert_eq!(call(&mut cpu, &mut kernel, flip, &[screen]), 0);
         let pixels: Vec<_> = kernel
             .framebuffer
+            .resident_cpu()
+            .unwrap()
             .pixels
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
