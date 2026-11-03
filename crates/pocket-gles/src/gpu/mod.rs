@@ -1,5 +1,6 @@
 //! OpenGL 2.1 / GLES 2 offscreen rasterizer. Guest pointers never reach a driver.
 mod platform;
+mod resolve;
 use crate::{
     consts::*,
     matrix::{Matrix4, IDENTITY},
@@ -1277,6 +1278,8 @@ pub struct Renderer {
     uniforms: HashMap<String, i32>,
     scratch: Vec<f32>,
     readback: Vec<u8>,
+    logical_resolve: Option<resolve::LogicalResolve>,
+    logical_resolve_disabled: bool,
     dirty: bool,
     full_npot: bool,
     native_max_level: bool,
@@ -1437,6 +1440,8 @@ impl Renderer {
                 uniforms: HashMap::new(),
                 scratch: Vec::new(),
                 readback: Vec::new(),
+                logical_resolve: None,
+                logical_resolve_disabled: false,
                 render_scale: 1,
                 render_policy: 1,
                 dirty: true,
@@ -3222,6 +3227,10 @@ impl Renderer {
             return Ok(());
         }
         self.host.make_current()?;
+        // Queue/complete the reduction before the full display readback. Both
+        // results then belong to the same untouched native color attachment.
+        let gpu_resolved = self.render_scale > 1
+            && unsafe { self.resolve_logical_gpu(target.width, target.height) };
         unsafe {
             self.readback
                 .resize((self.width * self.height * 4) as usize, 0);
@@ -3237,6 +3246,30 @@ impl Renderer {
                 self.readback.as_mut_ptr().cast(),
             );
             self.check()?;
+            if gpu_resolved {
+                let logical = &self.logical_resolve.as_ref().unwrap().pixels;
+                let stride = target.width as usize * 4;
+                for (row, out) in target.color.chunks_exact_mut(stride).enumerate() {
+                    let start = (target.height as usize - 1 - row) * stride;
+                    for (src, dst) in logical[start..start + stride]
+                        .chunks_exact(4)
+                        .zip(out.chunks_exact_mut(4))
+                    {
+                        let p = [src[0], src[1], src[2], src[3]];
+                        let p = if target.rgb565 {
+                            crate::raster::rgb565_pixel(p)
+                        } else {
+                            p
+                        };
+                        dst.copy_from_slice(&p);
+                    }
+                }
+                if let Some(out) = rgb565 {
+                    target.to_rgb565(out);
+                }
+                self.dirty = false;
+                return Ok(());
+            }
             if self.render_scale > 1 {
                 // Guest read/copy APIs still see the logical image. Resolve only
                 // that cache; retain full native pixels for host presentation.
@@ -3323,6 +3356,9 @@ impl Drop for Renderer {
             return;
         }
         unsafe {
+            if let Some(resolve) = self.logical_resolve.take() {
+                resolve.delete(&self.gl);
+            }
             for (id, _) in self.textures.values() {
                 (self.gl.DeleteTextures)(1, id);
             }

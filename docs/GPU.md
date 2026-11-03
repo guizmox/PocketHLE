@@ -1,5 +1,71 @@
 # GPU rendering
 
+## GPU logical image reduction (2026-11-03)
+
+This iteration moves the X2/X3/X4 box reduction to a separate GPU pass. It is
+automatic with GPU rendering and an effective internal scale above one; native
+X1 and software rendering keep their previous algorithms. No new setting,
+profiling probe, dependency or CPU optimization change is introduced.
+
+The native color attachment remains unchanged and its full readback is retained
+for the existing high-resolution presentation/filter path. The GPU resolves
+into an RGBA8 logical-size texture, which is then read into the logical guest
+cache. This is not zero-copy presentation: full native readback, logical output
+copy/packing and the extra logical-size readback remain. The added pass/readback
+can affect wall time on some drivers, especially at X2.
+
+The shader samples exact texel centers using the source's nearest/clamp setup,
+recovers byte values, and implements integer-equivalent truncating box averages.
+A small quotient bias protects integer boundaries against reciprocal rounding;
+it is below the minimum nonzero quotient step for all three factors. The logical
+cache retains the existing RGB565 conversion when required. Full-resolution
+presentation pixels are not replaced by the reduced image.
+
+Resources are lazy, reused per renderer, recreated when logical size/scale
+changes, and released on renderer destruction. The pass requires fragment
+highp precision and a verified RGBA8 framebuffer. Failure logs once and retains
+the established CPU reduction. Its program and buffer are separate from guest
+draw resources; the native framebuffer/program are restored, driver errors are
+handled, and pipeline/attribute caches are invalidated before subsequent draws.
+This first use may compile a shader; timings below exclude initialization.
+
+Validation on Linux Mesa desktop OpenGL and GLES2:
+
+- Byte-exact logical images against the CPU reference at X2/X3/X4, both RGB565
+  and RGBA, in landscape and portrait (24 combinations of format/scale/API/size).
+  Random native pixel patterns exercise channel/alpha rounding. Native display
+  readback bytes are identical before/after the logical resolve.
+- Draw-after-read with non-default viewport, scissor, depth and blend state;
+  scale switches, native X1, forced CPU fallback, and an incomplete auxiliary
+  FBO to test optional-pass error recovery. Both focused native tests pass.
+- Full GLES regression run: 273 pass with the existing benchmark excluded.
+  After final precision/packing guards, 218 default tests pass, 56 native tests
+  are ignored by default; the two focused tests are explicitly run again.
+- WinCE window-swap/internal-resolution export regression passes for all tested
+  policies. The updated clean app stack compiles and PVR Racer runs in X4,
+  producing animated 3D frames with no reduction fallback warning.
+
+Optimized presentation microbenchmark, RGB565 320x240 logical image, repeated
+clear/read-present workload, no profiling code. Three before/after comparisons
+in alternating order; five warmed batches of 30 frames per executable/scale.
+Numbers are medians over 15 batch averages, measured with CLOCK_THREAD_CPUTIME_ID
+on the calling emulation/render thread. Mesa llvmpipe worker CPU is excluded:
+this is not total-system CPU, game FPS, or a physical-GPU performance guarantee.
+
+| Scale | Before thread CPU ms/frame | After thread CPU ms/frame | Reduction |
+| --- | ---: | ---: | ---: |
+| X2 | 1.835 | 1.068 | 41.8% |
+| X3 | 2.992 | 1.738 | 41.9% |
+| X4 | 4.504 | 2.716 | 39.7% |
+
+Corresponding median wall times were 2.088 -> 1.753 ms, 3.329 -> 3.048 ms and
+4.923 -> 4.273 ms. One initial X2 before/after pair had a wall-time increase;
+there is host/driver variation and no claim of a universal frame-time gain.
+Native X1 is a control and has no retained performance claim.
+Windows/MSVC, Android/physical GPUs and complete platform CI were not run.
+Apply this three-file delta over the cumulative no-probes optimization lot.
+
+
 ## CPU preparation optimizations (2026-11-03)
 
 Keep the validated high-resolution presentation and per-draw scratch reuse.
