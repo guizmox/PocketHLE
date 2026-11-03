@@ -1,5 +1,45 @@
 # GPU rendering
 
+## Deferred native error checks with shared presentation (2026-11-03)
+
+The supplied hybrid-laptop investigation measured NVIDIA 561.09 post-draw
+`glGetError` latency (584 calls above 2 ms; 11.43 s total, versus 3.7 ms on
+Intel). These are reported host-call timings, not a measurement of the driver's
+internal cause, and were not repeated on NVIDIA in this environment.
+
+Draw and glFlush submission no longer query the native error state each time.
+Guest validation remains immediate. Native failures are checked at explicit
+guest glGetError/glFinish, read boundaries (including clean cached reads), and
+before a configured shared snapshot export. Pending errors are checked before
+texture upload fallback so an earlier draw failure cannot be swallowed by a
+compressed-format fallback. Initialization, allocation, clear, snapshot-copy
+and post-read checks remain in place. No glFinish or new readback is added.
+
+The FullGPU export boundary propagates a pending batch error to Context's
+existing fatal GPU failure path, even if export is disabled or all three slots
+are leased. It must not label a native rendering failure as an optional sharing
+failure, drain the error and then publish the faulty image. Copy/transport
+failures retain their established optional export fallback.
+
+The FPS menus also offer an explicit 120 fps cap globally and per game. It
+overrides implicit 60 Hz presentation pacing; explicit guest vertical-blank
+waits and the modeled LCD clock remain 60 Hz. UI/vsync and game-internal timing
+can still limit displayed output. Default remains 60 fps.
+
+This port retains WGL relay/compatibility contexts, deferred pixel authority,
+shared presentation, internal scales, filters, and frame limits. It excludes
+all timing probes from the supplied archive. Previously delivered bounded
+handoff/pool diagnostics remain; the fresh-texture-per-reuse experiment is off.
+This change does not establish a cause or fix for Intel image artifacts or
+input-correlated NVIDIA stutters. Device tests and before/after comparisons
+remain necessary for those observations.
+
+Validation: 218 default GLES tests pass; native desktop GL/GLES tests cover
+zero error queries for steady draw/flush, deferred error delivery, clean reads,
+pre-upload protection, full shared-pool error handling, and shared transport.
+Windows-gated code passes metadata/type checking on Linux (not a Windows link).
+
+
 ## GPU logical image reduction (2026-11-03)
 
 This iteration moves the X2/X3/X4 box reduction to a separate GPU pass. It is

@@ -257,7 +257,7 @@ data class LauncherConfig(
             verbosity = obj.optInt("verbosity", 1),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
-            frameRateLimit = obj.optString("frame_rate_limit", "60").takeIf { it in listOf("10","15","20","30","45","60","unlimited") } ?: "60",
+            frameRateLimit = obj.optString("frame_rate_limit", "60").takeIf { it in listOf("10","15","20","30","45","60","120","unlimited") } ?: "60",
             glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),

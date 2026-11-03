@@ -418,20 +418,26 @@ impl Renderer {
     }
     /// Optional frontend export; a private fallback renderer cannot publish
     /// names into the UI's unrelated share group.
-    pub fn snapshot_configured_shared_frame(&mut self) -> Option<SharedFrame> {
+    pub fn snapshot_configured_shared_frame(&mut self) -> Result<Option<SharedFrame>, String> {
+        // Deferred draw failures are fatal renderer failures, not an optional
+        // transport failure. Check before pool pressure or disabled export can
+        // take the CPU fallback and before snapshot code consumes the error.
+        self.poll_error()?;
         if self.shared_export_failed {
-            return None;
+            return Ok(None);
         }
-        let source = SHARED_CONTEXT_SOURCE.with(|s| s.borrow().clone())?;
+        let Some(source) = SHARED_CONTEXT_SOURCE.with(|s| s.borrow().clone()) else {
+            return Ok(None);
+        };
         if !Arc::ptr_eq(&source.1, &self.host.shared_source().1) {
-            return None;
+            return Ok(None);
         }
         match self.snapshot_shared_frame() {
-            Ok(frame) => frame,
+            Ok(frame) => Ok(frame),
             Err(error) => {
                 self.shared_export_failed = true;
                 log::warn!("Shared frame export unavailable; retaining CPU presentation: {error}");
-                None
+                Ok(None)
             }
         }
     }
@@ -475,6 +481,51 @@ mod tests {
                 (pixel, texture)
             })
             .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires native shared OpenGL/GLES3"]
+    fn deferred_draw_error_is_not_hidden_by_shared_export_or_pool_pressure() {
+        use std::cell::Cell;
+        thread_local! { static ERROR: Cell<u32> = const { Cell::new(0) }; }
+        unsafe extern "system" fn error_probe() -> u32 {
+            ERROR.with(|e| e.replace(0))
+        }
+        for es in [false, true] {
+            let ui = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let source = ui.shared_context_source();
+            with_shared_context_source(Some(source.clone()), || {
+                let mut gpu = Renderer::new_shared(&source, 8, 8).unwrap();
+                let original = gpu.gl.GetError;
+                gpu.gl.GetError = error_probe;
+                ERROR.with(|e| e.set(GL_OUT_OF_MEMORY));
+                assert!(gpu.snapshot_configured_shared_frame().is_err());
+                assert!(!gpu.shared_export_failed);
+                assert!(
+                    gpu.shared_frames.is_none(),
+                    "failed batch must not allocate/copy a snapshot"
+                );
+                gpu.gl.GetError = original;
+                let retained: Vec<_> = (0..3)
+                    .map(|_| gpu.snapshot_configured_shared_frame().unwrap().unwrap())
+                    .collect();
+                assert!(gpu.snapshot_configured_shared_frame().unwrap().is_none());
+                gpu.gl.GetError = error_probe;
+                ERROR.with(|e| e.set(GL_INVALID_OPERATION));
+                assert!(
+                    gpu.snapshot_configured_shared_frame().is_err(),
+                    "pool pressure must not swallow draw errors"
+                );
+                assert!(!gpu.shared_export_failed);
+                gpu.gl.GetError = original;
+                drop(retained);
+                assert!(gpu.snapshot_configured_shared_frame().unwrap().is_some());
+            });
+        }
     }
 
     #[test]

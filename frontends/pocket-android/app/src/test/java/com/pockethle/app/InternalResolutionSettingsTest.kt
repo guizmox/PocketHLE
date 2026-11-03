@@ -8,7 +8,7 @@ class InternalResolutionSettingsTest {
     @Test fun globalFrameLimitAndOptionalGameLimitRemainIndependent() {
         assertEquals("60", LauncherConfig.fromJson(JSONObject()).frameRateLimit)
         assertNull(GameSettings.fromJson(JSONObject()).frameRateLimit)
-        for (limit in listOf("10","15","20","30","45","60","unlimited")) {
+        for (limit in listOf("10","15","20","30","45","60","120","unlimited")) {
             val global=LauncherConfig.default().copy(frameRateLimit=limit,upscaleFilter="none")
             val restored=LauncherConfig.fromJson(global.toJson())
             assertEquals(limit,restored.frameRateLimit)

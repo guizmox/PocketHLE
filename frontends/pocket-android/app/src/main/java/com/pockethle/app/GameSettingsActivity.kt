@@ -140,12 +140,12 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
-            val globalFrameLimit = runCatching { JSONObject(NativeBridge.readConfig(rootDir)).optString("frame_rate_limit", "60") }.getOrDefault("60").takeIf { it in listOf("10","15","20","30","45","60","unlimited") } ?: "60"
+            val globalFrameLimit = runCatching { JSONObject(NativeBridge.readConfig(rootDir)).optString("frame_rate_limit", "60") }.getOrDefault("60").takeIf { it in listOf("10","15","20","30","45","60","120","unlimited") } ?: "60"
             val inheritedLimitLabel = "Emulator default (${if (globalFrameLimit == "unlimited") "Unlimited" else "$globalFrameLimit fps"})"
             findPreference<ListPreference>("frame_rate_limit")?.apply {
                 isPersistent = false
-                entries = arrayOf(inheritedLimitLabel, "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps", "Unlimited")
-                entryValues = arrayOf("inherit", "10", "15", "20", "30", "45", "60", "unlimited")
+                entries = arrayOf(inheritedLimitLabel, "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps", "120 fps", "Unlimited")
+                entryValues = arrayOf("inherit", "10", "15", "20", "30", "45", "60", "120", "unlimited")
                 value = current.frameRateLimit ?: "inherit"
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
                     "${pref.entry ?: inheritedLimitLabel}. Maximum game FPS, or Unlimited. Emulator default inherits the global limit. GAPI / DirectDraw / OpenGL ES; GDI-only drawing is not capped. Restart the game to apply."

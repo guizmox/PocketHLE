@@ -699,7 +699,13 @@ impl Context {
             self.gpu_failure("shared snapshot geometry", error);
             return None;
         }
-        self.gpu.as_mut()?.snapshot_configured_shared_frame()
+        match self.gpu.as_mut()?.snapshot_configured_shared_frame() {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.gpu_failure("shared snapshot batch", error);
+                None
+            }
+        }
     }
 
     /// Window presentation does not preserve ancillary depth storage. Do not
@@ -733,6 +739,13 @@ impl Context {
 
     /// `glGetError`: return and clear the sticky error code.
     pub fn take_error(&mut self) -> u32 {
+        if !self.gpu_failed {
+            if let Some(gpu) = self.gpu.as_ref() {
+                if let Err(error) = gpu.poll_error() {
+                    self.gpu_failure("get_error", error);
+                }
+            }
+        }
         std::mem::replace(&mut self.error, GL_NO_ERROR)
     }
 

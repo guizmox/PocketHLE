@@ -1143,6 +1143,15 @@ enum UploadRoute {
     Compressed,
     Rgba,
 }
+unsafe fn check_native_error(gl: &Gl) -> Result<(), String> {
+    let error = (gl.GetError)();
+    if error == 0 {
+        Ok(())
+    } else {
+        Err(format!("host OpenGL error 0x{error:04x}"))
+    }
+}
+
 unsafe fn upload_error(gl: &Gl) -> Result<u32, String> {
     let mut first = 0;
     for _ in 0..16 {
@@ -1966,12 +1975,7 @@ impl Renderer {
         self.uniforms[n]
     }
     unsafe fn check(&self) -> Result<(), String> {
-        let e = (self.gl.GetError)();
-        if e == 0 {
-            Ok(())
-        } else {
-            Err(format!("host OpenGL error 0x{e:04x}"))
-        }
+        check_native_error(&self.gl)
     }
     unsafe fn toggle(&self, cap: u32, on: bool) {
         if on {
@@ -2927,6 +2931,9 @@ impl Renderer {
                                     relative_max.min(last_level) as i32,
                                 );
                             }
+                            // Do not let upload fallback consume a deferred draw
+                            // error and misclassify it as a texture-format failure.
+                            check_native_error(&self.gl)?;
                             upload_texture(
                                 &self.gl,
                                 &self.compressed_formats,
@@ -3202,8 +3209,15 @@ impl Renderer {
                 }
             }
             self.dirty = true;
-            self.check()
+            // NVIDIA drivers can stall in glGetError after each draw. Check at
+            // exports/reads/finish and explicit guest queries instead.
+            Ok(())
         }
+    }
+    /// Explicit batch-boundary driver check; does not read pixels or glFinish.
+    pub fn poll_error(&self) -> Result<(), String> {
+        self.host.make_current()?;
+        unsafe { self.check() }
     }
     /// Wait for this context's queued GL work without reading back or presenting.
     pub fn finish(&mut self) -> Result<(), String> {
@@ -3219,7 +3233,7 @@ impl Renderer {
         self.host.make_current()?;
         unsafe {
             (self.gl.Flush)();
-            self.check()
+            Ok(())
         }
     }
 
@@ -3294,6 +3308,9 @@ impl Renderer {
         mut rgb565: Option<&mut [u8]>,
     ) -> Result<(), String> {
         self.resize(target.width, target.height)?;
+        // Before optional resolve or a clean-cache early return, preserve a
+        // pending native error rather than letting a fallback drain it.
+        self.poll_error()?;
         if !self.dirty {
             if let Some(out) = rgb565 {
                 target.to_rgb565(out);
@@ -5998,6 +6015,94 @@ mod tests {
             assert!(gpu.readback.is_empty(), "no hidden framebuffer download");
             gpu.read(&mut target).unwrap();
             assert_eq!(&target.color[..4], &[255, 0, 0, 255]);
+            assert!(!gpu.dirty);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES2; deferred driver errors"]
+    fn draw_and_flush_defer_driver_errors_to_read_or_finish() {
+        use std::cell::Cell;
+        thread_local! {
+            static CALLS: Cell<u32> = const { Cell::new(0) };
+            static ERROR: Cell<u32> = const { Cell::new(0) };
+        }
+        unsafe extern "system" fn error_probe() -> u32 {
+            CALLS.with(|n| n.set(n.get() + 1));
+            ERROR.with(|e| e.replace(0))
+        }
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(16, 16).unwrap()
+            } else {
+                Renderer::new(16, 16).unwrap()
+            };
+            let mut target = RenderTarget::new(16, 16);
+            let state = PipelineState::default();
+            let original = gpu.gl.GetError;
+            CALLS.with(|n| n.set(0));
+            ERROR.with(|e| e.set(0));
+            gpu.gl.GetError = error_probe;
+            for _ in 0..16 {
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &triangle([1.; 4], 0.),
+                    &[],
+                    &HashMap::new(),
+                    [0; 4],
+                )
+                .unwrap();
+                gpu.flush().unwrap();
+            }
+            assert_eq!(CALLS.with(Cell::get), 0, "no per-draw or flush query");
+            ERROR.with(|e| e.set(GL_OUT_OF_MEMORY));
+            assert!(
+                gpu.poll_error().is_err(),
+                "explicit guest error query sees pending failures"
+            );
+            ERROR.with(|e| e.set(GL_OUT_OF_MEMORY));
+            assert!(gpu.read(&mut target).is_err());
+            assert!(gpu.dirty, "failed read must not publish the native cache");
+            gpu.dirty = false;
+            ERROR.with(|e| e.set(GL_INVALID_OPERATION));
+            assert!(
+                gpu.read(&mut target).is_err(),
+                "clean-cache reads still check deferred errors"
+            );
+            gpu.dirty = true;
+
+            ERROR.with(|e| e.set(GL_INVALID_OPERATION));
+            assert!(gpu.finish().is_err());
+            let mut texture = Texture::default();
+            texture.set_level(0, 1, 1, vec![255; 4]);
+            texture.min_filter = Filter::Nearest;
+            let textures = HashMap::from([(1, texture)]);
+            let stage = TextureStage {
+                unit: 0,
+                env: TexEnvMode::Modulate,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            };
+            ERROR.with(|e| e.set(GL_INVALID_OPERATION));
+            assert!(
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &triangle([1.; 4], 0.),
+                    &[stage],
+                    &textures,
+                    [1; 4]
+                )
+                .is_err(),
+                "pending draw errors must not be consumed by upload fallback"
+            );
+            assert_eq!(gpu.textures[&1].1, u64::MAX, "upload must not proceed");
+            gpu.gl.GetError = original;
+            gpu.read(&mut target).unwrap();
             assert!(!gpu.dirty);
         }
     }

@@ -117,7 +117,7 @@ impl Emulator {
     /// Some(0) disables implicit pacing; explicit guest vblank waits stay active.
     pub fn set_frame_rate_limit(&mut self, fps: Option<u32>) {
         self.requested_frame_rate_limit =
-            fps.filter(|fps| matches!(fps, 0 | 10 | 15 | 20 | 30 | 45 | 60));
+            fps.filter(|fps| matches!(fps, 0 | 10 | 15 | 20 | 30 | 45 | 60 | 120));
         if let Some(process) = self.process.as_mut() {
             let clock = &mut process.state.framebuffer.directdraw;
             clock.frame_rate_limit = self.requested_frame_rate_limit;
@@ -701,6 +701,8 @@ mod tests {
         emu.set_frame_rate_limit(Some(0));
         assert_eq!(emu.requested_frame_rate_limit, Some(0));
         emu.set_frame_rate_limit(Some(60));
+        emu.set_frame_rate_limit(Some(120));
+        assert_eq!(emu.requested_frame_rate_limit, Some(120));
         emu.set_frame_rate_limit(None);
         assert_eq!(emu.requested_frame_rate_limit, None);
     }

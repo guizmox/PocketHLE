@@ -70,7 +70,7 @@ impl DirectDrawTiming {
     pub fn frame_limit_deadline(&self, now: std::time::Instant) -> std::time::Instant {
         let fps = self
             .frame_rate_limit
-            .filter(|fps| matches!(fps, 10 | 15 | 20 | 30 | 45 | 60));
+            .filter(|fps| matches!(fps, 10 | 15 | 20 | 30 | 45 | 60 | 120));
         match (fps, self.last_present) {
             (Some(fps), Some(last)) => {
                 let nanos = 1_000_000_000u64.div_ceil(u64::from(fps));
@@ -82,6 +82,11 @@ impl DirectDrawTiming {
     pub fn present_deadline(&self, now: std::time::Instant) -> std::time::Instant {
         if self.frame_rate_limit == Some(0) {
             return now; // Unlimited bypasses implicit pacing, not explicit vblank waits.
+        }
+        if self.frame_rate_limit == Some(120) {
+            // An explicit high-rate cap overrides implicit 60 Hz presentation
+            // pacing, while blank_deadline/in_blank retain the modeled LCD.
+            return self.frame_limit_deadline(now);
         }
         self.last_present
             .map_or(now, |last| (last + Self::PERIOD).max(now))
@@ -849,7 +854,7 @@ mod display_timing_tests {
         let mut clock = DirectDrawTiming::default();
         let start = clock.epoch;
         let blank = clock.blank_deadline(start, true);
-        for fps in [10, 15, 20, 30, 45, 60] {
+        for fps in [10, 15, 20, 30, 45, 60, 120] {
             clock.frame_rate_limit = Some(fps);
             clock.last_present = None;
             assert_eq!(clock.present_deadline(start), start);

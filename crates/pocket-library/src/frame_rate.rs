@@ -16,18 +16,21 @@ pub enum FrameRateLimit {
     #[default]
     #[serde(rename = "60")]
     Fps60,
+    #[serde(rename = "120")]
+    Fps120,
     #[serde(rename = "unlimited")]
     Unlimited,
 }
 
 impl FrameRateLimit {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Fps10,
         Self::Fps15,
         Self::Fps20,
         Self::Fps30,
         Self::Fps45,
         Self::Fps60,
+        Self::Fps120,
         Self::Unlimited,
     ];
 
@@ -40,6 +43,7 @@ impl FrameRateLimit {
             Self::Fps30 => Some(30),
             Self::Fps45 => Some(45),
             Self::Fps60 => Some(60),
+            Self::Fps120 => Some(120),
             Self::Unlimited => Some(0),
         }
     }
@@ -52,6 +56,7 @@ impl FrameRateLimit {
             Self::Fps30 => "30 fps",
             Self::Fps45 => "45 fps",
             Self::Fps60 => "60 fps",
+            Self::Fps120 => "120 fps",
             Self::Unlimited => "Unlimited",
         }
     }
