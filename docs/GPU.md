@@ -1,3 +1,21 @@
+## No-op native paint must preserve GPU authority (2026-11-04)
+
+KernelState::composite_window_layers previously called cpu_mut before collecting
+native window layers and checking paint_generation against published_generation.
+Thus present_window_surfaces could materialize/invalidate a shared GPU image,
+then immediately return because no backing bitmap had changed. EndPaint without
+new drawing is not a framebuffer write. Delay CPU mutable access until after
+the existing generation decision. Real changed GDI painting, control overlays,
+visibility, guest frame accounting and authority-epoch rejection are unchanged.
+Do not weaken cpu_mut or reuse old GPU pixels after a real CPU write.
+
+Regression covers absent layers, 1000 unchanged native paints with a deliberately
+unavailable CPU reader, exact GPU source identity/revision/epoch preservation,
+real green GDI output/readback, and changed but hidden native surfaces. Native
+EGL handoff tests retain the texture across 32 no-op validations per swap before
+testing the existing stale-authority rejection. This fixes a concrete unnecessary
+CPU transition; other legitimate or unrelated CPU transitions remain possible.
+
 WGL experiment rollback in this delivery: upstream eframe change_gl_context
 body/signature restored. No custom WGL query, lookup cache or binding reuse
 guard remains. Opt-in CPU timing remains available for verification only.

@@ -2340,14 +2340,6 @@ impl KernelState {
             .get(&title_owner)
             .map(String::as_str)
             .unwrap_or("");
-        let frame = match self.framebuffer.cpu_mut() {
-            Ok(frame) => frame,
-            Err(error) => {
-                log::error!("CPU compositor could not access GPU pixels: {error}");
-                return;
-            }
-        };
-        let mut surf = gdi::Surface::Screen(frame);
         let mut layers = Vec::new();
         let mut native_paint_changed = false;
         for (&hwnd, &dc) in &self.window_dcs {
@@ -2445,6 +2437,17 @@ impl KernelState {
         if present_windows && !native_paint_changed {
             return;
         }
+        // A completed but unchanged paint is not a framebuffer write. Acquire
+        // CPU pixels only after that decision, or merely polling EndPaint
+        // would materialize and invalidate an otherwise valid shared GPU image.
+        let frame = match self.framebuffer.cpu_mut() {
+            Ok(frame) => frame,
+            Err(error) => {
+                log::error!("CPU compositor could not access GPU pixels: {error}");
+                return;
+            }
+        };
+        let mut surf = gdi::Surface::Screen(frame);
         layers.sort_by_key(|layer| layer.0);
         controls.render_composited_with_images(&mut surf, &self.gdi, |owner, surface| {
             for (hwnd, parent, x, y, bm, clip) in &layers {
@@ -5513,6 +5516,70 @@ mod tests {
         assert!(heap.virtual_free(base, 0, true));
         assert_eq!(ram.snapshot().program_used, 0);
         assert_eq!(heap.free_bytes(), initial);
+    }
+
+    #[test]
+    fn unchanged_native_window_paint_preserves_gpu_authority_without_readback() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let state = &mut process.state;
+        state.framebuffer.resize(3, 2);
+        let source = std::sync::Arc::new(RetainedTestImage {
+            reads: AtomicUsize::new(0),
+            fail: AtomicBool::new(true),
+        });
+        state.framebuffer.publish_gpu(source.clone()).unwrap();
+        // Even an absent backing layer must not enter the CPU boundary.
+        state.present_window_surfaces();
+        let hwnd = 0xdead4000;
+        let dc = state.gdi.create_memory_dc();
+        let bm = state.gdi.create_compatible_bitmap(3, 2);
+        state.gdi.select_into(dc, bm);
+        state.window_dcs.insert(hwnd, dc);
+        state.window_rects.insert(hwnd, (0, 0, 3, 2));
+        state.window_visibility.insert(hwnd, true);
+        let revision = state.framebuffer.revision();
+        let epoch = state.framebuffer.authority_epoch();
+        let identity = state.framebuffer.gpu_source().unwrap().clone();
+        for _ in 0..1000 {
+            state.present_window_surfaces();
+        }
+        assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+        assert!(!state.framebuffer.cpu_resident());
+        assert!(std::sync::Arc::ptr_eq(
+            state.framebuffer.gpu_source().unwrap(),
+            &identity
+        ));
+        assert_eq!(state.framebuffer.revision(), revision);
+        assert_eq!(state.framebuffer.authority_epoch(), epoch);
+        // Real changed GDI pixels must still be composited and published.
+        source.fail.store(false, Ordering::Relaxed);
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0, 0, 3, 2, 0x07e0);
+        state.present_window_surfaces();
+        assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+        assert!(state.framebuffer.gpu_source().is_none());
+        assert_eq!(
+            &state.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &[0xe0, 7]
+        );
+        assert_eq!(state.framebuffer.revision(), revision.wrapping_add(1));
+        // A hidden window with changed backing pixels is also a no-op.
+        state.framebuffer.publish_gpu(source.clone()).unwrap();
+        source.fail.store(true, Ordering::Relaxed);
+        state.window_visibility.insert(hwnd, false);
+        gdi::Surface::Bitmap(state.gdi.bitmap_mut(bm).unwrap()).fill_rect(0, 0, 3, 2, 0x001f);
+        let epoch = state.framebuffer.authority_epoch();
+        state.present_window_surfaces();
+        assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+        assert_eq!(state.framebuffer.authority_epoch(), epoch);
+        assert!(!state.framebuffer.cpu_resident());
     }
 
     #[test]

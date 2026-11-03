@@ -1,7 +1,3 @@
-vendor/eframe/src/epi.rs
-vendor/eframe/src/native/epi_integration.rs
-vendor/eframe/src/native/winit_integration.rs
-vendor/eframe/src/native/glow_integration.rs
-vendor/eframe/src/native/wgpu_integration.rs
-vendor/eframe/src/native/pocket_ui_trace.rs
-vendor/eframe/POCKETHLE-PATCH.md
+crates/pocket-kernel/src/lib.rs
+crates/pocket-winceapi/src/gles.rs
+docs/GPU.md

@@ -3476,6 +3476,13 @@ mod tests {
                             "swap must defer CPU materialization unless GAPI is mapped"
                         );
                         assert_eq!(kernel.framebuffer.gpu_source().is_some(), !mapped);
+                        let before_noop = kernel.framebuffer.authority_epoch();
+                        for _ in 0..32 {
+                            kernel.present_window_surfaces();
+                        }
+                        assert_eq!(kernel.framebuffer.authority_epoch(), before_noop);
+                        assert_eq!(kernel.framebuffer.cpu_resident(), mapped);
+                        assert_eq!(kernel.framebuffer.gpu_source().is_some(), !mapped);
                         assert_eq!(&kernel.framebuffer.cpu().unwrap().pixels[..2], &[0, 0xf8]);
                         let revision = kernel.framebuffer.frame_counter;
                         let size = kernel.framebuffer.presentation_size();
