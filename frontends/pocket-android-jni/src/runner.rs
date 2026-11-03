@@ -215,7 +215,8 @@ impl Session {
         self.send_input(InputCommand::Stop);
     }
 
-    pub fn presentation_fps(&self) -> Option<f32> {
+    /// Guest submission telemetry, independent of Android GL draw completions.
+    pub fn submitted_frame_fps(&self) -> Option<f32> {
         self.state.presentation_stats.lock().ok()?.as_ref()?.fps()
     }
 

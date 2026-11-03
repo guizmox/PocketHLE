@@ -17,6 +17,8 @@ pub struct Reconstruction {
     staging: Option<glow::Texture>,
     staging_size: [u32; 2],
     pending: Option<FrameSnapshot>,
+    image_id: Option<u64>,
+    drawn_image_id: Option<u64>,
     smaa: Option<crate::smaa::Smaa>,
     smaa_dirty: bool,
     smaa_mode: i32,
@@ -138,6 +140,8 @@ impl Reconstruction {
                 staging: None,
                 staging_size: [0, 0],
                 pending: None,
+                image_id: None,
+                drawn_image_id: None,
                 smaa,
                 smaa_dirty: true,
                 smaa_mode: -1,
@@ -205,7 +209,11 @@ impl Reconstruction {
         };
         self.smaa_dirty = true;
     }
+    pub fn drawn_image_id(&self) -> Option<u64> {
+        self.drawn_image_id
+    }
     pub fn paint(&mut self, gl: &glow::Context, uv: [f32; 6], filter: i32) {
+        self.drawn_image_id = None;
         if let Some(consumer) = self.consumer.as_mut() {
             let _ = consumer.collect_retired_frames();
         }
@@ -242,6 +250,7 @@ impl Reconstruction {
                     false
                 };
                 if copied {
+                    self.image_id = Some(frame.image_id);
                     self.current_path = Some(PresentationPath::GpuShared);
                 }
                 if !copied {
@@ -249,7 +258,10 @@ impl Reconstruction {
                         .cpu_rgba()
                         .and_then(|rgba| self.upload_cpu(gl, &frame, rgba.as_ref()));
                     match result {
-                        Ok(()) => self.current_path = Some(PresentationPath::Cpu(cpu_reason)),
+                        Ok(()) => {
+                            self.image_id = Some(frame.image_id);
+                            self.current_path = Some(PresentationPath::Cpu(cpu_reason));
+                        }
                         Err(error) => {
                             log::warn!("CPU presentation fallback unavailable; retaining last image: {error}");
                             self.current_path =
@@ -316,6 +328,9 @@ impl Reconstruction {
             gl.use_program(None);
             gl.bind_texture(glow::TEXTURE_2D, None);
             self.report_presentation(gl);
+            if self.current_path != Some(PresentationPath::Failed) {
+                self.drawn_image_id = self.image_id;
+            }
         }
     }
     unsafe fn staging_target(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
@@ -602,6 +617,7 @@ mod tests {
             }
         }
         let native = FrameSnapshot {
+            image_id: FrameSnapshot::next_image_id(),
             presentation_stats: Default::default(),
             text_input: false,
             shared: None,

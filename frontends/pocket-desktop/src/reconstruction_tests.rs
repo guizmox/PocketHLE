@@ -754,6 +754,7 @@ fn presenter_benchmark_current_cpu_and_shared_transport() {
                                         (rgba, shared, (tw, th))
                                     };
                                     send.send(runner::FrameSnapshot {
+                                        image_id: runner::FrameSnapshot::next_image_id(),
                                         presentation_stats: Default::default(),
                                         width: 320,
                                         height: 240,
@@ -825,6 +826,66 @@ fn presenter_benchmark_current_cpu_and_shared_transport() {
             cpu.destroy(&gl);
             owner.collect_retired_frames().unwrap();
             owner.close();
+            gl.delete_framebuffer(target);
+            gl.delete_texture(texture);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires native EGL desktop GL/GLES"]
+fn displayed_identity_follows_painted_image_not_queued_or_failed_frames() {
+    unsafe {
+        for es in [false, true] {
+            let ui = Ui::new(es);
+            let gl =
+                glow::Context::from_loader_function_cstr(|n| (ui.get)(n.as_ptr()).cast_const());
+            let mut renderer = reconstruction::Reconstruction::new(
+                &gl,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                true,
+            )
+            .unwrap();
+            let (texture, target) = output(&gl, 96, 64);
+            let make = || runner::FrameSnapshot {
+                image_id: runner::FrameSnapshot::next_image_id(),
+                presentation_stats: Default::default(),
+                width: 2,
+                height: 2,
+                texture_width: 2,
+                texture_height: 2,
+                rgba: vec![255; 16],
+                text_input: false,
+                shared: None,
+                deferred: None,
+                backlight: 11,
+            };
+            let a = make();
+            let b = make();
+            assert_ne!(a.image_id, b.image_id);
+            assert_eq!(a.clone().image_id, a.image_id);
+            assert_eq!(a.cpu_only().unwrap().image_id, a.image_id);
+            renderer.queue(&a, 1);
+            renderer.queue(&b, 1); // a is abandoned before paint.
+            assert_eq!(renderer.drawn_image_id(), None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+            gl.viewport(0, 0, 96, 64);
+            renderer.paint(&gl, [0., 0., 1., 0., 0., 1.], 1);
+            assert_eq!(renderer.drawn_image_id(), Some(b.image_id));
+            renderer.paint(&gl, [0., 1., 0., -1., 1., 0.], 0); // Rotation/filter repaint.
+            assert_eq!(renderer.drawn_image_id(), Some(b.image_id));
+            let mut broken = make();
+            broken.rgba.clear();
+            renderer.queue(&broken, 1);
+            renderer.paint(&gl, [0., 0., 1., 0., 0., 1.], 1);
+            assert_eq!(
+                renderer.drawn_image_id(),
+                Some(b.image_id),
+                "failed fallback retains old identity"
+            );
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+            renderer.destroy(&gl);
             gl.delete_framebuffer(target);
             gl.delete_texture(texture);
         }

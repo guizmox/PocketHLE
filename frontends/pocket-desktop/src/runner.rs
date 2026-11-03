@@ -756,6 +756,8 @@ pub struct RunOutcome {
 
 #[derive(Debug, Clone)]
 pub struct FrameSnapshot {
+    /// Identity of this produced image; clones/filter/rotation changes preserve it.
+    pub image_id: u64,
     pub presentation_stats: pocket_core::kernel::framebuffer::PresentationStats,
     pub width: u32,
     pub height: u32,
@@ -769,6 +771,10 @@ pub struct FrameSnapshot {
 }
 
 impl FrameSnapshot {
+    pub(crate) fn next_image_id() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
     pub(crate) fn from_shared(
         fb: &pocket_core::kernel::framebuffer::deferred::DeferredFramebuffer,
         shared: pocket_core::winceapi::gles::SharedFrame,
@@ -790,6 +796,7 @@ impl FrameSnapshot {
             return Err("shared snapshot geometry mismatch".into());
         }
         Ok(Self {
+            image_id: Self::next_image_id(),
             presentation_stats: fb.presentation_stats.clone(),
             width: fb.width,
             height: fb.height,
@@ -806,6 +813,7 @@ impl FrameSnapshot {
     /// planned context teardown, or after teardown only if pixels are cached.
     pub(crate) fn cpu_only(&self) -> Result<Self, String> {
         Ok(Self {
+            image_id: self.image_id,
             presentation_stats: self.presentation_stats.clone(),
             width: self.width,
             height: self.height,
@@ -840,6 +848,7 @@ impl FrameSnapshot {
         let mut rgba = Vec::new();
         fb.snapshot_presentation_rgba8888_into(&mut rgba);
         Self {
+            image_id: Self::next_image_id(),
             presentation_stats: fb.presentation_stats.clone(),
             text_input: false,
             shared: None,
@@ -859,6 +868,7 @@ impl FrameSnapshot {
     fn fill_from_framebuffer(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
         fb.snapshot_presentation_rgba8888_into(scratch);
         Self {
+            image_id: Self::next_image_id(),
             presentation_stats: fb.presentation_stats.clone(),
             text_input: false,
             shared: None,

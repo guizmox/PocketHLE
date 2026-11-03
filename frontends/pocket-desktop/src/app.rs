@@ -279,6 +279,7 @@ pub struct PocketLauncher {
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
     last_frame_texture: Option<egui::TextureHandle>,
+    uploaded_image_id: Option<u64>,
     /// Latest native guest framebuffer, retained for input and filtered screenshots.
     last_frame_snapshot: Option<FrameSnapshot>,
     last_frame_status: Option<String>,
@@ -671,69 +672,34 @@ pub enum UiEvent {
     RunFinished(RunOutcome),
 }
 
-#[derive(Debug, Clone)]
+/// Frontend draw completions, never guest submissions or queued uploads.
+#[derive(Debug, Clone, Default)]
 struct FrameStats {
-    presentation_stats: Option<pocket_core::kernel::framebuffer::PresentationStats>,
-    fps: f32,
-    window_started_at: Option<Instant>,
-    window_frames: u32,
-    last_frame_at: Option<Instant>,
+    state: std::sync::Arc<
+        std::sync::Mutex<(
+            Option<u64>,
+            pocket_core::kernel::framebuffer::PresentationStats,
+        )>,
+    >,
 }
-
-impl Default for FrameStats {
-    fn default() -> Self {
-        Self {
-            presentation_stats: None,
-            fps: 0.0,
-            window_started_at: None,
-            window_frames: 0,
-            last_frame_at: None,
-        }
-    }
-}
-
 impl FrameStats {
     fn reset(&mut self) {
         *self = Self::default();
     }
-
-    fn record_frame(&mut self) {
-        let now = Instant::now();
-        self.last_frame_at = Some(now);
-        self.window_frames = self.window_frames.saturating_add(1);
-
-        let started_at = match self.window_started_at {
-            Some(t) => t,
-            None => {
-                self.window_started_at = Some(now);
-                now
-            }
-        };
-        let elapsed = now.duration_since(started_at);
-        if elapsed >= Duration::from_secs(1) {
-            self.fps = self.window_frames as f32 / elapsed.as_secs_f32();
-            self.window_frames = 0;
-            self.window_started_at = Some(now);
+    fn record_frame(&self, image_id: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.0 != Some(image_id) {
+            state.0 = Some(image_id);
+            state.1.record_present();
         }
     }
-
     fn current_fps(&self) -> f32 {
-        if let Some(fps) = self
-            .presentation_stats
-            .as_ref()
-            .and_then(|stats| stats.fps())
-        {
-            return fps;
-        }
-        if self
-            .last_frame_at
-            .map(|t| t.elapsed() > Duration::from_secs(1))
-            .unwrap_or(true)
-        {
-            0.0
-        } else {
-            self.fps
-        }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .1
+            .fps()
+            .unwrap_or(0.0)
     }
 }
 
@@ -907,6 +873,7 @@ impl PocketLauncher {
             config_draft: None,
             game_settings_draft: None,
             last_frame_texture: None,
+            uploaded_image_id: None,
             last_frame_snapshot: None,
             last_frame_status: None,
             frame_stats: FrameStats::default(),
@@ -1168,8 +1135,6 @@ impl PocketLauncher {
         // Keep native pixels for input coordinates and rebuilding filtered images.
         self.last_frame_snapshot = Some(frame.clone());
         self.refresh_frame_texture(ctx, frame);
-        self.frame_stats.presentation_stats = Some(frame.presentation_stats.clone());
-        self.frame_stats.record_frame();
     }
 
     fn filtered_frame_image(
@@ -1224,6 +1189,7 @@ impl PocketLauncher {
         } else {
             self.last_frame_texture = Some(ctx.load_texture("pockethle-fb", img, options));
         }
+        self.uploaded_image_id = Some(frame.image_id);
     }
 
     fn set_upscale_x2(&mut self, ctx: &egui::Context, enabled: bool) {
@@ -3231,6 +3197,7 @@ impl PocketLauncher {
         let uv = rotation_uv(self.game_rotation);
         if let Some(renderer) = self.reconstruction.as_ref() {
             let renderer = std::sync::Arc::clone(renderer);
+            let frame_stats = self.frame_stats.clone();
             let filter = self.upscale_filter.gpu_filter();
             let capture = std::sync::Arc::clone(&self.screenshot);
             let recording = self.recording.clone();
@@ -3253,11 +3220,12 @@ impl PocketLauncher {
                 rect,
                 callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
                     move |info, painter| {
-                        renderer.lock().unwrap_or_else(|e| e.into_inner()).paint(
-                            painter.gl(),
-                            transform,
-                            filter,
-                        );
+                        let mut renderer = renderer.lock().unwrap_or_else(|e| e.into_inner());
+                        renderer.paint(painter.gl(), transform, filter);
+                        if let Some(image_id) = renderer.drawn_image_id() {
+                            frame_stats.record_frame(image_id);
+                        }
+                        drop(renderer);
                         crate::screenshot::capture(
                             painter.gl(),
                             egui::PaintCallbackInfo {
@@ -3299,18 +3267,9 @@ impl PocketLauncher {
             }
             mesh.indices.extend_from_slice(&[0, 1, 2, 2, 1, 3]);
             ui.painter().add(egui::Shape::mesh(mesh));
-            if self
-                .screenshot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending
-                .is_some()
-                || self
-                    .recording
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .active()
             {
+                let frame_stats = self.frame_stats.clone();
+                let image_id = self.uploaded_image_id;
                 let capture = std::sync::Arc::clone(&self.screenshot);
                 let recording = self.recording.clone();
                 let video_size = self
@@ -3324,6 +3283,9 @@ impl PocketLauncher {
                     rect,
                     callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
                         move |info, painter| {
+                            if let Some(image_id) = image_id {
+                                frame_stats.record_frame(image_id);
+                            }
                             crate::screenshot::capture(
                                 painter.gl(),
                                 egui::PaintCallbackInfo {
@@ -3358,18 +3320,7 @@ impl PocketLauncher {
             return;
         }
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        let unit = if self
-            .frame_stats
-            .presentation_stats
-            .as_ref()
-            .and_then(|stats| stats.fps())
-            .is_some()
-        {
-            "FPS"
-        } else {
-            "IPS"
-        };
-        let text = format!("{:.1} {unit}", self.frame_stats.current_fps());
+        let text = format!("{:.1} FPS", self.frame_stats.current_fps());
         let galley = painter.layout_no_wrap(
             text,
             egui::FontId::proportional(13.0),
@@ -5329,6 +5280,7 @@ impl PocketLauncher {
             return;
         }
         self.last_frame_texture = None;
+        self.uploaded_image_id = None;
         self.last_frame_snapshot = None;
         self.last_frame_status = None;
         self.frame_stats.reset();
@@ -5885,6 +5837,29 @@ impl eframe::App for PocketLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displayed_fps_excludes_dropped_frames_repaints_and_capture_redraws() {
+        let stats = FrameStats::default();
+        // A producer can submit 400 images; only every seventh reaches paint.
+        for image_id in 1..=400 {
+            if image_id % 7 == 0 {
+                for _ in 0..10 {
+                    stats.record_frame(image_id);
+                }
+            }
+        }
+        assert_eq!(stats.state.lock().unwrap().1.completed(), 57);
+        let capture_clone = stats.clone();
+        capture_clone.record_frame(399);
+        assert_eq!(stats.state.lock().unwrap().1.completed(), 57);
+        let mut fresh_session = stats.clone();
+        fresh_session.reset();
+        assert_eq!(fresh_session.current_fps(), 0.0);
+        assert_eq!(fresh_session.state.lock().unwrap().1.completed(), 0);
+        stats.record_frame(401); // A previous session callback cannot affect the reset meter.
+        assert_eq!(fresh_session.state.lock().unwrap().1.completed(), 0);
+    }
 
     #[test]
     fn physical_swap_matches_classic_slots_and_leaves_other_keys_unchanged() {

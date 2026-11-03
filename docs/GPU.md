@@ -1,5 +1,39 @@
 # GPU rendering
 
+## Displayed game FPS (2026-11-03)
+
+The game-screen overlay now counts new images drawn by the frontend, not guest
+GXEndDraw/Flip/eglSwapBuffers submissions or queued framebuffer updates. This
+policy is common to GAPI, GDI, DirectDraw, software GLES and host-GPU GLES,
+including fullscreen, Deck, filters, captures and recording. It reports draw
+submission by the frontend, not OS compositor/physical scanout confirmation.
+No artificial 60/120 clamp is applied to the measurement.
+
+Desktop snapshots have a monotonic image identity preserved by clones and CPU
+fallback conversion. Reconstruction exposes the identity only after drawing;
+its callback records a new identity once. Queued images superseded before paint,
+retained images after failed replacement, filter/rotation repaints and repeated
+UI redraws do not inflate the rate. The plain egui texture path records in an
+ordered callback after its image mesh, with the last successfully uploaded
+identity. Meter state is detached between game sessions and idle rates become
+zero. Producer PresentationStats remain submission telemetry, not overlay FPS.
+
+Android uses the existing GL-thread PresentedFrameCounter after glDrawArrays.
+The former native submission-rate override is removed from the overlay; JNI
+telemetry is explicitly renamed nativeSubmittedFrameFps. The overlay always
+labels the sampled displayed-image rate FPS. No new per-frame glGetError,
+readback, glFinish, fence, input-repeat or pacing behavior is introduced.
+
+Validation: real presenter tests on Mesa desktop GL and GLES cover dropped
+queues, repaint/filter/rotation identity, failed replacement, shared/CPU pixels
+and context recreation. An isolated test of the actual desktop meter covers
+400 produced identities with only 57 painted and repeated/capture redraws.
+An Android unit test covers 400 submitted objects, 60 drawn and idle redraws;
+Android Gradle/APK and full desktop eframe builds are not run in this workspace.
+Input-correlated NVIDIA stuttering and Intel texture corruption remain separate
+investigations; this metric change is not claimed as their fix.
+
+
 ## Deferred native error checks with shared presentation (2026-11-03)
 
 The supplied hybrid-laptop investigation measured NVIDIA 561.09 post-draw
