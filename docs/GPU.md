@@ -1,5 +1,19 @@
 # GPU rendering
 
+## CPU preparation optimizations (2026-11-03)
+
+Keep the validated high-resolution presentation and per-draw scratch reuse.
+Scaled presentation exports top-down RGBA with exactly the former RGB565 color
+quantization and opaque alpha, avoiding the RGB565 pack/unpack round-trip.
+Guest memory, native-resolution rendering, filters and brightness are unchanged.
+The retained host image costs two extra bytes per physical pixel (+2.34 MiB at
+1280x960). Reuse bounded fallback vertex/remap/index storage; guest inputs are
+still reread every draw, with cleanup on early exits and no guest-memory cache.
+
+The temporary GPU profiling module and frontend probes have been removed.
+No GL calls, shader, readback, upload or draw ordering are changed by this cleanup.
+
+
 ## RGB surface RGBA readback (Stuntcar Extreme)
 
 The single exposed EGL configuration advertises RGB565 and zero alpha bits.

@@ -163,6 +163,7 @@ impl PresentationStats {
 /// Optional host presentation image; never mapped into guest address space.
 #[derive(Debug, Clone)]
 struct RenderPresentation {
+    rgba: bool,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -283,6 +284,15 @@ impl Framebuffer {
     }
 
     pub fn set_render_presentation(&mut self, width: u32, height: u32, pixels: Vec<u8>) {
+        self.set_render_image(width, height, pixels, false);
+    }
+
+    /// Host-only RGBA, already quantized to the display precision; never guest mapped.
+    pub fn set_render_presentation_rgba(&mut self, width: u32, height: u32, pixels: Vec<u8>) {
+        self.set_render_image(width, height, pixels, true);
+    }
+
+    fn set_render_image(&mut self, width: u32, height: u32, pixels: Vec<u8>, rgba: bool) {
         let valid = width > 0
             && height > 0
             && self.width > 0
@@ -293,9 +303,10 @@ impl Framebuffer {
             && width / self.width == height / self.height
             && (width as usize)
                 .checked_mul(height as usize)
-                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| n.checked_mul(if rgba { 4 } else { 2 }))
                 == Some(pixels.len());
         self.render_presentation = valid.then_some(RenderPresentation {
+            rgba,
             width,
             height,
             pixels,
@@ -315,6 +326,18 @@ impl Framebuffer {
         let Some(image) = self.render_presentation.as_ref() else {
             return self.snapshot_rgba8888_into(out);
         };
+        if image.rgba {
+            out.clear();
+            out.extend_from_slice(&image.pixels);
+            if self.backlight_level != 11 {
+                for pixel in out.chunks_exact_mut(4) {
+                    pixel[0] = self.backlight_channel(pixel[0]);
+                    pixel[1] = self.backlight_channel(pixel[1]);
+                    pixel[2] = self.backlight_channel(pixel[2]);
+                }
+            }
+            return;
+        }
         out.resize(image.width as usize * image.height as usize * 4, 0);
         for (source, dest) in image.pixels.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
             let color = rgb565_to_rgba8888(u16::from_le_bytes([source[0], source[1]]));
@@ -559,6 +582,32 @@ fn clip_rect(x: i32, y: i32, w: i32, h: i32, max_w: u32, max_h: u32) -> (u32, u3
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rgba_presentation_matches_rgb565_for_every_color_and_backlight() {
+        let mut old = Framebuffer::new(128, 128);
+        let mut new = old.clone();
+        let pixels: Vec<u8> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
+        old.set_render_presentation(256, 256, pixels);
+        let mut expected = Vec::new();
+        old.snapshot_presentation_rgba8888_into(&mut expected);
+        new.set_render_presentation_rgba(256, 256, expected.clone());
+        let mut actual = Vec::new();
+        for level in 1..=31 {
+            old.set_backlight_level(level);
+            new.set_backlight_level(level);
+            old.snapshot_presentation_rgba8888_into(&mut expected);
+            new.snapshot_presentation_rgba8888_into(&mut actual);
+            assert_eq!(actual, expected, "backlight {level}");
+            assert_eq!(new.pixels, old.pixels);
+        }
+        new.mark_dirty();
+        assert_eq!(new.presentation_size(), (128, 128));
+        new.set_render_presentation_rgba(256, 256, vec![0; 256 * 256 * 2]);
+        assert_eq!(new.presentation_size(), (128, 128));
+        new.set_render_presentation_rgba(256, 384, vec![0; 256 * 384 * 4]);
+        assert_eq!(new.presentation_size(), (128, 128));
+    }
+
     #[test]
     fn render_presentation_is_host_only_and_invalidated_by_guest_writes() {
         let mut fb = Framebuffer::new(2, 1);

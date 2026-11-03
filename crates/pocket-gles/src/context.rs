@@ -406,6 +406,11 @@ pub struct Context {
     array_read_pool: Vec<Vec<u8>>,
     vertex_stream: crate::gpu::VertexStream,
     flat_vertex_stream: crate::gpu::VertexStream,
+    // Per-draw scratch only: never cache decoded guest memory between calls.
+    assembled_vertices: Vec<Vertex>,
+    vertex_remap: HashMap<u32, usize>,
+    dense_indices: Vec<u16>,
+    expanded_indices: Vec<usize>,
     decoded_indices: Vec<u32>,
     scratch: Vec<u8>,
     /// Scratch for index buffer reads.
@@ -475,6 +480,10 @@ impl Context {
             array_read_pool: Vec::new(),
             vertex_stream: Default::default(),
             flat_vertex_stream: Default::default(),
+            assembled_vertices: Vec::new(),
+            vertex_remap: HashMap::new(),
+            dense_indices: Vec::new(),
+            expanded_indices: Vec::new(),
             decoded_indices: Vec::new(),
             scratch: Vec::new(),
             index_scratch: Vec::new(),
@@ -557,6 +566,14 @@ impl Context {
             return None;
         }
         self.gpu.as_ref()?.scaled_rgb565_into(out)
+    }
+
+    /// Host presentation pixels; logical readbacks and guest memory remain RGB565.
+    pub fn scaled_display_rgba_into(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        if self.gpu_failed {
+            return None;
+        }
+        self.gpu.as_ref()?.scaled_display_rgba_into(out)
     }
 
     /// Select before guest rendering begins. Initialization failure keeps software.
@@ -3152,169 +3169,172 @@ impl Context {
                 mode,
                 GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
             );
-        let mut remap: HashMap<u32, usize> = HashMap::new();
-        let mut verts: Vec<Vertex> = Vec::with_capacity(count.min(65536));
-        let mut dense = Vec::<u16>::new();
-        let mut expanded = Vec::<usize>::new();
-        for i in indices {
-            let index = if !sequential {
-                remap.get(&i).copied()
-            } else {
-                None
-            };
-            let index = if let Some(index) = index {
-                index
-            } else {
-                let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
-                    self.recycle_prepared_arrays();
-                    return;
+        let mut remap = std::mem::take(&mut self.vertex_remap);
+        let mut verts = std::mem::take(&mut self.assembled_vertices);
+        let mut dense = std::mem::take(&mut self.dense_indices);
+        let mut expanded = std::mem::take(&mut self.expanded_indices);
+        // All exits (including malformed guest arrays and GPU failure) return here
+        // before recycling. No guest pointers or previous vertex values survive.
+        (|| {
+            for i in indices {
+                let index = if !sequential {
+                    remap.get(&i).copied()
+                } else {
+                    None
                 };
-                let index = verts.len();
-                verts.push(v);
+                let index = if let Some(index) = index {
+                    index
+                } else {
+                    let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
+                        self.recycle_prepared_arrays();
+                        return;
+                    };
+                    let index = verts.len();
+                    verts.push(v);
+                    if !sequential {
+                        remap.insert(i, index);
+                    }
+                    index
+                };
                 if !sequential {
-                    remap.insert(i, index);
+                    expanded.push(index);
                 }
-                index
-            };
-            if !sequential {
-                expanded.push(index);
             }
-        }
-        let direct_indexed = native_indices && verts.len() <= 65536;
-        if direct_indexed {
-            dense.extend(expanded.iter().map(|i| *i as u16));
-        } else if !sequential {
-            verts = expanded.iter().map(|i| verts[*i]).collect();
-        }
-        self.recycle_prepared_arrays();
-
-        match mode {
-            GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
-            | GL_LINE_STRIP | GL_LINE_LOOP => {}
-            _ => {
-                self.set_error(GL_INVALID_ENUM);
-                return;
+            let direct_indexed = native_indices && verts.len() <= 65536;
+            if direct_indexed {
+                dense.extend(expanded.iter().map(|i| *i as u16));
+            } else if !sequential {
+                verts = expanded.iter().map(|i| verts[*i]).collect();
             }
-        }
+            self.recycle_prepared_arrays();
 
-        if self.es11.pretransform {
-            let planes = self.clip_draw_planes();
-            (mode, verts) =
-                raster::clip_user_primitives(mode, &verts, &planes, self.state.smooth_shading);
-        }
-        if let Some(gpu) = self.gpu.as_mut() {
+            match mode {
+                GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN | GL_POINTS | GL_LINES
+                | GL_LINE_STRIP | GL_LINE_LOOP => {}
+                _ => {
+                    self.set_error(GL_INVALID_ENUM);
+                    return;
+                }
+            }
+
             if self.es11.pretransform {
-                let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
-                let result = if mode == GL_POINTS {
-                    let mut result = Ok(());
-                    for v in &verts {
-                        let mut state = self.state.clone();
-                        state.point_size = if v.point_width >= 0. {
-                            v.point_width
-                        } else {
-                            self.state.point_size
-                        };
-                        if let Err(error) = gpu.draw(
+                let planes = self.clip_draw_planes();
+                (mode, verts) =
+                    raster::clip_user_primitives(mode, &verts, &planes, self.state.smooth_shading);
+            }
+            if let Some(gpu) = self.gpu.as_mut() {
+                if self.es11.pretransform {
+                    let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
+                    let result = if mode == GL_POINTS {
+                        let mut result = Ok(());
+                        for v in &verts {
+                            let mut state = self.state.clone();
+                            state.point_size = if v.point_width >= 0. {
+                                v.point_width
+                            } else {
+                                self.state.point_size
+                            };
+                            if let Err(error) = gpu.draw(
+                                &self.target,
+                                &state,
+                                mode,
+                                &[*v],
+                                stages,
+                                &self.textures,
+                                names,
+                            ) {
+                                result = Err(error);
+                                break;
+                            }
+                        }
+                        result
+                    } else {
+                        gpu.draw(
                             &self.target,
-                            &state,
+                            &self.state,
                             mode,
-                            &[*v],
+                            &verts,
                             stages,
                             &self.textures,
                             names,
-                        ) {
-                            result = Err(error);
-                            break;
-                        }
+                        )
+                    };
+                    if let Err(error) = result {
+                        self.gpu_failure("clipped draw", error);
                     }
-                    result
-                } else {
-                    gpu.draw(
+                    return;
+                }
+                let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
+                let result = if direct_indexed {
+                    gpu.draw_indexed_object_space(
                         &self.target,
                         &self.state,
                         mode,
                         &verts,
-                        stages,
+                        &dense,
+                        &stages,
                         &self.textures,
                         names,
+                        &transforms,
+                    )
+                } else {
+                    let draw = if sequential {
+                        crate::gpu::Renderer::draw_arrays_object_space
+                    } else {
+                        crate::gpu::Renderer::draw_object_space
+                    };
+                    draw(
+                        gpu,
+                        &self.target,
+                        &self.state,
+                        mode,
+                        &verts,
+                        &stages,
+                        &self.textures,
+                        names,
+                        &transforms,
                     )
                 };
-                if let Err(error) = result {
-                    self.gpu_failure("clipped draw", error);
+                if let Err(e) = result {
+                    self.gpu_failure("draw", e);
                 }
                 return;
             }
-            let names = std::array::from_fn(|i| self.texture_units[i].bound_texture);
-            let result = if direct_indexed {
-                gpu.draw_indexed_object_space(
-                    &self.target,
-                    &self.state,
-                    mode,
-                    &verts,
-                    &dense,
-                    &stages,
-                    &self.textures,
-                    names,
-                    &transforms,
-                )
-            } else {
-                let draw = if sequential {
-                    crate::gpu::Renderer::draw_arrays_object_space
-                } else {
-                    crate::gpu::Renderer::draw_object_space
-                };
-                draw(
-                    gpu,
-                    &self.target,
-                    &self.state,
-                    mode,
-                    &verts,
-                    &stages,
-                    &self.textures,
-                    names,
-                    &transforms,
-                )
-            };
-            if let Err(e) = result {
-                self.gpu_failure("draw", e);
-            }
-            return;
-        }
-        // Decode/generate only once per texture revision, and only in software.
-        for stage in stages {
-            let name = self.texture_units[stage.unit].bound_texture;
-            if let Some(tex) = self.textures.get(&name) {
-                let mips = tex.min_filter.uses_mipmaps();
-                if mips || tex.rgba.is_empty() || tex.base_level != 0 {
-                    if !self
-                        .software_mips
-                        .get(&name)
-                        .is_some_and(|c| c.0 == tex.revision && c.1 == mips)
-                    {
-                        let mut levels = tex.upload_levels();
-                        // Base zero is already owned by Texture; other bases
-                        // and deferred compressed data must retain their snapshot.
-                        if tex.base_level == 0 && !tex.rgba.is_empty() {
-                            if let Some(base) = levels.first_mut() {
-                                base.2 = Vec::new();
+            // Decode/generate only once per texture revision, and only in software.
+            for stage in stages {
+                let name = self.texture_units[stage.unit].bound_texture;
+                if let Some(tex) = self.textures.get(&name) {
+                    let mips = tex.min_filter.uses_mipmaps();
+                    if mips || tex.rgba.is_empty() || tex.base_level != 0 {
+                        if !self
+                            .software_mips
+                            .get(&name)
+                            .is_some_and(|c| c.0 == tex.revision && c.1 == mips)
+                        {
+                            let mut levels = tex.upload_levels();
+                            // Base zero is already owned by Texture; other bases
+                            // and deferred compressed data must retain their snapshot.
+                            if tex.base_level == 0 && !tex.rgba.is_empty() {
+                                if let Some(base) = levels.first_mut() {
+                                    base.2 = Vec::new();
+                                }
                             }
+                            self.software_mips
+                                .insert(name, (tex.revision, mips, levels));
                         }
-                        self.software_mips
-                            .insert(name, (tex.revision, mips, levels));
+                    } else {
+                        self.software_mips.remove(&name);
                     }
-                } else {
-                    self.software_mips.remove(&name);
                 }
             }
-        }
-        // Resolve the bound textures once per draw, not per fragment.
-        let mut texs: [Option<&Texture>; raster::MAX_TEXTURE_STAGES] = [None; _];
-        for stage in stages {
-            texs[stage.unit] = self
-                .textures
-                .get(&self.texture_units[stage.unit].bound_texture);
-        }
-        log::debug!(
+            // Resolve the bound textures once per draw, not per fragment.
+            let mut texs: [Option<&Texture>; raster::MAX_TEXTURE_STAGES] = [None; _];
+            for stage in stages {
+                texs[stage.unit] = self
+                    .textures
+                    .get(&self.texture_units[stage.unit].bound_texture);
+            }
+            log::debug!(
             "GLES draw mode=0x{mode:04x} indices={} stages={:?} active_unit={} vertex_array={} blend={} src={:?} dst={:?} alpha_test={} func={:?} ref={}",
             count,
             stages
@@ -3330,81 +3350,99 @@ impl Context {
             self.state.alpha_func,
             self.state.alpha_ref,
         );
-        let sample = SoftwareSampler {
-            textures: texs,
-            cache: &self.software_mips,
-            names: std::array::from_fn(|i| self.texture_units[i].bound_texture),
-        };
+            let sample = SoftwareSampler {
+                textures: texs,
+                cache: &self.software_mips,
+                names: std::array::from_fn(|i| self.texture_units[i].bound_texture),
+            };
 
-        match mode {
-            GL_POINTS => {
-                for v in &verts {
-                    raster::draw_point(&mut self.target, &self.state, &sample, &stages, *v);
-                }
-                return;
-            }
-            GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => {
-                if mode == GL_LINES {
-                    for v in verts.chunks_exact(2) {
-                        raster::draw_line(
-                            &mut self.target,
-                            &self.state,
-                            &sample,
-                            &stages,
-                            [v[0], v[1]],
-                        );
+            match mode {
+                GL_POINTS => {
+                    for v in &verts {
+                        raster::draw_point(&mut self.target, &self.state, &sample, &stages, *v);
                     }
-                } else {
-                    for v in verts.windows(2) {
-                        raster::draw_line(
-                            &mut self.target,
-                            &self.state,
-                            &sample,
-                            &stages,
-                            [v[0], v[1]],
-                        );
-                    }
-                    if mode == GL_LINE_LOOP && verts.len() > 1 {
-                        raster::draw_line(
-                            &mut self.target,
-                            &self.state,
-                            &sample,
-                            &stages,
-                            [*verts.last().unwrap(), verts[0]],
-                        );
-                    }
+                    return;
                 }
-                return;
-            }
-            _ => {}
-        }
-
-        // Stream primitives in their original order without allocating a triangle list.
-        let mut draw = |tri| {
-            raster::draw_triangle(&mut self.target, &self.state, &sample, &stages, tri);
-        };
-        match mode {
-            GL_TRIANGLES => {
-                for c in verts.chunks_exact(3) {
-                    draw([c[0], c[1], c[2]]);
-                }
-            }
-            GL_TRIANGLE_STRIP => {
-                for i in 2..verts.len() {
-                    // Preserve alternating winding and the provoking vertex.
-                    if i % 2 == 0 {
-                        draw([verts[i - 2], verts[i - 1], verts[i]]);
+                GL_LINES | GL_LINE_STRIP | GL_LINE_LOOP => {
+                    if mode == GL_LINES {
+                        for v in verts.chunks_exact(2) {
+                            raster::draw_line(
+                                &mut self.target,
+                                &self.state,
+                                &sample,
+                                &stages,
+                                [v[0], v[1]],
+                            );
+                        }
                     } else {
-                        draw([verts[i - 1], verts[i - 2], verts[i]]);
+                        for v in verts.windows(2) {
+                            raster::draw_line(
+                                &mut self.target,
+                                &self.state,
+                                &sample,
+                                &stages,
+                                [v[0], v[1]],
+                            );
+                        }
+                        if mode == GL_LINE_LOOP && verts.len() > 1 {
+                            raster::draw_line(
+                                &mut self.target,
+                                &self.state,
+                                &sample,
+                                &stages,
+                                [*verts.last().unwrap(), verts[0]],
+                            );
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
+
+            // Stream primitives in their original order without allocating a triangle list.
+            let mut draw = |tri| {
+                raster::draw_triangle(&mut self.target, &self.state, &sample, &stages, tri);
+            };
+            match mode {
+                GL_TRIANGLES => {
+                    for c in verts.chunks_exact(3) {
+                        draw([c[0], c[1], c[2]]);
                     }
                 }
-            }
-            GL_TRIANGLE_FAN => {
-                for i in 2..verts.len() {
-                    draw([verts[0], verts[i - 1], verts[i]]);
+                GL_TRIANGLE_STRIP => {
+                    for i in 2..verts.len() {
+                        // Preserve alternating winding and the provoking vertex.
+                        if i % 2 == 0 {
+                            draw([verts[i - 2], verts[i - 1], verts[i]]);
+                        } else {
+                            draw([verts[i - 1], verts[i - 2], verts[i]]);
+                        }
+                    }
                 }
+                GL_TRIANGLE_FAN => {
+                    for i in 2..verts.len() {
+                        draw([verts[0], verts[i - 1], verts[i]]);
+                    }
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+        })();
+        verts.clear();
+        dense.clear();
+        expanded.clear();
+        remap.clear();
+        // Bound retained storage after exceptional large/sparse guest submissions.
+        if verts.capacity() <= 65536 {
+            self.assembled_vertices = verts;
+        }
+        if dense.capacity() <= 131072 {
+            self.dense_indices = dense;
+        }
+        if expanded.capacity() <= 131072 {
+            self.expanded_indices = expanded;
+        }
+        if remap.capacity() <= 131072 {
+            self.vertex_remap = remap;
         }
     }
 }
@@ -4396,6 +4434,89 @@ mod tests {
         assert_eq!(out.bytes[offset], 42);
         assert!(!c.prepare_vertex_stream(&mut source, [0, 0, 3].into_iter(), 3, false, &[], false));
         assert!(!source.flat_triangles);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES2; indexed fallback storage and mutable guest data"]
+    fn gpu_indexed_fallback_reuses_scratch_and_refreshes_guest_data() {
+        for es in [false, true] {
+            let mut c = native_ctx(es);
+            let mut mem = CountMem {
+                inner: FakeMem {
+                    base: BASE,
+                    bytes: quad_floats(),
+                },
+                reads: 0,
+                reject_bulk: true,
+            };
+            c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            let indices = [0, 1, 2, 0, 2, 3];
+            c.current_color = [1., 0., 0., 1.];
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [255, 0, 0, 255]);
+            let storage = (
+                c.assembled_vertices.as_ptr(),
+                c.dense_indices.as_ptr(),
+                c.expanded_indices.as_ptr(),
+                c.vertex_remap.capacity(),
+            );
+            assert!(c.assembled_vertices.capacity() >= 4);
+            assert!(c.dense_indices.capacity() >= 6);
+            c.clear_color = [0., 0., 0., 1.];
+            c.clear(GL_COLOR_BUFFER_BIT);
+            mem.inner.bytes.fill(0);
+            c.draw_elements(&mut mem, GL_TRIANGLES, &indices);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 0, 0, 255]);
+            assert_eq!(
+                storage,
+                (
+                    c.assembled_vertices.as_ptr(),
+                    c.dense_indices.as_ptr(),
+                    c.expanded_indices.as_ptr(),
+                    c.vertex_remap.capacity()
+                )
+            );
+            assert!(c.assembled_vertices.is_empty());
+            assert!(c.vertex_remap.is_empty());
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+    }
+
+    #[test]
+    fn fallback_scratch_reuses_storage_but_refreshes_guest_vertices() {
+        let mut c = ctx();
+        let original = quad_floats();
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: original.clone(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        let ptr = c.assembled_vertices.as_ptr();
+        let capacity = c.assembled_vertices.capacity();
+        assert!(capacity >= 4);
+        assert!(c.assembled_vertices.is_empty());
+        c.target.color.fill(0);
+        // All vertices at the same point must not reuse the previous quad.
+        mem.bytes.fill(0);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        assert_eq!(covered(&c), 0);
+        assert_eq!(c.assembled_vertices.as_ptr(), ptr);
+        assert_eq!(c.assembled_vertices.capacity(), capacity);
+        // Invalid memory and then recovery must also recycle on the early exit.
+        mem.bytes.clear();
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        assert_eq!(c.assembled_vertices.as_ptr(), ptr);
+        c.take_error();
+        mem.bytes = original;
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        assert!(covered(&c) > 3000);
+        assert_eq!(c.assembled_vertices.as_ptr(), ptr);
     }
 
     #[test]

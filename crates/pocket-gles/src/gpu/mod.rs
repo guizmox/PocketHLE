@@ -3167,6 +3167,38 @@ impl Renderer {
         Some((self.width, self.height))
     }
 
+    /// Publish top-down RGBA directly, preserving the old RGB565 display precision.
+    /// Uses the existing readback; introduces no GL call or synchronization.
+    pub fn scaled_display_rgba_into(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        if self.render_scale == 1
+            || self.dirty
+            || self.readback.len() != (self.width * self.height * 4) as usize
+        {
+            return None;
+        }
+        out.resize(self.readback.len(), 0);
+        let stride = self.width as usize * 4;
+        for (src, dst) in self
+            .readback
+            .chunks_exact(stride)
+            .rev()
+            .zip(out.chunks_exact_mut(stride))
+        {
+            for (src, dst) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                let r = src[0] >> 3;
+                let g = src[1] >> 2;
+                let b = src[2] >> 3;
+                dst.copy_from_slice(&[
+                    (r << 3) | (r >> 2),
+                    (g << 2) | (g >> 4),
+                    (b << 3) | (b >> 2),
+                    255,
+                ]);
+            }
+        }
+        Some((self.width, self.height))
+    }
+
     pub fn read(&mut self, target: &mut RenderTarget) -> Result<(), String> {
         self.read_inner(target, None)
     }
@@ -5898,6 +5930,24 @@ mod tests {
             let mut high = Vec::new();
             assert_eq!(gpu.scaled_rgb565_into(&mut high), Some((32, 32)));
             assert_eq!(high.len(), 32 * 32 * 2);
+            let mut rgba = Vec::new();
+            assert_eq!(gpu.scaled_display_rgba_into(&mut rgba), Some((32, 32)));
+            for (old, new) in high.chunks_exact(2).zip(rgba.chunks_exact(4)) {
+                let p = u16::from_le_bytes([old[0], old[1]]);
+                let r = (p >> 11) as u8;
+                let g = ((p >> 5) & 63) as u8;
+                let b = (p & 31) as u8;
+                assert_eq!(
+                    new,
+                    &[
+                        (r << 3) | (r >> 2),
+                        (g << 2) | (g >> 4),
+                        (b << 3) | (b >> 2),
+                        255
+                    ]
+                );
+            }
+
             let pixel = |x: usize, y: usize| {
                 u16::from_le_bytes([high[(y * 32 + x) * 2], high[(y * 32 + x) * 2 + 1]])
             };

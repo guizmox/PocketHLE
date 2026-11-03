@@ -2567,13 +2567,13 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             c.target.resize(w, h);
         }
         c.present_rgb565(&mut ctx.kernel.framebuffer.pixels[..fb_len]);
-        c.scaled_rgb565_into(&mut rendered)
+        c.scaled_display_rgba_into(&mut rendered)
     });
     ctx.kernel.framebuffer.mark_dirty();
     if let Some((width, height)) = physical {
         ctx.kernel
             .framebuffer
-            .set_render_presentation(width, height, rendered);
+            .set_render_presentation_rgba(width, height, rendered);
     }
     // The conversion above replaces the framebuffer, including any video
     // composed by the message pump. Invalidate that presentation before
