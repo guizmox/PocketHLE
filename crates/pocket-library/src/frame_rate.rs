@@ -3,9 +3,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FrameRateLimit {
-    #[default]
-    #[serde(rename = "unlimited")]
-    Unlimited,
     #[serde(rename = "10")]
     Fps10,
     #[serde(rename = "15")]
@@ -16,13 +13,13 @@ pub enum FrameRateLimit {
     Fps30,
     #[serde(rename = "45")]
     Fps45,
-    #[serde(rename = "60")]
+    #[default]
+    #[serde(rename = "60", alias = "unlimited")]
     Fps60,
 }
 
 impl FrameRateLimit {
-    pub const ALL: [Self; 7] = [
-        Self::Unlimited,
+    pub const ALL: [Self; 6] = [
         Self::Fps10,
         Self::Fps15,
         Self::Fps20,
@@ -33,7 +30,6 @@ impl FrameRateLimit {
 
     pub fn fps(self) -> Option<u32> {
         match self {
-            Self::Unlimited => None,
             Self::Fps10 => Some(10),
             Self::Fps15 => Some(15),
             Self::Fps20 => Some(20),
@@ -45,7 +41,6 @@ impl FrameRateLimit {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Unlimited => "Unlimited",
             Self::Fps10 => "10 fps",
             Self::Fps15 => "15 fps",
             Self::Fps20 => "20 fps",
@@ -53,6 +48,20 @@ impl FrameRateLimit {
             Self::Fps45 => "45 fps",
             Self::Fps60 => "60 fps",
         }
+    }
+}
+
+/// Old explicit unlimited game values now inherit the emulator's bounded limit.
+pub fn deserialize_game_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<FrameRateLimit>, D::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) if value == "unlimited" || value == "inherit" => Ok(None),
+        Some(value) => FrameRateLimit::deserialize(
+            serde::de::value::StringDeserializer::<D::Error>::new(value),
+        )
+        .map(Some),
     }
 }
 
@@ -67,12 +76,12 @@ mod tests {
         assert_eq!(old.frame_rate_limit, None);
         assert_eq!(
             old.effective_frame_rate_limit(&crate::LauncherConfig::default()),
-            None
+            Some(60)
         );
     }
 
     #[test]
-    fn inherited_limit_and_explicit_unlimited_remain_distinct() {
+    fn all_games_inherit_the_global_limit_unless_they_choose_a_bounded_override() {
         for global in FrameRateLimit::ALL {
             let mut config = crate::LauncherConfig::default();
             config.frame_rate_limit = global;
@@ -84,10 +93,27 @@ mod tests {
             }
             let explicit: GameSettings =
                 serde_json::from_str(r#"{"frame_rate_limit":"unlimited"}"#).unwrap();
-            assert_eq!(explicit.effective_frame_rate_limit(&config), None);
+            assert_eq!(explicit.frame_rate_limit, None);
+            assert_eq!(explicit.effective_frame_rate_limit(&config), global.fps());
             let inherit: GameSettings =
                 serde_json::from_str(r#"{"frame_rate_limit":null}"#).unwrap();
             assert_eq!(inherit.effective_frame_rate_limit(&config), global.fps());
+        }
+    }
+
+    #[test]
+    fn global_default_and_legacy_unlimited_are_capped_at_sixty() {
+        assert_eq!(FrameRateLimit::default(), FrameRateLimit::Fps60);
+        for legacy in ["{}", r#"{"frame_rate_limit":"unlimited"}"#] {
+            let config: crate::LauncherConfig = serde_json::from_str(legacy).unwrap();
+            assert_eq!(config.frame_rate_limit, FrameRateLimit::Fps60);
+            assert_eq!(
+                serde_json::to_value(config).unwrap()["frame_rate_limit"],
+                "60"
+            );
+        }
+        for value in FrameRateLimit::ALL {
+            assert!(value.fps().is_some_and(|fps| fps <= 60));
         }
     }
 

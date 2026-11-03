@@ -129,7 +129,7 @@ data class GameSettings(
             screen = obj.optString("screen", "portrait"),
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
-            frameRateLimit = if (obj.isNull("frame_rate_limit")) null else obj.optString("frame_rate_limit", "unlimited"),
+            frameRateLimit = if (obj.isNull("frame_rate_limit")) null else obj.optString("frame_rate_limit", "unlimited").takeUnless { it == "unlimited" || it == "inherit" },
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
@@ -149,7 +149,7 @@ data class GameSettings(
 }
 
 data class LauncherConfig(
-    val frameRateLimit: String = "unlimited",
+    val frameRateLimit: String = "60",
     val schemaVersion: Int,
     val defaultCpuBackend: String,
     val verbosity: Int,
@@ -257,7 +257,7 @@ data class LauncherConfig(
             verbosity = obj.optInt("verbosity", 1),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
-            frameRateLimit = obj.optString("frame_rate_limit", "unlimited"),
+            frameRateLimit = obj.optString("frame_rate_limit", "60").takeIf { it in listOf("10","15","20","30","45","60") } ?: "60",
             glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),

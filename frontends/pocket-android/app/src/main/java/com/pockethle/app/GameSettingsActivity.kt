@@ -140,13 +140,15 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
+            val globalFrameLimit = runCatching { JSONObject(NativeBridge.readConfig(rootDir)).optString("frame_rate_limit", "60") }.getOrDefault("60").takeIf { it in listOf("10","15","20","30","45","60") } ?: "60"
+            val inheritedLimitLabel = "Emulator default ($globalFrameLimit fps)"
             findPreference<ListPreference>("frame_rate_limit")?.apply {
                 isPersistent = false
-                entries = arrayOf("Emulator default", "Unlimited", "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps")
-                entryValues = arrayOf("inherit", "unlimited", "10", "15", "20", "30", "45", "60")
+                entries = arrayOf(inheritedLimitLabel, "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps")
+                entryValues = arrayOf("inherit", "10", "15", "20", "30", "45", "60")
                 value = current.frameRateLimit ?: "inherit"
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
-                    "${pref.entry ?: "Emulator default"}. Maximum game FPS; may help frame-dependent animations. Unlimited adds no cap; display sync still applies. GAPI / DirectDraw / OpenGL ES; GDI-only drawing is not capped. Restart the game to apply."
+                    "${pref.entry ?: inheritedLimitLabel}. Maximum game FPS, up to 60. Emulator default inherits the global limit. GAPI / DirectDraw / OpenGL ES; GDI-only drawing is not capped. Restart the game to apply."
                 }
                 setOnPreferenceChangeListener { _, newValue ->
                     current = current.copy(frameRateLimit = newValue.toString().takeUnless { it == "inherit" })

@@ -567,8 +567,8 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
-    /// None inherits the emulator ceiling; Some(Unlimited) explicitly disables it.
-    #[serde(default)]
+    /// None inherits the emulator ceiling; explicit overrides are limited to 60 fps.
+    #[serde(default, deserialize_with = "frame_rate::deserialize_game_limit")]
     pub frame_rate_limit: Option<FrameRateLimit>,
     /// Display-relative arrows hold fixed touch zones; left-stick tilt controls position.
     #[serde(default)]
@@ -1282,7 +1282,7 @@ fn default_pocketpc_processor() -> String {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
-            frame_rate_limit: FrameRateLimit::Unlimited,
+            frame_rate_limit: FrameRateLimit::Fps60,
             pocketpc_processor: default_pocketpc_processor(),
             pocketpc_intel2700g_depth_bias: false,
             recording_quality: default_recording_quality(),

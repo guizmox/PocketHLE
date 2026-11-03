@@ -6,9 +6,9 @@ import org.junit.Test
 
 class InternalResolutionSettingsTest {
     @Test fun globalFrameLimitAndOptionalGameLimitRemainIndependent() {
-        assertEquals("unlimited", LauncherConfig.fromJson(JSONObject()).frameRateLimit)
+        assertEquals("60", LauncherConfig.fromJson(JSONObject()).frameRateLimit)
         assertNull(GameSettings.fromJson(JSONObject()).frameRateLimit)
-        for (limit in listOf("unlimited","10","15","20","30","45","60")) {
+        for (limit in listOf("10","15","20","30","45","60")) {
             val global=LauncherConfig.default().copy(frameRateLimit=limit,upscaleFilter="none")
             val restored=LauncherConfig.fromJson(global.toJson())
             assertEquals(limit,restored.frameRateLimit)
@@ -18,7 +18,8 @@ class InternalResolutionSettingsTest {
             assertNull(GameSettings.fromJson(game.copy(frameRateLimit=null).toJson()).frameRateLimit)
         }
         val legacy=JSONObject().put("anisotropic_filtering",8).put("frame_rate_limit","unlimited")
-        assertEquals("unlimited",GameSettings.fromJson(legacy).frameRateLimit)
+        assertNull(GameSettings.fromJson(legacy).frameRateLimit)
+        assertEquals("60",LauncherConfig.fromJson(legacy).frameRateLimit)
         assertFalse(GameSettings.fromJson(legacy).toJson().has("anisotropic_filtering"))
         assertFalse(LauncherConfig.fromJson(legacy).toJson().has("anisotropic_filtering"))
     }

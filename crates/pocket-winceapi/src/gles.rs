@@ -6318,6 +6318,57 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native OpenGL"]
+    fn fps_caps_apply_to_every_internal_resolution_policy() {
+        let _g = guard();
+        for policy in [1, 2, 3, 4, 5] {
+            let mut cpu = fresh_cpu();
+            let mut kernel = fresh_kernel();
+            reset_for_test(240, 320);
+            set_internal_resolution(policy);
+            set_gpu_renderer(true);
+            assert!(with_ctx(|c| c.gpu_active()));
+            with_ctx(|c| c.clear(pocket_gles::GL_COLOR_BUFFER_BIT));
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_swap_buffers,
+                    &[DISPLAY_HANDLE, SURFACE_HANDLE]
+                ),
+                EGL_TRUE
+            );
+            for fps in [10u32, 15, 20, 30, 45, 60] {
+                let anchor = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                kernel.framebuffer.directdraw.frame_rate_limit = Some(fps);
+                kernel.framebuffer.directdraw.last_present = Some(anchor);
+                kernel.framebuffer.directdraw.pending.clear();
+                cpu.write_reg(ArmReg::R0, DISPLAY_HANDLE).unwrap();
+                cpu.write_reg(ArmReg::R1, SURFACE_HANDLE).unwrap();
+                let t = thunk();
+                let mut ctx = CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &t,
+                };
+                assert_eq!(
+                    egl_swap_buffers(&mut ctx).unwrap(),
+                    DispatchOutcome::JumpTo(t.thunk_va)
+                );
+                let key = (0, t.thunk_va, ctx.cpu.read_reg(ArmReg::Sp).unwrap());
+                assert_eq!(
+                    ctx.kernel.framebuffer.directdraw.pending[&key],
+                    anchor
+                        + std::time::Duration::from_nanos(
+                            1_000_000_000u64.div_ceil(u64::from(fps))
+                        ),
+                    "policy={policy} fps={fps}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn window_swaps_pace_software_and_preserve_retry_arguments() {
         let _g = guard();
         window_swap_timing(false);

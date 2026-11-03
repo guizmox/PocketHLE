@@ -356,10 +356,10 @@ class SettingsActivity : AppCompatActivity() {
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="frame_rate_limit"; title="Frame rate limit"; isPersistent=false
-                entries=arrayOf("Unlimited", "10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps")
-                entryValues=arrayOf("unlimited", "10", "15", "20", "30", "45", "60")
+                entries=arrayOf("10 fps", "15 fps", "20 fps", "30 fps", "45 fps", "60 fps")
+                entryValues=arrayOf("10", "15", "20", "30", "45", "60")
                 value=current.frameRateLimit
-                summaryProvider=Preference.SummaryProvider<ListPreference> { pref -> "${pref.entry ?: "Unlimited"}. Default maximum game FPS; each game can inherit or override it. Applies next launch." }
+                summaryProvider=Preference.SummaryProvider<ListPreference> { pref -> "${pref.entry ?: "60 fps"}. Default maximum game FPS (up to 60); each game can inherit or override it. Applies next launch." }
                 setOnPreferenceChangeListener { _, v -> current=current.copy(frameRateLimit=v.toString());writeConfig();true }
             })
 

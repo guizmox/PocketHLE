@@ -1,3 +1,8 @@
-tools\hardware-diag\suites\timing\build.py
-tools\hardware-diag\suites\timing\src\timetest.c
-tools\hardware-diag\suites\vfs\src\vfstest.c
+crates\pocket-library\src\frame_rate.rs
+crates\pocket-library\src\lib.rs
+crates\pocket-winceapi\src\gles.rs
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\InternalResolutionSettingsTest.kt
+frontends\pocket-desktop\src\app.rs
