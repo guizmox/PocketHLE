@@ -13,3 +13,6 @@ mod glow_integration;
 
 #[cfg(feature = "wgpu")]
 mod wgpu_integration;
+
+#[cfg(feature = "glow")]
+mod pocket_ui_trace;

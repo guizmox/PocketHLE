@@ -18,6 +18,7 @@ mod gamepad;
 mod gamepad_host;
 mod gizmondo_layout;
 mod host_gpu;
+mod latest_frame;
 mod launch_args;
 mod native_share;
 mod reconstruction;
@@ -143,7 +144,17 @@ fn run_launcher() -> Result<()> {
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE logo")?
         .to_rgba8();
+    // Diagnostic A/B switch for input-triggered NVIDIA UI presentation stalls.
+    // Normal launches retain vsync; this does not change guest LCD/FPS pacing.
+    let ui_vsync = std::env::var("POCKETHLE_UI_VSYNC")
+        .map(|value| value != "0")
+        .unwrap_or(true);
+    log::info!(
+        "HOST_UI_VSYNC_REQUEST={} (host window only; game FPS limit unchanged)",
+        if ui_vsync { "ON" } else { "OFF" }
+    );
     let native_options = eframe::NativeOptions {
+        vsync: ui_vsync,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(std::sync::Arc::new(eframe::egui::IconData {
                 width: icon.width(),

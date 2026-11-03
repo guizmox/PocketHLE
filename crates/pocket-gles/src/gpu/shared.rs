@@ -288,6 +288,10 @@ impl SharedConsumer {
     }
 }
 
+// Desktop has one kernel image, one mailbox image, and up to two UI images
+// during receive/replace. Reserve one more slot to capture their successor.
+// Bounded mailbox transport is essential: capacity alone cannot bound a FIFO.
+const SNAPSHOT_CAPACITY: usize = 5;
 pub(super) struct FramePool {
     sync: SyncApi,
     copy: unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32),
@@ -317,7 +321,7 @@ impl FramePool {
         let index = self.slots.iter().position(|s| Arc::strong_count(s) == 1);
         let index = match index {
             Some(i) => i,
-            None if self.slots.len() < 3 => {
+            None if self.slots.len() < SNAPSHOT_CAPACITY => {
                 let mut texture = 0;
                 (r.gl.GenTextures)(1, &mut texture);
                 if texture == 0 {
@@ -403,7 +407,7 @@ impl FramePool {
     }
 }
 impl Renderer {
-    /// Snapshot without readback. Returns None when all three slots are leased.
+    /// Snapshot without readback. Returns None when all bounded pipeline slots are leased.
     /// This alone does not make a window swap visible or update guest memory.
     pub fn snapshot_shared_frame(&mut self) -> Result<Option<SharedFrame>, String> {
         self.host.make_current()?;
@@ -510,7 +514,7 @@ mod tests {
                     "failed batch must not allocate/copy a snapshot"
                 );
                 gpu.gl.GetError = original;
-                let retained: Vec<_> = (0..3)
+                let retained: Vec<_> = (0..SNAPSHOT_CAPACITY)
                     .map(|_| gpu.snapshot_configured_shared_frame().unwrap().unwrap())
                     .collect();
                 assert!(gpu.snapshot_configured_shared_frame().unwrap().is_none());
@@ -524,6 +528,64 @@ mod tests {
                 gpu.gl.GetError = original;
                 drop(retained);
                 assert!(gpu.snapshot_configured_shared_frame().unwrap().is_some());
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires shared EGL desktop GL/GLES and native sync"]
+    fn bounded_latest_pipeline_keeps_capture_headroom_without_cpu_readback() {
+        for es in [false, true] {
+            let ui = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let mut external = unsafe { ExternalGpuContext::capture_current().unwrap() };
+            let source = external.source();
+            std::thread::scope(|scope| {
+                let (tx, rx) = mpsc::sync_channel(1);
+                let worker = scope.spawn(move || {
+                    let mut producer = Renderer::new_shared(&source, 8, 8).unwrap();
+                    let state = PipelineState {
+                        viewport: (0, 0, 8, 8),
+                        ..Default::default()
+                    };
+                    producer
+                        .clear(8, 8, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                        .unwrap();
+                    let retained_ui = producer.snapshot_shared_frame().unwrap().unwrap();
+                    let mut in_flight: Vec<_> = (0..3)
+                        .map(|_| producer.snapshot_shared_frame().unwrap().unwrap())
+                        .collect();
+                    for _ in 0..1000 {
+                        producer
+                            .clear(8, 8, &state, [0., 1., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                            .unwrap();
+                        let next = producer.snapshot_shared_frame().unwrap().expect(
+                            "bounded UI/mailbox/kernel pipeline must leave capture headroom",
+                        );
+                        // Replace, rather than accumulate an unbounded history.
+                        in_flight.rotate_left(1);
+                        in_flight[2] = next;
+                    }
+                    assert!(producer.readback.is_empty());
+                    assert_eq!(
+                        producer.shared_frames.as_ref().unwrap().slots.len(),
+                        SNAPSHOT_CAPACITY
+                    );
+                    tx.send((retained_ui, in_flight.pop().unwrap())).unwrap();
+                });
+                let (old, latest) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                worker.join().unwrap();
+                assert_eq!(
+                    unsafe { read_sample(&ui, &mut external, &old) }.0,
+                    [255, 0, 0, 255]
+                );
+                assert_eq!(
+                    unsafe { read_sample(&ui, &mut external, &latest) }.0,
+                    [0, 255, 0, 255]
+                );
             });
         }
     }
@@ -555,8 +617,15 @@ mod tests {
                             .unwrap();
                         retained.push(producer.snapshot_shared_frame().unwrap().unwrap());
                     }
+                    // Keep the extra in-flight pipeline slots occupied too.
+                    let pipeline: Vec<_> = (3..SNAPSHOT_CAPACITY)
+                        .map(|_| producer.snapshot_shared_frame().unwrap().unwrap())
+                        .collect();
                     assert!(producer.snapshot_shared_frame().unwrap().is_none());
-                    assert_eq!(producer.shared_frames.as_ref().unwrap().slots.len(), 3);
+                    assert_eq!(
+                        producer.shared_frames.as_ref().unwrap().slots.len(),
+                        SNAPSHOT_CAPACITY
+                    );
                     send.send(retained).unwrap();
                     commands.recv_timeout(Duration::from_secs(10)).unwrap();
                     // The consumer abandons exactly one unpainted slot. Other
@@ -571,6 +640,7 @@ mod tests {
                     let replacement = producer.snapshot_shared_frame().unwrap().unwrap();
                     assert!(producer.snapshot_shared_frame().unwrap().is_none());
                     assert!(producer.readback.is_empty());
+                    drop(pipeline);
                     send.send(vec![replacement]).unwrap();
                     commands.recv_timeout(Duration::from_secs(10)).unwrap();
                     assert!(producer.readback.is_empty());

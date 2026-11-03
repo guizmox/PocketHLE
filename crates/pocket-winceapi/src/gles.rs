@@ -3578,7 +3578,8 @@ mod tests {
                         set_gpu_renderer(true);
                         let mut retained = Vec::new();
                         let mut first_source = None;
-                        let swaps = if disable { 2 } else { 4 };
+                        // Retain all five bounded pipeline slots before testing true exhaustion.
+                        let swaps = if disable { 2 } else { 6 };
                         for index in 0..swaps {
                             let final_swap = index + 1 == swaps;
                             if final_swap && disable {

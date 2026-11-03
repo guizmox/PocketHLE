@@ -247,7 +247,7 @@ pub struct PocketLauncher {
     /// Live framebuffer updates streamed by [`Runner`] while a game
     /// is running. `Some` between [`Self::spawn_run`] and
     /// `UiEvent::RunFinished`; `None` otherwise.
-    frame_rx: Option<Receiver<FrameSnapshot>>,
+    frame_rx: Option<crate::latest_frame::Receiver<FrameSnapshot>>,
     gps_notice_rx: Option<Receiver<(f64, f64)>>,
     dependency_notice_rx: Option<Receiver<String>>,
     dependency_notice: Option<String>,
@@ -1066,9 +1066,9 @@ impl PocketLauncher {
         // have produced since the last UI tick.
         let mut latest: Option<FrameSnapshot> = None;
         if let Some(rx) = self.frame_rx.as_ref() {
-            while let Ok(frame) = rx.try_recv() {
-                latest = Some(frame);
-            }
+            // The mailbox already discards superseded images on the producer.
+            // Take once: a fast producer must not keep the UI draining forever.
+            latest = rx.try_recv().ok();
         }
         if self.dependency_notice.is_none() {
             if let Some(rx) = &self.dependency_notice_rx {
@@ -5308,7 +5308,7 @@ impl PocketLauncher {
         };
         self.running_stylus_grid = game.settings.pocketpc_stylus_grid.clone();
         self.console_fit_pending = true;
-        let (frame_tx, frame_rx) = mpsc::channel();
+        let (frame_tx, frame_rx) = crate::latest_frame::channel();
         let (input_tx, input_rx) = mpsc::channel();
         let (dependency_notice_tx, dependency_notice_rx) = mpsc::channel();
         self.dependency_notice_rx = Some(dependency_notice_rx);

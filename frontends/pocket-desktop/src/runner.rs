@@ -80,7 +80,7 @@ impl Runner {
         &self,
         context: &mut Option<pocket_core::winceapi::gles::ExternalGpuContext>,
         input: &mut Option<Sender<InputCommand>>,
-        frames: &mut Option<Receiver<FrameSnapshot>>,
+        frames: &mut Option<crate::latest_frame::Receiver<FrameSnapshot>>,
         worker: &mut Option<std::thread::JoinHandle<()>>,
     ) {
         self.shared_export.store(false, Ordering::Release);
@@ -106,7 +106,7 @@ impl Runner {
         &self,
         library_root: PathBuf,
         game: GameEntry,
-        live_tx: Option<Sender<FrameSnapshot>>,
+        live_tx: Option<crate::latest_frame::Sender<FrameSnapshot>>,
         input_rx: Option<Receiver<InputCommand>>,
         gps_notice_tx: Option<Sender<(f64, f64)>>,
         dependency_notice_tx: Option<Sender<String>>,
@@ -938,7 +938,7 @@ struct RunHook {
     gps_notice_tx: Option<Sender<(f64, f64)>>,
     dependency_notice_tx: Option<Sender<String>>,
     geofence_down: bool,
-    frame_tx: Option<Sender<FrameSnapshot>>,
+    frame_tx: Option<crate::latest_frame::Sender<FrameSnapshot>>,
     input_rx: Option<Arc<Mutex<Receiver<InputCommand>>>>,
     stop_all: Arc<AtomicBool>,
     foreground: Arc<AtomicU32>,
@@ -1230,7 +1230,7 @@ impl RunHook {
     }
 
     fn new(
-        frame_tx: Option<Sender<FrameSnapshot>>,
+        frame_tx: Option<crate::latest_frame::Sender<FrameSnapshot>>,
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
@@ -1820,7 +1820,7 @@ mod deferred_read_tests {
         policy.store(true, Ordering::Release);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (input_tx, input_rx) = std::sync::mpsc::channel();
-        let (_frame_tx, frame_rx) = std::sync::mpsc::channel::<FrameSnapshot>();
+        let (_frame_tx, frame_rx) = crate::latest_frame::channel::<FrameSnapshot>();
         let (final_tx, final_rx) = std::sync::mpsc::channel();
         let worker_source = source.clone();
         let mut worker = Some(std::thread::spawn(move || {
@@ -1960,7 +1960,7 @@ mod deferred_read_tests {
                     1
                 );
                 pocket_core::winceapi::gles::set_gpu_renderer(true);
-                let (tx, rx) = std::sync::mpsc::channel();
+                let (tx, rx) = crate::latest_frame::channel();
                 let mut hook = RunHook::new(Some(tx), None);
                 let mut frames = Vec::new();
                 for color in [[65536, 0, 0, 65536], [0, 65536, 0, 65536]] {
@@ -1999,7 +1999,7 @@ mod deferred_read_tests {
     }
     #[test]
     fn throttled_frames_never_read_gpu_and_due_read_failures_stop_without_stale_pixels() {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::latest_frame::channel();
         let mut hook = RunHook::new(Some(tx), None);
         let mut process = process();
         let kernel = &mut process.state;

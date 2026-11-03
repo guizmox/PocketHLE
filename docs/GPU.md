@@ -1,3 +1,36 @@
+WGL experiment rollback in this delivery: upstream eframe change_gl_context
+body/signature restored. No custom WGL query, lookup cache or binding reuse
+guard remains. Opt-in CPU timing remains available for verification only.
+
+## Bounded desktop image handoff (2026-11-04)
+
+Desktop/Deck preview transport is a one-image mailbox, not an unbounded mpsc
+FIFO. Producer publication replaces and releases the previous pending image;
+the UI takes once per update, avoiding both stale GPU leases and an unbounded
+drain loop. Input, child-process, GPS, and outcome channels retain mpsc FIFO
+semantics. Mailbox receiver teardown releases the pending lease and rejects
+future sends; producer clones preserve disconnect semantics.
+
+The shared native snapshot pool is bounded to five slots: one current kernel
+image, one pending mailbox image, up to two UI snapshots during receive/replace,
+and one slot for capturing their successor. Capacity alone cannot fix an
+unbounded queue; both changes are required. Additional slots allocate lazily.
+At 320x240 the two extra RGBA textures total 614400 bytes; at 1280x960 about
+9.4 MiB, excluding driver allocation overhead. No texture is overwritten while
+leased, and existing ready/done fences, retirement, errors, CPU authority and
+real-backpressure fallback remain unchanged. Explicit CPU filters, mapped GAPI,
+recording/readback, missing sharing, and software rendering are not forced GPU.
+Android already uses a latest-image handoff; only the common pool bound changes
+there. Desktop shutdown still joins the worker before closing the UI share group.
+
+Tests cover 10000 publications to a stalled UI with prompt obsolete-lease
+release, newest-image delivery, producer clones and receiver shutdown. A native
+GL/GLES test holds four old pipeline images across 1000 successor captures,
+checks no readback and unchanged retained red/new green pixels. Full-pool
+backpressure, resize, abandonment, delayed disposal and queued-error detection
+are still tested at the new bound. Hardware NVIDIA/Intel visual validation and
+complete Windows/Android builds remain separate from local tests.
+
 # GPU rendering
 
 ## UI redraw context reuse (2026-11-03)
