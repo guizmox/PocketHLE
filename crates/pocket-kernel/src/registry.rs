@@ -282,6 +282,15 @@ impl Registry {
         if let Some(snapshot) = snapshot {
             let mut keys = store.keys.clone();
             for (key, mut values) in snapshot.keys {
+                // Older device snapshots may have this key without Mute.
+                // Supply only the missing default; zero is a saved choice.
+                if key == r"hkcu\controlpanel\volume" {
+                    if let Some(default) = store.keys.get(&key).and_then(|v| v.get("mute")) {
+                        values
+                            .entry("mute".into())
+                            .or_insert_with(|| default.clone());
+                    }
+                }
                 // Old snapshots may contain an empty backlight key or a zero
                 // left by an uninitialised game setting. Repair device defaults
                 // before Colors queries them to initialise its own slider.
@@ -417,6 +426,10 @@ impl Registry {
     /// tends to give up and exit rather than fall back.
     pub fn with_device_defaults() -> Self {
         let mut reg = Self::new();
+        // Despite its name, CE's Mute value enables sound categories. Bit 1
+        // enables application audio. Interstellar Flames checks it both at
+        // startup and on resume, disabling music/SFX when the value is absent.
+        reg.set_value(r"HKCU\ControlPanel\Volume", "Mute", RegistryValue::Dword(2));
         // Gizmondo OEMINC.H: range 1..31. Neutral is Colors slider position 2,
         // OnLevel 11 / DimLevel 0 (SDK hardware default is 24). Colors reads
         // OnLevel to initialise its own brightness slider, then writes both
@@ -922,6 +935,63 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn application_audio_default_is_queryable() {
+        let mut registry = Registry::with_device_defaults();
+        let handle = registry.open(r"HKCU\ControlPanel\Volume").unwrap();
+        let key = registry.path_for(handle).unwrap();
+        let value = registry.value(&key, "MUTE").unwrap();
+        assert_eq!(value.type_code(), 4);
+        assert_eq!(value.to_bytes(), 2u32.to_le_bytes());
+        registry.close(handle);
+    }
+
+    #[test]
+    fn application_audio_persistence_fills_missing_value_and_preserves_choices() {
+        let key = r"HKCU\ControlPanel\Volume";
+        // No volume key, an empty key, a key with another setting, and saved
+        // sound-category masks including an explicit mute must all survive.
+        for (has_key, saved) in [
+            (false, None),
+            (true, None),
+            (true, Some(0)),
+            (true, Some(1)),
+            (true, Some(2)),
+            (true, Some(7)),
+        ] {
+            for other_setting in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("registry.json");
+                let mut previous = Registry::new();
+                previous.configure_persistence(&path).unwrap();
+                if has_key {
+                    assert!(previous.create_key(key));
+                    if other_setting {
+                        assert!(previous.set_value(key, "Volume", RegistryValue::Dword(123)));
+                    }
+                    if let Some(mask) = saved {
+                        assert!(previous.set_value(key, "Mute", RegistryValue::Dword(mask)));
+                    }
+                }
+                previous.flush().unwrap();
+                let mut loaded = Registry::with_device_defaults();
+                loaded.configure_persistence(&path).unwrap();
+                assert_eq!(
+                    loaded.value(key, "Mute"),
+                    Some(RegistryValue::Dword(saved.unwrap_or(2)))
+                );
+                assert_eq!(
+                    loaded.value(key, "Volume"),
+                    (has_key && other_setting).then_some(RegistryValue::Dword(123))
+                );
+                loaded.flush().unwrap();
+                let mut reloaded = Registry::with_device_defaults();
+                reloaded.configure_persistence(&path).unwrap();
+                assert_eq!(reloaded.values(key), loaded.values(key));
+            }
+        }
+    }
+
     #[test]
     fn persisted_orphan_keys_restore_parent_enumeration_without_changing_values() {
         let dir = tempfile::tempdir().unwrap();
