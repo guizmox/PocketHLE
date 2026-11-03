@@ -314,6 +314,19 @@ fn install_virtual_tlb(
         let _ = uc.ctl_set_tlb_type(TlbType::CPU);
         return None;
     }
+    // Installed callback above always returns paddr == page. Only this fixed
+    // mapping contract permits cross-page direct TB links. A CPU-TLB fallback
+    // never opts in; older native libraries safely reject the private control.
+    let chaining = unsafe {
+        ::unicorn_engine::uc_ctl(
+            uc.get_handle(),
+            ::unicorn_engine::ControlType(0x44005049u32 as _),
+            0x504841524d494431u64,
+        )
+    };
+    if chaining as u32 == 0 {
+        log::info!("ARM identity-mapping block chaining enabled");
+    }
     Some(map)
 }
 
@@ -1295,6 +1308,70 @@ mod tests {
             StopReason::Hook(0x1100)
         );
         assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 2);
+    }
+
+    #[test]
+    fn identity_cross_page_links_follow_code_permissions_and_remapping() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x4000, Prot::ALL).unwrap();
+        cpu.write_mem(0x1000, &0xea0007feu32.to_le_bytes()).unwrap();
+        let target = [0xe2800001u32, 0xe2522001, 0x1afff7fc, 0xea0003fb];
+        cpu.write_mem(
+            0x3000,
+            &target
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        cpu.add_code_hook(0x4000).unwrap();
+        for increment in [1u32, 3] {
+            cpu.write_mem(0x3000, &(0xe2800000u32 | increment).to_le_bytes())
+                .unwrap();
+            // Unicorn host writes require explicit translated-code invalidation.
+            cpu.uc.ctl_remove_cache(0x3000, 0x3003).unwrap();
+            cpu.write_reg(ArmReg::R0, 0).unwrap();
+            cpu.write_reg(ArmReg::R2, 5000).unwrap();
+            assert_eq!(
+                cpu.run_until_hook(0x1000, 100000).unwrap(),
+                StopReason::Hook(0x4000)
+            );
+            assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 5000 * increment);
+        }
+        // Guest writes must invalidate and unlink the already-chained target.
+        cpu.write_mem(0x2000, &[0x00, 0x30, 0x81, 0xe5, 0xfd, 0xfb, 0xff, 0xea])
+            .unwrap();
+        cpu.write_reg(ArmReg::R1, 0x3000).unwrap();
+        cpu.write_reg(ArmReg::R3, 0xe2800005).unwrap();
+        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 5000).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x2000, 100000).unwrap(),
+            StopReason::Hook(0x4000)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 25000);
+        cpu.protect_region(0x3000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::R2, 2).unwrap();
+        assert!(cpu.run_until_hook(0x1000, 100).is_err());
+        cpu.unmap_region(0x3000, 0x1000).unwrap();
+        cpu.map_region(0x3000, 0x1000, Prot::ALL).unwrap();
+        let target = [0xe2800007u32, 0xe2522001, 0x1afff7fc, 0xea0003fb];
+        cpu.write_mem(
+            0x3000,
+            &target
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        cpu.write_reg(ArmReg::R2, 5000).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 100000).unwrap(),
+            StopReason::Hook(0x4000)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 35000);
     }
 
     #[test]

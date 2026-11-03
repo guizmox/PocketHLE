@@ -2321,6 +2321,25 @@ int16_t float32_to_int16_round_to_zero(float32 a, float_status *s)
 
 int32_t float32_to_int32_round_to_zero(float32 a, float_status *s)
 {
+#if defined(TARGET_ARM) && !defined(TARGET_AARCH64)
+    unsigned exponent = (a >> 23) & 255;
+    /* Normal finite inputs whose magnitudes fit in a signed integer. */
+    if (exponent >= 127 && exponent < 158) {
+        uint32_t significand = (a & 0x7fffff) | 0x800000;
+        unsigned shift = exponent - 127;
+        uint32_t magnitude;
+        if (shift >= 23) {
+            magnitude = significand << (shift - 23);
+        } else {
+            unsigned discarded = 23 - shift;
+            magnitude = significand >> discarded;
+            if (significand & ((1u << discarded) - 1)) {
+                float_raise(float_flag_inexact, s);
+            }
+        }
+        return (a >> 31) ? -(int32_t)magnitude : (int32_t)magnitude;
+    }
+#endif
     return float32_to_int32_scalbn(a, float_round_to_zero, 0, s);
 }
 

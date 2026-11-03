@@ -1421,7 +1421,12 @@ static inline void tb_remove_from_jmp_list(TranslationBlock *orig, int n_orig)
     int n;
 
     /* mark the LSB of jmp_dest[] so that no further jumps can be inserted */
+#if defined(_MSC_VER) && defined(_WIN64)
+    ptr = (uintptr_t)InterlockedOr64(
+        (volatile LONG64 *)&orig->jmp_dest[n_orig], 1) | (uintptr_t)1;
+#else
     ptr = atomic_or_fetch(&orig->jmp_dest[n_orig], 1);
+#endif
     dest = (TranslationBlock *)(ptr & ~1);
     if (dest == NULL) {
         return;
@@ -1469,7 +1474,9 @@ static inline void tb_jmp_unlink(TranslationBlock *dest)
 
     TB_FOR_EACH_JMP(dest, tb, n) {
         tb_reset_jump(tb, n);
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && defined(_WIN64)
+        InterlockedAnd64((volatile LONG64 *)&tb->jmp_dest[n], 1);
+#elif defined(_MSC_VER)
         atomic_and((long *)&tb->jmp_dest[n], (uintptr_t)NULL | 1);
 #else
         atomic_and(&tb->jmp_dest[n], (uintptr_t)NULL | 1);

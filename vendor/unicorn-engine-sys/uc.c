@@ -2937,11 +2937,34 @@ uc_err uc_ctl(uc_engine *uc, uc_control_type control, ...)
 
         if (rw == UC_CTL_IO_WRITE) {
             int mode = va_arg(args, int);
+            if (uc->ph_arm_identity_chaining) {
+                uc->tb_flush(uc);
+                uc->ph_arm_identity_chaining = false;
+            }
             err = uc->set_tlb(uc, mode);
         } else {
             err = UC_ERR_ARG;
         }
 
+        restore_jit_state(uc);
+        break;
+    }
+
+    /* Private identity-mapping contract; only a stopped ARM engine may opt in.
+     * This is not valid for arbitrary virtual-to-physical TLB callbacks. */
+    case 0x5049: {
+        UC_INIT(uc);
+        if (rw != UC_CTL_IO_WRITE || uc->arch != UC_ARCH_ARM || uc->nested_level) {
+            err = UC_ERR_ARG;
+        } else {
+            uint64_t policy = va_arg(args, uint64_t);
+            if (policy != 0 && policy != UINT64_C(0x504841524d494431)) {
+                err = UC_ERR_ARG;
+            } else {
+                uc->tb_flush(uc);
+                uc->ph_arm_identity_chaining = policy != 0;
+            }
+        }
         restore_jit_state(uc);
         break;
     }

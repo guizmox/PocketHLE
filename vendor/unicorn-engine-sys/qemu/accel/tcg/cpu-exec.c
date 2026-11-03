@@ -222,7 +222,10 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
         goto out_unlock_next;
     }
     /* Atomically claim the jump destination slot only if it was NULL */
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && defined(_WIN64)
+    old = (uintptr_t)InterlockedCompareExchange64(
+        (volatile LONG64 *)&tb->jmp_dest[n], (LONG64)(uintptr_t)tb_next, 0);
+#elif defined(_MSC_VER)
     old = atomic_cmpxchg((long *)&tb->jmp_dest[n], (uintptr_t)NULL, (uintptr_t)tb_next);
 #else
     old = atomic_cmpxchg(&tb->jmp_dest[n], (uintptr_t)NULL, (uintptr_t)tb_next);

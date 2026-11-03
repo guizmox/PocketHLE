@@ -2710,6 +2710,12 @@ static void gen_neon_dup_high16(TCGContext *tcg_ctx, TCGv_i32 var)
 static inline bool use_goto_tb(DisasContext *s, target_ulong dest)
 {
     struct uc_struct *uc = s->uc;
+    /* PocketHLE's virtual TLB maps VA to the identical physical address.
+     * Explicit opt-in keeps arbitrary remapping users on the original path.
+     * Linked TB invalidation and entry exit-request checks remain unchanged. */
+    if (uc->ph_arm_identity_chaining) {
+        return true;
+    }
     return (s->base.tb->pc & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK) ||
            ((s->base.pc_next - 1) & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK);
 }

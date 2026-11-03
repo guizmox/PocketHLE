@@ -3787,4 +3787,34 @@ static inline bool isar_feature_any_ccidx(const ARMISARegisters *id)
  */
 #define cpu_isar_feature(name, cpu) isar_feature_##name(&cpu->isar)
 
+/* Inline only the common A/R-profile AArch32 TB key. Read every dynamic
+ * input on every lookup; preserve the full helper for other profiles/debug. */
+static inline void arm_get_tb_cpu_state_fast(CPUARMState *env, target_ulong *pc,
+                                             target_ulong *cs_base,
+                                             uint32_t *pflags)
+{
+#ifdef CONFIG_DEBUG_TCG
+    cpu_get_tb_cpu_state(env, pc, cs_base, pflags);
+#else
+    uint32_t flags = env->hflags;
+    if (unlikely(FIELD_EX32(flags, TBFLAG_ANY, AARCH64_STATE) ||
+                 FIELD_EX32(flags, TBFLAG_ANY, SS_ACTIVE) ||
+                 arm_feature(env, ARM_FEATURE_M) ||
+                 arm_feature(env, ARM_FEATURE_XSCALE))) {
+        cpu_get_tb_cpu_state(env, pc, cs_base, pflags);
+        return;
+    }
+    *pc = env->regs[15];
+    *cs_base = 0;
+    FIELD_DP32(flags, TBFLAG_A32, VECLEN, env->vfp.vec_len, flags);
+    FIELD_DP32(flags, TBFLAG_A32, VECSTRIDE, env->vfp.vec_stride, flags);
+    if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
+        FIELD_DP32(flags, TBFLAG_A32, VFPEN, 1, flags);
+    }
+    FIELD_DP32(flags, TBFLAG_AM32, THUMB, env->thumb, flags);
+    FIELD_DP32(flags, TBFLAG_AM32, CONDEXEC, env->condexec_bits, flags);
+    *pflags = flags;
+#endif
+}
+
 #endif

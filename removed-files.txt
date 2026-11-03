@@ -1,1 +1,5 @@
+crates\pocket-cpu\src\diagnostics.rs
+crates\pocket-kernel\src\cpu_diagnostics.rs
 crates\pocket-gles\src\profile.rs
+docs\CPU-DIAGNOSTICS.md
+tools\inspect-unicorn-arm-inline.ps1

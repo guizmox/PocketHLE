@@ -270,6 +270,9 @@ typedef struct TargetPageBits TargetPageBits;
 typedef struct TCGContext TCGContext;
 
 struct uc_struct {
+    /* Private opt-in: caller guarantees identity virtual mappings. */
+    bool ph_arm_identity_chaining;
+
     uc_arch arch;
     uc_mode mode;
     uc_err errnum; // qemu/cpu-exec.c
