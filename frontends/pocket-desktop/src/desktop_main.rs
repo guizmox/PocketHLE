@@ -44,8 +44,44 @@ use pocket_library::{default_library_root, Library};
 /// same lines to a file under the library root means "there is no
 /// sound" can be answered by reading a log instead of by rebuilding
 /// with a console subsystem.
-struct Tee {
-    file: std::fs::File,
+// The restore transaction may replace the library directory. Keep ownership
+// controllable so our own logger does not pin that directory on Windows.
+static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+struct Tee;
+
+pub(crate) fn with_suspended_library_log<T>(
+    root: &std::path::Path,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct ResumeLog(Option<std::path::PathBuf>);
+    impl Drop for ResumeLog {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    Ok(file) => {
+                        *LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+                    }
+                    Err(error) => {
+                        eprintln!("Cannot resume library log {}: {error}", path.display())
+                    }
+                }
+            }
+        }
+    }
+    let file = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let resume = ResumeLog(file.as_ref().map(|_| root.join("pockethle-gui.log")));
+    if let Some(mut file) = file {
+        let _ = std::io::Write::flush(&mut file);
+        drop(file);
+    }
+    let result = operation();
+    drop(resume);
+    result
 }
 
 impl std::io::Write for Tee {
@@ -54,13 +90,18 @@ impl std::io::Write for Tee {
         // there is no console attached and every write fails. That must
         // not stop the file from being written.
         let _ = std::io::stderr().write_all(buf);
-        self.file.write_all(buf)?;
+        if let Some(file) = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            file.write_all(buf)?;
+        }
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         let _ = std::io::stderr().flush();
-        self.file.flush()
+        if let Some(file) = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            file.flush()?;
+        }
+        Ok(())
     }
 }
 
@@ -76,7 +117,8 @@ fn init_logging(library_root: &std::path::Path) -> Option<std::path::PathBuf> {
     let opened = std::fs::File::create(&path).ok();
     let result = opened.is_some().then(|| path.clone());
     if let Some(file) = opened {
-        builder.target(env_logger::Target::Pipe(Box::new(Tee { file })));
+        *LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+        builder.target(env_logger::Target::Pipe(Box::new(Tee)));
     }
     builder.init();
     result
@@ -184,4 +226,61 @@ fn run_launcher() -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod restore_log_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn restore_releases_its_log_and_resumes_after_success_error_and_unwind() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp =
+            std::env::temp_dir().join(format!("pockethle-log-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let source = temp.join("source");
+        drop(pocket_library::Library::open(&source).unwrap());
+        std::fs::write(source.join("marker"), b"restored").unwrap();
+        let archive = temp.join("backup.zip");
+        pocket_library::backup::save(&source, &archive).unwrap();
+        for (index, mode) in [
+            pocket_library::backup::RestoreMode::MergeNoOverwrite,
+            pocket_library::backup::RestoreMode::MergeOverwrite,
+            pocket_library::backup::RestoreMode::Replace,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = temp.join(format!("target-{index}"));
+            drop(pocket_library::Library::open(&root).unwrap());
+            *LOG_FILE.lock().unwrap() =
+                Some(std::fs::File::create(root.join("pockethle-gui.log")).unwrap());
+            with_suspended_library_log(&root, || {
+                assert!(LOG_FILE.lock().unwrap().is_none());
+                pocket_library::backup::restore(&root, &archive, mode)
+            })
+            .unwrap();
+            let mut tee = Tee;
+            tee.write_all(b"after restore\n").unwrap();
+            tee.flush().unwrap();
+            assert_eq!(std::fs::read(root.join("marker")).unwrap(), b"restored");
+            assert!(std::fs::read_to_string(root.join("pockethle-gui.log"))
+                .unwrap()
+                .contains("after restore"));
+            let result: Result<(), &str> = with_suspended_library_log(&root, || Err("test error"));
+            assert!(result.is_err());
+            assert!(LOG_FILE.lock().unwrap().is_some());
+            let panic = std::panic::catch_unwind(|| {
+                with_suspended_library_log(&root, || panic!("test unwind"))
+            });
+            assert!(panic.is_err());
+            assert!(LOG_FILE.lock().unwrap().is_some());
+            LOG_FILE.lock().unwrap().take();
+        }
+        std::fs::remove_dir_all(temp).unwrap();
+    }
 }

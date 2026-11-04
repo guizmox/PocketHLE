@@ -110,10 +110,7 @@ pub extern "system" fn Java_com_pockethle_app_MainActivity_banner<'local>(
     _class: JClass<'local>,
 ) -> jstring {
     init_logger();
-    new_jstring(
-        &env,
-        about_banner(),
-    )
+    new_jstring(&env, about_banner())
 }
 
 /// Explicit offline save action from Colors' startup dialog, before game launch.

@@ -1,2 +1,8 @@
-frontends/pocket-desktop/src/app.rs
 frontends/pocket-android-jni/src/lib.rs
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/desktop_main.rs
+vendor/eframe/src/epi.rs
+vendor/eframe/src/native/epi_integration.rs
+vendor/eframe/src/native/glow_integration.rs
+vendor/eframe/src/native/wgpu_integration.rs
+vendor/eframe/src/native/winit_integration.rs

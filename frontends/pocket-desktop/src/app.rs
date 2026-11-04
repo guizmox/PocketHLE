@@ -5131,7 +5131,9 @@ impl PocketLauncher {
             let tx = self.events_tx.clone();
             self.status = "Validating and restoring backup…".into();
             std::thread::spawn(move || {
-                let result = pocket_library::backup::restore(&root, &archive, mode)
+                let result = crate::with_suspended_library_log(&root, || {
+                    pocket_library::backup::restore(&root, &archive, mode)
+                })
                     .map(|()| "Library restored.".into())
                     .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(UiEvent::BackupFinished(result));
