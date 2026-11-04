@@ -1,5 +1,6 @@
 //! Portable library backups. Call only while games/imports/settings writes are stopped.
-//! Restore validates and builds a complete sibling tree before publishing it.
+//! Restore validates a complete sibling tree, then publishes its entries with rollback.
+//! The library root directory remains in place, including on Windows.
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -311,6 +312,15 @@ fn merge_catalogue(current: &Path, incoming: &Path, target: &Path, overwrite: bo
 }
 
 pub fn restore(root: &Path, archive: &Path, mode: RestoreMode) -> Result<()> {
+    restore_with_rename(root, archive, mode, |from, to| fs::rename(from, to))
+}
+
+fn restore_with_rename(
+    root: &Path,
+    archive: &Path,
+    mode: RestoreMode,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
     if fs::symlink_metadata(root)?.file_type().is_symlink() {
         bail!("Library root cannot be a symbolic link");
     }
@@ -335,17 +345,125 @@ pub fn restore(root: &Path, archive: &Path, mode: RestoreMode) -> Result<()> {
         validate_library(&next)?;
     }
     let previous = staging.path().join("previous");
-    fs::rename(&root, &previous).context("Could not move current library; nothing was replaced")?;
-    if let Err(error) = fs::rename(&next, &root) {
-        if let Err(rollback) = fs::rename(&previous, &root) {
-            let retained = staging.keep();
-            bail!("Restore failed ({error}); rollback failed ({rollback}). Original library retained at {}", retained.join("previous").display());
-        }
-        return Err(error).context("Restore failed; original library restored");
+    if let Err(failure) = publish_contents(&root, &next, &previous, &mut rename) {
+        return match failure {
+            PublishFailure::RolledBack(error) => {
+                Err(error).context("Restore failed; original library contents restored")
+            }
+            PublishFailure::Retain(error) => {
+                let retained = staging.keep();
+                Err(error).context(format!(
+                    "Restore and rollback could not complete. Recovery files retained at {}; do not delete this directory",
+                    retained.display()
+                ))
+            }
+        };
     }
     // A cleanup failure must not turn a successful commit into an apparent failure.
     if let Err(error) = staging.close() {
         log::warn!("Backup cleanup failed: {error}");
+    }
+    Ok(())
+}
+
+// Keep the library directory itself in place. Windows may pin that directory
+// (Explorer, a current directory or another directory handle) even when its
+// children can be replaced. Publish only a fully validated staged tree, retaining
+// every displaced entry until all moves succeed. This is a rollback transaction,
+// not a filesystem-wide atomic swap: callers must stop readers/writers first.
+enum PublishFailure {
+    RolledBack(anyhow::Error),
+    Retain(anyhow::Error),
+}
+
+fn entry_names(directory: &Path) -> std::io::Result<Vec<std::ffi::OsString>> {
+    let mut names = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    names.sort();
+    // Publish the catalogue last; it describes all other committed entries.
+    if let Some(index) = names.iter().position(|name| name == "library.json") {
+        let catalogue = names.remove(index);
+        names.push(catalogue);
+    }
+    Ok(names)
+}
+
+fn move_entry(
+    from: &Path,
+    to: &Path,
+    rename: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    // Never clobber a file created by an unexpected writer during publication
+    // or rollback. symlink_metadata also detects dangling links.
+    match fs::symlink_metadata(to) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "restore destination already exists",
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    rename(from, to)
+}
+
+fn publish_contents(
+    root: &Path,
+    next: &Path,
+    previous: &Path,
+    rename: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> std::result::Result<(), PublishFailure> {
+    let old_names = entry_names(root).map_err(|e| PublishFailure::RolledBack(e.into()))?;
+    let new_names = entry_names(next).map_err(|e| PublishFailure::RolledBack(e.into()))?;
+    fs::create_dir(previous).map_err(|e| PublishFailure::RolledBack(e.into()))?;
+    let mut displaced = Vec::new();
+    let mut published = Vec::new();
+    let publication = (|| -> Result<()> {
+        for name in old_names {
+            move_entry(&root.join(&name), &previous.join(&name), rename).with_context(|| {
+                format!(
+                    "Could not preserve current entry {}",
+                    root.join(&name).display()
+                )
+            })?;
+            displaced.push(name);
+        }
+        for name in new_names {
+            move_entry(&next.join(&name), &root.join(&name), rename).with_context(|| {
+                format!(
+                    "Could not publish restored entry {}",
+                    root.join(&name).display()
+                )
+            })?;
+            published.push(name);
+        }
+        Ok(())
+    })();
+    if let Err(error) = publication {
+        let mut failures = Vec::new();
+        for name in published.iter().rev() {
+            if let Err(e) = move_entry(&root.join(name), &next.join(name), rename) {
+                failures.push(format!(
+                    "could not withdraw {}: {e}",
+                    root.join(name).display()
+                ));
+            }
+        }
+        for name in displaced.iter().rev() {
+            if let Err(e) = move_entry(&previous.join(name), &root.join(name), rename) {
+                failures.push(format!(
+                    "could not recover {}: {e}",
+                    root.join(name).display()
+                ));
+            }
+        }
+        return if failures.is_empty() {
+            Err(PublishFailure::RolledBack(error))
+        } else {
+            Err(PublishFailure::Retain(error.context(failures.join("; "))))
+        };
     }
     Ok(())
 }
@@ -618,5 +736,175 @@ mod tests {
         library(temp.path(), "game", "bytes");
         assert!(save(temp.path(), &temp.path().join("recursive.zip")).is_err());
         assert!(!temp.path().join("recursive.zip").exists());
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn fixture(parent: &Path) -> (PathBuf, PathBuf) {
+        let source = parent.join("source");
+        let target = parent.join("target");
+        drop(crate::Library::open(&source).unwrap());
+        drop(crate::Library::open(&target).unwrap());
+        fs::write(source.join("incoming-only"), b"incoming").unwrap();
+        fs::write(source.join("shared"), b"backup").unwrap();
+        fs::write(target.join("local-only"), b"keep").unwrap();
+        fs::create_dir_all(target.join("saves/nested")).unwrap();
+        fs::write(target.join("saves/nested/progress.dat"), b"original save").unwrap();
+        fs::create_dir(source.join("empty-folder")).unwrap();
+        fs::write(target.join("shared"), b"current").unwrap();
+        let archive = parent.join("backup.zip");
+        save(&source, &archive).unwrap();
+        (target, archive)
+    }
+
+    fn snapshot(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+        fn walk(root: &Path, dir: &Path, result: &mut BTreeMap<String, Option<Vec<u8>>>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let key = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if path.is_dir() {
+                    result.insert(key, None);
+                    walk(root, &path, result);
+                } else {
+                    result.insert(key, Some(fs::read(path).unwrap()));
+                }
+            }
+        }
+        let mut result = BTreeMap::new();
+        walk(root, root, &mut result);
+        result
+    }
+
+    #[test]
+    fn all_modes_restore_while_the_root_directory_is_pinned() {
+        for mode in [
+            RestoreMode::MergeNoOverwrite,
+            RestoreMode::MergeOverwrite,
+            RestoreMode::Replace,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (root, archive) = fixture(temp.path());
+            #[cfg(windows)]
+            let pin = {
+                use std::os::windows::fs::OpenOptionsExt;
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0x1 | 0x2)
+                    .custom_flags(0x02000000)
+                    .open(&root)
+                    .unwrap()
+            };
+            #[cfg(not(windows))]
+            let pin = File::open(&root).unwrap();
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                root.metadata().unwrap().ino()
+            };
+            restore(&root, &archive, mode).unwrap();
+            assert_eq!(fs::read(root.join("incoming-only")).unwrap(), b"incoming");
+            assert_eq!(
+                root.join("local-only").exists(),
+                mode != RestoreMode::Replace
+            );
+            assert_eq!(
+                fs::read(root.join("shared")).unwrap(),
+                if mode == RestoreMode::MergeNoOverwrite {
+                    b"current".as_slice()
+                } else {
+                    b"backup".as_slice()
+                }
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(root.metadata().unwrap().ino(), inode);
+            }
+            drop(pin);
+        }
+    }
+
+    #[test]
+    fn failed_preservation_or_publication_restores_original_bytes() {
+        for during_publication in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (root, archive) = fixture(temp.path());
+            let before = snapshot(&root);
+            let fail_at = if during_publication {
+                entry_names(&root).unwrap().len() + 2
+            } else {
+                2
+            };
+            let mut calls = 0;
+            let error = restore_with_rename(&root, &archive, RestoreMode::Replace, |from, to| {
+                calls += 1;
+                if calls == fail_at {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected move refusal",
+                    ));
+                }
+                fs::rename(from, to)
+            })
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("original library contents restored"));
+            assert_eq!(snapshot(&root), before);
+        }
+    }
+
+    #[test]
+    fn failed_rollback_retains_every_original_entry_for_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let (root, archive) = fixture(temp.path());
+        let before = snapshot(&root);
+        let fail_at = entry_names(&root).unwrap().len() + 2;
+        let mut calls = 0;
+        let mut refused_rollback = false;
+        let error = restore_with_rename(&root, &archive, RestoreMode::Replace, |from, to| {
+            calls += 1;
+            let rollback =
+                from.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("previous"));
+            if calls == fail_at || (rollback && !refused_rollback) {
+                refused_rollback |= rollback;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected move refusal",
+                ));
+            }
+            fs::rename(from, to)
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("Recovery files retained"));
+        let recovery = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".pockethle-restore-")
+            })
+            .unwrap();
+        for (name, bytes) in before {
+            if let Some(bytes) = bytes {
+                assert!(
+                    fs::read(root.join(&name)).ok().as_ref() == Some(&bytes)
+                        || fs::read(recovery.join("previous").join(&name))
+                            .ok()
+                            .as_ref()
+                            == Some(&bytes),
+                    "missing original {name}"
+                );
+            }
+        }
     }
 }
