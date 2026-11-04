@@ -144,13 +144,9 @@ fn run_launcher() -> Result<()> {
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE logo")?
         .to_rgba8();
-    // Diagnostic A/B switch for input-triggered NVIDIA UI presentation stalls.
-    // Normal launches retain vsync; this does not change guest LCD/FPS pacing.
-    let ui_vsync = std::env::var("POCKETHLE_UI_VSYNC")
-        .map(|value| value != "0")
-        .unwrap_or(true);
+    let ui_vsync = library.config().desktop_vsync;
     log::info!(
-        "HOST_UI_VSYNC_REQUEST={} (host window only; game FPS limit unchanged)",
+        "HOST_UI_VSYNC_REQUEST={} (host window; game FPS setting is independent)",
         if ui_vsync { "ON" } else { "OFF" }
     );
     let native_options = eframe::NativeOptions {

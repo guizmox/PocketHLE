@@ -987,6 +987,9 @@ pub struct LauncherConfig {
     /// Default presentation ceiling for games that inherit emulator settings.
     #[serde(default)]
     pub frame_rate_limit: FrameRateLimit,
+    /// Desktop window swap synchronization. Applied when the window is created.
+    #[serde(default = "default_desktop_vsync")]
+    pub desktop_vsync: bool,
 
     #[serde(default = "default_pocketpc_processor")]
     pub pocketpc_processor: String,
@@ -1279,10 +1282,15 @@ fn default_pocketpc_processor() -> String {
     "pxa270".into()
 }
 
+fn default_desktop_vsync() -> bool {
+    true
+}
+
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
             frame_rate_limit: FrameRateLimit::Fps60,
+            desktop_vsync: true,
             pocketpc_processor: default_pocketpc_processor(),
             pocketpc_intel2700g_depth_bias: false,
             recording_quality: default_recording_quality(),

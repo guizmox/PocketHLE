@@ -12,27 +12,35 @@ use pocket_core::kernel::{FrameAction, FrameHook, InputEvent, KernelState};
 use pocket_core::Emulator;
 use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry};
 
-/// Minimum wall-clock interval between two `FrameSnapshot`s pushed
-/// from the runner thread to the GUI thread. The frame hook fires
-/// after every dispatched WinCE API call (potentially thousands of
-/// times per logical game frame, since every `FillRect` / `BitBlt`
-/// bumps `frame_counter`); without throttling we would generate and
-/// queue a fresh 300 KiB RGBA snapshot for every one of those calls,
-/// which is exactly the per-frame cost the desktop launcher used to
-/// drown in. ~60 fps is plenty for a 320×240 LCD preview.
-const FRAME_PUSH_INTERVAL: Duration = Duration::from_millis(16);
+/// Dirty GDI operations have no completed-frame boundary. Bound their snapshots
+/// independently of Unlimited, rather than converting every intermediate blit.
+const IMPLICIT_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
-fn presentation_phase(last: Option<Instant>, now: Instant) -> Option<Instant> {
+fn frame_interval(limit: Option<u32>) -> Option<Duration> {
+    match limit {
+        Some(0) => None,
+        Some(fps) => Some(Duration::from_nanos(1_000_000_000 / u64::from(fps))),
+        None => Some(IMPLICIT_FRAME_INTERVAL),
+    }
+}
+
+fn presentation_phase(
+    last: Option<Instant>,
+    now: Instant,
+    interval: Option<Duration>,
+) -> Option<Instant> {
+    let Some(interval) = interval else {
+        return Some(now);
+    };
     let Some(last) = last else {
         return Some(now);
     };
     let elapsed = now.saturating_duration_since(last);
-    if elapsed < FRAME_PUSH_INTERVAL {
+    if elapsed < interval {
         return None;
     }
-    // Skip missed slots after a pause; never send a burst of catch-up frames.
-    let remainder =
-        Duration::from_nanos((elapsed.as_nanos() % FRAME_PUSH_INTERVAL.as_nanos()) as u64);
+    // Preserve phase without generating catch-up bursts after a pause.
+    let remainder = Duration::from_nanos((elapsed.as_nanos() % interval.as_nanos()) as u64);
     Some(now - remainder)
 }
 
@@ -230,7 +238,11 @@ impl Runner {
         };
         summary_lines.push(format!("Backend: {}", effective_backend.label()));
         summary_lines.push(format!("Executable: {}", exe.display()));
-        emu.set_frame_rate_limit(game.settings.effective_frame_rate_limit(&launcher_config));
+        let fps_limit = game.settings.effective_frame_rate_limit(&launcher_config);
+        emu.set_frame_rate_limit(fps_limit);
+        hook.frame_interval = frame_interval(fps_limit);
+        log::info!("PRESENTATION_LIMIT={} (completed frames; unbounded intermediate GDI updates remain coalesced)",
+            fps_limit.filter(|fps| *fps != 0).map(|fps| format!("{fps} FPS")).unwrap_or_else(|| if fps_limit == Some(0) { "UNLIMITED".into() } else { "NATIVE".into() }));
         emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
             library_root.join("pockethle-unimplemented-apis.log"),
             game.display_name.clone(),
@@ -947,13 +959,10 @@ struct RunHook {
     last_frame: u64,
     frame_send_failed: bool,
     input_disconnected: bool,
-    /// Wall-clock timestamp of the last snapshot we emitted. Used to
-    /// rate-limit the snapshot conversion + channel send to roughly
-    /// `FRAME_PUSH_INTERVAL` (60 fps) so a chatty guest that bumps
-    /// `frame_counter` thousands of times per logical frame doesn't
-    /// pin the runner thread doing redundant RGB565→RGBA8888 work
-    /// the GUI never gets to paint anyway.
+    /// Phase of the last published snapshot, shared by explicit and implicit paths.
     last_emit_at: Option<Instant>,
+    frame_interval: Option<Duration>,
+    last_completed: u64,
     /// Reusable host-side scratch buffer for the RGBA conversion.
     /// `FrameSnapshot::fill_from_framebuffer` swaps it with the
     /// outgoing `Vec<u8>` so we keep amortising the same allocation
@@ -1225,6 +1234,7 @@ impl RunHook {
 
     fn reset_process(&mut self) {
         self.last_frame = 0;
+        self.last_completed = 0;
         self.last_emit_at = None;
         self.saw_non_black = false;
     }
@@ -1251,6 +1261,8 @@ impl RunHook {
             frame_send_failed: false,
             input_disconnected: false,
             last_emit_at: None,
+            frame_interval: Some(IMPLICIT_FRAME_INTERVAL),
+            last_completed: 0,
             scratch: Vec::new(),
             saw_non_black: false,
             stopped_by_user: false,
@@ -1292,8 +1304,8 @@ impl FrameHook for RunHook {
         }
         stop_requested |= self.stopped_by_user;
 
-        // Stream the latest framebuffer up to the GUI, but at most
-        // once per `FRAME_PUSH_INTERVAL`. The hook is invoked after
+        // Publish at the selected game limit. Unlimited explicit presents bypass
+        // the interval; intermediate dirty GDI updates keep a bounded fallback. The hook is invoked after
         // every dispatched WinCE call; without throttling a single
         // game tick that does ~2k `BitBlt`s would generate ~2k
         // 300 KiB snapshots — the work that turned a logical 60 fps
@@ -1301,12 +1313,17 @@ impl FrameHook for RunHook {
         if !self.frame_send_failed && self.foreground.load(Ordering::Acquire) == self.pid {
             if let Some(tx) = self.frame_tx.as_ref() {
                 let counter = state.framebuffer.frame_counter;
-                if counter != self.last_frame {
+                let completed = state.framebuffer.presentation_stats.completed();
+                if counter != self.last_frame || completed != self.last_completed {
+                    let explicit = completed != self.last_completed;
+                    let interval = self
+                        .frame_interval
+                        .or_else(|| (!explicit).then_some(IMPLICIT_FRAME_INTERVAL));
                     let now = Instant::now();
                     // Keep the presentation phase instead of restarting the
                     // interval after each GPU readback/scheduler delay. The
                     // latter accumulates jitter and periodically skips frames.
-                    if let Some(phase) = presentation_phase(self.last_emit_at, now) {
+                    if let Some(phase) = presentation_phase(self.last_emit_at, now, interval) {
                         let shared = if !state.shell_keyboard.visible
                             && state.gdi.shell_menus.tracking.is_none()
                         {
@@ -1314,6 +1331,18 @@ impl FrameHook for RunHook {
                                 &state.framebuffer,
                             )
                         } else {
+                            // These overlays bypass shared-frame acquisition, so
+                            // the GLES handoff diagnostics cannot explain them.
+                            static SEEN: std::sync::atomic::AtomicU8 =
+                                std::sync::atomic::AtomicU8::new(0);
+                            let (reason, bit) = if state.shell_keyboard.visible {
+                                ("shell_keyboard_visible", 1)
+                            } else {
+                                ("shell_menu_tracking", 2)
+                            };
+                            if SEEN.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                                log::info!("SHARED_HANDOFF=CPU reason={reason} (first occurrence this process)");
+                            }
                             None
                         };
                         let mut snapshot = if let Some(shared) = shared {
@@ -1356,6 +1385,7 @@ impl FrameHook for RunHook {
                         // full CPU black scan. Final CPU snapshots keep the legacy heuristic.
                         self.saw_non_black = true;
                         self.last_frame = counter;
+                        self.last_completed = completed;
                         self.last_emit_at = Some(phase);
                         snapshot.text_input = state.gapi_action_key
                             == pocket_core::kernel::gapi::VK_RETURN
@@ -1674,16 +1704,33 @@ mod presentation_clock_tests {
     #[test]
     fn jitter_keeps_phase_and_pause_does_not_create_a_catchup_burst() {
         let base = Instant::now();
+        let interval = Some(Duration::from_millis(16));
         let mut phase = None;
         for ms in [0, 17, 33, 49, 66, 83, 99] {
-            phase = Some(presentation_phase(phase, base + Duration::from_millis(ms)).unwrap());
+            phase = Some(
+                presentation_phase(phase, base + Duration::from_millis(ms), interval).unwrap(),
+            );
         }
         assert_eq!(phase.unwrap(), base + Duration::from_millis(96));
-        assert!(presentation_phase(phase, base + Duration::from_millis(100)).is_none());
+        assert!(presentation_phase(phase, base + Duration::from_millis(100), interval).is_none());
         let after_pause = base + Duration::from_millis(1001);
-        phase = presentation_phase(phase, after_pause);
+        phase = presentation_phase(phase, after_pause, interval);
         assert!(phase.is_some());
-        assert!(presentation_phase(phase, after_pause).is_none());
+        assert!(presentation_phase(phase, after_pause, interval).is_none());
+    }
+
+    #[test]
+    fn selected_rates_reach_the_publisher_and_unlimited_has_no_interval() {
+        let base = Instant::now();
+        let next = base + Duration::from_nanos(8_333_334);
+        assert!(presentation_phase(Some(base), next, frame_interval(Some(60))).is_none());
+        assert!(presentation_phase(Some(base), next, frame_interval(Some(120))).is_some());
+        assert_eq!(frame_interval(Some(0)), None);
+        assert_eq!(
+            presentation_phase(Some(base), base, frame_interval(Some(0))),
+            Some(base)
+        );
+        assert_eq!(frame_interval(None), Some(IMPLICIT_FRAME_INTERVAL));
     }
 }
 
@@ -1997,6 +2044,31 @@ mod deferred_read_tests {
             });
         });
     }
+    #[test]
+    fn unlimited_publishes_completed_frames_without_flooding_intermediate_gdi_updates() {
+        let (tx, rx) = crate::latest_frame::channel();
+        let mut hook = RunHook::new(Some(tx), None);
+        hook.frame_interval = frame_interval(Some(0));
+        let mut process = process();
+        let kernel = &mut process.state;
+        kernel.framebuffer.resize(3, 2);
+        kernel.framebuffer.fill(0xf800);
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
+        rx.try_recv().unwrap();
+        // Even a stalled publisher cannot hold back an explicit Unlimited frame.
+        hook.last_emit_at = Some(Instant::now() + Duration::from_secs(60));
+        kernel.framebuffer.fill(0x07e0);
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
+        assert!(
+            rx.try_recv().is_err(),
+            "an intermediate GDI draw is not a frame"
+        );
+        kernel.framebuffer.presentation_stats.record_present();
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
+        assert_eq!(&rx.try_recv().unwrap().rgba[..4], &[0, 255, 0, 255]);
+        assert_eq!(hook.last_completed, 1);
+    }
+
     #[test]
     fn throttled_frames_never_read_gpu_and_due_read_failures_stop_without_stale_pixels() {
         let (tx, rx) = crate::latest_frame::channel();

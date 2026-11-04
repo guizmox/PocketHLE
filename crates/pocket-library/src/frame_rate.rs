@@ -113,6 +113,17 @@ mod tests {
     }
 
     #[test]
+    fn desktop_vsync_defaults_on_and_explicit_off_survives_round_trip() {
+        let old: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
+        assert!(old.desktop_vsync);
+        let mut config = crate::LauncherConfig::default();
+        config.desktop_vsync = false;
+        let saved = serde_json::to_string(&config).unwrap();
+        let restored: crate::LauncherConfig = serde_json::from_str(&saved).unwrap();
+        assert!(!restored.desktop_vsync);
+    }
+
+    #[test]
     fn unlimited_is_explicit_and_default_stays_sixty() {
         assert_eq!(FrameRateLimit::default(), FrameRateLimit::Fps60);
         let default: crate::LauncherConfig = serde_json::from_str("{}").unwrap();

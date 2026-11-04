@@ -519,7 +519,7 @@ pub struct WaveOutState {
     /// Set while the guest is executing `waveOutProc`, so the pump
     /// knows to restore the interrupted call's registers when the
     /// callback returns.
-    pub function_frame: Option<GuestCallFrame>,
+    pub function_frame: Option<(usize, u32, GuestCallFrame)>,
 }
 
 /// One `hssSound` or `hssMusic` object the guest constructed.

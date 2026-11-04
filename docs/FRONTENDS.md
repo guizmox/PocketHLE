@@ -22,7 +22,9 @@ not the photographed console skin. The five function controls stay above the
 game: Home, Volume, Brightness, Geofence and Power. Geofence uses a GPS-style
 symbol. Action buttons are circular in the Stop/Rewind/Forward/Play diamond;
 L/R extend downward. Keep existing guest codes and customized bindings.
-Brightness is not labelled Light; Geofence is not labelled Alert.
+Brightness is not labelled Light; Geofence is not labelled Alert. A sixth host
+EXIT button sits beside the five function controls, using the PocketPC style
+and returning to the library; it does not send the guest Power key.
 
 Desktop/Deck game-only fullscreen hides the virtual panel, including EXIT and
 FULL. It does not change guest geometry. Do not reintroduce these controls from

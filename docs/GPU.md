@@ -102,6 +102,12 @@ apply changes at the next launch. A cap does not accelerate a game that sleeps
 or simulates more slowly. Internal resolution does not bypass the game limit.
 Host VSync, explicit guest vertical-blank waits and the modeled display clock
 remain distinct; Unlimited is not a promise of unlimited physical refresh.
+Desktop general settings expose VSync (enabled by default, applied after restarting
+PocketHLE). Disabling it can allow tearing. The desktop publisher follows the
+selected game limit for completed presentations, including 120 and Unlimited;
+there is no fixed 16 ms ceiling on explicit EGL/GX/DirectDraw presents. Without
+an explicit presentation boundary, Unlimited coalesces intermediate dirty GDI
+updates at 60 Hz to avoid treating every blit as a complete image.
 
 ## Input-induced desktop stutter
 

@@ -1817,6 +1817,9 @@ pub struct FileDialog {
 pub struct Controls {
     /// Latest consumed stylus position in screen coordinates.
     pub cursor_position: (i32, i32),
+    /// ShowCursor display counters keyed by stable guest thread ID. Guest devices
+    /// expose a stylus, not a mouse, so an untouched counter starts at -1.
+    pub cursor_display_counts: std::collections::HashMap<u32, i32>,
     /// Screen point of the last message retrieved by each guest thread.
     pub message_positions: std::collections::HashMap<usize, (i32, i32)>,
     /// Explicit guest SetCapture ownership, separate from host button presses.
@@ -1849,6 +1852,7 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             cursor_position: (0, 0),
+            cursor_display_counts: Default::default(),
             message_positions: Default::default(),
             pointer_capture: Default::default(),
             recognized_holds: Default::default(),

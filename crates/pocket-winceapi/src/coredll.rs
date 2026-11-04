@@ -1310,7 +1310,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetThreadLocale", get_thread_locale);
     d.register_handler(dll, "GetLocaleInfoW", get_locale_info_w);
     d.register_handler(dll, "GetACP", get_acp);
-    d.register_constant(dll, "ShowCursor", 1, one_returning);
+    d.register_handler(dll, "ShowCursor", show_cursor);
     d.register_handler(dll, "CreateCursor", create_cursor);
     d.register_handler(dll, "DestroyCursor", destroy_cursor);
 
@@ -13719,10 +13719,14 @@ fn release_capture(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 pub(crate) fn monotonic_ms() -> u64 {
+    monotonic_micros() / 1000
+}
+
+fn monotonic_micros() -> u64 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {
@@ -21635,10 +21639,9 @@ fn query_performance_counter(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     if p == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0);
+    // Performance ticks measure intervals, independently of wall-clock edits.
+    // A Unix-epoch magnitude also destroys precision in legacy float timers.
+    let now = monotonic_micros();
     let lo = (now & 0xFFFF_FFFF) as u32;
     let hi = (now >> 32) as u32;
     let mut buf = [0u8; 8];
@@ -22351,6 +22354,25 @@ fn get_locale_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 
 fn get_acp(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(1252))
+}
+
+/// WinCE ShowCursor returns the new signed display count, not a BOOL.
+/// https://learn.microsoft.com/en-us/previous-versions/windows/embedded/aa453730(v=msdn.10)
+fn show_cursor(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let show = ctx.arg_u32(0)? != 0;
+    let thread = current_thread_id(ctx);
+    let count = ctx
+        .kernel
+        .controls
+        .cursor_display_counts
+        .entry(thread)
+        .or_insert(-1);
+    *count = if show {
+        count.wrapping_add(1)
+    } else {
+        count.wrapping_sub(1)
+    };
+    Ok(DispatchOutcome::ReturnedR0(*count as u32))
 }
 
 fn create_cursor(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -23753,7 +23775,13 @@ fn wave_out_enter_callback(
     ctx: &mut CallCtx<'_>,
     thunk_va: u32,
 ) -> Result<Option<DispatchOutcome>, KernelError> {
-    if let Some(frame) = ctx.kernel.wave_out.function_frame {
+    if let Some((thread, return_thunk, frame)) = ctx.kernel.wave_out.function_frame {
+        // SP comparisons are only meaningful within the interrupted thread.
+        // A different runnable thread may call Sleep or pump messages while
+        // this callback is parked; its registers must remain untouched.
+        if thread != ctx.kernel.current_thread || return_thunk != thunk_va {
+            return Ok(None);
+        }
         // Zuma's `waveOutProc` calls `Sleep(0)` before it acknowledges a
         // stop request, and `sleep` is one of the handlers that delivers
         // these callbacks — so a re-entry is not proof the callback
@@ -23810,7 +23838,11 @@ fn wave_out_enter_callback(
     ctx.cpu.write_reg(ArmReg::R2, device.instance)?;
     ctx.cpu.write_reg(ArmReg::R3, param1)?;
     ctx.cpu.write_reg(ArmReg::Lr, thunk_va)?;
-    ctx.kernel.wave_out.function_frame = Some(pocket_kernel::GuestCallFrame { args, lr, sp });
+    ctx.kernel.wave_out.function_frame = Some((
+        ctx.kernel.current_thread,
+        thunk_va,
+        pocket_kernel::GuestCallFrame { args, lr, sp },
+    ));
     log::trace!(
         "waveOutProc(0x{proc_va:08x}) h=0x{callback_handle:08x} msg=0x{message:04x} param1=0x{param1:08x}"
     );
@@ -39312,6 +39344,78 @@ mod tests {
     /// is why the nested leg below matters: treating that as "the
     /// callback returned" would move SP out from under it.
     #[test]
+    fn performance_counter_uses_monotonic_microseconds_and_matching_frequency() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        let before = monotonic_micros();
+        {
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                query_performance_counter(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+        }
+        let ticks = u64::from_le_bytes(cpu.read_mem(0x1000, 8).unwrap().try_into().unwrap());
+        assert!(ticks >= before && ticks <= monotonic_micros());
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            query_performance_frequency(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            u64::from_le_bytes(ctx.cpu.read_mem(0x1000, 8).unwrap().try_into().unwrap()),
+            1_000_000
+        );
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(
+            query_performance_counter(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
+    #[test]
+    fn show_cursor_preserves_signed_counts_and_thread_isolation() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let call = |cpu: &mut StubCpu, kernel: &mut KernelState, show| {
+            cpu.write_reg(ArmReg::R0, show).unwrap();
+            let mut ctx = CallCtx {
+                cpu,
+                kernel,
+                thunk: &thunk,
+            };
+            match show_cursor(&mut ctx).unwrap() {
+                DispatchOutcome::ReturnedR0(value) => value as i32,
+                other => panic!("unexpected cursor result: {other:?}"),
+            }
+        };
+        assert_eq!(call(&mut cpu, &mut kernel, 0), -2);
+        assert_eq!(call(&mut cpu, &mut kernel, 0), -3);
+        assert_eq!(call(&mut cpu, &mut kernel, 1), -2);
+        assert_eq!(call(&mut cpu, &mut kernel, 1), -1);
+        assert_eq!(call(&mut cpu, &mut kernel, 1), 0);
+        assert_eq!(call(&mut cpu, &mut kernel, 42), 1);
+        kernel.current_thread = 1;
+        assert_eq!(call(&mut cpu, &mut kernel, 1), 0);
+        kernel.current_thread = 0;
+        assert_eq!(call(&mut cpu, &mut kernel, 0), 0);
+        assert_eq!(call(&mut cpu, &mut kernel, 0), -1);
+    }
+
+    #[test]
     fn sleep_delivers_wave_out_callback_and_survives_a_nested_sleep() {
         wave_callback_sleep_roundtrip(0);
     }
@@ -39393,6 +39497,25 @@ mod tests {
         let flags = u32::from_le_bytes(cpu.read_mem(HDR + 16, 4).unwrap().try_into().unwrap());
         assert_eq!(flags & WHDR_DONE, WHDR_DONE, "the guest polls this bit");
         assert!(kernel.wave_out.pending.is_empty());
+
+        // Another thread has a higher stack. It must not be mistaken for
+        // the callback returning, even when it enters the same Sleep thunk.
+        kernel.current_thread = 1;
+        cpu.write_reg(ArmReg::Sp, CALL_SP + 0x100).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x6666).unwrap();
+        cpu.write_reg(ArmReg::R0, 0).unwrap();
+        {
+            let mut c = CallCtx {
+                cpu: &mut cpu,
+                thunk: &t,
+                kernel: &mut kernel,
+            };
+            assert_eq!(wave_out_enter_callback(&mut c, t.thunk_va).unwrap(), None);
+        }
+        assert_eq!(cpu.read_reg(ArmReg::Sp).unwrap(), CALL_SP + 0x100);
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x6666);
+        assert!(kernel.wave_out.function_frame.is_some());
+        kernel.current_thread = 0;
 
         // `waveOutProc` now calls `Sleep(0)` itself, one frame deeper.
         cpu.write_reg(ArmReg::R0, 0).unwrap();

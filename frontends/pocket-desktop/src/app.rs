@@ -190,7 +190,8 @@ const SHARED_PRESENTATION_READY: bool = true;
 
 /// Top-level egui app.
 pub struct PocketLauncher {
-    icon_cache: std::collections::HashMap<String, egui::TextureHandle>,
+    icon_cache: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    game_card_metadata: std::collections::HashMap<String, (bool, Option<String>)>,
     screen_cache: std::collections::HashMap<String, (ScreenPref, (u32, u32))>,
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
     upscale_x2: bool,
@@ -797,6 +798,7 @@ impl PocketLauncher {
             controller_ui: Default::default(),
             recordings_gallery: Default::default(),
             icon_cache: std::collections::HashMap::new(),
+            game_card_metadata: std::collections::HashMap::new(),
             screen_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
             upscale_x2: false,
@@ -943,9 +945,9 @@ impl PocketLauncher {
     fn drain_events(&mut self, ctx: &egui::Context) {
         if let Some(rx) = self.frame_rx.as_ref() {
             let native_wake = ctx.data(|data| {
-                data.get_temp::<std::sync::Arc<dyn Fn() + Send + Sync>>(
-                    egui::Id::new("pockethle.native_image_wake"),
-                )
+                data.get_temp::<std::sync::Arc<dyn Fn() + Send + Sync>>(egui::Id::new(
+                    "pockethle.native_image_wake",
+                ))
             });
             let ctx = ctx.clone();
             rx.set_waker_once(std::sync::Arc::new(move || {
@@ -965,6 +967,7 @@ impl PocketLauncher {
                             self.status = message;
                             self.reload_library();
                             self.icon_cache.clear();
+                            self.game_card_metadata.clear();
                             self.screen_cache.clear();
                             self.selected_game = None;
                         }
@@ -1004,6 +1007,7 @@ impl PocketLauncher {
                     );
                     self.reload_library();
                     self.icon_cache.clear();
+                    self.game_card_metadata.clear();
                     if let Some(game) = entries.first() {
                         let (id, name) = (game.id.clone(), game.display_name.clone());
                         self.library_tab = if is_gizmondo_game(game, self.library.root()) {
@@ -1036,6 +1040,7 @@ impl PocketLauncher {
                     self.library_busy = false;
                     self.reload_library();
                     self.icon_cache.clear();
+                    self.game_card_metadata.clear();
                     match result {
                         Ok(entries) => {
                             self.status = format!("Imported {} separate games.", entries.len());
@@ -1572,7 +1577,7 @@ impl PocketLauncher {
         let all: Vec<GameEntry> = self.library.games().to_vec();
         let (gizmondo, pocketpc): (Vec<_>, Vec<_>) = all
             .into_iter()
-            .partition(|g| is_gizmondo_game(g, self.library.root()));
+            .partition(|g| self.cached_game_card_metadata(g).0);
         let previous_tab = self.library_tab;
         ui.horizontal(|ui| {
             crate::controller_ui::selectable_value(
@@ -1769,11 +1774,46 @@ impl PocketLauncher {
         }
     }
 
+    fn cached_game_card_metadata(&mut self, game: &GameEntry) -> (bool, Option<String>) {
+        self.game_card_metadata
+            .entry(game.id.clone())
+            .or_insert_with(|| {
+                (
+                    is_gizmondo_game(game, self.library.root()),
+                    game_gizmondo_title_id(game, self.library.root()),
+                )
+            })
+            .clone()
+    }
+
+    fn cached_game_icon(
+        &mut self,
+        ctx: &egui::Context,
+        game: &GameEntry,
+    ) -> Option<(egui::TextureId, Vec2)> {
+        let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
+            let path = game.icon_path(self.library.root())?;
+            let bytes = std::fs::read(path).ok()?;
+            let image = load_image_bytes(&bytes).ok()?;
+            Some(ctx.load_texture(
+                format!("icon-{}", game.id),
+                image,
+                egui::TextureOptions::LINEAR,
+            ))
+        });
+        texture
+            .as_ref()
+            .map(|texture| (texture.id(), texture.size_vec2()))
+    }
+
     fn ui_game_card(&mut self, ui: &mut egui::Ui, game: &GameEntry, size: Vec2, selected: bool) {
         let (card_rect, card_response) = ui.allocate_exact_size(size, Sense::click());
         if selected && self.deck_scroll_selection {
             ui.scroll_to_rect(card_rect, Some(egui::Align::Center));
             self.deck_scroll_selection = false;
+        }
+        if !ui.is_rect_visible(card_rect) {
+            return;
         }
         let stroke = if selected {
             egui::Stroke::new(2.0_f32, Color32::from_rgb(95, 170, 225))
@@ -1871,31 +1911,10 @@ impl PocketLauncher {
             Pos2::new(card_rect.left(), card_rect.top() + 4.0),
             Vec2::new(size.x, 126.0),
         );
-        let giz = is_gizmondo_game(game, self.library.root());
+        let (giz, title_id) = self.cached_game_card_metadata(game);
         if giz {
-            let title_id = game_gizmondo_title_id(game, self.library.root());
             let artwork = if game.icon.as_deref() == Some(std::path::Path::new("cartridge.png")) {
-                if let Some(path) = game.icon_path(self.library.root()) {
-                    if let Ok(bytes) = std::fs::read(path) {
-                        if let Ok(image) = load_image_bytes(&bytes) {
-                            let texture =
-                                self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
-                                    ui.ctx().load_texture(
-                                        format!("cartridge-{}", game.id),
-                                        image,
-                                        egui::TextureOptions::LINEAR,
-                                    )
-                                });
-                            Some((texture.id(), texture.size_vec2()))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                self.cached_game_icon(ui.ctx(), game)
             } else {
                 None
             };
@@ -1920,20 +1939,7 @@ impl PocketLauncher {
                 device.max - Vec2::new(8.0, 24.0),
             );
             painter.rect_filled(screen, 3.0, Color32::from_rgb(38, 61, 80));
-            let artwork = game
-                .icon_path(self.library.root())
-                .and_then(|path| std::fs::read(path).ok())
-                .and_then(|bytes| load_image_bytes(&bytes).ok())
-                .map(|image| {
-                    let texture = self.icon_cache.entry(game.id.clone()).or_insert_with(|| {
-                        ui.ctx().load_texture(
-                            format!("icon-{}", game.id),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        )
-                    });
-                    (texture.id(), texture.size_vec2())
-                });
+            let artwork = self.cached_game_icon(ui.ctx(), game);
             if let Some((texture, size)) = artwork {
                 let available = screen.shrink(5.0).size();
                 let scale = (available.x / size.x).min(available.y / size.y);
@@ -1998,7 +2004,7 @@ impl PocketLauncher {
                 .size(12.0)
                 .color(Color32::from_gray(185)),
         );
-        if let Some(id) = game_gizmondo_title_id(game, self.library.root()) {
+        if let Some(id) = title_id {
             text_ui.label(
                 RichText::new(id)
                     .monospace()
@@ -2378,6 +2384,12 @@ impl PocketLauncher {
                 ui.end_row();
                 ui.label("");
                 ui.small("2x/3x/4x increases the rendered resolution; display zoom then scales that image. Applies next launch.");
+                ui.end_row();
+                ui.label("VSync (PC / Steam Deck)");
+                crate::controller_ui::checkbox(ui, &mut draft.desktop_vsync, "Synchronize with the display");
+                ui.end_row();
+                ui.label("");
+                ui.small("Limits window presentation to the display refresh rate and prevents tearing. Restart PocketHLE after changing this setting.");
                 ui.end_row();
                 ui.label("Frame rate limit");
                 crate::controller_ui::ComboBox::from_id_source("global_frame_rate_limit")
@@ -3741,6 +3753,19 @@ impl PocketLauncher {
                 button,
                 false,
             );
+        }
+        if ui
+            .put(
+                rect(layout.functions[5]),
+                egui::Button::new("EXIT")
+                    .fill(Color32::from_rgb(169, 89, 45))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(207, 139, 88)))
+                    .rounding(8.0),
+            )
+            .on_hover_text("Return to library")
+            .clicked()
+        {
+            self.return_to_library(ui.ctx());
         }
         for (i, (label, button)) in [("L", GuestButton::Soft1), ("R", GuestButton::Soft2)]
             .into_iter()

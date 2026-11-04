@@ -1,9 +1,14 @@
-# TIMETEST v1 — ARM timing and callback diagnostic
+# TIMETEST v2 — ARM timing and callback diagnostic
 
-Import `dist/PocketHLE-TIMETEST.zip` as a Gizmondo title. Run it once in Software
-and once in GPU mode, restarting the title after changing the renderer. The
-report is `\Flash Disk\TIMETEST.TXT`. Expect `TIMETEST_RESULT PASS` and no FAIL
-lines. A final dialog must show PASS; close it normally.
+Run **Timing / threads / audio** from the single HARDWARE DIAG executable.
+Select the 60 FPS game limit before this pacing contract test; Unlimited is not
+its test configuration. Run in Software and GPU modes, restarting the title after
+changing the renderer. The report is `\Flash Disk\TIMETEST.TXT`.
+The current window-surface revision performs 46 checks. It creates a native
+window surface before binding the EGL context. A 43-check report without
+`egl.native_window`, `egl.window_surface` and `egl.destroy_surface` comes from an
+older binary; rebuild HARDWARE DIAG instead of enabling surfaceless contexts.
+No test deadline or lower-bound assertion was relaxed in this revision.
 
 Checks: repeated 20 ms Sleep, single/multiple wait timeouts and manual event
 state, worker signaling/exit, timer callback delivery/cancel/restart, waveOut
@@ -22,5 +27,6 @@ CPAL/Android audio output and native GPU runs must also be tested on the device.
 DirectDraw, pause/resume and visual/audio quality are covered by host contract
 suites/manual games, not fully exercised by this guest program.
 
-Build: `python3 tools/hardware-diag/suites/timing/build.py --clang clang --lld ld.lld`.
+Build the integrated tool: `python3 tools/hardware-diag/build.py --clang clang --lld ld.lld`.
+The suite-local build remains a private regression fixture.
 Native integration: `cargo test -p pocket-core --no-default-features --features unicorn --test ram_guest native_arm_timing -- --nocapture`.

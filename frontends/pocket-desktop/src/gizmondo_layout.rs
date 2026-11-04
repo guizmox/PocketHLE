@@ -30,7 +30,7 @@ pub const GAP: f32 = 12.0;
 #[derive(Debug)]
 pub struct Layout {
     pub screen: BoxRect,
-    pub functions: [BoxRect; 5],
+    pub functions: [BoxRect; 6],
     pub shoulders: [BoxRect; 2],
     pub directions: [BoxRect; 4], // N,W,E,S
     pub dpad: BoxRect,
@@ -87,8 +87,8 @@ pub fn calculate(
         fitted[2] as f32 / dpi,
         fitted[3] as f32 / dpi,
     );
-    let fw = ((room.w - 4.0 * 8.0 * unit) / 5.0).min(90.0 * unit);
-    let fx = w / 2.0 - (fw * 5.0 + 32.0 * unit) / 2.0;
+    let fw = ((room.w - 5.0 * 8.0 * unit) / 6.0).min(90.0 * unit);
+    let fx = w / 2.0 - (fw * 6.0 + 40.0 * unit) / 2.0;
     let functions = std::array::from_fn(|i| {
         BoxRect::new(
             fx + i as f32 * (fw + 8.0 * unit),
