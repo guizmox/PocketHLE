@@ -190,7 +190,15 @@ No actual Windows/Linux visual comparison has been performed in this package.
 ## Desktop recording under encoder load
 
 Recording cadence is independent of the emulated game's FPS limit. Capture keeps
-its selected display resolution and input overlays. When an MP4 capture is missed,
+its selected display resolution and input overlays. Capture and muxing use the
+same nearest 30/60 FPS time slots, so small early/late VSync jitter does not discard
+otherwise on-time paints. Very fast Unlimited paints still produce at most one
+capture per output slot; a pause does not trigger a burst of new captures.
+The desktop MP4 path uses four conversion slice workers and four H.264 workers
+(with four encoder slices). These stages execute sequentially, not as eight
+simultaneous encoding tasks. Conversion borrows the input through refcounted
+frame views without another full RGBA copy; odd dimensions retain the existing
+edge-extension policy. When an MP4 capture is missed,
 the writer advances audio and represents the held image through video timestamp
 spacing. It does not re-encode the same pixels in every missing 30/60 FPS slot.
 A final timestamped image preserves each segment's duration at stop or resize.

@@ -10,7 +10,7 @@
 #include <libswscale/swscale.h>
 typedef struct PocketRecording {
  AVFormatContext *format; AVCodecContext *video,*audio;
- AVStream *vs,*as; AVFrame *vf,*af; AVPacket *packet;
+ AVStream *vs,*as; AVFrame *vf,*af,*rgba,*yuv_view; AVPacket *packet;
  struct SwsContext *scale; int input_width,input_height; int audio_count,header; int64_t audio_pts;
 } PocketRecording;
 int pocket_recording_available(void) {
@@ -25,6 +25,7 @@ void pocket_recording_error(int error,char *buffer,unsigned size){av_strerror(er
 static void recording_free(PocketRecording *r) {
  if (!r) return;
  sws_freeContext(r->scale); av_frame_free(&r->vf); av_frame_free(&r->af);
+ av_frame_free(&r->rgba); av_frame_free(&r->yuv_view);
  av_packet_free(&r->packet); avcodec_free_context(&r->video); avcodec_free_context(&r->audio);
  if(r->format){if(r->format->pb)avio_closep(&r->format->pb);avformat_free_context(r->format);} av_free(r);
 }
@@ -46,13 +47,13 @@ PocketRecording *pocket_recording_open(const char *path,int w,int h,int fps,int 
  rc=avformat_alloc_output_context2(&r->format,NULL,"mp4",path);if(rc<0)goto fail;
  const AVCodec *vc=avcodec_find_encoder_by_name("libopenh264"),*ac=avcodec_find_encoder(AV_CODEC_ID_AAC);
  r->video=avcodec_alloc_context3(vc);r->audio=avcodec_alloc_context3(ac);r->vs=avformat_new_stream(r->format,NULL);r->as=avformat_new_stream(r->format,NULL);
- r->vf=av_frame_alloc();r->af=av_frame_alloc();r->packet=av_packet_alloc();
- if(!r->video||!r->audio||!r->vs||!r->as||!r->vf||!r->af||!r->packet){rc=AVERROR(ENOMEM);goto fail;}
+ r->vf=av_frame_alloc();r->af=av_frame_alloc();r->rgba=av_frame_alloc();r->yuv_view=av_frame_alloc();r->packet=av_packet_alloc();
+ if(!r->video||!r->audio||!r->vs||!r->as||!r->vf||!r->af||!r->rgba||!r->yuv_view||!r->packet){rc=AVERROR(ENOMEM);goto fail;}
  r->input_width=w;r->input_height=h;
  r->video->width=(w+1)&~1;r->video->height=(h+1)&~1;r->video->pix_fmt=AV_PIX_FMT_YUV420P;r->video->time_base=(AVRational){1,fps};r->video->framerate=(AVRational){fps,1};
  r->video->bit_rate=(int64_t)w*h*fps/(quality==0?12:quality==2?3:6);int64_t floor=(int64_t)(quality==0?400000:quality==2?1600000:800000)*fps/30;if(r->video->bit_rate<floor)r->video->bit_rate=floor;
  r->video->rc_max_rate=r->video->bit_rate;r->video->rc_buffer_size=(int)r->video->bit_rate;r->video->rc_initial_buffer_occupancy=r->video->rc_buffer_size*3/4;
- r->video->gop_size=fps*2;r->video->max_b_frames=0;r->video->thread_count=2;
+ r->video->gop_size=fps*2;r->video->max_b_frames=0;r->video->thread_count=4;r->video->slices=4; /* OpenH264 needs multiple slices to use its workers. */
  r->audio->sample_fmt=AV_SAMPLE_FMT_FLTP;r->audio->sample_rate=48000;r->audio->time_base=(AVRational){1,48000};r->audio->bit_rate=quality==0?96000:quality==2?192000:128000;av_channel_layout_default(&r->audio->ch_layout,2);
  if(r->format->oformat->flags&AVFMT_GLOBALHEADER){r->video->flags|=AV_CODEC_FLAG_GLOBAL_HEADER;r->audio->flags|=AV_CODEC_FLAG_GLOBAL_HEADER;}
  rc=av_opt_set(r->video->priv_data,"profile","constrained_baseline",0);if(rc<0)goto fail;
@@ -63,14 +64,32 @@ PocketRecording *pocket_recording_open(const char *path,int w,int h,int fps,int 
  r->vf->format=r->video->pix_fmt;r->vf->width=r->video->width;r->vf->height=r->video->height;rc=av_frame_get_buffer(r->vf,32);if(rc<0)goto fail;
  r->af->format=r->audio->sample_fmt;r->af->sample_rate=48000;r->af->nb_samples=r->audio->frame_size;rc=av_channel_layout_copy(&r->af->ch_layout,&r->audio->ch_layout);if(rc<0)goto fail;
  rc=av_frame_get_buffer(r->af,0);if(rc<0)goto fail;
- r->scale=sws_getContext(w,h,AV_PIX_FMT_RGBA,w,h,AV_PIX_FMT_YUV420P,SWS_BILINEAR,NULL,NULL,NULL);if(!r->scale){rc=AVERROR(ENOMEM);goto fail;}
+ /* The frame API enables slice threading; legacy sws_scale is serial.
+    Preserve the same geometry, pixel formats and filter settings. */
+ r->scale=sws_alloc_context();if(!r->scale){rc=AVERROR(ENOMEM);goto fail;}
+ const char *keys[]={"srcw","srch","src_format","dstw","dsth","dst_format","sws_flags","threads"};
+ const int values[]={w,h,AV_PIX_FMT_RGBA,w,h,AV_PIX_FMT_YUV420P,SWS_BILINEAR,4};
+ for(unsigned i=0;i<sizeof(values)/sizeof(values[0]);i++){rc=av_opt_set_int(r->scale,keys[i],values[i],0);if(rc<0)goto fail;}
+ rc=sws_init_context(r->scale,NULL,NULL);if(rc<0)goto fail;
  rc=avio_open(&r->format->pb,path,AVIO_FLAG_WRITE);if(rc<0)goto fail;AVDictionary *mux_options=NULL;av_dict_set(&mux_options,"movflags","+faststart",0);
  rc=avformat_write_header(r->format,&mux_options);av_dict_free(&mux_options);if(rc<0)goto fail;r->header=1;*error=0;return r;
  fail:if(error)*error=rc;recording_free(r);return NULL;
 }
+/* Borrow caller pixels only for this synchronous conversion. Frame references
+   avoid the deep copy sws_scale_frame would make for a non-refcounted input. */
+static void recording_borrowed_pixels(void *opaque,uint8_t *data){(void)opaque;(void)data;}
 int pocket_recording_video(PocketRecording *r,const uint8_t *rgba,int64_t pts) {
- int rc=av_frame_make_writable(r->vf);if(rc<0)return rc;const uint8_t *src[4]={rgba,NULL,NULL,NULL};int stride[4]={r->input_width*4,0,0,0};
- if(sws_scale(r->scale,src,stride,0,r->input_height,r->vf->data,r->vf->linesize)!=r->input_height)return AVERROR(EINVAL);
+ int rc=av_frame_make_writable(r->vf);if(rc<0)return rc;
+ r->rgba->format=AV_PIX_FMT_RGBA;r->rgba->width=r->input_width;r->rgba->height=r->input_height;
+ r->rgba->buf[0]=av_buffer_create((uint8_t*)rgba,(size_t)r->input_width*r->input_height*4,recording_borrowed_pixels,NULL,AV_BUFFER_FLAG_READONLY);
+ if(!r->rgba->buf[0])return AVERROR(ENOMEM);
+ r->rgba->data[0]=(uint8_t*)rgba;r->rgba->linesize[0]=r->input_width*4;
+ rc=av_frame_ref(r->yuv_view,r->vf);if(rc<0){av_frame_unref(r->rgba);return rc;}
+ /* Expose only original pixels to swscale, while retaining the even-sized
+    encoder allocation. Odd dimensions are extended below, never stretched. */
+ r->yuv_view->width=r->input_width;r->yuv_view->height=r->input_height;
+ rc=sws_scale_frame(r->scale,r->yuv_view,r->rgba);
+ av_frame_unref(r->yuv_view);av_frame_unref(r->rgba);if(rc<0)return rc;
  /* H.264 4:2:0 requires even dimensions. Preserve every source pixel and
     extend only the final luma row/column, never resize or crop the picture. */
  if(r->video->width!=r->input_width)for(int y=0;y<r->input_height;y++) {
