@@ -1,3 +1,34 @@
+## Hidden control repaint and Q3 gameplay handoffs (2026-11-04)
+
+The Windows Q3CE 1.1b gameplay log identifies coredll::repaint_controls as the
+only GPU-to-CPU mutation site observed. It previously checked is_empty after
+refreshing visibility, acquired cpu_mut and marked the frame dirty even with
+only hidden startup controls. Use Controls::has_visible_content before acquiring
+CPU pixels, exactly as compositor preflight already does. Visible controls and
+native rendering retain the existing path; no title-specific exception.
+
+Regression uses an immutable GPU source whose materialize panics: repaint of a
+registered hidden panel must preserve GPU authority, residency, counter and
+epoch without reading pixels. Re-showing the panel is still paintable. Existing
+visible/native composition tests also run. Windows gameplay confirmation remains
+necessary; one recorded mutation site does not prove all possible fallbacks
+have been eliminated. Keep bounded handoff diagnostics for this validation.
+
+## CPU handoff provenance (2026-11-04)
+
+A shared publication can already have been consumed when a subsequent CPU update
+is emitted. If both SHARED_WINDOW and GPU authority are absent and the last swap
+succeeded, report cpu_authority_without_pending_shared_publication rather than
+silently returning None. Desktop keyboard/menu composition bypasses acquisition
+and reports its own reason once per process.
+
+DeferredFramebuffer logs GPU-to-CPU mutation entry points with track_caller:
+cpu_mut (after successful materialization), full overwrite, fill and resize.
+At most 32 distinct operation/file/line sites are logged per process, only with
+INFO enabled. Pure reads preserve authority and do not log. These diagnostics
+do not suppress real CPU images, change fences, defer inputs or alter pacing.
+They identify mutation entry points, not proof that pixels actually changed.
+
 ## Deferred mapped GAPI memory (2026-11-04)
 
 Mapped GAPI is no longer an unconditional readback requirement on ARM virtual-

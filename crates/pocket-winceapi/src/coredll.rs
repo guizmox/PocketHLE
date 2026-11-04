@@ -11736,7 +11736,10 @@ fn repaint_status_bar(ctx: &mut CallCtx<'_>) {
 /// is exactly what CERF BlankApp does — would otherwise erase them.
 fn repaint_controls(ctx: &mut CallCtx<'_>) {
     ctx.kernel.refresh_control_visibility();
-    if ctx.kernel.controls.is_empty() {
+    // Registered startup windows can survive for the entire game while
+    // hidden. Acquiring CPU pixels for their empty repaint would invalidate
+    // the latest EGL image even though render_with_images paints nothing.
+    if !ctx.kernel.controls.has_visible_content() {
         return;
     }
     let controls = ctx.kernel.controls.clone();
@@ -33520,6 +33523,65 @@ mod tests {
         // little-endian on the wire).
         let off = (7 * pocket_kernel::framebuffer::FB_WIDTH as usize + 5) * 2;
         assert_ne!(kernel.framebuffer.resident_cpu().unwrap().pixels[off], 0);
+    }
+
+    #[test]
+    fn hidden_controls_repaint_preserves_gpu_authority_without_readback() {
+        use pocket_kernel::framebuffer::deferred::{CpuPixelSource, MaterializedPixels};
+        #[derive(Debug)]
+        struct NoReadback;
+        impl CpuPixelSource for NoReadback {
+            fn logical_size(&self) -> (u32, u32) {
+                (240, 320)
+            }
+            fn native_size(&self) -> (u32, u32) {
+                (240, 320)
+            }
+            fn materialize(&self) -> Result<MaterializedPixels, String> {
+                panic!("hidden repaint must not read GPU pixels")
+            }
+        }
+        let mut kernel = fresh_kernel();
+        let hwnd = 0xdead1000;
+        kernel.window_visibility.insert(hwnd, false);
+        kernel
+            .controls
+            .add_panel(pocket_kernel::controls::DialogPanel {
+                hwnd,
+                x: 0,
+                y: 0,
+                w: 40,
+                h: 50,
+                visible: false,
+                border: false,
+                caption: None,
+                ok_pressed: false,
+                caption_height: None,
+            });
+        assert!(!kernel.controls.is_empty());
+        kernel
+            .framebuffer
+            .publish_gpu(std::sync::Arc::new(NoReadback))
+            .unwrap();
+        let counter = kernel.framebuffer.frame_counter;
+        let epoch = kernel.framebuffer.authority_epoch();
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        repaint_controls(&mut ctx);
+        assert!(ctx.kernel.framebuffer.gpu_source().is_some());
+        assert!(!ctx.kernel.framebuffer.cpu_resident());
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
+        assert_eq!(ctx.kernel.framebuffer.authority_epoch(), epoch);
+        // The same control becoming visible must still be considered paintable.
+        ctx.kernel.window_visibility.insert(hwnd, true);
+        ctx.kernel.controls.panel_mut(hwnd).unwrap().visible = true;
+        ctx.kernel.refresh_control_visibility();
+        assert!(ctx.kernel.controls.has_visible_content());
     }
 
     #[test]
