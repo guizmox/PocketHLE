@@ -1,0 +1,4 @@
+Upstream eframe0.27.2, MIT OR Apache-2.0. Only src/native/glow_integration.rs
+changes behavior: native wake for incoming images, deferred passive input repaint
+requests during Run, scoped automatic-input-repaint policy. Standard WGL calls
+and run.rs are upstream. No custom trace module, diagnostic mode or counter.

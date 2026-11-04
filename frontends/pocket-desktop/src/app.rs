@@ -941,6 +941,21 @@ impl PocketLauncher {
     }
 
     fn drain_events(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = self.frame_rx.as_ref() {
+            let native_wake = ctx.data(|data| {
+                data.get_temp::<std::sync::Arc<dyn Fn() + Send + Sync>>(
+                    egui::Id::new("pockethle.native_image_wake"),
+                )
+            });
+            let ctx = ctx.clone();
+            rx.set_waker_once(std::sync::Arc::new(move || {
+                if let Some(wake) = native_wake.as_ref() {
+                    wake();
+                } else {
+                    ctx.request_repaint();
+                }
+            }));
+        }
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
                 UiEvent::BackupFinished(result) => {
@@ -5428,6 +5443,11 @@ impl eframe::App for PocketLauncher {
         );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Early-return dialogs retain ordinary host repaint behavior. Only a
+        // complete Run update enables image-driven redraws.
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("pockethle.frame_driven_ui"), false);
+        });
         // One-shot startup override, after egui/native window state restoration.
         if let Some(fullscreen) = self.startup_fullscreen.take() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
@@ -5818,14 +5838,17 @@ impl eframe::App for PocketLauncher {
         if self.screen != Screen::Run {
             self.controller_ui.show(ctx);
         }
-        // While a game is running we want to drain the live frame
-        // channel as fast as the runner produces frames; the original
-        // 250 ms cadence capped the launcher at 4 fps, which is most
-        // of what users perceived as "lag" in JumpyBall on the
-        // desktop. ~16 ms (60 fps) matches the runner's per-slice
-        // hook and keeps idle-frame redraws cheap because egui only
-        // actually re-uploads textures when something changed.
-        let repaint_after = if matches!(self.screen, Screen::Run) || self.frame_rx.is_some() {
+        // Image arrival wakes the native event loop. Keep a bounded fallback
+        // for hover/controller processing when a game stops publishing images.
+        let frame_driven = self.screen == Screen::Run && self.frame_rx.is_some();
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("pockethle.frame_driven_ui"), frame_driven);
+        });
+        let repaint_after = if frame_driven {
+            // Images notify immediately. Keep input/hover/controller processing
+            // alive even if the guest stops producing images; no FPS cap here.
+            Duration::from_millis(100)
+        } else if matches!(self.screen, Screen::Run) || self.frame_rx.is_some() {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(250)

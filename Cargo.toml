@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["vendor/eframe"]
+exclude = ["vendor/eframe", "vendor/egui"]
 resolver = "2"
 members = [
     "crates/pocket-cab",
@@ -61,5 +61,8 @@ opt-level = 1
 unicorn-engine-sys = { path = "vendor/unicorn-engine-sys" }
 newtua-nsis = { path = "vendor/newtua-nsis" }
 
-# Avoid redundant UI context rebinding on input-triggered redraws.
+# Native image-driven desktop presentation.
 eframe = { path = "vendor/eframe" }
+
+# Keep automatic input repaints independent from input delivery in image-driven presentation.
+egui = { path = "vendor/egui" }

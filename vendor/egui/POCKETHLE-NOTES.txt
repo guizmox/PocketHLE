@@ -1,0 +1,4 @@
+Upstream egui0.27.2, MIT OR Apache-2.0. Original crate checksum verified against
+PocketHLE Cargo.lock. Changed only src/context.rs and src/memory.rs: add runtime
+Options.repaint_on_input (defaulttrue, not serialized) and gate automatic input
+follow-up repaint. Input events and explicit requests are unchanged.

@@ -34,11 +34,18 @@ use crate::{
     App, AppCreator, CreationContext, NativeOptions, Result, Storage,
 };
 
-use super::pocket_ui_trace::{self as ui_trace, Phase as UiPhase};
 use super::{
     winit_integration::{EventResult, UserEvent, WinitApp},
     *,
 };
+
+// Run-mode redraws follow image arrival; input events are still queued normally.
+fn game_frame_driven_ui(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<bool>(egui::Id::new("pockethle.frame_driven_ui"))
+            .unwrap_or(false)
+    })
+}
 
 // ----------------------------------------------------------------------------
 // Types:
@@ -250,6 +257,31 @@ impl GlowWinitApp {
                 });
         }
 
+        // Frame-ready wake, separate from egui's own repaint bookkeeping.
+        // Capture a frame-number cell rather than Context: storing a closure
+        // capturing Context in its own data map would create an Arc cycle.
+        {
+            let frame_nr = Arc::new(std::sync::atomic::AtomicU64::new(
+                integration.egui_ctx.frame_nr(),
+            ));
+            let event_frame_nr = frame_nr.clone();
+            let proxy = self.repaint_proxy.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                proxy
+                    .lock()
+                    .send_event(UserEvent::RequestRepaint {
+                        viewport_id: ViewportId::ROOT,
+                        when: Instant::now(),
+                        frame_nr: event_frame_nr.load(std::sync::atomic::Ordering::Acquire),
+                    })
+                    .ok();
+            });
+            integration.egui_ctx.data_mut(|data| {
+                data.insert_temp(egui::Id::new("pockethle.native_image_wake"), wake);
+                data.insert_temp(egui::Id::new("pockethle.native_image_frame_nr"), frame_nr);
+            });
+        }
+
         #[cfg(feature = "accesskit")]
         {
             let event_loop_proxy = self.repaint_proxy.lock().clone();
@@ -351,6 +383,21 @@ impl WinitApp for GlowWinitApp {
             .map_or(0, |r| r.integration.egui_ctx.frame_nr_for(viewport_id))
     }
 
+    fn is_focused(&self, window_id: WindowId) -> bool {
+        if let Some(running) = &self.running {
+            let glutin = running.glutin.borrow();
+            if let Some(window_id) = glutin.viewport_from_window.get(&window_id) {
+                return glutin.focused_viewport == Some(*window_id);
+            }
+        }
+
+        false
+    }
+
+    fn integration(&self) -> Option<&EpiIntegration> {
+        self.running.as_ref().map(|r| &r.integration)
+    }
+
     fn window(&self, window_id: WindowId) -> Option<Arc<Window>> {
         let running = self.running.as_ref()?;
         let glutin = running.glutin.borrow();
@@ -369,7 +416,6 @@ impl WinitApp for GlowWinitApp {
     }
 
     fn save_and_destroy(&mut self) {
-        ui_trace::flush();
         if let Some(mut running) = self.running.take() {
             crate::profile_function!();
 
@@ -387,7 +433,6 @@ impl WinitApp for GlowWinitApp {
         event_loop: &EventLoopWindowTarget<UserEvent>,
         window_id: WindowId,
     ) -> EventResult {
-        let _ui_frame = ui_trace::scope(UiPhase::Frame);
         if let Some(running) = &mut self.running {
             running.run_ui_and_paint(event_loop, window_id)
         } else {
@@ -401,8 +446,6 @@ impl WinitApp for GlowWinitApp {
         event: &winit::event::Event<UserEvent>,
     ) -> Result<EventResult> {
         crate::profile_function!(winit_integration::short_event_description(event));
-        ui_trace::event(event);
-        let _ui_event = ui_trace::scope(UiPhase::Event);
 
         Ok(match event {
             winit::event::Event::Resumed => {
@@ -444,12 +487,18 @@ impl WinitApp for GlowWinitApp {
             } => {
                 if let Some(running) = &mut self.running {
                     let mut glutin = running.glutin.borrow_mut();
+                    let defer_repaint = glutin.focused_viewport == Some(ViewportId::ROOT)
+                        && game_frame_driven_ui(&glutin.egui_ctx);
                     if let Some(viewport) = glutin
                         .focused_viewport
                         .and_then(|viewport| glutin.viewports.get_mut(&viewport))
                     {
                         if let Some(egui_winit) = viewport.egui_winit.as_mut() {
                             egui_winit.on_mouse_motion(*delta);
+                        }
+
+                        if defer_repaint {
+                            return Ok(EventResult::Wait);
                         }
 
                         if let Some(window) = viewport.window.as_ref() {
@@ -498,7 +547,6 @@ impl GlowWinitRunning {
         window_id: WindowId,
     ) -> EventResult {
         crate::profile_function!();
-        let ui_acquire = ui_trace::scope(UiPhase::Acquire);
 
         let Some(viewport_id) = self
             .glutin
@@ -565,7 +613,6 @@ impl GlowWinitRunning {
             .app
             .clear_color(&self.integration.egui_ctx.style().visuals);
 
-        drop(ui_acquire);
         let has_many_viewports = self.glutin.borrow().viewports.len() > 1;
         let clear_before_update = !has_many_viewports; // HACK: for some reason, an early clear doesn't "take" on Mac with multiple viewports.
 
@@ -590,15 +637,10 @@ impl GlowWinitRunning {
 
             {
                 frame_timer.pause();
-                {
-                    let _ui_context = ui_trace::scope(UiPhase::Context);
-                    ui_trace::rebound();
-                    change_gl_context(current_gl_context, gl_surface);
-                }
+                change_gl_context(current_gl_context, gl_surface);
                 frame_timer.resume();
             }
 
-            let _ui_clear = ui_trace::scope(UiPhase::Clear);
             self.painter
                 .borrow()
                 .clear(screen_size_in_pixels, clear_color);
@@ -608,11 +650,33 @@ impl GlowWinitRunning {
         // The update function, which could call immediate viewports,
         // so make sure we don't hold any locks here required by the immediate viewports rendeer.
 
-        let full_output = {
-            let _ui_update = ui_trace::scope(UiPhase::Update);
+        let repaint_on_input = self.integration.egui_ctx.options(|o| o.repaint_on_input);
+        let frame_driven = viewport_id == ViewportId::ROOT
+            && game_frame_driven_ui(&self.integration.egui_ctx);
+        if frame_driven {
             self.integration
-                .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input)
-        };
+                .egui_ctx
+                .options_mut(|o| o.repaint_on_input = false);
+        }
+        let full_output = self.integration
+            .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input);
+        if frame_driven {
+            self.integration
+                .egui_ctx
+                .options_mut(|o| o.repaint_on_input = repaint_on_input);
+        }
+        if viewport_id == ViewportId::ROOT {
+            if let Some(frame_nr) = self.integration.egui_ctx.data(|data| {
+                data.get_temp::<Arc<std::sync::atomic::AtomicU64>>(
+                    egui::Id::new("pockethle.native_image_frame_nr"),
+                )
+            }) {
+                frame_nr.store(
+                    self.integration.egui_ctx.frame_nr(),
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+        }
 
         // ------------------------------------------------------------
 
@@ -649,39 +713,29 @@ impl GlowWinitRunning {
         let gl_surface = viewport.gl_surface.as_ref().unwrap();
         let egui_winit = viewport.egui_winit.as_mut().unwrap();
 
-        let ui_prepare = ui_trace::scope(UiPhase::Prepare);
         egui_winit.handle_platform_output(&window, platform_output);
 
         let clipped_primitives = integration.egui_ctx.tessellate(shapes, pixels_per_point);
-        drop(ui_prepare);
 
         {
             // We may need to switch contexts again, because of immediate viewports:
             frame_timer.pause();
-            {
-                let _ui_context = ui_trace::scope(UiPhase::Context);
-                ui_trace::rebound();
-                change_gl_context(current_gl_context, gl_surface);
-            }
+            change_gl_context(current_gl_context, gl_surface);
             frame_timer.resume();
         }
 
         let screen_size_in_pixels: [u32; 2] = window.inner_size().into();
 
         if !clear_before_update {
-            let _ui_clear = ui_trace::scope(UiPhase::Clear);
             painter.clear(screen_size_in_pixels, clear_color);
         }
 
-        {
-            let _ui_paint = ui_trace::scope(UiPhase::Paint);
-            painter.paint_and_update_textures(
-                screen_size_in_pixels,
-                pixels_per_point,
-                &clipped_primitives,
-                &textures_delta,
-            );
-        }
+        painter.paint_and_update_textures(
+            screen_size_in_pixels,
+            pixels_per_point,
+            &clipped_primitives,
+            &textures_delta,
+        );
 
         {
             let screenshot_requested = std::mem::take(&mut viewport.screenshot_requested);
@@ -702,7 +756,6 @@ impl GlowWinitRunning {
             // vsync - don't count as frame-time:
             frame_timer.pause();
             crate::profile_scope!("swap_buffers");
-            let _ui_swap = ui_trace::scope(UiPhase::Swap);
             if let Err(err) = gl_surface.swap_buffers(
                 current_gl_context
                     .as_ref()
@@ -835,6 +888,18 @@ impl GlowWinitRunning {
         }
 
         if event_response.repaint {
+            let passive_input =
+                matches!(event, winit::event::WindowEvent::CursorMoved { .. })
+                    || matches!(event, winit::event::WindowEvent::KeyboardInput { event, .. } if event.repeat);
+            if !repaint_asap
+                && viewport_id == Some(ViewportId::ROOT)
+                && passive_input
+                && game_frame_driven_ui(&glutin.egui_ctx)
+            {
+                // on_window_event above has already queued the event. A new
+                // game image or the 100 ms fallback will run UI/input processing.
+                return EventResult::Wait;
+            }
             if repaint_asap {
                 EventResult::RepaintNow(window_id)
             } else {
