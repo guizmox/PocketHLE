@@ -518,7 +518,7 @@ mod tests {
         let empty = crate::Library::open(&target).unwrap();
         assert!(empty.games().is_empty());
         assert!(target.join("library.json").is_file());
-        let original_config = fs::read(target.join("config.json")).unwrap();
+        let original_config = fs::read(target.join(crate::CONFIG_FILE_NAME)).unwrap();
         drop(empty);
 
         restore(&target, &archive, RestoreMode::MergeNoOverwrite).unwrap();
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(restored.games().len(), 1);
         assert!(restored.get("incoming").is_some());
         assert_eq!(
-            fs::read(target.join("config.json")).unwrap(),
+            fs::read(target.join(crate::CONFIG_FILE_NAME)).unwrap(),
             original_config
         );
         assert_eq!(
