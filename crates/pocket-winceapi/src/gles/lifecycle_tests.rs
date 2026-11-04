@@ -625,3 +625,48 @@ fn a_terminated_guest_thread_does_not_keep_exclusive_context_or_surface_ownershi
     call(&mut cpu, &mut k, egl_release_thread, &[]);
     enter_thread(0);
 }
+
+#[test]
+fn implicit_loader_thread_uses_sole_goforce_context_without_stealing_binding() {
+    let _guard = guard();
+    reset_for_test(2, 2);
+    set_gizmondo_goforce_driver(true);
+    enter_gl_thread(1);
+    assert!(!needs_thread_switch(0));
+    with_ctx(|c| texture(c, 17, [21, 43, 65, 255]));
+    enter_thread(0);
+    with_ctx(|c| assert_eq!(c.textures[&17].rgba, [21, 43, 65, 255]));
+    SURFACES.with(|s| {
+        let s = s.borrow();
+        assert_eq!(s.contexts[&CONTEXT_HANDLE].owner, Some(0));
+        assert!(!s.threads.contains_key(&1));
+    });
+    // Explicit EGL entry switches to the thread's own unbound state.
+    enter_thread(1);
+    assert_eq!(SURFACES.with(|s| s.borrow().current), 0);
+    enter_thread(0);
+    enter_gl_thread(1);
+    assert_eq!(SURFACES.with(|s| s.borrow().current), 0);
+    enter_thread(0);
+    with_ctx(|c| assert_eq!(c.textures[&17].rgba, [21, 43, 65, 255]));
+}
+
+#[test]
+fn implicit_loader_thread_keeps_standard_and_multicontext_isolation() {
+    let _guard = guard();
+    for (goforce, additional) in [(false, false), (true, true)] {
+        reset_for_test(2, 2);
+        set_gizmondo_goforce_driver(goforce);
+        with_ctx(|c| texture(c, 17, [21, 43, 65, 255]));
+        if additional {
+            let mut cpu = fresh_cpu();
+            let mut k = fresh_kernel();
+            create(&mut cpu, &mut k, 0);
+        }
+        enter_gl_thread(1);
+        assert_eq!(SURFACES.with(|s| s.borrow().current), 0);
+        with_ctx(|c| assert!(!c.is_texture(17)));
+        enter_thread(0);
+        with_ctx(|c| assert_eq!(c.textures[&17].rgba, [21, 43, 65, 255]));
+    }
+}

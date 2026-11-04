@@ -596,7 +596,15 @@ impl Dispatcher for WinCeDispatcher {
                     .iter()
                     .any(|dll| thunk.dll.eq_ignore_ascii_case(dll))
             {
-                gles::enter_thread(ctx.kernel.current_thread);
+                if thunk
+                    .friendly_name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("gl"))
+                {
+                    gles::enter_gl_thread(ctx.kernel.current_thread);
+                } else {
+                    gles::enter_thread(ctx.kernel.current_thread);
+                }
             }
             match handler(&mut ctx) {
                 Ok(o) => Ok(o),

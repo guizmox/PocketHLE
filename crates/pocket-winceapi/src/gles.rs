@@ -10,7 +10,7 @@ mod es11;
 #[cfg(test)]
 mod lifecycle_tests;
 
-pub(crate) use egl_context::{enter_thread, needs_thread_switch};
+pub(crate) use egl_context::{enter_gl_thread, enter_thread, needs_thread_switch};
 use egl_context::{EglContext, EglThread};
 use pocket_gles::context::{ObjectReferences, SharedObjects, SurfaceBuffers};
 use std::cell::{Cell, RefCell};

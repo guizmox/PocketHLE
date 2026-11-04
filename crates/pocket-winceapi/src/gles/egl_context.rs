@@ -186,6 +186,21 @@ impl EglSurfaces {
     }
 }
 
+/// Some GoForce applications upload from a loader thread without making an
+/// EGL binding there (Jump). Preserve the sole active context for GL-only
+/// calls from a thread that has never entered EGL. Explicit thread bindings
+/// and all multi-context sessions retain normal EGL isolation.
+pub(crate) fn enter_gl_thread(thread: usize) {
+    let legacy_loader = with_ctx(|c| c.gizmondo_goforce_20051013)
+        && SURFACES.with(|s| {
+            let s = s.borrow();
+            s.bound && s.current != 0 && s.contexts.len() == 1 && !s.threads.contains_key(&thread)
+        });
+    if !legacy_loader {
+        enter_thread(thread);
+    }
+}
+
 pub(crate) fn enter_thread(thread: usize) {
     if !needs_thread_switch(thread) {
         return;
