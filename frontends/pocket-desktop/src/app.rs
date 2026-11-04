@@ -1457,17 +1457,33 @@ impl PocketLauncher {
                 if !available { ui.label("Stop the game and finish imports before backing up or restoring."); }
             });
             crate::controller_ui::menu_button(ui, "Settings", |ui| self.ui_settings_menu(ui));
-            crate::controller_ui::menu_button(ui, "About", |ui| {
-                ui.label(format!("PocketHLE v{}",env!("CARGO_PKG_VERSION")));
-                crate::controller_ui::hyperlink_to(ui, "PocketHLE fork — guizmox", "https://github.com/guizmox/PocketHLE");
-                crate::controller_ui::hyperlink_to(ui, "Original project", "https://github.com/j92580498-max/PocketHLE");
-                crate::controller_ui::hyperlink_to(ui, "GTShell support — Katamaran21", "https://github.com/Katamaran21/PocketHLE-GTShell");
-                ui.label("Windows and Linux share this desktop frontend.");
-                ui.separator();
-                ui.strong("Thanks");
-                for name in ["Nekomo", "OLego", "TimofeyLednev", "Benoît (FX-man)", "Jérôme (SoldatGG)", "Tim (Firefly)"] {
-                    ui.label(name);
-                }
+            ui.scope(|ui| {
+                // Fit the About menu to the viewport rather than the default
+                // 200-point combo limit. Small windows retain normal scrolling.
+                ui.spacing_mut().combo_height =
+                    (ui.ctx().screen_rect().bottom() - ui.next_widget_position().y - 32.0)
+                        .clamp(32.0, 420.0);
+                crate::controller_ui::menu_button(ui, "About", |ui| {
+                    ui.set_max_width(320.0);
+                    ui.label(format!("PocketHLE v{}", env!("CARGO_PKG_VERSION")));
+                    crate::controller_ui::hyperlink_to(ui, "PocketHLE fork — guizmox", "https://github.com/guizmox/PocketHLE");
+                    crate::controller_ui::hyperlink_to(ui, "Original project — j92580498-max", "https://github.com/j92580498-max/PocketHLE");
+                    crate::controller_ui::hyperlink_to(ui, "GTShell support — Katamaran21", "https://github.com/Katamaran21/PocketHLE-GTShell");
+                    ui.add(egui::Label::new("Windows and Linux share this desktop frontend.").wrap(true));
+                    ui.separator();
+                    ui.strong("Thanks");
+                    egui::Grid::new("about_thanks").num_columns(2).show(ui, |ui| {
+                        for names in [
+                            ["Nekomo", "OLego"],
+                            ["TimofeyLednev", "Benoît (FX-man)"],
+                            ["Jérôme (SoldatGG)", "Tim (Firefly)"],
+                        ] {
+                            ui.label(names[0]);
+                            ui.label(names[1]);
+                            ui.end_row();
+                        }
+                    });
+                });
             });
             let can_screenshot = self.screen==Screen::Run && self.last_frame_snapshot.is_some();
             if crate::controller_ui::add_enabled(ui, can_screenshot, egui::Button::new("Screenshot (F10)"))
