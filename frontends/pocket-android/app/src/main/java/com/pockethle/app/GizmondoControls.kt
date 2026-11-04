@@ -87,7 +87,7 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
             if (view is Button) view.textSize = when (id) {
                 R.id.btn_stop_emulation, R.id.btn_fullscreen -> 13f * geometry.toolbarScale
                 R.id.btn_soft1, R.id.btn_soft2 -> 18f
-                else -> 18f * geometry.controlScale
+                else -> 20f * geometry.controlScale
             }
             measure(view, rect)
         }

@@ -33,7 +33,8 @@ internal data class GizmondoGeometry(
             val scale = size / (140f * dp)
             val pad = ControlRect((4f * dp).toInt(), (h - 8f * dp - size).toInt(), size, size)
             val axis = pad.y + size / 2f
-            val diameter = 44f * dp * scale; val delta = 46f * dp * scale
+            // Larger circles, closer centers: preserve the 136-unit outer envelope.
+            val diameter = 50f * dp * scale; val delta = 43f * dp * scale
             val faceX = w - 6f * dp - delta - diameter / 2f
             val actions = listOf(0f to -1f, -1f to 0f, 1f to 0f, 0f to 1f).map { (x, y) ->
                 rect(faceX + x * delta - diameter / 2f, axis + y * delta - diameter / 2f, diameter, diameter)

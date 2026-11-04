@@ -43,7 +43,7 @@ class GizmondoGeometryTest {
             assertEquals(normal.toolbar, big.toolbar)
             assertTrue(big.actions[0].w > normal.actions[0].w)
             for (g in listOf(normal, big)) {
-                assertEquals(44f * g.controlScale, g.actions[0].w.toFloat(), 1f)
+                assertEquals(50f * g.controlScale, g.actions[0].w.toFloat(), 1f)
                 assertTrue(g.shoulders.all { it.y + it.h < g.dpad.y })
             }
         }
@@ -52,7 +52,7 @@ class GizmondoGeometryTest {
     @Test fun constrainedHeightClampsBothGroupsWithoutCoveringTheShoulders() {
         val g = GizmondoGeometry.calculate(800, 240, 1f, true)
         assertTrue(g.dpad.w < 186)
-        assertEquals(44f * g.controlScale, g.actions[0].w.toFloat(), 1f)
+        assertEquals(50f * g.controlScale, g.actions[0].w.toFloat(), 1f)
         assertTrue(g.shoulders.all { it.y + it.h <= g.dpad.y - 8 })
     }
 
