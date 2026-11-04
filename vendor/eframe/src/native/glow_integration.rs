@@ -47,6 +47,72 @@ fn game_frame_driven_ui(ctx: &egui::Context) -> bool {
     })
 }
 
+fn passive_game_input(event: &winit::event::WindowEvent) -> bool {
+    use winit::event::{TouchPhase, WindowEvent};
+    matches!(
+        event,
+        WindowEvent::CursorMoved { .. } | WindowEvent::MouseWheel { .. }
+    ) || matches!(event, WindowEvent::KeyboardInput { event, .. } if event.repeat)
+        || matches!(event, WindowEvent::Touch(touch) if touch.phase == TouchPhase::Moved)
+}
+
+#[cfg(test)]
+mod passive_game_input_tests {
+    use super::passive_game_input;
+    use winit::{
+        dpi::PhysicalPosition,
+        event::{
+            DeviceId, ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent,
+        },
+    };
+
+    #[test]
+    fn wheel_reports_defer_redraw_for_both_delta_formats() {
+        // Dummy IDs identify synthetic events only; no native device is queried.
+        let device_id = unsafe { DeviceId::dummy() };
+        for delta in [
+            MouseScrollDelta::LineDelta(0.0, 1.0),
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 12.0)),
+        ] {
+            assert!(passive_game_input(&WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase: TouchPhase::Moved,
+            }));
+        }
+    }
+
+    #[test]
+    fn touch_motion_is_passive_but_contact_edges_are_immediate() {
+        let device_id = unsafe { DeviceId::dummy() };
+        for phase in [
+            TouchPhase::Started,
+            TouchPhase::Moved,
+            TouchPhase::Ended,
+            TouchPhase::Cancelled,
+        ] {
+            assert_eq!(
+                passive_game_input(&WindowEvent::Touch(Touch {
+                    device_id,
+                    phase,
+                    location: PhysicalPosition::new(20.0, 30.0),
+                    force: None,
+                    id: 7,
+                })),
+                phase == TouchPhase::Moved,
+            );
+        }
+        for state in [ElementState::Pressed, ElementState::Released] {
+            assert!(!passive_game_input(&WindowEvent::MouseInput {
+                device_id,
+                state,
+                button: MouseButton::Left,
+            }));
+        }
+        assert!(!passive_game_input(&WindowEvent::Focused(false)));
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Types:
 
@@ -651,15 +717,16 @@ impl GlowWinitRunning {
         // so make sure we don't hold any locks here required by the immediate viewports rendeer.
 
         let repaint_on_input = self.integration.egui_ctx.options(|o| o.repaint_on_input);
-        let frame_driven = viewport_id == ViewportId::ROOT
-            && game_frame_driven_ui(&self.integration.egui_ctx);
+        let frame_driven =
+            viewport_id == ViewportId::ROOT && game_frame_driven_ui(&self.integration.egui_ctx);
         if frame_driven {
             self.integration
                 .egui_ctx
                 .options_mut(|o| o.repaint_on_input = false);
         }
-        let full_output = self.integration
-            .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input);
+        let full_output =
+            self.integration
+                .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input);
         if frame_driven {
             self.integration
                 .egui_ctx
@@ -667,9 +734,9 @@ impl GlowWinitRunning {
         }
         if viewport_id == ViewportId::ROOT {
             if let Some(frame_nr) = self.integration.egui_ctx.data(|data| {
-                data.get_temp::<Arc<std::sync::atomic::AtomicU64>>(
-                    egui::Id::new("pockethle.native_image_frame_nr"),
-                )
+                data.get_temp::<Arc<std::sync::atomic::AtomicU64>>(egui::Id::new(
+                    "pockethle.native_image_frame_nr",
+                ))
             }) {
                 frame_nr.store(
                     self.integration.egui_ctx.frame_nr(),
@@ -888,9 +955,7 @@ impl GlowWinitRunning {
         }
 
         if event_response.repaint {
-            let passive_input =
-                matches!(event, winit::event::WindowEvent::CursorMoved { .. })
-                    || matches!(event, winit::event::WindowEvent::KeyboardInput { event, .. } if event.repeat);
+            let passive_input = passive_game_input(event);
             if !repaint_asap
                 && viewport_id == Some(ViewportId::ROOT)
                 && passive_input
