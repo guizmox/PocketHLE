@@ -35,3 +35,26 @@ memory hooks, write protection, self-modifying code and shared host-RAM aliases.
 Its header contains a standalone build command. Rust CPU tests cover the ARM
 virtual-TLB integration, MIPS execution and image-page lifecycle/budget behavior.
 Configuration tests verify that old optimization switches are discarded.
+
+## Retained ARM-specific optimizations
+
+These are architecture-guarded fast paths, not user switches:
+
+- Recompute dynamic ARM/Thumb/IT/VFP inputs for the ARM TB lookup key; retain
+  fallback for XScale, M-profile, debugging and AArch64 states.
+- Use the finite normal float32-to-int32 truncation fast path only in its checked
+  magnitude range, preserving inexact flags and generic exceptional/boundary cases.
+- Permit inter-page direct ARM chaining only after the identity virtual-TLB
+  contract is installed. TLB-mode changes clear the contract and flush blocks.
+  CPU-TLB fallback and indirect calls keep their established behavior.
+- Keep Win64 link/unlink pointer atomics 64-bit. Preserve guest-code store,
+  permissions, unmap/remap and explicit host-code invalidation requirements.
+
+The private 0x5049 identity-mapping control is a retained optimization contract;
+the temporary 0x5048 profiling control, timing fields, sampling module and
+Cpu::take_backend_diagnostics are not production dependencies. Rejected division
+lowering and cache/hash experiments are not retained optimizations.
+
+Historical synthetic gains and original validation counts are recorded in
+[implementation notes](IMPLEMENTATION-NOTES.md#history-cpu). They are not a
+promise of the same speedup on games, Windows, Android or MIPS.

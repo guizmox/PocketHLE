@@ -51,3 +51,17 @@ The WinCE flavour of PE32 uses `IMAGE_FILE_MACHINE_ARM = 0x01C0`. The
 
 - PE / COFF specification (includes `IMAGE_FILE_MACHINE_ARM = 0x01C0`):
   <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format>
+
+## Graphics and UI primary sources
+
+- [Khronos OpenGL ES registry](https://registry.khronos.org/OpenGL/index_es.php):
+  use the applicable ES 1.0/1.1 specification and extension contracts; a vendor
+  driver's observed behavior is separate compatibility evidence.
+- [egui 0.27.2 published source](https://docs.rs/crate/egui/0.27.2/source/):
+  inspect the pinned version rather than assuming current egui APIs match it.
+- [CERF design comparison](IMPLEMENTATION-NOTES.md#history-cerf): retained HLE
+  boundaries, VFS ideas and features explicitly not adopted.
+
+These links identify sources, not a claim that they were all fetched or verified
+online during this documentation-only review. No SDK/game/driver binaries are
+added by this change.

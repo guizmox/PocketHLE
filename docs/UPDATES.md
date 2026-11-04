@@ -48,9 +48,9 @@ download, automatic installation, EXE replacement or APK installation request.
    Attach the Windows, Linux and Steam Deck packages and the Android APK as
    release assets. Actions artifacts alone do not trigger a release notification.
 
-The checker does not publish releases or change repository settings. A stable
-`v0.3.1` release is already present; applications whose comparison version is
-`0.3.1` must not offer it as a newer update.
+The checker does not publish releases or change repository settings. An installed version must not offer an equal-version tag as an update. The
+published release set is external state; this guide does not assert which tag
+is currently deployed.
 
 ## Validation
 

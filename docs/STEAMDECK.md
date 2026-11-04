@@ -1,106 +1,98 @@
-# PocketHLE — édition Steam Deck
+# PocketHLE — Steam Deck edition
 
-Cette édition est la version Windows dédiée à SteamOS via Proton.
+This edition is the dedicated Windows build for SteamOS through Proton.
+It is distinct from the native Linux desktop build.
 
-## Télécharger le build CI
+## CI artifact and startup
 
-Dans GitHub Actions, ouvrir une exécution réussie du workflow **CI**, puis
-télécharger l’artefact **PocketHLE-steamdeck-x86_64**. Il contient le ZIP
-`PocketHLE-steamdeck-x86_64.zip`, avec `pockethle-steamdeck.exe` et ce guide.
+Download **PocketHLE-steamdeck-x86_64** from a successful CI run and extract
+`PocketHLE-steamdeck-x86_64.zip`. Point the existing Steam shortcut at
+`pockethle-steamdeck.exe`, enable Proton and select a Gamepad Steam Input layout.
+The SDL Proton profile is built in; launch options can remain empty.
 
-Extraire le ZIP sur la Deck. Dans le raccourci Steam existant, choisir
-`pockethle-steamdeck.exe` comme cible et garder Proton activé. Les options de
-lancement peuvent rester vides : le profil SDL pour Proton est intégré.
-Utiliser un modèle Steam Input de type **Manette / Gamepad**, qui transmet
-les boutons Xbox. Les boutons arrière ne sont pas nécessaires.
+The dedicated edition requests fullscreen at window creation and on its first
+UI frame after native state restoration. An explicit CLI display argument wins:
+0 means fullscreen; 1 means windowed. This does not enable automatic Deck
+identification in an ordinary desktop executable.
 
-## Commandes en jeu
+## Reserved controls during gameplay
 
-Les boutons Menu (☰, à droite) et View (à gauche) servent à l’émulateur :
+| Deck control | Action |
+| --- | --- |
+| Menu, short press | Next presentation filter |
+| Menu, hold 650 ms | Start/stop video recording |
+| View, short press | Toggle fullscreen |
+| View, hold 650 ms | Gizmondo brightness; exit game on PocketPC |
 
-| Bouton Deck | Fonction |
-|---|---|
-| Menu — appui court | Filtre d’upscaling suivant |
-| Menu — maintien de 650 ms | Démarrer / arrêter l’enregistrement vidéo |
-| View — appui court | Basculer le plein écran |
-| View — maintien de 650 ms | Luminosité Gizmondo ; sortie du jeu sur PocketPC |
+These host gestures take precedence over an old default-binding migration note.
+They change emulator presentation/device controls, not SteamOS volume/brightness.
 
 ### PocketPC / WinCE
 
-| Bouton Deck | Fonction |
-|---|---|
-| Croix / stick gauche | Directions |
-| L1 | P1 (VK_APP1) |
-| R1 | P2 (VK_APP2) |
-| L2 | P3 (VK_APP3) |
-| R2 | P4 (VK_APP4) |
-| L3 — clic du stick gauche | Échap |
-| R3 — clic du stick droit | Action / Entrée |
-| A / B / X / Y | A / B / C / Tab (Ctrl / Espace / Maj / Tab) |
+| Deck control | Guest action |
+| --- | --- |
+| D-pad / left stick | Directions |
+| L1 / R1 | P1 / P2 |
+| L2 / R2 | P3 / P4 |
+| Left-stick click | Escape |
+| Right-stick click | Action / Enter |
+| A / B / X / Y | A / B / C / Tab (Ctrl / Space / Shift / Tab) |
 
-Les quatre boutons P1–P4 sont ceux annoncés par GAPI. Un jeu peut limiter son
-écran de configuration à ces boutons et aux directions ; cela ne signifie pas
-qu’il accepte aussi toutes les touches du clavier. Action / Entrée est distinct
-de P1. Le clic d’un stick est indépendant de ses déplacements. Si SDL les expose, les
-boutons Steam (Guide/Mode) et Quick Access (Misc1) permettent aussi de sortir du
-jeu PocketPC par appui long. SteamOS peut réserver ces boutons au système.
+P1-P4 are the buttons exposed by GAPI; Action/Enter is separate. A game that
+only lists GAPI buttons need not accept every keyboard key. Stick clicks and
+motion are independent. If SDL exposes Guide/Mode or Misc1, their long press
+can exit a PocketPC game; SteamOS may reserve these controls.
 
 ### Gizmondo
 
-| Bouton Deck | Fonction |
-|---|---|
-| Croix / stick gauche | Directions |
+| Deck control | Guest action |
+| --- | --- |
+| D-pad / left stick | Directions |
 | A / Y / B / X | Action / A / B / C |
-| L1 | Volume Gizmondo (Piano 2) |
-| R1 | Home Gizmondo (Piano 1) |
+| L1 | Volume (Piano 2) |
+| R1 | Home (Piano 1) |
 | L2 / R2 | Gizmondo L / R |
 
-Les assignations Gizmondo personnalisées restent conservées, à l’exception de
-L1 réservé au volume. Les commandes Gizmondo règlent la machine émulée, pas le
-volume ou la luminosité de SteamOS.
+Customized Gizmondo bindings remain, except L1 reserved for volume. Game-only
+fullscreen hides the virtual Gizmondo panel and EXIT/FULL buttons; see
+[FRONTENDS.md](FRONTENDS.md). It does not change the guest's LCD geometry.
 
-## Catalogue
+## Library and settings
 
-Croix ou stick gauche pour sélectionner une carte, **A** pour lancer,
-**X** pour changer de catégorie, **Y** pour les options du jeu et **Start**
-pour les réglages. **B** revient depuis les menus sans enregistrer les
-modifications. Le catalogue défile pour garder la sélection visible.
-Dans le menu de démarrage Colors : directions pour la langue, A pour lancer,
-B pour annuler. L’import initial et la saisie de texte peuvent nécessiter le
-trackpad ou un clavier.
+D-pad/stick selects a card; A launches; X changes category; Y opens the game's
+menu; Start opens settings. L1/L2 move to the previous tab and R1/R2 to the next,
+wrapping through Gizmondo, PocketPC and Recordings. Selection stays in view.
 
-## Réglages et mise à jour
+The game menu includes Information, Play, Rename, Settings and Remove. A accepts;
+B returns to the parent menu, then closes it. In settings, up/down moves focus,
+left/right adjusts sliders and A activates the selected control. Dropdowns use
+up/down, A to accept and B to cancel. Pages scroll to keep focus visible.
 
-L’édition Deck utilise `config-steamdeck.json` et la version standard utilise
-`config.json`. Elles peuvent partager le catalogue d’une même bibliothèque.
-Le préréglage Deck initial (Start = Home) est automatiquement remplacé par le
-nouveau préréglage (Start = Volume) uniquement s’il correspond encore
-exactement aux anciennes valeurs d’usine. Les assignations personnalisées sont
-conservées. **Apply Steam Deck preset** permet de rétablir toutes les valeurs
-Deck en un clic, si souhaité.
+A on a text field opens the virtual keyboard. Directions select, A types, Y
+switches symbols and Shift changes case. Apply accepts; B cancels. External
+file dialogs remain OS dialogs. Initial import may need a trackpad or keyboard.
 
-## Compiler sous Windows
+Colors startup uses directions for language, A to launch and B to cancel. Its
+explicit unlock action uses X; see [COLORS.md](COLORS.md).
+
+The Deck edition uses config-steamdeck.json; standard desktop uses config.json.
+They may share a library. **Apply Steam Deck preset** restores the preset;
+custom bindings should otherwise be preserved. Do not confuse historical
+Start=Home/Volume migration values with the reserved Menu gestures above.
+
+## Captures
+
+A long Menu press toggles recording; release is not required to keep recording.
+The flashing REC indicator is local UI, applied after game capture. In Recordings,
+A opens the selected capture. Y shares only when a native share service exists;
+no fixed list of sharing destinations is fabricated.
+
+## Build
 
 ```text
 cargo build --release --locked -p pocket-desktop --features steam-deck --bin pockethle-steamdeck
 ```
 
-Le fichier produit est `target/release/pockethle-steamdeck.exe` (ou
-`target/cargo/release/pockethle-steamdeck.exe` dans la CI).
-La compilation standard sans `steam-deck` garde ses commandes habituelles.
-
-## Catalogue et captures
-
-L1/L2 passent à l’onglet précédent et R1/R2 au suivant, en boucle : Gizmondo / PocketPC / Recordings. Le menu à trois points de chaque jeu contient Informations. Dans Recordings, A ouvre la capture sélectionnée avec le lecteur par défaut. Share apparaît uniquement si le système fournit un panneau de partage natif ; aucune liste de destinations fixe n’est proposée.
-
-Un appui long sur Menu démarre la vidéo ; le bouton peut être relâché. Un nouvel appui long arrête la vidéo. Le témoin REC avec point rouge clignotant est visible uniquement sur l’écran local, après la capture du framebuffer.
-
-Dans le catalogue, A lance le jeu sélectionné ; Y ouvre son menu à trois points. Haut/bas au stick ou à la croix parcourent Informations, Play, Rename, Settings et Remove ; A valide. B quitte un sous-menu et revient au menu du jeu, puis B ferme ce menu.
-
-## Navigation des réglages à la manette (PC et Steam Deck)
-
-Haut/bas parcourent les champs ; gauche/droite ajustent les curseurs. A actionne le contrôle sélectionné (bouton, checkbox ou liste déroulante). Dans une liste, haut/bas parcourent les choix, A valide et B ferme sans modifier le choix. B quitte ensuite les réglages. Le focus apparaît avec un contour bleu, et les pages de réglages défilent pour le garder visible.
-
-A sur un champ de texte ouvre le clavier virtuel. Stick/croix choisissent les touches, A les saisit, Y bascule vers les symboles ; Shift change la casse. Apply valide le texte ; B annule la saisie. Les boîtes de fichiers externes restent celles du système d’exploitation.
-
-Dans Recordings : A ouvre la capture sélectionnée ; Y ouvre le partage natif lorsqu’il est disponible.
+Output is target/release/pockethle-steamdeck.exe, or the CI's configured target
+folder. The standard build retains its own control policy. Native services and
+physical Deck behavior require device validation; build success alone is not it.

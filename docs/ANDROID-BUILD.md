@@ -6,46 +6,10 @@ See [Gizmondo options](GIZMONDO.md) and [GPU rendering](GPU.md).
 
 ## Interface and settings
 
-- Portrait library: neutral SD card tiles, game names, Gizmondo/Pocket PC tabs.
-  Each card has a ⋮ menu: Run, Rename, Settings, Remove. Rename preserves the
-  game identifier, folders and saves.
-- Main ⋮ → Settings: Emulator Settings, Display and controls, Gizmondo options,
-  Keyboard and controllers. All settings remain outside gameplay. Interface text
-  and project documentation are maintained in English.
-- Gizmondo immersive landscape gameplay: central image, controls and Exit. Stop, Rewind,
-  Forward and Play are on the physical right; D-pad is on the physical left.
-  L/R shoulders sit above their respective groups. The layout remains the same
-  in both landscape orientations and is not mirrored for right-to-left locales.
-- Five function buttons use the desktop skin's Home, Volume, Brightness, Geofence
-  and Power symbols, mapped to guest F1/F2/F3/F4/F11. Power is not guest F5.
-  The default PC keyboard may use host F5 to produce guest VK_F11.
-- PocketPC uses its own restored controls, Rotate/Exit, and orientation based on
-  the rotated game dimensions; phone rotation does not override the game mode.
-- Gizmondo's native framebuffer remains 320×240, without rotation or stretching.
-  Pocket PC retains its configured native dimensions and rotation.
-- Auto chooses the largest integer scale that fits the available game area,
-  excluding controls and system insets. Examples: ×1 = 320×240, ×2 = 640×480,
-  ×3 = 960×720, ×4 = 1280×960. Auto can use a larger integer on larger screens.
-  Explicit ×1/×2/×3/×4 choices are capped at the largest integer scale that fits.
-  Remaining space is letterboxed. A viewport smaller than the native frame clips
-  at ×1 rather than introducing fractional scaling. Scaling does not increase
-  the emulated renderer's resolution.
-- Filters: reconstruction, SMAA, SMAA Soft, xBRZ, bicubic, Lanczos, bilinear,
-  nearest. Desktop shaders, reference three-pass SMAA and xbrz-rs 0.1.0 ×3
-  preprocessing are used. GLES 3 is required.
-- Physical keyboard F10 captures actual filtered/rotated GL pixels, excluding
-  the UI/buttons. PNGs are stored in `library/screenshots/`.
-- Gizmondo options include GPRS/data, Colors server and player ID, real or fixed
-  GPS, Bluetooth and camera. Changes take effect on the next game launch.
-  Fixed GPS does not require real-location permission; older Bluetooth APIs may
-  independently require that permission. Latitude accepts −90..90 and longitude
-  −180..180. Satellite counts are not fabricated.
-- The existing WinINet bridge redirects Colors' fixed server domain. Supply a
-  host, IP or HTTP(S) origin, for example `nas.local:8080`, `192.168.1.10:8080`
-  or `http://192.168.1.10:8080`. On a phone, `localhost` means the phone itself,
-  not the NAS. This Android update does not require a NAS server change.
-- Gizmondo saves use `library/flash/`, mounted at `\Flash Disk\` as on PC.
-  Colors identity, configuration and registry data remain persistent.
+Use [FRONTENDS.md](FRONTENDS.md) for control geometry, settings ownership and
+current display fitting, and [GPU.md](GPU.md) for rendered resolution, filters
+and FPS. Those policies are not duplicated in this build recipe.
+
 
 ## Build from Windows using WSL2 / Ubuntu
 
@@ -160,36 +124,21 @@ GPL-3.0-only as on PC. License texts are included in assets. SMAA shaders and lo
 tables retain their MIT license. Public APK distribution must include the source
 and reconstruction/relinking materials required by these licenses.
 
-## RAMTEST / VFSTEST runner update
+## Diagnostics and runner regression tests
 
-The Android runner now supports child processes, suspended startup, shared file
-handles/object storage and the shared device RAM budget. Process completion is
-published after CPU/RAM teardown and before joining descendants, so an orphan
-can observe its parent's exit. The session waits for all jobs before returning
-to the library; Stop reaches foreground/background jobs and startup gates.
-
-Host regression commands (require Rust, a C/C++ compiler, CMake, pkg-config,
-Python and libclang for Unicorn):
+Use the single [HARDWARE DIAG application](../tools/hardware-diag/README.md),
+not old standalone RAMTEST/VFSTEST installations. It may relaunch its own EXE
+for real process tests and needs private DLL/data fixtures; that does not make
+it a menu of unrelated diagnostic executables.
 
 ```sh
+python tools/hardware-diag/build.py
+python tools/hardware-diag/run.py --guest
 cargo test -p pocket-android-jni --no-default-features --features unicorn --lib
 ```
 
-The full core `ram_guest` suite additionally requires regenerated fixtures;
-follow `tools/ramtest/README.md` and `tools/vfstest/README.md` before running it.
-The alternate process-exit fixtures are not included in the diagnostic ZIPs.
-
-The runner tests import the shipped diagnostic archives, execute their original
-ARM programs and verify reports. VFSTEST runs twice to verify sharing, rename,
-32 MiB Flash quota/refunds and complete cleanup. RAMTEST also verifies the child,
-orphan, DLL and dependency reports. An intentionally disabled process runner
-reproduces the previous 24-failure VFSTEST report without changing VFS semantics.
-
-To apply a source-only patch, extract its files at the repository root. Rebuild
-both native ABIs and the APK using the existing build commands in this document.
-An older installed APK does not receive source changes automatically. On Android,
-rerun the diagnostics from a fresh test library: a failed VFSTEST intentionally
-leaves its private probe directory and refuses to overwrite it on a later run.
-Keep game data separate; do not erase an existing gameplay library for this check.
-Host ARM regression success is not a claim of APK, physical storage or sensor
-validation. This update does not change Windows frontend or shared kernel sources.
+Follow that tool's current README for fixture generation. Keep native ABIs and
+APK in sync. Run destructive quota/lifecycle probes in an isolated test library;
+never erase a gameplay library to obtain a clean diagnostic result. A failed
+probe may deliberately retain its private data for inspection.
+Host ARM regressions do not certify APK, physical storage or sensor behavior.

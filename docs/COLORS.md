@@ -128,7 +128,7 @@ dismiss the popup without starting a game on the same input.
 
 With the supplied complete game, Fake GPS Paris (48.8584, 2.2945), a local server
 at GizmondoColorsTurfWarsServer 0d3765a, actual ARM and GPU rendering, the map GIF
-arrives in HTTP 200 but the game displays `Erreur de transfert. Réessayer.`
+arrives in HTTP 200 but the game displays a localized transfer error (English translation: "Transfer error. Try again.")
 The original coordinate parser at 0xf2704 returns false if either turf coordinate
 is <= 0 (0xf279c..0xf27b0). The signed server grid around Eiffel Tower includes
 negative X and zero Y, so the metadata callback rejects it after image decoding.

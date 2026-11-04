@@ -3,7 +3,7 @@
 Use Gizmondo options globally or in per-game settings where offered. Hardware
 access switches apply at the next launch; the guest starts the actual service.
 Windows/Linux share the desktop settings UI, but native hardware bridges are
-platform-specific. See [DESKTOP-PARITY.md](DESKTOP-PARITY.md).
+platform-specific. See [DESKTOP-PARITY.md](FRONTENDS.md#native-service-parity).
 
 ## Imports and game information
 
@@ -27,8 +27,9 @@ exchange. Use two hosts, not two instances on one radio.
 The SDK path supports discovery, advertised services, serial/COM and supported
 RFCOMM socket operations. This is not a full HCI/L2CAP/controller stack or a
 promise of interoperability with physical Gizmondo consoles.
-[BTTEST](../tools/bttest/android-host/README.md) covers Android host diagnostics.
-Desktop also provides `pockethle-bt-test server`, `scan` and `client ADDRESS`.
+The Bluetooth suite in [HARDWARE DIAG](../tools/hardware-diag/README.md) checks
+the guest contract. Its README also documents optional native host-provider
+examples; these are not separate public diagnostic applications.
 
 ## GPS
 
@@ -38,7 +39,7 @@ Tower, selected once per launch. Simulation takes priority if enabled; disable
 it and enable host GPS to use the real provider. Manual coordinates are retained.
 Fake fixes do not require host-location permission; Bluetooth may independently
 require it on older Android versions. Linux supports simulation, not a native
-location bridge. [GPSTEST](../tools/gpstest/README.md) checks the ARM contract.
+location bridge. the GPS suite in [HARDWARE DIAG](../tools/hardware-diag/README.md) checks the ARM contract.
 
 ## Internet and Colors
 
@@ -47,7 +48,7 @@ Enable GPRS/data for Colors. The default replacement server origin is
 On a phone, localhost means that phone. Windows uses WinHTTP; Android uses
 HttpURLConnection with normal TLS verification and bounded transfer buffers.
 HTTP/HTTPS WinINet support is not general TCP/UDP, FTP or every WinCE option.
-[NETTEST](../tools/nettest/README.md) checks HTTP/HTTPS and guest errors.
+[NETTEST](../tools/hardware-diag/README.md) checks HTTP/HTTPS and guest errors.
 
 ## Camera
 
@@ -57,7 +58,7 @@ RGB565 and capture is I420; unsupported controls report errors. This is separate
 from PocketPC DirectShow camera support. Pause/exit/last-close release capture. Android Gizmondo camera frames follow
 the screen orientation, including reverse landscape, before the game performs
 tracking. This rotates pixels without adding a mirror.
-[CAMTEST](../tools/camtest/README.md) produces a BMP for checking a real image.
+[CAMTEST](../tools/hardware-diag/README.md) produces a BMP for checking a real image.
 
 ## Controls, vibration and brightness
 
@@ -66,7 +67,7 @@ controller sticks; digital contacts stay digital. Keyboard/controller bindings
 remain configurable. Android game vibration uses fixed amplitude where supported;
 desktop rumble requires a supported connected controller. OFF/exit releases output;
 closing VIB1 alone intentionally preserves the SDK's requested motor state.
-[VIBTEST](../tools/vibtest/README.md) checks patterns, stop and reopening.
+[VIBTEST](../tools/hardware-diag/README.md) checks patterns, stop and reopening.
 
 The Gizmondo Brightness button opens the game's menu through its guest key.
 Backlight registry/events control bounded image adjustment; this is not host
@@ -93,8 +94,8 @@ and release the decoder's resources. Detailed contracts remain in
 
 ## Diagnostics and compatibility
 
-[Compatibility](GIZMONDO-COMPATIBILITY.md) records maintainer-reported results.
-[RAMTEST](../tools/ramtest/README.md) and [VFSTEST](../tools/vfstest/README.md)
+[Compatibility](GIZMONDO.md#reported-game-compatibility) records maintainer-reported results.
+The RAM and VFS suites in [HARDWARE DIAG](../tools/hardware-diag/README.md)
 exercise memory/process and filesystem contracts. Run hardware tests explicitly;
 they do not run automatically when importing a game. GPU differences and visual
 regression checks are documented in [GPU.md](GPU.md).
@@ -341,3 +342,54 @@ The kernel now bounds all CPU slices with its existing reusable host-time timer:
 20ms normally, retaining the 5ms live-audio quantum. Native clock thunks and game
 files remain unchanged. Validation must omit POCKETHLE_SLICE_TIMEOUT_MS: setting
 that diagnostic watchdog masked the original freeze in earlier local tests.
+
+## Reported game compatibility
+
+
+Updated 2026-10-12. Status reflects the maintainer's reported successful tests
+on the Windows/Android builds used at the time of that report.
+The documentation audit does not refresh those gameplay results. It is not an independent rerun
+of every title, a certification of every game mode, or a complete worldwide
+release catalogue. The list covers the maintained/tested collection discussed
+with the maintainer; additional titles should be added after testing.
+
+| Game / card | Status | Evidence |
+| --- | --- | --- |
+| Agaju — The Sacred Path of Treasure | OK | Maintainer-reported testing |
+| Alien Hominid | OK | Maintainer-reported testing |
+| Ball Busters | OK | Maintainer-reported testing |
+| Battlestations | OK | Maintainer-reported testing |
+| Carmageddon | OK | Maintainer-reported testing |
+| Catapult | OK | Maintainer-reported testing |
+| Chicane | OK | Maintainer-reported testing |
+| Classic Compendium | OK | Maintainer-reported testing |
+| Classic Compendium 2 | OK | Maintainer-reported testing |
+| Colors | OK | Maintainer-reported testing |
+| Conflict: Vietnam | OK | Maintainer-reported testing |
+| Fathammer Classics | OK | Maintainer-reported testing |
+| FIFA Football 2005 | OK | Maintainer-reported testing |
+| Gizmondo Demonstrations / Demo Card | OK | Maintainer-reported testing |
+| Gizmondo Motocross 2005 | OK | Maintainer-reported testing |
+| Hit & Myth | OK | Maintainer-reported testing |
+| Kiosk Card | OK | Maintainer-reported testing |
+| Pocket Ping Pong 2005 | OK | Maintainer-reported testing |
+| Richard Burns Rally | OK | Maintainer-reported testing |
+| Sticky Balls | OK | Maintainer-reported testing |
+| Stuntcar Extreme | OK | Maintainer-reported testing |
+| Toy Golf | OK | Maintainer-reported testing |
+| Trailblazer | OK | Maintainer-reported testing |
+| Hockey Rage 2005 | OK | Maintainer-reported overall compatibility status |
+| Interstellar Flames 2 | OK | Maintainer-reported overall compatibility status |
+| Point of Destruction | OK | Maintainer-reported overall compatibility status |
+| SSX 3 | OK | Maintainer-reported overall compatibility status |
+
+The previous per-game proof captures remain in proof/ and document narrower
+historical checks. This status update does not replace those artifacts or
+claim new automated gameplay runs. Demo/kiosk cards are launchers, not separate
+game titles. Camera, Bluetooth, location and multiplayer depend on permissions,
+hardware and external services. Regression reports should specify platform,
+software/GPU mode, binary version and the failing action.
+
+See [proof captures](../proof/) for recorded gameplay evidence.
+
+Catalogue cross-check (names only): https://en.wikipedia.org/wiki/Gizmondo#Game_library
