@@ -128,6 +128,7 @@ pub struct UnicornCpu {
     #[cfg(test)]
     backend_runs: u64,
     images: Rc<RefCell<crate::image_pages::ImagePages>>,
+    deferred_memory: Rc<RefCell<crate::deferred_memory::PendingMemory>>,
     scheduler_timeout_us: u64,
     shared_regions:
         std::collections::BTreeMap<u32, (u32, std::sync::Arc<crate::shared_memory::SharedRegion>)>,
@@ -156,8 +157,11 @@ impl UnicornCpu {
         // Unicorn's virtual TLB can restore MIPS delay-slot branch state during
         // a store refill and raise an exception on the following branch. Keep
         // the architectural TLB for MIPS; the flat-memory fast path is ARM-only.
+        let deferred_memory = Rc::new(RefCell::new(
+            crate::deferred_memory::PendingMemory::default(),
+        ));
         let guest_map = if arch == Arch::Arm {
-            install_virtual_tlb(&mut uc, &last_fault, &images)
+            install_virtual_tlb(&mut uc, &last_fault, &images, &deferred_memory)
         } else {
             None
         };
@@ -204,6 +208,7 @@ impl UnicornCpu {
             #[cfg(test)]
             backend_runs: 0,
             images,
+            deferred_memory,
             scheduler_timeout_us: 0,
             shared_regions: Default::default(),
             scheduler_timer: None,
@@ -243,6 +248,7 @@ fn install_virtual_tlb(
     uc: &mut Unicorn<'static, ()>,
     last_fault: &Rc<RefCell<Option<(String, u64)>>>,
     images: &Rc<RefCell<crate::image_pages::ImagePages>>,
+    deferred_memory: &Rc<RefCell<crate::deferred_memory::PendingMemory>>,
 ) -> Option<Rc<RefCell<GuestMap>>> {
     if std::env::var_os("POCKETHLE_CPU_TLB").is_some() {
         return None;
@@ -256,11 +262,16 @@ fn install_virtual_tlb(
     // `begin > end` is Unicorn's "every address" bound check. The
     // address handed to the callback is already page-aligned.
     let pending = images.clone();
+    let deferred = deferred_memory.clone();
     let installed = uc.add_tlb_hook(1, 0, move |uc, page, kind| {
         if let Err(error) = materialize_images(uc, &pending, page as u32, 1) {
             *sink.borrow_mut() = Some((error.to_string(), page));
             return None;
         }
+        // Native protect/unmap invalidates code with FETCH translations too.
+        // Data-only pending ranges must not read pixels for that maintenance,
+        // nor become executable via the legacy data-code promotion path.
+        let deferred_fetch = kind == MemType::FETCH && deferred.borrow().pending(page as u32);
         let mut map = regions.borrow_mut();
         let Some(region_exec) = map.region_for(page) else {
             *sink.borrow_mut() = Some((format!("{kind:?} unmapped"), page));
@@ -281,6 +292,17 @@ fn install_virtual_tlb(
                 *sink.borrow_mut() = Some((format!("{kind:?} protected"), page));
                 return None;
             }
+            if deferred_fetch {
+                return Some(TlbEntry {
+                    paddr: page,
+                    perms: UcProt::READ | UcProt::WRITE,
+                });
+            }
+            drop(map);
+            if let Err(error) = materialize_deferred(uc, &deferred, page as u32, 1) {
+                *sink.borrow_mut() = Some((error.to_string(), page));
+                return None;
+            }
             return Some(TlbEntry {
                 paddr: page,
                 perms: map_prot(prot),
@@ -292,6 +314,9 @@ fn install_virtual_tlb(
         // and a page we hand back as non-executable stays on the slow
         // helper path anyway whenever it is genuinely read-only.
         let mut perms = UcProt::READ | UcProt::WRITE;
+        if deferred_fetch {
+            return Some(TlbEntry { paddr: page, perms });
+        }
         if region_exec || map.is_promoted_exec(page) {
             perms |= UcProt::EXEC;
         } else if kind == MemType::FETCH {
@@ -303,6 +328,11 @@ fn install_virtual_tlb(
             // inline and leave stale translated code behind.
             map.promote_exec(page);
             perms |= UcProt::EXEC;
+        }
+        drop(map);
+        if let Err(error) = materialize_deferred(uc, &deferred, page as u32, 1) {
+            *sink.borrow_mut() = Some((error.to_string(), page));
+            return None;
         }
         Some(TlbEntry { paddr: page, perms })
     });
@@ -339,6 +369,28 @@ fn materialize_images(
     len: u32,
 ) -> Result<bool, CpuError> {
     crate::image_batch::materialize(&mut UnicornImageBackend(uc), images, va, len)
+}
+
+fn materialize_deferred(
+    uc: &mut Unicorn<'_, ()>,
+    pending: &Rc<RefCell<crate::deferred_memory::PendingMemory>>,
+    va: u32,
+    len: u32,
+) -> Result<(), CpuError> {
+    let regions = pending.borrow().overlapping(va, len);
+    for region in regions {
+        let bytes = region
+            .source
+            .materialize()
+            .map_err(|e| CpuError::Backend(format!("deferred memory: {e}")))?;
+        if bytes.len() != region.size as usize {
+            return Err(CpuError::Backend("deferred memory size mismatch".into()));
+        }
+        uc.mem_write(region.base as u64, &bytes)
+            .map_err(|e| CpuError::Backend(format!("deferred memory write: {e:?}")))?;
+        pending.borrow_mut().remove(region.base);
+    }
+    Ok(())
 }
 
 struct UnicornImageBackend<'a, 'uc>(&'a mut Unicorn<'uc, ()>);
@@ -688,6 +740,13 @@ impl Cpu for UnicornCpu {
         Ok(())
     }
     fn unmap_region(&mut self, va: u32, size: u32) -> Result<(), CpuError> {
+        let end = u64::from(va) + u64::from(size);
+        let pending_regions = self.deferred_memory.borrow().overlapping(va, size);
+        for r in pending_regions {
+            if u64::from(r.base) < u64::from(va) || u64::from(r.base) + u64::from(r.size) > end {
+                materialize_deferred(&mut self.uc, &self.deferred_memory, r.base, r.size)?;
+            }
+        }
         let end_va = va
             .checked_add(size)
             .ok_or(CpuError::BadMemory { va, size })?;
@@ -727,6 +786,7 @@ impl Cpu for UnicornCpu {
                 .mem_unmap(va as u64, size as u64)
                 .map_err(|e| CpuError::Backend(format!("mem_unmap: {e:?}")))?;
         }
+        self.deferred_memory.borrow_mut().discard(va, size)?;
         self.shared_regions.remove(&va);
         if let Some(map) = &self.guest_map {
             map.borrow_mut().remove(va as u64, size as u64);
@@ -800,6 +860,62 @@ impl Cpu for UnicornCpu {
         }
         Ok(())
     }
+    fn supports_deferred_memory(&self) -> bool {
+        self.arch == Arch::Arm && self.guest_map.is_some()
+    }
+    fn defer_memory(
+        &mut self,
+        va: u32,
+        size: u32,
+        source: std::sync::Arc<dyn crate::DeferredMemorySource>,
+    ) -> Result<bool, CpuError> {
+        if !self.supports_deferred_memory() {
+            return Ok(false);
+        }
+        self.deferred_memory.borrow().validate(va, size)?;
+        if self
+            .check_guest_access(va, size, Prot::READ | Prot::WRITE)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let end = u64::from(va) + u64::from(size);
+        let regions = self
+            .uc
+            .mem_regions()
+            .map_err(|e| CpuError::Backend(format!("deferred regions: {e:?}")))?;
+        let mapped = regions.iter().any(|r| {
+            r.begin <= u64::from(va)
+                && r.end + 1 >= end
+                && (r.perms as u32) & (UcProt::READ | UcProt::WRITE).0 as u32
+                    == (UcProt::READ | UcProt::WRITE).0 as u32
+                && (r.perms as u32) & UcProt::EXEC.0 as u32 == 0
+        });
+        if !mapped
+            || self.shared_regions.iter().any(|(&base, (len, _))| {
+                u64::from(base) < end && u64::from(base) + u64::from(*len) > u64::from(va)
+            })
+        {
+            return Ok(false);
+        }
+        // Flush before publication: failure cannot leave new pending bytes
+        // behind a previously cached physical pointer.
+        self.uc
+            .ctl_flush_tlb()
+            .map_err(|e| CpuError::Backend(format!("deferred TLB flush: {e:?}")))?;
+        self.deferred_memory.borrow_mut().insert(va, size, source);
+        Ok(true)
+    }
+    fn deferred_memory_range(&self, va: u32) -> Option<(u32, u32)> {
+        self.deferred_memory.borrow().range(va)
+    }
+    fn deferred_memory_pending(&self, va: u32) -> bool {
+        self.deferred_memory.borrow().pending(va)
+    }
+    fn discard_deferred_memory(&mut self, va: u32, size: u32) -> Result<(), CpuError> {
+        self.deferred_memory.borrow_mut().discard(va, size)
+    }
+
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError> {
         if self.shared_regions.iter().any(|(&base, (len, region))| {
             u64::from(base) < u64::from(va) + data.len() as u64
@@ -813,6 +929,7 @@ impl Cpu for UnicornCpu {
         }
 
         materialize_images(&mut self.uc, &self.images, va, data.len() as u32)?;
+        materialize_deferred(&mut self.uc, &self.deferred_memory, va, data.len() as u32)?;
         self.uc
             .mem_write(va as u64, data)
             .map_err(|e| CpuError::Backend(format!("mem_write: {e:?}")))
@@ -820,6 +937,7 @@ impl Cpu for UnicornCpu {
 
     fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, CpuError> {
         materialize_images(&mut self.uc, &self.images, va, len)?;
+        materialize_deferred(&mut self.uc, &self.deferred_memory, va, len)?;
         let mut out = vec![0u8; len as usize];
         self.uc
             .mem_read(va as u64, &mut out)
@@ -829,6 +947,7 @@ impl Cpu for UnicornCpu {
 
     fn read_mem_into(&mut self, va: u32, dst: &mut [u8]) -> Result<(), CpuError> {
         materialize_images(&mut self.uc, &self.images, va, dst.len() as u32)?;
+        materialize_deferred(&mut self.uc, &self.deferred_memory, va, dst.len() as u32)?;
         // Bypass the default `read_mem` -> Vec allocation: feed
         // unicorn's `mem_read` the caller's buffer directly. Used by
         // the per-frame GAPI flush (~150 KiB).
@@ -1621,5 +1740,165 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod deferred_memory_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    #[derive(Debug)]
+    struct Source {
+        bytes: Vec<u8>,
+        reads: AtomicUsize,
+        fail: AtomicBool,
+    }
+    impl crate::DeferredMemorySource for Source {
+        fn materialize(&self) -> Result<Vec<u8>, String> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail.load(Ordering::Relaxed) {
+                Err("test unavailable".into())
+            } else {
+                Ok(self.bytes.clone())
+            }
+        }
+    }
+    fn source(value: u8, size: usize) -> Arc<Source> {
+        Arc::new(Source {
+            bytes: vec![value; size],
+            reads: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        })
+    }
+    fn cpu() -> UnicornCpu {
+        let mut c = UnicornCpu::new().unwrap();
+        c.map_region(0x1000, 4096, Prot::ALL).unwrap();
+        c.map_region(0x8000, 8192, Prot::READ | Prot::WRITE)
+            .unwrap();
+        c.add_code_hook(0x1100).unwrap();
+        c
+    }
+    fn execute(c: &mut UnicornCpu, store: bool) -> Result<StopReason, CpuError> {
+        let op = if store { 0xe5801004u32 } else { 0xe5901000u32 };
+        c.write_mem(
+            0x1000,
+            &[op.to_le_bytes(), 0xe12fff1eu32.to_le_bytes()].concat(),
+        )
+        .unwrap();
+        c.write_reg(ArmReg::R0, 0x8000).unwrap();
+        c.write_reg(ArmReg::Lr, 0x1100).unwrap();
+        c.run_until_hook(0x1000, 100)
+    }
+    #[test]
+    fn guest_read_materializes_once_and_republication_invalidates_cached_tlb() {
+        let mut c = cpu();
+        let first = source(0x12, 4096);
+        assert!(c.defer_memory(0x8000, 4096, first.clone()).unwrap());
+        assert_eq!(first.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(execute(&mut c, false).unwrap(), StopReason::Hook(0x1100));
+        assert_eq!(c.read_reg(ArmReg::R1).unwrap(), 0x12121212);
+        assert!(!c.deferred_memory_pending(0x8000));
+        let second = source(0x34, 4096);
+        assert!(c.defer_memory(0x8000, 4096, second.clone()).unwrap());
+        execute(&mut c, false).unwrap();
+        assert_eq!(c.read_reg(ArmReg::R1).unwrap(), 0x34343434);
+        assert_eq!(first.reads.load(Ordering::Relaxed), 1);
+        assert_eq!(second.reads.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn failed_guest_fault_can_retry_same_instruction_with_same_publication() {
+        let mut c = cpu();
+        let image = source(0x23, 4096);
+        image.fail.store(true, Ordering::Relaxed);
+        c.defer_memory(0x8000, 4096, image.clone()).unwrap();
+        assert!(execute(&mut c, false).is_err());
+        assert!(c.deferred_memory_pending(0x8000));
+        image.fail.store(false, Ordering::Relaxed);
+        execute(&mut c, false).unwrap();
+        assert_eq!(c.read_reg(ArmReg::R1).unwrap(), 0x23232323);
+        assert_eq!(image.reads.load(Ordering::Relaxed), 2);
+    }
+    #[test]
+    fn guest_partial_write_preserves_unmodified_snapshot_bytes() {
+        let mut c = cpu();
+        let image = source(0x56, 4096);
+        c.defer_memory(0x8000, 4096, image.clone()).unwrap();
+        c.write_reg(ArmReg::R1, 0x12345678).unwrap();
+        execute(&mut c, true).unwrap();
+        assert_eq!(
+            c.read_mem(0x8000, 12).unwrap(),
+            [0x56, 0x56, 0x56, 0x56, 0x78, 0x56, 0x34, 0x12, 0x56, 0x56, 0x56, 0x56]
+        );
+        assert_eq!(image.reads.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn hle_reads_and_partial_writes_use_same_boundary() {
+        let mut c = cpu();
+        let image = source(0x78, 4096);
+        c.defer_memory(0x8000, 4096, image.clone()).unwrap();
+        c.write_mem(0x8001, &[1, 2]).unwrap();
+        let mut bytes = [0; 4];
+        c.read_mem_into(0x8000, &mut bytes).unwrap();
+        assert_eq!(bytes, [0x78, 1, 2, 0x78]);
+        assert_eq!(image.reads.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn replacement_and_full_unmap_release_without_reading_old_publication() {
+        let mut c = cpu();
+        let old = source(1, 4096);
+        let new = source(2, 4096);
+        c.defer_memory(0x8000, 4096, old.clone()).unwrap();
+        c.defer_memory(0x8000, 4096, new.clone()).unwrap();
+        assert_eq!(Arc::strong_count(&old), 1);
+        c.unmap_region(0x8000, 4096).unwrap();
+        assert_eq!(old.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(new.reads.load(Ordering::Relaxed), 0);
+        assert!(!c.deferred_memory_pending(0x8000));
+    }
+    #[test]
+    fn failed_or_malformed_read_keeps_publication_retryable() {
+        let mut c = cpu();
+        let image = source(3, 4096);
+        image.fail.store(true, Ordering::Relaxed);
+        c.defer_memory(0x8000, 4096, image.clone()).unwrap();
+        assert!(c.read_mem(0x8000, 4).is_err());
+        assert!(c.deferred_memory_pending(0x8000));
+        image.fail.store(false, Ordering::Relaxed);
+        assert_eq!(c.read_mem(0x8000, 4).unwrap(), [3; 4]);
+        assert_eq!(image.reads.load(Ordering::Relaxed), 2);
+        c.defer_memory(0x8000, 4096, source(4, 16)).unwrap();
+        assert!(c.read_mem(0x8000, 4).is_err());
+        assert!(c.deferred_memory_pending(0x8000));
+        c.discard_deferred_memory(0x8000, 4096).unwrap();
+        assert_eq!(c.read_mem(0x8000, 4).unwrap(), [3; 4]);
+    }
+    #[test]
+    fn protected_guest_access_does_not_fetch_deferred_pixels() {
+        let mut c = cpu();
+        let image = source(5, 4096);
+        c.defer_memory(0x8000, 4096, image.clone()).unwrap();
+        c.protect_region(0x8000, 4096, Prot::empty()).unwrap();
+        assert!(execute(&mut c, false).is_err());
+        assert_eq!(image.reads.load(Ordering::Relaxed), 0);
+        assert!(c.deferred_memory_pending(0x8000));
+        c.protect_region(0x8000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        execute(&mut c, false).unwrap();
+        assert_eq!(c.read_reg(ArmReg::R1).unwrap(), 0x05050505);
+    }
+    #[test]
+    fn partial_unmap_preserves_remaining_bytes_and_overlap_is_rejected() {
+        let mut c = cpu();
+        let image = source(6, 8192);
+        c.defer_memory(0x8000, 8192, image.clone()).unwrap();
+        assert!(c.defer_memory(0x9000, 4096, source(7, 4096)).is_err());
+        c.unmap_region(0x8000, 4096).unwrap();
+        assert_eq!(c.read_mem(0x9000, 4).unwrap(), [6; 4]);
+        assert_eq!(image.reads.load(Ordering::Relaxed), 1);
+        let mut stub = crate::stub::StubCpu::new();
+        assert!(!stub.defer_memory(0x8000, 4096, source(8, 4096)).unwrap());
     }
 }

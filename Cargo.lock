@@ -2903,6 +2903,7 @@ dependencies = [
  "log",
  "pocket-cab",
  "pocket-cpu",
+ "pocket-gles",
  "pocket-kernel",
  "pocket-pe",
  "pocket-winceapi",

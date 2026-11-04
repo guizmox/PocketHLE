@@ -41,3 +41,4 @@ required-features = ["unicorn"]
 
 [dev-dependencies]
 tempfile = "3"
+pocket-gles = { path = "../pocket-gles" }

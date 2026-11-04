@@ -2136,6 +2136,19 @@ impl Controls {
         self.children.is_empty() && self.panels.is_empty()
     }
 
+    /// Conservative paint preflight: hidden controls and a direct GAPI panel
+    /// have no pixels to replay, but visible children/popups still do.
+    pub fn has_visible_content(&self) -> bool {
+        self.children.iter().any(|c| self.is_showing(c))
+            || self.panels.iter().any(|p| {
+                p.visible
+                    && p.w > 0
+                    && p.h > 0
+                    && !self.inherited_hidden.contains(&p.hwnd)
+                    && (self.direct_surface_hwnd == 0 || self.direct_surface_hwnd != p.hwnd)
+            })
+    }
+
     /// Drop a control and anything that referred to it.
     pub fn destroy(&mut self, hwnd: u32) {
         self.recognized_holds

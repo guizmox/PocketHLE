@@ -1,3 +1,13 @@
+## Deferred GAPI memory and GPU presentation (2026-11-04)
+
+See docs/GPU.md. A mapped pointer does not imply pixels have been accessed.
+ARM virtual-TLB Unicorn may retain the newest EGL image and populate mapped
+GAPI bytes only on a guest data access or HLE memory access. Do not bypass the
+checked memory helpers, let polling trigger readback, execute pending data, or
+replay an older deferred image after GDI has changed CPU authority. The kernel
+mirrors such CPU mutations before guest resume. Other backends/layouts retain
+the eager fallback. Existing slot fences, epochs and guest frame accounting stay.
+
 # PocketHLE — architecture reference for coding agents
 
 ## Modal progress dialogs and guest scheduling (2026-10-21)

@@ -1,3 +1,43 @@
+## Deferred mapped GAPI memory (2026-11-04)
+
+Mapped GAPI is no longer an unconditional readback requirement on ARM virtual-
+TLB Unicorn. An EGL swap can publish an immutable shared image and replace the
+mapped logical RGB565 bytes with a deferred data-memory provider. The first ARM
+data access populates that range at TLB fill; HLE read_mem/read_mem_into and
+partial write_mem use the same boundary. Invalidate cached TLB entries before
+installing a replacement provider. No valid-memory/instruction polling hook is
+installed. Native mapping maintenance can request FETCH translations too: those
+must neither read pixels nor promote pending data into executable memory.
+
+Provider errors and malformed sizes keep pending memory retryable. Unmapping
+all pending bytes releases them without readback; partial unmap first preserves
+remaining bytes. Unsupported CPUs, unsuitable permissions/shared mappings and
+padded scanline layouts keep the eager path. Packed scanlines and physical
+columns encode exactly the logical guest framebuffer; internal GLES scale and
+frontend presentation scale are unchanged. Frame slot leases/fences stay intact.
+
+Internal framebuffer polling must not itself materialize pending GPU pixels.
+Before resuming guest code, an intervening real GDI mutation must discard the
+older deferred publication and mirror the newer CPU image into guest RAM. That
+prevents a retained pointer from resurrecting old GPU pixels. Real writes still
+invalidate shared presentation through existing authority epochs.
+
+Compositor preflight also distinguishes registered controls from visible paint:
+hidden startup panels and an empty direct GAPI panel have no pixels to replay.
+Visible children, native bitmap layers, modal/shell/taskbar/keyboard overlays
+retain their CPU composition path. Q3's hidden startup controls otherwise forced
+CPU authority immediately after a correctly deferred swap.
+
+Native regression covers real ARM pointer reuse across two EGL swaps, packed
+and column layouts, native and X4 render sizes, HLE reads/partial writes, GDI
+precedence before guest resume, permission failure, replacement, malformed source
+and unmap lifetime. Local Q3CE 1.1b menu exercises actual shared export and a UI
+consumer while GAPI remains mapped. Gameplay and Windows/Android hardware still
+require validation; the earlier Single Player breakpoint was not investigated.
+User also reports input stutter on Intel UHD only fullscreen X1, versus NVIDIA
+in windowed and fullscreen; presentation/driver interaction remains a separate
+open investigation, not a solved NVIDIA-only issue.
+
 ## No-op native paint must preserve GPU authority (2026-11-04)
 
 KernelState::composite_window_layers previously called cpu_mut before collecting

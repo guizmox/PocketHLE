@@ -17,6 +17,8 @@
 use thiserror::Error;
 
 pub mod arithmetic64;
+mod deferred_memory;
+pub use deferred_memory::DeferredMemorySource;
 #[cfg(any(feature = "unicorn", test))]
 mod image_batch;
 pub mod image_pages;
@@ -236,6 +238,29 @@ pub trait Cpu {
     /// Host loader reads/writes intentionally bypass protection; guest API buffers do not.
     fn check_guest_access(&self, _va: u32, _len: u32, _required: Prot) -> Result<(), CpuError> {
         Err(CpuError::Unsupported("guest buffer permissions"))
+    }
+    /// Whether this backend can populate mapped data on the first access.
+    fn supports_deferred_memory(&self) -> bool {
+        false
+    }
+    /// Publish replacement bytes for an existing mapped RW data range.
+    fn defer_memory(
+        &mut self,
+        _va: u32,
+        _size: u32,
+        _source: std::sync::Arc<dyn DeferredMemorySource>,
+    ) -> Result<bool, CpuError> {
+        Ok(false)
+    }
+    fn deferred_memory_pending(&self, _va: u32) -> bool {
+        false
+    }
+    fn deferred_memory_range(&self, _va: u32) -> Option<(u32, u32)> {
+        None
+    }
+    /// Discard only fully covered pending publications before a complete overwrite.
+    fn discard_deferred_memory(&mut self, _va: u32, _size: u32) -> Result<(), CpuError> {
+        Ok(())
     }
     fn write_mem(&mut self, va: u32, data: &[u8]) -> Result<(), CpuError>;
     fn read_mem(&mut self, va: u32, len: u32) -> Result<Vec<u8>, CpuError>;

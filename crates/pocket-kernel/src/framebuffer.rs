@@ -931,3 +931,4 @@ mod presentation_stats_tests {
 
 /// Checked GPU/CPU authority facade, not yet installed in KernelState.
 pub mod deferred;
+pub mod gapi_memory;

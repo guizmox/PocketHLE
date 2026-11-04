@@ -2437,6 +2437,16 @@ impl KernelState {
         if present_windows && !native_paint_changed {
             return;
         }
+        if !present_windows
+            && layers.is_empty()
+            && !controls.has_visible_content()
+            && modal.is_none()
+            && shell_bar.is_none()
+            && !taskbar
+            && !(self.shell_keyboard.visible && !self.shell_keyboard.sip)
+        {
+            return;
+        }
         // A completed but unchanged paint is not a framebuffer write. Acquire
         // CPU pixels only after that decision, or merely polling EndPaint
         // would materialize and invalidate an otherwise valid shared GPU image.
@@ -4450,6 +4460,10 @@ pub fn gapi_copy_columns(width: usize, height: usize, src: &[u8], dst: &mut [u8]
 }
 
 fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
+    // Internal polling is not a guest read. Leave untouched GPU pixels deferred.
+    if cpu.deferred_memory_pending(SYNTHETIC_FRAMEBUFFER_BASE) {
+        return;
+    }
     if !state.fb_mapped
         || state.gx_draw_active
         || !state.framebuffer.directdraw.primary_locks.is_empty()
@@ -4649,6 +4663,7 @@ pub fn run_main_loop_with_hook(
         // continuation address is kept separately in `pc`, so restore it
         // explicitly before each new slice; otherwise a return from one
         // API thunk re-enters that same thunk forever.
+        framebuffer::gapi_memory::before_resume(cpu, &mut process.state)?;
         cpu.write_reg(ArmReg::Pc, pc)?;
         // Refresh the host-managed tick page so the native
         // `GetTickCount` thunk's plain `LDR` returns a fresh
@@ -5536,6 +5551,23 @@ mod tests {
             fail: AtomicBool::new(true),
         });
         state.framebuffer.publish_gpu(source.clone()).unwrap();
+        // Hidden startup controls must not invalidate a subsequent GL frame.
+        state.controls.add_panel(controls::DialogPanel {
+            hwnd: 0xdead4100,
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 2,
+            visible: false,
+            border: false,
+            caption: None,
+            ok_pressed: false,
+            caption_height: None,
+        });
+        state.composite_controls();
+        assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+        assert!(!state.framebuffer.cpu_resident());
+        assert!(state.framebuffer.gpu_source().is_some());
         // Even an absent backing layer must not enter the CPU boundary.
         state.present_window_surfaces();
         let hwnd = 0xdead4000;

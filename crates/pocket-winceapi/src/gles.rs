@@ -2666,9 +2666,13 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             .as_ref()
             .is_some_and(|p| p.load(std::sync::atomic::Ordering::Relaxed))
     });
-    // Mapped GAPI needs canonical guest bytes at this very swap. Otherwise
-    // retain the immutable image and defer CPU readback until an actual read.
-    let shared = if enabled && !ctx.kernel.fb_mapped {
+    // When the CPU can fault in mapped GAPI bytes, retain the immutable image
+    // and populate RAM only on a real guest/HLE access. Other backends/layouts
+    // keep canonical bytes eagerly, preserving retained-pointer correctness.
+    let mapped_defer = ctx.kernel.fb_mapped
+        && pocket_kernel::framebuffer::gapi_memory::eligible(ctx.cpu, ctx.kernel);
+    let mut memory_error = None;
+    let shared = if enabled && (!ctx.kernel.fb_mapped || mapped_defer) {
         pocket_gles::gpu::configured_shared_context_source().and_then(|source| {
             let frame = with_ctx(|c| c.snapshot_shared_frame())?;
             let provider =
@@ -2676,10 +2680,27 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             let provider: std::sync::Arc<dyn pocket_kernel::framebuffer::deferred::CpuPixelSource> =
                 std::sync::Arc::new(provider);
             let identity = std::sync::Arc::downgrade(&provider);
+            if ctx.kernel.fb_mapped {
+                match pocket_kernel::framebuffer::gapi_memory::defer(
+                    ctx.cpu,
+                    ctx.kernel,
+                    provider.clone(),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(error) => {
+                        memory_error = Some(error);
+                        return None;
+                    }
+                }
+            }
             match ctx.kernel.framebuffer.publish_gpu(provider) {
                 Ok(()) => Some((frame, identity)),
                 Err(error) => {
                     log::warn!("Shared swap publication unavailable: {error}");
+                    if let Err(error) = pocket_kernel::framebuffer::gapi_memory::discard(ctx.cpu) {
+                        memory_error = Some(error);
+                    }
                     None
                 }
             }
@@ -2687,6 +2708,9 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     } else {
         None
     };
+    if let Some(error) = memory_error {
+        return Err(error.into());
+    }
     SHARED_SWAP_REASON.with(|reason| {
         reason.set(if shared.is_some() {
             None
@@ -2701,6 +2725,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         });
     });
     if shared.is_none() {
+        pocket_kernel::framebuffer::gapi_memory::discard(ctx.cpu)?;
         // Full replacement: never materialize a previous retained image only
         // to overwrite it with this new swap (disabled policy/backpressure).
         ctx.kernel.framebuffer.overwrite_rgb565(|pixels, native| {
@@ -2732,7 +2757,11 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     // readback copy those zeros back over the frame we just presented,
     // blanking the screen. Push the presented pixels into the guest
     // mapping so both views agree and the readback sees no change.
-    if ctx.kernel.fb_mapped {
+    if ctx.kernel.fb_mapped
+        && !ctx
+            .cpu
+            .deferred_memory_pending(pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE)
+    {
         ctx.cpu.write_mem(
             pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
             &ctx.kernel

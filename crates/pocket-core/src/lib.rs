@@ -749,3 +749,6 @@ pub fn suspend_host_session() -> pocket_winceapi::SuspendedSession {
 
 pub mod dependencies;
 mod pocketpc_storage;
+
+#[cfg(all(test, feature = "unicorn"))]
+mod deferred_gapi_tests;

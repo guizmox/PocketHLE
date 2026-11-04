@@ -1,3 +1,14 @@
+Cargo.lock
+crates/pocket-core/Cargo.toml
+crates/pocket-core/src/lib.rs
+crates/pocket-core/src/deferred_gapi_tests.rs
+crates/pocket-cpu/src/lib.rs
+crates/pocket-cpu/src/deferred_memory.rs
+crates/pocket-cpu/src/unicorn.rs
 crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/controls.rs
+crates/pocket-kernel/src/framebuffer.rs
+crates/pocket-kernel/src/framebuffer/gapi_memory.rs
 crates/pocket-winceapi/src/gles.rs
+docs/AGENTS.md
 docs/GPU.md
