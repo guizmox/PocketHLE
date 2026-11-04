@@ -110,7 +110,12 @@ fn query_reports_reservation_commit_protection_and_decommit_boundaries() {
     heap.virtual_free(a + 4096, 4096, false);
     assert_eq!(heap.query_virtual(a).unwrap()[3], 8192);
     heap.virtual_free(a, 0, true);
-    assert_eq!(heap.query_virtual(a), None);
+    // Releasing the reservation makes it a described free range, rather than
+    // falling through to VirtualQuery's unrelated coarse address heuristic.
+    assert_eq!(
+        heap.query_virtual(a),
+        Some([a, 0, 0, super::HOST_VIRTUAL_END - a, 0x10000, 0, 0])
+    );
 }
 #[test]
 fn fixed_arena_reservation_also_reports_only_committed_ram() {

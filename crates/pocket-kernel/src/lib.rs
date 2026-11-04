@@ -3452,10 +3452,27 @@ impl Heap {
     }
     /// MEMORY_BASIC_INFORMATION, ending at the next state/protection transition.
     pub fn query_virtual(&self, address: u32) -> Option<[u32; 7]> {
-        let (&base, block) = self
+        let Some((&base, block)) = self
             .virtual_blocks
             .iter()
-            .find(|&(base, block)| address >= *base && address < *base + block.size)?;
+            .find(|&(base, block)| address >= *base && address < *base + block.size)
+        else {
+            // Independent host-backed VA is owned by this allocator even in
+            // its free gaps. A free query starts at the queried page, never at
+            // an earlier coarse boundary that may contain a live reservation.
+            if self.ram.is_none() && (HOST_VIRTUAL_BASE..HOST_VIRTUAL_END).contains(&address) {
+                let page = address & !0xfff;
+                let end = self
+                    .virtual_blocks
+                    .keys()
+                    .copied()
+                    .filter(|&base| base > page && base < HOST_VIRTUAL_END)
+                    .min()
+                    .unwrap_or(HOST_VIRTUAL_END);
+                return Some([page, 0, 0, end - page, 0x10000, 0, 0]);
+            }
+            return None;
+        };
         let first = address / 4096;
         let committed = block.committed.contains(&first);
         let protect = if committed {
@@ -6422,5 +6439,47 @@ mod standalone_egl_tests {
         assert_eq!(exports[&EGL_MODULE_HANDLE]["eglGetDisplay"], 0x70000080);
         assert!(!exports.contains_key(&GLES_CM_MODULE_HANDLE));
         assert!(!exports.contains_key(&GLES_CL_MODULE_HANDLE));
+    }
+}
+
+#[cfg(test)]
+mod virtual_query_free_gap_tests {
+    use super::*;
+
+    #[test]
+    fn free_query_after_full_reservation_can_reserve_the_next_block() {
+        let mut heap = Heap::new(0x0100_0000, 0x0020_0000);
+        let first = heap.virtual_alloc(0, 0x10000, true, true).unwrap();
+        assert_eq!(first, HOST_VIRTUAL_BASE);
+        let query = heap.query_virtual(first + 0x10000).unwrap();
+        assert_eq!(query[0], first + 0x10000);
+        assert_eq!(query[1], 0);
+        assert_eq!(query[4], 0x10000);
+        assert_eq!(query[3], HOST_VIRTUAL_END - query[0]);
+        // The guest CRT uses BaseAddress returned by VirtualQuery as the next
+        // preferred VirtualAlloc address. It must not point back into `first`.
+        assert_eq!(
+            heap.virtual_alloc(query[0], 0x10000, true, true),
+            Some(first + 0x10000)
+        );
+        assert_eq!(heap.query_virtual(first).unwrap()[4], 0x1000);
+    }
+
+    #[test]
+    fn free_query_rounds_to_page_and_stops_before_next_live_reservation() {
+        let mut heap = Heap::new(0x0100_0000, 0x0020_0000);
+        let first = heap.virtual_alloc(0, 0x10000, true, false).unwrap();
+        let next = heap
+            .virtual_alloc(first + 0x30000, 0x10000, true, false)
+            .unwrap();
+        let query = heap.query_virtual(first + 0x1107b).unwrap();
+        assert_eq!(query, [first + 0x11000, 0, 0, 0x1f000, 0x10000, 0, 0]);
+        assert_eq!(query[0] + query[3], next);
+        assert!(heap.virtual_free(first, 0, true));
+        assert_eq!(
+            heap.query_virtual(first).unwrap(),
+            [first, 0, 0, 0x30000, 0x10000, 0, 0]
+        );
+        assert!(heap.query_virtual(HOST_VIRTUAL_END).is_none());
     }
 }
