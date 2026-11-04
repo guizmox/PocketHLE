@@ -1114,8 +1114,17 @@ impl PocketLauncher {
                         let _ = worker.join();
                     }
                     self.last_frame_status = Some(outcome.summary.clone());
-                    if let Some(frame) = outcome.framebuffer {
-                        self.upload_frame_texture(ctx, &frame);
+                    // A finished game's final image is not displayed in the
+                    // library. Drop it and all UI-held sources before retirement.
+                    drop(outcome.framebuffer);
+                    self.last_frame_snapshot = None;
+                    self.last_frame_texture = None;
+                    self.uploaded_image_id = None;
+                    if let Some(renderer) = self.reconstruction.as_ref() {
+                        renderer
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .end_session();
                     }
                     self.status = outcome.summary;
                     self.frame_rx = None;
@@ -5388,7 +5397,7 @@ impl PocketLauncher {
             renderer
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .reset_presentation_log();
+                .begin_session(self.upscale_filter.gpu_filter());
         }
         // Start turned the way this game was saved: a portrait-rendered
         // landscape title is unplayable until it is turned, and the user
@@ -5559,6 +5568,27 @@ impl eframe::App for PocketLauncher {
             self.recordings_gallery.close_player();
         }
         self.drain_events(ctx);
+        if let Some(renderer) = self.reconstruction.as_ref() {
+            if renderer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .needs_session_cleanup()
+            {
+                let renderer = renderer.clone();
+                ctx.layer_painter(egui::LayerId::background())
+                    .add(egui::PaintCallback {
+                        rect: ctx.screen_rect(),
+                        callback: std::sync::Arc::new(eframe::egui_glow::CallbackFn::new(
+                            move |_, _| {
+                                renderer
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .collect_session_resources();
+                            },
+                        )),
+                    });
+            }
+        }
         if self.file_dialog.is_some() {
             self.update_gamepad_input(ctx);
             self.ui_file_dialog(ctx);

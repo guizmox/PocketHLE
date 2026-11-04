@@ -17,6 +17,7 @@ pub struct Reconstruction {
     staging: Option<glow::Texture>,
     staging_size: [u32; 2],
     pending: Option<FrameSnapshot>,
+    session_cleanup_pending: bool,
     image_id: Option<u64>,
     drawn_image_id: Option<u64>,
     smaa: Option<crate::smaa::Smaa>,
@@ -140,6 +141,7 @@ impl Reconstruction {
                 staging: None,
                 staging_size: [0, 0],
                 pending: None,
+                session_cleanup_pending: false,
                 image_id: None,
                 drawn_image_id: None,
                 smaa,
@@ -156,8 +158,45 @@ impl Reconstruction {
             })
         }
     }
-    pub fn reset_presentation_log(&mut self) {
+    pub fn end_session(&mut self) {
+        self.export_policy
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.pending.take();
+        self.image_id = None;
+        self.drawn_image_id = None;
+        self.size = [0, 0];
+        self.staging_size = [0, 0];
+        self.smaa_dirty = true;
+        self.smaa_mode = -1;
+        self.current_path = None;
         self.reported_path = None;
+        self.session_cleanup_pending = true;
+    }
+    pub fn begin_session(&mut self, filter: i32) {
+        self.end_session();
+        self.shared_failed = false;
+        self.export_policy.store(
+            self.shared_requested && self.copy_program.is_some() && filter != 6,
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+    pub fn needs_session_cleanup(&self) -> bool {
+        self.session_cleanup_pending
+    }
+    /// UI update can run without a current GL context. Perform native cleanup
+    /// only from a paint callback, including while the library is visible.
+    pub fn collect_session_resources(&mut self) {
+        if !self.session_cleanup_pending {
+            return;
+        }
+        pocket_core::winceapi::gles::deferred_frame::release_reader();
+        if let Some(consumer) = self.consumer.as_mut() {
+            if let Err(error) = consumer.collect_retired_frames() {
+                log::warn!("Session GPU retirement could not complete: {error}");
+                return;
+            }
+        }
+        self.session_cleanup_pending = false;
     }
     unsafe fn report_presentation(&mut self, gl: &glow::Context) {
         let Some(path) = self.current_path else {
@@ -213,6 +252,7 @@ impl Reconstruction {
         self.drawn_image_id
     }
     pub fn paint(&mut self, gl: &glow::Context, uv: [f32; 6], filter: i32) {
+        self.collect_session_resources();
         self.drawn_image_id = None;
         if let Some(consumer) = self.consumer.as_mut() {
             let _ = consumer.collect_retired_frames();
@@ -649,3 +689,108 @@ mod tests {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "reconstruction_tests.rs"]
 mod native_tests;
+
+#[cfg(test)]
+mod session_lifetime_tests {
+    use super::*;
+    use std::{
+        num::NonZeroU32,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+    };
+    // Session state operations must not issue GL calls. Names are inert here;
+    // actual GL/context lifetime coverage remains in the native sharing tests.
+    fn presenter() -> Reconstruction {
+        let id = NonZeroU32::new(1).unwrap();
+        Reconstruction {
+            program: glow::NativeProgram(id),
+            vao: glow::NativeVertexArray(id),
+            texture: glow::NativeTexture(id),
+            size: [16, 16],
+            staging: None,
+            staging_size: [16, 16],
+            pending: None,
+            session_cleanup_pending: false,
+            image_id: Some(5),
+            drawn_image_id: Some(5),
+            smaa: None,
+            smaa_dirty: false,
+            smaa_mode: 5,
+            consumer: None,
+            shared_failed: true,
+            current_path: Some(PresentationPath::Failed),
+            reported_path: Some(PresentationPath::Failed),
+            shared_requested: true,
+            copy_program: Some(glow::NativeProgram(id)),
+            copy_fbo: None,
+            export_policy: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    #[test]
+    fn a_failed_game_does_not_disable_shared_presentation_for_the_next() {
+        let mut p = presenter();
+        p.begin_session(0);
+        assert!(!p.shared_failed);
+        assert!(p.export_policy.load(Ordering::Acquire));
+        assert_eq!(p.size, [0, 0]);
+        assert_eq!(p.image_id, None);
+        assert!(p.current_path.is_none() && p.reported_path.is_none());
+        assert!(p.needs_session_cleanup());
+        p.begin_session(6);
+        assert!(!p.export_policy.load(Ordering::Acquire));
+        p.copy_program = None;
+        p.begin_session(0);
+        assert!(
+            !p.export_policy.load(Ordering::Acquire),
+            "unsupported sharing must stay disabled"
+        );
+    }
+    #[test]
+    fn ending_a_session_releases_the_pending_cpu_pixel_source_without_readback() {
+        use pocket_core::kernel::framebuffer::deferred::{
+            CpuPixelSource, DeferredPresentation, MaterializedPixels,
+        };
+        #[derive(Debug)]
+        struct Source;
+        impl CpuPixelSource for Source {
+            fn logical_size(&self) -> (u32, u32) {
+                (16, 16)
+            }
+            fn native_size(&self) -> (u32, u32) {
+                (16, 16)
+            }
+            fn materialize(&self) -> Result<MaterializedPixels, String> {
+                panic!("teardown must not read pixels")
+            }
+        }
+        let source = Arc::new(Source);
+        let weak = Arc::downgrade(&source);
+        let frame = FrameSnapshot {
+            image_id: 7,
+            presentation_stats: Default::default(),
+            width: 16,
+            height: 16,
+            texture_width: 16,
+            texture_height: 16,
+            rgba: Vec::new(),
+            text_input: false,
+            shared: None,
+            deferred: Some(Arc::new(
+                DeferredPresentation::new(source.clone(), 11).unwrap(),
+            )),
+            backlight: 11,
+        };
+        let mut p = presenter();
+        p.pending = Some(frame);
+        drop(source);
+        assert!(weak.upgrade().is_some());
+        p.end_session();
+        assert!(weak.upgrade().is_none());
+        assert!(p.pending.is_none());
+        assert_eq!(p.drawn_image_id, None);
+        assert!(!p.export_policy.load(Ordering::Acquire));
+        assert!(p.needs_session_cleanup());
+    }
+}

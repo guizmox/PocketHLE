@@ -4,7 +4,6 @@ use crate::{CallCtx, WinCeDispatcher};
 #[path = "directshow_extended.rs"]
 mod extended;
 use extended::{extended, present};
-use once_cell::sync::Lazy;
 use pocket_kernel::{audio::GuestFormat, DispatchOutcome, KernelError};
 use std::{
     collections::HashMap,
@@ -77,6 +76,7 @@ struct Movie {
     offset: f64,
     stop: f64,
     cancel: Option<Arc<AtomicBool>>,
+    worker: Option<std::thread::JoinHandle<()>>,
     visible: bool,
     frame_ready_sent: bool,
     frame_ready_pending: bool,
@@ -115,6 +115,7 @@ impl Movie {
             offset: 0.0,
             stop: 0.0,
             cancel: None,
+            worker: None,
             presented: None,
             visible: true,
             frame_ready_sent: false,
@@ -152,7 +153,9 @@ impl Movie {
         }
     }
 }
-static MOVIES: Lazy<Mutex<HashMap<u32, Movie>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+// Concurrent guest processes execute on separate host threads. Synchronous
+// child processes preserve this registry through suspend_session/resume_session.
+thread_local! { static MOVIES: Mutex<HashMap<u32, Movie>> = Mutex::new(HashMap::new()); }
 fn exports(ctx: &CallCtx<'_>, name: &str) -> u32 {
     ctx.kernel
         .dynamic_exports
@@ -203,38 +206,40 @@ pub(crate) fn create(
     iid: &[u8],
     out: u32,
 ) -> Result<DispatchOutcome, KernelError> {
-    if out == 0
-        || ctx
-            .cpu
-            .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)
-            .is_err()
-    {
-        return Ok(DispatchOutcome::ReturnedR0(0x80004003));
-    }
-    ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
-    let Some(k) = kind(iid) else {
-        return Ok(DispatchOutcome::ReturnedR0(0x80004002));
-    };
-    let Some((root, table)) = allocate(ctx, 0, "graph")? else {
-        return Ok(DispatchOutcome::ReturnedR0(0x8007000e));
-    };
-    let mut movie = Movie::new();
-    movie.objects.insert("graph".into(), (root, table));
-    let object = if k == "graph" {
-        root
-    } else {
-        let Some(pair) = allocate(ctx, root, k)? else {
-            ctx.kernel.heap.free(root);
-            ctx.kernel.heap.free(table);
+    MOVIES.with(|registry| {
+        if out == 0
+            || ctx
+                .cpu
+                .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)
+                .is_err()
+        {
+            return Ok(DispatchOutcome::ReturnedR0(0x80004003));
+        }
+        ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
+        let Some(k) = kind(iid) else {
+            return Ok(DispatchOutcome::ReturnedR0(0x80004002));
+        };
+        let Some((root, table)) = allocate(ctx, 0, "graph")? else {
             return Ok(DispatchOutcome::ReturnedR0(0x8007000e));
         };
-        movie.objects.insert(k.into(), pair);
-        pair.0
-    };
-    MOVIES.lock().unwrap().insert(root, movie);
-    ctx.cpu.write_mem(out, &object.to_le_bytes())?;
-    log::info!("DirectShow FilterGraph created at 0x{root:08x}");
-    Ok(DispatchOutcome::ReturnedR0(0))
+        let mut movie = Movie::new();
+        movie.objects.insert("graph".into(), (root, table));
+        let object = if k == "graph" {
+            root
+        } else {
+            let Some(pair) = allocate(ctx, root, k)? else {
+                ctx.kernel.heap.free(root);
+                ctx.kernel.heap.free(table);
+                return Ok(DispatchOutcome::ReturnedR0(0x8007000e));
+            };
+            movie.objects.insert(k.into(), pair);
+            pair.0
+        };
+        registry.lock().unwrap().insert(root, movie);
+        ctx.cpu.write_mem(out, &object.to_le_bytes())?;
+        log::info!("DirectShow FilterGraph created at 0x{root:08x}");
+        Ok(DispatchOutcome::ReturnedR0(0))
+    })
 }
 fn read_path(ctx: &mut CallCtx<'_>, pointer: u32) -> Result<String, KernelError> {
     let mut text = Vec::new();
@@ -248,7 +253,12 @@ fn read_path(ctx: &mut CallCtx<'_>, pointer: u32) -> Result<String, KernelError>
     }
     Ok(String::from_utf16_lossy(&text))
 }
-type Decoded = (mpsc::Receiver<Packet>, Info, Arc<AtomicBool>);
+type Decoded = (
+    mpsc::Receiver<Packet>,
+    Info,
+    Arc<AtomicBool>,
+    std::thread::JoinHandle<()>,
+);
 #[cfg(not(feature = "video-static"))]
 fn decode(_path: std::path::PathBuf, _start: f64, _stop: f64) -> Result<Decoded, String> {
     Err("PocketHLE was compiled without the video-static feature".into())
@@ -281,7 +291,7 @@ fn decode(path: std::path::PathBuf, start: f64, stop: f64) -> Result<Decoded, St
     let (tx, rx) = mpsc::sync_channel(3);
     let cancel = Arc::new(AtomicBool::new(false));
     let canceled = cancel.clone();
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let mut run = || -> Result<(), String> {
             if let Some(mut audio) = audio.take() {
                 let mut samples = Vec::new();
@@ -349,14 +359,18 @@ fn decode(path: std::path::PathBuf, start: f64, stop: f64) -> Result<Decoded, St
             let _ = tx.send(Packet::Error(e));
         }
     });
-    Ok((rx, info, cancel))
+    Ok((rx, info, cancel, worker))
 }
 impl Movie {
     fn cancel_decode(&mut self) {
         if let Some(c) = self.cancel.take() {
             c.store(true, Ordering::Release);
         }
+        // Disconnect the bounded channel before joining: the decoder may be sending.
         self.receiver = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
     fn position(&self) -> f64 {
         (self.offset + elapsed(self).as_secs_f64()).min(self.stop)
@@ -393,6 +407,7 @@ fn restart(
     ctx.kernel.audio.stop_mas_stream(id);
     m.receiver = Some(decoded.0);
     m.cancel = Some(decoded.2);
+    m.worker = Some(decoded.3);
     m.offset = start;
     m.stop = stop;
     m.presented = None;
@@ -574,335 +589,343 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
     Ok(())
 }
 pub(crate) fn service(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
-    let mut movies = MOVIES.lock().unwrap();
-    for (&id, m) in movies.iter_mut() {
-        update(ctx, id, m)?;
-    }
-    Ok(())
+    MOVIES.with(|registry| {
+        let mut movies = registry.lock().unwrap();
+        for (&id, m) in movies.iter_mut() {
+            update(ctx, id, m)?;
+        }
+        Ok(())
+    })
 }
 fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let name = ctx.thunk.friendly_name.clone().unwrap_or_default();
-    let mut parts = name.split('_');
-    let _ = parts.next();
-    let k = parts.next().unwrap_or("");
-    let slot: usize = parts
-        .next()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(usize::MAX);
-    let this = ctx.arg_u32(0)?;
-    if this == 0
-        || ctx
-            .cpu
-            .check_guest_access(this, 12, pocket_cpu::Prot::READ)
-            .is_err()
-    {
-        return Ok(DispatchOutcome::ReturnedR0(0x80004003));
-    }
-    let id = root(ctx, this)?;
-    let mut movies = MOVIES.lock().unwrap();
-    let Some(m) = movies.get_mut(&id) else {
-        return Ok(DispatchOutcome::ReturnedR0(0x80004003));
-    };
-    if slot == 0 {
-        let iid = ctx.arg_u32(1)?;
-        let out = ctx.arg_u32(2)?;
-        if out == 0
+    MOVIES.with(|registry| {
+        let name = ctx.thunk.friendly_name.clone().unwrap_or_default();
+        let mut parts = name.split('_');
+        let _ = parts.next();
+        let k = parts.next().unwrap_or("");
+        let slot: usize = parts
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX);
+        let this = ctx.arg_u32(0)?;
+        if this == 0
             || ctx
                 .cpu
-                .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)
-                .is_err()
-            || ctx
-                .cpu
-                .check_guest_access(iid, 16, pocket_cpu::Prot::READ)
+                .check_guest_access(this, 12, pocket_cpu::Prot::READ)
                 .is_err()
         {
             return Ok(DispatchOutcome::ReturnedR0(0x80004003));
         }
-        ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
-        let bytes = ctx.cpu.read_mem(iid, 16)?;
-        let Some(k) = kind(&bytes) else {
-            return Ok(DispatchOutcome::ReturnedR0(0x80004002));
+        let id = root(ctx, this)?;
+        let mut movies = registry.lock().unwrap();
+        let Some(m) = movies.get_mut(&id) else {
+            return Ok(DispatchOutcome::ReturnedR0(0x80004003));
         };
-        let pair = if let Some(p) = m.objects.get(k) {
-            *p
-        } else {
-            let Some(pair) = allocate(ctx, id, k)? else {
-                return Ok(DispatchOutcome::ReturnedR0(0x8007000e));
-            };
-            m.objects.insert(k.into(), pair);
-            pair
-        };
-        let refs = ctx.cpu.read_u32_le(id + 4)?.saturating_add(1);
-        ctx.cpu.write_mem(id + 4, &refs.to_le_bytes())?;
-        ctx.cpu.write_mem(out, &pair.0.to_le_bytes())?;
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    if slot == 1 || slot == 2 {
-        let refs = ctx.cpu.read_u32_le(id + 4)?;
-        let refs = if slot == 1 {
-            refs.saturating_add(1)
-        } else {
-            refs.saturating_sub(1)
-        };
-        ctx.cpu.write_mem(id + 4, &refs.to_le_bytes())?;
-        if refs == 0 {
-            ctx.kernel.audio.stop_mas_stream(id);
-            let m = movies.remove(&id).unwrap();
-            for (_, (object, table)) in &m.objects {
-                ctx.kernel.heap.free(*object);
-                ctx.kernel.heap.free(*table);
-            }
-        }
-        return Ok(DispatchOutcome::ReturnedR0(refs));
-    }
-    // IMediaEventEx inherits all IMediaEvent slots. Keep its own vtable and
-    // IID for QueryInterface, but share the graph's event queue and state.
-    let k = if k == "eventex" { "event" } else { k };
-    let mut result = 0;
-    match (k, slot) {
-        ("graph", 13) => {
-            let p = ctx.arg_u32(1)?;
-            if p == 0 {
+        if slot == 0 {
+            let iid = ctx.arg_u32(1)?;
+            let out = ctx.arg_u32(2)?;
+            if out == 0
+                || ctx
+                    .cpu
+                    .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)
+                    .is_err()
+                || ctx
+                    .cpu
+                    .check_guest_access(iid, 16, pocket_cpu::Prot::READ)
+                    .is_err()
+            {
                 return Ok(DispatchOutcome::ReturnedR0(0x80004003));
             }
-            if ctx.arg_u32(2)? != 0 {
-                return Ok(DispatchOutcome::ReturnedR0(0x80070057));
-            }
-            let path = read_path(ctx, p)?;
-            let Some(host) = ctx.kernel.vfs.resolve(&path) else {
-                return Ok(DispatchOutcome::ReturnedR0(0x80070002));
+            ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
+            let bytes = ctx.cpu.read_mem(iid, 16)?;
+            let Some(k) = kind(&bytes) else {
+                return Ok(DispatchOutcome::ReturnedR0(0x80004002));
             };
-            if !host.is_file() {
-                return Ok(DispatchOutcome::ReturnedR0(0x80070002));
+            let pair = if let Some(p) = m.objects.get(k) {
+                *p
+            } else {
+                let Some(pair) = allocate(ctx, id, k)? else {
+                    return Ok(DispatchOutcome::ReturnedR0(0x8007000e));
+                };
+                m.objects.insert(k.into(), pair);
+                pair
+            };
+            let refs = ctx.cpu.read_u32_le(id + 4)?.saturating_add(1);
+            ctx.cpu.write_mem(id + 4, &refs.to_le_bytes())?;
+            ctx.cpu.write_mem(out, &pair.0.to_le_bytes())?;
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        if slot == 1 || slot == 2 {
+            let refs = ctx.cpu.read_u32_le(id + 4)?;
+            let refs = if slot == 1 {
+                refs.saturating_add(1)
+            } else {
+                refs.saturating_sub(1)
+            };
+            ctx.cpu.write_mem(id + 4, &refs.to_le_bytes())?;
+            if refs == 0 {
+                ctx.kernel.audio.stop_mas_stream(id);
+                let m = movies.remove(&id).unwrap();
+                for (_, (object, table)) in &m.objects {
+                    ctx.kernel.heap.free(*object);
+                    ctx.kernel.heap.free(*table);
+                }
             }
-            match decode(host.clone(), 0.0, f64::MAX) {
-                Ok((rx, info, cancel)) => {
-                    m.cancel_decode();
-                    m.path = Some(host);
-                    m.info = info;
-                    m.offset = 0.0;
-                    m.stop = info.duration;
-                    m.cancel = Some(cancel);
-                    ctx.kernel.audio.stop_mas_stream(id);
-                    m.completion_waits.clear();
-                    m.playing = false;
-                    m.is_paused = false;
-                    m.receiver = Some(rx);
-                    m.frame = None;
-                    m.pending = None;
-                    m.frame_number = 0;
-                    m.frame_ready_sent = false;
-                    m.frame_ready_pending = false;
-                    m.ended = false;
-                    m.completed = false;
-                    m.completion_code = 1;
-                    m.start = None;
-                    m.paused = Duration::ZERO;
-                    m.audio = None;
-                    m.audio_queued = false;
-                    m.audio_end = 0;
-                    log::info!(
+            return Ok(DispatchOutcome::ReturnedR0(refs));
+        }
+        // IMediaEventEx inherits all IMediaEvent slots. Keep its own vtable and
+        // IID for QueryInterface, but share the graph's event queue and state.
+        let k = if k == "eventex" { "event" } else { k };
+        let mut result = 0;
+        match (k, slot) {
+            ("graph", 13) => {
+                let p = ctx.arg_u32(1)?;
+                if p == 0 {
+                    return Ok(DispatchOutcome::ReturnedR0(0x80004003));
+                }
+                if ctx.arg_u32(2)? != 0 {
+                    return Ok(DispatchOutcome::ReturnedR0(0x80070057));
+                }
+                let path = read_path(ctx, p)?;
+                let Some(host) = ctx.kernel.vfs.resolve(&path) else {
+                    return Ok(DispatchOutcome::ReturnedR0(0x80070002));
+                };
+                if !host.is_file() {
+                    return Ok(DispatchOutcome::ReturnedR0(0x80070002));
+                }
+                match decode(host.clone(), 0.0, f64::MAX) {
+                    Ok((rx, info, cancel, worker)) => {
+                        m.cancel_decode();
+                        m.path = Some(host);
+                        m.info = info;
+                        m.offset = 0.0;
+                        m.stop = info.duration;
+                        m.cancel = Some(cancel);
+                        m.worker = Some(worker);
+                        ctx.kernel.audio.stop_mas_stream(id);
+                        m.completion_waits.clear();
+                        m.playing = false;
+                        m.is_paused = false;
+                        m.receiver = Some(rx);
+                        m.frame = None;
+                        m.pending = None;
+                        m.frame_number = 0;
+                        m.frame_ready_sent = false;
+                        m.frame_ready_pending = false;
+                        m.ended = false;
+                        m.completed = false;
+                        m.completion_code = 1;
+                        m.start = None;
+                        m.paused = Duration::ZERO;
+                        m.audio = None;
+                        m.audio_queued = false;
+                        m.audio_end = 0;
+                        log::info!(
                         "DirectShow RenderFile({path:?}): statically linked FFmpeg decoder started"
                     );
-                }
-                Err(e) => {
-                    log::warn!("DirectShow native decoder unavailable: {e}");
-                    result = 0x80004001;
-                }
-            }
-        }
-        ("control", 7) | ("filter", 6) => {
-            if m.receiver.is_none() {
-                let code = restart(ctx, id, m, m.position(), m.stop)?;
-                if code != 0 {
-                    return Ok(DispatchOutcome::ReturnedR0(code));
-                }
-            }
-            if !m.playing {
-                auto_show(m);
-            }
-            m.playing = true;
-            m.is_paused = false;
-            ctx.kernel.audio.pause_mas_stream(id, false);
-            if m.frame.is_some() && m.start.is_none() {
-                m.start = Some(Instant::now());
-            }
-        }
-        ("control", 8) | ("filter", 5) => {
-            if !m.is_paused {
-                auto_show(m);
-            }
-            m.is_paused = true;
-            m.paused = elapsed(m);
-            m.start = None;
-            m.playing = false;
-            ctx.kernel.audio.pause_mas_stream(id, true);
-        }
-        ("control", 9) | ("filter", 4) => {
-            m.completion_waits.clear();
-            m.playing = false;
-            m.is_paused = false;
-            m.completed = false;
-            m.paused = elapsed(m);
-            m.start = None;
-            m.cancel_decode();
-            m.frame = None;
-            m.pending = None;
-            ctx.kernel.audio.stop_mas_stream(id);
-        }
-        ("control", 10) | ("filter", 7) => {
-            let p = ctx.arg_u32(2)?;
-            if p != 0 {
-                ctx.cpu.write_mem(
-                    p,
-                    &(if m.playing {
-                        2u32
-                    } else if m.is_paused {
-                        1
-                    } else {
-                        0
-                    })
-                    .to_le_bytes(),
-                )?;
-            }
-        }
-        ("event", 8) => {
-            update(ctx, id, m)?;
-            if m.frame_ready_pending {
-                for (p, v) in [
-                    (ctx.arg_u32(1)?, 0x49u32),
-                    (ctx.arg_u32(2)?, 0),
-                    (ctx.arg_u32(3)?, 0),
-                ] {
-                    if p != 0 {
-                        ctx.cpu.write_mem(p, &v.to_le_bytes())?;
+                    }
+                    Err(e) => {
+                        log::warn!("DirectShow native decoder unavailable: {e}");
+                        result = 0x80004001;
                     }
                 }
-                m.frame_ready_pending = false;
-            } else if m.completed {
-                for (p, v) in [
-                    (ctx.arg_u32(1)?, m.completion_code),
-                    (
-                        ctx.arg_u32(2)?,
-                        if m.completion_code == 3 {
-                            0x80004005
+            }
+            ("control", 7) | ("filter", 6) => {
+                if m.receiver.is_none() {
+                    let code = restart(ctx, id, m, m.position(), m.stop)?;
+                    if code != 0 {
+                        return Ok(DispatchOutcome::ReturnedR0(code));
+                    }
+                }
+                if !m.playing {
+                    auto_show(m);
+                }
+                m.playing = true;
+                m.is_paused = false;
+                ctx.kernel.audio.pause_mas_stream(id, false);
+                if m.frame.is_some() && m.start.is_none() {
+                    m.start = Some(Instant::now());
+                }
+            }
+            ("control", 8) | ("filter", 5) => {
+                if !m.is_paused {
+                    auto_show(m);
+                }
+                m.is_paused = true;
+                m.paused = elapsed(m);
+                m.start = None;
+                m.playing = false;
+                ctx.kernel.audio.pause_mas_stream(id, true);
+            }
+            ("control", 9) | ("filter", 4) => {
+                m.completion_waits.clear();
+                m.playing = false;
+                m.is_paused = false;
+                m.completed = false;
+                m.paused = elapsed(m);
+                m.start = None;
+                m.cancel_decode();
+                m.frame = None;
+                m.pending = None;
+                ctx.kernel.audio.stop_mas_stream(id);
+            }
+            ("control", 10) | ("filter", 7) => {
+                let p = ctx.arg_u32(2)?;
+                if p != 0 {
+                    ctx.cpu.write_mem(
+                        p,
+                        &(if m.playing {
+                            2u32
+                        } else if m.is_paused {
+                            1
                         } else {
                             0
-                        },
-                    ),
-                    (ctx.arg_u32(3)?, 0),
-                ] {
-                    if p != 0 {
-                        ctx.cpu.write_mem(p, &v.to_le_bytes())?;
+                        })
+                        .to_le_bytes(),
+                    )?;
+                }
+            }
+            ("event", 8) => {
+                update(ctx, id, m)?;
+                if m.frame_ready_pending {
+                    for (p, v) in [
+                        (ctx.arg_u32(1)?, 0x49u32),
+                        (ctx.arg_u32(2)?, 0),
+                        (ctx.arg_u32(3)?, 0),
+                    ] {
+                        if p != 0 {
+                            ctx.cpu.write_mem(p, &v.to_le_bytes())?;
+                        }
                     }
+                    m.frame_ready_pending = false;
+                } else if m.completed {
+                    for (p, v) in [
+                        (ctx.arg_u32(1)?, m.completion_code),
+                        (
+                            ctx.arg_u32(2)?,
+                            if m.completion_code == 3 {
+                                0x80004005
+                            } else {
+                                0
+                            },
+                        ),
+                        (ctx.arg_u32(3)?, 0),
+                    ] {
+                        if p != 0 {
+                            ctx.cpu.write_mem(p, &v.to_le_bytes())?;
+                        }
+                    }
+                    m.completed = false;
+                } else {
+                    result = 0x80004004;
                 }
-                m.completed = false;
-            } else {
-                result = 0x80004004;
             }
-        }
-        ("event", 9) => {
-            let timeout = ctx.arg_u32(1)?;
-            let p = ctx.arg_u32(2)?;
-            if p == 0 {
-                return Ok(DispatchOutcome::ReturnedR0(0x80004003));
-            }
-            // WinCE specifies zero when the wait times out. Colors inspects
-            // this output even on E_ABORT; stale stack data skips its intro.
-            ctx.cpu.write_mem(p, &0u32.to_le_bytes())?;
-            update(ctx, id, m)?;
-            let thread = ctx.kernel.current_thread;
-            if m.completed {
-                m.completion_waits.remove(&thread);
-                ctx.cpu.write_mem(p, &m.completion_code.to_le_bytes())?;
-            } else if !m.playing {
-                m.completion_waits.remove(&thread);
-                result = 0x80040227; // VFW_E_WRONG_STATE
-            } else {
-                let started = *m
-                    .completion_waits
-                    .entry(thread)
-                    .or_insert_with(Instant::now);
-                if timeout != 0
-                    && (timeout == u32::MAX
-                        || started.elapsed() < Duration::from_millis(u64::from(timeout)))
-                {
-                    // Re-enter with unchanged guest registers. Let the run loop
-                    // present frames between slices instead of blocking the host.
-                    return Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va));
+            ("event", 9) => {
+                let timeout = ctx.arg_u32(1)?;
+                let p = ctx.arg_u32(2)?;
+                if p == 0 {
+                    return Ok(DispatchOutcome::ReturnedR0(0x80004003));
                 }
-                m.completion_waits.remove(&thread);
-                result = 0x80004004;
+                // WinCE specifies zero when the wait times out. Colors inspects
+                // this output even on E_ABORT; stale stack data skips its intro.
+                ctx.cpu.write_mem(p, &0u32.to_le_bytes())?;
+                update(ctx, id, m)?;
+                let thread = ctx.kernel.current_thread;
+                if m.completed {
+                    m.completion_waits.remove(&thread);
+                    ctx.cpu.write_mem(p, &m.completion_code.to_le_bytes())?;
+                } else if !m.playing {
+                    m.completion_waits.remove(&thread);
+                    result = 0x80040227; // VFW_E_WRONG_STATE
+                } else {
+                    let started = *m
+                        .completion_waits
+                        .entry(thread)
+                        .or_insert_with(Instant::now);
+                    if timeout != 0
+                        && (timeout == u32::MAX
+                            || started.elapsed() < Duration::from_millis(u64::from(timeout)))
+                    {
+                        // Re-enter with unchanged guest registers. Let the run loop
+                        // present frames between slices instead of blocking the host.
+                        return Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va));
+                    }
+                    m.completion_waits.remove(&thread);
+                    result = 0x80004004;
+                }
+            }
+            ("event", 12) => {}
+            ("event", 13) => {
+                m.notify = ctx.arg_u32(1)?;
+                m.notify_msg = ctx.arg_u32(2)?;
+                m.notify_param = ctx.arg_u32(3)?;
+            }
+            ("event", 14) => {
+                let flags = ctx.arg_u32(1)?;
+                if flags > 1 {
+                    result = 0x80070057;
+                }
+                // Only AM_MEDIAEVENT_NONOTIFY.
+                else {
+                    m.notify_flags = flags;
+                }
+            }
+            ("event", 15) => {
+                let p = ctx.arg_u32(1)?;
+                if p == 0 {
+                    result = 0x80004003;
+                } else {
+                    ctx.cpu.write_mem(p, &m.notify_flags.to_le_bytes())?;
+                }
+            }
+            ("audio", 7) => m.volume = (ctx.arg_u32(1)? as i32).clamp(-10000, 0),
+            ("audio", 8) => {
+                let p = ctx.arg_u32(1)?;
+                ctx.cpu.write_mem(p, &m.volume.to_le_bytes())?;
+            }
+            ("seeking", _) | ("position", _) | ("video", _) | ("window", _) => {
+                result = extended(ctx, id, m, k, slot)?;
+            }
+            ("filter", 9) => {}
+            _ => {
+                log::debug!("DirectShow unsupported {k} slot {slot}");
+                result = 0x80004001;
             }
         }
-        ("event", 12) => {}
-        ("event", 13) => {
-            m.notify = ctx.arg_u32(1)?;
-            m.notify_msg = ctx.arg_u32(2)?;
-            m.notify_param = ctx.arg_u32(3)?;
-        }
-        ("event", 14) => {
-            let flags = ctx.arg_u32(1)?;
-            if flags > 1 {
-                result = 0x80070057;
-            }
-            // Only AM_MEDIAEVENT_NONOTIFY.
-            else {
-                m.notify_flags = flags;
-            }
-        }
-        ("event", 15) => {
-            let p = ctx.arg_u32(1)?;
-            if p == 0 {
-                result = 0x80004003;
-            } else {
-                ctx.cpu.write_mem(p, &m.notify_flags.to_le_bytes())?;
-            }
-        }
-        ("audio", 7) => m.volume = (ctx.arg_u32(1)? as i32).clamp(-10000, 0),
-        ("audio", 8) => {
-            let p = ctx.arg_u32(1)?;
-            ctx.cpu.write_mem(p, &m.volume.to_le_bytes())?;
-        }
-        ("seeking", _) | ("position", _) | ("video", _) | ("window", _) => {
-            result = extended(ctx, id, m, k, slot)?;
-        }
-        ("filter", 9) => {}
-        _ => {
-            log::debug!("DirectShow unsupported {k} slot {slot}");
-            result = 0x80004001;
-        }
-    }
-    Ok(DispatchOutcome::ReturnedR0(result))
+        Ok(DispatchOutcome::ReturnedR0(result))
+    })
 }
 pub(crate) struct SuspendedMovies {
     movies: HashMap<u32, Movie>,
     at: Instant,
 }
 pub(crate) fn suspend() -> SuspendedMovies {
-    SuspendedMovies {
-        movies: std::mem::take(&mut *MOVIES.lock().unwrap()),
+    MOVIES.with(|registry| SuspendedMovies {
+        movies: std::mem::take(&mut *registry.lock().unwrap()),
         at: Instant::now(),
-    }
+    })
 }
 pub(crate) fn resume(mut saved: SuspendedMovies) {
-    let duration = saved.at.elapsed();
-    for movie in saved.movies.values_mut() {
-        if let Some(start) = movie.start.as_mut() {
-            *start += duration;
+    MOVIES.with(|registry| {
+        let duration = saved.at.elapsed();
+        for movie in saved.movies.values_mut() {
+            if let Some(start) = movie.start.as_mut() {
+                *start += duration;
+            }
+            for start in movie.completion_waits.values_mut() {
+                *start += duration;
+            }
         }
-        for start in movie.completion_waits.values_mut() {
-            *start += duration;
-        }
-    }
-    *MOVIES.lock().unwrap() = saved.movies;
+        *registry.lock().unwrap() = saved.movies;
+    })
 }
 
 pub(crate) fn reset() {
-    MOVIES.lock().unwrap().clear();
+    MOVIES.with(|registry| {
+        registry.lock().unwrap().clear();
+    })
 }
-// DirectShow's graph registry is process-global. Tests using independent fake
-// CPUs must not reset one another's graph collection while asserting lifetimes.
+// Serialize tests that also exercise shared COM test infrastructure.
 #[cfg(test)]
 pub(crate) static TEST_GRAPH_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -910,77 +933,81 @@ pub(crate) static TEST_GRAPH_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(
 mod tests {
     #[test]
     fn launcher_preview_survives_swaps_between_video_frames() {
-        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
-        reset();
-        let mut cpu = StubCpu::new();
-        let mut kernel = crate::gx::tests::fresh_kernel();
-        let t = thunk("eglSwapBuffers");
-        kernel.framebuffer.resize(320, 240);
-        let mut movie = Movie::new();
-        movie.playing = true;
-        movie.info.width = 2;
-        movie.info.height = 2;
-        // Exact miniature rectangle used by the attached launcher.
-        movie.window = [844, 40, 101, 82];
-        movie.pending = Some(vec![0xff; 8]);
-        movie.notify = 10;
-        movie.notify_msg = 20;
-        MOVIES.lock().unwrap().insert(1, movie);
-        let mut ctx = CallCtx {
-            cpu: &mut cpu,
-            kernel: &mut kernel,
-            thunk: &t,
-        };
-        service(&mut ctx).unwrap();
-        {
-            let mut movies = MOVIES.lock().unwrap();
-            let movie = movies.get_mut(&1).unwrap();
-            assert!(
-                movie.frame_ready_pending,
-                "off-screen decoding must announce readiness"
-            );
-            assert_eq!(ctx.kernel.posted_messages.len(), 1);
-            // The launcher handles EC_VIDEOFRAMEREADY by moving its window.
-            movie.frame_ready_pending = false;
-            movie.window = [204, 40, 101, 82];
-        }
-        for _ in 0..3 {
-            // The message pump may already have presented this video frame.
+        MOVIES.with(|registry| {
+            let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            reset();
+            let mut cpu = StubCpu::new();
+            let mut kernel = crate::gx::tests::fresh_kernel();
+            let t = thunk("eglSwapBuffers");
+            kernel.framebuffer.resize(320, 240);
+            let mut movie = Movie::new();
+            movie.playing = true;
+            movie.info.width = 2;
+            movie.info.height = 2;
+            // Exact miniature rectangle used by the attached launcher.
+            movie.window = [844, 40, 101, 82];
+            movie.pending = Some(vec![0xff; 8]);
+            movie.notify = 10;
+            movie.notify_msg = 20;
+            registry.lock().unwrap().insert(1, movie);
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &t,
+            };
             service(&mut ctx).unwrap();
-            crate::gles::egl_swap_buffers(&mut ctx).unwrap();
-            let pixel = ((80 * ctx.kernel.framebuffer.width + 250) * 2) as usize;
-            assert_eq!(
-                &ctx.kernel.framebuffer.resident_cpu().unwrap().pixels[pixel..pixel + 2],
-                &[0xff, 0xff]
-            );
-        }
-        reset();
+            {
+                let mut movies = registry.lock().unwrap();
+                let movie = movies.get_mut(&1).unwrap();
+                assert!(
+                    movie.frame_ready_pending,
+                    "off-screen decoding must announce readiness"
+                );
+                assert_eq!(ctx.kernel.posted_messages.len(), 1);
+                // The launcher handles EC_VIDEOFRAMEREADY by moving its window.
+                movie.frame_ready_pending = false;
+                movie.window = [204, 40, 101, 82];
+            }
+            for _ in 0..3 {
+                // The message pump may already have presented this video frame.
+                service(&mut ctx).unwrap();
+                crate::gles::egl_swap_buffers(&mut ctx).unwrap();
+                let pixel = ((80 * ctx.kernel.framebuffer.width + 250) * 2) as usize;
+                assert_eq!(
+                    &ctx.kernel.framebuffer.resident_cpu().unwrap().pixels[pixel..pixel + 2],
+                    &[0xff, 0xff]
+                );
+            }
+            reset();
+        })
     }
     #[test]
     fn directshow_suspension_restores_graph_and_freezes_movie_clock() {
-        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
-        reset();
-        let mut movie = Movie::new();
-        movie.playing = true;
-        movie.start = Some(Instant::now() - Duration::from_secs(2));
-        MOVIES.lock().unwrap().insert(0x50001100, movie);
-        let mut saved = suspend();
-        assert!(MOVIES.lock().unwrap().is_empty());
-        // Simulate a long child lifetime without slowing the test.
-        saved.at -= Duration::from_secs(30);
-        for movie in saved.movies.values_mut() {
-            movie.start = movie.start.map(|start| start - Duration::from_secs(30));
-        }
-        MOVIES.lock().unwrap().insert(0x50001100, Movie::new());
-        reset(); // Child Emulator Drop must not erase the detached parent.
-        resume(saved);
-        let movies = MOVIES.lock().unwrap();
-        let parent = movies.get(&0x50001100).unwrap();
-        assert!(parent.playing);
-        assert!(elapsed(parent) >= Duration::from_secs(2));
-        assert!(elapsed(parent) < Duration::from_secs(3));
-        drop(movies);
-        reset();
+        MOVIES.with(|registry| {
+            let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            reset();
+            let mut movie = Movie::new();
+            movie.playing = true;
+            movie.start = Some(Instant::now() - Duration::from_secs(2));
+            registry.lock().unwrap().insert(0x50001100, movie);
+            let mut saved = suspend();
+            assert!(registry.lock().unwrap().is_empty());
+            // Simulate a long child lifetime without slowing the test.
+            saved.at -= Duration::from_secs(30);
+            for movie in saved.movies.values_mut() {
+                movie.start = movie.start.map(|start| start - Duration::from_secs(30));
+            }
+            registry.lock().unwrap().insert(0x50001100, Movie::new());
+            reset(); // Child Emulator Drop must not erase the detached parent.
+            resume(saved);
+            let movies = registry.lock().unwrap();
+            let parent = movies.get(&0x50001100).unwrap();
+            assert!(parent.playing);
+            assert!(elapsed(parent) >= Duration::from_secs(2));
+            assert!(elapsed(parent) < Duration::from_secs(3));
+            drop(movies);
+            reset();
+        })
     }
     use super::*;
     use pocket_cpu::{regs::ArmReg, stub::StubCpu, Cpu, Prot};
@@ -1014,313 +1041,317 @@ mod tests {
     }
     #[test]
     fn autoshow_reveals_prepared_video_but_respects_disabled_and_live_hidden_windows() {
-        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
-        for enabled in [true, false] {
-            reset();
-            let mut cpu = StubCpu::new();
-            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+        MOVIES.with(|registry| {
+            let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            for enabled in [true, false] {
+                reset();
+                let mut cpu = StubCpu::new();
+                cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+                    .unwrap();
+                cpu.write_mem(0x1008, &1u32.to_le_bytes()).unwrap();
+                let mut kernel = crate::gx::tests::fresh_kernel();
+                kernel.framebuffer.resize(2, 2);
+                kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0x55);
+                let mut movie = Movie::new();
+                movie.info.width = 2;
+                movie.info.height = 2;
+                movie.window_properties[13] = if enabled { u32::MAX } else { 0 };
+                let (_sender, receiver) = mpsc::sync_channel(1);
+                movie.receiver = Some(receiver);
+                movie.pending = Some(vec![0xff; 8]);
+                registry.lock().unwrap().insert(1, movie);
+                call(&mut cpu, &mut kernel, "ds_window_19", [0x1000, 0, 0]);
+                assert!(!registry.lock().unwrap()[&1].visible);
+                call(&mut cpu, &mut kernel, "ds_control_7", [0x1000, 0, 0]);
+                assert_eq!(registry.lock().unwrap()[&1].visible, enabled);
+                let t = thunk("Sleep");
+                service(&mut CallCtx {
+                    cpu: &mut cpu,
+                    kernel: &mut kernel,
+                    thunk: &t,
+                })
                 .unwrap();
-            cpu.write_mem(0x1008, &1u32.to_le_bytes()).unwrap();
-            let mut kernel = crate::gx::tests::fresh_kernel();
-            kernel.framebuffer.resize(2, 2);
-            kernel.framebuffer.cpu_mut().unwrap().pixels.fill(0x55);
-            let mut movie = Movie::new();
-            movie.info.width = 2;
-            movie.info.height = 2;
-            movie.window_properties[13] = if enabled { u32::MAX } else { 0 };
-            let (_sender, receiver) = mpsc::sync_channel(1);
-            movie.receiver = Some(receiver);
-            movie.pending = Some(vec![0xff; 8]);
-            MOVIES.lock().unwrap().insert(1, movie);
-            call(&mut cpu, &mut kernel, "ds_window_19", [0x1000, 0, 0]);
-            assert!(!MOVIES.lock().unwrap()[&1].visible);
-            call(&mut cpu, &mut kernel, "ds_control_7", [0x1000, 0, 0]);
-            assert_eq!(MOVIES.lock().unwrap()[&1].visible, enabled);
-            let t = thunk("Sleep");
-            service(&mut CallCtx {
-                cpu: &mut cpu,
-                kernel: &mut kernel,
-                thunk: &t,
-            })
-            .unwrap();
-            assert_eq!(
-                kernel.framebuffer.resident_cpu().unwrap().pixels,
-                vec![if enabled { 0xff } else { 0x55 }; 8]
-            );
-            // Repeating Run is not a state transition and must not undo an
-            // explicit hide made while playback is already running.
-            call(&mut cpu, &mut kernel, "ds_window_19", [0x1000, 0, 0]);
-            call(&mut cpu, &mut kernel, "ds_control_7", [0x1000, 0, 0]);
-            assert!(!MOVIES.lock().unwrap()[&1].visible);
-            call(&mut cpu, &mut kernel, "ds_control_8", [0x1000, 0, 0]);
-            assert_eq!(MOVIES.lock().unwrap()[&1].visible, enabled);
-        }
-        reset();
+                assert_eq!(
+                    kernel.framebuffer.resident_cpu().unwrap().pixels,
+                    vec![if enabled { 0xff } else { 0x55 }; 8]
+                );
+                // Repeating Run is not a state transition and must not undo an
+                // explicit hide made while playback is already running.
+                call(&mut cpu, &mut kernel, "ds_window_19", [0x1000, 0, 0]);
+                call(&mut cpu, &mut kernel, "ds_control_7", [0x1000, 0, 0]);
+                assert!(!registry.lock().unwrap()[&1].visible);
+                call(&mut cpu, &mut kernel, "ds_control_8", [0x1000, 0, 0]);
+                assert_eq!(registry.lock().unwrap()[&1].visible, enabled);
+            }
+            reset();
+        })
     }
 
     #[test]
     fn directshow_graph_identity_interfaces_and_reference_lifetime() {
-        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut cpu = StubCpu::new();
-        let mut kernel = crate::gx::tests::fresh_kernel();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
-            .unwrap();
-        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
-            .unwrap();
-        let e = kernel
-            .dynamic_exports
-            .entry(pocket_kernel::OLE32_MODULE_HANDLE)
-            .or_default();
-        let mut address = 0x70001000;
-        for (k, _, slots) in KINDS {
-            for slot in 0..slots {
-                e.insert(format!("ds_{k}_{slot}"), address);
-                address += 16;
+        MOVIES.with(|registry| {
+            let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cpu = StubCpu::new();
+            let mut kernel = crate::gx::tests::fresh_kernel();
+            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let e = kernel
+                .dynamic_exports
+                .entry(pocket_kernel::OLE32_MODULE_HANDLE)
+                .or_default();
+            let mut address = 0x70001000;
+            for (k, _, slots) in KINDS {
+                for slot in 0..slots {
+                    e.insert(format!("ds_{k}_{slot}"), address);
+                    address += 16;
+                }
             }
-        }
-        let mut iid = [0u8; 16];
-        iid[..4].copy_from_slice(&0x56a868a9u32.to_le_bytes());
-        iid[4..].copy_from_slice(&TAIL);
-        let t = thunk("CoCreateInstance");
-        assert_eq!(
-            create(
-                &mut CallCtx {
-                    cpu: &mut cpu,
-                    kernel: &mut kernel,
-                    thunk: &t
-                },
-                &iid,
-                0x1000
-            )
-            .unwrap(),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        let object = cpu.read_u32_le(0x1000).unwrap();
-        let table = cpu.read_u32_le(object).unwrap();
-        assert_eq!(cpu.read_u32_le(table + 0x34).unwrap(), 0x70001000 + 13 * 16);
-        let mut control = iid;
-        control[..4].copy_from_slice(&0x56a868b1u32.to_le_bytes());
-        cpu.write_mem(0x1100, &control).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_graph_0",
-                [object, 0x1100, 0x1200]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        let child = cpu.read_u32_le(0x1200).unwrap();
-        assert_ne!(child, object);
-        assert_eq!(cpu.read_u32_le(child + 8).unwrap(), object);
-        cpu.write_mem(0x1100, &UNKNOWN).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_control_0",
-                [child, 0x1100, 0x1200]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), object);
-        // Jump requests IMediaEventEx during startup and checks the HRESULT.
-        // Both event IIDs share IUnknown identity and inherited event state.
-        let mut eventex = iid;
-        eventex[..4].copy_from_slice(&0x56a868c0u32.to_le_bytes());
-        cpu.write_mem(0x1100, &eventex).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_graph_0",
-                [object, 0x1100, 0x1200]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        let extended = cpu.read_u32_le(0x1200).unwrap();
-        assert_ne!(extended, object);
-        let extended_table = cpu.read_u32_le(extended).unwrap();
-        assert_eq!(
-            cpu.read_u32_le(extended_table + 13 * 4).unwrap(),
-            kernel.dynamic_exports[&pocket_kernel::OLE32_MODULE_HANDLE]["ds_eventex_13"]
-        );
-        cpu.write_mem(0x1100, &UNKNOWN).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_eventex_0",
-                [extended, 0x1100, 0x1200]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), object);
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_graph_2", [object, 0, 0]),
-            DispatchOutcome::ReturnedR0(4)
-        );
-        let mut event = iid;
-        event[..4].copy_from_slice(&0x56a868b6u32.to_le_bytes());
-        cpu.write_mem(0x1100, &event).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_eventex_0",
-                [extended, 0x1100, 0x1200]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        let base_event = cpu.read_u32_le(0x1200).unwrap();
-        assert_ne!(base_event, extended);
-        cpu.write_reg(ArmReg::R3, 0xab).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_eventex_13",
-                [extended, 0xdead0001, 0x400]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_eventex_14", [extended, 1, 0]),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_eventex_15",
-                [extended, 0x1200, 0]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_eventex_14", [extended, 2, 0]),
-            DispatchOutcome::ReturnedR0(0x80070057)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_eventex_15", [extended, 0, 0]),
-            DispatchOutcome::ReturnedR0(0x80004003)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_event_2", [base_event, 0, 0]),
-            DispatchOutcome::ReturnedR0(4)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_eventex_2", [extended, 0, 0]),
-            DispatchOutcome::ReturnedR0(3)
-        );
-        // A real decoder EOF and expired frame presentation time produce
-        // exactly one completion event, independently of decoder speed.
-        let (tx, rx) = mpsc::sync_channel(3);
-        {
-            let mut movies = MOVIES.lock().unwrap();
-            let movie = movies.get_mut(&object).unwrap();
-            movie.receiver = Some(rx);
-            movie.playing = true;
-        }
-        // A pending wait must overwrite a nonzero caller value, including
-        // a finite timeout (which re-enters without clobbering arguments).
-        cpu.write_mem(0x1200, &0xdeadbeefu32.to_le_bytes()).unwrap();
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_event_9", [object, 50, 0x1200]),
-            DispatchOutcome::JumpTo(0x70000000)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0);
-        {
-            MOVIES
-                .lock()
-                .unwrap()
-                .get_mut(&object)
-                .unwrap()
-                .completion_waits
-                .insert(0, Instant::now() - Duration::from_secs(1));
-        }
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_event_9", [object, 50, 0x1200]),
-            DispatchOutcome::ReturnedR0(0x80004004)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0);
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_event_9", [object, 0, 0]),
-            DispatchOutcome::ReturnedR0(0x80004003)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_filter_7", [object, 50, 0x1200]),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 2);
-        tx.send(Packet::Frame(vec![
-            0;
-            kernel
-                .framebuffer
-                .resident_cpu()
-                .unwrap()
-                .pixels
-                .len()
-        ]))
-        .unwrap();
-        tx.send(Packet::End).unwrap();
-        {
-            let mut movies = MOVIES.lock().unwrap();
-            let movie = movies.get_mut(&object).unwrap();
-            movie.start = Some(Instant::now() - Duration::from_secs(1));
-        }
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_event_9", [object, 0, 0x1200]),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
-        assert!(kernel.posted_messages.is_empty()); // NONOTIFY does not suppress polling.
-        cpu.write_reg(ArmReg::R3, 0x1300).unwrap();
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_event_8",
-                [object, 0x1200, 0x1240]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0x49);
-        assert_eq!(cpu.read_u32_le(0x1240).unwrap(), 0);
-        assert_eq!(cpu.read_u32_le(0x1300).unwrap(), 0);
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_event_8",
-                [object, 0x1200, 0x1240]
-            ),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
-        assert_eq!(
-            call(
-                &mut cpu,
-                &mut kernel,
-                "ds_event_8",
-                [object, 0x1200, 0x1240]
-            ),
-            DispatchOutcome::ReturnedR0(0x80004004)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_graph_2", [object, 0, 0]),
-            DispatchOutcome::ReturnedR0(2)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_control_2", [child, 0, 0]),
-            DispatchOutcome::ReturnedR0(1)
-        );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, "ds_graph_2", [object, 0, 0]),
-            DispatchOutcome::ReturnedR0(0)
-        );
-        assert!(!MOVIES.lock().unwrap().contains_key(&object));
+            let mut iid = [0u8; 16];
+            iid[..4].copy_from_slice(&0x56a868a9u32.to_le_bytes());
+            iid[4..].copy_from_slice(&TAIL);
+            let t = thunk("CoCreateInstance");
+            assert_eq!(
+                create(
+                    &mut CallCtx {
+                        cpu: &mut cpu,
+                        kernel: &mut kernel,
+                        thunk: &t
+                    },
+                    &iid,
+                    0x1000
+                )
+                .unwrap(),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let object = cpu.read_u32_le(0x1000).unwrap();
+            let table = cpu.read_u32_le(object).unwrap();
+            assert_eq!(cpu.read_u32_le(table + 0x34).unwrap(), 0x70001000 + 13 * 16);
+            let mut control = iid;
+            control[..4].copy_from_slice(&0x56a868b1u32.to_le_bytes());
+            cpu.write_mem(0x1100, &control).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_graph_0",
+                    [object, 0x1100, 0x1200]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let child = cpu.read_u32_le(0x1200).unwrap();
+            assert_ne!(child, object);
+            assert_eq!(cpu.read_u32_le(child + 8).unwrap(), object);
+            cpu.write_mem(0x1100, &UNKNOWN).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_control_0",
+                    [child, 0x1100, 0x1200]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), object);
+            // Jump requests IMediaEventEx during startup and checks the HRESULT.
+            // Both event IIDs share IUnknown identity and inherited event state.
+            let mut eventex = iid;
+            eventex[..4].copy_from_slice(&0x56a868c0u32.to_le_bytes());
+            cpu.write_mem(0x1100, &eventex).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_graph_0",
+                    [object, 0x1100, 0x1200]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let extended = cpu.read_u32_le(0x1200).unwrap();
+            assert_ne!(extended, object);
+            let extended_table = cpu.read_u32_le(extended).unwrap();
+            assert_eq!(
+                cpu.read_u32_le(extended_table + 13 * 4).unwrap(),
+                kernel.dynamic_exports[&pocket_kernel::OLE32_MODULE_HANDLE]["ds_eventex_13"]
+            );
+            cpu.write_mem(0x1100, &UNKNOWN).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_eventex_0",
+                    [extended, 0x1100, 0x1200]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), object);
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_graph_2", [object, 0, 0]),
+                DispatchOutcome::ReturnedR0(4)
+            );
+            let mut event = iid;
+            event[..4].copy_from_slice(&0x56a868b6u32.to_le_bytes());
+            cpu.write_mem(0x1100, &event).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_eventex_0",
+                    [extended, 0x1100, 0x1200]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let base_event = cpu.read_u32_le(0x1200).unwrap();
+            assert_ne!(base_event, extended);
+            cpu.write_reg(ArmReg::R3, 0xab).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_eventex_13",
+                    [extended, 0xdead0001, 0x400]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_eventex_14", [extended, 1, 0]),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_eventex_15",
+                    [extended, 0x1200, 0]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_eventex_14", [extended, 2, 0]),
+                DispatchOutcome::ReturnedR0(0x80070057)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_eventex_15", [extended, 0, 0]),
+                DispatchOutcome::ReturnedR0(0x80004003)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_event_2", [base_event, 0, 0]),
+                DispatchOutcome::ReturnedR0(4)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_eventex_2", [extended, 0, 0]),
+                DispatchOutcome::ReturnedR0(3)
+            );
+            // A real decoder EOF and expired frame presentation time produce
+            // exactly one completion event, independently of decoder speed.
+            let (tx, rx) = mpsc::sync_channel(3);
+            {
+                let mut movies = registry.lock().unwrap();
+                let movie = movies.get_mut(&object).unwrap();
+                movie.receiver = Some(rx);
+                movie.playing = true;
+            }
+            // A pending wait must overwrite a nonzero caller value, including
+            // a finite timeout (which re-enters without clobbering arguments).
+            cpu.write_mem(0x1200, &0xdeadbeefu32.to_le_bytes()).unwrap();
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_event_9", [object, 50, 0x1200]),
+                DispatchOutcome::JumpTo(0x70000000)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0);
+            {
+                registry
+                    .lock()
+                    .unwrap()
+                    .get_mut(&object)
+                    .unwrap()
+                    .completion_waits
+                    .insert(0, Instant::now() - Duration::from_secs(1));
+            }
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_event_9", [object, 50, 0x1200]),
+                DispatchOutcome::ReturnedR0(0x80004004)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0);
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_event_9", [object, 0, 0]),
+                DispatchOutcome::ReturnedR0(0x80004003)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_filter_7", [object, 50, 0x1200]),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 2);
+            tx.send(Packet::Frame(vec![
+                0;
+                kernel
+                    .framebuffer
+                    .resident_cpu()
+                    .unwrap()
+                    .pixels
+                    .len()
+            ]))
+            .unwrap();
+            tx.send(Packet::End).unwrap();
+            {
+                let mut movies = registry.lock().unwrap();
+                let movie = movies.get_mut(&object).unwrap();
+                movie.start = Some(Instant::now() - Duration::from_secs(1));
+            }
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_event_9", [object, 0, 0x1200]),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
+            assert!(kernel.posted_messages.is_empty()); // NONOTIFY does not suppress polling.
+            cpu.write_reg(ArmReg::R3, 0x1300).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_event_8",
+                    [object, 0x1200, 0x1240]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0x49);
+            assert_eq!(cpu.read_u32_le(0x1240).unwrap(), 0);
+            assert_eq!(cpu.read_u32_le(0x1300).unwrap(), 0);
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_event_8",
+                    [object, 0x1200, 0x1240]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 1);
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    "ds_event_8",
+                    [object, 0x1200, 0x1240]
+                ),
+                DispatchOutcome::ReturnedR0(0x80004004)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_graph_2", [object, 0, 0]),
+                DispatchOutcome::ReturnedR0(2)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_control_2", [child, 0, 0]),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, "ds_graph_2", [object, 0, 0]),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert!(!registry.lock().unwrap().contains_key(&object));
+        })
     }
 }
 #[cfg(all(test, feature = "video-static"))]
@@ -1332,7 +1363,7 @@ mod decoder_tests {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seeking.wmv");
         for _ in 0..5 {
-            let (rx, info, cancel) = decode(path.clone(), 0.75, 1.25).unwrap();
+            let (rx, info, cancel, worker) = decode(path.clone(), 0.75, 1.25).unwrap();
             assert_eq!((info.width, info.height), (96, 64));
             let mut frames = 0;
             let mut audio = 0;
@@ -1351,6 +1382,7 @@ mod decoder_tests {
             assert_eq!(audio, 44100);
             cancel.store(true, Ordering::Release);
             drop(rx);
+            worker.join().unwrap();
         }
     }
 }
@@ -1369,85 +1401,130 @@ mod lifetime_tests {
     }
     #[test]
     fn all_sdk_interfaces_share_identity_and_release_across_100_graphs() {
-        let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
-        reset();
-        let (mut cpu, mut k, mut d) = crate::bluetooth::tests::setup();
-        cpu.map_region(0x50000000, 65536, Prot::READ | Prot::WRITE)
-            .unwrap();
-        let exports = k
-            .dynamic_exports
-            .entry(pocket_kernel::OLE32_MODULE_HANDLE)
-            .or_default();
-        let mut address = 0x70001000;
-        for (name, _, slots) in KINDS {
-            for slot in 0..slots {
-                exports.insert(format!("ds_{name}_{slot}"), address);
-                address += 16;
-            }
-        }
-        let mut iid = [0u8; 16];
-        iid[..4].copy_from_slice(&0x56a868a9u32.to_le_bytes());
-        iid[4..].copy_from_slice(&TAIL);
-        let t = pocket_kernel::Thunk {
-            thunk_va: 0x70000000,
-            iat_va: 0,
-            dll: "ole32.dll".into(),
-            binding: pocket_pe::ImportBinding::Name("CoCreateInstance".into()),
-            friendly_name: Some("CoCreateInstance".into()),
-        };
-        for _ in 0..100 {
-            assert_eq!(
-                create(
-                    &mut CallCtx {
-                        cpu: &mut cpu,
-                        kernel: &mut k,
-                        thunk: &t
-                    },
-                    &iid,
-                    0x1100
-                )
-                .unwrap(),
-                DispatchOutcome::ReturnedR0(0)
-            );
-            let root = cpu.read_u32_le(0x1100).unwrap();
-            for (name, id, _) in KINDS {
-                let mut requested = iid;
-                requested[..4].copy_from_slice(&id.to_le_bytes());
-                if name == "seeking" {
-                    requested = [
-                        0x80, 0x38, 0xb7, 0x36, 0xc8, 0xc2, 0xcf, 0x11, 0x8b, 0x46, 0, 0x80, 0x5f,
-                        0x6c, 0xef, 0x60,
-                    ];
+        MOVIES.with(|registry| {
+            let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            reset();
+            let (mut cpu, mut k, mut d) = crate::bluetooth::tests::setup();
+            cpu.map_region(0x50000000, 65536, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let exports = k
+                .dynamic_exports
+                .entry(pocket_kernel::OLE32_MODULE_HANDLE)
+                .or_default();
+            let mut address = 0x70001000;
+            for (name, _, slots) in KINDS {
+                for slot in 0..slots {
+                    exports.insert(format!("ds_{name}_{slot}"), address);
+                    address += 16;
                 }
-                cpu.write_mem(0x1200, &requested).unwrap();
+            }
+            let mut iid = [0u8; 16];
+            iid[..4].copy_from_slice(&0x56a868a9u32.to_le_bytes());
+            iid[4..].copy_from_slice(&TAIL);
+            let t = pocket_kernel::Thunk {
+                thunk_va: 0x70000000,
+                iat_va: 0,
+                dll: "ole32.dll".into(),
+                binding: pocket_pe::ImportBinding::Name("CoCreateInstance".into()),
+                friendly_name: Some("CoCreateInstance".into()),
+            };
+            for _ in 0..100 {
                 assert_eq!(
-                    crate::bluetooth::tests::call(
-                        &mut cpu,
-                        &mut k,
-                        &mut d,
-                        "ole32.dll",
-                        "ds_graph_0",
-                        &[root, 0x1200, 0x1300]
-                    ),
+                    create(
+                        &mut CallCtx {
+                            cpu: &mut cpu,
+                            kernel: &mut k,
+                            thunk: &t
+                        },
+                        &iid,
+                        0x1100
+                    )
+                    .unwrap(),
                     DispatchOutcome::ReturnedR0(0)
                 );
-                let object = cpu.read_u32_le(0x1300).unwrap();
-                assert_eq!(cpu.read_u32_le(object + 8).unwrap(), root);
+                let root = cpu.read_u32_le(0x1100).unwrap();
+                for (name, id, _) in KINDS {
+                    let mut requested = iid;
+                    requested[..4].copy_from_slice(&id.to_le_bytes());
+                    if name == "seeking" {
+                        requested = [
+                            0x80, 0x38, 0xb7, 0x36, 0xc8, 0xc2, 0xcf, 0x11, 0x8b, 0x46, 0, 0x80,
+                            0x5f, 0x6c, 0xef, 0x60,
+                        ];
+                    }
+                    cpu.write_mem(0x1200, &requested).unwrap();
+                    assert_eq!(
+                        crate::bluetooth::tests::call(
+                            &mut cpu,
+                            &mut k,
+                            &mut d,
+                            "ole32.dll",
+                            "ds_graph_0",
+                            &[root, 0x1200, 0x1300]
+                        ),
+                        DispatchOutcome::ReturnedR0(0)
+                    );
+                    let object = cpu.read_u32_le(0x1300).unwrap();
+                    assert_eq!(cpu.read_u32_le(object + 8).unwrap(), root);
+                    assert_eq!(
+                        invoke(&mut cpu, &mut k, &format!("ds_{name}_2"), &[object]),
+                        DispatchOutcome::ReturnedR0(1)
+                    );
+                }
                 assert_eq!(
-                    invoke(&mut cpu, &mut k, &format!("ds_{name}_2"), &[object]),
-                    DispatchOutcome::ReturnedR0(1)
+                    invoke(&mut cpu, &mut k, "ds_graph_2", &[root]),
+                    DispatchOutcome::ReturnedR0(0)
                 );
+                assert!(registry.lock().unwrap().is_empty());
             }
-            assert_eq!(
-                invoke(&mut cpu, &mut k, "ds_graph_2", &[root]),
-                DispatchOutcome::ReturnedR0(0)
-            );
-            assert!(MOVIES.lock().unwrap().is_empty());
-        }
-        cpu.write_reg(ArmReg::R0, 0).unwrap();
-        let mut bad = iid;
-        bad[..4].copy_from_slice(&0x36b73880u32.to_le_bytes());
-        assert_eq!(kind(&bad), None);
+            cpu.write_reg(ArmReg::R0, 0).unwrap();
+            let mut bad = iid;
+            bad[..4].copy_from_slice(&0x36b73880u32.to_le_bytes());
+            assert_eq!(kind(&bad), None);
+            reset();
+        })
+    }
+}
+
+#[cfg(test)]
+mod session_cleanup_tests {
+    use super::*;
+    #[test]
+    fn decoder_shutdown_disconnects_full_queue_and_joins() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Packet::End).unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(Packet::End);
+            flag.store(true, Ordering::Release);
+        });
+        let mut movie = Movie::new();
+        movie.receiver = Some(rx);
+        movie.worker = Some(worker);
+        drop(movie);
+        assert!(finished.load(Ordering::Acquire));
+    }
+    #[test]
+    fn child_reset_does_not_destroy_parent_graphs() {
+        reset();
+        MOVIES.with(|r| {
+            r.lock().unwrap().insert(42, Movie::new());
+        });
+        std::thread::spawn(|| {
+            MOVIES.with(|r| assert!(r.lock().unwrap().is_empty()));
+            MOVIES.with(|r| {
+                r.lock().unwrap().insert(42, Movie::new());
+            });
+            reset();
+        })
+        .join()
+        .unwrap();
+        MOVIES.with(|r| assert!(r.lock().unwrap().contains_key(&42)));
+        let parent = suspend();
+        reset();
+        resume(parent);
+        MOVIES.with(|r| assert!(r.lock().unwrap().contains_key(&42)));
         reset();
     }
 }

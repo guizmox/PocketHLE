@@ -1340,6 +1340,14 @@ impl AudioEngine {
     }
 }
 
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        // Explicit runner shutdown is normal; destruction/unwinding must also
+        // signal and join the owned CPAL worker rather than detach its handle.
+        self.stop();
+    }
+}
+
 /// Host-side pull handle produced by [`AudioEngine::tap`].
 ///
 /// Draining moves the playback cursor forward, so `waveOutGetPosition`
@@ -2064,5 +2072,39 @@ mod output_recording_tests {
         tap.drain_into(&mut out[..2]);
         assert!(sink.drain().is_empty());
         assert_eq!(&out[..2], &[3000, -3000]);
+    }
+}
+
+#[cfg(test)]
+mod session_drop_tests {
+    use super::*;
+    #[cfg(feature = "audio-cpal")]
+    #[test]
+    fn dropping_engine_signals_and_joins_output_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut engine = AudioEngine::new();
+        let shutdown = engine.shutdown.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        engine.worker = Some(std::thread::spawn(move || {
+            while !shutdown.load(Ordering::SeqCst) {
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+            flag.store(true, Ordering::Release);
+        }));
+        drop(engine);
+        assert!(finished.load(Ordering::Acquire));
+    }
+    #[test]
+    fn dropping_engine_without_explicit_stop_flushes_a_retained_tap() {
+        let engine = AudioEngine::new();
+        engine.set_guest_format(GuestFormat::default());
+        engine.push_samples(&[1000; 128]);
+        let tap = engine.tap();
+        assert!(tap.format_ready());
+        drop(engine);
+        assert!(!tap.format_ready());
+        let mut output = [0; 128];
+        assert_eq!(tap.drain_into(&mut output), 0);
     }
 }

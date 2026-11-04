@@ -1,2 +1,5 @@
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/heap_virtual_tests.rs
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/reconstruction.rs
+crates/pocket-kernel/src/audio.rs
+crates/pocket-winceapi/src/directshow.rs
+crates/pocket-winceapi/src/wavein.rs
