@@ -1,3 +1,1 @@
-crates/pocket-winceapi/native/media.c
-crates/pocket-winceapi/src/media_static.rs
-frontends/pocket-desktop/src/capture_viewer.rs
+frontends/pocket-desktop/src/reconstruction_tests.rs
