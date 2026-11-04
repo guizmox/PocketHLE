@@ -723,6 +723,14 @@ impl Clip {
             Self::Mp4 { encoder, .. } => encoder.frame(video.pixels.as_raw(), audio),
         }
     }
+    /// AVI requires a sample in each constant-rate slot; MP4 represents a hold
+    /// with timestamp spacing and keeps encoding its continuous audio only.
+    fn hold(&mut self, video: &EncodedFrame, audio: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Avi(a) => a.frame(&video.jpeg, audio),
+            Self::Mp4 { encoder, .. } => encoder.hold_frame(audio),
+        }
+    }
     fn finish(&mut self) -> io::Result<()> {
         match self {
             Self::Avi(a) => a.finish(),
@@ -761,10 +769,13 @@ fn encode(
         if clip.as_ref().is_some_and(|c| c.rollover(w, h)) {
             if let Some(previous) = last.as_ref() {
                 while global < target {
-                    clip.as_mut().unwrap().frame(
-                        previous,
-                        &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?,
-                    )?;
+                    let pcm = timeline.ready_frame(&audio, epoch, global * audio_per_frame)?;
+                    let clip = clip.as_mut().unwrap();
+                    if global + 1 == target {
+                        clip.frame(previous, &pcm)?;
+                    } else {
+                        clip.hold(previous, &pcm)?;
+                    }
                     global += 1;
                 }
             }
@@ -793,8 +804,16 @@ fn encode(
             pixels: frame.pixels,
             jpeg,
         };
-        while global < target {
+        // A delayed first capture still supplies the image at the clip origin.
+        if last.is_none() && global < target {
             clip.as_mut().unwrap().frame(
+                &current,
+                &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?,
+            )?;
+            global += 1;
+        }
+        while global < target {
+            clip.as_mut().unwrap().hold(
                 last.as_ref().unwrap_or(&current),
                 &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?,
             )?;
@@ -817,10 +836,12 @@ fn encode(
     if let Some(mut c) = clip {
         if let Some(last) = last {
             while global < target {
-                c.frame(
-                    &last,
-                    &timeline.ready_frame(&audio, epoch, global * audio_per_frame)?,
-                )?;
+                let pcm = timeline.ready_frame(&audio, epoch, global * audio_per_frame)?;
+                if global + 1 == target {
+                    c.frame(&last, &pcm)?;
+                } else {
+                    c.hold(&last, &pcm)?;
+                }
                 global += 1;
             }
         }
@@ -1146,6 +1167,12 @@ mod tests {
                 },
             })
             .unwrap();
+            tx.send(Frame {
+                at: epoch + Duration::from_millis(500),
+                pixels: image::RgbaImage::from_pixel(321, 241, image::Rgba([180, 70, 30, 255])),
+                overlay: Default::default(),
+            })
+            .unwrap();
             drop(tx);
             let paths = encode(
                 rx,
@@ -1162,7 +1189,8 @@ mod tests {
             let bytes = std::fs::read(&paths[0]).unwrap();
             assert!(bytes.len() > 1000);
             // Inspect actual MP4 track metadata, not encoder settings: the video
-            // must contain fps samples over one second, with H.264 and AAC tracks.
+            // must hold the captured image for one second, with H.264/AAC tracks,
+            // without re-encoding it fps times when no new capture exists.
             fn boxes(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
                 let mut result = Vec::new();
                 while !data.is_empty() {
@@ -1199,7 +1227,23 @@ mod tests {
                         assert_eq!(duration, timescale, "video duration must be one second");
                         let sizes = child(samples, b"stsz");
                         let count = u32::from_be_bytes(sizes[8..12].try_into().unwrap());
-                        assert_eq!(count, fps, "wrong native video frame rate");
+                        assert_eq!(count, 3, "two captures plus final duration marker must not encode every missing slot");
+                        let timing = child(samples, b"stts");
+                        let entries = u32::from_be_bytes(timing[4..8].try_into().unwrap()) as usize;
+                        let mut slots = 0u64;
+                        for i in 0..entries {
+                            let at = 8 + 8 * i;
+                            slots += u64::from(u32::from_be_bytes(
+                                timing[at..at + 4].try_into().unwrap(),
+                            )) * u64::from(u32::from_be_bytes(
+                                timing[at + 4..at + 8].try_into().unwrap(),
+                            ));
+                        }
+                        assert_eq!(
+                            slots,
+                            u64::from(timescale),
+                            "sample timing must preserve wall-clock duration"
+                        );
                         video_found = true;
                     }
                     b"soun" => {

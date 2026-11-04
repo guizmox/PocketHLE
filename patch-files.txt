@@ -1,14 +1,2 @@
 frontends/pocket-desktop/src/app.rs
-frontends/pocket-desktop/src/gizmondo_layout.rs
-frontends/pocket-desktop/src/runner.rs
-frontends/pocket-desktop/src/desktop_main.rs
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/controls.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-library/src/lib.rs
-crates/pocket-library/src/frame_rate.rs
-docs/GPU.md
 docs/FRONTENDS.md
-tools/hardware-diag/src/hardware_diag.c
-tools/hardware-diag/suites/timing/src/timetest.c
-tools/hardware-diag/suites/timing/README.md

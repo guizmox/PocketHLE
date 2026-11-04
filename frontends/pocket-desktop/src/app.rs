@@ -173,6 +173,57 @@ impl UpscaleFilter {
     }
 }
 
+/// Library window state is independent of temporary game sizing/fullscreen.
+#[derive(Clone, Copy, Debug)]
+struct LibraryViewport {
+    fullscreen: bool,
+    maximized: bool,
+    size: Option<Vec2>,
+    position: Option<Pos2>,
+}
+impl LibraryViewport {
+    fn capture(ctx: &egui::Context) -> Self {
+        ctx.input(|input| {
+            let viewport = input.viewport();
+            Self {
+                fullscreen: viewport.fullscreen.unwrap_or(false),
+                maximized: viewport.maximized.unwrap_or(false),
+                size: viewport.inner_rect.map(|rect| rect.size()),
+                position: viewport.outer_rect.map(|rect| rect.min),
+            }
+        })
+    }
+    /// Wait for native mode acknowledgements before requesting window geometry.
+    /// Resizing a still-fullscreen surface can leave a small backbuffer in a
+    /// fullscreen Windows window. Game F12 restore sizes must not compete here.
+    fn restore(self, ctx: &egui::Context) -> bool {
+        let actual = Self::capture(ctx);
+        if actual.fullscreen != self.fullscreen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return false;
+        }
+        if self.fullscreen {
+            return true;
+        }
+        if actual.maximized != self.maximized {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.maximized));
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return false;
+        }
+        if !self.maximized {
+            if let Some(position) = self.position {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+            }
+            if let Some(size) = self.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+        }
+        ctx.request_repaint();
+        true
+    }
+}
+
 // Virtual button layout for the Run screen — modelled after the
 // j2me-loader gamepad: a D-pad on the left and three action buttons
 // (A / B / Start) on the right. Pressing a button sends a
@@ -204,7 +255,9 @@ pub struct PocketLauncher {
     deck_piano_release: Option<(usize, Instant)>,
     upscale_window_size: Option<Vec2>,
     console_fit_pending: bool,
-    library_window_size: Option<Vec2>,
+    library_viewport: LibraryViewport,
+    library_restore_pending: Option<LibraryViewport>,
+    game_viewport_active: bool,
     display_fullscreen: bool,
     startup_fullscreen: Option<bool>,
     fullscreen_window_size: Option<Vec2>,
@@ -810,7 +863,9 @@ impl PocketLauncher {
             deck_piano_release: None,
             upscale_window_size: None,
             console_fit_pending: false,
-            library_window_size: None,
+            library_viewport: LibraryViewport::capture(&cc.egui_ctx),
+            library_restore_pending: None,
+            game_viewport_active: false,
             display_fullscreen: false,
             startup_fullscreen: None,
             fullscreen_window_size: None,
@@ -1068,7 +1123,7 @@ impl PocketLauncher {
                     self.release_all_keys();
                     self.pointer_down_at = None;
                     self.running_game = None;
-                    if self.screen == Screen::Run && self.pending_run.is_none() {
+                    if self.game_viewport_active && self.pending_run.is_none() {
                         self.return_to_library(ctx);
                     }
                 }
@@ -1420,12 +1475,16 @@ impl PocketLauncher {
         if let Some(tx) = self.input_tx.as_ref() {
             let _ = tx.send(InputCommand::Stop);
         }
-        self.set_upscale_x2(ctx, false);
+        // Reset game-only sizing without emitting an InnerSize while native
+        // fullscreen may still be active. Restore from the library snapshot.
+        self.upscale_x2 = false;
+        self.upscale_window_size = None;
+        self.fullscreen_window_size = None;
         self.console_fit_pending = false;
-        if let Some(size) = self.library_window_size.take() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        }
+        self.library_restore_pending = Some(self.library_viewport);
+        self.game_viewport_active = false;
         self.screen = Screen::Library;
+        ctx.request_repaint();
     }
 
     fn settings_draft(&mut self) -> LauncherConfig {
@@ -3145,7 +3204,7 @@ impl PocketLauncher {
     }
 
     fn fit_console_window(&mut self, ui: &egui::Ui) {
-        if !self.console_fit_pending {
+        if !self.console_fit_pending || self.library_restore_pending.is_some() {
             return;
         }
         let (inner, fullscreen, maximized) = ui.ctx().input(|input| {
@@ -3160,7 +3219,8 @@ impl PocketLauncher {
             return;
         }
         if let Some(inner) = inner {
-            self.library_window_size.get_or_insert(inner);
+            // Command-line launches can precede the first native viewport info.
+            self.library_viewport.size.get_or_insert(inner);
             let body = if self.running_is_gizmondo {
                 let native = self
                     .last_frame_snapshot
@@ -5336,6 +5396,7 @@ impl PocketLauncher {
         self.game_rotation = game.settings.rotation;
         self.gamepad_rx.set_deadzone(game.settings.dpad_deadzone);
         self.screen = Screen::Run;
+        self.game_viewport_active = true;
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
@@ -5473,8 +5534,21 @@ impl eframe::App for PocketLauncher {
         ctx.data_mut(|data| {
             data.insert_temp(egui::Id::new("pockethle.frame_driven_ui"), false);
         });
+        // Observe the launcher before input/events can start a game. Freeze this
+        // state throughout the session, including a queued game-to-game launch.
+        let observed = LibraryViewport::capture(ctx);
+        if self.screen == Screen::Library
+            && self.running_game.is_none()
+            && self.library_restore_pending.is_none()
+        {
+            self.library_viewport = observed;
+        } else if self.library_viewport.size.is_none() {
+            self.library_viewport.size = observed.size;
+            self.library_viewport.position = observed.position;
+        }
         // One-shot startup override, after egui/native window state restoration.
         if let Some(fullscreen) = self.startup_fullscreen.take() {
+            self.library_viewport.fullscreen = fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
         }
 
@@ -5708,7 +5782,7 @@ impl eframe::App for PocketLauncher {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen != self.display_fullscreen {
             self.display_fullscreen = fullscreen;
-            if !fullscreen {
+            if !fullscreen && self.screen == Screen::Run && self.library_restore_pending.is_none() {
                 if let Some(size) = self.fullscreen_window_size.take() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                     self.console_fit_pending = false;
@@ -5718,6 +5792,12 @@ impl eframe::App for PocketLauncher {
             }
             if let Some(frame) = self.last_frame_snapshot.clone() {
                 self.refresh_frame_texture(ctx, &frame);
+            }
+        }
+        if let Some(saved) = self.library_restore_pending {
+            if saved.restore(ctx) {
+                self.library_restore_pending = None;
+                self.console_fit_pending = self.screen == Screen::Run;
             }
         }
         let console_only = fullscreen && self.screen == Screen::Run;
@@ -5885,6 +5965,106 @@ impl eframe::App for PocketLauncher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn library_restore_pass(
+        saved: LibraryViewport,
+        fullscreen: bool,
+        maximized: bool,
+    ) -> (bool, Vec<egui::ViewportCommand>) {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+        viewport.fullscreen = Some(fullscreen);
+        viewport.maximized = Some(maximized);
+        viewport.inner_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0)));
+        let mut done = false;
+        let output = ctx.run(input, |ctx| {
+            done = saved.restore(ctx);
+        });
+        (
+            done,
+            output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone(),
+        )
+    }
+
+    #[test]
+    fn library_windowed_restore_waits_for_fullscreen_exit_before_geometry() {
+        let saved = LibraryViewport {
+            fullscreen: false,
+            maximized: false,
+            size: Some(Vec2::new(960.0, 600.0)),
+            position: Some(Pos2::new(70.0, 40.0)),
+        };
+        let (done, commands) = library_restore_pass(saved, true, false);
+        assert!(!done);
+        assert_eq!(commands, vec![egui::ViewportCommand::Fullscreen(false)]);
+        // Only the next native acknowledgement allows restoring size/position.
+        let (done, commands) = library_restore_pass(saved, false, false);
+        assert!(done);
+        assert_eq!(
+            commands,
+            vec![
+                egui::ViewportCommand::OuterPosition(Pos2::new(70.0, 40.0)),
+                egui::ViewportCommand::InnerSize(Vec2::new(960.0, 600.0))
+            ]
+        );
+    }
+
+    #[test]
+    fn library_that_started_fullscreen_stays_fullscreen_without_resizing() {
+        let saved = LibraryViewport {
+            fullscreen: true,
+            maximized: false,
+            size: Some(Vec2::new(1920.0, 1080.0)),
+            position: Some(Pos2::ZERO),
+        };
+        let (done, commands) = library_restore_pass(saved, false, false);
+        assert!(!done);
+        assert_eq!(commands, vec![egui::ViewportCommand::Fullscreen(true)]);
+        let (done, commands) = library_restore_pass(saved, true, false);
+        assert!(done);
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn library_maximized_restore_does_not_apply_game_or_monitor_size() {
+        let saved = LibraryViewport {
+            fullscreen: false,
+            maximized: true,
+            size: Some(Vec2::new(1920.0, 1040.0)),
+            position: Some(Pos2::ZERO),
+        };
+        let (done, commands) = library_restore_pass(saved, true, false);
+        assert!(!done);
+        assert_eq!(commands, vec![egui::ViewportCommand::Fullscreen(false)]);
+        let (done, commands) = library_restore_pass(saved, false, false);
+        assert!(!done);
+        assert_eq!(commands, vec![egui::ViewportCommand::Maximized(true)]);
+        let (done, commands) = library_restore_pass(saved, false, true);
+        assert!(done);
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn library_unmaximized_restore_waits_before_applying_saved_geometry() {
+        let saved = LibraryViewport {
+            fullscreen: false,
+            maximized: false,
+            size: Some(Vec2::new(960.0, 600.0)),
+            position: None,
+        };
+        let (done, commands) = library_restore_pass(saved, false, true);
+        assert!(!done);
+        assert_eq!(commands, vec![egui::ViewportCommand::Maximized(false)]);
+        let (done, commands) = library_restore_pass(saved, false, false);
+        assert!(done);
+        assert_eq!(
+            commands,
+            vec![egui::ViewportCommand::InnerSize(Vec2::new(960.0, 600.0))]
+        );
+    }
 
     #[test]
     fn displayed_fps_excludes_dropped_frames_repaints_and_capture_redraws() {

@@ -135,7 +135,18 @@ impl Mp4Encoder {
         }
     }
     pub fn frame(&mut self, rgba: &[u8], pcm: &[u8]) -> io::Result<()> {
-        if rgba.len() != self.width as usize * self.height as usize * 4 || pcm.len() % 4 != 0 {
+        self.write_slot(Some(rgba), pcm)
+    }
+    /// Advance the output timeline while retaining the last video image.
+    /// MP4 holds a sample until the next timestamp: encoding its pixels again
+    /// for every missed capture only adds work to an already delayed encoder.
+    pub fn hold_frame(&mut self, pcm: &[u8]) -> io::Result<()> {
+        self.write_slot(None, pcm)
+    }
+    fn write_slot(&mut self, rgba: Option<&[u8]>, pcm: &[u8]) -> io::Result<()> {
+        if rgba.is_some_and(|pixels| pixels.len() != self.width as usize * self.height as usize * 4)
+            || pcm.len() % 4 != 0
+        {
             return Err(io::Error::other("Invalid recording buffers"));
         }
         #[cfg(feature = "video-static")]
@@ -144,7 +155,9 @@ impl Mp4Encoder {
                 .handle
                 .ok_or_else(|| io::Error::other("Encoder is closed"))?
                 .as_ptr();
-            check(unsafe { pocket_recording_video(ptr, rgba.as_ptr(), self.frame) })?;
+            if let Some(rgba) = rgba {
+                check(unsafe { pocket_recording_video(ptr, rgba.as_ptr(), self.frame) })?;
+            }
             let samples: Vec<i16> = pcm
                 .chunks_exact(2)
                 .map(|p| i16::from_le_bytes([p[0], p[1]]))

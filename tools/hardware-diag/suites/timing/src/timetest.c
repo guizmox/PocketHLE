@@ -77,7 +77,7 @@ done:
  if(current&&dpy)current(dpy,0,0,0);if(destroySurface&&surface)check("egl.destroy_surface",destroySurface(dpy,surface));if(destroyContext&&context)check("egl.destroy_context",destroyContext(dpy,context));if(terminate&&dpy)check("egl.terminate",terminate(dpy));FreeLibrary(dll);
 }
 __attribute__((section(".text.entry"))) U32 entry(void){U32 h,n=0;
- line("PocketHLE ARM TIMETEST v2 (window surface)\r\n");sleeps_and_waits();timers();waveout();egl();
+ line("PocketHLE ARM TIMETEST v2 (window surface)\r\n");line("CONFIG EGL pacing checks require game limit 60 FPS\r\n");sleeps_and_waits();timers();waveout();egl();
  line(failed||io_failed?"TIMETEST_RESULT FAIL checks=":"TIMETEST_RESULT PASS checks=");hex(checks);line(" failures=");hex(failed);line("\r\n");
  h=CreateFileW(L"\\Flash Disk\\TIMETEST.TXT",0x40000000,0,0,2,0,0);if(h==0xffffffff)io_failed=1;else{if(!WriteFile(h,report,used,&n,0)||n!=used)io_failed=1;CloseHandle(h);}
  MessageBoxW(0,failed||io_failed?L"FAIL: see TIMETEST.TXT in Flash Disk.":L"PASS: timing contracts. See TIMETEST.TXT for measured latency.",L"PocketHLE TIMETEST",0);

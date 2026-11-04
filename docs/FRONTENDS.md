@@ -32,6 +32,15 @@ an older panel-layout delivery note. Keep the configured FPS overlay discreet
 inside the emulated image. Android touch controls are a different layout policy.
 Recording overlays use Gizmondo names rather than PocketPC A/B/C/Action labels.
 
+Every game-session exit restores the library viewport captured before launch,
+including native game exit, host EXIT, shortcuts and an emulator error return.
+Keep fullscreen and maximized state, and restore windowed size/outer position.
+Wait for native fullscreen/maximize acknowledgements before applying geometry;
+never resize a still-fullscreen surface to the library's windowed dimensions.
+Discard game-only zoom/F12 restore sizes so they cannot override this snapshot.
+Ending a game while its options are visible uses the same session cleanup. A
+queued game-to-game launch retains the original library snapshot.
+
 ## Image geometry and input
 
 Use the produced image size for display fitting and the logical guest size for
@@ -177,3 +186,18 @@ Build with the same default Cargo features on both systems. A Linux build with
 same functional release. Linux file dialogs use GTK3; display/input is X11 or
 Wayland. Full desktop UI and physical native devices require device testing.
 No actual Windows/Linux visual comparison has been performed in this package.
+
+## Desktop recording under encoder load
+
+Recording cadence is independent of the emulated game's FPS limit. Capture keeps
+its selected display resolution and input overlays. When an MP4 capture is missed,
+the writer advances audio and represents the held image through video timestamp
+spacing. It does not re-encode the same pixels in every missing 30/60 FPS slot.
+A final timestamped image preserves each segment's duration at stop or resize.
+AVI retains its constant-rate MJPEG sample repetition. An overloaded encoder can
+still capture fewer new images than the requested rate; the fix prevents redundant
+catch-up work from causing an escalating backlog, without lowering resolution or
+changing the game renderer.
+
+HARDWARE DIAG's TIMETEST EGL pacing assertions require a 60 FPS per-game limit;
+Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
