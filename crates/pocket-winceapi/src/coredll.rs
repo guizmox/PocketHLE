@@ -6124,7 +6124,7 @@ fn read_cstr(ctx: &mut CallCtx<'_>, p: u32, max: u32) -> Result<Vec<u8>, KernelE
     Ok(out)
 }
 
-fn read_wstr(ctx: &mut CallCtx<'_>, p: u32, max: u32) -> Result<Vec<u16>, KernelError> {
+pub(crate) fn read_wstr(ctx: &mut CallCtx<'_>, p: u32, max: u32) -> Result<Vec<u16>, KernelError> {
     let mut out: Vec<u16> = Vec::new();
     let mut buf = [0u8; WSTR_CHUNK * 2];
     let mut off: u32 = 0;
@@ -31031,6 +31031,7 @@ mod tests {
             main_thread: pocket_kernel::MainThreadState::default(),
             object_handles: pocket_kernel::handles::HandleTable::default(),
             mapped_views: Default::default(),
+            msxml: Default::default(),
             random_seed: 0x1234_abcd,
             pending_startup: std::collections::VecDeque::new(),
             framebuffer: pocket_kernel::framebuffer::deferred::DeferredFramebuffer::default(),

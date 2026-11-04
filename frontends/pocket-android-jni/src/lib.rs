@@ -90,13 +90,17 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_libraryBackup<'local>
     )
 }
 
+fn about_banner() -> String {
+    format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE\n\nGTShell support — Katamaran21\nhttps://github.com/Katamaran21/PocketHLE-GTShell\n\nThanks\nNekomo\nOLego\nTimofeyLednev\nBenoît (FX-man)\nJérôme (SoldatGG)\nTim (Firefly)", env!("CARGO_PKG_VERSION"))
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_banner<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
     init_logger();
-    let banner = format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE", env!("CARGO_PKG_VERSION"));
+    let banner = about_banner();
     new_jstring(&env, banner)
 }
 
@@ -108,7 +112,7 @@ pub extern "system" fn Java_com_pockethle_app_MainActivity_banner<'local>(
     init_logger();
     new_jstring(
         &env,
-        format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project: https://github.com/j92580498-max/PocketHLE", env!("CARGO_PKG_VERSION")),
+        about_banner(),
     )
 }
 

@@ -389,6 +389,35 @@ mod tests {
     }
 
     #[test]
+    fn fresh_empty_library_can_merge_a_backup_before_first_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("new-phone-library");
+        library(&source, "incoming", "card game");
+        let archive = temp.path().join("backup.zip");
+        save(&source, &archive).unwrap();
+
+        let empty = crate::Library::open(&target).unwrap();
+        assert!(empty.games().is_empty());
+        assert!(target.join("library.json").is_file());
+        let original_config = fs::read(target.join("config.json")).unwrap();
+        drop(empty);
+
+        restore(&target, &archive, RestoreMode::MergeNoOverwrite).unwrap();
+        let restored = crate::Library::open(&target).unwrap();
+        assert_eq!(restored.games().len(), 1);
+        assert!(restored.get("incoming").is_some());
+        assert_eq!(
+            fs::read(target.join("config.json")).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("games/incoming/extracted/game.exe")).unwrap(),
+            "card game"
+        );
+    }
+
+    #[test]
     fn all_restore_modes_preserve_expected_files_and_catalogue() {
         for schema in [0, 1] {
             for mode in [

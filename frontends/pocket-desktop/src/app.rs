@@ -1461,7 +1461,13 @@ impl PocketLauncher {
                 ui.label(format!("PocketHLE v{}",env!("CARGO_PKG_VERSION")));
                 crate::controller_ui::hyperlink_to(ui, "PocketHLE fork — guizmox", "https://github.com/guizmox/PocketHLE");
                 crate::controller_ui::hyperlink_to(ui, "Original project", "https://github.com/j92580498-max/PocketHLE");
+                crate::controller_ui::hyperlink_to(ui, "GTShell support — Katamaran21", "https://github.com/Katamaran21/PocketHLE-GTShell");
                 ui.label("Windows and Linux share this desktop frontend.");
+                ui.separator();
+                ui.strong("Thanks");
+                for name in ["Nekomo", "OLego", "TimofeyLednev", "Benoît (FX-man)", "Jérôme (SoldatGG)", "Tim (Firefly)"] {
+                    ui.label(name);
+                }
             });
             let can_screenshot = self.screen==Screen::Run && self.last_frame_snapshot.is_some();
             if crate::controller_ui::add_enabled(ui, can_screenshot, egui::Button::new("Screenshot (F10)"))

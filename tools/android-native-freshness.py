@@ -16,9 +16,13 @@ def fingerprint():
         paths.extend(p for p in (ROOT / folder).rglob('*')
                      if p.is_file() and p.suffix in ('.rs', '.toml', '.c', '.h', '.cmake'))
     paths.extend((ROOT / 'tools').glob('build-*.sh'))
-    for path in sorted(paths):
+    # pathlib orders Windows paths without case sensitivity, unlike POSIX.
+    # Use the same relative string order in both checkouts.
+    for path in sorted(paths, key=lambda p: p.relative_to(ROOT).as_posix()):
         digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
-        digest.update(path.read_bytes())
+        # Windows checkouts and Linux/WSL build copies use different EOLs.
+        # Source content must match; checkout line endings do not change code.
+        digest.update(path.read_bytes().replace(b'\r\n', b'\n'))
     return digest.hexdigest()
 
 

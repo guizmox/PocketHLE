@@ -48,6 +48,7 @@ mod legacy_services;
 #[cfg(feature = "video-static")]
 pub mod media_static;
 mod mfc;
+mod msxml;
 mod number_format;
 pub mod ole32;
 pub mod ordinals;
@@ -292,6 +293,7 @@ impl WinCeDispatcher {
         gx::register(&mut d);
         hss::register(&mut d);
         ole32::register(&mut d);
+        msxml::register(&mut d);
         for dll in ["coredll.dll", "ws2.dll"] {
             for ordinal in 0..=4095u16 {
                 if let Some(name) = ordinals::lookup(dll, ordinal) {

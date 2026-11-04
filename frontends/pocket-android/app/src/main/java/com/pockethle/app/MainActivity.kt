@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.text.method.LinkMovementMethod
+import android.text.util.Linkify
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -190,7 +192,12 @@ class MainActivity : AppCompatActivity() {
                     .setTitle(R.string.about_title)
                     .setMessage(NativeBridge.banner())
                     .setPositiveButton(android.R.string.ok, null)
-                    .show()
+                    .show().also { dialog ->
+                        dialog.findViewById<TextView>(android.R.id.message)?.apply {
+                            Linkify.addLinks(this, Linkify.WEB_URLS)
+                            movementMethod = LinkMovementMethod.getInstance()
+                        }
+                    }
                 true
             }
             else -> super.onOptionsItemSelected(item)

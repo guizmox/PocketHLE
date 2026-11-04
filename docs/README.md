@@ -11,6 +11,7 @@ source identifiers, paths and original product names retain their spelling.
 | [FRONTENDS.md](FRONTENDS.md) | Shared settings, controls, display/input geometry and platform UI parity |
 | [ANDROID-BUILD.md](ANDROID-BUILD.md) | Android toolchain, packaging, signing and runner checks |
 | [STEAMDECK.md](STEAMDECK.md) | Dedicated Proton edition, controller gestures and distribution |
+| [GTSHELL.md](GTSHELL.md) | Optional Gizmondo shell profiles, local XML DOM and separate SD cards |
 | [GIZMONDO.md](GIZMONDO.md) | Device services, imports and dated compatibility reports |
 | [COLORS.md](COLORS.md) | Colors save/wallet/server contracts and scoped measurements |
 | [OPTIMIZATIONS.md](OPTIMIZATIONS.md) | Always-on optimizations and architecture guards |

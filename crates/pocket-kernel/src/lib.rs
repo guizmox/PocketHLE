@@ -59,6 +59,7 @@ pub mod imaging;
 pub mod internet;
 pub mod memory_division;
 pub mod msgbox;
+pub mod msxml;
 pub mod native_thunks;
 pub mod power;
 mod process_control;
@@ -1138,6 +1139,7 @@ pub struct KernelState {
     /// Closed aliases remain as tombstones to reject stale handles.
     pub object_handles: handles::HandleTable,
     pub mapped_views: file_mapping::MappedViews,
+    pub msxml: msxml::MsxmlState,
     pub random_seed: u32,
     /// Software-rendered display the GDI/GAPI handlers paint into.
     pub framebuffer: framebuffer::deferred::DeferredFramebuffer,
@@ -4242,6 +4244,7 @@ impl Process {
                 },
                 object_handles: handles::HandleTable::default(),
                 mapped_views: Default::default(),
+                msxml: Default::default(),
                 random_seed: 0x1234_abcd,
                 framebuffer: framebuffer::deferred::DeferredFramebuffer::default(),
                 gdi: GdiState::new(),
@@ -4580,7 +4583,14 @@ pub fn image_uses_thumb_entry(cpu: &mut dyn Cpu, image: &LoadedImage) -> Result<
     let arm_prologue = (word & 0x0fff_0000) == 0x01a0_0000
         || (word & 0x0fff_0000) == 0x092d_0000
         || (word & 0x0fff_0000) == 0x08bd_0000
-        || (word & 0x0e00_0000) == 0x0a00_0000;
+        || (word & 0x0e00_0000) == 0x0a00_0000
+        // GTShell's supplied PMS DLLs declare IMAGE_FILE_MACHINE_THUMB,
+        // but DllMain is an ARM `mov r0, #constant; bx lr` leaf. Check
+        // both instructions: treating an arbitrary Thumb pair as ARM
+        // would break genuine Thumb entry points.
+        || (image.machine == machine::THUMB
+            && (word & 0xffff_f000) == 0xe3a0_0000
+            && cpu.read_u32_le(entry + 4)? == 0xe12f_ff1e);
     if arm_prologue {
         log::debug!("entry bytes look like ARM code; loading image in ARM mode");
     }
@@ -6324,6 +6334,27 @@ mod tests {
         let p = Process::map_into(img, &mut cpu, &|_, _| None, &NullDispatcher)
             .expect("an image based at 0x10000 must load without an alias collision");
         assert_eq!(p.image.entry_va(), 0x11000);
+    }
+
+    #[test]
+    fn thumb_tagged_arm_leaf_entry_keeps_arm_mode() {
+        for constant in [0u32, 1, 255] {
+            let mut image = image_based_at(0x10000, 0x1000);
+            image.machine = machine::THUMB;
+            image.sections[0].data[..4].copy_from_slice(&(0xe3a0_0000 | constant).to_le_bytes());
+            image.sections[0].data[4..8].copy_from_slice(&0xe12f_ff1eu32.to_le_bytes());
+            let mut cpu = StubCpu::new();
+            let process =
+                Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+            assert!(!image_uses_thumb_entry(&mut cpu, &process.image).unwrap());
+        }
+
+        let mut image = image_based_at(0x10000, 0x1000);
+        image.machine = machine::THUMB;
+        image.sections[0].data[..4].copy_from_slice(&[0x01, 0x20, 0x70, 0x47]);
+        let mut cpu = StubCpu::new();
+        let process = Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+        assert!(image_uses_thumb_entry(&mut cpu, &process.image).unwrap());
     }
 
     /// An image based *above* slot 0 still gets the alias window, since
