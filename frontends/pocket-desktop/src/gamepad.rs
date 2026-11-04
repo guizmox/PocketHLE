@@ -278,9 +278,33 @@ fn scan(
     }
     Ok(changed)
 }
-fn publish(tx: &Sender<Event>, ctx: &egui::Context, event: Event) -> Result<(), String> {
+fn publish(
+    tx: &Sender<Event>,
+    ctx: &egui::Context,
+    event: Event,
+    gameplay: bool,
+) -> Result<(), String> {
+    let analog = matches!(&event, Event::SteeringAxis { .. } | Event::AimAxis { .. });
     tx.send(event)
         .map_err(|_| "controller receiver closed".to_owned())?;
+    // Small idle stick variations may arrive continuously over HID. Keep every
+    // event, but do not turn each analog report into a redundant game redraw.
+    // Incoming images and the Run fallback already service the input queue.
+    if gameplay && analog {
+        return Ok(());
+    }
+    if gameplay {
+        let native_wake = ctx.data(|data| {
+            data.get_temp::<Arc<dyn Fn() + Send + Sync>>(egui::Id::new(
+                "pockethle.native_image_wake",
+            ))
+        });
+        if let Some(wake) = native_wake {
+            wake();
+            return Ok(());
+        }
+    }
+    // Menus and button events without a native wake retain egui scheduling.
     ctx.request_repaint();
     Ok(())
 }
@@ -322,7 +346,7 @@ fn worker(
     let mut devices = BTreeMap::new();
     let mut state = Transitions::default();
     scan(&controllers, &joysticks, &mut devices)?;
-    publish(tx, ctx, list(&devices))?;
+    publish(tx, ctx, list(&devices), enabled.load(Ordering::Relaxed))?;
     let mut motors = BTreeMap::<u64, Option<crate::rumble::Pattern>>::new();
     let mut playing: Option<u32> = None;
     let mut rumble_on = false;
@@ -429,14 +453,14 @@ fn worker(
             match event {
                 SdlEvent::JoyDeviceAdded { .. } | SdlEvent::ControllerDeviceAdded { .. } => {
                     if scan(&controllers, &joysticks, &mut devices)? {
-                        publish(tx, ctx, list(&devices))?;
+                        publish(tx, ctx, list(&devices), enabled.load(Ordering::Relaxed))?;
                     }
                 }
                 SdlEvent::JoyDeviceRemoved { which, .. }
                 | SdlEvent::ControllerDeviceRemoved { which, .. } => {
                     if devices.remove(&which).is_some() {
                         changes = state.disconnect(which as usize);
-                        publish(tx, ctx, list(&devices))?;
+                        publish(tx, ctx, list(&devices), enabled.load(Ordering::Relaxed))?;
                     }
                 }
                 SdlEvent::ControllerButtonDown { which, button, .. } => {
@@ -500,7 +524,7 @@ fn worker(
                 _ => {}
             }
             for change in changes {
-                publish(tx, ctx, change)?;
+                publish(tx, ctx, change, enabled.load(Ordering::Relaxed))?;
             }
         }
         // Explicit refresh also works when SDL's automatic event update is
@@ -544,7 +568,7 @@ fn worker(
                 }
             };
             for change in changes {
-                publish(tx, ctx, change)?;
+                publish(tx, ctx, change, enabled.load(Ordering::Relaxed))?;
             }
         }
         if Instant::now() >= next_scan {
@@ -557,13 +581,13 @@ fn worker(
             for id in gone {
                 devices.remove(&id);
                 for change in state.disconnect(id as usize) {
-                    publish(tx, ctx, change)?;
+                    publish(tx, ctx, change, enabled.load(Ordering::Relaxed))?;
                 }
                 changed = true;
             }
             changed |= scan(&controllers, &joysticks, &mut devices)?;
             if changed {
-                publish(tx, ctx, list(&devices))?;
+                publish(tx, ctx, list(&devices), enabled.load(Ordering::Relaxed))?;
             }
             next_scan = Instant::now() + Duration::from_secs(1);
         }
@@ -636,7 +660,7 @@ pub fn start(ctx: egui::Context) -> Monitor {
                 &worker_enabled,
                 &command_rx,
             ) {
-                let _ = publish(&tx, &ctx, Event::Error(error));
+                let _ = publish(&tx, &ctx, Event::Error(error), false);
             }
         })
         .expect("spawn controller worker");
@@ -653,6 +677,125 @@ pub fn start(ctx: egui::Context) -> Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    fn context(native: bool) -> (egui::Context, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let c = egui::Context::default();
+        let normal = Arc::new(AtomicUsize::new(0));
+        let n = normal.clone();
+        c.set_request_repaint_callback(move |i| {
+            if i.delay.is_zero() {
+                n.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let _ = c.run(Default::default(), |_| {});
+        let _ = c.run(Default::default(), |_| {});
+        normal.store(0, Ordering::SeqCst);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        if native {
+            let n = wakes.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                n.fetch_add(1, Ordering::SeqCst);
+            });
+            c.data_mut(|d| d.insert_temp(egui::Id::new("pockethle.native_image_wake"), wake));
+        }
+        (c, normal, wakes)
+    }
+    #[test]
+    fn idle_axis_burst_keeps_all_values_without_requesting_redraw() {
+        let (c, normal, native) = context(true);
+        let (tx, rx) = mpsc::channel();
+        for i in 0..1000 {
+            publish(
+                &tx,
+                &c,
+                Event::SteeringAxis {
+                    device: 1,
+                    horizontal: true,
+                    value: i as f32 / 32767.0,
+                },
+                true,
+            )
+            .unwrap();
+        }
+        for i in 0..1000 {
+            let Event::SteeringAxis { value, .. } = rx.recv().unwrap() else {
+                panic!()
+            };
+            assert_eq!(value, i as f32 / 32767.0);
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(normal.load(Ordering::SeqCst), 0);
+        assert_eq!(native.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn press_and_release_keep_order_and_wake_native_immediately() {
+        let (c, normal, native) = context(true);
+        let (tx, rx) = mpsc::channel();
+        for down in [true, false] {
+            publish(
+                &tx,
+                &c,
+                Event::Input {
+                    device: 1,
+                    control: "South".into(),
+                    down,
+                },
+                true,
+            )
+            .unwrap();
+        }
+        for expected in [true, false] {
+            assert!(matches!(rx.recv().unwrap(),Event::Input{down,..}if down==expected));
+        }
+        assert_eq!(native.load(Ordering::SeqCst), 2);
+        assert_eq!(normal.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn menu_axes_keep_normal_egui_repaint() {
+        let (c, normal, native) = context(true);
+        let (tx, rx) = mpsc::channel();
+        publish(
+            &tx,
+            &c,
+            Event::AimAxis {
+                device: 1,
+                horizontal: false,
+                value: 0.001,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(matches!(rx.recv().unwrap(),Event::AimAxis{value,..}if value==0.001));
+        assert!(normal.load(Ordering::SeqCst) > 0);
+        assert_eq!(native.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn missing_native_bridge_keeps_button_fallback() {
+        let (c, normal, _) = context(false);
+        let (tx, _rx) = mpsc::channel();
+        publish(
+            &tx,
+            &c,
+            Event::Input {
+                device: 1,
+                control: "South".into(),
+                down: false,
+            },
+            true,
+        )
+        .unwrap();
+        assert!(normal.load(Ordering::SeqCst) > 0);
+    }
+    #[test]
+    fn closed_receiver_does_not_wake_ui() {
+        let (c, normal, native) = context(true);
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        assert!(publish(&tx, &c, Event::Error("closed".into()), true).is_err());
+        assert_eq!(normal.load(Ordering::SeqCst), 0);
+        assert_eq!(native.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn directional_presets_leave_digital_hat_contacts_direct() {
         for zone in pocket_library::DpadDeadzone::ALL {
