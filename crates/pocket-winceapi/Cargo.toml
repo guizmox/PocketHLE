@@ -13,6 +13,8 @@ description = "High-level emulation of Windows CE / Windows Mobile system DLLs (
 # crate without opting in) doesn't drag the cpal/oboe-sys native
 # stack onto unsuitable targets.
 default = []
+# Executes guest callback ABI regression tests with the real ARM backend.
+unicorn-tests = ["pocket-cpu/unicorn"]
 audio-cpal = ["pocket-kernel/audio-cpal", "dep:cpal"]
 video-static = []
 

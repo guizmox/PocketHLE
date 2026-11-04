@@ -2980,6 +2980,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "ttf-parser",
  "windows 0.54.0",
  "windows-sys 0.61.2",
 ]

@@ -10,6 +10,7 @@ const MAX_BODY: u32 = 8 * 1024 * 1024;
 pub fn register(d: &mut WinCeDispatcher) {
     for (name, f) in [
         ("InternetOpenW", open as crate::Handler),
+        ("InternetSetOptionW", set_option),
         ("InternetConnectW", connect),
         ("HttpOpenRequestW", open_request),
         ("HttpAddRequestHeadersW", add_headers),
@@ -20,6 +21,75 @@ pub fn register(d: &mut WinCeDispatcher) {
         ("InternetCloseHandle", close),
     ] {
         d.register_handler("wininet.dll", name, f);
+    }
+}
+fn set_option(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let option = ctx.arg_u32(1)?;
+    let buffer = ctx.arg_u32(2)?;
+    let length = ctx.arg_u32(3)?;
+    // SETTINGS_CHANGED is a global notification, not a network connection.
+    // Our backends have no cached registry proxy configuration to invalidate:
+    // each InternetOpen snapshots its explicit SessionSpec. Existing sessions
+    // deliberately retain that specification, as on WinINet.
+    if option == 39 {
+        if handle != 0 || buffer != 0 || length != 0 {
+            return fail(ctx, 87);
+        }
+        return done(ctx, 1);
+    }
+    if handle != 0 && !ctx.kernel.internet.handles.contains_key(&handle) {
+        return fail(ctx, 6);
+    }
+    fail(ctx, 12009) // ERROR_INTERNET_INVALID_OPTION
+}
+
+#[cfg(test)]
+mod option_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn ce_internet_settings_notification_is_not_a_fake_connection_or_option() {
+        let (mut cpu, mut k, mut d) = setup();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "wininet.dll",
+                "InternetSetOptionW",
+                &[0, 39, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(!k.internet.gprs_connected);
+        assert!(k.internet.handles.is_empty());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "wininet.dll",
+                "InternetSetOptionW",
+                &[0, 39, 0x1000, 4]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "wininet.dll",
+                "InternetSetOptionW",
+                &[0, 999, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            call(&mut cpu, &mut k, &mut d, "coredll.dll", "GetLastError", &[]),
+            DispatchOutcome::ReturnedR0(12009)
+        );
     }
 }
 fn done(ctx: &mut CallCtx<'_>, v: u32) -> Result<DispatchOutcome, KernelError> {

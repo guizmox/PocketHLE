@@ -44,6 +44,50 @@ The entry classifier recognizes ARM `mov r0, #constant; bx lr` leaf entry points
 even when the PE machine tag says THUMB; genuine Thumb entry behavior is retained.
 No user DLL or EXE bytes are changed.
 
+### CE shell compatibility APIs
+
+`InternetSetOptionW` accepts the global `INTERNET_OPTION_SETTINGS_CHANGED`
+notification (39). Backends retain the explicit settings of existing sessions;
+there is no cached registry proxy configuration to invalidate. Other options
+return an explicit unsupported-option error rather than false success.
+
+`SendNotifyMessageW` invokes same-thread guest window procedures synchronously
+and queues notifications for other window threads. Broadcast recipients are
+snapshotted top-level windows. Pointer-bearing system messages are rejected.
+`SHCreateShortcut` writes a CE text shortcut through VFS creation/sharing/quota
+rules; it does not overwrite an existing shortcut or create missing directories.
+The shortcut command uses the emulator's existing single-byte CP_ACP mapping
+(Latin-1), including accented Western European characters. An unrepresentable
+command fails with ERROR_NO_UNICODE_TRANSLATION before creating a file; it is
+never silently written as incompatible UTF-8 or with replacement characters.
+
+`AddFontResourceW` loads bounded TrueType/OpenType outlines and TrueType
+collections from guest VFS. Registered faces participate in text rendering and
+`EnumFontFamiliesW` callbacks, including early stop. Fonts and callback storage
+belong to the process and are released at exit. Raster FNT/FON and FOT wrappers
+are not supported. RemoveFontResourceW is outside this batch; registration lasts
+until process exit. This is not a global host font installation. Enumeration
+returns design-unit em size, height and average character width derived from
+the selected font, independently of its requested pixel size. Callback scratch
+storage is also reclaimed if its guest thread terminates before returning.
+
+`RasGetEntryProperties`, `RasSetEntryProperties` and `RasSetEntryDialParams`
+store CE-format phone-book data in the emulated registry. The supported CE
+layouts are RASENTRY 3472 bytes, RASDIALPARAMS 1464 bytes and RASCONN 52 bytes,
+not desktop Windows structures. Properties and opaque device configuration
+persist through the normal registry lifecycle. Passwords remain session-only
+and are excluded from persistent registry snapshots. `RasEnumConnections`
+reports zero connections because this device has no RasDial transport; host
+WinINet routing is not a dial-up connection.
+
+`GetServiceHandle` reports absent services with INVALID_HANDLE_VALUE; in
+particular, BTS1: is not the BTH1: stream driver. `DeregisterService` rejects
+invalid/unowned service handles and never stops a host service. Loading native
+services.exe service DLLs is outside this implementation.
+
+Cryptographic providers, CEDB, TAPI provider registration and scheduled
+application launch are separate work; these APIs do not imply their support.
+
 The contributor reports desktop and Android shell operation. Integration tests
 validate the changed code paths; complete shell workflows, media playback and
 physical device compatibility still require runtime validation.

@@ -74,7 +74,7 @@ use crate::{CallCtx, WinCeDispatcher};
 /// entry point, otherwise `hInstance == GetModuleHandle(NULL)` checks
 /// inside the game fail.
 const FAKE_MODULE_HANDLE: u32 = PROCESS_INSTANCE_HANDLE;
-const FAKE_HWND: u32 = 0xDEAD_0001;
+pub(crate) const FAKE_HWND: u32 = 0xDEAD_0001;
 /// Handle for the modeless dialog a title creates over its main window
 /// through `CreateDialogIndirectParamW`. Deliberately distinct from
 /// [`FAKE_HWND`]: Solitaire keeps the frame window and the board dialog
@@ -11234,13 +11234,7 @@ fn call_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 /// HWND_BROADCAST is a destination set, never a dispatchable window handle.
 /// Snapshot the top-level recipients at posting time, including hidden/pop-up
 /// windows, and let each recipient's owning thread retrieve its own copy.
-pub(crate) fn enqueue_window_message(
-    kernel: &mut KernelState,
-    hwnd: u32,
-    message: u32,
-    wp: u32,
-    lp: u32,
-) -> bool {
+pub(crate) fn notification_recipients(kernel: &KernelState, hwnd: u32) -> Vec<u32> {
     let mut recipients = if hwnd == 0xffff {
         let mut windows: Vec<u32> = kernel
             .window_procs
@@ -11268,6 +11262,17 @@ pub(crate) fn enqueue_window_message(
         vec![hwnd]
     };
     recipients.sort_unstable();
+    recipients
+}
+
+pub(crate) fn enqueue_window_message(
+    kernel: &mut KernelState,
+    hwnd: u32,
+    message: u32,
+    wp: u32,
+    lp: u32,
+) -> bool {
+    let recipients = notification_recipients(kernel, hwnd);
     if kernel
         .posted_messages
         .len()
@@ -12457,7 +12462,7 @@ pub(crate) fn send_back_to_focus_window(
     send_message_w(ctx)
 }
 
-fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(outcome) = finish_control_notify(ctx)? {
         return Ok(outcome);
     }
@@ -15580,6 +15585,30 @@ fn paint_owner_draw(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome,
     ctx.cpu.write_reg(ArmReg::R3, scratch)?;
     ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
     Ok(DispatchOutcome::JumpTo(proc & !1))
+}
+
+/// Resume only continuations owned by a built-in procedure called through
+/// SendNotifyMessage. Do not reinterpret the callback's return registers as
+/// a fresh HWND/message after the built-in procedure has completed.
+pub(crate) fn resume_notify_builtin(
+    ctx: &mut CallCtx<'_>,
+) -> Result<Option<DispatchOutcome>, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    if ctx.kernel.window_destroy_frames.last().is_some_and(|f| {
+        f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
+    }) {
+        return Ok(Some(destroy_window(ctx)?));
+    }
+    if let Some(outcome) = control_color::resume(ctx)? {
+        return Ok(Some(outcome));
+    }
+    if let Some(outcome) = list_paint::resume(ctx)? {
+        return Ok(Some(outcome));
+    }
+    if let Some(outcome) = finish_owner_draw(ctx)? {
+        return Ok(Some(outcome));
+    }
+    finish_control_notify(ctx)
 }
 
 fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -31115,6 +31144,7 @@ mod tests {
             shell_status: None,
             status_bar: None,
             message_frames: Default::default(),
+            notify_message_frames: Default::default(),
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             stylus_stick: Default::default(),

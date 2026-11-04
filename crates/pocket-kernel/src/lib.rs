@@ -837,6 +837,14 @@ pub struct GuestCallFrame {
     pub sp: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct NotifyMessageFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: GuestCallFrame,
+    pub recipients: Vec<u32>,
+}
+
 /// A synchronous window callback belongs to the guest thread that entered it.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowCallbackFrame {
@@ -1370,6 +1378,7 @@ pub struct KernelState {
     /// another thread is inside WndProc; its callback return must restore
     /// only its own arguments/stack, never another thread's continuation.
     pub message_frames: HashMap<usize, Vec<GuestCallFrame>>,
+    pub notify_message_frames: Vec<NotifyMessageFrame>,
     /// Bottom status bar created via commctrl's `CreateStatusWindowW`.
     ///
     /// Pocket PC apps get a real shell-drawn bar here; PocketHLE has no
@@ -1724,6 +1733,28 @@ impl KernelState {
     }
     pub fn reclaim_finished_stacks(&mut self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
         self.reclaim_finished_tls();
+        // An interrupted guest enumeration owns its scratch buffer. Retire it
+        // with its thread even if other threads keep the process alive.
+        let main_finished = self.main_thread.exit_code.is_some();
+        let threads = &self.threads;
+        let finished = |thread: usize| {
+            if thread == 0 {
+                main_finished
+            } else {
+                threads.get(thread - 1).is_some_and(|t| t.finished)
+            }
+        };
+        self.notify_message_frames
+            .retain(|frame| !finished(frame.thread));
+        let heap = &mut self.heap;
+        self.gdi.font_enum_frames.retain(|frame| {
+            if finished(frame.thread) {
+                heap.free(frame.scratch);
+                false
+            } else {
+                true
+            }
+        });
         let dead_host_buffers: Vec<_> = self
             .legacy_winsock
             .hostent_buffers
@@ -1951,6 +1982,11 @@ impl KernelState {
             }
         }
         self.message_frames.clear();
+        self.notify_message_frames.clear();
+        for frame in self.gdi.font_enum_frames.drain(..) {
+            self.heap.free(frame.scratch);
+        }
+        self.gdi.clear_guest_fonts();
         self.gdi.owner_draw_frames.clear();
         self.gdi.list_paint_frames.clear();
         self.gdi.control_color_frames.clear();
@@ -4330,6 +4366,7 @@ impl Process {
                 accelerator_frames: Vec::new(),
                 shell_status: None,
                 message_frames: Default::default(),
+                notify_message_frames: Default::default(),
                 status_bar: None,
                 controls: Default::default(),
                 modal: None,

@@ -26,6 +26,13 @@ pub mod aygshell;
 mod backlight_tests;
 mod bluetooth;
 mod camera;
+mod ce_fonts;
+#[cfg(all(test, feature = "unicorn-tests"))]
+mod ce_native_tests;
+mod ce_notify;
+mod ce_phonebook;
+mod ce_services;
+mod ce_shortcut;
 pub mod commctrl;
 mod copilot;
 pub mod coredll;
@@ -281,6 +288,11 @@ impl WinCeDispatcher {
         bluetooth::register(&mut d);
         vibration::register(&mut d);
         wininet::register(&mut d);
+        ce_phonebook::register(&mut d);
+        ce_shortcut::register(&mut d);
+        ce_fonts::register(&mut d);
+        ce_notify::register(&mut d);
+        ce_services::register(&mut d);
         ws2::register(&mut d);
         legacy_services::register(&mut d);
         ddraw::register(&mut d);

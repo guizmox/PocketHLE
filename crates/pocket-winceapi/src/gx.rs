@@ -626,6 +626,7 @@ pub(crate) mod tests {
             shell_status: None,
             status_bar: None,
             message_frames: Default::default(),
+            notify_message_frames: Default::default(),
             controls: Default::default(),
             pending_input: std::collections::VecDeque::new(),
             stylus_stick: Default::default(),

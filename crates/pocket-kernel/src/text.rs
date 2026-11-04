@@ -20,12 +20,18 @@ pub fn selected(gdi: &GdiState, handle: u32) -> Option<Font> {
         return None;
     }
     match gdi.get(handle) {
-        Some(GdiObject::Font(f)) => Some(*f),
+        Some(GdiObject::Font(f)) => Some(f.clone()),
         _ => None,
     }
 }
 
 fn resolve(request: &Font) -> Face {
+    if let Some(font) = &request.resource {
+        return Face {
+            font: font.clone(),
+            shear: false,
+        };
+    }
     let name = request.face_name().to_lowercase();
     let bold = request.field(16) >= 600;
     let italic = request.logfont[20] != 0;
@@ -122,6 +128,69 @@ fn resolve(request: &Font) -> Face {
     }
     cache.insert(key, face.clone());
     face
+}
+
+/// Guest-loaded faces belong to one GdiState, never the global fallback cache.
+#[derive(Debug, Clone)]
+pub struct InstalledFont {
+    pub family: String,
+    pub full_name: String,
+    pub style: String,
+    pub weight: u16,
+    pub italic: bool,
+    pub font: FontArc,
+}
+pub fn parse_resources(bytes: Vec<u8>) -> Option<Vec<InstalledFont>> {
+    if bytes.len() > 8 * 1024 * 1024 {
+        return None;
+    }
+    let count = ttf_parser::fonts_in_collection(&bytes).unwrap_or(1);
+    if count == 0 || count > 32 || bytes.len().saturating_mul(count as usize) > 32 * 1024 * 1024 {
+        return None;
+    }
+    let mut fonts = Vec::new();
+    for index in 0..count {
+        let face = ttf_parser::Face::parse(&bytes, index).ok()?;
+        let name = |id| {
+            face.names()
+                .into_iter()
+                .filter(|n| n.name_id == id)
+                .find_map(|n| n.to_string())
+        };
+        let family = name(1)?;
+        if family.is_empty() || family.encode_utf16().count() > 31 {
+            return None;
+        }
+        let full_name = name(4).unwrap_or_else(|| family.clone());
+        let style = name(2).unwrap_or_else(|| "Regular".into());
+        let weight = face.weight().to_number();
+        let italic = face.is_italic();
+        let font = ab_glyph::FontVec::try_from_vec_and_index(bytes.clone(), index).ok()?;
+        fonts.push(InstalledFont {
+            family,
+            full_name,
+            style,
+            weight,
+            italic,
+            font: FontArc::new(font),
+        });
+    }
+    Some(fonts)
+}
+pub fn bind_resource(resources: &[InstalledFont], font: &mut Font) {
+    let name = font.face_name();
+    let weight = font.field(16).max(400);
+    let italic = font.logfont[20] != 0;
+    font.resource = resources
+        .iter()
+        .filter(|f| f.family.eq_ignore_ascii_case(&name) || f.full_name.eq_ignore_ascii_case(&name))
+        .min_by_key(|f| {
+            (
+                u32::from(f.italic != italic),
+                (i32::from(f.weight) - weight).unsigned_abs(),
+            )
+        })
+        .map(|f| f.font.clone());
 }
 
 pub struct Layout {
@@ -407,4 +476,56 @@ pub fn metrics_w(font: Option<&Font>) -> [u8; 60] {
         out[56] = f.logfont[23];
     }
     out
+}
+
+/// NEWTEXTMETRICW appends design-unit metrics, not the selected pixel size.
+pub fn new_metrics_w(font: &Font) -> [u8; 76] {
+    let mut out = [0; 76];
+    out[..60].copy_from_slice(&metrics_w(Some(font)));
+    let face = resolve(font);
+    let mut flags = (u32::from(font.field(16) >= 600) * 0x20)
+        | u32::from(font.logfont[20] != 0)
+        | (u32::from(font.logfont[21] != 0) << 1)
+        | (u32::from(font.logfont[22] != 0) << 4);
+    if flags == 0 {
+        flags = 0x40;
+    }
+    let values = [
+        flags,
+        face.font
+            .units_per_em()
+            .unwrap_or(face.font.height_unscaled())
+            .round()
+            .max(1.0) as u32,
+        face.font.height_unscaled().round().max(1.0) as u32,
+        face.font
+            .h_advance_unscaled(face.font.glyph_id('x'))
+            .round()
+            .max(0.0) as u32,
+    ];
+    for (field, value) in out[60..].chunks_exact_mut(4).zip(values) {
+        field.copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+#[cfg(test)]
+mod enumeration_metrics_tests {
+    use super::*;
+    #[test]
+    fn design_units_do_not_change_with_requested_pixel_size() {
+        let mut small = Font::new(-12);
+        let mut large = Font::new(-30);
+        let a = new_metrics_w(&small);
+        let b = new_metrics_w(&large);
+        assert_eq!(&a[64..], &b[64..]);
+        assert_ne!(&a[..4], &b[..4]);
+        assert_eq!(u32::from_le_bytes(a[64..68].try_into().unwrap()), 2048);
+        assert!(u32::from_le_bytes(a[72..76].try_into().unwrap()) > 16);
+        small.logfont[16..20].copy_from_slice(&700u32.to_le_bytes());
+        small.logfont[20] = 1;
+        large.logfont[21] = 1;
+        assert_eq!(new_metrics_w(&small)[60], 0x21);
+        assert_eq!(new_metrics_w(&large)[60], 2);
+    }
 }

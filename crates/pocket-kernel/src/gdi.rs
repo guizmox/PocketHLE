@@ -265,11 +265,12 @@ pub struct Pen {
     pub width: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Font {
     pub height: i32,
     /// Original CE LOGFONTW, including face name, weight, charset and quality.
     pub logfont: [u8; 92],
+    pub resource: Option<ab_glyph::FontArc>,
 }
 impl Font {
     pub fn new(height: i32) -> Self {
@@ -281,6 +282,7 @@ impl Font {
         Self {
             height: i32::from_le_bytes(logfont[..4].try_into().unwrap()),
             logfont,
+            resource: None,
         }
     }
     pub fn field(&self, offset: usize) -> i32 {
@@ -365,8 +367,23 @@ pub struct ImageRenderer {
     pub height: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct FontEnumFrame {
+    pub thread: usize,
+    pub thunk: u32,
+    pub frame: crate::GuestCallFrame,
+    pub callback: u32,
+    pub parameter: u32,
+    pub scratch: u32,
+    pub records: Vec<Vec<u8>>,
+    pub next: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct GdiState {
+    pub installed_fonts: Vec<crate::text::InstalledFont>,
+    pub installed_font_bytes: usize,
+    pub font_enum_frames: Vec<FontEnumFrame>,
     pub image_decode_frames: Vec<ImageDecodeFrame>,
     pub image_renderers: HashMap<u32, ImageRenderer>,
     saved_dcs: HashMap<u32, Vec<Dc>>,
@@ -395,6 +412,9 @@ pub struct GdiState {
 impl GdiState {
     pub fn new() -> Self {
         let mut s = Self {
+            installed_fonts: Vec::new(),
+            installed_font_bytes: 0,
+            font_enum_frames: Vec::new(),
             image_decode_frames: Vec::new(),
             image_renderers: HashMap::new(),
             saved_dcs: HashMap::new(),
@@ -604,10 +624,31 @@ impl GdiState {
         self.create_logfont(font)
     }
 
-    pub fn create_logfont(&mut self, font: Font) -> u32 {
+    pub fn create_logfont(&mut self, mut font: Font) -> u32 {
+        crate::text::bind_resource(&self.installed_fonts, &mut font);
         let h = self.alloc_handle();
         self.objects.insert(h, GdiObject::Font(font));
         h
+    }
+
+    pub fn install_fonts(&mut self, fonts: Vec<crate::text::InstalledFont>, bytes: usize) {
+        self.installed_font_bytes += bytes;
+        self.installed_fonts.extend(fonts);
+        for object in self.objects.values_mut() {
+            if let GdiObject::Font(font) = object {
+                crate::text::bind_resource(&self.installed_fonts, font);
+            }
+        }
+    }
+
+    pub fn clear_guest_fonts(&mut self) {
+        self.installed_fonts.clear();
+        self.installed_font_bytes = 0;
+        for object in self.objects.values_mut() {
+            if let GdiObject::Font(font) = object {
+                font.resource = None;
+            }
+        }
     }
 
     pub fn create_font(&mut self, height: i32) -> u32 {
