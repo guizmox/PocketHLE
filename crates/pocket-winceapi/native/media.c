@@ -9,6 +9,7 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
+#include <libavutil/opt.h>
 #include <libavutil/mathematics.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
@@ -18,6 +19,8 @@ typedef struct PocketMedia {
     AVCodecContext *codec;
     AVPacket *packet;
     AVFrame *frame;
+    AVFrame *rgba_frame;
+    int rgba, scale_width, scale_height, scale_format;
     struct SwsContext *scale;
     SwrContext *resample;
     uint8_t *buffer;
@@ -29,6 +32,7 @@ typedef struct PocketMedia {
 void pocket_media_close(PocketMedia *m) {
     if (!m) return;
     sws_freeContext(m->scale);
+    av_frame_free(&m->rgba_frame);
     swr_free(&m->resample);
     av_frame_free(&m->frame);
     av_packet_free(&m->packet);
@@ -44,7 +48,9 @@ PocketMedia *pocket_media_open(const char *path, int video, int width, int heigh
     int ret;
     *error = AVERROR(ENOMEM);
     if (!m) return NULL;
-    m->video = video;
+    /* Internal output mode: 0 PCM, 1 guest RGB565, 2 host-player RGBA. */
+    m->rgba = video == 2;
+    m->video = video != 0;
     m->width = width;
     m->height = height;
     m->first_pts = AV_NOPTS_VALUE;
@@ -68,6 +74,10 @@ PocketMedia *pocket_media_open(const char *path, int video, int width, int heigh
     if (!m->codec || !m->packet || !m->frame) { ret = AVERROR(ENOMEM); goto fail; }
     ret = avcodec_parameters_to_context(m->codec, m->format->streams[m->stream]->codecpar);
     if (ret < 0) goto fail;
+    if (m->rgba) {
+        m->codec->thread_count = (int64_t)m->codec->width * m->codec->height >= 640 * 480 ? 4 : 1;
+        m->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
     ret = avcodec_open2(m->codec, codec, NULL);
     if (ret < 0) goto fail;
     if (video && width == 0) {
@@ -136,6 +146,50 @@ static int audio_output(PocketMedia *m, const uint8_t **input, int count, const 
 
 /* Returns 1 for an owned output buffer, 0 for EOF, or an FFmpeg error.
  * The borrowed output is valid only until the next call/close. */
+/* The view references PocketMedia.buffer, owned until the next decoder call.
+ * sws_scale_frame completes its slice workers before the view is unreferenced. */
+static void borrowed_pixels(void *opaque, uint8_t *data) { (void)opaque; (void)data; }
+
+static int host_rgba(PocketMedia *m, AVFrame *source, const uint8_t **data, int *length) {
+    const size_t bytes = (size_t)m->width * m->height * 4;
+    int ret;
+    if (!m->rgba_frame) m->rgba_frame = av_frame_alloc();
+    if (!m->rgba_frame) return AVERROR(ENOMEM);
+    av_frame_unref(m->rgba_frame);
+    av_fast_malloc(&m->buffer, &m->capacity, bytes);
+    if (!m->buffer) return AVERROR(ENOMEM);
+    if (!m->scale || m->scale_width != source->width || m->scale_height != source->height || m->scale_format != source->format) {
+        sws_freeContext(m->scale);
+        m->scale = sws_alloc_context();
+        if (!m->scale) return AVERROR(ENOMEM);
+        const char *keys[] = {"srcw", "srch", "src_format", "dstw", "dsth", "dst_format", "sws_flags", "threads"};
+        const int values[] = {source->width, source->height, source->format, m->width, m->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, (int64_t)m->width * m->height >= 640 * 480 ? 4 : 1};
+        for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+            ret = av_opt_set_int(m->scale, keys[i], values[i], 0);
+            if (ret < 0) return ret;
+        }
+        ret = sws_init_context(m->scale, NULL, NULL);
+        if (ret < 0) return ret;
+        m->scale_width = source->width;
+        m->scale_height = source->height;
+        m->scale_format = source->format;
+    }
+    AVFrame *output = m->rgba_frame;
+    output->format = AV_PIX_FMT_RGBA;
+    output->width = m->width;
+    output->height = m->height;
+    output->linesize[0] = m->width * 4;
+    output->data[0] = m->buffer;
+    output->buf[0] = av_buffer_create(m->buffer, bytes, borrowed_pixels, NULL, 0);
+    if (!output->buf[0]) return AVERROR(ENOMEM);
+    ret = sws_scale_frame(m->scale, output, source);
+    av_frame_unref(output);
+    if (ret < 0) return ret;
+    *data = m->buffer;
+    *length = (int)bytes;
+    return 0;
+}
+
 int pocket_media_next(PocketMedia *m, const uint8_t **data, int *length, double *seconds) {
     int ret;
     *data = NULL; *length = 0; *seconds = 0;
@@ -165,21 +219,26 @@ int pocket_media_next(PocketMedia *m, const uint8_t **data, int *length, double 
                 int stride[4] = { m->width * 2, 0, 0, 0 };
                 int64_t pts = f->best_effort_timestamp;
                 if (f->width <= 0 || f->height <= 0) return AVERROR_INVALIDDATA;
-                if ((int64_t)w * f->height > (int64_t)h * f->width)
-                    w = (int)((int64_t)h * f->width / f->height);
-                else h = (int)((int64_t)w * f->height / f->width);
-                if (w < 1) w = 1;
-                if (h < 1) h = 1;
-                x = (m->width - w) / 2; y = (m->height - h) / 2;
-                av_fast_malloc(&m->buffer, &m->capacity, (size_t)m->width * m->height * 2);
-                if (!m->buffer) return AVERROR(ENOMEM);
-                memset(m->buffer, 0, (size_t)m->width * m->height * 2);
-                m->scale = sws_getCachedContext(m->scale, f->width, f->height, (enum AVPixelFormat)f->format,
-                    w, h, AV_PIX_FMT_RGB565LE, SWS_BILINEAR, NULL, NULL, NULL);
-                if (!m->scale) return AVERROR(ENOMEM);
-                output[0] = m->buffer + (y * m->width + x) * 2;
-                ret = sws_scale(m->scale, (const uint8_t *const *)f->data, f->linesize, 0, f->height, output, stride);
-                if (ret < 0) return ret;
+                if (m->rgba) {
+                    ret = host_rgba(m, f, data, length);
+                    if (ret < 0) return ret;
+                } else {
+                    if ((int64_t)w * f->height > (int64_t)h * f->width)
+                        w = (int)((int64_t)h * f->width / f->height);
+                    else h = (int)((int64_t)w * f->height / f->width);
+                    if (w < 1) w = 1;
+                    if (h < 1) h = 1;
+                    x = (m->width - w) / 2; y = (m->height - h) / 2;
+                    av_fast_malloc(&m->buffer, &m->capacity, (size_t)m->width * m->height * 2);
+                    if (!m->buffer) return AVERROR(ENOMEM);
+                    memset(m->buffer, 0, (size_t)m->width * m->height * 2);
+                    m->scale = sws_getCachedContext(m->scale, f->width, f->height, (enum AVPixelFormat)f->format,
+                        w, h, AV_PIX_FMT_RGB565LE, SWS_BILINEAR, NULL, NULL, NULL);
+                    if (!m->scale) return AVERROR(ENOMEM);
+                    output[0] = m->buffer + (y * m->width + x) * 2;
+                    ret = sws_scale(m->scale, (const uint8_t *const *)f->data, f->linesize, 0, f->height, output, stride);
+                    if (ret < 0) return ret;
+                }
                 if (pts != AV_NOPTS_VALUE) {
                     if (m->first_pts == AV_NOPTS_VALUE) m->first_pts = pts;
                     *seconds = (pts - m->first_pts) * av_q2d(stream->time_base);
@@ -188,8 +247,10 @@ int pocket_media_next(PocketMedia *m, const uint8_t **data, int *length, double 
                     *seconds = rate.num > 0 && rate.den > 0 ? m->frame_count / av_q2d(rate) : m->frame_count / 30.0;
                 }
                 m->frame_count++;
-                *data = m->buffer;
-                *length = m->width * m->height * 2;
+                if (!m->rgba) {
+                    *data = m->buffer;
+                    *length = m->width * m->height * 2;
+                }
                 av_frame_unref(f);
                 return 1;
             }

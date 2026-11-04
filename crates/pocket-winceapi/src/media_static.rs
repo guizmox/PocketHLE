@@ -63,17 +63,20 @@ impl Decoder {
         }
     }
     pub fn open(path: &Path, video: bool, width: u32, height: u32) -> Result<Option<Self>, String> {
+        Self::open_mode(path, i32::from(video), width, height)
+    }
+
+    /// Native-size RGBA for host playback; guest media keeps RGB565 output.
+    pub fn open_rgba(path: &Path) -> Result<Option<Self>, String> {
+        Self::open_mode(path, 2, 0, 0)
+    }
+
+    fn open_mode(path: &Path, mode: i32, width: u32, height: u32) -> Result<Option<Self>, String> {
         let path = CString::new(path.to_str().ok_or("Media path is not valid UTF-8")?)
             .map_err(|_| "Media path contains NUL")?;
         let mut code = 0;
         let handle = unsafe {
-            pocket_media_open(
-                path.as_ptr(),
-                i32::from(video),
-                width as i32,
-                height as i32,
-                &mut code,
-            )
+            pocket_media_open(path.as_ptr(), mode, width as i32, height as i32, &mut code)
         };
         if let Some(handle) = NonNull::new(handle) {
             Ok(Some(Self(handle)))
@@ -178,5 +181,72 @@ mod seeking_tests {
         assert!(found);
         video.seek(0.0).unwrap();
         assert!(video.next().unwrap().unwrap().1 < 0.2);
+    }
+}
+
+#[cfg(test)]
+mod rgba_tests {
+    use super::*;
+
+    #[test]
+    fn recorded_x4_mp4_decodes_all_rgba_frames_at_original_timestamps() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("x4.mp4");
+        let mut encoder =
+            crate::recording_encoder::Mp4Encoder::open(&path, 1280, 960, 60, 1).unwrap();
+        let mut pixels = vec![0u8; 1280 * 960 * 4];
+        for frame in 0..12u8 {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[frame * 12, 200, 50, 255]);
+            }
+            encoder.frame(&pixels, &[]).unwrap();
+        }
+        encoder.finish().unwrap();
+        let mut decoder = Decoder::open_rgba(&path).unwrap().unwrap();
+        assert_eq!((decoder.info().1, decoder.info().2), (1280, 960));
+        let mut count = 0;
+        while let Some((rgba, pts)) = decoder.next().unwrap() {
+            assert_eq!(rgba.len(), 1280 * 960 * 4);
+            assert!((pts - f64::from(count) / 60.0).abs() < 0.0001);
+            assert_eq!(rgba[3], 255);
+            count += 1;
+        }
+        assert_eq!(count, 12);
+        decoder.seek(0.0).unwrap();
+        assert!(decoder.next().unwrap().unwrap().1.abs() < 0.0001);
+    }
+
+    #[test]
+    fn host_rgba_preserves_frame_timestamps_seek_and_guest_buffer_layout() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/seeking.wmv");
+        let mut guest = Decoder::open(&path, true, 0, 0).unwrap().unwrap();
+        let mut host = Decoder::open_rgba(&path).unwrap().unwrap();
+        assert_eq!(guest.info(), host.info());
+        let (_, w, h, _, _) = host.info();
+        let mut count = 0;
+        while let Some((rgba, time)) = host.next().unwrap() {
+            let (rgb565, guest_time) = guest.next().unwrap().unwrap();
+            assert_eq!(time, guest_time);
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+            assert_eq!(rgb565.len(), (w * h * 2) as usize);
+            assert!(rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            count += 1;
+        }
+        assert!(count >= 20);
+        assert!(guest.next().unwrap().is_none());
+        assert!(host.next().unwrap().is_none());
+        host.seek(0.75).unwrap();
+        let mut reached_target = false;
+        while let Some((rgba, time)) = host.next().unwrap() {
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+            if time >= 0.75 {
+                assert!(time < 1.1);
+                reached_target = true;
+                break;
+            }
+        }
+        assert!(reached_target);
+        host.seek(0.0).unwrap();
+        assert!(host.next().unwrap().unwrap().1 < 0.2);
     }
 }

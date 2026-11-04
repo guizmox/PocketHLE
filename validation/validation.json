@@ -1,0 +1,56 @@
+[
+  {
+    "path": "playback-investigation/moving-x4.mp4",
+    "seek": null,
+    "frames": 120,
+    "guest_rgb565_identical": true,
+    "rgba_reference_identical": true,
+    "reference_seconds": 0.9383666280045873,
+    "rgba_seconds": 0.48886378201132175
+  },
+  {
+    "path": "playback-investigation/moving-x4.mp4",
+    "seek": 0.1,
+    "frames": 120,
+    "guest_rgb565_identical": true,
+    "rgba_reference_identical": true,
+    "reference_seconds": 0.8650180389959132,
+    "rgba_seconds": 0.4781794309965335
+  },
+  {
+    "path": "playback-investigation/odd.avi",
+    "seek": null,
+    "frames": 3,
+    "guest_rgb565_identical": true,
+    "rgba_reference_identical": true,
+    "reference_seconds": 0.004319916988606565,
+    "rgba_seconds": 0.004292054989491589
+  },
+  {
+    "path": "playback-investigation/odd.avi",
+    "seek": 0.1,
+    "frames": 2,
+    "guest_rgb565_identical": true,
+    "rgba_reference_identical": true,
+    "reference_seconds": 0.0030923759914003313,
+    "rgba_seconds": 0.002782156996545382
+  },
+  {
+    "path": "pr-review/ci-fix/crates/pocket-winceapi/tests/fixtures/seeking.wmv",
+    "seek": null,
+    "frames": 20,
+    "guest_rgb565_identical": true,
+    "rgba_reference_identical": true,
+    "reference_seconds": 0.0008862670074449852,
+    "rgba_seconds": 0.0009801690030144528
+  },
+  {
+    "path": "pr-review/ci-fix/crates/pocket-winceapi/tests/fixtures/seeking.wmv",
+    "seek": 0.1,
+    "frames": 20,
+    "guest_rgb565_identical": true,
+    "rgba_reference_identical": true,
+    "reference_seconds": 0.0008705429936526343,
+    "rgba_seconds": 0.0011502050037961453
+  }
+]
