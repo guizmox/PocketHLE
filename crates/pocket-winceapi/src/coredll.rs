@@ -1294,6 +1294,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "lstrcatA", lstrcat_a);
     d.register_handler(dll, "lstrcmpW", lstrcmp_w);
     d.register_handler(dll, "lstrcmpA", lstrcmp_a);
+    d.register_handler(dll, "CompareStringW", compare_string_w);
     d.register_handler(dll, "lstrcmpiW", lstrcmpi_w);
     d.register_handler(dll, "lstrcmpiA", lstrcmpi_a);
 
@@ -5384,10 +5385,9 @@ fn map_resource_module_inner(
                     friendly_name,
                 };
                 let native = thunk.friendly_name.as_deref().and_then(|name| {
-                    if ctx.cpu.arch() == pocket_cpu::Arch::Mips {
-                        pocket_kernel::native_thunks::mips_thunk_for(&import.dll, name)
-                    } else if copy_helper_size == 0 {
-                        // No local ARM copy helper was allocated in this module's pool.
+                    if copy_helper_size == 0 {
+                        // Preserve the existing non-ARM import path; there is
+                        // no local ARM copy helper in that module's pool.
                         pocket_kernel::native_thunks::native_thunk_for(&import.dll, name)
                     } else {
                         pocket_kernel::native_thunks::native_thunk_with_helper(
@@ -14152,6 +14152,11 @@ fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
 }
 
 fn legacy_paint_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    let target = idle_paint_target(ctx.kernel);
+    due_paint_for_target(ctx, target)
+}
+
+fn due_paint_for_target(ctx: &mut CallCtx<'_>, target: u32) -> Option<(u32, u32, u32, u32)> {
     let now = monotonic_ms();
     if now >= ctx.kernel.synthetic_paint_next_ms {
         ctx.kernel.synthetic_paint_next_ms = advance_deadline(
@@ -14159,7 +14164,6 @@ fn legacy_paint_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
             SYNTHETIC_PAINT_INTERVAL_MS,
             now,
         );
-        let target = idle_paint_target(ctx.kernel);
         return (target != 0).then_some((target, WM_PAINT, 0, 0));
     }
     None
@@ -14644,7 +14648,7 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
 /// own update/render branch. Real input, posted traffic and timers still win.
 /// A PM_NOREMOVE preview stays in pending_message until actually removed,
 /// so repeated previews cannot consume this idle opportunity prematurely.
-fn next_peek_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+fn next_peek_message_if_due(ctx: &mut CallCtx<'_>, preview: bool) -> Option<(u32, u32, u32, u32)> {
     if let Some(message) =
         next_queued_message_if_due(ctx).or_else(|| timer_message_if_due(ctx, true))
     {
@@ -14654,7 +14658,15 @@ fn next_peek_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
     if ctx.kernel.synthetic_peek_paint_yield.remove(&thread) {
         return None;
     }
-    let paint = legacy_paint_if_due(ctx)?;
+    // PM_NOREMOVE can be a readiness check before GetMessage. A
+    // direct display owner using that pump still needs a paint to preview.
+    // Keep suppressing idle paints for direct surfaces polled with PM_REMOVE.
+    let paint = if preview {
+        let target = synthetic_paint_target(ctx.kernel);
+        due_paint_for_target(ctx, target)
+    } else {
+        legacy_paint_if_due(ctx)
+    }?;
     ctx.kernel.synthetic_peek_paint_yield.insert(thread);
     Some(paint)
 }
@@ -14938,7 +14950,7 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         // loop is idle, so let a parked worker (typically the mixer
         // thread) run, and conversely park a worker that has drained
         // its own queue.
-        None => match next_peek_message_if_due(ctx) {
+        None => match next_peek_message_if_due(ctx, remove_mode & 1 == 0) {
             Some(addressed) => addressed,
             None => {
                 if remove_mode & 2 != 0 {
@@ -22260,6 +22272,59 @@ fn lstrcmp_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         read_cstr(ctx, b, 0x10000)?
     };
     Ok(DispatchOutcome::ReturnedR0(cmp_to_winapi(sa.cmp(&sb))))
+}
+
+fn compare_string_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const NORM_IGNORECASE: u32 = 1;
+    const ERROR_INVALID_FLAGS: u32 = 1004;
+    const MAX_UNITS: u32 = 0x10000;
+
+    let flags = ctx.arg_u32(1)?;
+    if flags & !NORM_IGNORECASE != 0 {
+        set_thread_error(ctx, ERROR_INVALID_FLAGS);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let first = (ctx.arg_u32(2)?, ctx.arg_u32(3)?);
+    let second = (ctx.arg_u32(4)?, ctx.arg_u32(5)?);
+    let mut read = |pointer: u32, count: u32| -> Option<Vec<u16>> {
+        if pointer == 0 || count == 0 {
+            return None;
+        }
+        let available = (u64::from(u32::MAX) + 1 - u64::from(pointer)) / 2;
+        if count == u32::MAX {
+            let max = u64::from(MAX_UNITS).min(available) as u32;
+            let units = read_wstr(ctx, pointer, max).ok()?;
+            return (units.len() < max as usize).then_some(units);
+        }
+        if count > MAX_UNITS || u64::from(count) > available {
+            return None;
+        }
+        let bytes = ctx.cpu.read_mem(pointer, count * 2).ok()?;
+        Some(
+            bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect(),
+        )
+    };
+    let (Some(first), Some(second)) = (read(first.0, first.1), read(second.0, second.1)) else {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    // PocketHLE has no locale collation tables. Use a deterministic Unicode
+    // fallback, retaining the WinCE return convention and counted lengths.
+    let order = if flags == NORM_IGNORECASE {
+        String::from_utf16_lossy(&first)
+            .to_lowercase()
+            .cmp(&String::from_utf16_lossy(&second).to_lowercase())
+    } else {
+        first.cmp(&second)
+    };
+    Ok(DispatchOutcome::ReturnedR0(match order {
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Equal => 2,
+        std::cmp::Ordering::Greater => 3,
+    }))
 }
 
 fn lstrcmpi_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -38296,6 +38361,37 @@ mod tests {
             .any(|(dll, name)| dll == "coredll.dll" && name == "InvalidateRgn"));
     }
 
+    #[test]
+    fn compare_string_w_uses_counted_utf16_and_win_ce_result_codes() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x1100, b"A\0b\0X\0\0\0").unwrap();
+        cpu.write_mem(0x1200, b"a\0B\0Y\0\0\0").unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x400).unwrap();
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1100).unwrap();
+        cpu.write_mem(0x1800, &0x1200u32.to_le_bytes()).unwrap();
+        let thunk = dummy_thunk();
+        for (first_len, second_len, expected) in
+            [(2u32, 2u32, 2), (u32::MAX, u32::MAX, 1), (3, 2, 3)]
+        {
+            cpu.write_reg(ArmReg::R3, first_len).unwrap();
+            cpu.write_mem(0x1804, &second_len.to_le_bytes()).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                compare_string_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
+    }
+
     /// Call a handler with `args` already in r0.. and return r0.
     fn call_r0(
         handler: fn(&mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>,
@@ -38680,6 +38776,58 @@ mod tests {
         };
         assert_eq!(next_message_if_due(&mut ctx).unwrap().1, WM_PAINT);
         assert!(ctx.kernel.synthetic_peek_paint_yield.contains(&0));
+    }
+
+    #[test]
+    fn direct_display_paint_preview_can_be_consumed_by_get_message() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.synthetic_message_budget = 0;
+        kernel.pending_startup.clear();
+        kernel.pending_create = None;
+        kernel.pending_message = None;
+        kernel.posted_messages.clear();
+        kernel.timers.clear();
+        kernel.fb_mapped = true;
+        kernel.controls.direct_surface_hwnd = FAKE_HWND;
+        kernel.synthetic_paint_next_ms = 0;
+        let peek = |cpu: &mut StubCpu,
+                    kernel: &mut KernelState,
+                    dispatcher: &mut WinCeDispatcher,
+                    mode| {
+            call(
+                cpu,
+                kernel,
+                dispatcher,
+                "coredll.dll",
+                "PeekMessageW",
+                &[0x2000, 0, 0, 0, mode],
+            )
+        };
+        assert_eq!(
+            peek(&mut cpu, &mut kernel, &mut dispatcher, 1),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        kernel.synthetic_paint_next_ms = 0;
+        assert_eq!(
+            peek(&mut cpu, &mut kernel, &mut dispatcher, 0),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        let preview = cpu.read_mem(0x2000, 16).unwrap();
+        assert_eq!(preview[4..8], WM_PAINT.to_le_bytes());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "GetMessageW",
+                &[0x2000, 0, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 16).unwrap(), preview);
+        assert!(kernel.pending_message.is_none());
     }
 
     #[test]
