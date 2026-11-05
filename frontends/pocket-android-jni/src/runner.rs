@@ -899,7 +899,7 @@ impl SessionHook {
     }
 
     fn run_pending_child(&mut self, state: &mut KernelState) {
-        let Some(request) = state.pending_process_launch.take() else {
+        let Some(request) = state.take_process_launch() else {
             return;
         };
         let context = self.launch_context.clone();
@@ -998,9 +998,18 @@ impl SessionHook {
                 }
                 Err(5)
             };
-            state
-                .process_launch_results
-                .insert(request.call_key, result);
+            if let Some(key) = request.call_key {
+                state.process_launch_results.insert(key, result);
+            } else if let Ok(handle) = result {
+                if let Some(table) = state.object_handles.child(handle) {
+                    table.allow_start();
+                }
+            } else if let Err(error) = result {
+                log::warn!(
+                    "CeRunAppAtTime: guest launch failed for {:?}: {error}",
+                    request.guest_path
+                );
+            }
             return;
         }
         let mut exit_code = 0xc0000135;
@@ -1265,7 +1274,7 @@ mod child_card_tests {
             concurrent,
             command_line: String::new(),
             creation_flags: 0,
-            call_key: (0, 0, 0),
+            call_key: Some((0, 0, 0)),
         }
     }
 

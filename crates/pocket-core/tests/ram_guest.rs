@@ -319,7 +319,7 @@ fn launch_pending(
     let ram = state.memory_division.clone();
     let assets = assets.clone();
     let flash = flash.clone();
-    let key = request.call_key;
+    let key = request.call_key.unwrap();
     let handle = request.process_handle;
     let (tx, rx) = std::sync::mpsc::channel();
     children.push(std::thread::spawn(move || {

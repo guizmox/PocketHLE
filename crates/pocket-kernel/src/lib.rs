@@ -1087,7 +1087,7 @@ pub struct ProcessLaunch {
     pub concurrent: bool,
     pub command_line: String,
     pub creation_flags: u32,
-    pub call_key: (usize, u32, u32),
+    pub call_key: Option<(usize, u32, u32)>,
     pub executable: PathBuf,
     pub guest_path: String,
     pub process_handle: u32,
@@ -1137,6 +1137,7 @@ pub struct KernelState {
     /// Only frontends with foreground handoff support may expose SD launch.
     pub process_launch_enabled: bool,
     pub pending_process_launch: Option<ProcessLaunch>,
+    pub scheduled_process_launches: HashMap<String, (std::time::SystemTime, String)>,
     pub command_line_cache: Option<u32>,
     pub command_line: Option<String>,
     pub process_launch_results: HashMap<(usize, u32, u32), Result<u32, u32>>,
@@ -1719,6 +1720,49 @@ impl KernelState {
         if guest_current {
             self.gx_last_pushed_counter = self.framebuffer.frame_counter;
         }
+    }
+
+    pub fn take_process_launch(&mut self) -> Option<ProcessLaunch> {
+        if self.pending_process_launch.is_some() {
+            return self.pending_process_launch.take();
+        }
+        if self.scheduled_process_launches.is_empty() {
+            return None;
+        }
+        self.take_scheduled_process_launch(std::time::SystemTime::now())
+    }
+
+    /// Drain one expired notification through the same guest process runner.
+    pub fn take_scheduled_process_launch(
+        &mut self,
+        now: std::time::SystemTime,
+    ) -> Option<ProcessLaunch> {
+        let (key, _) = self
+            .scheduled_process_launches
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .min_by_key(|(key, (deadline, _))| (*deadline, *key))?;
+        let key = key.clone();
+        let (_, guest_path) = self.scheduled_process_launches.remove(&key)?;
+        let Some(executable) = self.vfs.resolve(&guest_path).filter(|path| path.is_file()) else {
+            log::debug!("CeRunAppAtTime: scheduled executable unavailable: {guest_path:?}");
+            return None;
+        };
+        let Some((process_handle, table)) = self.object_handles.new_child() else {
+            log::warn!("CeRunAppAtTime: could not allocate a guest process for {guest_path:?}");
+            return None;
+        };
+        table.hold_start();
+        Some(ProcessLaunch {
+            concurrent: true,
+            command_line: "AppRunAtTime".into(),
+            creation_flags: 0,
+            call_key: None,
+            executable,
+            guest_path,
+            process_handle,
+            thread_handle: process_handle + 1,
+        })
     }
 
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {
@@ -4267,6 +4311,7 @@ impl Process {
                 module_path: DEFAULT_MODULE_PATH.to_string(),
                 process_launch_enabled: false,
                 pending_process_launch: None,
+                scheduled_process_launches: Default::default(),
                 command_line_cache: None,
                 command_line: None,
                 process_launch_results: HashMap::new(),

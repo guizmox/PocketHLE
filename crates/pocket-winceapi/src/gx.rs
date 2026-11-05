@@ -532,6 +532,7 @@ pub(crate) mod tests {
             module_path: "\\Program Files\\Game\\Game.exe".to_string(),
             process_launch_enabled: false,
             pending_process_launch: None,
+            scheduled_process_launches: Default::default(),
             command_line_cache: None,
             command_line: None,
             process_launch_results: Default::default(),

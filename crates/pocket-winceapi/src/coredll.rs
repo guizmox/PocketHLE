@@ -609,6 +609,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "TranslateMessage", translate_message);
     d.register_handler(dll, "PostQuitMessage", post_quit_message);
     d.register_handler(dll, "CreateProcessW", create_process_w);
+    d.register_handler(dll, "CeRunAppAtTime", ce_run_app_at_time);
     d.register_handler(dll, "ShellExecuteEx", shell_execute::execute);
     d.register_handler(dll, "ShellExecuteExW", shell_execute::execute);
     d.register_handler("sdlaunch.dll", "SDCreateProcess", sd_create_process);
@@ -3639,11 +3640,11 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         concurrent: false,
         command_line: arguments,
         creation_flags: flags,
-        call_key: (
+        call_key: Some((
             ctx.kernel.current_thread,
             ctx.thunk.thunk_va,
             ctx.cpu.read_reg(ArmReg::Sp)?,
-        ),
+        )),
     });
     log::info!(
         "SDCreateProcess: suspending parent for selected child process 0x{process_handle:08x}"
@@ -3678,6 +3679,67 @@ fn get_exit_code_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if ctx.cpu.write_mem(output, &code.to_le_bytes()).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn ce_run_app_at_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let app = ctx.arg_u32(0)?;
+    let time = ctx.arg_u32(1)?;
+    if time != 0 && !ctx.kernel.process_launch_enabled {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let mut request = || -> Option<()> {
+        let units = read_wstr(ctx, app, 1024).ok()?;
+        if units.is_empty() || units.len() == 1024 {
+            return None;
+        }
+        let name = String::from_utf16(&units).ok()?;
+        let key = name.replace('/', "\\").to_lowercase();
+        if time == 0 {
+            ctx.kernel.scheduled_process_launches.remove(&key);
+            return Some(());
+        }
+        let bytes = ctx.cpu.read_mem(time, 16).ok()?;
+        let word = |i: usize| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+        let (year, month, day) = (i32::from(word(0)), i32::from(word(1)), i32::from(word(3)));
+        let (hour, minute, second, millis) = (word(4), word(5), word(6), word(7));
+        if !(1601..=30_827).contains(&year) || !(1..=12).contains(&month)
+            || !(1..=31).contains(&day) || hour >= 24 || minute >= 60
+            || second >= 60 || millis >= 1000
+        {
+            return None;
+        }
+        let days = days_from_civil(year, month, day);
+        if civil_from_days(days) != (year, month, day) {
+            return None;
+        }
+        // GetLocalTime uses the emulator's UTC clock. WinCE dispatches alarms
+        // within the default RTC accuracy window immediately.
+        let secs = days * 86_400 + i64::from(hour) * 3600
+            + i64::from(minute) * 60 + i64::from(second);
+        let timestamp = secs * 1000 + i64::from(millis);
+        let delta = Duration::from_millis(timestamp.unsigned_abs());
+        let deadline = if timestamp < 0 {
+            UNIX_EPOCH.checked_sub(delta)?
+        } else {
+            UNIX_EPOCH.checked_add(delta)?
+        };
+        let now = SystemTime::now();
+        let deadline = if deadline <= now + Duration::from_secs(10) {
+            now
+        } else {
+            deadline
+        };
+        ctx.kernel.scheduled_process_launches.insert(key, (deadline, name));
+        Some(())
+    };
+    if app == 0 || app > u32::MAX - 2048 || request().is_none() {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -3846,7 +3908,7 @@ fn queue_child_launch(
         concurrent: true,
         command_line,
         creation_flags: flags,
-        call_key: key,
+        call_key: Some(key),
     });
     // The runner maps the child before this call commits its guest output.
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
@@ -31087,6 +31149,7 @@ mod tests {
             module_path: "\\Program Files\\Game\\Game.exe".to_string(),
             process_launch_enabled: false,
             pending_process_launch: None,
+            scheduled_process_launches: Default::default(),
             command_line_cache: None,
             command_line: None,
             process_launch_results: Default::default(),
@@ -33947,6 +34010,49 @@ mod tests {
             DispatchOutcome::ReturnedR0(v) => v as i32,
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn ce_run_app_at_time_replaces_cancels_and_drains_once() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("alarm.exe");
+        std::fs::write(&executable, b"guest executable placeholder").unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.process_launch_enabled = true;
+        kernel.vfs.mount_read_only(r"\SD Card\", root.path());
+        let mut cpu = scanf_cpu();
+        let thunk = dummy_thunk();
+        let mut invoke = |kernel: &mut KernelState, name: &str, time: Option<[u16; 8]>| {
+            write_wide_str(&mut cpu, 0x1000, 200, name).unwrap();
+            let time_ptr = if let Some(words) = time {
+                let bytes: Vec<_> = words.into_iter().flat_map(u16::to_le_bytes).collect();
+                cpu.write_mem(0x1800, &bytes).unwrap();
+                0x1800
+            } else {
+                0
+            };
+            cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+            cpu.write_reg(ArmReg::R1, time_ptr).unwrap();
+            ce_run_app_at_time(&mut CallCtx { cpu: &mut cpu, thunk: &thunk, kernel }).unwrap()
+        };
+        let name = r"\SD Card\alarm.exe";
+        let future = [2099, 1, 0, 1, 0, 0, 0, 0];
+        let invalid = [2099, 2, 0, 29, 0, 0, 0, 0];
+        let past = [2000, 2, 0, 29, 0, 0, 0, 0];
+        assert!(matches!(invoke(&mut kernel, name, Some(future)), DispatchOutcome::ReturnedR0(1)));
+        assert!(matches!(invoke(&mut kernel, name, Some(invalid)), DispatchOutcome::ReturnedR0(0)));
+        assert!(kernel.take_scheduled_process_launch(std::time::SystemTime::now()).is_none());
+        assert_eq!(kernel.scheduled_process_launches.len(), 1);
+        assert!(matches!(invoke(&mut kernel, "/SD CARD/ALARM.EXE", None), DispatchOutcome::ReturnedR0(1)));
+        assert!(kernel.scheduled_process_launches.is_empty());
+        invoke(&mut kernel, name, Some(future));
+        invoke(&mut kernel, name, Some(past));
+        let now = std::time::SystemTime::now();
+        let launch = kernel.take_scheduled_process_launch(now).unwrap();
+        assert_eq!(launch.executable, executable);
+        assert_eq!(launch.command_line, "AppRunAtTime");
+        assert!(launch.concurrent && launch.call_key.is_none());
+        assert!(kernel.take_scheduled_process_launch(now).is_none());
     }
 
     #[test]
