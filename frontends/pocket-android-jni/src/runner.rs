@@ -699,6 +699,9 @@ fn run_process(
         emu.set_default_dir(&paths.working_dir);
         let save_dir = entry.save_dir(library_root);
         emu.mount_save_dir(&paths.save_prefix, &save_dir);
+        if let Some(process) = emu.process_mut() {
+            process.state.cedb.path = Some(save_dir.join("cedb-contacts.json"));
+        }
         if !is_gizmondo
             && !paths
                 .save_prefix

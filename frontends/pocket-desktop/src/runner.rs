@@ -610,6 +610,9 @@ impl Runner {
             summary_lines.push(format!("Module path: {}", paths.module_path));
             let save_dir = game.save_dir(library_root);
             emu.mount_save_dir(&paths.save_prefix, &save_dir);
+            if let Some(process) = emu.process_mut() {
+                process.state.cedb.path = Some(save_dir.join("cedb-contacts.json"));
+            }
             if !is_gizmondo
                 && !paths
                     .save_prefix

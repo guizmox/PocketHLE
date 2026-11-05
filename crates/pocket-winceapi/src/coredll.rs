@@ -9141,7 +9141,7 @@ fn close_handle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     let handle = ctx.arg_u32(0)?;
-    if close_owned_handle(ctx.kernel, handle) {
+    if ctx.kernel.cedb.cursors.remove(&handle).is_some() || close_owned_handle(ctx.kernel, handle) {
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
     if thread_handle_is_closed(ctx.kernel, handle)
@@ -10446,7 +10446,7 @@ pub(crate) fn do_alloc(ctx: &mut CallCtx<'_>, size: u32) -> Result<DispatchOutco
     Ok(DispatchOutcome::ReturnedR0(user_ptr))
 }
 
-fn do_free(ctx: &mut CallCtx<'_>, user_ptr: u32) {
+pub(crate) fn do_free(ctx: &mut CallCtx<'_>, user_ptr: u32) {
     ctx.kernel.heap.free(user_ptr);
 }
 
@@ -31222,6 +31222,7 @@ mod tests {
             main_thread: pocket_kernel::MainThreadState::default(),
             object_handles: pocket_kernel::handles::HandleTable::default(),
             crypto: Default::default(),
+            cedb: Default::default(),
             mapped_views: Default::default(),
             msxml: Default::default(),
             random_seed: 0x1234_abcd,

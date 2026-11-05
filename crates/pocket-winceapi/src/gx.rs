@@ -543,6 +543,7 @@ pub(crate) mod tests {
             main_thread: pocket_kernel::MainThreadState::default(),
             object_handles: pocket_kernel::handles::HandleTable::default(),
             crypto: Default::default(),
+            cedb: Default::default(),
             mapped_views: Default::default(),
             msxml: Default::default(),
             random_seed: 0x1234_abcd,
