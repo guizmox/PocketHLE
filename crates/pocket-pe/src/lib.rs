@@ -177,6 +177,25 @@ fn parse_wince_pe(bytes: &[u8]) -> Result<PE<'_>, LoadError> {
     PE::parse_with_opts(bytes, &options).map_err(|e| LoadError::NotPe(e.to_string()))
 }
 
+/// Read the version resource without constructing or loading a guest image.
+pub fn file_version_resource(bytes: &[u8]) -> Option<&[u8]> {
+    let pe = parse_wince_pe(bytes).ok()?;
+    let entry = resources::collect_resources(bytes, &pe)
+        .ok()?
+        .into_iter()
+        .find(|entry| entry.ty == ResourceKey::Id(16) && entry.name == ResourceKey::Id(1))?;
+    let section = pe.sections.iter().find(|section| {
+        entry.data_rva >= section.virtual_address
+            && entry.data_rva - section.virtual_address < section.size_of_raw_data
+    })?;
+    let offset = entry.data_rva - section.virtual_address;
+    if entry.size > section.size_of_raw_data - offset {
+        return None;
+    }
+    let start = section.pointer_to_raw_data.checked_add(offset)? as usize;
+    bytes.get(start..start.checked_add(entry.size as usize)?)
+}
+
 /// Parse and lay out a PE32 image from raw bytes.
 pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
     let pe = parse_wince_pe(bytes)?;

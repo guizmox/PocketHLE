@@ -1,6 +1,2 @@
-crates/pocket-kernel/src/lib.rs
+crates/pocket-pe/src/lib.rs
 crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/gx.rs
-crates/pocket-core/tests/ram_guest.rs
-frontends/pocket-desktop/src/runner.rs
-frontends/pocket-android-jni/src/runner.rs

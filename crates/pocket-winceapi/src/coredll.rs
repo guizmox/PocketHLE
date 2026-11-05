@@ -1810,53 +1810,76 @@ fn report_gsfailure(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     Ok(DispatchOutcome::Halt)
 }
 
-fn version_resource(kernel: &KernelState) -> Option<(u32, u32)> {
-    kernel.resource_scopes().find_map(|(entries, base)| {
-        entries
-            .iter()
-            .find(|entry| entry.ty == ResourceKey::Id(16) && entry.name == ResourceKey::Id(1))
-            .map(|entry| (base.wrapping_add(entry.data_rva), entry.size))
-    })
+fn read_file_version_resource(ctx: &mut CallCtx<'_>, file_ptr: u32) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    if file_ptr == 0 || file_ptr > u32::MAX - 520 {
+        return None;
+    }
+    let file = String::from_utf16(&read_wstr(ctx, file_ptr, 260).ok()?).ok()?;
+    if file.is_empty() {
+        return None;
+    }
+    let path = file.replace('/', "\\");
+    let bare = !path.contains('\\');
+    let resolve_file = |name: &str| ctx.kernel.vfs.resolve(name).filter(|path| path.is_file());
+    let host = resolve_file(&path).or_else(|| {
+        if bare {
+            resolve_file(&format!("\\Windows\\{path}"))
+        } else {
+            None
+        }
+    });
+    if let Some(host) = host {
+        const MAX_PE_BYTES: u64 = 32 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        std::fs::File::open(host)
+            .ok()?
+            .take(MAX_PE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_PE_BYTES {
+            return None;
+        }
+        return Some(pocket_pe::file_version_resource(&bytes)?.to_vec());
+    }
+
+    // A directly loaded executable may have no VFS entry. Use its mapped
+    // resource only when the caller specifically asks for that executable.
+    let module = &ctx.kernel.module_path;
+    if !path.eq_ignore_ascii_case(module)
+        && !(bare && module.rsplit('\\').next()?.eq_ignore_ascii_case(&path))
+    {
+        return None;
+    }
+    let entry = ctx.kernel.resources.iter()
+        .find(|entry| entry.ty == ResourceKey::Id(16) && entry.name == ResourceKey::Id(1))?;
+    ctx.cpu.read_mem(ctx.kernel.image_base.checked_add(entry.data_rva)?, entry.size).ok()
 }
 
 fn get_file_version_info_size_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let file_ptr = ctx.arg_u32(0)?;
     let handle_ptr = ctx.arg_u32(1)?;
-    let file = if file_ptr == 0 {
-        String::new()
-    } else {
-        String::from_utf16_lossy(&read_wstr(ctx, file_ptr, 260)?)
-    };
-    let Some((_, size)) = version_resource(ctx.kernel) else {
-        log::debug!("GetFileVersionInfoSizeW({file:?}) -> 0");
+    let Some(bytes) = read_file_version_resource(ctx, file_ptr) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if handle_ptr != 0 {
         ctx.cpu.write_mem(handle_ptr, &0u32.to_le_bytes())?;
     }
-    log::debug!("GetFileVersionInfoSizeW({file:?}) -> {size}");
-    Ok(DispatchOutcome::ReturnedR0(size))
+    Ok(DispatchOutcome::ReturnedR0(bytes.len() as u32))
 }
 
 fn get_file_version_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let file_ptr = ctx.arg_u32(0)?;
-    let _handle = ctx.arg_u32(1)?;
     let length = ctx.arg_u32(2)?;
     let data = ctx.arg_u32(3)?;
-    let file = if file_ptr == 0 {
-        String::new()
-    } else {
-        String::from_utf16_lossy(&read_wstr(ctx, file_ptr, 260)?)
-    };
-    let Some((source, size)) = version_resource(ctx.kernel) else {
+    let Some(bytes) = read_file_version_resource(ctx, file_ptr) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    if data == 0 || length < size {
+    if data == 0 || (length as usize) < bytes.len() {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let bytes = ctx.cpu.read_mem(source, size)?;
     ctx.cpu.write_mem(data, &bytes)?;
-    log::debug!("GetFileVersionInfoW({file:?}, {length}) -> {size}");
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -1932,10 +1955,13 @@ fn ver_query_value_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let query = String::from_utf16_lossy(&read_wstr(ctx, subblock, 260)?);
-    let Some((_, size)) = version_resource(ctx.kernel) else {
+    let Ok(header) = ctx.cpu.read_mem(block, 2) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let bytes = ctx.cpu.read_mem(block, size)?;
+    let size = u16::from_le_bytes([header[0], header[1]]) as u32;
+    let Ok(bytes) = ctx.cpu.read_mem(block, size) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
     let Some((_, mut node)) = version_node(&bytes, 0) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
