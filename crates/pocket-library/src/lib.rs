@@ -3535,16 +3535,17 @@ fn register_cab_install_dir(
         return;
     }
     let key = format!(r"HKLM\Software\Apps\{} {}", provider.trim(), app.trim());
-    if !registry
-        .iter()
-        .any(|v| v.key.eq_ignore_ascii_case(&key) && v.name.eq_ignore_ascii_case("InstallDir"))
-    {
-        registry.push(pocket_cab::SetupRegistryValue {
-            key,
-            name: "InstallDir".into(),
-            string: Some(directory.trim_end_matches('\\').into()),
-            dword: None,
-        });
+    for name in ["InstallDir", "InstlDir"] {
+        if !registry.iter().any(|value| {
+            value.key.eq_ignore_ascii_case(&key) && value.name.eq_ignore_ascii_case(name)
+        }) {
+            registry.push(pocket_cab::SetupRegistryValue {
+                key: key.clone(),
+                name: name.into(),
+                string: Some(directory.trim_end_matches('\\').into()),
+                dword: None,
+            });
+        }
     }
 }
 
@@ -6915,7 +6916,7 @@ mod resource_destination_tests {
         };
         let mut registry = Vec::new();
         super::register_cab_install_dir(&mut registry, &header);
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.len(), 2);
         assert_eq!(
             registry[0].key,
             r"HKLM\Software\Apps\Example Publisher Example App"
@@ -6924,11 +6925,13 @@ mod resource_destination_tests {
             registry[0].string.as_deref(),
             Some(r"\Program Files\Example")
         );
+        assert_eq!(registry[1].name, "InstlDir");
+        assert_eq!(registry[1].string, registry[0].string);
         registry[0].key.make_ascii_uppercase();
         registry[0].name.make_ascii_lowercase();
         registry[0].string = Some(r"\Storage Card\Example".into());
         super::register_cab_install_dir(&mut registry, &header);
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.len(), 2);
         assert_eq!(
             registry[0].string.as_deref(),
             Some(r"\Storage Card\Example")
