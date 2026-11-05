@@ -791,6 +791,7 @@ pub struct FrameSnapshot {
     pub texture_width: u32,
     pub texture_height: u32,
     pub rgba: Vec<u8>,
+    pub rgb565: Option<Arc<[u8]>>,
     pub text_input: bool,
     pub shared: Option<pocket_core::winceapi::gles::SharedFrame>,
     pub deferred: Option<Arc<pocket_core::kernel::framebuffer::deferred::DeferredPresentation>>,
@@ -830,6 +831,7 @@ impl FrameSnapshot {
             texture_width: shared.size().0,
             texture_height: shared.size().1,
             rgba: Vec::new(),
+            rgb565: None,
             text_input: false,
             shared: Some(shared),
             deferred: Some(deferred),
@@ -847,6 +849,7 @@ impl FrameSnapshot {
             texture_width: self.texture_width,
             texture_height: self.texture_height,
             rgba: self.cpu_rgba()?.into_owned(),
+            rgb565: None,
             text_input: self.text_input,
             shared: None,
             deferred: None,
@@ -861,6 +864,18 @@ impl FrameSnapshot {
             .ok_or("snapshot size overflow")?;
         if self.rgba.len() == expected {
             return Ok(std::borrow::Cow::Borrowed(&self.rgba));
+        }
+        if let Some(pixels) = &self.rgb565 {
+            if pixels.len() != expected / 2 {
+                return Err("invalid RGB565 snapshot size".into());
+            }
+            let mut rgba = Vec::with_capacity(expected);
+            for pixel in pixels.chunks_exact(2) {
+                let word = u16::from_le_bytes([pixel[0], pixel[1]]);
+                let color = pocket_core::kernel::framebuffer::rgb565_to_rgba8888(word);
+                rgba.extend_from_slice(&color.to_le_bytes());
+            }
+            return Ok(std::borrow::Cow::Owned(rgba));
         }
         let deferred = self
             .deferred
@@ -877,6 +892,7 @@ impl FrameSnapshot {
         Self {
             image_id: Self::next_image_id(),
             presentation_stats: fb.presentation_stats.clone(),
+            rgb565: None,
             text_input: false,
             shared: None,
             deferred: None,
@@ -892,11 +908,24 @@ impl FrameSnapshot {
     /// Like [`FrameSnapshot::from_framebuffer`] but reuses an existing
     /// `rgba` buffer the caller owns. Saves the per-frame 300 KiB
     /// allocation that the naive constructor does.
-    fn fill_from_framebuffer(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
-        fb.snapshot_presentation_rgba8888_into(scratch);
+    fn fill_from_framebuffer(
+        fb: &pocket_core::kernel::Framebuffer,
+        scratch: &mut Vec<u8>,
+        prefer_rgb565: bool,
+    ) -> Self {
+        let rgb565 = fb.presentation_rgb565()
+            .filter(|_| prefer_rgb565 && cfg!(target_endian = "little"))
+            .map(Arc::from);
+        let rgba = if rgb565.is_some() {
+            Vec::new()
+        } else {
+            fb.snapshot_presentation_rgba8888_into(scratch);
+            std::mem::take(scratch)
+        };
         Self {
             image_id: Self::next_image_id(),
             presentation_stats: fb.presentation_stats.clone(),
+            rgb565,
             text_input: false,
             shared: None,
             deferred: None,
@@ -905,11 +934,7 @@ impl FrameSnapshot {
             height: fb.height,
             texture_width: fb.presentation_size().0,
             texture_height: fb.presentation_size().1,
-            // `std::mem::take` hands ownership of the scratch buffer
-            // to the snapshot we are about to ship across the
-            // channel and leaves an empty `Vec` behind. The next
-            // call resizes it back up — same allocation, no churn.
-            rgba: std::mem::take(scratch),
+            rgba,
         }
     }
 }
@@ -1414,6 +1439,7 @@ impl FrameHook for RunHook {
                                     FrameAction::Continue
                                 };
                             }
+                            let prefer_rgb565 = state.fb_mapped && state.gx_explicit_present;
                             let presentation = match state.presentation_framebuffer() {
                                 Ok(frame) => frame,
                                 Err(error) => {
@@ -1422,7 +1448,7 @@ impl FrameHook for RunHook {
                                     return FrameAction::Stop;
                                 }
                             };
-                            FrameSnapshot::fill_from_framebuffer(&presentation, &mut self.scratch)
+                            FrameSnapshot::fill_from_framebuffer(&presentation, &mut self.scratch, prefer_rgb565)
                         };
                         // Valid GPU frames (including black clears) are accepted without a
                         // full CPU black scan. Final CPU snapshots keep the legacy heuristic.
@@ -1935,6 +1961,22 @@ mod geofence_refresh_tests {
 #[cfg(test)]
 mod internal_resolution_tests {
     use super::FrameSnapshot;
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn packed_gapi_snapshot_preserves_capture_pixels() {
+        let mut fb = pocket_core::kernel::Framebuffer::new(3, 1);
+        fb.pixels.copy_from_slice(&[0, 0xf8, 0xe0, 0x07, 0x65, 0x2c]);
+        let mut scratch = Vec::new();
+        let frame = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch, true);
+        assert_eq!(frame.rgb565.as_deref(), Some(fb.pixels.as_slice()));
+        assert!(frame.rgba.is_empty());
+        assert_eq!(frame.cpu_only().unwrap().rgba, fb.snapshot_rgba8888());
+        fb.set_backlight_level(5);
+        let dimmed = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch, true);
+        assert!(dimmed.rgb565.is_none());
+        assert_eq!(dimmed.rgba, fb.snapshot_rgba8888());
+    }
+
     #[test]
     fn physical_texture_does_not_change_logical_input_or_zoom_dimensions() {
         let mut fb = pocket_core::kernel::Framebuffer::new(2, 1);

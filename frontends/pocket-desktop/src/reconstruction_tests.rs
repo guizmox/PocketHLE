@@ -765,6 +765,7 @@ fn presenter_benchmark_current_cpu_and_shared_transport() {
                                         shared,
                                         deferred: None,
                                         backlight: 11,
+                                        rgb565: None,
                                     })
                                     .unwrap();
                                     acked.recv().unwrap();
@@ -860,6 +861,7 @@ fn displayed_identity_follows_painted_image_not_queued_or_failed_frames() {
                 shared: None,
                 deferred: None,
                 backlight: 11,
+                rgb565: None,
             };
             let a = make();
             let b = make();

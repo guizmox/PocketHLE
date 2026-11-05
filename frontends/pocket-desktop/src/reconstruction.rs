@@ -294,9 +294,7 @@ impl Reconstruction {
                     self.current_path = Some(PresentationPath::GpuShared);
                 }
                 if !copied {
-                    let result = frame
-                        .cpu_rgba()
-                        .and_then(|rgba| self.upload_cpu(gl, &frame, rgba.as_ref()));
+                    let result = self.upload_cpu(gl, &frame);
                     match result {
                         Ok(()) => {
                             self.image_id = Some(frame.image_id);
@@ -394,8 +392,14 @@ impl Reconstruction {
         &mut self,
         gl: &glow::Context,
         frame: &FrameSnapshot,
-        rgba: &[u8],
     ) -> Result<(), String> {
+        let rgba;
+        let (pixels, format, pixel_type) = if let Some(rgb565) = frame.rgb565.as_ref().filter(|_| !gl.version().is_embedded) {
+            (rgb565.as_ref(), glow::RGB, glow::UNSIGNED_SHORT_5_6_5)
+        } else {
+            rgba = frame.cpu_rgba()?;
+            (rgba.as_ref(), glow::RGBA, glow::UNSIGNED_BYTE)
+        };
         let size = [frame.texture_width, frame.texture_height];
         // The ordinary CPU-only presenter keeps its existing single texture.
         // Once shared conversion is used, both upload paths commit a spare
@@ -421,9 +425,9 @@ impl Reconstruction {
                 0,
                 size[0] as i32,
                 size[1] as i32,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(rgba),
+                format,
+                pixel_type,
+                glow::PixelUnpackData::Slice(pixels),
             );
         } else {
             gl.tex_image_2d(
@@ -433,9 +437,9 @@ impl Reconstruction {
                 size[0] as i32,
                 size[1] as i32,
                 0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                Some(rgba),
+                format,
+                pixel_type,
+                Some(pixels),
             );
         }
         if transactional {
@@ -625,6 +629,7 @@ fn prepare_frame(frame: &FrameSnapshot, filter: i32) -> Result<FrameSnapshot, St
         let rgba = frame.cpu_rgba()?;
         output.shared = None;
         output.deferred = None;
+        output.rgb565 = None;
         output.rgba = xbrz::scale_rgba(
             &rgba,
             frame.texture_width as usize,
@@ -663,6 +668,7 @@ mod tests {
             shared: None,
             deferred: None,
             backlight: 11,
+            rgb565: None,
             width: 16,
             height: 16,
             texture_width: 16,
@@ -781,6 +787,7 @@ mod session_lifetime_tests {
                 DeferredPresentation::new(source.clone(), 11).unwrap(),
             )),
             backlight: 11,
+            rgb565: None,
         };
         let mut p = presenter();
         p.pending = Some(frame);

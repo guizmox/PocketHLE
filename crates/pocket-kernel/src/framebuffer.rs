@@ -344,6 +344,12 @@ impl Framebuffer {
             })
     }
 
+    /// Native pixels when no alternate image or brightness conversion is needed.
+    pub fn presentation_rgb565(&self) -> Option<&[u8]> {
+        (self.render_presentation.is_none() && self.bpp == 16 && self.backlight_level == 11)
+            .then_some(self.pixels.as_slice())
+    }
+
     pub fn snapshot_presentation_rgba8888_into(&self, out: &mut Vec<u8>) {
         let Some(image) = self.render_presentation.as_ref() else {
             return self.snapshot_rgba8888_into(out);
@@ -565,7 +571,7 @@ impl Framebuffer {
 /// memory: `[R, G, B, A]`. Inlined hot path: this runs once per
 /// framebuffer pixel during every host display update.
 #[inline(always)]
-fn rgb565_to_rgba8888(p: u16) -> u32 {
+pub fn rgb565_to_rgba8888(p: u16) -> u32 {
     let r5 = ((p >> 11) & 0x1f) as u32;
     let g6 = ((p >> 5) & 0x3f) as u32;
     let b5 = (p & 0x1f) as u32;
