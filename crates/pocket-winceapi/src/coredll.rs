@@ -933,6 +933,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetCurrentThread", get_current_thread);
     d.register_handler(dll, "CreateThread", create_thread);
     d.register_handler(dll, "WaitForMultipleObjects", wait_for_multiple_objects);
+    d.register_handler(dll, "CeSetThreadPriority", ce_set_thread_priority);
+    d.register_handler(dll, "CeGetThreadPriority", ce_get_thread_priority);
     d.register_constant(dll, "SetThreadPriority", 1, one_returning);
     d.register_constant(dll, "GetThreadPriority", 0, zero_returning);
     d.register_handler(dll, "TerminateThread", terminate_thread);
@@ -3403,6 +3405,40 @@ fn remote_thread_target(kernel: &KernelState, handle: u32) -> Option<(u32, usize
         _ => None,
     }
 }
+fn ce_thread_priority_target(kernel: &KernelState, handle: u32) -> Option<(u32, usize)> {
+    thread_object_index(kernel, handle)
+        .map(|index| (kernel.object_handles.process_id(), index))
+        .or_else(|| remote_thread_target(kernel, handle))
+}
+
+fn ce_set_thread_priority(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let Ok(priority) = u8::try_from(ctx.arg_u32(1)?) else {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let updated = ce_thread_priority_target(ctx.kernel, handle)
+        .and_then(|(pid, index)| {
+            ctx.kernel.object_handles.ce_thread_priority(pid, index, Some(priority))
+        })
+        .is_some();
+    if !updated {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+    }
+    Ok(DispatchOutcome::ReturnedR0(u32::from(updated)))
+}
+
+fn ce_get_thread_priority(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let Some(priority) = ce_thread_priority_target(ctx.kernel, handle)
+        .and_then(|(pid, index)| ctx.kernel.object_handles.ce_thread_priority(pid, index, None))
+    else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(i32::MAX as u32));
+    };
+    Ok(DispatchOutcome::ReturnedR0(u32::from(priority)))
+}
+
 fn remote_suspend_result(
     ctx: &mut CallCtx<'_>,
     pid: u32,

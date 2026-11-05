@@ -1,2 +1,4 @@
-crates/pocket-pe/src/lib.rs
+crates/pocket-kernel/src/gdi.rs
+crates/pocket-kernel/src/handles.rs
+crates/pocket-winceapi/src/ce_fonts.rs
 crates/pocket-winceapi/src/coredll.rs

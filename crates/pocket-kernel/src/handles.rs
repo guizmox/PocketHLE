@@ -28,6 +28,7 @@ pub struct ThreadUpdate {
 #[derive(Clone, Copy)]
 struct ThreadControl {
     tid: u32,
+    ce_priority: u8,
     suspend_count: u32,
 }
 #[derive(Default)]
@@ -69,6 +70,7 @@ impl Default for HandleTable {
         domain.threads.insert(
             (1, 0),
             ThreadControl {
+                ce_priority: 251,
                 tid: 1,
                 suspend_count: 0,
             },
@@ -99,10 +101,23 @@ impl HandleTable {
             .threads
             .entry((self.pid, index))
             .or_insert(ThreadControl {
+                ce_priority: 251,
                 tid,
                 suspend_count: count,
             });
     }
+    pub fn ce_thread_priority(&self, pid: u32, index: usize, priority: Option<u8>) -> Option<u8> {
+        let mut domain = self.domain.lock().unwrap();
+        if !domain.active.contains(&pid) || domain.exits.contains_key(&(pid, Some(index))) {
+            return None;
+        }
+        let thread = domain.threads.get_mut(&(pid, index))?;
+        if let Some(priority) = priority {
+            thread.ce_priority = priority;
+        }
+        Some(thread.ce_priority)
+    }
+
     pub fn thread_id(&self, index: usize) -> Option<u32> {
         self.domain
             .lock()
@@ -362,6 +377,7 @@ impl HandleTable {
         d.threads.insert(
             (pid, 0),
             ThreadControl {
+                ce_priority: 251,
                 tid,
                 suspend_count: 0,
             },

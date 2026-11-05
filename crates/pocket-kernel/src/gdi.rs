@@ -383,6 +383,7 @@ pub struct FontEnumFrame {
 pub struct GdiState {
     pub installed_fonts: Vec<crate::text::InstalledFont>,
     pub installed_font_bytes: usize,
+    font_registrations: Vec<(std::path::PathBuf, usize, usize)>,
     pub font_enum_frames: Vec<FontEnumFrame>,
     pub image_decode_frames: Vec<ImageDecodeFrame>,
     pub image_renderers: HashMap<u32, ImageRenderer>,
@@ -414,6 +415,7 @@ impl GdiState {
         let mut s = Self {
             installed_fonts: Vec::new(),
             installed_font_bytes: 0,
+            font_registrations: Vec::new(),
             font_enum_frames: Vec::new(),
             image_decode_frames: Vec::new(),
             image_renderers: HashMap::new(),
@@ -631,7 +633,13 @@ impl GdiState {
         h
     }
 
-    pub fn install_fonts(&mut self, fonts: Vec<crate::text::InstalledFont>, bytes: usize) {
+    pub fn install_fonts(
+        &mut self,
+        path: std::path::PathBuf,
+        fonts: Vec<crate::text::InstalledFont>,
+        bytes: usize,
+    ) {
+        self.font_registrations.push((path, fonts.len(), bytes));
         self.installed_font_bytes += bytes;
         self.installed_fonts.extend(fonts);
         for object in self.objects.values_mut() {
@@ -641,8 +649,21 @@ impl GdiState {
         }
     }
 
+    pub fn remove_fonts(&mut self, path: &std::path::Path) -> bool {
+        let Some(index) = self.font_registrations.iter().rposition(|entry| entry.0 == path) else {
+            return false;
+        };
+        let start: usize = self.font_registrations[..index].iter().map(|entry| entry.1).sum();
+        let (_, count, bytes) = self.font_registrations.remove(index);
+        self.installed_fonts.drain(start..start + count);
+        self.installed_font_bytes -= bytes;
+        // Existing GDI font objects retain their owned font references.
+        true
+    }
+
     pub fn clear_guest_fonts(&mut self) {
         self.installed_fonts.clear();
+        self.font_registrations.clear();
         self.installed_font_bytes = 0;
         for object in self.objects.values_mut() {
             if let GdiObject::Font(font) = object {

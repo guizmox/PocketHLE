@@ -8,6 +8,7 @@ use pocket_kernel::{
 const RECORD_SIZE: u32 = 284 + 76;
 pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler("coredll.dll", "AddFontResourceW", add);
+    d.register_handler("coredll.dll", "RemoveFontResourceW", remove);
     d.register_handler("coredll.dll", "EnumFontFamiliesW", enumerate);
 }
 
@@ -16,6 +17,30 @@ mod tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+    #[test]
+    fn ce_fonts_remove_one_registration_at_a_time() {
+        let (mut cpu, mut k, mut d) = setup();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("font.ttf"),
+            include_bytes!("../../pocket-kernel/assets/fonts/LiberationSerif-Regular.ttf"),
+        ).unwrap();
+        k.vfs.mount("/", dir.path());
+        cpu.write_mem(
+            0x1000,
+            &"/font.ttf".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>(),
+        ).unwrap();
+        let mut invoke = |api| call(&mut cpu, &mut k, &mut d, "coredll.dll", api, &[0x1000]);
+        for _ in 0..2 {
+            assert_eq!(invoke("AddFontResourceW"), DispatchOutcome::ReturnedR0(1));
+        }
+        for expected in [1, 1, 0] {
+            assert_eq!(invoke("RemoveFontResourceW"), DispatchOutcome::ReturnedR0(expected));
+        }
+        assert!(k.gdi.installed_fonts.is_empty());
+        assert_eq!(k.gdi.installed_font_bytes, 0);
+    }
+
     #[test]
     fn ce_fonts_real_resource_is_selected_and_enum_stops_on_zero() {
         let (mut cpu, mut k, mut d) = setup();
@@ -151,6 +176,7 @@ fn add(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let result = (|| {
         let path = crate::ce_shortcut::text(ctx, p, 260)?;
         let size = ctx.kernel.vfs.file_information(&path)?.size;
+        let source = ctx.kernel.vfs.resolve(&path).ok_or(2u32)?;
         if size == 0 || size > 8 * 1024 * 1024 {
             return Err(13);
         }
@@ -175,7 +201,7 @@ fn add(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         {
             return Err(8);
         }
-        ctx.kernel.gdi.install_fonts(fonts, bytes);
+        ctx.kernel.gdi.install_fonts(source, fonts, bytes);
         Ok(count as u32)
     })();
     match result {
@@ -183,6 +209,17 @@ fn add(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         Err(e) => fail(ctx, e),
     }
 }
+fn remove(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let ptr = ctx.arg_u32(0)?;
+    let path = match crate::ce_shortcut::text(ctx, ptr, 260) {
+        Ok(path) => path,
+        Err(error) => return fail(ctx, error),
+    };
+    let removed = ctx.kernel.vfs.resolve(&path)
+        .is_some_and(|source| ctx.kernel.gdi.remove_fonts(&source));
+    Ok(DispatchOutcome::ReturnedR0(u32::from(removed)))
+}
+
 fn put_text(out: &mut [u8], value: &str) {
     let limit = out.len() / 2 - 1;
     for (i, c) in value.encode_utf16().take(limit).enumerate() {
