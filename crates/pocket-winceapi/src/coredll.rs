@@ -18531,7 +18531,7 @@ fn set_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
             })
             .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
             .unwrap_or(ctx.kernel.wnd_proc);
-        log::info!("SetWindowLongW(GWL_WNDPROC) re-binding WndProc=0x{new_long:08x} (previous=0x{previous:08x})");
+        log::debug!("SetWindowLongW(GWL_WNDPROC) hwnd=0x{hwnd:08x} WndProc=0x{new_long:08x} (previous=0x{previous:08x})");
         if hwnd == FAKE_HWND {
             ctx.kernel.wnd_proc = new_long;
         }
