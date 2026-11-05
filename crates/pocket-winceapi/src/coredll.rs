@@ -31221,6 +31221,7 @@ mod tests {
             memory_division: None,
             main_thread: pocket_kernel::MainThreadState::default(),
             object_handles: pocket_kernel::handles::HandleTable::default(),
+            crypto: Default::default(),
             mapped_views: Default::default(),
             msxml: Default::default(),
             random_seed: 0x1234_abcd,

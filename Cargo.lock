@@ -935,6 +935,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "916a94e407b54f9034d71dd748234cd1e516ced6284009906ae246f177eafe5a"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2978,6 +2987,7 @@ dependencies = [
  "rmp3",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror 1.0.69",
  "ttf-parser",
@@ -3032,6 +3042,7 @@ dependencies = [
  "anyhow",
  "cc",
  "cpal",
+ "des",
  "image 0.24.9",
  "indexmap",
  "log",

@@ -52,6 +52,7 @@ pub mod gdi;
 pub mod gps;
 pub mod gz;
 pub mod handles;
+pub mod crypto;
 #[cfg(test)]
 mod heap_virtual_tests;
 pub mod image_memory;
@@ -1147,6 +1148,7 @@ pub struct KernelState {
     pub main_thread: MainThreadState,
     /// Closed aliases remain as tombstones to reject stale handles.
     pub object_handles: handles::HandleTable,
+    pub crypto: crypto::CryptoState,
     pub mapped_views: file_mapping::MappedViews,
     pub msxml: msxml::MsxmlState,
     pub random_seed: u32,
@@ -4324,6 +4326,7 @@ impl Process {
                     ..MainThreadState::default()
                 },
                 object_handles: handles::HandleTable::default(),
+                crypto: Default::default(),
                 mapped_views: Default::default(),
                 msxml: Default::default(),
                 random_seed: 0x1234_abcd,

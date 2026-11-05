@@ -27,6 +27,7 @@ mod backlight_tests;
 mod bluetooth;
 mod camera;
 mod ce_fonts;
+mod ce_crypto;
 #[cfg(all(test, feature = "unicorn-tests"))]
 mod ce_native_tests;
 mod ce_notify;
@@ -291,6 +292,7 @@ impl WinCeDispatcher {
         ce_phonebook::register(&mut d);
         ce_shortcut::register(&mut d);
         ce_fonts::register(&mut d);
+        ce_crypto::register(&mut d);
         ce_notify::register(&mut d);
         ce_services::register(&mut d);
         ws2::register(&mut d);

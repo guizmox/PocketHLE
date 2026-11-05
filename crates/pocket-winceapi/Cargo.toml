@@ -19,6 +19,7 @@ audio-cpal = ["pocket-kernel/audio-cpal", "dep:cpal"]
 video-static = []
 
 [dependencies]
+des = "0.9"
 cpal = { version = "0.15", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true

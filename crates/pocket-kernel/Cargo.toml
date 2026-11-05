@@ -17,6 +17,7 @@ default = ["audio-cpal"]
 audio-cpal = ["dep:cpal"]
 
 [dependencies]
+sha1 = "0.11"
 ab_glyph = "=0.2.32"
 ttf-parser = "=0.25.1"
 png = "0.17"
