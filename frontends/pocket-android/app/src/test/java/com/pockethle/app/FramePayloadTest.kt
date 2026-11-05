@@ -18,8 +18,14 @@ class FramePayloadTest {
     }
 
     @Test fun highResolutionDoesNotChangeGuestCoordinates() {
-        val frame = decodeFramePayload(payload(-1, 2, 1, 4, 2, pixelBytes = 32))!!
-        assertEquals(FramePayload(2, 1, 4, 2, 20), frame)
+        for (scale in 2..4) {
+            val textureWidth = 320 * scale
+            val textureHeight = 240 * scale
+            val frame = decodeFramePayload(
+                payload(-1, 320, 240, textureWidth, textureHeight, pixelBytes = textureWidth * textureHeight * 4),
+            )
+            assertEquals(FramePayload(320, 240, textureWidth, textureHeight, 20), frame)
+        }
     }
 
     @Test fun malformedAndTruncatedImagesAreRejected() {
@@ -29,6 +35,9 @@ class FramePayloadTest {
         assertNull(decodeFramePayload(payload(240, 320)))
         assertNull(decodeFramePayload(payload(Int.MAX_VALUE, Int.MAX_VALUE)))
         assertNull(decodeFramePayload(payload(-1, 2, 1, 3, 2, pixelBytes = 32)))
+        assertNull(decodeFramePayload(payload(-1, 2, 1, 4, 3, pixelBytes = 48)))
+        assertNull(decodeFramePayload(payload(-1, 2, 1, 10, 5, pixelBytes = 200)))
         assertNull(decodeFramePayload(payload(-1, 2, 1, 4, 2, pixelBytes = 31)))
+        assertNull(decodeFramePayload(payload(-1, 2, 1, 8, 4, pixelBytes = 127)))
     }
 }

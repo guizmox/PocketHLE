@@ -27,10 +27,13 @@ internal fun decodeFramePayload(raw: ByteArray): FramePayload? {
         textureWidth = buffer.int
         textureHeight = buffer.int
         offset = 20
-        if (textureWidth.toLong() != width.toLong() * 2 ||
-            textureHeight.toLong() != height.toLong() * 2) return null
     }
     if (width <= 0 || height <= 0 || textureWidth <= 0 || textureHeight <= 0) return null
+    if (offset == 20) {
+        val scale = textureWidth / width
+        if (scale !in 2..4 || textureWidth.toLong() != width.toLong() * scale ||
+            textureHeight.toLong() != height.toLong() * scale) return null
+    }
     // Reject malformed lengths before copying or asking GL to allocate an image.
     val pixels = textureWidth.toLong() * textureHeight
     if (pixels > (raw.size.toLong() - offset) / 4) return null
