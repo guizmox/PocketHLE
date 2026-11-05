@@ -1884,6 +1884,7 @@ impl Vfs {
         self.vibration_handles.clear();
         self.camera_deadlines.clear();
         self.bluetooth.lookups.clear();
+        self.bluetooth.clear_discovery_aliases();
         self.bluetooth.writes.clear();
         self.bluetooth.sockets.clear();
         self.bluetooth.socket_deadlines.clear();

@@ -370,6 +370,7 @@ pub struct State {
     pub service: Service,
     pub startups: u32,
     pub lookups: HashMap<u32, Lookup>,
+    discovery_aliases: HashMap<u64, u64>,
     pub next_lookup: u32,
     pub writes: HashMap<(usize, u32, u32), PendingWrite>,
     pub sockets: HashMap<u32, GuestSocket>,
@@ -396,6 +397,29 @@ impl State {
         );
         Ok(id)
     }
+    /// The Gizmondo discovery UI recognizes peers by this address prefix.
+    /// Keep aliases local to the guest session and never change the radio address.
+    pub fn gizmondo_discovery_alias(&mut self, host_address: u64) -> BtResult<u64> {
+        const PREFIX: u64 = 0x0012_8500_0000;
+        if let Some((&alias, _)) = self.discovery_aliases.iter().find(|(_, address)| **address == host_address) {
+            return Ok(alias);
+        }
+        if self.discovery_aliases.len() >= 1024 {
+            return Err(10055);
+        }
+        let alias = PREFIX | (0x00ff_0000 + self.discovery_aliases.len() as u64);
+        self.discovery_aliases.insert(alias, host_address);
+        Ok(alias)
+    }
+
+    pub fn resolve_discovery_alias(&self, address: u64) -> u64 {
+        self.discovery_aliases.get(&address).copied().unwrap_or(address)
+    }
+
+    pub fn clear_discovery_aliases(&mut self) {
+        self.discovery_aliases.clear();
+    }
+
     pub fn begin_lookup(&mut self) -> BtResult<u32> {
         let backend = self.service.active_backend()?;
         let result = Arc::new(Mutex::new(None));

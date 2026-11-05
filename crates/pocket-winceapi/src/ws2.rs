@@ -26,6 +26,9 @@ pub fn register(dispatcher: &mut WinCeDispatcher) {
         dispatcher.register_handler("ws2.dll", name, lookup_next);
     }
     dispatcher.register_handler("ws2.dll", "WSALookupServiceEnd", lookup_end);
+    dispatcher.register_handler("btdrt.dll", "BthNsLookupServiceBegin", lookup_begin);
+    dispatcher.register_handler("btdrt.dll", "BthNsLookupServiceNext", lookup_next);
+    dispatcher.register_handler("btdrt.dll", "BthNsLookupServiceEnd", lookup_end);
 }
 
 fn startup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -110,6 +113,10 @@ fn hostname(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.cpu.write_mem(ptr, &bytes)?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
+fn btdrt_lookup(ctx: &CallCtx<'_>) -> bool {
+    ctx.thunk.dll.eq_ignore_ascii_case("btdrt.dll")
+}
+
 fn lookup_begin(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.kernel.vfs.bluetooth.startups == 0 {
         return not_initialized(ctx);
@@ -138,9 +145,11 @@ fn lookup_begin(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     {
         return fail(ctx, 10022);
     }
-    if [4, 8, 12, 16, 24, 28, 32, 36, 40, 44, 48, 56]
+    // BTDRT callers may supply a protocol-array pointer with a zero count.
+    if [4, 8, 12, 16, 24, 28, 32, 36, 40, 44, 56]
         .iter()
         .any(|i| q[*i..*i + 4] != [0; 4])
+        || (!btdrt_lookup(ctx) && q[48..52] != [0; 4])
     {
         return fail(ctx, 10045); // Service/filter queries are a separate contract.
     }
@@ -161,7 +170,9 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let flags = ctx.arg_u32(1)?;
     let length = ctx.arg_u32(2)?;
     let ptr = ctx.arg_u32(3)?;
-    if flags & !(0x10 | 0x100) != 0 {
+    let return_blob = btdrt_lookup(ctx) && flags & 0x200 != 0;
+    let supported = 0x10 | 0x100 | if return_blob { 0x200 } else { 0 };
+    if flags & !supported != 0 {
         return fail(ctx, 10022);
     }
     if length == 0
@@ -190,9 +201,10 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         .chain(Some(0))
         .flat_map(u16::to_le_bytes)
         .collect();
+    let name_offset: u32 = if return_blob { 140 } else { 124 };
     let Some(required) = u32::try_from(name.len())
         .ok()
-        .and_then(|n| 124u32.checked_add(n))
+        .and_then(|n| name_offset.checked_add(n))
     else {
         return fail(ctx, 10055);
     };
@@ -210,10 +222,18 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.cpu.write_mem(length, &required.to_le_bytes())?;
         return fail(ctx, 10014);
     }
+    let address = if return_blob {
+        match ctx.kernel.vfs.bluetooth.gizmondo_discovery_alias(device.address) {
+            Ok(address) => address,
+            Err(error) => return fail(ctx, error),
+        }
+    } else {
+        device.address
+    };
     let mut bytes = vec![0; required as usize];
     for (offset, value) in [
         (0, 60),
-        (4, ptr + 124),
+        (4, ptr + name_offset),
         (20, 16),
         (44, 1),
         (48, ptr + 60),
@@ -225,8 +245,16 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
     bytes[84..86].copy_from_slice(&32u16.to_le_bytes());
-    bytes[92..100].copy_from_slice(&device.address.to_le_bytes());
-    bytes[124..].copy_from_slice(&name);
+    bytes[92..100].copy_from_slice(&address.to_le_bytes());
+    if return_blob {
+        // BTDRT inquiry supplies a BLOB whose first field is the 64-bit
+        // Bluetooth address, in addition to the standard CSADDR_INFO.
+        bytes[56..60].copy_from_slice(&(ptr + 124).to_le_bytes());
+        bytes[124..128].copy_from_slice(&8u32.to_le_bytes());
+        bytes[128..132].copy_from_slice(&(ptr + 132).to_le_bytes());
+        bytes[132..140].copy_from_slice(&address.to_le_bytes());
+    }
+    bytes[name_offset as usize..].copy_from_slice(&name);
     ctx.cpu.write_mem(ptr, &bytes)?;
     ctx.kernel.vfs.bluetooth.lookups.get_mut(&id).unwrap().index += 1;
     Ok(DispatchOutcome::ReturnedR0(0))
@@ -457,6 +485,42 @@ mod tests {
             ),
             DispatchOutcome::ReturnedR0(0)
         );
+        // GTShell uses BTDRT with an unused protocol pointer and asks for
+        // the address BLOB. Reuse the same simulated host inquiry.
+        query[48..52].copy_from_slice(&0x1150u32.to_le_bytes());
+        cpu.write_mem(0x1100, &query).unwrap();
+        assert_eq!(
+            call(&mut cpu, &mut kernel, &mut dispatcher, "btdrt.dll",
+                "BthNsLookupServiceBegin", &[0x1100, 2, 0x1210]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let legacy = cpu.read_u32_le(0x1210).unwrap();
+        let legacy_result = kernel.vfs.bluetooth.lookups[&legacy].result.clone();
+        for _ in 0..100 {
+            if legacy_result.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        cpu.write_mem(0x1214, &512u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(&mut cpu, &mut kernel, &mut dispatcher, "btdrt.dll",
+                "BthNsLookupServiceNext", &[legacy, 0x310, 0x1214, 0x2000]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let blob = cpu.read_u32_le(0x2038).unwrap();
+        assert_eq!(cpu.read_u32_le(blob).unwrap(), 8);
+        let address = cpu.read_u32_le(blob + 4).unwrap();
+        let alias = u64::from_le_bytes(cpu.read_mem(address, 8).unwrap().try_into().unwrap());
+        assert_eq!(alias >> 24, 0x001285);
+        assert_eq!(kernel.vfs.bluetooth.resolve_discovery_alias(alias), 0x123456789abc);
+        assert_eq!(cpu.read_mem(0x205c, 8).unwrap(), alias.to_le_bytes());
+        assert_eq!(
+            call(&mut cpu, &mut kernel, &mut dispatcher, "btdrt.dll",
+                "BthNsLookupServiceEnd", &[legacy]),
+            DispatchOutcome::ReturnedR0(0)
+        );
+
         let lookup = cpu.read_u32_le(0x1200).unwrap();
         let result = kernel.vfs.bluetooth.lookups[&lookup].result.clone();
         for _ in 0..100 {

@@ -201,10 +201,11 @@ fn connect(ctx: &mut CallCtx<'_>) -> Outcome {
     if !valid(ctx, h) {
         return error(ctx, 10038);
     }
-    let addr = match read_address(ctx, ptr, len) {
+    let mut addr = match read_address(ctx, ptr, len) {
         Ok(a) => a,
         Err(e) => return error(ctx, e),
     };
+    addr.address = ctx.kernel.vfs.bluetooth.resolve_discovery_alias(addr.address);
     let s = ctx.kernel.vfs.bluetooth.sockets.get_mut(&h).unwrap();
     let nonblocking = s.nonblocking;
     let timeout = 0;
@@ -710,6 +711,7 @@ mod tests {
         rx: VecDeque<u8>,
         accepts: u32,
         bound: SocketAddress,
+        connect_address: u64,
         ready: bool,
         closed: u32,
     }
@@ -727,7 +729,8 @@ mod tests {
         fn listen(&mut self, _: i32) -> BtResult<()> {
             Ok(())
         }
-        fn connect(&mut self, _: &SocketAddress) -> BtResult<()> {
+        fn connect(&mut self, address: &SocketAddress) -> BtResult<()> {
+            self.0.lock().unwrap().connect_address = address.address;
             Err(WOULD_BLOCK)
         }
         fn accept(&mut self) -> BtResult<(Box<dyn RfcommSocket>, SocketAddress)> {
@@ -816,6 +819,7 @@ mod tests {
             rx: VecDeque::new(),
             accepts: 0,
             bound: Default::default(),
+            connect_address: 0,
             ready: false,
             closed: 0,
         }));
@@ -842,6 +846,26 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+    #[test]
+    fn winsock_connect_resolves_gizmondo_discovery_alias() {
+        let (mut cpu, mut kernel, mut dispatcher, shared) = started_with("winsock.dll");
+        let handle = ret(call(
+            &mut cpu, &mut kernel, &mut dispatcher, "winsock.dll", "socket", &[32, 1, 3],
+        ));
+        kernel.vfs.bluetooth.sockets.get_mut(&handle).unwrap().nonblocking = true;
+        let real = 0x1234_5678_9abc;
+        let alias = kernel.vfs.bluetooth.gizmondo_discovery_alias(real).unwrap();
+        assert_eq!(kernel.vfs.bluetooth.gizmondo_discovery_alias(real), Ok(alias));
+        let address = SocketAddress { address: alias, port: 1, uuid: [0; 16] };
+        cpu.write_mem(0x1200, &encode(&address)).unwrap();
+        assert_eq!(
+            ret(call(&mut cpu, &mut kernel, &mut dispatcher, "winsock.dll", "connect",
+                &[handle, 0x1200, 40])),
+            u32::MAX
+        );
+        assert_eq!(shared.lock().unwrap().connect_address, real);
+    }
+
     #[test]
     fn chicane_server_sequence_real_handles_options_nonblocking_and_cleanup() {
         for dll in ["ws2.dll", "winsock.dll"] {
