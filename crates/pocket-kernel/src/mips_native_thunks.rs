@@ -39,16 +39,26 @@ mod tests {
     fn multiply_executes_with_exact_wrapping_result_and_preserves_the_abi() {
         use pocket_cpu::{regs::ArmReg, unicorn::UnicornCpu, Arch, Cpu, Prot};
         let mut cpu = UnicornCpu::new_for_arch(Arch::Mips).unwrap();
-        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.map_region(0x1000, 0x2000, Prot::ALL).unwrap();
         let words = native_thunk_for("coredll.dll", "__ll_mul").unwrap();
-        cpu.write_mem(0x1000, &crate::native_thunks::thunk_bytes(&words))
+        cpu.write_mem(0x1100, &crate::native_thunks::thunk_bytes(&words))
             .unwrap();
         cpu.write_mem(
-            0x1100,
-            &crate::native_thunks::thunk_bytes(&[0xafa2_0000, 0xafa3_0004, 0, 0, 0, 0, 0, 0]),
+            0x1000,
+            // jal 0x1100; nop; move gp,v1 (expose the high return word); break.
+            &crate::native_thunks::thunk_bytes(&[
+                0x0c00_0440,
+                0,
+                0x0060_e021,
+                0x0000_000d,
+                0,
+                0,
+                0,
+                0,
+            ]),
         )
         .unwrap();
-        cpu.add_code_hook(0x1108).unwrap();
+        cpu.add_code_hook(0x100c).unwrap();
         let mut seed = 0x1234_5678_9abc_def0u64;
         let mut cases = vec![
             (0, 0),
@@ -71,21 +81,21 @@ mod tests {
                 (ArmReg::R1, (a >> 32) as u32),
                 (ArmReg::R2, b as u32),
                 (ArmReg::R3, (b >> 32) as u32),
-                (ArmReg::Sp, 0x1ff0),
+                (ArmReg::Sp, 0x2ff0),
                 (ArmReg::R4, 0x13579bdf),
-                (ArmReg::Lr, 0x1100),
             ] {
                 cpu.write_reg(r, v).unwrap();
             }
             cpu.run_until_hook(0x1000, 1000).unwrap();
             let product = a.wrapping_mul(b);
-            assert_eq!(cpu.read_u32_le(0x1ff0).unwrap(), product as u32);
-            assert_eq!(cpu.read_u32_le(0x1ff4).unwrap(), (product >> 32) as u32);
+            assert_eq!(cpu.read_return().unwrap(), product as u32);
+            assert_eq!(cpu.read_reg(ArmReg::R12).unwrap(), (product >> 32) as u32);
             assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), a as u32);
             assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), (a >> 32) as u32);
-            assert_eq!(cpu.read_reg(ArmReg::Sp).unwrap(), 0x1ff0);
+            assert_eq!(cpu.read_reg(ArmReg::Sp).unwrap(), 0x2ff0);
             assert_eq!(cpu.read_reg(ArmReg::R4).unwrap(), 0x13579bdf);
-            assert_eq!(cpu.read_reg(ArmReg::Pc).unwrap(), 0x1108);
+            assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x1008);
+            assert_eq!(cpu.read_reg(ArmReg::Pc).unwrap(), 0x100c);
         }
     }
 }

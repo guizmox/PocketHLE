@@ -60,6 +60,7 @@ pub mod image_memory;
 pub mod imaging;
 pub mod internet;
 pub mod memory_division;
+mod mips_native_thunks;
 pub mod msgbox;
 pub mod msxml;
 pub mod native_thunks;
@@ -4003,7 +4004,7 @@ impl Process {
             };
             let native =
                 if image.machine == machine::MIPS_R3000 || image.machine == machine::MIPS_R4000 {
-                    None
+                    native_name.and_then(|name| native_thunks::mips_thunk_for(&imp.dll, name))
                 } else {
                     native_name.and_then(|n| native_thunks::native_thunk_at(&imp.dll, n, thunk_va))
                 };
@@ -4107,7 +4108,9 @@ impl Process {
                 // GetProcAddress must expose the same small-copy fast path
                 // as a static import; unrelated dynamic exports keep their
                 // existing dispatch behaviour.
-                let hybrid = if cpu.arch() == Arch::Arm
+                let hybrid = if cpu.arch() == Arch::Mips {
+                    native_thunks::mips_thunk_for(&dll, &name).map(|words| (None, words))
+                } else if cpu.arch() == Arch::Arm
                     && (native_thunks::hybrid_fallback_offset(&dll, &name).is_some()
                         || (dll.eq_ignore_ascii_case("coredll.dll")
                             && matches!(name.as_str(), "__i64tod" | "__u64tod")))

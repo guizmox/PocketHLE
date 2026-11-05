@@ -154,17 +154,10 @@ impl UnicornCpu {
         let images = Rc::new(RefCell::new(crate::image_pages::ImagePages {
             ..Default::default()
         }));
-        // Unicorn's virtual TLB can restore MIPS delay-slot branch state during
-        // a store refill and raise an exception on the following branch. Keep
-        // the architectural TLB for MIPS; the flat-memory fast path is ARM-only.
         let deferred_memory = Rc::new(RefCell::new(
             crate::deferred_memory::PendingMemory::default(),
         ));
-        let guest_map = if arch == Arch::Arm {
-            install_virtual_tlb(&mut uc, &last_fault, &images, &deferred_memory)
-        } else {
-            None
-        };
+        let guest_map = install_virtual_tlb(&mut uc, arch, &last_fault, &images, &deferred_memory);
         if guest_map.is_none() {
             // Architectural TLB: Unicorn resolves pages itself, so the
             // only way to learn the faulting address is the
@@ -246,6 +239,7 @@ impl UnicornCpu {
 /// restores the pre-optimisation behaviour exactly.
 fn install_virtual_tlb(
     uc: &mut Unicorn<'static, ()>,
+    arch: Arch,
     last_fault: &Rc<RefCell<Option<(String, u64)>>>,
     images: &Rc<RefCell<crate::image_pages::ImagePages>>,
     deferred_memory: &Rc<RefCell<crate::deferred_memory::PendingMemory>>,
@@ -255,6 +249,21 @@ fn install_virtual_tlb(
     }
     if uc.ctl_set_tlb_type(TlbType::VIRTUAL).is_err() {
         return None;
+    }
+    if arch == Arch::Mips {
+        // A MIPS refill must not restore delay-slot state before resuming
+        // translated code. Older Unicorn libraries keep their CPU TLB.
+        let mapping_only = unsafe {
+            ::unicorn_engine::uc_ctl(
+                uc.get_handle(),
+                ::unicorn_engine::ControlType(0x4400504au32 as _),
+                0x50484d4950535631u64,
+            )
+        };
+        if mapping_only as u32 != 0 {
+            let _ = uc.ctl_set_tlb_type(TlbType::CPU);
+            return None;
+        }
     }
     let map: Rc<RefCell<GuestMap>> = Rc::new(RefCell::new(GuestMap::default()));
     let regions = map.clone();
@@ -343,6 +352,10 @@ fn install_virtual_tlb(
         // architectural TLB instead.
         let _ = uc.ctl_set_tlb_type(TlbType::CPU);
         return None;
+    }
+    if arch == Arch::Mips {
+        log::info!("MIPS virtual TLB enabled");
+        return Some(map);
     }
     // Installed callback above always returns paddr == page. Only this fixed
     // mapping contract permits cross-page direct TB links. A CPU-TLB fallback
@@ -688,8 +701,13 @@ impl Cpu for UnicornCpu {
             .mem_map(va as u64, size as u64, map_prot(prot))
             .map_err(|e| CpuError::Backend(format!("mem_map: {e:?}")))?;
         if let Some(map) = &self.guest_map {
-            map.borrow_mut()
-                .insert(va as u64, size as u64, prot.contains(Prot::EXEC));
+            let mut map = map.borrow_mut();
+            map.insert(va as u64, size as u64, prot.contains(Prot::EXEC));
+            if self.arch == Arch::Mips {
+                // Preserve the MIPS loader's explicit page permissions.
+                map.protected
+                    .push((u64::from(va), u64::from(va) + u64::from(size), prot));
+            }
             // Pages inside the new region may already have a
             // "fault" verdict cached from a probe, so drop the TLB.
             // Mappings are created at load time and by VirtualAlloc,
@@ -1209,6 +1227,174 @@ mod tests {
             cpu.read_mem(0x2000, 4).unwrap(),
             0x40000001u32.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn mips_virtual_tlb_preserves_delay_slot_loads_and_faults() {
+        if std::env::var_os("POCKETHLE_CPU_TLB").is_some() {
+            return;
+        }
+        for (branch, condition, target, mapped) in [
+            (0x1080_0002u32, 0, 0x100c, true), // beq taken
+            (0x1080_0002, 1, 0x1008, true),    // beq not taken
+            (0x5080_0002, 1, 0x1008, false),   // beql not taken: annul the slot
+            (0x1080_0002, 0, 0, false),        // taken branch with a real fault
+        ] {
+            let mut cpu = UnicornCpu::new_for_arch(Arch::Mips).unwrap();
+            assert!(cpu.guest_map.is_some());
+            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::EXEC)
+                .unwrap();
+            // Branch; lw v0,0(a1) in the slot; break on both paths.
+            let code: Vec<_> = [branch, 0x8ca2_0000, 0x0000_000d, 0x0000_000d]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            cpu.write_mem(0x1000, &code).unwrap();
+            cpu.add_code_hook(0x1008).unwrap();
+            cpu.add_code_hook(0x100c).unwrap();
+            cpu.write_reg(ArmReg::R0, condition).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
+            cpu.write_return(0xdead_beef).unwrap();
+            if mapped {
+                cpu.map_region(0x2000, 0x1000, Prot::READ).unwrap();
+                cpu.write_mem(0x2000, &0x1234_5678u32.to_le_bytes())
+                    .unwrap();
+            }
+            let result = cpu.run_until_hook(0x1000, 0);
+            if target == 0 {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("0x00002000"), "{error}");
+            } else {
+                assert_eq!(result.unwrap(), StopReason::Hook(target));
+            }
+            assert_eq!(
+                cpu.read_return().unwrap(),
+                if mapped { 0x1234_5678 } else { 0xdead_beef }
+            );
+        }
+    }
+
+    #[test]
+    fn mips_tlb_preserves_kernel_segment_aliases() {
+        for address in [0x8000_2000, 0xa000_2000] {
+            let mut cpu = UnicornCpu::new_for_arch(Arch::Mips).unwrap();
+            cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::EXEC)
+                .unwrap();
+            cpu.map_region(0x2000, 0x1000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            // lw v0,0(a0); break; sw a1,0(a0); break.
+            let code = [0x8c82_0000u32, 0x0000_000d, 0xac85_0000, 0x0000_000d];
+            let bytes: Vec<_> = code.into_iter().flat_map(u32::to_le_bytes).collect();
+            cpu.write_mem(0x1000, &bytes).unwrap();
+            cpu.write_mem(0x2000, &0x1234_5678u32.to_le_bytes())
+                .unwrap();
+            cpu.add_code_hook(0x1004).unwrap();
+            cpu.add_code_hook(0x100c).unwrap();
+            cpu.write_reg(ArmReg::R0, address).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x8765_4321).unwrap();
+            assert_eq!(
+                cpu.run_until_hook(0x1000, 0).unwrap(),
+                StopReason::Hook(0x1004)
+            );
+            assert_eq!(cpu.read_return().unwrap(), 0x1234_5678);
+            assert_eq!(
+                cpu.run_until_hook(0x1008, 0).unwrap(),
+                StopReason::Hook(0x100c)
+            );
+            assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 0x8765_4321);
+
+            // Translating code through an alias must not hide writes to
+            // the physical page through its low address.
+            cpu.map_region(0x3000, 0x1000, Prot::ALL).unwrap();
+            cpu.write_mem(0x3000, &[1, 0, 2, 0x24, 0x0d, 0, 0, 0])
+                .unwrap();
+            let code_alias = address + 0x1000;
+            cpu.add_code_hook(code_alias + 4).unwrap();
+            assert_eq!(
+                cpu.run_until_hook(code_alias, 0).unwrap(),
+                StopReason::Hook(code_alias + 4)
+            );
+            assert_eq!(cpu.read_return().unwrap(), 1);
+            cpu.write_reg(ArmReg::R0, 0x3000).unwrap();
+            cpu.write_reg(ArmReg::R1, 0x2402_0002).unwrap();
+            assert_eq!(
+                cpu.run_until_hook(0x1008, 0).unwrap(),
+                StopReason::Hook(0x100c)
+            );
+            assert_eq!(
+                cpu.run_until_hook(code_alias, 0).unwrap(),
+                StopReason::Hook(code_alias + 4)
+            );
+            assert_eq!(cpu.read_return().unwrap(), 2);
+
+            cpu.protect_region(0x2000, 0x1000, Prot::READ).unwrap();
+            cpu.write_reg(ArmReg::R0, address).unwrap();
+            cpu.write_reg(ArmReg::R1, 0xdead_beef).unwrap();
+            assert!(cpu.run_until_hook(0x1008, 0).is_err());
+            assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 0x8765_4321);
+        }
+    }
+
+    #[test]
+    fn mips_virtual_tlb_respects_protection_and_remapping() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Mips).unwrap();
+        if std::env::var_os("POCKETHLE_CPU_TLB").is_some() {
+            return;
+        }
+        assert!(cpu.guest_map.is_some());
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::EXEC)
+            .unwrap();
+        cpu.map_region(0x2000, 0x1000, Prot::READ).unwrap();
+        // sw a0,0(a1); break. The hook fires only after the store.
+        cpu.write_mem(0x1000, &[0, 0, 0xa4, 0xac, 0x0d, 0, 0, 0])
+            .unwrap();
+        cpu.add_code_hook(0x1004).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1234_5678).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x2000).unwrap();
+        assert!(cpu.run_until_hook(0x1000, 0).is_err());
+        assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 0);
+
+        cpu.protect_region(0x2000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 0).unwrap(),
+            StopReason::Hook(0x1004)
+        );
+        assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 0x1234_5678);
+        assert!(cpu.run_until_hook(0x2000, 0).is_err());
+
+        cpu.unmap_region(0x2000, 0x1000).unwrap();
+        assert!(cpu.run_until_hook(0x1000, 0).is_err());
+        cpu.map_region(0x2000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 0).unwrap(),
+            StopReason::Hook(0x1004)
+        );
+        assert_eq!(cpu.read_u32_le(0x2000).unwrap(), 0x1234_5678);
+
+        // A guest write into executable RAM must invalidate translated code.
+        cpu.map_region(0x3000, 0x1000, Prot::ALL).unwrap();
+        cpu.write_mem(0x3000, &[1, 0, 2, 0x24, 0x0d, 0, 0, 0])
+            .unwrap();
+        cpu.add_code_hook(0x3004).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x3000, 0).unwrap(),
+            StopReason::Hook(0x3004)
+        );
+        assert_eq!(cpu.read_return().unwrap(), 1);
+
+        cpu.write_reg(ArmReg::R0, 0x2402_0002).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x3000).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 0).unwrap(),
+            StopReason::Hook(0x1004)
+        );
+        assert_eq!(
+            cpu.run_until_hook(0x3000, 0).unwrap(),
+            StopReason::Hook(0x3004)
+        );
+        assert_eq!(cpu.read_return().unwrap(), 2);
     }
 
     #[test]

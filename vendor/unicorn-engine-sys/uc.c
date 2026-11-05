@@ -2941,6 +2941,7 @@ uc_err uc_ctl(uc_engine *uc, uc_control_type control, ...)
                 uc->tb_flush(uc);
                 uc->ph_arm_identity_chaining = false;
             }
+            uc->ph_mips_mapping_tlb = false;
             err = uc->set_tlb(uc, mode);
         } else {
             err = UC_ERR_ARG;
@@ -2963,6 +2964,25 @@ uc_err uc_ctl(uc_engine *uc, uc_control_type control, ...)
             } else {
                 uc->tb_flush(uc);
                 uc->ph_arm_identity_chaining = policy != 0;
+            }
+        }
+        restore_jit_state(uc);
+        break;
+    }
+
+    /* Private MIPS TLB callback contract: map addresses and permissions
+     * only, without reading or changing the running guest CPU state. */
+    case 0x504A: {
+        UC_INIT(uc);
+        if (rw != UC_CTL_IO_WRITE || uc->arch != UC_ARCH_MIPS ||
+            !(uc->mode & UC_MODE_MIPS32) || uc->nested_level) {
+            err = UC_ERR_ARG;
+        } else {
+            uint64_t policy = va_arg(args, uint64_t);
+            if (policy != UINT64_C(0x50484d4950535631)) {
+                err = UC_ERR_ARG;
+            } else {
+                uc->ph_mips_mapping_tlb = true;
             }
         }
         restore_jit_state(uc);

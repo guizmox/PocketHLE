@@ -5384,9 +5384,10 @@ fn map_resource_module_inner(
                     friendly_name,
                 };
                 let native = thunk.friendly_name.as_deref().and_then(|name| {
-                    if copy_helper_size == 0 {
-                        // Preserve the existing non-ARM import path; there is
-                        // no local ARM copy helper in that module's pool.
+                    if ctx.cpu.arch() == pocket_cpu::Arch::Mips {
+                        pocket_kernel::native_thunks::mips_thunk_for(&import.dll, name)
+                    } else if copy_helper_size == 0 {
+                        // No local ARM copy helper was allocated in this module's pool.
                         pocket_kernel::native_thunks::native_thunk_for(&import.dll, name)
                     } else {
                         pocket_kernel::native_thunks::native_thunk_with_helper(

@@ -15,8 +15,16 @@ These changes do not change the emulated CPU speed, FPS limit or FPS counter.
 
 The old private Unicorn optimization control, conservative RAM flag, legacy jump
 execution/helper routines and message-pump specialization have been removed.
-Safety and architecture conditions remain: in particular, MIPS keeps its
-architectural TLB rather than using the ARM virtual-TLB path.
+
+MIPS uses the virtual TLB for flat process mappings when Unicorn accepts
+PocketHLE's private mapping-only callback contract. The callback resolves page
+permissions without restoring guest branch state during a successful refill.
+Faults still restore the faulting instruction state, and MIPS page permissions
+remain explicit. Kernel segments, including the cached and uncached aliases
+of physical memory, still use architectural translation. Older native
+libraries fall back to the architectural TLB for all addresses.
+Set `POCKETHLE_CPU_TLB=1` before launch to force that fallback for diagnosis.
+ARM-only direct block chaining and lazy image paging remain architecture-guarded.
 
 `POCKETHLE_JUMP_CACHE_BITS=12`, `14` or `16` remains a build-time cache capacity,
 not a runtime switch.

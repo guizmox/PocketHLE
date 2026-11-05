@@ -55,7 +55,20 @@ bool unicorn_fill_tlb(CPUState *cs, vaddr address, int size,
     struct hook *hook;
     HOOK_FOREACH_VAR_DECLARE;
 
-    cpu_restore_state(cs, retaddr, false);
+    /* Preserve MIPS32's architectural kernel-segment translation, including
+       the cached and uncached aliases of low physical memory. */
+    if (uc->ph_mips_mapping_tlb && address >= UINT64_C(0x80000000)) {
+        CPUClass *cc = CPU_GET_CLASS(cs);
+        return cc->tlb_fill_cpu(cs, address, size, rw, mmu_idx, probe, retaddr);
+    }
+
+    /* PocketHLE's MIPS refill callback only resolves flat mappings.
+       Restoring the faulting instruction here resurrects a pending
+       branch after its delay-slot store succeeds. Faults still restore
+       state in raise_mmu_exception. */
+    if (!uc->ph_mips_mapping_tlb) {
+        cpu_restore_state(cs, retaddr, false);
+    }
 
     HOOK_FOREACH(uc, hook, UC_HOOK_TLB_FILL) {
         if (hook->to_delete) {

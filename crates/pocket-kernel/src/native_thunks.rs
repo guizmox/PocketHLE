@@ -52,6 +52,11 @@
 /// otherwise-unused tail of each 32-byte slot.
 const BX_LR: u32 = 0xE12F_FF1E;
 
+/// Register-only MIPS runtime thunks for architectures supported by Unicorn.
+pub fn mips_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
+    crate::mips_native_thunks::native_thunk_for(dll, name)
+}
+
 /// Pure 64-bit helpers cannot fit a general integer divide in a 32-byte ARM
 /// thunk. Colors' pose interpolation calls these repeatedly per model. A CPU
 /// backend may serve their exact register arithmetic without leaving its run

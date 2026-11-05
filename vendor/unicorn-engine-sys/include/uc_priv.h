@@ -272,6 +272,7 @@ typedef struct TCGContext TCGContext;
 struct uc_struct {
     /* Private opt-in: caller guarantees identity virtual mappings. */
     bool ph_arm_identity_chaining;
+    bool ph_mips_mapping_tlb;
 
     uc_arch arch;
     uc_mode mode;
