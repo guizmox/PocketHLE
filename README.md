@@ -29,18 +29,20 @@ Documentation is maintained in English. See the [documentation index](docs/READM
 ---
 
 > [!NOTE]
-> PocketHLE targets native ARM Windows CE / Windows Mobile executables packaged in `.CAB` archives. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
+> PocketHLE runs native Windows CE software for Pocket PC, Windows Mobile and Gizmondo. It supports Pocket PC CAB imports and user-provided Gizmondo game and shell profiles. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
 
 > [!WARNING]
 > PocketHLE is developed for research and educational purposes. It does not include Microsoft system files, firmware or game data. Use only legally obtained game copies and archives.
 
 ## Info
 
-PocketHLE is an early-stage high-level emulator for Pocket PC 2002/2003 and Windows Mobile 5/6 games. Instead of emulating a complete Windows CE device, it loads the original game executable, runs its ARM code through a CPU backend, and provides clean-room host-side implementations of the Windows CE APIs the game expects.
+PocketHLE is a high-level emulator for Pocket PC 2002/2003, Windows Mobile 5/6 and Gizmondo software. Instead of emulating a complete Windows CE device, it loads the original game executable, runs its ARM code through a CPU backend, and provides clean-room host-side implementations of the Windows CE APIs the game expects.
 
 The project is inspired by [touchHLE](https://github.com/touchHLE/touchHLE) and [EKA2L1](https://github.com/EKA2L1/EKA2L1), with a launcher and library workflow influenced by [j2me-loader](https://github.com/nikita36078/j2me-loader).
 
 ## Games Tested
+
+See the [Gizmondo compatibility table](docs/GIZMONDO.md#reported-game-compatibility) for reported game results and known issues. The [GTShell guide](docs/GTSHELL.md) covers shell profile setup and Bluetooth file transfer.
 
 | Asphalt 4 Elite Racing | Call of Duty 2 |
 | :---: | :---: |
@@ -55,6 +57,131 @@ The project is inspired by [touchHLE](https://github.com/touchHLE/touchHLE) and 
 
 Additional compatibility probes and rendering captures are available under [`proof/`](proof/), including Asphalt 2 3D, Crazy Taxi, Diamond Twister, Splinter Cell Conviction and other Windows Mobile titles.
 
+<details>
+<summary>Maintainer's library (115 entries)</summary>
+
+This list comes from the maintainer's library and includes games, demos,
+benchmarks, and utilities. An entry here does not establish compatibility
+for every build, platform, or game mode.
+
+* 00 - HARDWARE DIAG — Gizmondo
+* 01 - GTShell + SD Card — Gizmondo
+* AAA - Nav — Gizmondo
+* AAAGZGA800069 — Gizmondo
+* Agaju — Gizmondo
+* Agaju (august 2005) — Gizmondo
+* Agaju (E3 demo) — Gizmondo
+* Age of Empires — Pocket PC
+* Alien Hominid — Gizmondo
+* Anthelion — Pocket PC
+* Argentum — Pocket PC
+* Aspyr Media THPS2 — Pocket PC
+* Battlestations: Midway — Gizmondo
+* Carmageddon — Gizmondo
+* Catapult — Gizmondo
+* Catapult (august 2005) — Gizmondo
+* Caywen Kevtris 2 — Pocket PC
+* Chicane — Gizmondo
+* Chicane (E3 Demo) — Gizmondo
+* Chicane (early demo) — Gizmondo
+* Chicane (licensed cars) — Gizmondo
+* Chix — Pocket PC
+* Chopper Alley — Pocket PC
+* Chopper Fight 1.0 — Pocket PC
+* Christmas Rush — Pocket PC
+* Classic Compendium 1 — Gizmondo
+* Classic Compendium 2 — Gizmondo
+* COD2 — Pocket PC
+* Colors — Gizmondo
+* Colors (E3 demo) — Gizmondo
+* Colors (early demo) — Gizmondo
+* Conflict Vietnam — Gizmondo
+* Conflict Vietnam (Interim Demo) — Gizmondo
+* CrazyKart — Pocket PC
+* Cube 2004 — Pocket PC
+* Diesel FPS Technology DEMO — Pocket PC
+* Dynamix 3D Benchmark — Pocket PC
+* Enigmo Demo — Pocket PC
+* Fade — Pocket PC
+* Fathammer Classics — Gizmondo
+* Fifa 2005 — Gizmondo
+* Flight — Pocket PC
+* Furious Phil — Gizmondo
+* Gameloft Prince of Persia — Pocket PC
+* Gapi Benchmark V2 0 Arm — Pocket PC
+* Geo Rally 2005 — Pocket PC
+* GeoRally EX — Pocket PC
+* GhostWorld — Pocket PC
+* Gizmondo Navigator (UK) — Gizmondo
+* GXmark — Pocket PC
+* GZAP200002 - PolNav — Gizmondo
+* GZAP200003 - Tomtom — Gizmondo
+* GZAP200004 - Tomtom 6 — Gizmondo
+* Hit &amp; Myth — Gizmondo
+* Hit &amp; Myth (may 2005) — Gizmondo
+* Hockey Rage 2005 — Gizmondo
+* Infectious Ground — Pocket PC
+* Interstellar Flames — Pocket PC
+* Interstellar Flames 2 — Gizmondo
+* Intooutland — Pocket PC
+* Johnny Whatever — Gizmondo
+* Johnny Whatever (august 2005) — Gizmondo
+* Jump — Gizmondo
+* Kart 2002 — Pocket PC
+* Kishonti Informatics GLBenchmark 2.0.3 — Pocket PC
+* Kishonti Ltd GLBenchmark 1.1.6 — Pocket PC
+* Kursk — Pocket PC
+* Leo's Flight Simulator — Pocket PC
+* Metalion — Pocket PC
+* Mini-Dogfight 1.2 — Pocket PC
+* Mini-Kayak 1.1 — Pocket PC
+* Motocross 2005 — Gizmondo
+* Motocross Stunt Racer — Pocket PC
+* MotoGear — Pocket PC
+* NFS — Pocket PC
+* Oglesvirgin — Pocket PC
+* OmniGSoft Eternal Throne 1.1 — Pocket PC
+* PhoenixStudio — Pocket PC
+* Pocket Athlete — Pocket PC
+* Pocketpc Mark V1 03 — Pocket PC
+* POD — Gizmondo
+* Pvr Racer — Pocket PC
+* Quake 3 — Pocket PC
+* Quake3 1.1b — Pocket PC
+* Racing Days — Pocket PC
+* Radium — Pocket PC
+* RedSector 2112 — Pocket PC
+* Richard Burns Rally — Gizmondo
+* Richard Burns Rally (april 2005) — Gizmondo
+* Sce X51v Patch — Pocket PC
+* Sega Classics — Gizmondo
+* Simcity 2000 — Pocket PC
+* SkyStriker — Gizmondo
+* Snails — Pocket PC
+* Spawn — Pocket PC
+* Sphere mobile — Pocket PC
+* Spirit Arm — Pocket PC
+* Springer — Pocket PC
+* SSX3 — Gizmondo
+* Strategic Assault — Pocket PC
+* Street Duel — Pocket PC
+* Strip4You — Pocket PC
+* Supernaturals — Gizmondo
+* TechPreview01 — Pocket PC
+* The Mark — Pocket PC
+* Tomb Raider — Pocket PC
+* Tots'N'Togs — Pocket PC
+* Toy Golf — Gizmondo
+* Trailblazer — Gizmondo
+* Undead — Pocket PC
+* Unfinished Business (Gametrac Demo) — Gizmondo
+* Virtual Squash — Gizmondo
+* Warcraft 2 — Pocket PC
+* Worms — Pocket PC
+* Xrick 021212 Gizmondo — Gizmondo
+
+</details>
+
 ## Status
 
 PocketHLE can currently:
@@ -68,15 +195,21 @@ PocketHLE can currently:
 * intercept imported Windows CE DLL calls through HLE thunks;
 * provide ordinal-to-name resolution for `coredll.dll` and `aygshell.dll`;
 * emulate core windowing, GDI, GAPI, registry, filesystem, timing, input and audio paths;
-* render software framebuffers in the desktop frontend and Android `SurfaceView` / OpenGL frontend;
+* present GDI and GAPI software framebuffers and accelerate supported OpenGL ES workloads on the host GPU;
+* share GLES frames with the desktop presentation context where supported, with a CPU upload path for other frames;
 * run a shared game library with per-game settings on desktop and Android;
 * build Linux, Windows and Android artifacts through GitHub Actions.
 
-The current reference proof demonstrates Asphalt 4 rendering at WVGA with
-captured PCM audio. The desktop Run screen also offers game-only fullscreen,
-with F11 returning to the emulator controls. Android has a game launcher,
-fullscreen/orientation controls, display modes, per-game settings and a turbo
-control for titles that need accelerated startup.
+The desktop frontend offers fullscreen (F12), screenshots (F10), video
+recording (F11), and separate VSync and game FPS settings. Supported 320×240
+GLES titles can use higher internal resolutions, independently of display
+scaling. The Android frontend offers per-game settings, orientation controls
+and on-screen controls. See the [frontend guide](docs/FRONTENDS.md) and
+[GPU guide](docs/GPU.md) for platform-specific behavior.
+
+Gizmondo profiles can use host Bluetooth Classic for supported RFCOMM workflows.
+GTShell image transfer from Windows to Android has been verified. The reverse
+direction with the updated Windows listener still needs validation.
 
 PocketHLE is not a full Windows CE emulator. Some games still stop during CRT initialization, dynamic imports, worker-thread setup or unimplemented APIs. A successful boot or first frame does not automatically mean that an entire game is playable from start to finish.
 
@@ -263,11 +396,13 @@ PocketHLE is dual-licensed under [Apache-2.0](LICENSE-APACHE) **OR** [MIT](LICEN
 
 Bug reports, compatibility results, API traces and pull requests are welcome. Please include the game version, target screen size, frontend, CPU backend, command line and relevant logs or frame captures when reporting a problem.
 
-Join the [PocketHLE Discord community](https://discord.gg/pSjD428p2) for development updates, compatibility discussions and support.
+Join the [PocketHLE Discord community](https://discord.gg/jDvzctQdFu) for development updates, compatibility discussions and support.
 
 ## Special Thanks
 
 * [touchHLE](https://github.com/touchHLE/touchHLE) for the high-level emulation model and project inspiration;
 * [EKA2L1](https://github.com/EKA2L1/EKA2L1) for another practical HLE-oriented emulator architecture;
 * [j2me-loader](https://github.com/nikita36078/j2me-loader) for launcher and library UX inspiration;
+* [Katamaran21](https://github.com/Katamaran21/PocketHLE-GTShell) for GTShell support;
+* Nekomo, OLego, TimofeyLednev, Benoît (FX-man), Jérôme (SoldatGG), and Tim (Firefly);
 * the PocketHLE contributors and testers who provide legally obtained software, traces and compatibility reports.

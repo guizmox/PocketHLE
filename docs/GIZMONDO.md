@@ -345,43 +345,41 @@ that diagnostic watchdog masked the original freeze in earlier local tests.
 
 ## Reported game compatibility
 
+The baseline records maintainer-reported results from 2026-10-12.
+Later observations are identified in the individual rows. Results apply to the
+build and settings tested and do not cover every mode or every release variant.
 
-Updated 2026-10-12. Status reflects the maintainer's reported successful tests
-on the Windows/Android builds used at the time of that report.
-The documentation audit does not refresh those gameplay results. It is not an independent rerun
-of every title, a certification of every game mode, or a complete worldwide
-release catalogue. The list covers the maintained/tested collection discussed
-with the maintainer; additional titles should be added after testing.
+The additional features column lists maintainer-confirmed functionality.
 
-| Game / card | Status | Evidence |
-| --- | --- | --- |
-| Agaju — The Sacred Path of Treasure | OK | Maintainer-reported testing |
-| Alien Hominid | OK | Maintainer-reported testing |
-| Ball Busters | OK | Maintainer-reported testing |
-| Battlestations | OK | Maintainer-reported testing |
-| Carmageddon | OK | Maintainer-reported testing |
-| Catapult | OK | Maintainer-reported testing |
-| Chicane | OK | Maintainer-reported testing |
-| Classic Compendium | OK | Maintainer-reported testing |
-| Classic Compendium 2 | OK | Maintainer-reported testing |
-| Colors | OK | Maintainer-reported testing |
-| Conflict: Vietnam | OK | Maintainer-reported testing |
-| Fathammer Classics | OK | Maintainer-reported testing |
-| FIFA Football 2005 | OK | Maintainer-reported testing |
-| Gizmondo Demonstrations / Demo Card | OK | Maintainer-reported testing |
-| Gizmondo Motocross 2005 | OK | Maintainer-reported testing |
-| Hit & Myth | OK | Maintainer-reported testing |
-| Kiosk Card | OK | Maintainer-reported testing |
-| Pocket Ping Pong 2005 | OK | Maintainer-reported testing |
-| Richard Burns Rally | OK | Maintainer-reported testing |
-| Sticky Balls | OK | Maintainer-reported testing |
-| Stuntcar Extreme | OK | Maintainer-reported testing |
-| Toy Golf | OK | Maintainer-reported testing |
-| Trailblazer | OK | Maintainer-reported testing |
-| Hockey Rage 2005 | OK | Maintainer-reported overall compatibility status |
-| Interstellar Flames 2 | OK | Maintainer-reported overall compatibility status |
-| Point of Destruction | OK | Maintainer-reported overall compatibility status |
-| SSX 3 | OK | Maintainer-reported overall compatibility status |
+| Game / card | Status | Evidence | Confirmed additional features |
+| --- | --- | --- | --- |
+| Agaju — The Sacred Path of Treasure | OK | Maintainer-reported testing | Camera |
+| Alien Hominid | OK | Maintainer-reported testing | — |
+| Ball Busters | OK | Maintainer-reported testing | — |
+| Battlestations | OK | Maintainer-reported testing | — |
+| Carmageddon | OK | Maintainer-reported testing | — |
+| Catapult | OK | Maintainer-reported testing | Camera, Bluetooth |
+| Chicane | OK | Maintainer-reported testing | Bluetooth |
+| Classic Compendium | OK | Maintainer-reported testing | — |
+| Classic Compendium 2 | OK | Maintainer-reported testing | — |
+| Colors | OK | Maintainer-reported testing | GPS, data, camera |
+| Conflict: Vietnam | OK | Maintainer-reported testing | — |
+| Fathammer Classics | OK | Maintainer-reported testing | — |
+| FIFA Football 2005 | OK | Maintainer-reported testing | — |
+| Gizmondo Demonstrations / Demo Card | OK | Maintainer-reported testing | — |
+| Gizmondo Motocross 2005 | OK | Maintainer-reported testing | — |
+| Hit & Myth | OK | Maintainer-reported testing | — |
+| Kiosk Card | OK | Maintainer-reported testing | — |
+| Pocket Ping Pong 2005 | OK | Maintainer-reported testing | — |
+| Richard Burns Rally | OK | Maintainer-reported testing | — |
+| Sticky Balls | OK | Maintainer-reported testing | — |
+| Stuntcar Extreme | Runs with a visual issue reported | Blue artifacts behind some HUD text. Use internal resolution ×1 for now. | Bluetooth |
+| Toy Golf | OK | Maintainer-reported testing | — |
+| Trailblazer | OK | Maintainer-reported testing | — |
+| Hockey Rage 2005 | OK | Maintainer-reported overall compatibility status | — |
+| Interstellar Flames 2 | OK | Maintainer-reported overall compatibility status | — |
+| Point of Destruction | OK | Maintainer-reported overall compatibility status | — |
+| SSX 3 | OK | Maintainer-reported overall compatibility status | — |
 
 The previous per-game proof captures remain in proof/ and document narrower
 historical checks. This status update does not replace those artifacts or
