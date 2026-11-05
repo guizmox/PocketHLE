@@ -1,4 +1,2 @@
-crates\pocket-pe\src\lib.rs
-frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\desktop_main.rs
-frontends\pocket-desktop\src\frame_pacing.rs
+crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\coredll\trackbar.rs
