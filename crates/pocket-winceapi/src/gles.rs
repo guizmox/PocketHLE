@@ -2672,7 +2672,8 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     let mapped_defer = ctx.kernel.fb_mapped
         && pocket_kernel::framebuffer::gapi_memory::eligible(ctx.cpu, ctx.kernel);
     let mut memory_error = None;
-    let shared = if enabled && (!ctx.kernel.fb_mapped || mapped_defer) {
+    let measure_ips = ctx.kernel.framebuffer.ips_enabled();
+    let shared = if enabled && !measure_ips && (!ctx.kernel.fb_mapped || mapped_defer) {
         pocket_gles::gpu::configured_shared_context_source().and_then(|source| {
             let frame = with_ctx(|c| c.snapshot_shared_frame())?;
             let provider =
@@ -2714,6 +2715,8 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     SHARED_SWAP_REASON.with(|reason| {
         reason.set(if shared.is_some() {
             None
+        } else if measure_ips {
+            Some("ips_requires_cpu_pixels")
         } else if !enabled {
             Some("shared_export_policy_disabled")
         } else if ctx.kernel.fb_mapped {
@@ -2734,6 +2737,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
                 c.scaled_display_rgba_into(native)
             })
         });
+        ctx.kernel.framebuffer.observe_ips();
     }
     SHARED_WINDOW.with(|s| {
         s.replace(shared.map(|(frame, identity)| {

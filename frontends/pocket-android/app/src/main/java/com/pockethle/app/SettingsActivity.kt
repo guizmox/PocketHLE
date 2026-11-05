@@ -373,6 +373,15 @@ class SettingsActivity : AppCompatActivity() {
                     true
                 }
             })
+            findPreference<androidx.preference.PreferenceCategory>("misc_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "show_ips"; title = "Show IPS"; isPersistent = false; isChecked = current.showIps
+                summary = "Shows changed images per second at the top right. Applies on next launch. Uses CPU pixel readback for OpenGL ES."
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(showIps = value as Boolean)
+                    writeConfig()
+                    true
+                }
+            })
             findPreference<SeekBarPreference>("verbosity")?.apply {
                 value = current.verbosity
                 setOnPreferenceChangeListener { _, newValue ->

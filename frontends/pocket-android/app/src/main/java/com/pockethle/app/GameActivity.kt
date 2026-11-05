@@ -50,7 +50,11 @@ class GameActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var fpsOverlay: TextView
     private val fpsMeter = FrameRateMeter()
+    private var frontendFps: Double? = null
     private var showFps = false
+    private lateinit var ipsOverlay: TextView
+    private var showIps = false
+    private var lastIpsUpdateNs = 0L
     private var activityResumed = false
     private lateinit var gameControls: View
     private lateinit var glRenderer: AndroidFrameRenderer
@@ -165,6 +169,7 @@ class GameActivity : AppCompatActivity() {
                 android.widget.Toast.makeText(this@GameActivity, message, android.widget.Toast.LENGTH_LONG).show()
             }
             updateFpsOverlay()
+            updateIpsOverlay()
             if (NativeBridge.nativeIsRunning(session) == 0) {
                 // Worker exited on its own (game called ExitProcess
                 // / hit max_slices / errored out). Reap it so we
@@ -184,6 +189,7 @@ class GameActivity : AppCompatActivity() {
         bindings = InputBindings(config)
         stylusBindings = StylusBindings(config)
         showFps = config.showFps
+        showIps = config.showIps
         displayScale = config.displayScale
         controlsOpacity = config.controlsOpacity
         gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
@@ -228,6 +234,7 @@ class GameActivity : AppCompatActivity() {
         progress = findViewById(R.id.progress)
         status = findViewById(R.id.status)
         fpsOverlay = findViewById(R.id.fps_overlay)
+        ipsOverlay = findViewById(R.id.ips_overlay)
 
         findViewById<View>(R.id.btn_stop_emulation).apply {
             setOnTouchListener { view, event ->
@@ -366,6 +373,7 @@ class GameActivity : AppCompatActivity() {
         super.onResume()
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).registerInputDeviceListener(stylusDeviceListener,mainHandler)
         activityResumed = true
+        frontendFps = null
         if (::glRenderer.isInitialized) fpsMeter.reset(glRenderer.presentedFrameCount, System.nanoTime())
         if (::surface.isInitialized) surface.onResume()
         updateCameraOrientation()
@@ -380,6 +388,7 @@ class GameActivity : AppCompatActivity() {
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).unregisterInputDeviceListener(stylusDeviceListener)
         activityResumed = false
         if (::fpsOverlay.isInitialized) fpsOverlay.visibility = View.GONE
+        if (::ipsOverlay.isInitialized) ipsOverlay.visibility = View.GONE
         if (::surface.isInitialized) surface.onPause()
         CameraHost.pause()
         GpsHost.pause()
@@ -440,6 +449,7 @@ class GameActivity : AppCompatActivity() {
         if (handle == 0L) return
         joiningSession = true
         fpsOverlay.visibility = View.GONE
+        ipsOverlay.visibility = View.GONE
         CameraHost.closeAll()
         GpsHost.closeAll()
         VibrationHost.closeAll()
@@ -602,6 +612,21 @@ class GameActivity : AppCompatActivity() {
         return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight)
     }
 
+    private fun updateIpsOverlay() {
+        if (!showIps || !activityResumed || session == 0L) return
+        val now = System.nanoTime()
+        if (now - lastIpsUpdateNs < 1_000_000_000L) return
+        lastIpsUpdateNs = now
+        val ips = NativeBridge.nativePublishedImageIps(session).coerceAtLeast(0f)
+        val fps = frontendFps
+        ipsOverlay.text = if (fps != null) {
+            String.format(java.util.Locale.US, "%.0f FPS / %.0f IPS", fps, ips)
+        } else {
+            String.format(java.util.Locale.US, "%.0f IPS", ips)
+        }
+        ipsOverlay.visibility = View.VISIBLE
+    }
+
     private fun updateFpsOverlay() {
         if (!showFps || !activityResumed) return
         val total = glRenderer.presentedFrameCount
@@ -610,8 +635,11 @@ class GameActivity : AppCompatActivity() {
             return
         }
         fpsMeter.sample(total, System.nanoTime())?.let { fps ->
-            fpsOverlay.text = String.format(java.util.Locale.US, "%.1f FPS", fps)
-            fpsOverlay.visibility = View.VISIBLE
+            frontendFps = fps
+            if (!showIps) {
+                fpsOverlay.text = String.format(java.util.Locale.US, "%.1f FPS", fps)
+                fpsOverlay.visibility = View.VISIBLE
+            }
         }
     }
 

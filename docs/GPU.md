@@ -89,12 +89,15 @@ of its controls and JSON fields are not current settings documentation.
 
 ## FPS and frame limits
 
-The game overlay measures newly drawn image identities at the frontend. It does
-not count every API call, submitted image, UI repaint, filter change or recording
-redraw as another game frame. This is frontend draw evidence, not confirmation
-of physical display scanout. Submission telemetry is useful separately and must
-not replace that overlay value. Identical-pixel application presentations and
-newly displayed images are distinct measurements.
+**Show FPS** measures image identities drawn by the frontend. **Show IPS**
+measures changes to the logical RGB565 image. GX compares completed images
+using the existing readback. EGL measures completed window swaps, and GDI
+measures published images after drawing operations have been grouped.
+With both options enabled, the badge combines these measurements and updates
+once per second at the top right. Both rates are independent of physical scanout.
+
+EGL uses its CPU pixel presentation path while measuring IPS, including when
+shared textures would otherwise be available. This can affect performance.
 
 The global limit is inherited by a game's **Emulator default** choice; an explicit
 per-game choice overrides it. Current choices include 60, 120 and Unlimited;

@@ -124,8 +124,10 @@ object NativeBridge {
      */
     @JvmStatic external fun nativeStartGame(libraryRoot: String, id: String): Long
 
-    /** Completed display presentations per second, or -1 for changed-image (IPS) fallback. */
-    // Diagnostic guest submission rate; never use for the on-screen FPS overlay.
+    /** Changed images per second, or -1 before the first change. */
+    @JvmStatic external fun nativePublishedImageIps(handle: Long): Float
+
+    /** Completed guest presentations per second, or -1 if no boundary was observed. */
     @JvmStatic external fun nativeSubmittedFrameFps(handle: Long): Float
 
     /**

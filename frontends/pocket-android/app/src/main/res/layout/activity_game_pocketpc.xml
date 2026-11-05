@@ -39,6 +39,7 @@
                 android:layout_height="match_parent" />
 
             <TextView android:id="@+id/fps_overlay" style="@style/GameFpsOverlay" />
+            <TextView android:id="@+id/ips_overlay" style="@style/GameFpsOverlay" />
 
             <ProgressBar
                 android:id="@+id/progress"

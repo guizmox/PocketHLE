@@ -122,6 +122,14 @@ pub struct DeferredFramebuffer {
     gpu: Option<GpuAuthority>,
     resident: bool,
     epoch: u64,
+    ips_image: Option<IpsImage>,
+}
+
+#[derive(Debug)]
+struct IpsImage {
+    revision: u64,
+    size: (u32, u32),
+    pixels: Vec<u8>,
 }
 // Only metadata is exposed. In particular, dereferencing this wrapper can
 // never expose the eager image, its pixel Vec or its snapshot methods.
@@ -161,8 +169,38 @@ impl DeferredFramebuffer {
             gpu: None,
             resident: true,
             epoch: 0,
+            ips_image: None,
         })
     }
+    pub fn enable_ips(&mut self) {
+        self.ips_image = Some(IpsImage {
+            revision: self.cpu.frame_counter,
+            size: self.logical_size(),
+            pixels: self.cpu.pixels.clone(),
+        });
+    }
+
+    pub fn ips_enabled(&self) -> bool {
+        self.ips_image.is_some()
+    }
+
+    /// Compare resident pixels against the last measured image.
+    pub fn observe_ips(&mut self) {
+        let size = self.logical_size();
+        let Some(image) = self.ips_image.as_mut() else {
+            return;
+        };
+        if !self.resident || image.revision == self.cpu.frame_counter {
+            return;
+        }
+        image.revision = self.cpu.frame_counter;
+        if image.size != size || image.pixels != self.cpu.pixels {
+            image.size = size;
+            image.pixels.clone_from(&self.cpu.pixels);
+            self.cpu.presentation_stats.record_image_update();
+        }
+    }
+
     /// Diagnostic snapshots also obey the checked CPU read boundary.
     pub fn write_ppm(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         let frame = self.cpu().map_err(std::io::Error::other)?;
@@ -317,6 +355,29 @@ impl DeferredFramebuffer {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn ips_counts_pixel_changes_once_per_publication() {
+        let mut fb = DeferredFramebuffer::new(Framebuffer::new(2, 2)).unwrap();
+        fb.enable_ips();
+        fb.mark_dirty();
+        fb.observe_ips();
+        assert_eq!(fb.presentation_stats.ips(), None);
+
+        fb.fill(0xffff);
+        fb.observe_ips();
+        fb.observe_ips();
+        assert_eq!(fb.presentation_stats.ips(), Some(1.0));
+
+        fb.fill(0xffff);
+        fb.observe_ips();
+        assert_eq!(fb.presentation_stats.ips(), Some(1.0));
+
+        fb.fill(0x0000);
+        fb.observe_ips();
+        assert_eq!(fb.presentation_stats.ips(), Some(2.0));
+        assert_eq!(fb.presentation_stats.fps(), None);
+    }
     #[derive(Debug)]
     struct Source {
         reads: AtomicUsize,

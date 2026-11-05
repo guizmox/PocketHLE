@@ -215,6 +215,10 @@ impl Session {
         self.send_input(InputCommand::Stop);
     }
 
+    pub fn published_image_ips(&self) -> Option<f32> {
+        self.state.presentation_stats.lock().ok()?.as_ref()?.ips()
+    }
+
     /// Guest submission telemetry, independent of Android GL draw completions.
     pub fn submitted_frame_fps(&self) -> Option<f32> {
         self.state.presentation_stats.lock().ok()?.as_ref()?.fps()
@@ -662,6 +666,11 @@ fn run_process(
         entry.settings.screen.resolve_image(image.as_ref().ok())
     };
     emu.set_screen_size(screen_width, screen_height);
+    if launcher_config.show_ips {
+        if let Some(process) = emu.process_mut() {
+            process.state.framebuffer.enable_ips();
+        }
+    }
     summary_lines.push(format!("Screen: {screen_width}x{screen_height}"));
     let extracted = entry.extracted_dir(library_root);
 
@@ -1208,6 +1217,9 @@ impl FrameHook for SessionHook {
 
                 self.last_frame = counter;
                 self.last_emit_at = Some(phase);
+                if !kernel.gx_explicit_present {
+                    kernel.framebuffer.observe_ips();
+                }
                 let presentation = match kernel.presentation_framebuffer() {
                     Ok(frame) => frame,
                     Err(error) => {

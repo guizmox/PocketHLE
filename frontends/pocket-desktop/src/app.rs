@@ -338,6 +338,7 @@ pub struct PocketLauncher {
     last_frame_snapshot: Option<FrameSnapshot>,
     last_frame_status: Option<String>,
     frame_stats: FrameStats,
+    rate_badge: Option<(Instant, String)>,
     /// How far the presented frame is turned. Initialised from the
     /// running game's persisted [`RotationPref`] and editable live on
     /// the Run screen, where a change is written straight back to the
@@ -934,6 +935,7 @@ impl PocketLauncher {
             last_frame_snapshot: None,
             last_frame_status: None,
             frame_stats: FrameStats::default(),
+            rate_badge: None,
             game_rotation: RotationPref::None,
             running_game_id: None,
             running_is_gizmondo: false,
@@ -2551,6 +2553,10 @@ impl PocketLauncher {
                 ui.label("Show FPS on game screen");
                 crate::controller_ui::checkbox(ui, &mut draft.show_fps, "");
                 ui.end_row();
+                ui.label("Show IPS on game screen")
+                    .on_hover_text("Applies on next launch. Uses CPU pixel readback for OpenGL ES.");
+                crate::controller_ui::checkbox(ui, &mut draft.show_ips, "");
+                ui.end_row();
                 ui.label("Library root");
                 ui.label(library_root);
                 ui.end_row();
@@ -3303,7 +3309,7 @@ impl PocketLauncher {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
     }
 
-    fn paint_guest_frame(&self, ui: &egui::Ui, rect: Rect) {
+    fn paint_guest_frame(&mut self, ui: &egui::Ui, rect: Rect) {
         if !rect.intersect(ui.clip_rect()).is_positive() {
             let mut capture = self.screenshot.lock().unwrap_or_else(|e| e.into_inner());
             if capture.pending.take().is_some() {
@@ -3366,7 +3372,7 @@ impl PocketLauncher {
                 )),
             });
             self.paint_recording_indicator(ui, rect);
-            self.paint_fps_indicator(ui, rect);
+            self.paint_rate_indicators(ui, rect);
             return;
         }
         if let Some(tex) = self.last_frame_texture.as_ref() {
@@ -3428,24 +3434,56 @@ impl PocketLauncher {
             }
         }
         self.paint_recording_indicator(ui, rect);
-        self.paint_fps_indicator(ui, rect);
+        self.paint_rate_indicators(ui, rect);
     }
 
     /// Host overlay: use the actual displayed image bounds, including rotation
     /// and internal GLES resolution. Captures above keep the original image.
-    fn paint_fps_indicator(&self, ui: &egui::Ui, rect: Rect) {
-        if !self.library.config().show_fps {
-            return;
+    fn paint_rate_indicators(&mut self, ui: &egui::Ui, rect: Rect) {
+        let config = self.library.config();
+        if config.show_ips {
+            let Some(frame) = &self.last_frame_snapshot else {
+                return;
+            };
+            let now = Instant::now();
+            let interval = Duration::from_secs(1);
+            if self
+                .rate_badge
+                .as_ref()
+                .is_none_or(|(sampled_at, _)| now.duration_since(*sampled_at) >= interval)
+            {
+                let ips = frame.presentation_stats.ips().unwrap_or(0.0);
+                let fps = config.show_fps.then(|| self.frame_stats.current_fps());
+                let text = match fps {
+                    Some(fps) => format!("{fps:.0} FPS / {ips:.0} IPS"),
+                    None => format!("{ips:.0} IPS"),
+                };
+                self.rate_badge = Some((now, text));
+            }
+            if let Some((sampled_at, text)) = &self.rate_badge {
+                Self::paint_rate_badge(ui, rect, text.clone());
+                ui.ctx()
+                    .request_repaint_after(interval - now.duration_since(*sampled_at));
+            }
+        } else if config.show_fps {
+            Self::paint_rate_badge(
+                ui,
+                rect,
+                format!("{:.1} FPS", self.frame_stats.current_fps()),
+            );
         }
+    }
+
+    fn paint_rate_badge(ui: &egui::Ui, rect: Rect, text: String) {
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-        let text = format!("{:.1} FPS", self.frame_stats.current_fps());
         let galley = painter.layout_no_wrap(
             text,
             egui::FontId::proportional(13.0),
             Color32::from_white_alpha(220),
         );
         let size = galley.size() + Vec2::new(10.0, 6.0);
-        let badge = Rect::from_min_size(rect.right_top() + Vec2::new(-size.x - 6.0, 6.0), size);
+        let origin = rect.right_top() + Vec2::new(-size.x - 6.0, 6.0);
+        let badge = Rect::from_min_size(origin, size);
         painter.rect_filled(badge, 3.0, Color32::from_black_alpha(115));
         painter.galley(badge.min + Vec2::new(5.0, 3.0), galley, Color32::WHITE);
     }
@@ -5134,8 +5172,8 @@ impl PocketLauncher {
                 let result = crate::with_suspended_library_log(&root, || {
                     pocket_library::backup::restore(&root, &archive, mode)
                 })
-                    .map(|()| "Library restored.".into())
-                    .map_err(|e| format!("{e:#}"));
+                .map(|()| "Library restored.".into())
+                .map_err(|e| format!("{e:#}"));
                 let _ = tx.send(UiEvent::BackupFinished(result));
             });
         }
@@ -5417,6 +5455,7 @@ impl PocketLauncher {
         self.last_frame_snapshot = None;
         self.last_frame_status = None;
         self.frame_stats.reset();
+        self.rate_badge = None;
         if let Some(renderer) = self.reconstruction.as_ref() {
             renderer
                 .lock()

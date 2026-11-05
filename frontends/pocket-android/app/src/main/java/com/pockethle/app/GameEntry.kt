@@ -161,6 +161,7 @@ data class LauncherConfig(
     val glesInternalResolution: Int = 1,
     val lastImportDir: String?,
     val showFps: Boolean,
+    val showIps: Boolean = false,
     val fullscreen: Boolean,
     val fullscreenMode: String,
     val orientation: String,
@@ -212,6 +213,7 @@ data class LauncherConfig(
         put("gles_internal_resolution", glesInternalResolution)
         if (lastImportDir != null) put("last_import_dir", lastImportDir) else put("last_import_dir", JSONObject.NULL)
         put("show_fps", showFps)
+        put("show_ips", showIps)
         put("fullscreen", fullscreen)
         put("fullscreen_mode", fullscreenMode)
         put("orientation", orientation)
@@ -264,6 +266,7 @@ data class LauncherConfig(
             glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
+            showIps = obj.optBoolean("show_ips", false),
             fullscreen = obj.optBoolean("fullscreen", false),
             fullscreenMode = obj.optString("fullscreen_mode", "with_controls"),
             orientation = obj.optString("orientation", "auto"),

@@ -4,6 +4,7 @@
   <android.opengl.GLSurfaceView android:id="@+id/surface" android:layout_width="match_parent" android:layout_height="match_parent"/>
   <ProgressBar android:id="@+id/progress" android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="center"/>
   <TextView android:id="@+id/fps_overlay" style="@style/GameFpsOverlay" />
+  <TextView android:id="@+id/ips_overlay" style="@style/GameFpsOverlay" />
   <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" android:visibility="gone"/>
  </FrameLayout>
  <com.pockethle.app.GizmondoControls android:id="@+id/game_controls" android:layout_width="match_parent" android:layout_height="match_parent"/>

@@ -276,6 +276,7 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(outcome);
     }
     readback_framebuffer(ctx)?;
+    ctx.kernel.framebuffer.observe_ips();
     ctx.kernel.framebuffer.presentation_stats.record_present();
     // Explicit presentation takes precedence over the retained-pointer bulk-copy
     // fallback. A whole-screen background copy need not be the finished frame.
@@ -971,6 +972,7 @@ pub(crate) mod tests {
                 thunk: &thunk,
             };
             gx_open_display(&mut c).unwrap();
+            c.kernel.framebuffer.enable_ips();
             c.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
             let before = c.kernel.framebuffer.resident_cpu().unwrap().pixels.clone();
             let anchor = Instant::now() + Duration::from_secs(60);
@@ -1015,6 +1017,18 @@ pub(crate) mod tests {
             assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
             assert_eq!(c.kernel.framebuffer.frame_counter, counter);
             assert_eq!(c.kernel.framebuffer.presentation_stats.completed(), 2);
+            assert_eq!(c.kernel.framebuffer.presentation_stats.ips(), Some(1.0));
+            // Intermediate drawing can replace the host pixels without
+            // producing a new completed GX image.
+            c.kernel.framebuffer.fill(0xffff);
+            c.kernel
+                .framebuffer
+                .directdraw
+                .pending
+                .insert(key, Instant::now() - Duration::from_secs(1));
+            assert_eq!(gx_end_draw(&mut c).unwrap(), DispatchOutcome::ReturnedR0(1));
+            assert_eq!(c.kernel.framebuffer.presentation_stats.completed(), 3);
+            assert_eq!(c.kernel.framebuffer.presentation_stats.ips(), Some(1.0));
             // DirectDraw's explicit vertical-blank wait is a one-shot credit.
             c.kernel.framebuffer.directdraw.last_present = Some(anchor);
             c.kernel

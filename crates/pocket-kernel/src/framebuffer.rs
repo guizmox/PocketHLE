@@ -102,7 +102,10 @@ impl DirectDrawTiming {
 /// Only completed, explicit display boundaries are FPS. Without one, callers
 /// retain their changed-image rate (IPS), rather than guessing GDI frames.
 #[derive(Debug, Clone, Default)]
-pub struct PresentationStats(std::sync::Arc<std::sync::Mutex<PresentationRate>>);
+pub struct PresentationStats {
+    presents: std::sync::Arc<std::sync::Mutex<PresentationRate>>,
+    changes: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
+}
 
 #[derive(Debug, Default)]
 struct PresentationRate {
@@ -119,7 +122,9 @@ impl PresentationStats {
     }
 
     fn record_at(&self, now: std::time::Instant) {
-        let Ok(mut rate) = self.0.lock() else { return };
+        let Ok(mut rate) = self.presents.lock() else {
+            return;
+        };
         rate.completed = rate.completed.wrapping_add(1);
         if rate.last.is_some_and(|last| {
             now.saturating_duration_since(last) >= std::time::Duration::from_secs(1)
@@ -147,7 +152,7 @@ impl PresentationStats {
     }
 
     fn fps_at(&self, now: std::time::Instant) -> Option<f32> {
-        let rate = self.0.lock().ok()?;
+        let rate = self.presents.lock().ok()?;
         let last = rate.last?;
         Some(
             if now.saturating_duration_since(last) >= std::time::Duration::from_secs(1) {
@@ -158,13 +163,50 @@ impl PresentationStats {
         )
     }
 
+    pub fn record_image_update(&self) {
+        self.record_image_at(std::time::Instant::now());
+    }
+
+    fn record_image_at(&self, now: std::time::Instant) {
+        let Ok(mut changes) = self.changes.lock() else {
+            return;
+        };
+        while changes.front().is_some_and(|last| {
+            now.saturating_duration_since(*last) >= std::time::Duration::from_secs(1)
+        }) {
+            changes.pop_front();
+        }
+        changes.push_back(now);
+    }
+
+    pub fn ips(&self) -> Option<f32> {
+        self.ips_at(std::time::Instant::now())
+    }
+
+    fn ips_at(&self, now: std::time::Instant) -> Option<f32> {
+        let changes = self.changes.lock().ok()?;
+        changes.back()?;
+        Some(
+            changes
+                .iter()
+                .rev()
+                .take_while(|last| {
+                    now.saturating_duration_since(**last) < std::time::Duration::from_secs(1)
+                })
+                .count() as f32,
+        )
+    }
+
     pub fn completed(&self) -> u64 {
-        self.0.lock().map_or(0, |rate| rate.completed)
+        self.presents.lock().map_or(0, |rate| rate.completed)
     }
 
     pub fn reset(&self) {
-        if let Ok(mut rate) = self.0.lock() {
+        if let Ok(mut rate) = self.presents.lock() {
             *rate = PresentationRate::default();
+        }
+        if let Ok(mut changes) = self.changes.lock() {
+            changes.clear();
         }
     }
 }
@@ -353,7 +395,7 @@ impl Framebuffer {
             && self.bpp == 16
             && self.backlight_level == 11
             && bytes == self.pixels.len())
-            .then_some(self.pixels.as_slice())
+        .then_some(self.pixels.as_slice())
     }
 
     pub fn snapshot_presentation_rgba8888_into(&self, out: &mut Vec<u8>) {
@@ -902,6 +944,28 @@ mod display_timing_tests {
 mod presentation_stats_tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn published_image_rate_is_independent_of_completed_presents() {
+        let stats = PresentationStats::default();
+        let start = Instant::now();
+        for frame in 0..=60 {
+            let now = start + Duration::from_nanos(frame * 1_000_000_000 / 60);
+            stats.record_at(now);
+            if frame % 2 == 0 {
+                stats.record_image_at(now);
+            }
+        }
+        let end = start + Duration::from_secs(1);
+        assert_eq!(stats.fps_at(end), Some(60.0));
+        assert_eq!(stats.ips_at(end), Some(30.0));
+        assert_eq!(stats.ips_at(end + Duration::from_secs(1)), Some(0.0));
+        stats.record_image_at(end + Duration::from_secs(2));
+        assert_eq!(stats.ips_at(end + Duration::from_secs(2)), Some(1.0));
+        assert_eq!(stats.completed(), 61);
+        stats.reset();
+        assert_eq!(stats.ips(), None);
+    }
 
     #[test]
     fn completed_presentations_do_not_dirty_pixels_and_survive_snapshot_clones() {

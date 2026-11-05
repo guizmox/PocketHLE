@@ -1096,6 +1096,8 @@ pub struct LauncherConfig {
     #[serde(default = "default_show_fps")]
     pub show_fps: bool,
     #[serde(default)]
+    pub show_ips: bool,
+    #[serde(default)]
     pub fullscreen: bool,
     #[serde(default = "default_fullscreen_mode")]
     pub fullscreen_mode: String,
@@ -1337,6 +1339,7 @@ impl Default for LauncherConfig {
             android_display_scale: 0,
             last_import_dir: None,
             show_fps: default_show_fps(),
+            show_ips: false,
             fullscreen: false,
             fullscreen_mode: default_fullscreen_mode(),
             orientation: default_orientation(),

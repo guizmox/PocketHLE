@@ -517,6 +517,11 @@ impl Runner {
             game.settings.screen.resolve_image(metadata.as_ref())
         };
         emu.set_screen_size(screen_w, screen_h);
+        if launcher_config.show_ips {
+            if let Some(process) = emu.process_mut() {
+                process.state.framebuffer.enable_ips();
+            }
+        }
         summary_lines.push(format!(
             "Screen: {screen_w}x{screen_h}{}",
             if is_gizmondo { " (Gizmondo)" } else { "" }
@@ -907,11 +912,9 @@ impl FrameSnapshot {
 
     /// Keep native RGB565 for the display when possible. Reuse the caller's
     /// scratch buffer when an alternate image or brightness requires RGBA.
-    fn fill_from_framebuffer(
-        fb: &pocket_core::kernel::Framebuffer,
-        scratch: &mut Vec<u8>,
-    ) -> Self {
-        let rgb565 = fb.presentation_rgb565()
+    fn fill_from_framebuffer(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
+        let rgb565 = fb
+            .presentation_rgb565()
             .filter(|_| cfg!(target_endian = "little"))
             .map(Arc::from);
         let rgba = if rgb565.is_some() {
@@ -1436,6 +1439,9 @@ impl FrameHook for RunHook {
                                 } else {
                                     FrameAction::Continue
                                 };
+                            }
+                            if !state.gx_explicit_present {
+                                state.framebuffer.observe_ips();
                             }
                             let presentation = match state.presentation_framebuffer() {
                                 Ok(frame) => frame,
@@ -1962,7 +1968,8 @@ mod internal_resolution_tests {
     #[cfg(target_endian = "little")]
     fn packed_cpu_snapshot_preserves_capture_pixels() {
         let mut fb = pocket_core::kernel::Framebuffer::new(3, 1);
-        fb.pixels.copy_from_slice(&[0, 0xf8, 0xe0, 0x07, 0x65, 0x2c]);
+        fb.pixels
+            .copy_from_slice(&[0, 0xf8, 0xe0, 0x07, 0x65, 0x2c]);
         let mut scratch = Vec::new();
         let frame = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch);
         assert_eq!(frame.rgb565.as_deref(), Some(fb.pixels.as_slice()));
@@ -2266,7 +2273,10 @@ mod deferred_read_tests {
         );
         kernel.framebuffer.presentation_stats.record_present();
         assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
-        assert_eq!(&rx.try_recv().unwrap().cpu_rgba().unwrap()[..4], &[0, 255, 0, 255]);
+        assert_eq!(
+            &rx.try_recv().unwrap().cpu_rgba().unwrap()[..4],
+            &[0, 255, 0, 255]
+        );
         assert_eq!(hook.last_completed, 1);
     }
 
@@ -2296,6 +2306,9 @@ mod deferred_read_tests {
         assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
         assert_eq!(source.reads.load(Ordering::Relaxed), 2);
         assert!(kernel.framebuffer.cpu_resident());
-        assert_eq!(&rx.try_recv().unwrap().cpu_rgba().unwrap()[..4], &[255, 0, 0, 255]);
+        assert_eq!(
+            &rx.try_recv().unwrap().cpu_rgba().unwrap()[..4],
+            &[255, 0, 0, 255]
+        );
     }
 }
