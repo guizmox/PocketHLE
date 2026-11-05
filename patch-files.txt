@@ -1,9 +1,1 @@
-crates\pocket-cpu\src\unicorn.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-kernel\src\mips_native_thunks.rs
-crates\pocket-kernel\src\native_thunks.rs
-crates\pocket-winceapi\src\coredll.rs
-docs\OPTIMIZATIONS.md
-vendor\unicorn-engine-sys\include\uc_priv.h
-vendor\unicorn-engine-sys\qemu\softmmu\unicorn_vtlb.c
-vendor\unicorn-engine-sys\uc.c
+crates\pocket-library\src\lib.rs

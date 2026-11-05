@@ -3744,14 +3744,14 @@ fn import_installer_choice(
                 }
             }
         }
-        // Record this package's own installation path before rebasing its files.
-        let mut registry = header.registry.clone();
+        // The add-on's inferred install directory can be a common
+        // destination of its data files, such as a child directory of the
+        // application. Use the host application's root for the synthesized
+        // registration while keeping explicit CAB values and file paths.
+        header.install_dir = game.install_dir.clone();
+        let mut registry = std::mem::take(&mut header.registry);
         register_cab_install_dir(&mut registry, &header);
         header.registry = registry;
-        // Resolve every declared destination relative to the base game's root,
-        // not the add-on's root: a pack may install into a child directory.
-        // Preserve the destination strings from the CAB without guessing names.
-        header.install_dir = game.install_dir.clone();
         pocket_cab::materialise_install_header_names(&game_dir.join("extracted"), &files, &header);
         let mut entry = game.clone();
         for value in header.registry {
