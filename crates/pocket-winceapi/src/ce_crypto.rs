@@ -2,7 +2,10 @@
 use crate::{CallCtx, Handler, WinCeDispatcher};
 use des::cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use des::Des;
-use pocket_kernel::{crypto::{CryptoHash, CryptoKey, Digest, Sha1}, DispatchOutcome, KernelError};
+use pocket_kernel::{
+    crypto::{CryptoHash, CryptoKey, Digest, Sha1},
+    DispatchOutcome, KernelError,
+};
 
 const BAD_DATA: u32 = 0x8009_0005;
 const BAD_FLAGS: u32 = 0x8009_0009;
@@ -49,9 +52,11 @@ fn acquire(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if kind != 1 {
         return fail(ctx, 0x8009_0014);
     }
-    if name != 0 && !crate::ce_shortcut::text(ctx, name, 260).is_ok_and(|name| {
-        name.eq_ignore_ascii_case("Microsoft Enhanced Cryptographic Provider v1.0")
-    }) {
+    if name != 0
+        && !crate::ce_shortcut::text(ctx, name, 260).is_ok_and(|name| {
+            name.eq_ignore_ascii_case("Microsoft Enhanced Cryptographic Provider v1.0")
+        })
+    {
         return fail(ctx, 0x8009_0013);
     }
     match flags {
@@ -60,7 +65,9 @@ fn acquire(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         0 | 8 | 0xf000_0000 => {}
         _ => return fail(ctx, BAD_FLAGS),
     }
-    let Some(handle) = ctx.kernel.crypto.allocate() else { return fail(ctx, 8) };
+    let Some(handle) = ctx.kernel.crypto.allocate() else {
+        return fail(ctx, 8);
+    };
     if ctx.cpu.write_mem(out, &handle.to_le_bytes()).is_err() {
         return fail(ctx, 998);
     }
@@ -97,11 +104,20 @@ fn create_hash(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return fail(ctx, BAD_FLAGS);
     }
     let out = ctx.arg_u32(4)?;
-    let Some(handle) = ctx.kernel.crypto.allocate() else { return fail(ctx, 8) };
+    let Some(handle) = ctx.kernel.crypto.allocate() else {
+        return fail(ctx, 8);
+    };
     if ctx.cpu.write_mem(out, &handle.to_le_bytes()).is_err() {
         return fail(ctx, 998);
     }
-    ctx.kernel.crypto.hashes.insert(handle, CryptoHash { provider, digest: Sha1::new(), finished: false });
+    ctx.kernel.crypto.hashes.insert(
+        handle,
+        CryptoHash {
+            provider,
+            digest: Sha1::new(),
+            finished: false,
+        },
+    );
     Ok(OK)
 }
 
@@ -112,7 +128,9 @@ fn hash_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.arg_u32(3)? != 0 {
         return fail(ctx, BAD_FLAGS);
     }
-    let Some(hash) = ctx.kernel.crypto.hashes.get_mut(&handle) else { return fail(ctx, BAD_HASH) };
+    let Some(hash) = ctx.kernel.crypto.hashes.get_mut(&handle) else {
+        return fail(ctx, BAD_HASH);
+    };
     if hash.finished {
         return fail(ctx, 0x8009_000c);
     }
@@ -120,7 +138,9 @@ fn hash_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return fail(ctx, 8);
     }
     if len != 0 {
-        let Ok(bytes) = ctx.cpu.read_mem(ptr, len) else { return fail(ctx, 998) };
+        let Ok(bytes) = ctx.cpu.read_mem(ptr, len) else {
+            return fail(ctx, 998);
+        };
         hash.digest.update(&bytes);
     }
     Ok(OK)
@@ -147,19 +167,35 @@ fn derive_key(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return fail(ctx, BAD_FLAGS);
     }
     let out = ctx.arg_u32(4)?;
-    let Some(source) = ctx.kernel.crypto.hashes.get(&hash).filter(|h| h.provider == provider)
-    else { return fail(ctx, BAD_HASH) };
+    let Some(source) = ctx
+        .kernel
+        .crypto
+        .hashes
+        .get(&hash)
+        .filter(|h| h.provider == provider)
+    else {
+        return fail(ctx, BAD_HASH);
+    };
     if source.finished {
         return fail(ctx, 0x8009_000c);
     }
     let digest = source.digest.clone().finalize();
     let bytes = digest[..8].try_into().unwrap();
-    let Some(handle) = ctx.kernel.crypto.allocate() else { return fail(ctx, 8) };
+    let Some(handle) = ctx.kernel.crypto.allocate() else {
+        return fail(ctx, 8);
+    };
     if ctx.cpu.write_mem(out, &handle.to_le_bytes()).is_err() {
         return fail(ctx, 998);
     }
     ctx.kernel.crypto.hashes.get_mut(&hash).unwrap().finished = true;
-    ctx.kernel.crypto.keys.insert(handle, CryptoKey { provider, bytes, ecb: false });
+    ctx.kernel.crypto.keys.insert(
+        handle,
+        CryptoKey {
+            provider,
+            bytes,
+            ecb: false,
+        },
+    );
     Ok(OK)
 }
 
@@ -176,7 +212,9 @@ fn set_key_param(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     if ctx.cpu.read_u32_le(ptr).ok() != Some(2) {
         return fail(ctx, BAD_DATA);
     }
-    let Some(key) = ctx.kernel.crypto.keys.get_mut(&handle) else { return fail(ctx, BAD_KEY) };
+    let Some(key) = ctx.kernel.crypto.keys.get_mut(&handle) else {
+        return fail(ctx, BAD_KEY);
+    };
     key.ecb = true;
     Ok(OK)
 }
@@ -205,18 +243,30 @@ fn transform(ctx: &mut CallCtx<'_>, encrypt: bool) -> Result<DispatchOutcome, Ke
     if ctx.arg_u32(1)? != 0 || ctx.arg_u32(3)? != 0 {
         return fail(ctx, BAD_FLAGS);
     }
-    let Some(key) = ctx.kernel.crypto.keys.get(&handle) else { return fail(ctx, BAD_KEY) };
+    let Some(key) = ctx.kernel.crypto.keys.get(&handle) else {
+        return fail(ctx, BAD_KEY);
+    };
     if !key.ecb {
         return fail(ctx, BAD_TYPE);
     }
     let cipher = Des::new(&key.bytes.into());
-    let Ok(len) = ctx.cpu.read_u32_le(len_ptr) else { return fail(ctx, 998) };
+    let Ok(len) = ctx.cpu.read_u32_le(len_ptr) else {
+        return fail(ctx, 998);
+    };
     if len > MAX_BYTES || ((!encrypt || !final_block) && len % 8 != 0) {
         return fail(ctx, BAD_DATA);
     }
-    let output_len = if encrypt && final_block { (len / 8 + 1) * 8 } else { len };
+    let output_len = if encrypt && final_block {
+        (len / 8 + 1) * 8
+    } else {
+        len
+    };
     if encrypt && (data == 0 || output_len > ctx.arg_u32(6)?) {
-        if ctx.cpu.write_mem(len_ptr, &output_len.to_le_bytes()).is_err() {
+        if ctx
+            .cpu
+            .write_mem(len_ptr, &output_len.to_le_bytes())
+            .is_err()
+        {
             return fail(ctx, 998);
         }
         return if data == 0 { Ok(OK) } else { fail(ctx, 234) };
@@ -224,7 +274,9 @@ fn transform(ctx: &mut CallCtx<'_>, encrypt: bool) -> Result<DispatchOutcome, Ke
     let mut bytes = if len == 0 {
         Vec::new()
     } else {
-        let Ok(bytes) = ctx.cpu.read_mem(data, len) else { return fail(ctx, 998) };
+        let Ok(bytes) = ctx.cpu.read_mem(data, len) else {
+            return fail(ctx, 998);
+        };
         bytes
     };
     if encrypt && final_block {
@@ -232,17 +284,30 @@ fn transform(ctx: &mut CallCtx<'_>, encrypt: bool) -> Result<DispatchOutcome, Ke
     }
     for chunk in bytes.chunks_exact_mut(8) {
         let block: &mut Block<Des> = chunk.try_into().unwrap();
-        if encrypt { cipher.encrypt_block(block) } else { cipher.decrypt_block(block) }
+        if encrypt {
+            cipher.encrypt_block(block)
+        } else {
+            cipher.decrypt_block(block)
+        }
     }
     if !encrypt && final_block {
         let padding = bytes.last().copied().unwrap_or(0) as usize;
-        if !(1..=8).contains(&padding) || !bytes.iter().rev().take(padding).all(|&b| b as usize == padding) {
+        if !(1..=8).contains(&padding)
+            || !bytes
+                .iter()
+                .rev()
+                .take(padding)
+                .all(|&b| b as usize == padding)
+        {
             return fail(ctx, BAD_DATA);
         }
         bytes.truncate(bytes.len() - padding);
     }
     if (!bytes.is_empty() && ctx.cpu.write_mem(data, &bytes).is_err())
-        || ctx.cpu.write_mem(len_ptr, &(bytes.len() as u32).to_le_bytes()).is_err()
+        || ctx
+            .cpu
+            .write_mem(len_ptr, &(bytes.len() as u32).to_le_bytes())
+            .is_err()
     {
         return fail(ctx, 998);
     }
@@ -263,27 +328,41 @@ mod tests {
                 call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", $name, &[$($arg),*])
             };
         }
-        assert_eq!(invoke!("CryptAcquireContextW", 0x1000, 0, 0, 1, 0), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            invoke!("CryptAcquireContextW", 0x1000, 0, 0, 1, 0),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(invoke!("CryptAcquireContextW", 0x1000, 0, 0, 1, 8), OK);
         let provider = cpu.read_u32_le(0x1000).unwrap();
-        assert_eq!(invoke!("CryptCreateHash", provider, 0x8004, 0, 0, 0x1004), OK);
+        assert_eq!(
+            invoke!("CryptCreateHash", provider, 0x8004, 0, 0, 0x1004),
+            OK
+        );
         let hash = cpu.read_u32_le(0x1004).unwrap();
         cpu.write_mem(0x1100, b"abc").unwrap();
         assert_eq!(invoke!("CryptHashData", hash, 0x1100, 1, 0), OK);
         assert_eq!(invoke!("CryptHashData", hash, 0x1101, 2, 0), OK);
-        assert_eq!(invoke!("CryptDeriveKey", provider, 0x6601, hash, 0x10, 0x1008), OK);
+        assert_eq!(
+            invoke!("CryptDeriveKey", provider, 0x6601, hash, 0x10, 0x1008),
+            OK
+        );
         let key = cpu.read_u32_le(0x1008).unwrap();
         assert_eq!(invoke!("CryptDestroyHash", hash), OK);
         cpu.write_mem(0x100c, &2u32.to_le_bytes()).unwrap();
         assert_eq!(invoke!("CryptSetKeyParam", key, 4, 0x100c, 0), OK);
         cpu.write_mem(0x1100, b"PocketHLE").unwrap();
         cpu.write_mem(0x1010, &9u32.to_le_bytes()).unwrap();
-        assert_eq!(invoke!("CryptEncrypt", key, 0, 1, 0, 0x1100, 0x1010, 16), OK);
+        assert_eq!(
+            invoke!("CryptEncrypt", key, 0, 1, 0, 0x1100, 0x1010, 16),
+            OK
+        );
         assert_eq!(cpu.read_u32_le(0x1010).unwrap(), 16);
         assert_eq!(
             cpu.read_mem(0x1100, 16).unwrap(),
-            [0x7a, 0xc7, 0x96, 0x18, 0xed, 0x0a, 0xfa, 0xe3,
-             0x81, 0x4c, 0xb3, 0x2b, 0xa3, 0xf4, 0x97, 0x63]
+            [
+                0x7a, 0xc7, 0x96, 0x18, 0xed, 0x0a, 0xfa, 0xe3, 0x81, 0x4c, 0xb3, 0x2b, 0xa3, 0xf4,
+                0x97, 0x63
+            ]
         );
         assert_eq!(invoke!("CryptDecrypt", key, 0, 1, 0, 0x1100, 0x1010), OK);
         assert_eq!(cpu.read_u32_le(0x1010).unwrap(), 9);

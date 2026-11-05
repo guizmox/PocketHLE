@@ -205,7 +205,11 @@ fn connect(ctx: &mut CallCtx<'_>) -> Outcome {
         Ok(a) => a,
         Err(e) => return error(ctx, e),
     };
-    addr.address = ctx.kernel.vfs.bluetooth.resolve_discovery_alias(addr.address);
+    addr.address = ctx
+        .kernel
+        .vfs
+        .bluetooth
+        .resolve_discovery_alias(addr.address);
     let s = ctx.kernel.vfs.bluetooth.sockets.get_mut(&h).unwrap();
     let nonblocking = s.nonblocking;
     let timeout = 0;
@@ -801,7 +805,9 @@ mod tests {
     ) {
         started_with("ws2.dll")
     }
-    fn started_with(dll: &str) -> (
+    fn started_with(
+        dll: &str,
+    ) -> (
         pocket_cpu::stub::StubCpu,
         pocket_kernel::KernelState,
         WinCeDispatcher,
@@ -843,17 +849,41 @@ mod tests {
     fn winsock_connect_resolves_gizmondo_discovery_alias() {
         let (mut cpu, mut kernel, mut dispatcher, shared) = started_with("winsock.dll");
         let handle = ret(call(
-            &mut cpu, &mut kernel, &mut dispatcher, "winsock.dll", "socket", &[32, 1, 3],
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "winsock.dll",
+            "socket",
+            &[32, 1, 3],
         ));
-        kernel.vfs.bluetooth.sockets.get_mut(&handle).unwrap().nonblocking = true;
+        kernel
+            .vfs
+            .bluetooth
+            .sockets
+            .get_mut(&handle)
+            .unwrap()
+            .nonblocking = true;
         let real = 0x1234_5678_9abc;
         let alias = kernel.vfs.bluetooth.gizmondo_discovery_alias(real).unwrap();
-        assert_eq!(kernel.vfs.bluetooth.gizmondo_discovery_alias(real), Ok(alias));
-        let address = SocketAddress { address: alias, port: 1, uuid: [0; 16] };
+        assert_eq!(
+            kernel.vfs.bluetooth.gizmondo_discovery_alias(real),
+            Ok(alias)
+        );
+        let address = SocketAddress {
+            address: alias,
+            port: 1,
+            uuid: [0; 16],
+        };
         cpu.write_mem(0x1200, &encode(&address)).unwrap();
         assert_eq!(
-            ret(call(&mut cpu, &mut kernel, &mut dispatcher, "winsock.dll", "connect",
-                &[handle, 0x1200, 40])),
+            ret(call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "winsock.dll",
+                "connect",
+                &[handle, 0x1200, 40]
+            )),
             u32::MAX
         );
         assert_eq!(shared.lock().unwrap().connect_address, real);
@@ -868,14 +898,7 @@ mod tests {
 
     fn assert_rfcomm_server_sequence(dll: &str) {
         let (mut cpu, mut k, mut d, shared) = started_with(dll);
-        let h = ret(call(
-            &mut cpu,
-            &mut k,
-            &mut d,
-            dll,
-            "socket",
-            &[32, 1, 3],
-        ));
+        let h = ret(call(&mut cpu, &mut k, &mut d, dll, "socket", &[32, 1, 3]));
         assert_ne!(h, 0);
         assert_ne!(h, u32::MAX);
         cpu.write_mem(0x1100, &4096u32.to_le_bytes()).unwrap();
@@ -924,14 +947,7 @@ mod tests {
         };
         cpu.write_mem(0x1200, &encode(&addr)).unwrap();
         assert_eq!(
-            call(
-                &mut cpu,
-                &mut k,
-                &mut d,
-                dll,
-                "bind",
-                &[h, 0x1200, 40]
-            ),
+            call(&mut cpu, &mut k, &mut d, dll, "bind", &[h, 0x1200, 40]),
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(shared.lock().unwrap().bound.port, 7);

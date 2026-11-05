@@ -49,7 +49,10 @@ impl ContactStore {
         let mut data = Vec::new();
         file.take(MAX_STORE_BYTES + 1).read_to_end(&mut data)?;
         if data.len() as u64 > MAX_STORE_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "CEDB contacts too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CEDB contacts too large",
+            ));
         }
         serde_json::from_slice(&data).map_err(io::Error::other)
     }
@@ -104,7 +107,8 @@ impl Contacts {
         let mut ids: Vec<_> = self.records.keys().copied().collect();
         if self.sort != 0 {
             ids.sort_by_cached_key(|oid| {
-                self.records[oid].get(&self.sort)
+                self.records[oid]
+                    .get(&self.sort)
                     .map(|value| String::from_utf16_lossy(value).to_lowercase())
                     .unwrap_or_default()
             });

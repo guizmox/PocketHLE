@@ -24,18 +24,27 @@ mod tests {
         std::fs::write(
             dir.path().join("font.ttf"),
             include_bytes!("../../pocket-kernel/assets/fonts/LiberationSerif-Regular.ttf"),
-        ).unwrap();
+        )
+        .unwrap();
         k.vfs.mount("/", dir.path());
         cpu.write_mem(
             0x1000,
-            &"/font.ttf".encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect::<Vec<_>>(),
-        ).unwrap();
+            &"/font.ttf"
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let mut invoke = |api| call(&mut cpu, &mut k, &mut d, "coredll.dll", api, &[0x1000]);
         for _ in 0..2 {
             assert_eq!(invoke("AddFontResourceW"), DispatchOutcome::ReturnedR0(1));
         }
         for expected in [1, 1, 0] {
-            assert_eq!(invoke("RemoveFontResourceW"), DispatchOutcome::ReturnedR0(expected));
+            assert_eq!(
+                invoke("RemoveFontResourceW"),
+                DispatchOutcome::ReturnedR0(expected)
+            );
         }
         assert!(k.gdi.installed_fonts.is_empty());
         assert_eq!(k.gdi.installed_font_bytes, 0);
@@ -215,7 +224,10 @@ fn remove(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         Ok(path) => path,
         Err(error) => return fail(ctx, error),
     };
-    let removed = ctx.kernel.vfs.resolve(&path)
+    let removed = ctx
+        .kernel
+        .vfs
+        .resolve(&path)
         .is_some_and(|source| ctx.kernel.gdi.remove_fonts(&source));
     Ok(DispatchOutcome::ReturnedR0(u32::from(removed)))
 }

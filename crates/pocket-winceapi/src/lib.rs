@@ -26,9 +26,9 @@ pub mod aygshell;
 mod backlight_tests;
 mod bluetooth;
 mod camera;
-mod ce_fonts;
 mod ce_crypto;
 mod ce_database;
+mod ce_fonts;
 #[cfg(all(test, feature = "unicorn-tests"))]
 mod ce_native_tests;
 mod ce_notify;

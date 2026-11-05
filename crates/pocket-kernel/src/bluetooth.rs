@@ -401,7 +401,11 @@ impl State {
     /// Keep aliases local to the guest session and never change the radio address.
     pub fn gizmondo_discovery_alias(&mut self, host_address: u64) -> BtResult<u64> {
         const PREFIX: u64 = 0x0012_8500_0000;
-        if let Some((&alias, _)) = self.discovery_aliases.iter().find(|(_, address)| **address == host_address) {
+        if let Some((&alias, _)) = self
+            .discovery_aliases
+            .iter()
+            .find(|(_, address)| **address == host_address)
+        {
             return Ok(alias);
         }
         if self.discovery_aliases.len() >= 1024 {
@@ -413,7 +417,10 @@ impl State {
     }
 
     pub fn resolve_discovery_alias(&self, address: u64) -> u64 {
-        self.discovery_aliases.get(&address).copied().unwrap_or(address)
+        self.discovery_aliases
+            .get(&address)
+            .copied()
+            .unwrap_or(address)
     }
 
     pub fn clear_discovery_aliases(&mut self) {

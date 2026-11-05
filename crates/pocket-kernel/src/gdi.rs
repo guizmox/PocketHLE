@@ -650,10 +650,17 @@ impl GdiState {
     }
 
     pub fn remove_fonts(&mut self, path: &std::path::Path) -> bool {
-        let Some(index) = self.font_registrations.iter().rposition(|entry| entry.0 == path) else {
+        let Some(index) = self
+            .font_registrations
+            .iter()
+            .rposition(|entry| entry.0 == path)
+        else {
             return false;
         };
-        let start: usize = self.font_registrations[..index].iter().map(|entry| entry.1).sum();
+        let start: usize = self.font_registrations[..index]
+            .iter()
+            .map(|entry| entry.1)
+            .sum();
         let (_, count, bytes) = self.font_registrations.remove(index);
         self.installed_fonts.drain(start..start + count);
         self.installed_font_bytes -= bytes;

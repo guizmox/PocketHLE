@@ -1854,9 +1854,17 @@ fn read_file_version_resource(ctx: &mut CallCtx<'_>, file_ptr: u32) -> Option<Ve
     {
         return None;
     }
-    let entry = ctx.kernel.resources.iter()
+    let entry = ctx
+        .kernel
+        .resources
+        .iter()
         .find(|entry| entry.ty == ResourceKey::Id(16) && entry.name == ResourceKey::Id(1))?;
-    ctx.cpu.read_mem(ctx.kernel.image_base.checked_add(entry.data_rva)?, entry.size).ok()
+    ctx.cpu
+        .read_mem(
+            ctx.kernel.image_base.checked_add(entry.data_rva)?,
+            entry.size,
+        )
+        .ok()
 }
 
 fn get_file_version_info_size_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -3421,7 +3429,9 @@ fn ce_set_thread_priority(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     };
     let updated = ce_thread_priority_target(ctx.kernel, handle)
         .and_then(|(pid, index)| {
-            ctx.kernel.object_handles.ce_thread_priority(pid, index, Some(priority))
+            ctx.kernel
+                .object_handles
+                .ce_thread_priority(pid, index, Some(priority))
         })
         .is_some();
     if !updated {
@@ -3432,9 +3442,11 @@ fn ce_set_thread_priority(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 
 fn ce_get_thread_priority(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    let Some(priority) = ce_thread_priority_target(ctx.kernel, handle)
-        .and_then(|(pid, index)| ctx.kernel.object_handles.ce_thread_priority(pid, index, None))
-    else {
+    let Some(priority) = ce_thread_priority_target(ctx.kernel, handle).and_then(|(pid, index)| {
+        ctx.kernel
+            .object_handles
+            .ce_thread_priority(pid, index, None)
+    }) else {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(i32::MAX as u32));
     };
@@ -3773,9 +3785,13 @@ fn ce_run_app_at_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         let word = |i: usize| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
         let (year, month, day) = (i32::from(word(0)), i32::from(word(1)), i32::from(word(3)));
         let (hour, minute, second, millis) = (word(4), word(5), word(6), word(7));
-        if !(1601..=30_827).contains(&year) || !(1..=12).contains(&month)
-            || !(1..=31).contains(&day) || hour >= 24 || minute >= 60
-            || second >= 60 || millis >= 1000
+        if !(1601..=30_827).contains(&year)
+            || !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hour >= 24
+            || minute >= 60
+            || second >= 60
+            || millis >= 1000
         {
             return None;
         }
@@ -3785,8 +3801,8 @@ fn ce_run_app_at_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         }
         // GetLocalTime uses the emulator's UTC clock. WinCE dispatches alarms
         // within the default RTC accuracy window immediately.
-        let secs = days * 86_400 + i64::from(hour) * 3600
-            + i64::from(minute) * 60 + i64::from(second);
+        let secs =
+            days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
         let timestamp = secs * 1000 + i64::from(millis);
         let delta = Duration::from_millis(timestamp.unsigned_abs());
         let deadline = if timestamp < 0 {
@@ -3800,7 +3816,9 @@ fn ce_run_app_at_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         } else {
             deadline
         };
-        ctx.kernel.scheduled_process_launches.insert(key, (deadline, name));
+        ctx.kernel
+            .scheduled_process_launches
+            .insert(key, (deadline, name));
         Some(())
     };
     if app == 0 || app > u32::MAX - 2048 || request().is_none() {
@@ -30279,18 +30297,24 @@ mod tests {
     #[test]
     fn native_import_preserves_btdrt_discovery_thunks() {
         let mut cpu = StubCpu::new();
-        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
         let mut kernel = fresh_kernel();
         let mut module = lifecycle_test_module(0x31000000, 0x31001000);
         module.name = "btdrt.dll".into();
         module.attached = true;
         kernel.modules.push(module);
-        let names = ["BthSetSecurityUI", "BthNsLookupServiceBegin",
-            "BthNsLookupServiceNext", "BthNsLookupServiceEnd"];
+        let names = [
+            "BthSetSecurityUI",
+            "BthNsLookupServiceBegin",
+            "BthNsLookupServiceNext",
+            "BthNsLookupServiceEnd",
+        ];
         let mut exports = std::collections::HashMap::new();
         for (index, name) in names.into_iter().enumerate() {
             let iat_va = 0x1100 + index as u32 * 4;
-            cpu.write_mem(iat_va, &(0x70000000u32 + index as u32 * 4).to_le_bytes()).unwrap();
+            cpu.write_mem(iat_va, &(0x70000000u32 + index as u32 * 4).to_le_bytes())
+                .unwrap();
             kernel.image_imports.push(pocket_pe::ImportSymbol {
                 dll: "BTDRT.dll".into(),
                 binding: pocket_pe::ImportBinding::Name(name.into()),
@@ -30307,12 +30331,20 @@ mod tests {
             iat_va: 0x1100,
         };
         assert_eq!(
-            native_import(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(),
+            native_import(&mut CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk
+            })
+            .unwrap(),
             DispatchOutcome::JumpTo(0x31001000)
         );
         assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0x31001000);
         for index in 1..4 {
-            assert_eq!(cpu.read_u32_le(0x1100 + index * 4).unwrap(), 0x70000000 + index * 4);
+            assert_eq!(
+                cpu.read_u32_le(0x1100 + index * 4).unwrap(),
+                0x70000000 + index * 4
+            );
         }
     }
 
@@ -30772,7 +30804,10 @@ mod tests {
         assert_eq!(ctx.kernel.vfs.read(file.handle, &mut bytes), Some(4));
         assert_eq!(&bytes, b"jpeg");
         assert!(ctx.kernel.vfs.close(file.handle));
-        assert_eq!(std::fs::read(store.path().join(name)).unwrap(), b"root file");
+        assert_eq!(
+            std::fs::read(store.path().join(name)).unwrap(),
+            b"root file"
+        );
         assert!(!installed.path().join(name).exists());
     }
 
@@ -34144,17 +34179,33 @@ mod tests {
             };
             cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
             cpu.write_reg(ArmReg::R1, time_ptr).unwrap();
-            ce_run_app_at_time(&mut CallCtx { cpu: &mut cpu, thunk: &thunk, kernel }).unwrap()
+            ce_run_app_at_time(&mut CallCtx {
+                cpu: &mut cpu,
+                thunk: &thunk,
+                kernel,
+            })
+            .unwrap()
         };
         let name = r"\SD Card\alarm.exe";
         let future = [2099, 1, 0, 1, 0, 0, 0, 0];
         let invalid = [2099, 2, 0, 29, 0, 0, 0, 0];
         let past = [2000, 2, 0, 29, 0, 0, 0, 0];
-        assert!(matches!(invoke(&mut kernel, name, Some(future)), DispatchOutcome::ReturnedR0(1)));
-        assert!(matches!(invoke(&mut kernel, name, Some(invalid)), DispatchOutcome::ReturnedR0(0)));
-        assert!(kernel.take_scheduled_process_launch(std::time::SystemTime::now()).is_none());
+        assert!(matches!(
+            invoke(&mut kernel, name, Some(future)),
+            DispatchOutcome::ReturnedR0(1)
+        ));
+        assert!(matches!(
+            invoke(&mut kernel, name, Some(invalid)),
+            DispatchOutcome::ReturnedR0(0)
+        ));
+        assert!(kernel
+            .take_scheduled_process_launch(std::time::SystemTime::now())
+            .is_none());
         assert_eq!(kernel.scheduled_process_launches.len(), 1);
-        assert!(matches!(invoke(&mut kernel, "/SD CARD/ALARM.EXE", None), DispatchOutcome::ReturnedR0(1)));
+        assert!(matches!(
+            invoke(&mut kernel, "/SD CARD/ALARM.EXE", None),
+            DispatchOutcome::ReturnedR0(1)
+        ));
         assert!(kernel.scheduled_process_launches.is_empty());
         invoke(&mut kernel, name, Some(future));
         invoke(&mut kernel, name, Some(past));

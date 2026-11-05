@@ -238,7 +238,12 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return fail(ctx, 10014);
     }
     let address = if return_blob {
-        match ctx.kernel.vfs.bluetooth.gizmondo_discovery_alias(device.address) {
+        match ctx
+            .kernel
+            .vfs
+            .bluetooth
+            .gizmondo_discovery_alias(device.address)
+        {
             Ok(address) => address,
             Err(error) => return fail(ctx, error),
         }
@@ -506,8 +511,14 @@ mod tests {
         query[48..52].copy_from_slice(&0x1150u32.to_le_bytes());
         cpu.write_mem(0x1100, &query).unwrap();
         assert_eq!(
-            call(&mut cpu, &mut kernel, &mut dispatcher, "btdrt.dll",
-                "BthNsLookupServiceBegin", &[0x1100, 2, 0x1210]),
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "btdrt.dll",
+                "BthNsLookupServiceBegin",
+                &[0x1100, 2, 0x1210]
+            ),
             DispatchOutcome::ReturnedR0(0)
         );
         let legacy = cpu.read_u32_le(0x1210).unwrap();
@@ -520,8 +531,14 @@ mod tests {
         }
         cpu.write_mem(0x1214, &512u32.to_le_bytes()).unwrap();
         assert_eq!(
-            call(&mut cpu, &mut kernel, &mut dispatcher, "btdrt.dll",
-                "BthNsLookupServiceNext", &[legacy, 0x310, 0x1214, 0x2000]),
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "btdrt.dll",
+                "BthNsLookupServiceNext",
+                &[legacy, 0x310, 0x1214, 0x2000]
+            ),
             DispatchOutcome::ReturnedR0(0)
         );
         let blob = cpu.read_u32_le(0x2038).unwrap();
@@ -529,11 +546,20 @@ mod tests {
         let address = cpu.read_u32_le(blob + 4).unwrap();
         let alias = u64::from_le_bytes(cpu.read_mem(address, 8).unwrap().try_into().unwrap());
         assert_eq!(alias >> 24, 0x001285);
-        assert_eq!(kernel.vfs.bluetooth.resolve_discovery_alias(alias), 0x123456789abc);
+        assert_eq!(
+            kernel.vfs.bluetooth.resolve_discovery_alias(alias),
+            0x123456789abc
+        );
         assert_eq!(cpu.read_mem(0x205c, 8).unwrap(), alias.to_le_bytes());
         assert_eq!(
-            call(&mut cpu, &mut kernel, &mut dispatcher, "btdrt.dll",
-                "BthNsLookupServiceEnd", &[legacy]),
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "btdrt.dll",
+                "BthNsLookupServiceEnd",
+                &[legacy]
+            ),
             DispatchOutcome::ReturnedR0(0)
         );
 
