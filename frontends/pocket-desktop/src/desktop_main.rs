@@ -13,6 +13,7 @@ mod controller_ui;
 mod deck_navigation;
 mod desktop_pointer;
 mod file_dialog;
+mod frame_pacing;
 mod fullscreen_layout;
 mod gamepad;
 mod gamepad_host;

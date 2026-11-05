@@ -198,6 +198,18 @@ pub fn file_version_resource(bytes: &[u8]) -> Option<&[u8]> {
 
 /// Parse and lay out a PE32 image from raw bytes.
 pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
+    load_bytes_inner(bytes, None)
+}
+
+/// Load a PE for optional analysis with a cap on the total mapped section bytes.
+pub fn load_bytes_bounded(bytes: &[u8], max_section_bytes: u64) -> Result<LoadedImage, LoadError> {
+    load_bytes_inner(bytes, Some(max_section_bytes))
+}
+
+fn load_bytes_inner(
+    bytes: &[u8],
+    max_section_bytes: Option<u64>,
+) -> Result<LoadedImage, LoadError> {
     let pe = parse_wince_pe(bytes)?;
     if pe.is_64 {
         return Err(LoadError::UnsupportedMachine(pe.header.coff_header.machine));
@@ -228,6 +240,17 @@ pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
     // Don't reject other subsystems — the user may want to inspect a
     // desktop image (the JumpyBall zip is x86 GUI for example).
 
+    if max_section_bytes.is_some_and(|limit| {
+        pe.sections
+            .iter()
+            .map(|s| u64::from(s.virtual_size))
+            .sum::<u64>()
+            > limit
+    }) {
+        return Err(LoadError::SectionOob(
+            "mapped sections exceed analysis limit".into(),
+        ));
+    }
     let mut sections = Vec::with_capacity(pe.sections.len());
     for s in &pe.sections {
         let name = String::from_utf8_lossy(&s.name)

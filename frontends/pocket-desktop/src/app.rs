@@ -280,6 +280,7 @@ pub struct PocketLauncher {
     rename_draft: Option<(String, String, bool)>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
+    frame_pacing_warnings: std::collections::VecDeque<String>,
     updating_import: bool,
     library_busy: bool,
     restore_archive: Option<std::path::PathBuf>,
@@ -338,7 +339,6 @@ pub struct PocketLauncher {
     last_frame_snapshot: Option<FrameSnapshot>,
     last_frame_status: Option<String>,
     frame_stats: FrameStats,
-    rate_badge: Option<(Instant, String)>,
     /// How far the presented frame is turned. Initialised from the
     /// running game's persisted [`RotationPref`] and editable live on
     /// the Run screen, where a change is written straight back to the
@@ -721,10 +721,32 @@ pub enum UiEvent {
     BackupFinished(Result<String, String>),
     ColorsUnlocked(Result<String, String>),
     ReleaseAvailable(pocket_library::updates::Update),
-    ImportFinished(Result<Vec<GameEntry>, String>),
+    ImportFinished(Result<ImportedGames, String>),
     ImportPrepared(PreparedImport),
     DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
     RunFinished(RunOutcome),
+}
+
+#[derive(Debug)]
+pub struct ImportedGames {
+    entries: Vec<GameEntry>,
+    frame_pacing_warnings: Vec<String>,
+}
+
+impl ImportedGames {
+    fn analyze(entries: Vec<GameEntry>, library: &Library, existing_ids: &[String]) -> Self {
+        let frame_pacing_warnings = entries
+            .iter()
+            .filter(|game| !existing_ids.contains(&game.id) && !library.is_demo_card(&game.id))
+            .filter(|game| !is_gizmondo_game(game, library.root()))
+            .filter(|game| crate::frame_pacing::may_run_fast(&game.executable_path(library.root())))
+            .map(|game| game.id.clone())
+            .collect();
+        Self {
+            entries,
+            frame_pacing_warnings,
+        }
+    }
 }
 
 /// Frontend draw completions, never guest submissions or queued uploads.
@@ -894,6 +916,7 @@ impl PocketLauncher {
             rename_draft: None,
             demo_import: None,
             pending_import: None,
+            frame_pacing_warnings: Default::default(),
             updating_import: false,
             library_busy: false,
             restore_archive: None,
@@ -935,7 +958,6 @@ impl PocketLauncher {
             last_frame_snapshot: None,
             last_frame_status: None,
             frame_stats: FrameStats::default(),
-            rate_badge: None,
             game_rotation: RotationPref::None,
             running_game_id: None,
             running_is_gizmondo: false,
@@ -1049,7 +1071,11 @@ impl PocketLauncher {
                     self.pending_import = Some(pending);
                     self.status = "Waiting for import confirmation...".into();
                 }
-                UiEvent::ImportFinished(Ok(entries)) => {
+                UiEvent::ImportFinished(Ok(ImportedGames {
+                    entries,
+                    frame_pacing_warnings,
+                })) => {
+                    self.frame_pacing_warnings.extend(frame_pacing_warnings);
                     self.library_busy = false;
                     let updated = self.updating_import;
                     self.updating_import = false;
@@ -2187,7 +2213,10 @@ impl PocketLauncher {
             self.status = "Importing...".into();
             std::thread::spawn(move || {
                 let result = Library::open(root)
-                    .and_then(|mut lib| lib.apply_prepared_import(pending, false))
+                    .and_then(|mut lib| {
+                        let entries = lib.apply_prepared_import(pending, false)?;
+                        Ok(ImportedGames::analyze(entries, &lib, &[]))
+                    })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(UiEvent::ImportFinished(result));
             });
@@ -2235,11 +2264,59 @@ impl PocketLauncher {
             self.status = "Updating game files...".into();
             std::thread::spawn(move || {
                 let result = Library::open(root)
-                    .and_then(|mut lib| lib.apply_prepared_import(pending, true))
+                    .and_then(|mut lib| {
+                        let existing_ids: Vec<_> =
+                            lib.games().iter().map(|game| game.id.clone()).collect();
+                        let entries = lib.apply_prepared_import(pending, true)?;
+                        Ok(ImportedGames::analyze(entries, &lib, &existing_ids))
+                    })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(UiEvent::ImportFinished(result));
             });
         }
+    }
+
+    fn ui_frame_pacing_warning(&mut self, ctx: &egui::Context) -> bool {
+        if self.screen != Screen::Library || self.rename_draft.is_some() {
+            return false;
+        }
+        let Some(id) = self.frame_pacing_warnings.front() else {
+            return false;
+        };
+        let Some(game) = self.library.games().iter().find(|game| &game.id == id) else {
+            self.frame_pacing_warnings.pop_front();
+            ctx.request_repaint();
+            return false;
+        };
+        self.deck_nav_repeat = None;
+        self.deck_library_actions.clear();
+        let mut open_settings = false;
+        let mut dismiss = false;
+        egui::CentralPanel::default().show(ctx, |_| {});
+        egui::Window::new("Possible speed issue")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                ui.strong(&game.display_name);
+                ui.label("Some animations in this game may run faster at higher frame rates. If the game seems too fast, try setting an FPS limit in its launch settings. Would you like to open those settings now?");
+                ui.horizontal(|ui| {
+                    open_settings = crate::controller_ui::button(ui, "Open Launch Settings").clicked();
+                    dismiss = crate::controller_ui::button(ui, "Not Now").clicked();
+                });
+            });
+        if open_settings {
+            self.selected_game = Some(game.id.clone());
+            self.game_settings_draft = Some((game.id.clone(), game.settings.clone()));
+            self.screen = Screen::GameSettings;
+        }
+        if open_settings || dismiss {
+            self.frame_pacing_warnings.pop_front();
+            ctx.request_repaint();
+        }
+        self.controller_ui.show(ctx);
+        true
     }
 
     fn ui_demo_import(&mut self, ctx: &egui::Context) {
@@ -2552,10 +2629,6 @@ impl PocketLauncher {
                 ui.end_row();
                 ui.label("Show FPS on game screen");
                 crate::controller_ui::checkbox(ui, &mut draft.show_fps, "");
-                ui.end_row();
-                ui.label("Show IPS on game screen")
-                    .on_hover_text("Applies on next launch. Uses CPU pixel readback for OpenGL ES.");
-                crate::controller_ui::checkbox(ui, &mut draft.show_ips, "");
                 ui.end_row();
                 ui.label("Library root");
                 ui.label(library_root);
@@ -3309,7 +3382,7 @@ impl PocketLauncher {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
     }
 
-    fn paint_guest_frame(&mut self, ui: &egui::Ui, rect: Rect) {
+    fn paint_guest_frame(&self, ui: &egui::Ui, rect: Rect) {
         if !rect.intersect(ui.clip_rect()).is_positive() {
             let mut capture = self.screenshot.lock().unwrap_or_else(|e| e.into_inner());
             if capture.pending.take().is_some() {
@@ -3372,7 +3445,7 @@ impl PocketLauncher {
                 )),
             });
             self.paint_recording_indicator(ui, rect);
-            self.paint_rate_indicators(ui, rect);
+            self.paint_fps_indicator(ui, rect);
             return;
         }
         if let Some(tex) = self.last_frame_texture.as_ref() {
@@ -3434,56 +3507,24 @@ impl PocketLauncher {
             }
         }
         self.paint_recording_indicator(ui, rect);
-        self.paint_rate_indicators(ui, rect);
+        self.paint_fps_indicator(ui, rect);
     }
 
     /// Host overlay: use the actual displayed image bounds, including rotation
     /// and internal GLES resolution. Captures above keep the original image.
-    fn paint_rate_indicators(&mut self, ui: &egui::Ui, rect: Rect) {
-        let config = self.library.config();
-        if config.show_ips {
-            let Some(frame) = &self.last_frame_snapshot else {
-                return;
-            };
-            let now = Instant::now();
-            let interval = Duration::from_secs(1);
-            if self
-                .rate_badge
-                .as_ref()
-                .is_none_or(|(sampled_at, _)| now.duration_since(*sampled_at) >= interval)
-            {
-                let ips = frame.presentation_stats.ips().unwrap_or(0.0);
-                let fps = config.show_fps.then(|| self.frame_stats.current_fps());
-                let text = match fps {
-                    Some(fps) => format!("{fps:.0} FPS / {ips:.0} IPS"),
-                    None => format!("{ips:.0} IPS"),
-                };
-                self.rate_badge = Some((now, text));
-            }
-            if let Some((sampled_at, text)) = &self.rate_badge {
-                Self::paint_rate_badge(ui, rect, text.clone());
-                ui.ctx()
-                    .request_repaint_after(interval - now.duration_since(*sampled_at));
-            }
-        } else if config.show_fps {
-            Self::paint_rate_badge(
-                ui,
-                rect,
-                format!("{:.1} FPS", self.frame_stats.current_fps()),
-            );
+    fn paint_fps_indicator(&self, ui: &egui::Ui, rect: Rect) {
+        if !self.library.config().show_fps {
+            return;
         }
-    }
-
-    fn paint_rate_badge(ui: &egui::Ui, rect: Rect, text: String) {
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let text = format!("{:.1} FPS", self.frame_stats.current_fps());
         let galley = painter.layout_no_wrap(
             text,
             egui::FontId::proportional(13.0),
             Color32::from_white_alpha(220),
         );
         let size = galley.size() + Vec2::new(10.0, 6.0);
-        let origin = rect.right_top() + Vec2::new(-size.x - 6.0, 6.0);
-        let badge = Rect::from_min_size(origin, size);
+        let badge = Rect::from_min_size(rect.right_top() + Vec2::new(-size.x - 6.0, 6.0), size);
         painter.rect_filled(badge, 3.0, Color32::from_black_alpha(115));
         painter.galley(badge.min + Vec2::new(5.0, 3.0), galley, Color32::WHITE);
     }
@@ -5197,7 +5238,7 @@ impl PocketLauncher {
         let library_root = self.library.root().to_path_buf();
         let tx = self.events_tx.clone();
         std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<GameEntry>, String> {
+            let result = (|| -> Result<Option<ImportedGames>, String> {
                 let mut lib = Library::open(&library_root).map_err(|e| e.to_string())?;
                 let parent = path
                     .parent()
@@ -5212,12 +5253,14 @@ impl PocketLauncher {
                 {
                     tx.send(UiEvent::ImportPrepared(pending))
                         .map_err(|e| e.to_string())?;
-                    return Ok(Vec::new());
+                    return Ok(None);
                 }
-                lib.apply_prepared_import(pending, false)
-                    .map_err(|e| e.to_string())
+                let entries = lib
+                    .apply_prepared_import(pending, false)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(ImportedGames::analyze(entries, &lib, &[])))
             })();
-            if !matches!(&result, Ok(entries) if entries.is_empty()) {
+            if let Some(result) = result.transpose() {
                 let _ = tx.send(UiEvent::ImportFinished(result));
             }
         });
@@ -5455,7 +5498,6 @@ impl PocketLauncher {
         self.last_frame_snapshot = None;
         self.last_frame_status = None;
         self.frame_stats.reset();
-        self.rate_badge = None;
         if let Some(renderer) = self.reconstruction.as_ref() {
             renderer
                 .lock()
@@ -5843,6 +5885,9 @@ impl eframe::App for PocketLauncher {
                 self.ui_demo_import(ctx);
             }
             ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+        if self.ui_frame_pacing_warning(ctx) {
             return;
         }
         if self.ui_release_update(ctx) {
