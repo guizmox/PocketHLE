@@ -195,8 +195,8 @@ PocketHLE can currently:
 * intercept imported Windows CE DLL calls through HLE thunks;
 * provide ordinal-to-name resolution for `coredll.dll` and `aygshell.dll`;
 * emulate core windowing, GDI, GAPI, registry, filesystem, timing, input and audio paths;
-* present GDI and GAPI software framebuffers and accelerate supported OpenGL ES workloads on the host GPU;
-* share GLES frames with the desktop presentation context where supported, with a CPU upload path for other frames;
+* present GDI and GAPI software framebuffers and use the host GPU by default for OpenGL ES, with a software fallback when the GPU backend is unavailable;
+* keep supported OpenGL ES frames on the GPU from rendering through desktop presentation, avoiding CPU pixel readback and re-upload;
 * run a shared game library with per-game settings on desktop and Android;
 * build Linux, Windows and Android artifacts through GitHub Actions.
 
@@ -208,8 +208,11 @@ and on-screen controls. See the [frontend guide](docs/FRONTENDS.md) and
 [GPU guide](docs/GPU.md) for platform-specific behavior.
 
 Gizmondo profiles can use host Bluetooth Classic for supported RFCOMM workflows.
-GTShell image transfer from Windows to Android has been verified. The reverse
-direction with the updated Windows listener still needs validation.
+GTShell image transfer from Windows to Android is confirmed.
+
+GPU-only presentation applies to compatible GLES frames. GDI composition,
+software rendering, capture readback and unsupported sharing configurations
+can use CPU pixels. The guest CPU still executes the game logic.
 
 PocketHLE is not a full Windows CE emulator. Some games still stop during CRT initialization, dynamic imports, worker-thread setup or unimplemented APIs. A successful boot or first frame does not automatically mean that an entire game is playable from start to finish.
 
@@ -261,7 +264,23 @@ When a game starts:
 
 ## Using
 
-Download a release archive for your platform, import a legally obtained Pocket PC `.CAB`, and choose the game in the desktop or Android launcher.
+Download a release archive for your platform, import a legally obtained Pocket PC
+CAB or supported Windows installer, and choose the game in the desktop or Android
+launcher. PocketHLE extracts the Windows CE payload without running the Windows
+setup program.
+
+The Pocket PC importer supports these installer and archive families:
+
+* standalone Windows CE CABs and supported embedded CABs in Windows executables;
+* ZIP and ZIP self-extracting archives, plus supported RAR 3 self-extracting archives;
+* InstallShield 5 and 6–13 cabinet sets, including supported InstallShield 5
+  CabWiz INF layouts without a prebuilt CE CAB;
+* NSIS installers, including supported solid and legacy bzip2 variants;
+* legacy Inno Setup 2.0.11 installers with internal zlib payloads;
+* supported Wise sequential DEFLATE, VISE ESIV and PocketSetup PS2 installers.
+
+Support depends on the actual installer variant and its payload. Keep matching
+header and volume files together in the archive when the installer uses a set.
 
 For command-line runs:
 
