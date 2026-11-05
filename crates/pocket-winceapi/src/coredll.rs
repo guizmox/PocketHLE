@@ -9280,9 +9280,10 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     }
     // Pocket PC games sometimes pass `Game/data.bin` without a leading
     // backslash; the VFS expects `\Game\…`. Try both spellings so the
-    // ROM lookup succeeds. Writable paths must try the rooted form
-    // first so the writable save overlay wins over broader read-only
-    // mounts such as `\Application\`.
+    // ROM lookup succeeds. Try the working-directory path first, as
+    // CreateFileW does. RedSector writes a relative temporary JPEG with
+    // fopen and reopens it with CreateFileW. Trying the root first puts
+    // that file in the Pocket PC object store instead of the game overlay.
     let normalized = path.replace('/', "\\").trim_start_matches('\\').to_string();
     let normalized_lower = normalized.to_ascii_lowercase();
     let without_program_files = normalized
@@ -9297,9 +9298,9 @@ fn open_cstr_path(ctx: &mut CallCtx<'_>, path: &str, mode: &str) -> u32 {
     let rooted = format!("\\{normalized}");
     let mut candidates = if create {
         vec![
+            normalized.clone(),
             rooted.clone(),
             format!("\\{without_program_files}"),
-            normalized.clone(),
         ]
     } else {
         vec![
@@ -30566,6 +30567,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn crt_relative_creation_shares_the_game_path_with_win32_file_opens() {
+        let store = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        let name = "TMPJPG_.TMP";
+        std::fs::write(store.path().join(name), b"root file").unwrap();
+
+        let mut kernel = fresh_kernel();
+        kernel.vfs.mount_filesystem("\\", store.path());
+        kernel.vfs.mount_read_only("\\Game", installed.path());
+        kernel.vfs.mount_save_dir("\\Game", saves.path());
+        kernel.vfs.set_default_dir("\\Game");
+        let mut cpu = StubCpu::new();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+
+        let stream = open_cstr_path(&mut ctx, name, "wb");
+        assert_ne!(stream, 0);
+        assert_eq!(ctx.kernel.vfs.write(stream, b"jpeg"), Some(4));
+        assert!(ctx.kernel.vfs.close(stream));
+
+        // CreateFileW passes its relative name directly to this VFS entry.
+        let file = ctx.kernel.vfs.open_file(name, 1, 1, 3, false, 0).unwrap();
+        let mut bytes = [0; 4];
+        assert_eq!(ctx.kernel.vfs.read(file.handle, &mut bytes), Some(4));
+        assert_eq!(&bytes, b"jpeg");
+        assert!(ctx.kernel.vfs.close(file.handle));
+        assert_eq!(std::fs::read(store.path().join(name)).unwrap(), b"root file");
+        assert!(!installed.path().join(name).exists());
     }
 
     #[test]
