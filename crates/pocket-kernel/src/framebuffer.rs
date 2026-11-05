@@ -346,7 +346,13 @@ impl Framebuffer {
 
     /// Native pixels when no alternate image or brightness conversion is needed.
     pub fn presentation_rgb565(&self) -> Option<&[u8]> {
-        (self.render_presentation.is_none() && self.bpp == 16 && self.backlight_level == 11)
+        let bytes = (self.width as usize)
+            .checked_mul(self.height as usize)?
+            .checked_mul(2)?;
+        (self.render_presentation.is_none()
+            && self.bpp == 16
+            && self.backlight_level == 11
+            && bytes == self.pixels.len())
             .then_some(self.pixels.as_slice())
     }
 

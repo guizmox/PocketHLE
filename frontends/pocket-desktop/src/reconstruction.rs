@@ -5,7 +5,7 @@ use eframe::glow::{self, HasContext};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PresentationPath {
     GpuShared,
-    Cpu(&'static str),
+    Cpu { reason: &'static str, format: &'static str },
     Retained(&'static str),
     Failed,
 }
@@ -220,7 +220,7 @@ impl Reconstruction {
         }
         match path {
             PresentationPath::GpuShared=>log::info!("PRESENTATION=GPU_SHARED cpu_pixel_upload=NO (shared texture converted and displayed on GPU)"),
-            PresentationPath::Cpu(reason)=>log::info!("PRESENTATION=CPU_UPLOAD reason={reason} (presentation uses CPU pixels; GLES rendering may still be GPU)"),
+            PresentationPath::Cpu { reason, format }=>log::info!("PRESENTATION=CPU_UPLOAD format={format} reason={reason} (presentation uses CPU pixels; GLES rendering may still be GPU)"),
             PresentationPath::Retained("no_valid_image_available")=>log::warn!("PRESENTATION=NO_IMAGE reason=no_valid_image_available"),
             PresentationPath::Retained(reason)=>log::warn!("PRESENTATION=LAST_VALID_FRAME reason={reason} (new frame was not displayed)"),
             PresentationPath::Failed=>{},
@@ -296,9 +296,12 @@ impl Reconstruction {
                 if !copied {
                     let result = self.upload_cpu(gl, &frame);
                     match result {
-                        Ok(()) => {
+                        Ok(format) => {
                             self.image_id = Some(frame.image_id);
-                            self.current_path = Some(PresentationPath::Cpu(cpu_reason));
+                            self.current_path = Some(PresentationPath::Cpu {
+                                reason: cpu_reason,
+                                format,
+                            });
                         }
                         Err(error) => {
                             log::warn!("CPU presentation fallback unavailable; retaining last image: {error}");
@@ -392,13 +395,15 @@ impl Reconstruction {
         &mut self,
         gl: &glow::Context,
         frame: &FrameSnapshot,
-    ) -> Result<(), String> {
+    ) -> Result<&'static str, String> {
         let rgba;
-        let (pixels, format, pixel_type) = if let Some(rgb565) = frame.rgb565.as_ref().filter(|_| !gl.version().is_embedded) {
-            (rgb565.as_ref(), glow::RGB, glow::UNSIGNED_SHORT_5_6_5)
+        let (pixels, format, pixel_type, label) = if let Some(rgb565) =
+            frame.rgb565.as_ref().filter(|_| !gl.version().is_embedded)
+        {
+            (rgb565.as_ref(), glow::RGB, glow::UNSIGNED_SHORT_5_6_5, "RGB565")
         } else {
             rgba = frame.cpu_rgba()?;
-            (rgba.as_ref(), glow::RGBA, glow::UNSIGNED_BYTE)
+            (rgba.as_ref(), glow::RGBA, glow::UNSIGNED_BYTE, "RGBA8")
         };
         let size = [frame.texture_width, frame.texture_height];
         // The ordinary CPU-only presenter keeps its existing single texture.
@@ -452,7 +457,7 @@ impl Reconstruction {
         } else {
             self.size = size;
         }
-        Ok(())
+        Ok(label)
     }
     unsafe fn copy_shared(
         &mut self,

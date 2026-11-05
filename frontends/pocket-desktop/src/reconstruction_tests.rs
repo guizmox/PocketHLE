@@ -348,7 +348,10 @@ fn presenter_shared_and_cpu_paths_match_all_gpu_filters_and_fallbacks() {
                         );
                         assert_eq!(
                             cpu.reported_path,
-                            Some(super::PresentationPath::Cpu("no_shared_frame_supplied"))
+                            Some(super::PresentationPath::Cpu {
+                                reason: "no_shared_frame_supplied",
+                                format: "RGBA8",
+                            })
                         );
                         assert!(
                             gpu_only.deferred.as_ref().unwrap().cached_rgba().is_none(),

@@ -1,11 +1,1 @@
-docs/ANDROID_CONTROLS.md
-docs/CPU-OPTIMIZATIONS.md
-docs/DESKTOP-PARITY.md
-docs/DIAGNOSTICS-RESOLUTION-FIXES.md
-docs/GIZMONDO-COMPATIBILITY.md
-docs/GIZMONDO-DESKTOP-CONTROLS.md
-docs/MESSAGE-PUMP-SCHEDULING.md
-docs/NAVIGATOR-RENDU-BUILD27.md
-docs/OPENGL-ES-INTERNAL-RESOLUTION.md
-docs/POCKETPC-PRESET-ID.md
-docs/cerf-integration.md
+crates/pocket-kernel/src/framebuffer/gapi_probe.rs

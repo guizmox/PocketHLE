@@ -1,4 +1,2 @@
-crates/pocket-kernel/src/framebuffer.rs
-frontends/pocket-desktop/src/runner.rs
 frontends/pocket-desktop/src/reconstruction.rs
 frontends/pocket-desktop/src/reconstruction_tests.rs

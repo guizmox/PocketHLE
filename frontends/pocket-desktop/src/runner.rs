@@ -905,16 +905,14 @@ impl FrameSnapshot {
         }
     }
 
-    /// Like [`FrameSnapshot::from_framebuffer`] but reuses an existing
-    /// `rgba` buffer the caller owns. Saves the per-frame 300 KiB
-    /// allocation that the naive constructor does.
+    /// Keep native RGB565 for the display when possible. Reuse the caller's
+    /// scratch buffer when an alternate image or brightness requires RGBA.
     fn fill_from_framebuffer(
         fb: &pocket_core::kernel::Framebuffer,
         scratch: &mut Vec<u8>,
-        prefer_rgb565: bool,
     ) -> Self {
         let rgb565 = fb.presentation_rgb565()
-            .filter(|_| prefer_rgb565 && cfg!(target_endian = "little"))
+            .filter(|_| cfg!(target_endian = "little"))
             .map(Arc::from);
         let rgba = if rgb565.is_some() {
             Vec::new()
@@ -1439,7 +1437,6 @@ impl FrameHook for RunHook {
                                     FrameAction::Continue
                                 };
                             }
-                            let prefer_rgb565 = state.fb_mapped && state.gx_explicit_present;
                             let presentation = match state.presentation_framebuffer() {
                                 Ok(frame) => frame,
                                 Err(error) => {
@@ -1448,7 +1445,7 @@ impl FrameHook for RunHook {
                                     return FrameAction::Stop;
                                 }
                             };
-                            FrameSnapshot::fill_from_framebuffer(&presentation, &mut self.scratch, prefer_rgb565)
+                            FrameSnapshot::fill_from_framebuffer(&presentation, &mut self.scratch)
                         };
                         // Valid GPU frames (including black clears) are accepted without a
                         // full CPU black scan. Final CPU snapshots keep the legacy heuristic.
@@ -1963,16 +1960,16 @@ mod internal_resolution_tests {
     use super::FrameSnapshot;
     #[test]
     #[cfg(target_endian = "little")]
-    fn packed_gapi_snapshot_preserves_capture_pixels() {
+    fn packed_cpu_snapshot_preserves_capture_pixels() {
         let mut fb = pocket_core::kernel::Framebuffer::new(3, 1);
         fb.pixels.copy_from_slice(&[0, 0xf8, 0xe0, 0x07, 0x65, 0x2c]);
         let mut scratch = Vec::new();
-        let frame = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch, true);
+        let frame = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch);
         assert_eq!(frame.rgb565.as_deref(), Some(fb.pixels.as_slice()));
         assert!(frame.rgba.is_empty());
         assert_eq!(frame.cpu_only().unwrap().rgba, fb.snapshot_rgba8888());
         fb.set_backlight_level(5);
-        let dimmed = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch, true);
+        let dimmed = FrameSnapshot::fill_from_framebuffer(&fb, &mut scratch);
         assert!(dimmed.rgb565.is_none());
         assert_eq!(dimmed.rgba, fb.snapshot_rgba8888());
     }
@@ -2269,7 +2266,7 @@ mod deferred_read_tests {
         );
         kernel.framebuffer.presentation_stats.record_present();
         assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
-        assert_eq!(&rx.try_recv().unwrap().rgba[..4], &[0, 255, 0, 255]);
+        assert_eq!(&rx.try_recv().unwrap().cpu_rgba().unwrap()[..4], &[0, 255, 0, 255]);
         assert_eq!(hook.last_completed, 1);
     }
 
@@ -2299,6 +2296,6 @@ mod deferred_read_tests {
         assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
         assert_eq!(source.reads.load(Ordering::Relaxed), 2);
         assert!(kernel.framebuffer.cpu_resident());
-        assert_eq!(&rx.try_recv().unwrap().rgba[..4], &[255, 0, 0, 255]);
+        assert_eq!(&rx.try_recv().unwrap().cpu_rgba().unwrap()[..4], &[255, 0, 0, 255]);
     }
 }
