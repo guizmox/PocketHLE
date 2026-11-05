@@ -8,13 +8,14 @@ const WSANOTINITIALISED: u32 = 10093;
 
 pub fn register(dispatcher: &mut WinCeDispatcher) {
     sockets::register(dispatcher);
-    for name in ["htons", "ntohs"] {
-        dispatcher.register_handler("ws2.dll", name, swap_short);
+    for dll in ["ws2.dll", "winsock.dll"] {
+        for name in ["htons", "ntohs"] {
+            dispatcher.register_handler(dll, name, swap_short);
+        }
+        dispatcher.register_handler(dll, "inet_addr", inet_addr);
+        dispatcher.register_handler(dll, "WSAStartup", startup);
+        dispatcher.register_handler(dll, "WSACleanup", cleanup);
     }
-    dispatcher.register_handler("ws2.dll", "inet_addr", inet_addr);
-
-    dispatcher.register_handler("ws2.dll", "WSAStartup", startup);
-    dispatcher.register_handler("ws2.dll", "WSACleanup", cleanup);
     dispatcher.register_handler("ws2.dll", "WSAGetLastError", get_last_error);
     dispatcher.register_handler("ws2.dll", "WSASetLastError", set_last_error);
     dispatcher.register_handler("ws2.dll", "gethostname", hostname);
@@ -65,6 +66,7 @@ fn cleanup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         ctx.kernel.vfs.bluetooth.lookups.clear();
         ctx.kernel.vfs.bluetooth.sockets.clear();
         ctx.kernel.vfs.bluetooth.socket_deadlines.clear();
+        crate::legacy_services::release_hostent_buffers_if_idle(ctx);
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }

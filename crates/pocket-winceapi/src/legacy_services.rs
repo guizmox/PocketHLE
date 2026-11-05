@@ -9,12 +9,14 @@ pub fn register(d: &mut WinCeDispatcher) {
         for (name, handler) in [
             ("gethostname", hostname as crate::Handler),
             ("gethostbyname", host_by_name),
-            ("WSAStartup", startup),
-            ("WSACleanup", cleanup),
             ("WSAGetLastError", last_error),
             ("WSASetLastError", set_error),
         ] {
             d.register_handler(dll, name, handler);
+        }
+        if dll != "winsock.dll" {
+            d.register_handler(dll, "WSAStartup", startup);
+            d.register_handler(dll, "WSACleanup", cleanup);
         }
     }
     for name in ["Shell_NotifyIcon", "Shell_NotifyIconW"] {
@@ -72,15 +74,28 @@ fn cleanup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return error(ctx, 10093, u32::MAX);
     }
     ctx.kernel.legacy_winsock.startups -= 1;
-    if ctx.kernel.legacy_winsock.startups == 0 {
-        for (_, p) in ctx.kernel.legacy_winsock.hostent_buffers.drain() {
-            ctx.kernel.heap.free(p);
-        }
-    }
+    release_hostent_buffers_if_idle(ctx);
     Ok(DispatchOutcome::ReturnedR0(0))
 }
+
+pub(crate) fn release_hostent_buffers_if_idle(ctx: &mut CallCtx<'_>) {
+    if ctx.kernel.legacy_winsock.startups == 0 && ctx.kernel.vfs.bluetooth.startups == 0 {
+        for (_, ptr) in ctx.kernel.legacy_winsock.hostent_buffers.drain() {
+            ctx.kernel.heap.free(ptr);
+        }
+    }
+}
+
+fn host_database_started(ctx: &CallCtx<'_>) -> bool {
+    if ctx.thunk.dll.eq_ignore_ascii_case("winsock.dll") {
+        ctx.kernel.vfs.bluetooth.startups != 0
+    } else {
+        ctx.kernel.legacy_winsock.startups != 0
+    }
+}
+
 fn hostname(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.kernel.legacy_winsock.startups == 0 {
+    if !host_database_started(ctx) {
         return error(ctx, 10093, u32::MAX);
     }
     let p = ctx.arg_u32(0)?;
@@ -96,7 +111,7 @@ fn hostname(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn host_by_name(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.kernel.legacy_winsock.startups == 0 {
+    if !host_database_started(ctx) {
         return error(ctx, 10093, 0);
     }
     let p = ctx.arg_u32(0)?;

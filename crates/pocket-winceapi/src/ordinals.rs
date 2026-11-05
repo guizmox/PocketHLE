@@ -20,6 +20,7 @@ use serde::Deserialize;
 const COREDLL_JSON: &str = include_str!("../data/coredll-ordinals.json");
 const AYGSHELL_JSON: &str = include_str!("../data/aygshell-ordinals.json");
 // Exact exports from the Gizmondo ROM DLLs supplied for the SDK audit.
+const WINSOCK_JSON: &str = include_str!("../data/winsock-ordinals.json");
 const WS2_JSON: &str = include_str!("../data/ws2-ordinals.json");
 const BTD_JSON: &str = include_str!("../data/btd-ordinals.json");
 
@@ -39,6 +40,7 @@ static ORDINAL_TABLES: Lazy<HashMap<String, HashMap<u16, String>>> = Lazy::new(|
         ("coredll.dll", COREDLL_JSON),
         ("aygshell.dll", AYGSHELL_JSON),
         ("ws2.dll", WS2_JSON),
+        ("winsock.dll", WINSOCK_JSON),
         ("btd.dll", BTD_JSON),
     ] {
         match serde_json::from_str::<OrdinalFile>(json) {
@@ -135,6 +137,20 @@ mod tests {
         // CRT-style helpers; exact name varies by build, so just
         // verify the lookup returns *something*.
         let _ = lookup("coredll.dll", 33);
+    }
+
+    #[test]
+    fn winsock_ordinals_are_distinct_from_ws2() {
+        for (legacy, modern, name) in [
+            (7, 44, "accept"),
+            (8, 45, "bind"),
+            (22, 68, "listen"),
+            (25, 71, "recv"),
+            (33, 79, "socket"),
+        ] {
+            assert_eq!(lookup("WINSOCK.dll", legacy).as_deref(), Some(name));
+            assert_eq!(lookup("WS2.dll", modern).as_deref(), Some(name));
+        }
     }
 
     #[test]
