@@ -6,6 +6,18 @@ use pocket_kernel::{DispatchOutcome, KernelError};
 const SOCKET_ERROR: u32 = u32::MAX;
 const WSANOTINITIALISED: u32 = 10093;
 
+const BTDRT_DISCOVERY: [(&str, crate::Handler); 3] = [
+    ("BthNsLookupServiceBegin", lookup_begin),
+    ("BthNsLookupServiceNext", lookup_next),
+    ("BthNsLookupServiceEnd", lookup_end),
+];
+
+pub(crate) fn owns_btdrt_import(import: &pocket_pe::ImportSymbol) -> bool {
+    import.dll.eq_ignore_ascii_case("btdrt.dll")
+        && matches!(&import.binding, pocket_pe::ImportBinding::Name(name)
+            if BTDRT_DISCOVERY.iter().any(|(export, _)| name == export))
+}
+
 pub fn register(dispatcher: &mut WinCeDispatcher) {
     sockets::register(dispatcher);
     for dll in ["ws2.dll", "winsock.dll"] {
@@ -26,9 +38,9 @@ pub fn register(dispatcher: &mut WinCeDispatcher) {
         dispatcher.register_handler("ws2.dll", name, lookup_next);
     }
     dispatcher.register_handler("ws2.dll", "WSALookupServiceEnd", lookup_end);
-    dispatcher.register_handler("btdrt.dll", "BthNsLookupServiceBegin", lookup_begin);
-    dispatcher.register_handler("btdrt.dll", "BthNsLookupServiceNext", lookup_next);
-    dispatcher.register_handler("btdrt.dll", "BthNsLookupServiceEnd", lookup_end);
+    for (name, handler) in BTDRT_DISCOVERY {
+        dispatcher.register_handler("btdrt.dll", name, handler);
+    }
 }
 
 fn startup(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -118,7 +130,10 @@ fn btdrt_lookup(ctx: &CallCtx<'_>) -> bool {
 }
 
 fn lookup_begin(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.kernel.vfs.bluetooth.startups == 0 {
+    let legacy = btdrt_lookup(ctx);
+    // BTDRT is a direct Bluetooth namespace API. GTShell uses it
+    // before initializing Winsock for the actual RFCOMM connection.
+    if !legacy && ctx.kernel.vfs.bluetooth.startups == 0 {
         return not_initialized(ctx);
     }
     let query = ctx.arg_u32(0)?;
@@ -163,7 +178,7 @@ fn lookup_begin(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     crate::bluetooth::finish_wait(ctx)?;
-    if ctx.kernel.vfs.bluetooth.startups == 0 {
+    if !btdrt_lookup(ctx) && ctx.kernel.vfs.bluetooth.startups == 0 {
         return not_initialized(ctx);
     }
     let id = ctx.arg_u32(0)?;
@@ -260,7 +275,7 @@ fn lookup_next(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn lookup_end(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.kernel.vfs.bluetooth.startups == 0 {
+    if !btdrt_lookup(ctx) && ctx.kernel.vfs.bluetooth.startups == 0 {
         return not_initialized(ctx);
     }
     let id = ctx.arg_u32(0)?;
@@ -487,6 +502,7 @@ mod tests {
         );
         // GTShell uses BTDRT with an unused protocol pointer and asks for
         // the address BLOB. Reuse the same simulated host inquiry.
+        kernel.vfs.bluetooth.startups = 0;
         query[48..52].copy_from_slice(&0x1150u32.to_le_bytes());
         cpu.write_mem(0x1100, &query).unwrap();
         assert_eq!(
@@ -521,6 +537,7 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
 
+        kernel.vfs.bluetooth.startups = 1;
         let lookup = cpu.read_u32_le(0x1200).unwrap();
         let result = kernel.vfs.bluetooth.lookups[&lookup].result.clone();
         for _ in 0..100 {

@@ -724,7 +724,9 @@ impl Vfs {
                     options.create(true).truncate(true);
                 }
                 4 => {
-                    options.create(true);
+                    // Read-only OPEN_ALWAYS creates missing files separately.
+                    // An existing file needs a plain read-only host open.
+                    options.create(access & 2 != 0);
                 }
                 5 => {
                     options.truncate(true);
@@ -1493,6 +1495,13 @@ mod tests {
             assert_eq!(v.write(h.handle, b"SAVE"), Some(4));
             v.close(h.handle);
             assert_eq!(v.open_file(path, 2, 3, 1, false, 0), Err(80));
+            let h = v.open_file(path, 1, 3, 4, false, 0).unwrap();
+            assert!(h.existed);
+            let mut bytes = [0; 4];
+            assert_eq!(v.read(h.handle, &mut bytes), Some(4));
+            assert_eq!(&bytes, b"SAVE");
+            assert!(v.write(h.handle, b"X").is_none());
+            v.close(h.handle);
             let h = v.open_file(path, 2, 3, 4, false, 0).unwrap();
             assert!(h.existed);
             assert_eq!(v.size(h.handle), Some(4));

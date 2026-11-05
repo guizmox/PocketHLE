@@ -31,6 +31,27 @@ Foreground SDCreateProcess children must remain within the canonical card root;
 concurrent CreateProcess retains the existing VFS-resolved launch contract.
 Synchronous children preserve the existing host-session suspend/resume guard.
 
+## Bluetooth file transfer
+
+Enable Classic Bluetooth in PocketHLE on both hosts before launching GTShell.
+In the receiving shell, open **Bluetooth → Receive files** and leave it waiting.
+On the sender, select an image and choose **Send → Bluetooth**, then select the
+receiving host and accept the transfer there. Use the platform Bluetooth
+permissions, discoverability and pairing steps in [GIZMONDO.md](GIZMONDO.md#bluetooth).
+Check received images in the gallery or in `MyPictures` on the profile's Flash Disk.
+
+GTShell uses BTDRT discovery and Winsock RFCOMM. PocketHLE translates discovery
+addresses for the guest and resolves them back to host addresses when connecting.
+The receiving host advertises the logical Gizmondo service UUID through SDP.
+On Windows the OS allocates the physical RFCOMM channel.
+
+The Windows-to-Android image transfer and failure on an interrupted transfer
+have been verified. Android-to-Windows transfer still needs validation with
+the Windows listener change. A host appearing in discovery only confirms that
+its radio was found. Android can report the same read exception for a completed
+transfer and an interrupted link. PocketHLE preserves the socket error in this
+case so a real interruption still reaches the guest.
+
 ## Implementation and limits
 
 The per-process kernel MSXML arena implements the shell's read-only DOM operations,

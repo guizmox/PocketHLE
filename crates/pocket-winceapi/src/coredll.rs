@@ -4777,16 +4777,16 @@ pub(crate) fn native_import(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         set_thread_error(ctx, 127);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    // Imported data (MFC message maps / CRuntimeClass objects) is read without
-    // calling a thunk. Bind the executable's entire DLL IAT after successful
-    // attach, including functions with an HLE implementation, so data and
-    // methods share one runtime. Validate all exports before changing any slot.
+    // Bind native functions and data together after attach. BTDRT discovery
+    // keeps its HLE thunks when another export loads the supplied DLL.
+    // Validate all remaining native exports before changing any slot.
     let exports = &ctx.kernel.dynamic_exports[&base];
     let bindings: Vec<_> = ctx
         .kernel
         .image_imports
         .iter()
         .filter(|import| import.dll.eq_ignore_ascii_case(&dll))
+        .filter(|import| !crate::ws2::owns_btdrt_import(import))
         .map(|import| {
             let key = match &import.binding {
                 pocket_pe::ImportBinding::Name(name) => name.clone(),
@@ -30267,6 +30267,46 @@ mod tests {
         thunk.dll = "coredll.dll".into();
         std::fs::write(root.path().join("coredll.dll"), []).unwrap();
         assert!(!native_import_preferred(&kernel, &thunk));
+    }
+
+    #[test]
+    fn native_import_preserves_btdrt_discovery_thunks() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE).unwrap();
+        let mut kernel = fresh_kernel();
+        let mut module = lifecycle_test_module(0x31000000, 0x31001000);
+        module.name = "btdrt.dll".into();
+        module.attached = true;
+        kernel.modules.push(module);
+        let names = ["BthSetSecurityUI", "BthNsLookupServiceBegin",
+            "BthNsLookupServiceNext", "BthNsLookupServiceEnd"];
+        let mut exports = std::collections::HashMap::new();
+        for (index, name) in names.into_iter().enumerate() {
+            let iat_va = 0x1100 + index as u32 * 4;
+            cpu.write_mem(iat_va, &(0x70000000u32 + index as u32 * 4).to_le_bytes()).unwrap();
+            kernel.image_imports.push(pocket_pe::ImportSymbol {
+                dll: "BTDRT.dll".into(),
+                binding: pocket_pe::ImportBinding::Name(name.into()),
+                iat_va,
+            });
+            exports.insert(name.into(), 0x31001000u32);
+        }
+        kernel.dynamic_exports.insert(0x31000000, exports);
+        let thunk = pocket_kernel::Thunk {
+            dll: "btdrt.dll".into(),
+            binding: pocket_pe::ImportBinding::Name(names[0].into()),
+            friendly_name: None,
+            thunk_va: 0x70000000,
+            iat_va: 0x1100,
+        };
+        assert_eq!(
+            native_import(&mut CallCtx { cpu: &mut cpu, kernel: &mut kernel, thunk: &thunk }).unwrap(),
+            DispatchOutcome::JumpTo(0x31001000)
+        );
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), 0x31001000);
+        for index in 1..4 {
+            assert_eq!(cpu.read_u32_le(0x1100 + index * 4).unwrap(), 0x70000000 + index * 4);
+        }
     }
 
     #[test]

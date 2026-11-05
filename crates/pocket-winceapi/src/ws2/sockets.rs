@@ -399,16 +399,9 @@ fn shutdown(ctx: &mut CallCtx<'_>) -> Outcome {
     if !(0..=2).contains(&how) {
         return error(ctx, 10022);
     }
-    match ctx
-        .kernel
-        .vfs
-        .bluetooth
-        .sockets
-        .get_mut(&h)
-        .unwrap()
-        .native
-        .shutdown(how)
-    {
+    let s = ctx.kernel.vfs.bluetooth.sockets.get_mut(&h).unwrap();
+    let result = s.native.shutdown(how);
+    match result {
         Ok(()) => done(ctx, 0),
         Err(e) => error(ctx, e),
     }

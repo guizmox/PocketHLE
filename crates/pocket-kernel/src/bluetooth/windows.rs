@@ -535,6 +535,13 @@ impl RfcommSocket for NativeSocket {
     fn bind(&mut self, addr: &SocketAddress) -> BtResult<()> {
         let mut a = native_address(addr);
         a.serviceClassId = GUID::default();
+        if addr.port > 30 && addr.port != u32::MAX {
+            return Err(10022);
+        }
+        if addr.port != 0 {
+            // SDP maps the guest's service to the channel allocated by Winsock.
+            a.port = u32::MAX; // BT_PORT_ANY
+        }
         status(unsafe {
             bind(
                 self.socket.0,
@@ -671,7 +678,15 @@ impl RfcommSocket for NativeSocket {
                 )
             }
         })?;
-        Ok(guest_address(a))
+        let mut address = guest_address(a);
+        if !peer {
+            if let Some(bound) = &self.bound {
+                if (1..=30).contains(&bound.port) {
+                    address.port = bound.port;
+                }
+            }
+        }
+        Ok(address)
     }
     fn shutdown(&mut self, how: i32) -> BtResult<()> {
         status(unsafe { shutdown(self.socket.0, how) })

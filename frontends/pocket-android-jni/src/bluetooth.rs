@@ -10,13 +10,14 @@ use std::sync::Arc;
 
 pub fn install(env: &mut JNIEnv<'_>, class: &JClass<'_>) -> jni::errors::Result<()> {
     bluetooth::install_host(Arc::new(Bridge {
-        vm: env.get_java_vm()?,
+        vm: Arc::new(env.get_java_vm()?),
         class: env.new_global_ref(class)?,
     }));
     Ok(())
 }
+#[derive(Clone)]
 struct Bridge {
-    vm: JavaVM,
+    vm: Arc<JavaVM>,
     class: GlobalRef,
 }
 impl Bridge {
@@ -51,7 +52,7 @@ impl Backend for Bridge {
         }
     }
     fn socket(&self) -> BtResult<Box<dyn bluetooth::RfcommSocket>> {
-        let bridge = self.duplicate()?;
+        let bridge = self.clone();
         let v = self.socket_call(serde_json::json!({"op": "new"}))?;
         let id = v["id"].as_i64().ok_or(10091u32)? as i32;
         Ok(Box::new(JavaSocket {
@@ -114,10 +115,8 @@ impl Backend for Bridge {
         if id <= 0 {
             return Err(if id < 0 { id.unsigned_abs() } else { 10091 });
         }
-        let vm = self.call(|env, _| env.get_java_vm())?;
-        let class = self.call(|env, class| env.new_global_ref(class.as_obj()))?;
         Ok(Box::new(JavaStream {
-            bridge: Bridge { vm, class },
+            bridge: self.clone(),
             id,
         }))
     }
@@ -240,12 +239,6 @@ fn decode_address(v: &serde_json::Value) -> BtResult<bluetooth::SocketAddress> {
     })
 }
 impl Bridge {
-    fn duplicate(&self) -> BtResult<Self> {
-        Ok(Self {
-            vm: self.call(|env, _| env.get_java_vm())?,
-            class: self.call(|env, class| env.new_global_ref(class.as_obj()))?,
-        })
-    }
     fn socket_call(&self, value: serde_json::Value) -> BtResult<serde_json::Value> {
         let text: String = self.call(|env, class| {
             let request = env.new_string(value.to_string())?;
@@ -289,12 +282,10 @@ impl bluetooth::RfcommSocket for JavaSocket {
             .map(|_| ())
     }
     fn accept(&mut self) -> BtResult<(Box<dyn bluetooth::RfcommSocket>, bluetooth::SocketAddress)> {
-        // Acquire JNI ownership before accepting, so failures cannot leak a child.
-        let bridge = self.bridge.duplicate()?;
         let v = self.control("accept", serde_json::json!({}))?;
         let id = v["id"].as_i64().ok_or(10091u32)? as i32;
         let socket = JavaSocket {
-            bridge,
+            bridge: self.bridge.clone(),
             id,
             options: self.options.clone(),
         };
