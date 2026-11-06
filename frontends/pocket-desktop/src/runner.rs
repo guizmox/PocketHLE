@@ -1487,6 +1487,8 @@ impl FrameHook for RunHook {
         if stop_requested {
             state.should_stop = true;
             FrameAction::Stop
+        } else if self.foreground.load(Ordering::Acquire) != self.pid {
+            FrameAction::ContinueInBackground
         } else {
             FrameAction::Continue
         }

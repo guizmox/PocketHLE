@@ -1,4 +1,6 @@
-crates\pocket-library\src\analysis.rs
-frontends\pocket-desktop\src\app.rs
+Cargo.lock
+crates\pocket-kernel\Cargo.toml
+crates\pocket-kernel\src\handles.rs
+crates\pocket-kernel\src\lib.rs
 frontends\pocket-desktop\src\runner.rs
 frontends\pocket-android-jni\src\runner.rs

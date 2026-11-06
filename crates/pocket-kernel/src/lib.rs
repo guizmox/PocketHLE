@@ -4551,6 +4551,8 @@ impl Process {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameAction {
     Continue,
+    /// Keep running a background process while giving foreground work a turn.
+    ContinueInBackground,
     Stop,
 }
 
@@ -5332,9 +5334,17 @@ pub fn run_main_loop_with_hook(
                 process.state.sync_power_notifications();
                 let action = hook.on_frame(&mut process.state);
                 last_presented_frame = process.state.framebuffer.frame_counter;
-                if action == FrameAction::Stop {
-                    log::info!("frame hook requested stop");
-                    return Ok(());
+                match action {
+                    FrameAction::Stop => {
+                        log::info!("frame hook requested stop");
+                        return Ok(());
+                    }
+                    FrameAction::ContinueInBackground if !process.state.should_stop => {
+                        // The execution gate is released here. A busy background
+                        // message pump must give other guests a chance to run.
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    FrameAction::Continue | FrameAction::ContinueInBackground => {}
                 }
             }
         }
