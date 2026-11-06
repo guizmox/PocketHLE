@@ -789,6 +789,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ChangeDisplaySettingsEx", change_display_settings_ex);
     d.register_handler(dll, "ChangeDisplaySettingsExW", change_display_settings_ex);
     d.register_handler(dll, "ChangeDisplaySettingsW", change_display_settings_ex);
+    d.register_handler(dll, "SHGetFileInfo", images::shell_file_info);
     d.register_handler(dll, "SHGetSpecialFolderPath", sh_get_special_folder_path);
     d.register_handler(dll, "SHGetSpecialFolderPathW", sh_get_special_folder_path);
     d.register_handler(dll, "GetKeyboardLayout", keyboard_layout);
@@ -12089,8 +12090,10 @@ fn list_view_message(
             .unwrap_or(0),
         0x1014 => {
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
-            let max = (c.list_items.len() as i64 * i64::from(c.list_row_height()) - i64::from(c.h))
-                .max(0);
+            let max = (c.list_items.len() as i64 * i64::from(c.list_row_height())
+                + i64::from(c.list_header_height())
+                - i64::from(c.h))
+            .max(0);
             c.list_scroll_y = (i64::from(c.list_scroll_y) + i64::from(lp as i32))
                 .clamp(0, max.min(i64::from(i32::MAX))) as i32;
             repaint_controls(ctx);
@@ -12113,7 +12116,7 @@ fn list_view_message(
             let field = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
             let text_only = message == 0x102d || message == 0x1073;
             let index = if text_only { wp } else { field(4) };
-            let Some((text, param)) = ctx
+            let Some((_, param)) = ctx
                 .kernel
                 .controls
                 .get(hwnd)
@@ -12124,6 +12127,13 @@ fn list_view_message(
             else {
                 return Ok(0);
             };
+            let text = ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .unwrap()
+                .list_text(index as usize, field(8))
+                .to_owned();
             let mask = if text_only { 1 } else { field(0) };
             let mut written = 0;
             if mask & 1 != 0 && field(20) != 0 && field(24) > 0 {
@@ -12172,12 +12182,38 @@ fn list_view_message(
                 1
             }
         }
+        0x102e | 0x1074 => {
+            // LVM_SETITEMTEXTA/W takes the row in wParam, independently
+            // of LVITEM.iItem and LVITEM.mask.
+            let index = wp as usize;
+            if lp == 0 || index >= ctx.kernel.controls.get(hwnd).unwrap().list_items.len() {
+                return Ok(0);
+            }
+            let subitem = ctx.cpu.read_u32_le(lp + 8)?;
+            let ptr = ctx.cpu.read_u32_le(lp + 20)?;
+            let text = if ptr == 0 {
+                String::new()
+            } else if ptr == u32::MAX {
+                return Ok(0);
+            } else if message == 0x1074 {
+                String::from_utf16_lossy(&read_wstr(ctx, ptr, 1024)?)
+            } else {
+                read_cstr_string(ctx, ptr, 1024)?
+            };
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            u32::from(c.set_list_text(index, subitem, text))
+        }
         0x1007 | 0x104d | 0x1006 | 0x104c => {
             // insert/set LVITEMA/W
             let data = ctx.cpu.read_mem(lp, 36)?;
             let field = |offset| u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             let mask = field(0);
             let index = field(4) as usize;
+            let subitem = field(8);
+            let insert = matches!(message, 0x1007 | 0x104d);
+            if insert && subitem != 0 {
+                return Ok(u32::MAX);
+            }
             let text = if mask & 1 != 0 && field(20) != 0 {
                 if message == 0x104d || message == 0x104c {
                     String::from_utf16_lossy(&read_wstr(ctx, field(20), 1024)?)
@@ -12188,8 +12224,12 @@ fn list_view_message(
                 String::new()
             };
             let control = ctx.kernel.controls.get_mut(hwnd).unwrap();
-            if message == 0x1007 || message == 0x104d {
+            if insert {
                 let index = index.min(control.list_items.len());
+                control
+                    .list_subitems
+                    .resize_with(control.list_items.len(), Default::default);
+                control.list_subitems.insert(index, Default::default());
                 control
                     .list_positions
                     .resize(control.list_items.len(), None);
@@ -12200,6 +12240,8 @@ fn list_view_message(
                     .insert(index, if mask & 2 != 0 { field(28) as i32 } else { -1 });
                 control.list_items.insert(index, (text, field(32)));
                 index as u32
+            } else if subitem != 0 {
+                u32::from(mask & 1 != 0 && control.set_list_text(index, subitem, text))
             } else if let Some(item) = control.list_items.get_mut(index) {
                 if mask & 1 != 0 {
                     item.0 = text;
@@ -12220,6 +12262,9 @@ fn list_view_message(
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             if (wp as usize) < c.list_items.len() {
                 c.list_items.remove(wp as usize);
+                if (wp as usize) < c.list_subitems.len() {
+                    c.list_subitems.remove(wp as usize);
+                }
                 if (wp as usize) < c.list_positions.len() {
                     c.list_positions.remove(wp as usize);
                 }
@@ -12235,6 +12280,7 @@ fn list_view_message(
         0x1009 => {
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             c.list_items.clear();
+            c.list_subitems.clear();
             c.list_images.clear();
             c.list_positions.clear();
             c.list_scroll_y = 0;
@@ -12302,26 +12348,85 @@ fn list_view_message(
                 .list_selected
                 .is_some(),
         ),
-        0x101b | 0x1061 => {
-            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
-            let index = wp.min(c.list_column_count);
-            c.list_column_count = c.list_column_count.saturating_add(1);
-            index
-        }
-        0x101c => {
-            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
-            if wp < c.list_column_count {
-                c.list_column_count -= 1;
-                1
-            } else {
-                0
+        0x101b | 0x1061 | 0x101a | 0x1060 => {
+            // LVCOLUMN has the same first six fields for ANSI and Unicode.
+            let insert = matches!(message, 0x101b | 0x1061);
+            if lp == 0 || ctx.cpu.check_guest_access(lp, 24, Prot::READ).is_err() {
+                return Ok(if insert { u32::MAX } else { 0 });
             }
+            let fields = ctx.cpu.read_mem(lp, 24)?;
+            let field = |i| u32::from_le_bytes(fields[i..i + 4].try_into().unwrap());
+            let mask = field(0);
+            let title = if mask & 4 != 0 && field(12) != 0 {
+                if matches!(message, 0x1060 | 0x1061) {
+                    String::from_utf16_lossy(&read_wstr(ctx, field(12), 1024)?)
+                } else {
+                    read_cstr_string(ctx, field(12), 1024)?
+                }
+            } else {
+                String::new()
+            };
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            let index = (wp as usize).min(c.list_report_columns.len());
+            if insert {
+                c.list_report_columns.insert(
+                    index,
+                    pocket_kernel::controls::ListColumn {
+                        title: String::new(),
+                        width: 80,
+                        format: 0,
+                        subitem: index as u32,
+                    },
+                );
+            }
+            let Some(column) = c.list_report_columns.get_mut(index) else {
+                return Ok(0);
+            };
+            if mask & 1 != 0 {
+                column.format = field(4);
+            }
+            if mask & 2 != 0 {
+                column.width = (field(8) as i32).max(0);
+            }
+            if mask & 4 != 0 {
+                column.title = title;
+            }
+            if mask & 8 != 0 {
+                column.subitem = field(20);
+            }
+            repaint_controls(ctx);
+            if insert {
+                index as u32
+            } else {
+                1
+            }
+        }
+        0x101c | 0x101d | 0x101e => {
+            let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
+            let index = wp as usize;
+            let Some(column) = c.list_report_columns.get_mut(index) else {
+                return Ok(0);
+            };
+            if message == 0x101d {
+                return Ok(column.width as u32);
+            }
+            if message == 0x101c {
+                c.list_report_columns.remove(index);
+            } else {
+                let width = lp as i16 as i32;
+                if width < 0 {
+                    return Ok(0);
+                }
+                column.width = width;
+            }
+            repaint_controls(ctx);
+            1
         }
         _ => 0,
     };
     if matches!(
         message,
-        0x1007 | 0x104d | 0x1006 | 0x104c | 0x1008 | 0x1009 | 0x102b
+        0x1007 | 0x104d | 0x1006 | 0x104c | 0x1008 | 0x1009 | 0x102b | 0x102e | 0x1074
     ) {
         repaint_controls(ctx);
     }
@@ -29060,6 +29165,56 @@ mod tests {
         assert_eq!(ctx.kernel.controls.get(hwnd).unwrap().text, "WAA");
         assert!(ctx.kernel.posted_messages.is_empty());
         assert!(ctx.kernel.control_notify_frames.is_empty());
+    }
+
+    #[test]
+    fn list_report_keeps_subitems_with_their_row_after_deletion() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let hwnd = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::ListView,
+            1,
+            String::new(),
+            0x50000001,
+            0,
+            0,
+            200,
+            100,
+        );
+        let c = kernel.controls.get_mut(hwnd).unwrap();
+        c.list_items.push(("folder".into(), 1));
+        c.list_items.push(("disc.iso".into(), 2));
+        cpu.write_mem(0x3000, &wide_to_bytes(&[73, 83, 79, 0]))
+            .unwrap();
+        let mut fields = [0u32; 9];
+        fields[0] = 1;
+        fields[1] = 1;
+        fields[2] = 1;
+        fields[5] = 0x3000;
+        cpu.write_mem(
+            0x2000,
+            &fields
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            list_view_message(&mut ctx, hwnd, 0x104c, 0, 0x2000).unwrap(),
+            1
+        );
+        assert_eq!(list_view_message(&mut ctx, hwnd, 0x1008, 0, 0).unwrap(), 1);
+        let c = ctx.kernel.controls.get(hwnd).unwrap();
+        assert_eq!(c.list_text(0, 0), "disc.iso");
+        assert_eq!(c.list_text(0, 1), "ISO");
+        assert_eq!(c.list_items[0].1, 2);
     }
 
     #[test]

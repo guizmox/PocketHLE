@@ -1,2 +1,3 @@
+crates\pocket-kernel\src\controls.rs
 crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\coredll\trackbar.rs
+crates\pocket-winceapi\src\coredll\images.rs

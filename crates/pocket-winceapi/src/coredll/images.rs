@@ -40,6 +40,72 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
 fn ret(value: u32) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(value))
 }
+/// Return a caller-owned shell icon for a file or directory.
+pub(super) fn shell_file_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const SHGFI_SMALLICON: u32 = 0x0001;
+    const SHGFI_USEFILEATTRIBUTES: u32 = 0x0010;
+    const SHGFI_ICON: u32 = 0x0100;
+    const SHFILEINFO_BYTES: u32 = 12 + 2 * (260 + 80);
+    let flags = ctx.arg_u32(4)?;
+    let out = ctx.arg_u32(2)?;
+    if flags & SHGFI_ICON == 0
+        || flags & !(SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES) != 0
+        || ctx.arg_u32(3)? < SHFILEINFO_BYTES
+        || !vfs_probe_output(ctx, out, SHFILEINFO_BYTES)
+    {
+        return ret(0);
+    }
+    let Ok(path) = vfs_api_path(ctx, 0) else {
+        return ret(0);
+    };
+    let attributes = if flags & SHGFI_USEFILEATTRIBUTES != 0 {
+        ctx.arg_u32(1)?
+    } else {
+        let Ok(attributes) = ctx.kernel.vfs.attributes(&path) else {
+            return ret(0);
+        };
+        attributes
+    };
+    let folder = attributes & 0x10 != 0;
+    let mut icon = Image::new(16, 16).unwrap();
+    for y in 0..16 {
+        for x in 0..16 {
+            let index = y * 16 + x;
+            let color = if folder {
+                if (2..6).contains(&x) && (3..6).contains(&y) {
+                    0xdde4
+                } else if (1..15).contains(&x) && (5..13).contains(&y) {
+                    0xff08
+                } else {
+                    0
+                }
+            } else if (3..13).contains(&x) && (1..15).contains(&y) {
+                if x == 3 || x == 12 || y == 1 || y == 14 {
+                    0x7bef
+                } else {
+                    0xffff
+                }
+            } else {
+                0
+            };
+            icon.pixels[index] = color;
+            icon.alpha[index] = if color == 0 { 0 } else { 255 };
+        }
+    }
+    if flags & SHGFI_SMALLICON == 0 {
+        icon = icon.scaled(32, 32).unwrap();
+    }
+    let handle = ctx.kernel.gdi.register_icon(icon);
+    let mut data = [0u8; SHFILEINFO_BYTES as usize];
+    data[..4].copy_from_slice(&handle.to_le_bytes());
+    data[4..8].copy_from_slice(&u32::from(folder).to_le_bytes());
+    if let Err(error) = ctx.cpu.write_mem(out, &data) {
+        ctx.kernel.gdi.icons.remove(&handle);
+        return Err(error.into());
+    }
+    ret(1)
+}
+
 fn resource(
     ctx: &mut CallCtx<'_>,
     instance: u32,

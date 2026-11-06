@@ -284,6 +284,15 @@ impl DialogPanel {
     }
 }
 
+/// Column metadata for a report-mode list view.
+#[derive(Debug, Clone)]
+pub struct ListColumn {
+    pub title: String,
+    pub width: i32,
+    pub format: u32,
+    pub subitem: u32,
+}
+
 /// One built-in control owned by the HLE rather than by the guest.
 #[derive(Debug, Clone)]
 pub struct ChildWindow {
@@ -331,7 +340,8 @@ pub struct ChildWindow {
     pub list_text_color: u32,
     pub image: u32,
     pub list_selected: Option<usize>,
-    pub list_column_count: u32,
+    pub list_report_columns: Vec<ListColumn>,
+    pub list_subitems: Vec<std::collections::BTreeMap<u32, String>>,
     pub font: u32,
     pub choice_open: bool,
     pub choice_row_height: i32,
@@ -545,6 +555,39 @@ impl ChildWindow {
     pub fn list_columns(&self) -> usize {
         (self.w.max(1) / self.list_spacing.0.max(4)).max(1) as usize
     }
+    pub fn list_header_height(&self) -> i32 {
+        if self.style & 3 == 1 && self.style & 0x4000 == 0 && !self.list_report_columns.is_empty() {
+            self.list_row_height()
+        } else {
+            0
+        }
+    }
+    pub fn list_text(&self, row: usize, column: u32) -> &str {
+        if column == 0 {
+            return self.list_items.get(row).map_or("", |item| item.0.as_str());
+        }
+        self.list_subitems
+            .get(row)
+            .and_then(|cells| cells.get(&column))
+            .map_or("", String::as_str)
+    }
+    pub fn set_list_text(&mut self, row: usize, column: u32, text: String) -> bool {
+        let Some(item) = self.list_items.get_mut(row) else {
+            return false;
+        };
+        if column == 0 {
+            item.0 = text;
+        } else {
+            self.list_subitems
+                .resize_with(self.list_items.len(), Default::default);
+            if text.is_empty() {
+                self.list_subitems[row].remove(&column);
+            } else {
+                self.list_subitems[row].insert(column, text);
+            }
+        }
+        true
+    }
     pub fn list_item_position(&self, index: usize) -> (i32, i32) {
         self.list_positions
             .get(index)
@@ -560,8 +603,9 @@ impl ChildWindow {
                 } else {
                     (
                         0,
-                        (index as i64 * i64::from(self.list_row_height())).min(i64::from(i32::MAX))
-                            as i32,
+                        (index as i64 * i64::from(self.list_row_height())
+                            + i64::from(self.list_header_height()))
+                        .min(i64::from(i32::MAX)) as i32,
                     )
                 }
             })
@@ -589,8 +633,9 @@ impl ChildWindow {
         } else {
             self.list_row_height()
         };
-        if top < self.list_scroll_y {
-            self.list_scroll_y = top;
+        let header = self.list_header_height();
+        if top.saturating_sub(header) < self.list_scroll_y {
+            self.list_scroll_y = top.saturating_sub(header);
         } else if top.saturating_add(height) > self.list_scroll_y.saturating_add(self.h) {
             self.list_scroll_y = top.saturating_add(height).saturating_sub(self.h).max(0);
         }
@@ -716,9 +761,10 @@ impl ChildWindow {
             let mut item = self.clone();
             item.list_items = self.list_items.get(index).cloned().into_iter().collect();
             item.list_images = self.list_images.get(index).copied().into_iter().collect();
+            item.list_subitems = self.list_subitems.get(index).cloned().into_iter().collect();
+            item.style |= 0x4000; // The header belongs to the full control paint.
             item.list_selected = (self.list_selected == Some(index)).then_some(0);
-            let y =
-                index as i64 * i64::from(self.list_row_height()) - i64::from(self.list_scroll_y);
+            let y = i64::from(self.list_item_position(index).1) - i64::from(self.list_scroll_y);
             item.y = self
                 .y
                 .saturating_add(y.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
@@ -726,18 +772,19 @@ impl ChildWindow {
                 .list_row_height()
                 .min(self.h.saturating_sub(item.y - self.y));
             item.list_scroll_y = 0;
-            if item.y >= self.y && item.h > 0 {
+            if item.y >= self.y.saturating_add(self.list_header_height()) && item.h > 0 {
                 item.render_list(surf, Some(gdi));
             }
         }
     }
 
     pub fn list_item_at(&self, y: i32) -> Option<usize> {
-        if y < 0 || y >= self.h {
+        let header = self.list_header_height();
+        if y < header || y >= self.h {
             return None;
         }
         let index =
-            (i64::from(y) + i64::from(self.list_scroll_y)) / i64::from(self.list_row_height());
+            (i64::from(y - header) + i64::from(self.list_scroll_y)) / i64::from(self.list_row_height());
         usize::try_from(index)
             .ok()
             .filter(|i| *i < self.list_items.len())
@@ -758,17 +805,22 @@ impl ChildWindow {
             return;
         }
         let row_height = self.list_row_height();
+        let header = self.list_header_height();
+        let body_top = self.y.saturating_add(header);
+        let right = self.x.saturating_add(self.w);
+        let bottom_edge = self.y.saturating_add(self.h);
+        let report = self.style & 3 == 1 && !self.list_report_columns.is_empty();
         let (handle, iw, ih) = self.list_image_list();
         let first = (self.list_scroll_y.max(0) / row_height) as usize;
         for (index, (text, _)) in self.list_items.iter().enumerate().skip(first) {
-            let y = i64::from(self.y) + index as i64 * i64::from(row_height)
+            let y = i64::from(body_top) + index as i64 * i64::from(row_height)
                 - i64::from(self.list_scroll_y);
             if y >= i64::from(self.y) + i64::from(self.h) {
                 break;
             }
             let y = y as i32;
-            let top = y.max(self.y);
-            let bottom = (y + row_height).min(self.y + self.h);
+            let top = y.max(body_top);
+            let bottom = y.saturating_add(row_height).min(bottom_edge);
             let selected = self.list_selected == Some(index);
             if selected {
                 surf.fill_rect(self.x, top, self.w, bottom - top, 0x001f);
@@ -785,11 +837,42 @@ impl ChildWindow {
                     y + (row_height - ih as i32) / 2,
                     iw,
                     ih,
-                    [self.x, self.y, self.x + self.w, self.y + self.h],
+                    [self.x, body_top, right, bottom_edge],
                 );
             }
-            let ty = y + (row_height - crate::text::layout(face, &[]).height) / 2;
-            if ty >= self.y && ty + crate::text::layout(face, &[]).height <= self.y + self.h {
+            let font_height = crate::text::layout(face, &[]).height;
+            let ty = y + (row_height - font_height) / 2;
+            if ty >= body_top && ty.saturating_add(font_height) <= bottom_edge {
+                if report {
+                    let mut left = self.x;
+                    for column in &self.list_report_columns {
+                        let end = left.saturating_add(column.width).min(right);
+                        let inset = if column.subitem == 0 && iw > 0 {
+                            iw as i32 + 5
+                        } else {
+                            2
+                        };
+                        let cell = self.list_text(index, column.subitem);
+                        let start = left.saturating_add(inset);
+                        let x = list_aligned_x(face, cell, start, end - 2, column.format);
+                        if start < end {
+                            draw_clipped_font(
+                                surf,
+                                x,
+                                ty,
+                                cell,
+                                if selected { Self::WINDOW } else { Self::TEXT },
+                                end - 1,
+                                face,
+                            );
+                        }
+                        left = end;
+                        if left >= right {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 draw_clipped_font(
                     surf,
                     self.x + 2 + if iw > 0 { iw as i32 + 3 } else { 0 },
@@ -799,6 +882,26 @@ impl ChildWindow {
                     self.x + self.w - 1,
                     face,
                 );
+            }
+        }
+        if header > 0 {
+            surf.fill_rect(self.x, self.y, self.w, header.min(self.h), Self::FACE);
+            let font_height = crate::text::layout(face, &[]).height;
+            if font_height <= header.min(self.h) {
+                let y = self.y + (header - font_height) / 2;
+                let mut left = self.x;
+                for column in &self.list_report_columns {
+                    let end = left.saturating_add(column.width).min(right);
+                    if end > left {
+                        let x = list_aligned_x(face, &column.title, left + 2, end - 2, column.format);
+                        draw_clipped_font(surf, x, y, &column.title, Self::TEXT, end - 1, face);
+                        surf.fill_rect(end - 1, self.y, 1, header.min(self.h), Self::SHADOW);
+                    }
+                    left = end;
+                    if left >= right {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1693,6 +1796,24 @@ impl ChildWindow {
     }
 }
 
+fn list_aligned_x(
+    face: Option<&crate::gdi::Font>,
+    text: &str,
+    left: i32,
+    right: i32,
+    format: u32,
+) -> i32 {
+    if format & 3 == 0 {
+        return left;
+    }
+    let text = text.encode_utf16().collect::<Vec<_>>();
+    let spare = right
+        .saturating_sub(left)
+        .saturating_sub(crate::text::layout(face, &text).width)
+        .max(0);
+    left.saturating_add(if format & 3 == 2 { spare / 2 } else { spare })
+}
+
 /// Draw `text` but stop before `right`, so a caption never bleeds out
 /// of its control.
 fn draw_clipped_font(
@@ -1936,7 +2057,8 @@ impl Controls {
             list_text_color: 0,
             image: 0,
             list_selected: None,
-            list_column_count: 0,
+            list_report_columns: Vec::new(),
+            list_subitems: Vec::new(),
             font: crate::gdi::STOCK_SYSTEM_FONT,
             choice_open: false,
             choice_row_height: 16,
