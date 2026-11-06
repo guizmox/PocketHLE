@@ -7,6 +7,11 @@ use std::sync::Mutex;
 /// even when the PE section lacks IMAGE_SCN_MEM_EXECUTE. ARMNT and non-CE images
 /// retain the section's explicit execute permission. Never add write permission.
 /// ARM ARM DDI0406C.d, D12.6: XN is introduced by the VMSAv6 table format.
+pub(crate) fn legacy_arm_ce(machine: u16, subsystem: u16) -> bool {
+    subsystem == pocket_pe::subsystem::WINDOWS_CE_GUI
+        && matches!(machine, pocket_pe::machine::ARM | pocket_pe::machine::THUMB)
+}
+
 pub fn image_section_protection(
     machine: u16,
     subsystem: u16,
@@ -17,9 +22,7 @@ pub fn image_section_protection(
     if section.is_writable() {
         prot |= Prot::WRITE;
     }
-    let legacy_arm_ce = subsystem == pocket_pe::subsystem::WINDOWS_CE_GUI
-        && matches!(machine, pocket_pe::machine::ARM | pocket_pe::machine::THUMB);
-    if section.is_executable() || (legacy_arm_ce && section.is_readable()) {
+    if section.is_executable() || (legacy_arm_ce(machine, subsystem) && section.is_readable()) {
         prot |= Prot::EXEC;
     }
     prot

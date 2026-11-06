@@ -1,2 +1,8 @@
-crates\pocket-kernel\src\vfs.rs
-crates\pocket-kernel\src\vfs_contract.rs
+Cargo.lock
+crates\pocket-kernel\src\crypto.rs
+crates\pocket-kernel\src\image_memory.rs
+crates\pocket-kernel\src\lib.rs
+crates\pocket-winceapi\Cargo.toml
+crates\pocket-winceapi\data\coredll-ordinals.json
+crates\pocket-winceapi\src\ce_crypto.rs
+crates\pocket-winceapi\src\coredll.rs

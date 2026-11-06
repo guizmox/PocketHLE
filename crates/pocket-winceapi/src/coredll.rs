@@ -2053,6 +2053,15 @@ fn read_guest_regs(cpu: &mut dyn pocket_cpu::Cpu) -> Result<[u32; 17], KernelErr
     }
     Ok(values)
 }
+fn guest_resume_pc(cpu: &dyn pocket_cpu::Cpu, regs: &[u32; 17]) -> u32 {
+    let pc = regs[15];
+    if cpu.arch() == pocket_cpu::Arch::Arm {
+        pc | ((regs[16] >> 5) & 1)
+    } else {
+        pc
+    }
+}
+
 fn write_guest_regs(cpu: &mut dyn pocket_cpu::Cpu, values: &[u32; 17]) -> Result<(), KernelError> {
     // Activate the target register bank before restoring SP/LR. Reapply the
     // saved status last as before so the ARM/Thumb continuation is exact.
@@ -2216,7 +2225,9 @@ fn park_worker_at(
     write_guest_regs(ctx.cpu, &main_regs)?;
     ctx.kernel.worker_preempt_after_ms =
         monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
-    Ok(Some(DispatchOutcome::JumpTo(main_regs[15] & !1)))
+    Ok(Some(DispatchOutcome::JumpTo(guest_resume_pc(
+        ctx.cpu, &main_regs,
+    ))))
 }
 
 fn thread_handle_is_closed(kernel: &KernelState, handle: u32) -> bool {
@@ -2442,7 +2453,10 @@ fn resume_worker(
         thread_index,
         worker_regs[15]
     );
-    Ok(Some(DispatchOutcome::JumpTo(worker_regs[15] & !1)))
+    Ok(Some(DispatchOutcome::JumpTo(guest_resume_pc(
+        ctx.cpu,
+        &worker_regs,
+    ))))
 }
 
 /// Hand the CPU to a parked worker from a **blocking** wait on the main
@@ -2523,7 +2537,10 @@ fn resume_worker_reenter(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome
         thread_index,
         worker_regs[15]
     );
-    Ok(Some(DispatchOutcome::JumpTo(worker_regs[15] & !1)))
+    Ok(Some(DispatchOutcome::JumpTo(guest_resume_pc(
+        ctx.cpu,
+        &worker_regs,
+    ))))
 }
 
 /// Sleep or an expired audio quantum gives the remaining ready workers one
@@ -2576,7 +2593,9 @@ fn resume_ready_worker_after_sleep(
     ctx.kernel.current_thread = index + 1;
     ctx.kernel.worker_preempt_after_ms =
         monotonic_ms().saturating_add(timer_poll_interval(ctx.kernel));
-    Ok(Some(DispatchOutcome::JumpTo(regs[15] & !1)))
+    Ok(Some(DispatchOutcome::JumpTo(guest_resume_pc(
+        ctx.cpu, &regs,
+    ))))
 }
 
 /// Poll runnable workers at API boundaries, preserving the interrupted main
@@ -3387,7 +3406,7 @@ pub(crate) fn schedule_idle(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
     if ctx.kernel.main_thread.exit_code.is_none() && ctx.kernel.main_thread.suspend_count == 0 {
         if let Some(regs) = ctx.kernel.main_thread.saved_regs.take() {
             write_guest_regs(ctx.cpu, &regs)?;
-            return Ok(DispatchOutcome::JumpTo(regs[15] & !1));
+            return Ok(DispatchOutcome::JumpTo(guest_resume_pc(ctx.cpu, &regs)));
         }
     }
     if ctx.kernel.main_thread.exit_code.is_some() && ctx.kernel.threads.iter().all(|t| t.finished) {
@@ -12951,7 +12970,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     } else {
         FAKE_HWND
     };
-    let wnd_proc = (ctx
+    let wnd_proc = ctx
         .kernel
         .window_procs
         .get(&hwnd)
@@ -12963,8 +12982,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             } else {
                 0
             }
-        }))
-        & !1;
+        });
     if lp_msg == 0 {
         // No registered WndProc / no message → behave like the old
         // stub: return 0, control resumes from LR.
@@ -12989,11 +13007,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if hwnd == 0 && !timer_callback {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let wnd_proc = if timer_callback {
-        lparam & !1
-    } else {
-        wnd_proc
-    };
+    let wnd_proc = if timer_callback { lparam } else { wnd_proc };
     if wnd_proc == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -20525,6 +20539,12 @@ fn create_guest_thread(
     worker_regs[14] = exit_va;
     worker_regs[15] = entry;
     worker_regs[16] = saved_regs[16];
+    // A new ARM thread starts in the instruction set of its entry pointer.
+    // The creator's CPSR still governs its own continuation.
+    if ctx.cpu.arch() == pocket_cpu::Arch::Arm {
+        const THUMB: u32 = 1 << 5;
+        worker_regs[16] = (worker_regs[16] & !THUMB) | ((entry & 1) << 5);
+    }
     thread.worker_regs = worker_regs;
     thread.worker_saved = true;
     thread.started = !suspended;
@@ -39616,7 +39636,7 @@ mod tests {
                     thunk: &thunk
                 })
                 .unwrap(),
-                DispatchOutcome::JumpTo(main[15])
+                DispatchOutcome::JumpTo(if cpsr == 0x30 { 0x5013 } else { 0x5014 })
             );
             assert_eq!(kernel.current_thread, 0);
             assert_eq!(read_guest_regs(&mut cpu).unwrap(), main);

@@ -1,9 +1,9 @@
-//! Legacy CryptoAPI operations used by GTShell.
+//! WinCE CryptoAPI handlers.
 use crate::{CallCtx, Handler, WinCeDispatcher};
 use des::cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use des::Des;
 use pocket_kernel::{
-    crypto::{CryptoHash, CryptoKey, Digest, Sha1},
+    crypto::{CryptoHash, CryptoKey, CryptoPublicKey, Digest, Sha1},
     DispatchOutcome, KernelError,
 };
 
@@ -24,6 +24,9 @@ pub fn register(d: &mut WinCeDispatcher) {
         ("CryptReleaseContext", release),
         ("CryptCreateHash", create_hash),
         ("CryptHashData", hash_data),
+        ("CryptSetHashParam", set_hash_param),
+        ("CryptImportKey", import_key),
+        ("CryptVerifySignatureW", verify_signature),
         ("CryptDestroyHash", destroy_hash),
         ("CryptDeriveKey", derive_key),
         ("CryptSetKeyParam", set_key_param),
@@ -89,6 +92,7 @@ fn release(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     state.hashes.retain(|_, hash| hash.provider != provider);
     state.keys.retain(|_, key| key.provider != provider);
+    state.public_keys.retain(|_, key| key.provider != provider);
     Ok(OK)
 }
 
@@ -116,6 +120,7 @@ fn create_hash(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             provider,
             digest: Sha1::new(),
             finished: false,
+            value: None,
         },
     );
     Ok(OK)
@@ -142,6 +147,140 @@ fn hash_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             return fail(ctx, 998);
         };
         hash.digest.update(&bytes);
+    }
+    Ok(OK)
+}
+
+fn set_hash_param(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let parameter = ctx.arg_u32(1)?;
+    let data = ctx.arg_u32(2)?;
+    if ctx.arg_u32(3)? != 0 {
+        return fail(ctx, BAD_FLAGS);
+    }
+    if parameter != 2 {
+        return fail(ctx, BAD_TYPE);
+    }
+    let Some(hash) = ctx.kernel.crypto.hashes.get_mut(&handle) else {
+        return fail(ctx, BAD_HASH);
+    };
+    if hash.finished {
+        return fail(ctx, 0x8009_000c);
+    }
+    let mut digest = [0; 20];
+    if ctx.cpu.read_mem_into(data, &mut digest).is_err() {
+        return fail(ctx, 998);
+    }
+    hash.value = Some(digest);
+    hash.finished = true;
+    Ok(OK)
+}
+
+fn rsa_public_key(modulus_le: &[u8], exponent: u32) -> Option<rsa::RsaPublicKey> {
+    rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_le(modulus_le),
+        rsa::BigUint::from(exponent),
+    )
+    .ok()
+}
+
+fn import_key(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let provider = ctx.arg_u32(0)?;
+    let data = ctx.arg_u32(1)?;
+    let len = ctx.arg_u32(2)?;
+    if !ctx.kernel.crypto.providers.contains(&provider) {
+        return fail(ctx, BAD_UID);
+    }
+    if ctx.arg_u32(3)? != 0 {
+        return fail(ctx, BAD_KEY);
+    }
+    // Public keys may be imported with CRYPT_EXPORTABLE.
+    if ctx.arg_u32(4)? & !1 != 0 {
+        return fail(ctx, BAD_FLAGS);
+    }
+    let out = ctx.arg_u32(5)?;
+    if !(20..=532).contains(&len) {
+        return fail(ctx, BAD_DATA);
+    }
+    let Ok(blob) = ctx.cpu.read_mem(data, len) else {
+        return fail(ctx, 998);
+    };
+    let word = |offset| u32::from_le_bytes(blob[offset..offset + 4].try_into().unwrap());
+    if blob[..4] != [6, 2, 0, 0]
+        || !matches!(word(4), 0x2400 | 0xa400)
+        || word(8) != u32::from_le_bytes(*b"RSA1")
+    {
+        return fail(ctx, BAD_DATA);
+    }
+    let bits = word(12);
+    let exponent = word(16);
+    let modulus = &blob[20..];
+    if bits != (modulus.len() as u32) * 8
+        || modulus.last().is_none_or(|last| last & 0x80 == 0)
+        || rsa_public_key(modulus, exponent).is_none()
+    {
+        return fail(ctx, BAD_DATA);
+    }
+    let Some(handle) = ctx.kernel.crypto.allocate() else {
+        return fail(ctx, 8);
+    };
+    if ctx.cpu.write_mem(out, &handle.to_le_bytes()).is_err() {
+        return fail(ctx, 998);
+    }
+    ctx.kernel.crypto.public_keys.insert(
+        handle,
+        CryptoPublicKey {
+            provider,
+            modulus_le: modulus.to_vec(),
+            exponent,
+        },
+    );
+    Ok(OK)
+}
+
+fn verify_signature(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hash = ctx.arg_u32(0)?;
+    let signature = ctx.arg_u32(1)?;
+    let len = ctx.arg_u32(2)?;
+    let key = ctx.arg_u32(3)?;
+    if ctx.arg_u32(4)? != 0 {
+        return fail(ctx, 87);
+    }
+    if ctx.arg_u32(5)? != 0 {
+        return fail(ctx, BAD_FLAGS);
+    }
+    let Some(hash) = ctx.kernel.crypto.hashes.get_mut(&hash) else {
+        return fail(ctx, BAD_HASH);
+    };
+    let Some(key) = ctx
+        .kernel
+        .crypto
+        .public_keys
+        .get(&key)
+        .filter(|key| key.provider == hash.provider)
+    else {
+        return fail(ctx, BAD_KEY);
+    };
+    if len as usize != key.modulus_le.len() {
+        return fail(ctx, 0x8009_0006);
+    }
+    let Ok(mut signature) = ctx.cpu.read_mem(signature, len) else {
+        return fail(ctx, 998);
+    };
+    signature.reverse();
+    let digest = hash
+        .value
+        .unwrap_or_else(|| hash.digest.clone().finalize().into());
+    hash.finished = true;
+    let key = rsa_public_key(&key.modulus_le, key.exponent)
+        .ok_or_else(|| KernelError::Dispatch("invalid stored RSA public key".into()))?;
+    // DER DigestInfo prefix for SHA-1, followed by the existing 20-byte digest.
+    let scheme = rsa::Pkcs1v15Sign {
+        hash_len: Some(20),
+        prefix: Box::from(*b"\x30\x21\x30\x09\x06\x05\x2b\x0e\x03\x02\x1a\x05\x00\x04\x14"),
+    };
+    if key.verify(scheme, &digest, &signature).is_err() {
+        return fail(ctx, 0x8009_0006);
     }
     Ok(OK)
 }
@@ -221,7 +360,9 @@ fn set_key_param(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
 fn destroy_key(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
-    if ctx.kernel.crypto.keys.remove(&handle).is_none() {
+    if ctx.kernel.crypto.keys.remove(&handle).is_none()
+        && ctx.kernel.crypto.public_keys.remove(&handle).is_none()
+    {
         return fail(ctx, BAD_KEY);
     }
     Ok(OK)

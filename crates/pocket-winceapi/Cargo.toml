@@ -20,6 +20,7 @@ video-static = []
 
 [dependencies]
 des = "0.9"
+rsa = { version = "0.9", default-features = false }
 cpal = { version = "0.15", optional = true }
 anyhow.workspace = true
 thiserror.workspace = true

@@ -4209,11 +4209,17 @@ impl Process {
             log::debug!("starting Thumb-mode entry with CPSR.T set");
         }
 
-        // 4. Map a heap.
-        cpu.map_region(HEAP_BASE, HEAP_SIZE, Prot::READ | Prot::WRITE)?;
+        // 4. Map the ordinary process heap. Legacy ARM CE software can
+        // load code into malloc storage. Virtual allocations retain the
+        // protections requested by the guest.
+        let mut heap_prot = Prot::READ | Prot::WRITE;
+        if image_memory::legacy_arm_ce(image.machine, image.subsystem) {
+            heap_prot |= Prot::EXEC;
+        }
+        cpu.map_region(HEAP_BASE, HEAP_SIZE, heap_prot)?;
         let mut heap = if let Some((_, _, heap_base)) = private_layout {
             let heap_size = 0x0200_0000 - heap_base;
-            cpu.map_region(heap_base, heap_size, Prot::READ | Prot::WRITE)?;
+            cpu.map_region(heap_base, heap_size, heap_prot)?;
             let mut heap = Heap::new(heap_base, heap_size);
             heap.add_region(HEAP_BASE, HEAP_SIZE);
             heap
@@ -4902,6 +4908,11 @@ pub fn run_main_loop_with_hook(
             match stop {
                 StopReason::InstructionLimit => {
                     pc = cpu.read_reg(ArmReg::Pc)?;
+                    // Unicorn reports an aligned PC when preempted. Its next
+                    // emu_start needs the Thumb tag to resume in that state.
+                    if cpu.arch() == pocket_cpu::Arch::Arm {
+                        pc = (pc & !1) | ((cpu.read_reg(ArmReg::Cpsr)? >> 5) & 1);
+                    }
                     if let Some(worker_pc) =
                         dispatcher.schedule_cpu_slice(cpu, &mut process.state)?
                     {
