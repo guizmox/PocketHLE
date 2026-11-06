@@ -3223,14 +3223,16 @@ impl PocketLauncher {
 
 
 
-                ui.label("GAPI display compatibility");
-                crate::controller_ui::ComboBox::from_id_source("pocketpc_gapi_layout")
-                    .selected_text(if draft.pocketpc_gapi_columns { "Rotated LCD columns" } else { "Linear scanlines (default)" })
-                    .show_ui(ui, |ui| {
-                        crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, false, "Linear scanlines (default)");
-                        crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, true, "Rotated LCD columns");
-                    }).response.on_hover_text("Changes the physical layout of direct framebuffer memory. Use columns for software designed for a rotated LCD. Applies on next launch.");
-                ui.end_row();
+                if !is_gizmondo {
+                    ui.label("GAPI display compatibility");
+                    crate::controller_ui::ComboBox::from_id_source("pocketpc_gapi_layout")
+                        .selected_text(if draft.pocketpc_gapi_columns { "Rotated LCD columns" } else { "Linear scanlines (default)" })
+                        .show_ui(ui, |ui| {
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, false, "Linear scanlines (default)");
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, true, "Rotated LCD columns");
+                        }).response.on_hover_text("Changes the physical layout of direct framebuffer memory. Use columns for software designed for a rotated LCD. Applies on next launch.");
+                    ui.end_row();
+                }
                 ui.heading("Sound");
                 ui.label("No per-game sound options yet.");
                 ui.end_row();

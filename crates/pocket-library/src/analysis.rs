@@ -184,6 +184,30 @@ fn serial_gps_evidence(text: &str) -> Option<&'static str> {
     (gps && transport).then_some("Serial/NMEA GPS (port string or serial API with GPS evidence)")
 }
 
+/// Identify the Gizmondo runtime that uses a rotated LCD framebuffer.
+pub fn uses_rotated_gizmondo_lcd(image: &pocket_pe::LoadedImage) -> bool {
+    use pocket_pe::resources::ResourceKey;
+    image
+        .resources
+        .iter()
+        .filter(|entry| entry.ty == ResourceKey::Id(16))
+        .any(|entry| {
+            let Some(bytes) = image.sections.iter().find_map(|section| {
+                let offset = entry.data_rva.checked_sub(section.virtual_address)? as usize;
+                section
+                    .data
+                    .get(offset..offset.checked_add(entry.size as usize)?)
+            }) else {
+                return false;
+            };
+            let strings = binary_strings(bytes);
+            ["InternalName", "ProductName"].into_iter().all(|key| {
+                version_value(&strings, key)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("mophun"))
+            })
+        })
+}
+
 fn version_value(strings: &[String], key: &str) -> Option<String> {
     for (i, s) in strings.iter().enumerate() {
         if s.eq_ignore_ascii_case(key) {

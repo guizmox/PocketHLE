@@ -1,5 +1,4 @@
-crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\coredll\graphics_tests.rs
+crates\pocket-library\src\analysis.rs
 frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\runner.rs
 frontends\pocket-android-jni\src\runner.rs

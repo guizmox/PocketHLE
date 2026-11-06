@@ -1627,6 +1627,19 @@ pub struct MainThreadState {
 }
 
 impl KernelState {
+    /// Discard input and repeats when this process loses or regains focus.
+    pub fn reset_foreground_input(&mut self) {
+        self.pending_input.clear();
+        if let Some(up) = self.stylus_stick.cancel() {
+            self.pending_input.push_back(up);
+        }
+        self.pressed_keys.fill(false);
+        self.async_keys = Default::default();
+        self.held_keys.clear();
+        self.key_repeat_next_ms = None;
+        self.key_repeat_cursor = 0;
+    }
+
     /// Observe each host input once, whether queried asynchronously or removed by a pump.
     pub fn pop_pending_input(&mut self) -> Option<InputEvent> {
         self.async_keys

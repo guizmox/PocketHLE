@@ -510,13 +510,18 @@ impl Runner {
                 );
             }
         }
-        emu.set_pocketpc_gapi_columns(game.settings.pocketpc_gapi_columns);
         let (screen_w, screen_h) = if is_gizmondo {
             game.settings.screen.gizmondo_size()
         } else {
             game.settings.screen.resolve_image(metadata.as_ref())
         };
         emu.set_screen_size(screen_w, screen_h);
+        emu.set_pocketpc_gapi_columns(if is_gizmondo {
+            (screen_w, screen_h) == (320, 240)
+                && metadata.as_ref().is_some_and(pocket_library::analysis::uses_rotated_gizmondo_lcd)
+        } else {
+            game.settings.pocketpc_gapi_columns
+        });
         if launcher_config.show_ips {
             if let Some(process) = emu.process_mut() {
                 process.state.framebuffer.enable_ips();
@@ -1122,6 +1127,7 @@ impl RunHook {
                         match ready_rx.recv_timeout(Duration::from_secs(30)) {
                             Ok(Ok(())) => {
                                 self.foreground.store(table.process_id(), Ordering::Release);
+                                state.reset_foreground_input();
                                 Ok(request.process_handle)
                             }
                             Ok(Err(error)) => Err(error),
@@ -1195,13 +1201,7 @@ impl RunHook {
             self.reset_process();
             // Repaint the preserved parent frame even if its counter is static.
             state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
-            state.pending_input.clear();
-            if let Some(up) = state.stylus_stick.cancel() {
-                state.pending_input.push_back(up);
-            }
-            state.pressed_keys.fill(false);
-            state.held_keys.clear();
-            state.key_repeat_next_ms = None;
+            state.reset_foreground_input();
         }
         if let Some(table) = state.object_handles.child(request.process_handle) {
             table.complete_process_exit(exit_code);

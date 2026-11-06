@@ -40233,6 +40233,27 @@ mod tests {
     }
 
     #[test]
+    fn foreground_transfer_cancels_the_launch_keys_repeat() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: 13 });
+        let (_, msg, vk, _) = next_message_if_due(&mut ctx).unwrap();
+        assert_eq!((msg, vk), (WM_KEYDOWN, 13));
+        ctx.kernel.key_repeat_next_ms = Some(monotonic_ms());
+        ctx.kernel.reset_foreground_input();
+        assert!(!ctx.kernel.pressed_keys[13]);
+        assert_eq!(key_repeat_if_due(&mut ctx), None);
+    }
+
+    #[test]
     fn pending_key_releases_override_old_state_and_ignore_other_keys() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();

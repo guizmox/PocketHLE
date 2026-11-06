@@ -635,7 +635,6 @@ fn run_process(
             return (summary_lines.join("\n"), 87);
         }
     }
-    emu.set_pocketpc_gapi_columns(entry.settings.pocketpc_gapi_columns);
     for value in &entry.registry {
         let registry_value = if let Some(text) = value.string.as_deref() {
             pocket_core::kernel::registry::RegistryValue::Sz(text.to_string())
@@ -666,6 +665,15 @@ fn run_process(
         entry.settings.screen.resolve_image(image.as_ref().ok())
     };
     emu.set_screen_size(screen_width, screen_height);
+    emu.set_pocketpc_gapi_columns(if is_gizmondo {
+        (screen_width, screen_height) == (320, 240)
+            && image
+                .as_ref()
+                .ok()
+                .is_some_and(pocket_library::analysis::uses_rotated_gizmondo_lcd)
+    } else {
+        entry.settings.pocketpc_gapi_columns
+    });
     if launcher_config.show_ips {
         if let Some(process) = emu.process_mut() {
             process.state.framebuffer.enable_ips();
@@ -988,6 +996,7 @@ impl SessionHook {
                         match ready_rx.recv_timeout(Duration::from_secs(30)) {
                             Ok(Ok(())) => {
                                 self.foreground.store(table.process_id(), Ordering::Release);
+                                state.reset_foreground_input();
                                 Ok(request.process_handle)
                             }
                             Ok(Err(error)) => Err(error),
@@ -1063,13 +1072,7 @@ impl SessionHook {
             self.saw_non_black = false;
             // Repaint the preserved parent frame even if its counter is static.
             state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
-            state.pending_input.clear();
-            if let Some(up) = state.stylus_stick.cancel() {
-                state.pending_input.push_back(up);
-            }
-            state.pressed_keys.fill(false);
-            state.held_keys.clear();
-            state.key_repeat_next_ms = None;
+            state.reset_foreground_input();
         }
         if let Some(table) = state.object_handles.child(request.process_handle) {
             table.complete_process_exit(exit_code);
