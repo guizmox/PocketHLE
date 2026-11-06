@@ -172,6 +172,27 @@ class GameSettingsActivity : AppCompatActivity() {
                     true
                 }
             }
+            findPreference<ListPreference>("executable_heap")?.apply {
+                entries = arrayOf("Use emulator setting", "Enabled", "Disabled")
+                entryValues = arrayOf("inherit", "enabled", "disabled")
+                value = when (current.executableHeap) {
+                    null -> "inherit"
+                    true -> "enabled"
+                    false -> "disabled"
+                }
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
+                    "${pref.entry ?: "Use emulator setting"}. ${getString(R.string.executable_heap_help)}"
+                }
+                setOnPreferenceChangeListener { _, newValue ->
+                    current = current.copy(executableHeap = when (newValue) {
+                        "enabled" -> true
+                        "disabled" -> false
+                        else -> null
+                    })
+                    writeGameSettings()
+                    true
+                }
+            }
             findPreference<ListPreference>("gpu_renderer_mode")?.apply {
                 // JSON is authoritative; do not maintain a second SharedPreferences value.
                 isPersistent = false
@@ -205,7 +226,9 @@ class GameSettingsActivity : AppCompatActivity() {
             val gpuSaved = saved != null && saved.has("gpu_renderer") &&
                 (if (saved.isNull("gpu_renderer")) null else saved.optBoolean("gpu_renderer")) == current.gpuRenderer
             val frameLimitSaved = saved != null && saved.has("frame_rate_limit") && (if (saved.isNull("frame_rate_limit")) null else saved.optString("frame_rate_limit")) == current.frameRateLimit
-            if (result?.optBoolean("ok", false) != true || !gpuSaved || !frameLimitSaved) {
+            val heapSaved = saved != null &&
+                (if (saved.isNull("executable_heap")) null else saved.optBoolean("executable_heap")) == current.executableHeap
+            if (result?.optBoolean("ok", false) != true || !gpuSaved || !frameLimitSaved || !heapSaved) {
                 android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }
         }

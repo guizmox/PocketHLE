@@ -365,6 +365,18 @@ class SettingsActivity : AppCompatActivity() {
 
 
             findPreference<androidx.preference.PreferenceCategory>("misc_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "executable_heap"
+                title = "Executable heap"
+                isPersistent = false
+                isChecked = current.executableHeap
+                setSummary(R.string.executable_heap_help)
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(executableHeap = value as Boolean)
+                    writeConfig()
+                    true
+                }
+            })
+            findPreference<androidx.preference.PreferenceCategory>("misc_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "show_fps"; title = "Show FPS"; isPersistent = false; isChecked = current.showFps
                 summary = "Shows a small counter of rendered frames on the game screen. Applies on the next launch."
                 setOnPreferenceChangeListener { _, value ->
@@ -461,6 +473,11 @@ class SettingsActivity : AppCompatActivity() {
             }
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_controls_size", "") != current.pocketpcControlsSize) {
                 android.widget.Toast.makeText(context, "Control size was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
+            }
+            if (result?.optBoolean("ok", false) == true &&
+                (saved == null || !saved.has("executable_heap") ||
+                    saved.optBoolean("executable_heap") != current.executableHeap)) {
+                android.widget.Toast.makeText(context, "Executable heap setting was not saved. Rebuild the native libraries and APK together.", android.widget.Toast.LENGTH_LONG).show()
             }
             if (!gpuSaved) android.widget.Toast.makeText(context, "GPU setting was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             if(result?.optBoolean("ok",false)!=true) android.widget.Toast.makeText(context,result?.optString("error") ?: "Could not save settings",android.widget.Toast.LENGTH_LONG).show()

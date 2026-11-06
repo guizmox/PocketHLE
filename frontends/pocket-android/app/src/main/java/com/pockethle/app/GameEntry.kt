@@ -65,6 +65,7 @@ data class GameSettings(
     val rotation: String,
     val frameRateLimit: String? = null,
     val gpuRenderer: Boolean? = null,
+    val executableHeap: Boolean? = null,
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
     val pocketpcControls: String? = null,
@@ -86,6 +87,7 @@ data class GameSettings(
         remove("anisotropic_filtering")
         put("frame_rate_limit", frameRateLimit ?: JSONObject.NULL)
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
+        put("executable_heap", executableHeap ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
         put("cpu_backend", cpuBackend)
         put("max_slices", maxSlices)
@@ -133,6 +135,7 @@ data class GameSettings(
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
             frameRateLimit = if (obj.isNull("frame_rate_limit")) null else obj.optString("frame_rate_limit", "unlimited").takeUnless { it == "inherit" },
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
+            executableHeap = if (obj.isNull("executable_heap")) null else obj.optBoolean("executable_heap"),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
             pocketpcSwapButtonGroups = obj.optBoolean("pocketpc_swap_button_groups", false),
@@ -158,6 +161,7 @@ data class LauncherConfig(
     val verbosity: Int,
     val logUnimplementedApis: Boolean = true,
     val gpuRenderer: Boolean = true,
+    val executableHeap: Boolean = true,
     val glesInternalResolution: Int = 1,
     val lastImportDir: String?,
     val showFps: Boolean,
@@ -210,6 +214,7 @@ data class LauncherConfig(
         put("verbosity", verbosity)
         put("log_unimplemented_apis", logUnimplementedApis)
         put("gpu_renderer", gpuRenderer)
+        put("executable_heap", executableHeap)
         put("gles_internal_resolution", glesInternalResolution)
         if (lastImportDir != null) put("last_import_dir", lastImportDir) else put("last_import_dir", JSONObject.NULL)
         put("show_fps", showFps)
@@ -262,6 +267,7 @@ data class LauncherConfig(
             verbosity = obj.optInt("verbosity", 1),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
+            executableHeap = obj.optBoolean("executable_heap", true),
             frameRateLimit = obj.optString("frame_rate_limit", "60").takeIf { it in listOf("10","15","20","30","45","60","120","unlimited") } ?: "60",
             glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
