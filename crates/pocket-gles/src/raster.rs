@@ -475,6 +475,13 @@ impl RenderTarget {
 /// draws from. Returning `None` means that unit has no usable texture,
 /// in which case the stage leaves the fragment colour alone.
 pub trait TextureSampler {
+    fn combiner_program(&self) -> Option<&crate::combiner_program::BasicProgram> {
+        None
+    }
+
+    fn combiner_constants(&self) -> [[f32; 4]; 4] {
+        [[0.0; 4]; 4]
+    }
     fn sample(&self, unit: usize, s: f32, t: f32) -> Option<[u8; 4]>;
     fn needs_gradients(&self) -> bool {
         false
@@ -496,6 +503,57 @@ impl<F: Fn(usize, f32, f32) -> Option<[u8; 4]>> TextureSampler for F {
     }
 }
 pub type SampleFn<'a> = &'a dyn TextureSampler;
+
+fn coordinate_units(sample: SampleFn<'_>, stages: &[TextureStage]) -> u8 {
+    sample.combiner_program().map_or_else(
+        || {
+            stages
+                .iter()
+                .fold(0, |mask, stage| mask | (1 << stage.unit))
+        },
+        |program| program.coordinate_units(),
+    )
+}
+
+fn framebuffer_color(target: &RenderTarget, idx: usize) -> [f32; 4] {
+    let offset = idx * 4;
+    [
+        to_unit(target.color[offset]),
+        to_unit(target.color[offset + 1]),
+        to_unit(target.color[offset + 2]),
+        if target.rgb565 {
+            1.
+        } else {
+            to_unit(target.color[offset + 3])
+        },
+    ]
+}
+
+fn evaluate_combiner(
+    program: &crate::combiner_program::BasicProgram,
+    sample: SampleFn<'_>,
+    stages: &[TextureStage],
+    primary: [f32; 4],
+    constants: [[f32; 4]; 4],
+    framebuffer: [f32; 4],
+    coordinate: impl Fn(usize) -> (f32, f32, [f32; 4]),
+) -> [f32; 4] {
+    program.evaluate_sampled(primary, constants, framebuffer, |route| {
+        let Some(stage) = stages.iter().find(|stage| stage.unit == route.texture) else {
+            return [0., 0., 0., 1.];
+        };
+        let (s, t, grad) = if route.s == route.t {
+            coordinate(route.s)
+        } else {
+            let (s, _, sg) = coordinate(route.s);
+            let (_, t, tg) = coordinate(route.t);
+            (s, t, [sg[0], tg[1], sg[2], tg[3]])
+        };
+        sample
+            .sample_grad(route.texture, s, t, grad, stage.lod_bias)
+            .map_or([0., 0., 0., 1.], |texel| texel.map(to_unit))
+    })
+}
 
 /// One enabled texture unit, as the rasterizer sees it.
 ///
@@ -775,9 +833,10 @@ fn raster_clipped(
     };
     let inv_area = 1.0 / area;
     let gradients = sample.needs_gradients();
-    let projective_units = stages.iter().fold(0u8, |mask, stage| {
-        if sv.iter().any(|v| v.texcoord[stage.unit][3] != 1.) {
-            mask | (1 << stage.unit)
+    let coordinates = coordinate_units(sample, stages);
+    let projective_units = (0..MAX_TEXTURE_STAGES).fold(0u8, |mask, unit| {
+        if coordinates & (1 << unit) != 0 && sv.iter().any(|v| v.texcoord[unit][3] != 1.) {
+            mask | (1 << unit)
         } else {
             mask
         }
@@ -795,14 +854,17 @@ fn raster_clipped(
         ];
         let mut q_grad = [[0.; 2]; MAX_TEXTURE_STAGES];
         let mut uv_grad = [[0.; 4]; MAX_TEXTURE_STAGES];
-        for stage in stages {
+        for unit in 0..MAX_TEXTURE_STAGES {
+            if coordinates & (1 << unit) == 0 {
+                continue;
+            }
             for (axis, weights) in [dx, dy].iter().enumerate() {
-                q_grad[stage.unit][axis] = (0..3)
-                    .map(|i| weights[i] * sv[i].inv_w * sv[i].texcoord[stage.unit][3])
+                q_grad[unit][axis] = (0..3)
+                    .map(|i| weights[i] * sv[i].inv_w * sv[i].texcoord[unit][3])
                     .sum();
                 for c in 0..2 {
-                    uv_grad[stage.unit][axis * 2 + c] = (0..3)
-                        .map(|i| weights[i] * sv[i].inv_w * sv[i].texcoord[stage.unit][c])
+                    uv_grad[unit][axis * 2 + c] = (0..3)
+                        .map(|i| weights[i] * sv[i].inv_w * sv[i].texcoord[unit][c])
                         .sum();
                 }
             }
@@ -814,6 +876,8 @@ fn raster_clipped(
     // Flat shading takes the provoking vertex, which for a triangle is
     // the last one.
     let flat_color = sv[2].color;
+    let combiner = sample.combiner_program();
+    let constants = combiner.map(|_| sample.combiner_constants());
     let mut written = 0usize;
     let stride = target.width as usize;
 
@@ -878,13 +942,13 @@ fn raster_clipped(
             // rather than up front, because an unused unit's coordinate
             // set must not cost anything per fragment.
             let primary = frag;
-            for stage in stages {
+            let coordinate = |unit: usize| {
                 let uv = |c: usize| {
-                    p0 * sv[0].texcoord[stage.unit][c]
-                        + p1 * sv[1].texcoord[stage.unit][c]
-                        + p2 * sv[2].texcoord[stage.unit][c]
+                    p0 * sv[0].texcoord[unit][c]
+                        + p1 * sv[1].texcoord[unit][c]
+                        + p2 * sv[2].texcoord[unit][c]
                 };
-                let inv_q = if projective_units & (1 << stage.unit) == 0 {
+                let inv_q = if projective_units & (1 << unit) == 0 {
                     1.
                 } else {
                     let q = uv(3);
@@ -895,33 +959,40 @@ fn raster_clipped(
                     }
                 };
                 let (u, v) = (uv(0) * inv_q, uv(1) * inv_q);
-                let texel = if gradients {
-                    let g = uv_grad[stage.unit];
-                    let [qx, qy] = q_grad[stage.unit];
+                let grad = if gradients {
+                    let g = uv_grad[unit];
+                    let [qx, qy] = q_grad[unit];
                     let rec = rec * inv_q;
-                    sample.sample_grad(
-                        stage.unit,
-                        u,
-                        v,
-                        [
-                            (g[0] - u * qx) * rec,
-                            (g[1] - v * qx) * rec,
-                            (g[2] - u * qy) * rec,
-                            (g[3] - v * qy) * rec,
-                        ],
-                        stage.lod_bias,
-                    )
+                    [
+                        (g[0] - u * qx) * rec,
+                        (g[1] - v * qx) * rec,
+                        (g[2] - u * qy) * rec,
+                        (g[3] - v * qy) * rec,
+                    ]
                 } else {
-                    sample.sample(stage.unit, u, v)
+                    [0.; 4]
                 };
-                if let Some(texel) = texel {
-                    let tc = [
-                        to_unit(texel[0]),
-                        to_unit(texel[1]),
-                        to_unit(texel[2]),
-                        to_unit(texel[3]),
-                    ];
-                    frag = apply_tex_env(stage, frag, tc, primary);
+                (u, v, grad)
+            };
+            if let (Some(program), Some(constants)) = (combiner, constants) {
+                let dst = if program.reads_framebuffer() {
+                    framebuffer_color(target, idx)
+                } else {
+                    [0.; 4]
+                };
+                frag =
+                    evaluate_combiner(program, sample, stages, primary, constants, dst, coordinate);
+            } else {
+                for stage in stages {
+                    let (u, v, grad) = coordinate(stage.unit);
+                    let texel = if gradients {
+                        sample.sample_grad(stage.unit, u, v, grad, stage.lod_bias)
+                    } else {
+                        sample.sample(stage.unit, u, v)
+                    };
+                    if let Some(texel) = texel {
+                        frag = apply_tex_env(stage, frag, texel.map(to_unit), primary);
+                    }
                 }
             }
 
@@ -968,16 +1039,7 @@ fn write_fragment(
     }
 
     let ci = idx * 4;
-    let dst = [
-        to_unit(target.color[ci]),
-        to_unit(target.color[ci + 1]),
-        to_unit(target.color[ci + 2]),
-        if target.rgb565 {
-            1.
-        } else {
-            to_unit(target.color[ci + 3])
-        },
-    ];
+    let dst = framebuffer_color(target, idx);
     let out = if state.blend && !state.logic_op {
         let sf = state.blend_src.resolve(frag, dst);
         let df = state.blend_dst.resolve(frag, dst);
@@ -1068,27 +1130,46 @@ fn primitive_fragment(
     if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
         return false;
     }
-    let mut color = v.color;
-    for stage in stages {
-        let (uv, gradient) = if state.point_coord_replace[stage.unit] {
+    let coordinate = |unit: usize| {
+        let uv = v.texcoord[unit];
+        if state.point_coord_replace[unit] {
             if let Some((uv, inv_size)) = sprite {
-                ([uv[0], uv[1], 0., 1.], [inv_size, 0., 0., inv_size])
-            } else {
-                (v.texcoord[stage.unit], gradients[stage.unit])
+                return (uv[0], uv[1], [inv_size, 0., 0., inv_size]);
             }
-        } else {
-            (v.texcoord[stage.unit], gradients[stage.unit])
-        };
-        if let Some(texel) = sample.sample_grad(
-            stage.unit,
-            if uv[3] != 0. { uv[0] / uv[3] } else { 0. },
-            if uv[3] != 0. { uv[1] / uv[3] } else { 0. },
-            gradient,
-            stage.lod_bias,
-        ) {
-            color = apply_tex_env(stage, color, texel.map(to_unit), v.color);
         }
-    }
+        let q = uv[3];
+        if q != 0. {
+            (uv[0] / q, uv[1] / q, gradients[unit])
+        } else {
+            (0., 0., gradients[unit])
+        }
+    };
+    let color = if let Some(program) = sample.combiner_program() {
+        evaluate_combiner(
+            program,
+            sample,
+            stages,
+            v.color,
+            sample.combiner_constants(),
+            if program.reads_framebuffer() {
+                framebuffer_color(target, idx)
+            } else {
+                [0.; 4]
+            },
+            coordinate,
+        )
+    } else {
+        let mut color = v.color;
+        for stage in stages {
+            let (u, v_coord, gradient) = coordinate(stage.unit);
+            if let Some(texel) =
+                sample.sample_grad(stage.unit, u, v_coord, gradient, stage.lod_bias)
+            {
+                color = apply_tex_env(stage, color, texel.map(to_unit), v.color);
+            }
+        }
+        color
+    };
     write_fragment(target, state, idx, z, color, v.fog_depth)
 }
 
@@ -1268,6 +1349,7 @@ pub fn draw_line(
     let hi = (start[major].max(end[major]).ceil() as i32)
         .saturating_add(1)
         .min(bounds.1);
+    let coordinates = coordinate_units(sample, stages);
     let needs_gradients = sample.needs_gradients();
     let mut written = 0;
     for j in lo..hi {
@@ -1302,8 +1384,10 @@ pub fn draw_line(
                 let mut grad = [[0.; 4]; MAX_TEXTURE_STAGES];
                 if needs_gradients {
                     let dpdt = 1. / (ends[0].pos[3] * ends[1].pos[3] * iw * iw);
-                    for stage in stages {
-                        let unit = stage.unit;
+                    for unit in 0..MAX_TEXTURE_STAGES {
+                        if coordinates & (1 << unit) == 0 {
+                            continue;
+                        }
                         for axis in 0..2 {
                             for c in 0..2 {
                                 let q = v.texcoord[unit][3];

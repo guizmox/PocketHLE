@@ -55,6 +55,7 @@ impl Context {
         c.gpu_requested = self.gpu_requested;
         c.internal_resolution = self.internal_resolution;
         c.gizmondo_goforce_20051013 = self.gizmondo_goforce_20051013;
+        c.nv_combiner_client = self.nv_combiner_client;
         c.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
         c
     }

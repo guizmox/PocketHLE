@@ -1,4 +1,9 @@
-crates\pocket-kernel\src\controls.rs
-crates\pocket-library\src\lib.rs
-crates\pocket-winceapi\src\coredll.rs
-frontends\pocket-android-jni\src\runner.rs
+crates\pocket-core\src\lib.rs
+crates\pocket-gles\src\combiner_program.rs
+crates\pocket-gles\src\context.rs
+crates\pocket-gles\src\context\sharing.rs
+crates\pocket-gles\src\gpu\mod.rs
+crates\pocket-gles\src\lib.rs
+crates\pocket-gles\src\raster.rs
+crates\pocket-winceapi\src\gles.rs
+crates\pocket-winceapi\src\gles\nv_combiner.rs

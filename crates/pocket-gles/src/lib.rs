@@ -13,6 +13,7 @@
 
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
+pub mod combiner_program;
 pub mod consts;
 pub mod context;
 pub mod fixed;

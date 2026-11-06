@@ -9,6 +9,7 @@ mod egl_context;
 mod es11;
 #[cfg(test)]
 mod lifecycle_tests;
+mod nv_combiner;
 
 pub(crate) use egl_context::{enter_gl_thread, enter_thread, needs_thread_switch};
 use egl_context::{EglContext, EglThread};
@@ -323,6 +324,26 @@ pub fn set_gizmondo_goforce_driver(enabled: bool) {
             group.set_goforce_profile(enabled);
         }
     });
+}
+
+/// Recognize clients that query and load GoForce programs at runtime.
+pub fn uses_nv_combiner(image: &pocket_pe::LoadedImage) -> bool {
+    let contains = |marker: &[u8]| {
+        image.sections.iter().any(|section| {
+            section.is_readable()
+                && section
+                    .data
+                    .windows(marker.len())
+                    .any(|bytes| bytes == marker)
+        })
+    };
+    contains(b"GL_NV_combiner_program\0") && contains(b"glProgramStringNV\0")
+}
+
+/// Set the extension policy independently of the Gizmondo driver profile.
+pub fn set_nv_combiner_client(enabled: bool) {
+    with_ctx(|c| c.nv_combiner_client = enabled);
+    update_stored_contexts(|c| c.nv_combiner_client = enabled);
 }
 
 /// Explicit legacy-driver compatibility, independent of CPU identity and game ID.
@@ -653,7 +674,11 @@ fn gl_enable(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if cap == pocket_gles::GL_FOG {
         log::debug!("GLES enable fog");
     }
-    with_ctx(|c| c.set_capability(cap, true));
+    if cap == nv_combiner::TARGET && nv_combiner::enabled() {
+        nv_combiner::set_enabled(true);
+    } else {
+        with_ctx(|c| c.set_capability(cap, true));
+    }
     Ok(VOID)
 }
 
@@ -662,7 +687,11 @@ fn gl_disable(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if cap == pocket_gles::GL_FOG {
         log::debug!("GLES disable fog");
     }
-    with_ctx(|c| c.set_capability(cap, false));
+    if cap == nv_combiner::TARGET && nv_combiner::enabled() {
+        nv_combiner::set_enabled(false);
+    } else {
+        with_ctx(|c| c.set_capability(cap, false));
+    }
     Ok(VOID)
 }
 
@@ -1660,6 +1689,13 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
     };
+    if name == pocket_gles::GL_EXTENSIONS && nv_combiner::enabled() {
+        let extensions = format!("{text} GL_NV_combiner_program");
+        return Ok(DispatchOutcome::ReturnedR0(intern_string(
+            ctx,
+            &extensions,
+        )?));
+    }
     Ok(DispatchOutcome::ReturnedR0(intern_string(ctx, text)?))
 }
 
@@ -2956,6 +2992,9 @@ fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
         bytes.push(byte);
     }
     let name = String::from_utf8_lossy(&bytes);
+    if name.ends_with("NV") && nv_combiner::is_entry_point(&name) && !nv_combiner::enabled() {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let address = [
         pocket_kernel::GLES_CM_MODULE_HANDLE,
         pocket_kernel::GLES_CL_MODULE_HANDLE,
@@ -3399,6 +3438,7 @@ const EGL_NAMED_EXPORTS: &[&str] = &[
 ];
 
 pub fn register(d: &mut WinCeDispatcher) {
+    nv_combiner::register(d);
     // Standalone EGL exports by name. Its ordinal ABI is vendor-specific:
     // do not reuse the Common/Common-Lite GL ordinal tables.
     for name in EGL_NAMED_EXPORTS {

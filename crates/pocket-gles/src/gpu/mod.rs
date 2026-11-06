@@ -331,6 +331,7 @@ const COMBINE_UNIFORMS: [[&str; 4]; 5] = [
 ];
 #[allow(non_snake_case)]
 struct Gl {
+    CopyTexSubImage2D: Option<unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32)>,
     CopyTexImage2D: unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, i32),
     CompressedTexImage2D:
         Option<unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void)>,
@@ -406,6 +407,15 @@ struct Gl {
 impl Gl {
     unsafe fn load(host: &Host) -> Result<Self, String> {
         Ok(Self {
+            CopyTexSubImage2D: {
+                let p = host.load(c"glCopyTexSubImage2D");
+                (!p.is_null()).then(|| {
+                    std::mem::transmute::<
+                        *mut c_void,
+                        unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32),
+                    >(p)
+                })
+            },
             CopyTexImage2D: {
                 let p = host.load(c"glCopyTexImage2D");
                 if p.is_null() {
@@ -1289,12 +1299,19 @@ fn host_mipmap_levels(tex: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
     levels
 }
 
+type ProgramState = (u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>);
+
 pub struct Renderer {
     host: Host,
     gl: Gl,
     program: u32,
     alternate_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
     affine_program: bool,
+    combiner_programs: HashMap<(u64, bool), ProgramState>,
+    combiner: Option<(
+        std::sync::Arc<crate::combiner_program::BasicProgram>,
+        [[f32; 4]; 4],
+    )>,
     range_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
     range_active: bool,
     untextured_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
@@ -1315,6 +1332,7 @@ pub struct Renderer {
     texture_params: HashMap<u32, (Filter, Filter, Wrap, Wrap)>,
     fbo: u32,
     logic_destination: u32,
+    destination_format: Option<(u32, u32, bool)>,
     rgb565: bool,
     color: u32,
     depth: u32,
@@ -1340,6 +1358,7 @@ pub struct Renderer {
     attribute_layout: Option<VertexLayout>,
     stream_layout: Option<[Option<StreamAttribute>; 8]>,
     native_fixed: bool,
+    combiner_available: bool,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
     pub max_viewport: [i32; 2],
@@ -1490,6 +1509,8 @@ impl Renderer {
                 program: 0,
                 alternate_program: None,
                 affine_program: false,
+                combiner_programs: HashMap::new(),
+                combiner: None,
                 range_program: None,
                 range_active: false,
                 untextured_program: None,
@@ -1510,6 +1531,7 @@ impl Renderer {
                 texture_params: HashMap::new(),
                 fbo: 0,
                 logic_destination: 0,
+                destination_format: None,
                 rgb565: false,
                 color: 0,
                 depth: 0,
@@ -1535,6 +1557,7 @@ impl Renderer {
                 attribute_layout: None,
                 stream_layout: None,
                 native_fixed,
+                combiner_available: units >= 5,
                 point_range,
                 line_range,
                 max_viewport,
@@ -2437,6 +2460,90 @@ impl Renderer {
         )
     }
 
+    pub(crate) fn supports_combiner(&self) -> bool {
+        self.combiner_available
+    }
+
+    pub(crate) fn set_combiner(
+        &mut self,
+        program: Option<&std::sync::Arc<crate::combiner_program::BasicProgram>>,
+        constants: [[f32; 4]; 4],
+    ) {
+        self.combiner = program.map(|program| (program.clone(), constants));
+    }
+
+    fn take_combiner_program(
+        &mut self,
+        program: &crate::combiner_program::BasicProgram,
+        range: bool,
+    ) -> Result<ProgramState, String> {
+        if let Some(cached) = self.combiner_programs.remove(&(program.id(), range)) {
+            return Ok(cached);
+        }
+        let fragment = FRAGMENT.replace("/* NV_COMBINER_FUNCTION */", &program.fragment_function());
+        let range_define = if range {
+            "#define TEXTURE_LOD_RANGE\n"
+        } else {
+            ""
+        };
+        unsafe {
+            let id = self.compile_program(
+                VERTEX,
+                &format!("#define NV_COMBINER\n{range_define}{fragment}"),
+            )?;
+            let locations = self
+                .uniforms
+                .keys()
+                .map(String::as_str)
+                .chain(NV_CONSTANTS)
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        (self.gl.GetUniformLocation)(id, CString::new(name).unwrap().as_ptr()),
+                    )
+                })
+                .collect();
+            Ok((id, locations, HashMap::new()))
+        }
+    }
+
+    fn swap_program_state(&mut self, other: &mut ProgramState) {
+        std::mem::swap(&mut self.program, &mut other.0);
+        std::mem::swap(&mut self.uniforms, &mut other.1);
+        std::mem::swap(&mut self.uniform_values, &mut other.2);
+        self.point_drawing = true;
+    }
+
+    unsafe fn copy_destination(&mut self, reuse: bool) {
+        let format = (self.width, self.height, self.rgb565);
+        if reuse && self.destination_format == Some(format) {
+            if let Some(copy) = self.gl.CopyTexSubImage2D {
+                copy(
+                    GL_TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    self.width as i32,
+                    self.height as i32,
+                );
+                return;
+            }
+        }
+        (self.gl.CopyTexImage2D)(
+            GL_TEXTURE_2D,
+            0,
+            if self.rgb565 { GL_RGB } else { GL_RGBA },
+            0,
+            0,
+            self.width as i32,
+            self.height as i32,
+            0,
+        );
+        self.destination_format = Some(format);
+    }
+
     fn draw_inner(
         &mut self,
         target: &RenderTarget,
@@ -2478,7 +2585,13 @@ impl Renderer {
                 (lo > 0. || hi < w.max(h).checked_ilog2().unwrap_or(0) as f32) && tex.is_complete()
             })
         });
-        let affine = !range
+        let combiner = self.combiner.clone();
+        let framebuffer_fetch = combiner
+            .as_ref()
+            .is_some_and(|(program, _)| program.reads_framebuffer());
+        let ordered = state.logic_op || framebuffer_fetch;
+        let affine = combiner.is_none()
+            && !range
             && mode != GL_POINTS
             && !state.logic_op
             && affine_texture_coordinates(vertices, stages, transforms, stream);
@@ -2512,7 +2625,8 @@ impl Renderer {
         if self.simple_active && !simple {
             self.select_simple_program(false)?;
         }
-        let untextured = !simple
+        let untextured = combiner.is_none()
+            && !simple
             && stages.is_empty()
             && target.rgb565
             && mode != GL_POINTS
@@ -2544,10 +2658,10 @@ impl Renderer {
         } else {
             layout
         };
-        let flat_direct = !state.logic_op
-            && direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
+        let flat_direct =
+            !ordered && direct_flat_triangles(mode, state.smooth_shading, guest_indices.is_some());
         let direct = flat_direct
-            || (!state.logic_op
+            || (!ordered
                 && sequential
                 && state.smooth_shading
                 && matches!(
@@ -2657,9 +2771,22 @@ impl Renderer {
             self.vertex_keys = unique;
             self.packed_scratch = packed;
         }
-        unsafe {
+        let combiner_state = if let Some((program, _)) = &combiner {
+            let mut shader = self.take_combiner_program(program, range)?;
+            self.swap_program_state(&mut shader);
+            Some((program.id(), shader))
+        } else {
+            None
+        };
+        let result = (|| unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.UseProgram)(self.program);
+            if let Some((_, constants)) = &combiner {
+                // The compiler may retain only the first few elements.
+                for (name, value) in NV_CONSTANTS.into_iter().zip(constants) {
+                    self.uniform_4fv(self.loc(name), 1, value.as_ptr());
+                }
+            }
             let sprite = mode == GL_POINTS && state.point_sprite;
             if mode == GL_POINTS || self.point_drawing {
                 if !self.host.es && self.point_sprite_mode != sprite {
@@ -3118,7 +3245,7 @@ impl Renderer {
                     -1
                 },
             );
-            if state.logic_op {
+            if ordered {
                 let levels = if self.rgb565 {
                     [31., 63., 31., 255.]
                 } else {
@@ -3151,23 +3278,14 @@ impl Renderer {
                     indices.as_ptr().cast(),
                     0x88e0,
                 );
-                if state.logic_op {
+                if ordered {
                     let step = match draw_mode {
                         GL_POINTS => 1,
                         GL_LINES => 2,
                         _ => 3,
                     };
                     for first in (0..indices.len() / step * step).step_by(step) {
-                        (self.gl.CopyTexImage2D)(
-                            GL_TEXTURE_2D,
-                            0,
-                            if self.rgb565 { GL_RGB } else { GL_RGBA },
-                            0,
-                            0,
-                            self.width as i32,
-                            self.height as i32,
-                            0,
-                        );
+                        self.copy_destination(framebuffer_fetch);
                         (self.gl.DrawElements)(
                             draw_mode,
                             step as i32,
@@ -3185,23 +3303,14 @@ impl Renderer {
                 }
             } else {
                 let count = stream.map_or(self.scratch.len() / layout.floats, |s| s.count);
-                if state.logic_op {
+                if ordered {
                     let step = match draw_mode {
                         GL_POINTS => 1,
                         GL_LINES => 2,
                         _ => 3,
                     };
                     for first in (0..count / step * step).step_by(step) {
-                        (self.gl.CopyTexImage2D)(
-                            GL_TEXTURE_2D,
-                            0,
-                            if self.rgb565 { GL_RGB } else { GL_RGBA },
-                            0,
-                            0,
-                            self.width as i32,
-                            self.height as i32,
-                            0,
-                        );
+                        self.copy_destination(framebuffer_fetch);
                         (self.gl.DrawArrays)(draw_mode, first as i32, step as i32);
                     }
                 } else {
@@ -3212,7 +3321,17 @@ impl Renderer {
             // NVIDIA drivers can stall in glGetError after each draw. Check at
             // exports/reads/finish and explicit guest queries instead.
             Ok(())
+        })();
+        if let Some((id, mut shader)) = combiner_state {
+            self.swap_program_state(&mut shader);
+            if self.combiner_programs.len() >= 128 {
+                for (_, (program, _, _)) in self.combiner_programs.drain() {
+                    unsafe { (self.gl.DeleteProgram)(program) };
+                }
+            }
+            self.combiner_programs.insert((id, range), shader);
         }
+        result
     }
     /// Explicit batch-boundary driver check; does not read pixels or glFinish.
     pub fn poll_error(&self) -> Result<(), String> {
@@ -3471,6 +3590,9 @@ impl Drop for Renderer {
                 (self.gl.DeleteProgram)(*program);
             }
             (self.gl.DeleteProgram)(self.program);
+            for (program, _, _) in self.combiner_programs.values() {
+                (self.gl.DeleteProgram)(*program);
+            }
             if let Some((program, _, _)) = &self.alternate_program {
                 (self.gl.DeleteProgram)(*program);
             }
@@ -3627,6 +3749,13 @@ VARYING vec4 vColor;VARYING vec2 uv0;
 uniform sampler2D sampler0;uniform int env0;
 void main(){vec4 c=vColor;if(env0>=0)c*=texture2D(sampler0,uv0);gl_FragColor=c;}
 "#;
+const NV_CONSTANTS: [&str; 4] = [
+    "nvConstants[0]",
+    "nvConstants[1]",
+    "nvConstants[2]",
+    "nvConstants[3]",
+];
+
 const FRAGMENT: &str = r#"
 VARYING vec4 vColor,vBackColor;
 #ifdef AFFINE_TEXTURES
@@ -3706,8 +3835,11 @@ vec4 sampleRange(sampler2D tex,vec2 uv,float bias,vec4 limit,vec2 bounds){
 #else
 #define sampleRange(tex,uv,bias,lim,ran) texture2D(tex,uv,limitedBias(uv,bias,lim,ran))
 #endif
+/* NV_COMBINER_FUNCTION */
 void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c;
-#ifndef UNTEXTURED_DRAW
+#ifdef NV_COMBINER
+c=nvCombiner(primary);
+#elif !defined(UNTEXTURED_DRAW)
 if(env0>=0){vec4 t=sampleRange(sampler0,pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0,lodRange0);if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=sampleRange(sampler1,pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1,lodRange1);if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=sampleRange(sampler2,pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2,lodRange2);if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=sampleRange(sampler3,pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3,lodRange3);if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
 #endif
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);

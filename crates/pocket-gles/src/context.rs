@@ -27,11 +27,20 @@ use std::collections::HashMap;
 
 type SoftwareMipLevels = Vec<(u32, u32, Vec<u8>)>;
 struct SoftwareSampler<'a> {
+    combiner: Option<&'a crate::combiner_program::BasicProgram>,
+    combiner_constants: [[f32; 4]; 4],
     textures: [Option<&'a Texture>; raster::MAX_TEXTURE_STAGES],
     cache: &'a HashMap<u32, (u64, bool, SoftwareMipLevels)>,
     names: [u32; raster::MAX_TEXTURE_STAGES],
 }
 impl raster::TextureSampler for SoftwareSampler<'_> {
+    fn combiner_program(&self) -> Option<&crate::combiner_program::BasicProgram> {
+        self.combiner
+    }
+
+    fn combiner_constants(&self) -> [[f32; 4]; 4] {
+        self.combiner_constants
+    }
     fn sample(&self, unit: usize, s: f32, t: f32) -> Option<[u8; 4]> {
         let tex = self.textures[unit]?;
         let levels = self
@@ -379,11 +388,13 @@ pub struct Context {
 
     // ---- fragment pipeline ----
     pub state: PipelineState,
+    pub combiner_programs: crate::combiner_program::ProgramObjects,
     pub clear_color: [f32; 4],
     pub clear_depth: f32,
     /// Driver behavior observed in Gizmondo libgles_cm_20051013.dll, not
     /// a hardware claim or an ES-wide relaxation. Standard profile is default.
     pub gizmondo_goforce_20051013: bool,
+    pub nv_combiner_client: bool,
     /// `GL_CULL_FACE` enable, tracked separately from the face mode so
     /// `glCullFace` before `glEnable` is not lost.
     cull_enabled: bool,
@@ -467,9 +478,11 @@ impl Context {
             names: Default::default(),
             external_references: Default::default(),
             state,
+            combiner_programs: Default::default(),
             clear_color: [0.0, 0.0, 0.0, 0.0],
             clear_depth: 1.0,
             gizmondo_goforce_20051013: false,
+            nv_combiner_client: false,
             cull_enabled: false,
             scissor_enabled: false,
             scissor_box: None,
@@ -520,6 +533,7 @@ impl Context {
         fresh.gpu_requested = self.gpu_requested;
         fresh.internal_resolution = self.internal_resolution;
         fresh.gizmondo_goforce_20051013 = self.gizmondo_goforce_20051013;
+        fresh.nv_combiner_client = self.nv_combiner_client;
         fresh.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
         std::mem::swap(&mut fresh.target, &mut self.target);
         std::mem::swap(&mut fresh.gpu, &mut self.gpu);
@@ -638,6 +652,10 @@ impl Context {
     pub fn gpu_active(&self) -> bool {
         self.gpu.is_some()
     }
+    pub fn gpu_supports_combiner(&self) -> bool {
+        !self.gpu_failed && self.gpu.as_ref().is_some_and(|gpu| gpu.supports_combiner())
+    }
+
     /// Software rendering is synchronous; a GPU context must explicitly wait.
     /// Completion does not update the CPU framebuffer or present a surface.
     pub fn finish(&mut self) {
@@ -2526,6 +2544,17 @@ impl Context {
         }
     }
 
+    fn texture_coordinate_units(&self, stages: &[raster::TextureStage]) -> u8 {
+        self.combiner_programs.active().map_or_else(
+            || {
+                stages
+                    .iter()
+                    .fold(0, |mask, stage| mask | (1 << stage.unit))
+            },
+            |program| program.coordinate_units(),
+        )
+    }
+
     /// The texture stages this draw cascades through, in unit order.
     ///
     /// Unit 0 is *not* a safe assumption, and neither is a single stage:
@@ -2562,11 +2591,21 @@ impl Context {
         let mut count = 0;
         for u in 0..MAX_TEXTURE_UNITS {
             let unit = &self.texture_units[u];
-            if unit.texture_enabled
+            let enabled = self
+                .combiner_programs
+                .active()
+                .map_or(unit.texture_enabled, |p| p.texture_units() & (1 << u) != 0);
+            let coordinate_only = self.gpu.is_some()
                 && self
-                    .textures
-                    .get(&unit.bound_texture)
-                    .is_some_and(Texture::is_complete)
+                    .combiner_programs
+                    .active()
+                    .is_some_and(|p| p.coordinate_units() & (1 << u) != 0);
+            if coordinate_only
+                || enabled
+                    && self
+                        .textures
+                        .get(&unit.bound_texture)
+                        .is_some_and(Texture::is_complete)
             {
                 stages[count] = raster::TextureStage {
                     unit: u,
@@ -2580,16 +2619,14 @@ impl Context {
         (stages, count)
     }
 
-    /// Assemble one vertex from the enabled client arrays. `stages` are
-    /// the units this draw samples, and so the only units whose
-    /// coordinate arrays are worth reading; see
-    /// [`Context::texture_stages`].
+    /// Assemble one vertex from the enabled client arrays and the
+    /// coordinate sets needed by this draw.
     fn assemble(
         &mut self,
         mem: &mut dyn GuestMemory,
         index: u32,
         mvp: &Matrix4,
-        stages: &[raster::TextureStage],
+        coordinate_units: u8,
         normal_matrix: &Matrix4,
     ) -> Option<Vertex> {
         let obj = self.fetch(mem, self.vertex_array, index, false)?;
@@ -2610,18 +2647,21 @@ impl Context {
         };
 
         let mut texcoord = [[0., 0., 0., 1.]; raster::MAX_TEXTURE_STAGES];
-        for stage in stages {
-            let unit = self.texture_units[stage.unit];
+        for coordinate_unit in 0..MAX_TEXTURE_UNITS {
+            if coordinate_units & (1 << coordinate_unit) == 0 {
+                continue;
+            }
+            let unit = self.texture_units[coordinate_unit];
             let input = if unit.texcoord_array.enabled {
                 self.fetch(mem, unit.texcoord_array, index, false)
                     .unwrap_or([0., 0., 0., 1.])
             } else {
                 unit.current_texcoord
             };
-            texcoord[stage.unit] = if self.gpu.is_some() && !self.es11.pretransform {
+            texcoord[coordinate_unit] = if self.gpu.is_some() && !self.es11.pretransform {
                 input
             } else {
-                matrix::transform(self.texture_matrix[stage.unit].current(), input)
+                matrix::transform(self.texture_matrix[coordinate_unit].current(), input)
             };
         }
 
@@ -3047,8 +3087,14 @@ impl Context {
             matrix::IDENTITY
         };
         self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
+        let combiner = self.combiner_programs.active_shared();
+        let framebuffer_fetch = combiner.is_some_and(|p| p.reads_framebuffer());
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_combiner(combiner, self.combiner_programs.constants());
+        }
         let (stage_storage, stage_count) = self.texture_stages();
         let stages = &stage_storage[..stage_count];
+        let coordinate_units = self.texture_coordinate_units(stages);
         self.recycle_prepared_arrays();
         if let (Some(lo), Some(hi)) = (indices.clone().min(), indices.clone().max()) {
             let mut arrays = [ArrayPointer::default(); MAX_TEXTURE_UNITS + 4];
@@ -3066,9 +3112,9 @@ impl Context {
                 arrays[array_count] = self.point_size_array;
                 array_count += 1;
             }
-            for stage in stages {
-                let array = self.texture_units[stage.unit].texcoord_array;
-                if array.enabled {
+            for (unit, state) in self.texture_units.iter().enumerate() {
+                let array = state.texcoord_array;
+                if coordinate_units & (1 << unit) != 0 && array.enabled {
                     arrays[array_count] = array;
                     array_count += 1;
                 }
@@ -3134,6 +3180,7 @@ impl Context {
             textures: std::array::from_fn(|i| *self.texture_matrix[i].current()),
         };
         if self.gpu.is_some()
+            && !framebuffer_fetch
             && !self.state.logic_op
             && !self.es11.pretransform
             && ((self.state.smooth_shading
@@ -3186,7 +3233,8 @@ impl Context {
         }
         // Native smooth draws retain the topology and prepare each unique
         // guest vertex directly, instead of expanding then hashing float records.
-        let native_indices = !self.state.logic_op
+        let native_indices = !framebuffer_fetch
+            && !self.state.logic_op
             && !sequential
             && self.gpu.is_some()
             && !self.es11.pretransform
@@ -3211,7 +3259,8 @@ impl Context {
                 let index = if let Some(index) = index {
                     index
                 } else {
-                    let Some(v) = self.assemble(mem, i, &mvp, &stages, &normal_matrix) else {
+                    let Some(v) = self.assemble(mem, i, &mvp, coordinate_units, &normal_matrix)
+                    else {
                         self.recycle_prepared_arrays();
                         return;
                     };
@@ -3377,6 +3426,8 @@ impl Context {
             self.state.alpha_ref,
         );
             let sample = SoftwareSampler {
+                combiner: self.combiner_programs.active(),
+                combiner_constants: self.combiner_programs.constants(),
                 textures: texs,
                 cache: &self.software_mips,
                 names: std::array::from_fn(|i| self.texture_units[i].bound_texture),
@@ -4165,10 +4216,7 @@ mod tests {
         c.set_client_state(GL_VERTEX_ARRAY, true);
         let mvp = c.mvp();
         let reference: Vec<_> = (0..3)
-            .map(|i| {
-                c.assemble(&mut mem, i, &mvp, &[], &matrix::IDENTITY)
-                    .unwrap()
-            })
+            .map(|i| c.assemble(&mut mem, i, &mvp, 0, &matrix::IDENTITY).unwrap())
             .collect();
         let mut renderer = crate::gpu::Renderer::new(c.target.width, c.target.height).unwrap();
         renderer
@@ -4195,9 +4243,7 @@ mod tests {
         let mut expected = raster::RenderTarget::new(c.target.width, c.target.height);
         renderer.read(&mut expected).unwrap();
         c.enable_gpu().unwrap();
-        let raw = c
-            .assemble(&mut mem, 0, &mvp, &[], &matrix::IDENTITY)
-            .unwrap();
+        let raw = c.assemble(&mut mem, 0, &mvp, 0, &matrix::IDENTITY).unwrap();
         assert_eq!(raw.pos, [-0.75, -0.75, 0., 1.]);
         assert_ne!(raw.pos, reference[0].pos);
         c.clear(GL_COLOR_BUFFER_BIT);
@@ -4215,9 +4261,7 @@ mod tests {
             "guest draw differs in {differences} channels"
         );
         c.disable_gpu();
-        let restored = c
-            .assemble(&mut mem, 0, &mvp, &[], &matrix::IDENTITY)
-            .unwrap();
+        let restored = c.assemble(&mut mem, 0, &mvp, 0, &matrix::IDENTITY).unwrap();
         assert_eq!(restored.pos, reference[0].pos);
     }
 
@@ -4849,6 +4893,176 @@ mod tests {
         };
         c.draw_arrays(&mut m, GL_TRIANGLE_FAN, 0, 4);
         assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn software_combiner_samples_coordinates_from_the_program_route() {
+        combiner_samples_coordinates_from_the_program_route(false);
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL"]
+    fn gpu_combiner_samples_coordinates_from_the_program_route() {
+        combiner_samples_coordinates_from_the_program_route(true);
+    }
+
+    fn combiner_samples_coordinates_from_the_program_route(gpu: bool) {
+        let mut c = ctx();
+        if gpu {
+            c.enable_gpu().unwrap();
+        }
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            2,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[255, 0, 0, 255, 32, 160, 64, 255],
+        );
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        c.texture_units[1].current_texcoord = [0.75, 0.0, 0.0, 1.0];
+        c.current_color = [0.5, 0.5, 1.0, 1.0];
+
+        // One stage multiplies the texture sample by the primary RGBA.
+        let program = crate::combiner_program::Program::decode(&[
+            b'A', b'R', b'1', b'0', 1, 0x70, 0x06, 0, 0, 0x83, 0xc3, 0xcc, 0x70, 0x80, 0, 0, 0, 0,
+            0xa4, 0xe4, 0, 0x88, 0x29, 0x5c, 0x5b, 0x29,
+        ])
+        .unwrap()
+        .compile_basic()
+        .unwrap();
+        c.combiner_programs
+            .load_bound(program, MAX_TEXTURE_UNITS)
+            .unwrap();
+        c.combiner_programs.set_enabled(true);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(&c, 32, 32), [16, 80, 64, 255]);
+
+        c.combiner_programs.set_enabled(false);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(&c, 32, 32), [128, 128, 255, 255]);
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL"]
+    fn gpu_combiner_reads_overlapping_primitives_in_draw_order() {
+        use crate::combiner_program::{Architecture, Program, Stage};
+
+        let mut c = ctx();
+        c.enable_gpu().unwrap();
+        c.clear_color = [1., 0.5, 0.25, 1.];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: floats(&[-1., -1., 0., 1., -1., 0., 0., 1., 0.].repeat(2)),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        let stage = Stage {
+            alpha_output: 0x0670,
+            alpha_inputs: 0x0404_0000,
+            flags: 0xe0,
+            color_output: 0x8070,
+            color_input_modifiers: 0x0200,
+            color_inputs: 0xe484_0000,
+            color_input_modes: 0x8000,
+            texture_routing: 0x7fff_ffff,
+        };
+        let program = Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![stage],
+        }
+        .compile_basic()
+        .unwrap();
+        let expected = program.evaluate_sampled(
+            [1.; 4],
+            [[0.; 4]; 4],
+            program.evaluate_sampled(
+                [1.; 4],
+                [[0.; 4]; 4],
+                [1., 0.5, 0.25, 1.],
+                |_| unreachable!(),
+            ),
+            |_| unreachable!(),
+        );
+        c.combiner_programs
+            .load_bound(program, MAX_TEXTURE_UNITS)
+            .unwrap();
+        c.combiner_programs.set_enabled(true);
+        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 6);
+        c.sync_gpu();
+        let actual = pixel(&c, 32, 32);
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(actual.abs_diff((expected * 255.).round() as u8) <= 1);
+        }
+    }
+
+    #[test]
+    fn software_combiner_accumulates_samples_with_independent_s_and_t() {
+        use crate::combiner_program::{Architecture, Program, Stage};
+        let mut c = ctx();
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            2,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[240, 0, 0, 255, 0, 120, 0, 255, 0, 0, 60, 255, 0, 0, 0, 255],
+        );
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        c.texture_units[0].current_texcoord = [0.25, 0.25, 0., 1.];
+        c.texture_units[1].current_texcoord = [0.75, 0.75, 0., 1.];
+
+        // Four quarter-weight samples from the same texture. The middle
+        // stages choose S and T from different coordinate arrays.
+        let stages = [0x08, 0x28, 0x09, 0x29]
+            .into_iter()
+            .enumerate()
+            .map(|(i, route)| Stage {
+                alpha_output: 0x0670,
+                alpha_inputs: if i == 0 { 0x01c3_0000 } else { 0x01c3_0004 },
+                flags: if i == 0 { 0xc4 } else { 0xc6 },
+                color_output: 0x8070,
+                color_input_modifiers: if i == 0 { 0x1000 } else { 0x1004 },
+                color_inputs: if i == 0 { 0x42e4_0000 } else { 0x42e4_0008 },
+                color_input_modes: if i == 0 { 0x0800 } else { 0x0881 },
+                texture_routing: 0x3fff_fc00 | route,
+            })
+            .collect();
+        let program = Program {
+            architecture: Architecture::Ar10,
+            flags: 0,
+            stages,
+        }
+        .compile_basic()
+        .unwrap();
+        c.combiner_programs
+            .load_bound(program, MAX_TEXTURE_UNITS)
+            .unwrap();
+        c.combiner_programs.set_enabled(true);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        assert_eq!(pixel(&c, 32, 32), [60, 30, 15, 255]);
     }
 
     #[test]

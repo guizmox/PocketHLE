@@ -183,6 +183,7 @@ impl Emulator {
         let arch = self.cpu.arch();
         let gles_tables = pocket_winceapi::gles_exports::local_tables(path, &image)
             .map_err(anyhow::Error::msg)?;
+        let nv_combiner_client = pocket_winceapi::gles::uses_nv_combiner(&image);
         let mut process = Process::map_into_with_executable_heap(
             image,
             self.cpu.as_mut(),
@@ -192,6 +193,7 @@ impl Emulator {
         )
         .context("mapping image into CPU")?;
         process.state.gles_local_ordinals = gles_tables;
+        pocket_winceapi::gles::set_nv_combiner_client(nv_combiner_client);
         self.process = Some(process);
         // A frontend that sized the screen before loading gets its
         // request honoured here rather than silently dropped.
