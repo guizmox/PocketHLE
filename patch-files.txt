@@ -1,8 +1,1 @@
-crates\pocket-kernel\src\vfs.rs
-crates\pocket-kernel\src\vfs_mapping.rs
-crates\pocket-library\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\coredll\file_mapping.rs
-frontends\pocket-android-jni\src\runner.rs
-frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\runner.rs

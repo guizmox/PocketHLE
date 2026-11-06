@@ -128,6 +128,7 @@ pub fn register(d: &mut WinCeDispatcher) {
 
     // ---- Process / module / library ----
     d.register_handler(dll, "GetTickCount", get_tick_count);
+    d.register_constant(dll, "GetIdleTime", u32::MAX, get_idle_time);
     d.register_handler(dll, "Sleep", sleep);
     d.register_handler(dll, "DuplicateHandle", duplicate_handle);
     d.register_handler(dll, "SuspendThread", suspend_thread);
@@ -2001,6 +2002,11 @@ fn ver_query_value_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 }
 
 // ---------- process / time ----------
+
+fn get_idle_time(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // CE returns MAXDWORD when the platform has no idle-time counter.
+    Ok(DispatchOutcome::ReturnedR0(u32::MAX))
+}
 
 pub(crate) fn get_tick_count(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use std::sync::atomic::{AtomicU64, Ordering};
