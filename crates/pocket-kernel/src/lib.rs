@@ -1110,6 +1110,7 @@ pub struct ChildProcess {
 pub struct ProcessHandleContext {
     pub table: handles::HandleTable,
     vfs_shared: vfs::VfsShared,
+    registry_store: std::sync::Arc<std::sync::Mutex<registry::RegistryStore>>,
     events: shared_objects::SharedObjects<EventObject>,
     semaphores: shared_objects::SharedObjects<SemaphoreObject>,
     mutexes: shared_objects::SharedObjects<MutexObject>,
@@ -1790,6 +1791,7 @@ impl KernelState {
         Some(ProcessHandleContext {
             table: self.object_handles.child(handle)?,
             vfs_shared: self.vfs.shared_context(),
+            registry_store: self.registry.store.clone(),
             events: self.events.clone(),
             semaphores: self.semaphores.clone(),
             mutexes: self.mutexes.clone(),
@@ -1905,6 +1907,8 @@ impl KernelState {
     }
     pub fn attach_handle_context(&mut self, context: ProcessHandleContext) {
         self.vfs.attach_shared_context(context.vfs_shared);
+        // Registry values belong to the device; handles and overrides stay local.
+        self.registry.store = context.registry_store;
         self.object_handles = context.table;
         self.events = context.events;
         self.semaphores = context.semaphores;
@@ -2016,7 +2020,9 @@ impl KernelState {
         if !self.heap.attach_ram(division.clone()) {
             return false;
         }
-        if !self.registry.attach_ram(division.as_ref()) {
+        if (division.is_some() || previous.is_some())
+            && !self.registry.attach_ram(division.as_ref())
+        {
             self.heap.attach_ram(previous);
             return false;
         }

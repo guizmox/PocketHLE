@@ -80,7 +80,7 @@ struct RegistrySnapshot {
 }
 #[derive(Debug, Default)]
 pub struct Registry {
-    store: Arc<Mutex<RegistryStore>>,
+    pub(crate) store: Arc<Mutex<RegistryStore>>,
     /// Handles belong to a process; the values belong to the device.
     handles: HashMap<u32, String>,
     next_handle: u32,

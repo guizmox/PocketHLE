@@ -40729,6 +40729,35 @@ mod tests {
     }
 
     #[test]
+    fn pocketpc_child_registry_write_survives_parent_exit() {
+        use pocket_kernel::registry::RegistryValue;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry-pocketpc.json");
+        let mut parent = fresh_kernel();
+        assert!(parent.configure_memory_division(None));
+        parent.registry.configure_persistence(&path).unwrap();
+
+        let (process, _) = parent.object_handles.new_child().unwrap();
+        let mut child = fresh_kernel();
+        child.attach_handle_context(parent.child_handle_context(process).unwrap());
+        assert!(child.configure_memory_division(None));
+        child.registry.configure_persistence(&path).unwrap();
+
+        let key = r"HKLM\SOFTWARE\Ionside\Argentum";
+        let value = RegistryValue::Sz("example serial".into());
+        assert!(child.registry.set_value(key, "serial", value.clone()));
+        child.registry.flush().unwrap();
+        drop(child);
+        parent.registry.flush().unwrap();
+        assert_eq!(parent.registry.value(key, "serial"), Some(value.clone()));
+
+        let mut restarted = fresh_kernel();
+        restarted.registry.configure_persistence(&path).unwrap();
+        assert_eq!(restarted.registry.value(key, "serial"), Some(value));
+    }
+
+    #[test]
     fn timers_keep_windows_and_threads_separate_and_coalesce_overdue_ticks() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();

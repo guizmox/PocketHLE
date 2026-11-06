@@ -1,1 +1,3 @@
+crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\registry.rs
 crates\pocket-winceapi\src\coredll.rs
