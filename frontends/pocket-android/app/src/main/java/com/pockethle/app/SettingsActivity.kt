@@ -29,7 +29,7 @@ class SettingsActivity : AppCompatActivity() {
         return true
     }
 
-    class GlobalPreferencesFragment : PreferenceFragmentCompat() {
+    class GlobalPreferencesFragment : ScrollingTitlePreferenceFragment() {
         private lateinit var rootDir: String
         private var current: LauncherConfig = LauncherConfig.default()
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {

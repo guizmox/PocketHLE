@@ -4,7 +4,6 @@ import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.preference.ListPreference
-import androidx.preference.PreferenceFragmentCompat
 import org.json.JSONObject
 
 /** Per-game settings sheet. */
@@ -38,7 +37,7 @@ class GameSettingsActivity : AppCompatActivity() {
         return true
     }
 
-    class GamePreferencesFragment : PreferenceFragmentCompat() {
+    class GamePreferencesFragment : ScrollingTitlePreferenceFragment() {
         private lateinit var rootDir: String
         private lateinit var gameId: String
         private var current: GameSettings = GameSettings.default()

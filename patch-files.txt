@@ -14,6 +14,7 @@ crates\pocket-winceapi\src\coredll\tab_control.rs
 frontends\pocket-android-jni\src\runner.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\ScrollingTitlePreferenceFragment.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
 frontends\pocket-android\app\src\main\res\values\strings.xml
 frontends\pocket-android\app\src\main\res\xml\preferences_game.xml
