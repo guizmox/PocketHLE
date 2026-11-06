@@ -14341,6 +14341,11 @@ fn synthetic_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
 }
 
 fn legacy_paint_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    let target = idle_paint_target(ctx.kernel);
+    due_paint_for_target(ctx, target)
+}
+
+fn due_paint_for_target(ctx: &mut CallCtx<'_>, target: u32) -> Option<(u32, u32, u32, u32)> {
     let now = monotonic_ms();
     if now >= ctx.kernel.synthetic_paint_next_ms {
         ctx.kernel.synthetic_paint_next_ms = advance_deadline(
@@ -14348,7 +14353,6 @@ fn legacy_paint_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
             SYNTHETIC_PAINT_INTERVAL_MS,
             now,
         );
-        let target = idle_paint_target(ctx.kernel);
         return (target != 0).then_some((target, WM_PAINT, 0, 0));
     }
     None
@@ -14833,7 +14837,7 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
 /// own update/render branch. Real input, posted traffic and timers still win.
 /// A PM_NOREMOVE preview stays in pending_message until actually removed,
 /// so repeated previews cannot consume this idle opportunity prematurely.
-fn next_peek_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+fn next_peek_message_if_due(ctx: &mut CallCtx<'_>, preview: bool) -> Option<(u32, u32, u32, u32)> {
     if let Some(message) =
         next_queued_message_if_due(ctx).or_else(|| timer_message_if_due(ctx, true))
     {
@@ -14843,7 +14847,15 @@ fn next_peek_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32
     if ctx.kernel.synthetic_peek_paint_yield.remove(&thread) {
         return None;
     }
-    let paint = legacy_paint_if_due(ctx)?;
+    // PM_NOREMOVE can be a readiness check before GetMessage. A
+    // direct display owner using that pump still needs a paint to preview.
+    // Keep suppressing idle paints for direct surfaces polled with PM_REMOVE.
+    let paint = if preview {
+        let target = synthetic_paint_target(ctx.kernel);
+        due_paint_for_target(ctx, target)
+    } else {
+        legacy_paint_if_due(ctx)
+    }?;
     ctx.kernel.synthetic_peek_paint_yield.insert(thread);
     Some(paint)
 }
@@ -15127,7 +15139,7 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         // loop is idle, so let a parked worker (typically the mixer
         // thread) run, and conversely park a worker that has drained
         // its own queue.
-        None => match next_peek_message_if_due(ctx) {
+        None => match next_peek_message_if_due(ctx, remove_mode & 1 == 0) {
             Some(addressed) => addressed,
             None => {
                 if remove_mode & 2 != 0 {
@@ -39081,6 +39093,58 @@ mod tests {
         };
         assert_eq!(next_message_if_due(&mut ctx).unwrap().1, WM_PAINT);
         assert!(ctx.kernel.synthetic_peek_paint_yield.contains(&0));
+    }
+
+    #[test]
+    fn direct_display_paint_preview_can_be_consumed_by_get_message() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.synthetic_message_budget = 0;
+        kernel.pending_startup.clear();
+        kernel.pending_create = None;
+        kernel.pending_message = None;
+        kernel.posted_messages.clear();
+        kernel.timers.clear();
+        kernel.fb_mapped = true;
+        kernel.controls.direct_surface_hwnd = FAKE_HWND;
+        kernel.synthetic_paint_next_ms = 0;
+        let peek = |cpu: &mut StubCpu,
+                    kernel: &mut KernelState,
+                    dispatcher: &mut WinCeDispatcher,
+                    mode| {
+            call(
+                cpu,
+                kernel,
+                dispatcher,
+                "coredll.dll",
+                "PeekMessageW",
+                &[0x2000, 0, 0, 0, mode],
+            )
+        };
+        assert_eq!(
+            peek(&mut cpu, &mut kernel, &mut dispatcher, 1),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        kernel.synthetic_paint_next_ms = 0;
+        assert_eq!(
+            peek(&mut cpu, &mut kernel, &mut dispatcher, 0),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        let preview = cpu.read_mem(0x2000, 16).unwrap();
+        assert_eq!(preview[4..8], WM_PAINT.to_le_bytes());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "GetMessageW",
+                &[0x2000, 0, 0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 16).unwrap(), preview);
+        assert!(kernel.pending_message.is_none());
     }
 
     #[test]

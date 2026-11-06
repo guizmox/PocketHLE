@@ -1,7 +1,1 @@
-crates\pocket-kernel\src\framebuffer\deferred.rs
-crates\pocket-kernel\src\lib.rs
-crates\pocket-winceapi\src\directshow.rs
-crates\pocket-winceapi\src\directshow_extended.rs
-crates\pocket-winceapi\src\shell_execute.rs
-frontends\pocket-android-jni\src\runner.rs
-frontends\pocket-desktop\src\runner.rs
+crates\pocket-winceapi\src\coredll.rs
