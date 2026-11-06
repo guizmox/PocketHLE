@@ -267,7 +267,10 @@ impl Runner {
         emu.max_slices = game.settings.max_slices;
         emu.instruction_budget_per_slice = game.settings.instructions_per_slice;
 
-        if let Err(e) = emu.load_pe(&exe) {
+        if let Err(e) = emu.load_pe_with_executable_heap(
+            &exe,
+            game.settings.effective_executable_heap(&launcher_config),
+        ) {
             summary_lines.push(format!("load_pe failed: {e:#}"));
             return (
                 RunOutcome {

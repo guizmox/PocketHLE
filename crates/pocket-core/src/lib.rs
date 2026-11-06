@@ -166,6 +166,14 @@ impl Emulator {
     /// Load and map a PE file into the emulator. Existing process
     /// state is replaced.
     pub fn load_pe(&mut self, path: impl AsRef<Path>) -> Result<&Process> {
+        self.load_pe_with_executable_heap(path, true)
+    }
+
+    pub fn load_pe_with_executable_heap(
+        &mut self,
+        path: impl AsRef<Path>,
+        executable_heap: bool,
+    ) -> Result<&Process> {
         let path = path.as_ref();
         let raw = std::fs::read(path).context("reading PE")?;
         let mut image = pe::load_bytes(&raw).context("loading PE")?;
@@ -175,11 +183,12 @@ impl Emulator {
         let arch = self.cpu.arch();
         let gles_tables = pocket_winceapi::gles_exports::local_tables(path, &image)
             .map_err(anyhow::Error::msg)?;
-        let mut process = Process::map_into(
+        let mut process = Process::map_into_with_executable_heap(
             image,
             self.cpu.as_mut(),
             &|dll, ord| pocket_winceapi::gles_exports::resolve(&gles_tables, dll, ord, arch),
             &self.dispatcher,
+            executable_heap,
         )
         .context("mapping image into CPU")?;
         process.state.gles_local_ordinals = gles_tables;

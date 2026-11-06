@@ -1,9 +1,14 @@
+crates\pocket-core\src\lib.rs
 crates\pocket-kernel\src\controls.rs
 crates\pocket-kernel\src\lib.rs
 crates\pocket-kernel\src\registry.rs
 crates\pocket-kernel\src\shell_menu.rs
+crates\pocket-library\src\lib.rs
 crates\pocket-winceapi\src\aygshell.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\coredll\file_dialog.rs
 crates\pocket-winceapi\src\coredll\graphics_tests.rs
 crates\pocket-winceapi\src\coredll\tab_control.rs
+frontends\pocket-android-jni\src\runner.rs
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\runner.rs

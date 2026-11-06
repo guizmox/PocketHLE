@@ -3897,10 +3897,20 @@ impl Process {
     /// import will then take the regular hooked dispatcher path at
     /// runtime.
     pub fn map_into(
+        image: LoadedImage,
+        cpu: &mut dyn Cpu,
+        ordinal_resolver: &dyn Fn(&str, u16) -> Option<String>,
+        dispatcher: &dyn Dispatcher,
+    ) -> Result<Self, KernelError> {
+        Self::map_into_with_executable_heap(image, cpu, ordinal_resolver, dispatcher, true)
+    }
+
+    pub fn map_into_with_executable_heap(
         mut image: LoadedImage,
         cpu: &mut dyn Cpu,
         ordinal_resolver: &dyn Fn(&str, u16) -> Option<String>,
         dispatcher: &dyn Dispatcher,
+        executable_heap: bool,
     ) -> Result<Self, KernelError> {
         if let Some(runtime) = image.managed_runtime.as_deref() {
             return Err(KernelError::Loader(format!(
@@ -4222,7 +4232,7 @@ impl Process {
         // load code into malloc storage. Virtual allocations retain the
         // protections requested by the guest.
         let mut heap_prot = Prot::READ | Prot::WRITE;
-        if image_memory::legacy_arm_ce(image.machine, image.subsystem) {
+        if executable_heap && image_memory::legacy_arm_ce(image.machine, image.subsystem) {
             heap_prot |= Prot::EXEC;
         }
         cpu.map_region(HEAP_BASE, HEAP_SIZE, heap_prot)?;

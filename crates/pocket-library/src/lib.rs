@@ -578,6 +578,8 @@ impl GameEntry {
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_heap: Option<bool>,
     /// Optional Gizmondo SD Card/Storage Card host directory for both frontends.
     /// Relative paths resolve against the library root; None keeps the imported card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -694,6 +696,10 @@ impl DpadDeadzone {
 }
 
 impl GameSettings {
+    pub fn effective_executable_heap(&self, config: &LauncherConfig) -> bool {
+        self.executable_heap.unwrap_or(config.executable_heap)
+    }
+
     pub fn effective_frame_rate_limit(&self, config: &LauncherConfig) -> Option<u32> {
         self.frame_rate_limit
             .unwrap_or(config.frame_rate_limit)
@@ -761,6 +767,7 @@ impl GameSettings {
 impl Default for GameSettings {
     fn default() -> Self {
         Self {
+            executable_heap: None,
             storage_card_dir: None,
             frame_rate_limit: None,
             pocketpc_touch_steering: false,
@@ -1010,6 +1017,8 @@ fn identity_revision() -> u8 {
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    #[serde(default = "default_executable_heap")]
+    pub executable_heap: bool,
     /// Default presentation ceiling for games that inherit emulator settings.
     #[serde(default)]
     pub frame_rate_limit: FrameRateLimit,
@@ -1314,9 +1323,14 @@ fn default_desktop_vsync() -> bool {
     true
 }
 
+fn default_executable_heap() -> bool {
+    true
+}
+
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            executable_heap: default_executable_heap(),
             frame_rate_limit: FrameRateLimit::Fps60,
             desktop_vsync: true,
             pocketpc_processor: default_pocketpc_processor(),
@@ -6956,6 +6970,28 @@ mod resource_destination_tests {
         assert!(!matches(r"\Games\Example", r"\Games\Example\..\Other"));
         assert!(!matches(r"\Games\Example", r"Games\Example"));
         assert!(!matches(r"\", r"\Games\Example"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn executable_heap_inherits_and_round_trips_an_explicit_override() {
+    let mut config: LauncherConfig = serde_json::from_str("{}").unwrap();
+    let inherited: GameSettings = serde_json::from_str("{}").unwrap();
+    assert!(inherited.effective_executable_heap(&config));
+    config.executable_heap = false;
+    assert!(!inherited.effective_executable_heap(&config));
+
+    for enabled in [false, true] {
+        config.executable_heap = !enabled;
+        let game = GameSettings {
+            executable_heap: Some(enabled),
+            ..Default::default()
+        };
+        let restored: GameSettings = serde_json::from_str(
+            &serde_json::to_string(&game).unwrap(),
+        ).unwrap();
+        assert_eq!(restored.effective_executable_heap(&config), enabled);
     }
 }
 

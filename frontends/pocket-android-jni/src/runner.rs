@@ -458,7 +458,10 @@ fn run_process(
     emu.max_slices = entry.settings.max_slices;
     emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
 
-    if let Err(e) = emu.load_pe(&exe) {
+    if let Err(e) = emu.load_pe_with_executable_heap(
+            &exe,
+            entry.settings.effective_executable_heap(&launcher_config),
+        ) {
         summary_lines.push(format!("load_pe failed: {e:#}"));
         return (summary_lines.join("\n"), 0xc0000135);
     }

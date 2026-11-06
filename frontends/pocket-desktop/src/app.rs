@@ -92,6 +92,8 @@ enum UpscaleFilter {
     Bilinear,
     Nearest,
 }
+const EXECUTABLE_HEAP_HELP: &str = "Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.";
+
 impl UpscaleFilter {
     const ALL: [Self; 9] = [
         Self::None,
@@ -2649,6 +2651,17 @@ impl PocketLauncher {
                     .on_hover_text("Applies on next launch. Uses CPU pixel readback for OpenGL ES.");
                 crate::controller_ui::checkbox(ui, &mut draft.show_ips, "");
                 ui.end_row();
+                ui.label("Executable heap");
+                crate::controller_ui::ComboBox::from_id_source("emulator_executable_heap")
+                    .selected_text(if draft.executable_heap { "Enabled" } else { "Disabled" })
+                    .show_ui(ui, |ui| {
+                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, true, "Enabled");
+                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, false, "Disabled");
+                    });
+                ui.end_row();
+                ui.label("");
+                ui.add(egui::Label::new(EXECUTABLE_HEAP_HELP).wrap(true));
+                ui.end_row();
                 ui.label("Library root");
                 ui.label(library_root);
                 ui.end_row();
@@ -3252,6 +3265,22 @@ impl PocketLauncher {
                         }).response.on_hover_text("Changes the physical layout of direct framebuffer memory. Use columns for software designed for a rotated LCD. Applies on next launch.");
                     ui.end_row();
                 }
+                ui.label("Executable heap");
+                crate::controller_ui::ComboBox::from_id_source("game_executable_heap")
+                    .selected_text(match draft.executable_heap {
+                        None => "Use emulator setting",
+                        Some(true) => "Enabled",
+                        Some(false) => "Disabled",
+                    })
+                    .show_ui(ui, |ui| {
+                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, None, "Use emulator setting");
+                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(true), "Enabled");
+                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(false), "Disabled");
+                    });
+                ui.end_row();
+                ui.label("");
+                ui.add(egui::Label::new(EXECUTABLE_HEAP_HELP).wrap(true));
+                ui.end_row();
                 ui.heading("Sound");
                 ui.label("No per-game sound options yet.");
                 ui.end_row();
