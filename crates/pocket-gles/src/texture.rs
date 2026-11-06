@@ -51,6 +51,7 @@ pub struct CompressedLevel {
 pub struct Texture {
     /// Incremented on pixel updates; used by the host GPU upload cache.
     pub revision: u64,
+    pub(crate) gpu_copy: Option<crate::gpu::SharedFrame>,
     pub formats: std::collections::BTreeMap<u32, u32>,
     pub generate_mipmap: bool,
     pub width: u32,
@@ -76,6 +77,7 @@ impl Default for Texture {
     fn default() -> Self {
         Self {
             revision: 0,
+            gpu_copy: None,
             formats: Default::default(),
             generate_mipmap: false,
             width: 0,
@@ -106,12 +108,28 @@ impl Texture {
         if let Some(p) = pixels.filter(|p| !p.is_empty()) {
             return Some(std::borrow::Cow::Borrowed(p));
         }
+        if level == 0 {
+            if let Some(frame) = &self.gpu_copy {
+                let source = crate::gpu::configured_shared_context_source()?;
+                let mut reader = crate::gpu::SharedReadback::new(&source).ok()?;
+                return reader
+                    .read_guest_rgb_texture(frame)
+                    .ok()
+                    .map(std::borrow::Cow::Owned);
+            }
+        }
         let c = self.compressed.get(&level)?;
         decode_compressed_to_rgba(&c.bytes, c.width, c.height, c.format)
             .map(std::borrow::Cow::Owned)
     }
     /// Decode deferred native uploads only when software/subimage needs RGBA.
     pub fn ensure_rgba(&mut self) {
+        if self.gpu_copy.is_some() {
+            if let Some(std::borrow::Cow::Owned(bytes)) = self.rgba_level(0) {
+                self.rgba = bytes;
+                self.gpu_copy = None;
+            }
+        }
         let levels: Vec<_> = self
             .compressed
             .keys()
@@ -320,6 +338,7 @@ impl Texture {
         self.compressed.remove(&level);
         self.formats.insert(level, GL_RGBA);
         if level == 0 {
+            self.gpu_copy = None;
             self.width = width;
             self.height = height;
             self.rgba = rgba;
@@ -377,7 +396,12 @@ impl Texture {
                 .filter(|m| m.0 == width && m.1 == height)
                 .map(|m| m.2.as_slice())
         };
-        pixels.is_some_and(|p| p.len() >= size as usize)
+        (level == 0
+            && self
+                .gpu_copy
+                .as_ref()
+                .is_some_and(|frame| frame.size() == (width, height)))
+            || pixels.is_some_and(|p| p.len() >= size as usize)
             || self.compressed.get(&level).is_some_and(|c| {
                 c.width == width
                     && c.height == height

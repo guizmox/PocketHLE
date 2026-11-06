@@ -1618,6 +1618,36 @@ impl Context {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
+        if self.gpu_failed {
+            return;
+        }
+        let name = self.texture_units[self.active_texture as usize].bound_texture;
+        if level == 0
+            && format == GL_RGB
+            && width > 0
+            && height > 0
+            && self
+                .textures
+                .get(&name)
+                .is_none_or(|tex| !tex.generate_mipmap)
+        {
+            if let Some(gpu) = self.gpu.as_mut() {
+                match gpu.copy_guest_rgb_texture(x, y, width as u32, height as u32) {
+                    Ok(Some(frame)) => {
+                        let tex = self.textures.entry(name).or_default();
+                        tex.set_level(0, width as u32, height as u32, Vec::new());
+                        tex.set_format(0, GL_RGB);
+                        tex.gpu_copy = Some(frame);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.gpu_failure("copy texture", error);
+                        return;
+                    }
+                }
+            }
+        }
         self.sync_gpu();
         if self.gpu_failed {
             return;
@@ -2077,6 +2107,10 @@ impl Context {
             return;
         };
         tex.ensure_rgba();
+        if level == 0 && tex.gpu_copy.is_some() {
+            self.set_error(GL_INVALID_OPERATION);
+            return;
+        }
         let (tw, th, pixels) = if level == 0 {
             (tex.width, tex.height, &mut tex.rgba)
         } else if let Some((w, h, p)) = tex.mipmaps.get_mut(&(level as u32)) {
@@ -3072,6 +3106,10 @@ impl Context {
         if self.gpu.is_none() {
             for tex in self.textures.values_mut() {
                 tex.ensure_rgba();
+                if tex.gpu_copy.is_some() {
+                    self.set_error(GL_INVALID_OPERATION);
+                    return;
+                }
             }
         }
         let mvp = if self.gpu.is_some() && !self.es11.pretransform {

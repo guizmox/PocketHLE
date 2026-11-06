@@ -159,3 +159,60 @@ fn shared_texture_handoff_preserves_pixels_and_context_lifetime() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires shared native OpenGL"]
+fn guest_texture_copy_survives_producer_surface_change() {
+    let root = Renderer::new(4, 4).unwrap();
+    let source = root.shared_context_source();
+    with_shared_context_source(Some(source.clone()), || {
+        let mut producer = Renderer::new(4, 4).unwrap();
+        producer.set_surface_rgb565(true).unwrap();
+        producer
+            .clear(
+                4,
+                4,
+                &PipelineState::default(),
+                [1., 0., 0., 1.],
+                1.,
+                GL_COLOR_BUFFER_BIT,
+            )
+            .unwrap();
+        let frame = producer
+            .copy_guest_rgb_texture(1, 1, 2, 2)
+            .unwrap()
+            .unwrap();
+        assert!(producer.readback.is_empty());
+        drop(producer);
+
+        let consumer = Renderer::new(4, 4).unwrap();
+        consumer.host.make_current().unwrap();
+        let mut texture = 0;
+        unsafe {
+            (consumer.gl.GenTextures)(1, &mut texture);
+            (consumer.gl.BindTexture)(GL_TEXTURE_2D, texture);
+            assert!(consumer.import_guest_rgb_texture(&frame).unwrap());
+            (consumer.gl.BindFramebuffer)(0x8d40, consumer.fbo);
+            (consumer.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, texture, 0);
+            let mut pixels = [0u8; 16];
+            (consumer.gl.ReadPixels)(
+                0,
+                0,
+                2,
+                2,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels.as_mut_ptr().cast(),
+            );
+            assert_eq!(pixels, [255, 0, 0, 255].repeat(4).as_slice());
+            (consumer.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, consumer.color, 0);
+            (consumer.gl.DeleteTextures)(1, &texture);
+            consumer.check().unwrap();
+        }
+        let mut reader = SharedReadback::new(&source).unwrap();
+        assert_eq!(
+            reader.read_guest_rgb_texture(&frame).unwrap(),
+            [255, 0, 0, 255].repeat(4)
+        );
+    });
+}

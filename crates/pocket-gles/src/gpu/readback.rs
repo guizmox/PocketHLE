@@ -92,6 +92,20 @@ impl SharedReadback {
         self.cached = Some(frame.clone());
         Ok(())
     }
+    pub(crate) fn read_guest_rgb_texture(
+        &mut self,
+        frame: &SharedFrame,
+    ) -> Result<Vec<u8>, String> {
+        self.ensure_native(frame)?;
+        let mut out = self.native.clone();
+        for pixel in out.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&crate::raster::rgb565_pixel([
+                pixel[0], pixel[1], pixel[2], 255,
+            ]));
+        }
+        Ok(out)
+    }
+
     /// Release the retained slot once the caller owns its materialized bytes.
     pub fn clear_cache(&mut self) {
         self.cached = None;

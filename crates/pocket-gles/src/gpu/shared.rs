@@ -407,6 +407,101 @@ impl FramePool {
     }
 }
 impl Renderer {
+    pub(crate) fn copy_guest_rgb_texture(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<SharedFrame>, String> {
+        let Some(source) = configured_shared_context_source() else {
+            return Ok(None);
+        };
+        let group = self.host.shared_source().1;
+        if !Arc::ptr_eq(&source.1, &group)
+            || self.render_scale != 1
+            || !self.rgb565
+            || !self.dirty
+            || x < 0
+            || y < 0
+            || (x as u32).saturating_add(width) > self.width
+            || (y as u32).saturating_add(height) > self.height
+        {
+            return Ok(None);
+        }
+        self.host.make_current()?;
+        unsafe {
+            let Ok(sync) = SyncApi::load(|n| self.host.load(n)) else {
+                return Ok(None);
+            };
+            self.check()?;
+            group.collect(|n| self.host.load(n))?;
+            let mut texture = 0;
+            (self.gl.GenTextures)(1, &mut texture);
+            let slot = Arc::new(Slot {
+                texture,
+                width,
+                height,
+                rgb565: true,
+                group,
+                sync: Mutex::new(SlotSync::default()),
+            });
+            (self.gl.BindFramebuffer)(0x8d40, self.fbo);
+            (self.gl.ActiveTexture)(GL_TEXTURE0);
+            (self.gl.BindTexture)(GL_TEXTURE_2D, texture);
+            (self.gl.CopyTexImage2D)(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                x,
+                y,
+                width as i32,
+                height as i32,
+                0,
+            );
+            self.check()?;
+            let ready = sync.publish(self.gl.Flush);
+            if ready == 0 {
+                return Err("guest texture copy fence failed".into());
+            }
+            slot.sync.lock().unwrap_or_else(|e| e.into_inner()).ready = ready;
+            Ok(Some(SharedFrame(slot)))
+        }
+    }
+
+    pub(super) unsafe fn import_guest_rgb_texture(
+        &self,
+        frame: &SharedFrame,
+    ) -> Result<bool, String> {
+        let Ok((texture, ready, _)) = frame.read_source(&self.host.shared_source().1) else {
+            return Ok(false);
+        };
+        let sync = SyncApi::load(|n| self.host.load(n))?;
+        sync.wait(ready);
+        let mut fbo = 0;
+        (self.gl.GenFramebuffers)(1, &mut fbo);
+        (self.gl.BindFramebuffer)(0x8d40, fbo);
+        (self.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, texture, 0);
+        let complete = (self.gl.CheckFramebufferStatus)(0x8d40) == 0x8cd5;
+        if complete {
+            let (width, height) = frame.size();
+            (self.gl.CopyTexImage2D)(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                0,
+            );
+        }
+        (self.gl.BindFramebuffer)(0x8d40, self.fbo);
+        (self.gl.DeleteFramebuffers)(1, &fbo);
+        self.check()?;
+        Ok(complete)
+    }
+
     /// Snapshot without readback. Returns None when all bounded pipeline slots are leased.
     /// This alone does not make a window swap visible or update guest memory.
     pub fn snapshot_shared_frame(&mut self) -> Result<Option<SharedFrame>, String> {

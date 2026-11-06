@@ -1231,7 +1231,9 @@ unsafe fn upload_texture(
             }
         }
     }
-    let base = tex.rgba_level(0).unwrap();
+    let base = tex
+        .rgba_level(0)
+        .ok_or("guest texture pixels are unavailable")?;
     (gl.TexImage2D)(
         GL_TEXTURE_2D,
         0,
@@ -3061,14 +3063,25 @@ impl Renderer {
                             // Do not let upload fallback consume a deferred draw
                             // error and misclassify it as a texture-format failure.
                             check_native_error(&self.gl)?;
-                            upload_texture(
-                                &self.gl,
-                                &self.compressed_formats,
-                                tex,
-                                needs_mips,
-                                self.native_max_level,
-                            )?;
-                            item.1 = tex.revision;
+                            let native_copy = if tex.base_level == 0 && !needs_mips {
+                                if let Some(frame) = &tex.gpu_copy {
+                                    self.import_guest_rgb_texture(frame)?
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if !native_copy {
+                                upload_texture(
+                                    &self.gl,
+                                    &self.compressed_formats,
+                                    tex,
+                                    needs_mips,
+                                    self.native_max_level,
+                                )?;
+                            }
+                            self.textures.get_mut(&name).unwrap().1 = tex.revision;
                         }
                         let params = if base_only {
                             (
