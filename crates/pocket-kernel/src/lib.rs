@@ -1463,6 +1463,8 @@ pub struct KernelState {
     pub current_thread: usize,
     /// Last-error values are isolated by guest thread, including main (0).
     pub thread_last_errors: HashMap<usize, u32>,
+    /// WinCE access keys set by individual guest threads.
+    pub thread_proc_permissions: HashMap<usize, u32>,
     /// Winsock errors belong to the calling thread and survive status reads.
     pub legacy_winsock: desktop_services::LegacyWinsock,
     pub notification_icons: HashMap<(u32, u32), desktop_services::NotificationIcon>,
@@ -4468,6 +4470,7 @@ impl Process {
                 mutexes: Default::default(),
                 current_thread: 0,
                 thread_last_errors: HashMap::new(),
+                thread_proc_permissions: HashMap::new(),
                 legacy_winsock: Default::default(),
                 notification_icons: HashMap::new(),
                 winsock_last_errors: HashMap::new(),

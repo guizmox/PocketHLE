@@ -645,6 +645,7 @@ pub(crate) mod tests {
             mutexes: Default::default(),
             current_thread: 0,
             thread_last_errors: Default::default(),
+            thread_proc_permissions: Default::default(),
             legacy_winsock: Default::default(),
             notification_icons: Default::default(),
             winsock_last_errors: Default::default(),

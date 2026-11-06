@@ -958,6 +958,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "InterlockedTestExchange", interlocked_compare_exchange);
     d.register_handler(dll, "GetSystemInfo", get_system_info);
     d.register_handler(dll, "SetKMode", set_kmode);
+    d.register_handler(dll, "GetCurrentPermissions", get_current_permissions);
+    d.register_handler(dll, "SetProcPermissions", set_proc_permissions);
     d.register_handler(
         dll,
         "InterlockedCompareExchange",
@@ -2853,6 +2855,29 @@ pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         return Ok(outcome);
     }
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+// Each emulated process has a private address space with a single local slot.
+const DEFAULT_PROC_PERMISSIONS: u32 = 1;
+
+fn get_current_permissions(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(
+        ctx.kernel
+            .thread_proc_permissions
+            .get(&ctx.kernel.current_thread)
+            .copied()
+            .unwrap_or(DEFAULT_PROC_PERMISSIONS),
+    ))
+}
+
+fn set_proc_permissions(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let mask = ctx.arg_u32(0)?;
+    let previous = ctx
+        .kernel
+        .thread_proc_permissions
+        .insert(ctx.kernel.current_thread, mask)
+        .unwrap_or(DEFAULT_PROC_PERMISSIONS);
+    Ok(DispatchOutcome::ReturnedR0(previous))
 }
 
 fn set_kmode(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -31714,6 +31739,7 @@ mod tests {
             mutexes: Default::default(),
             current_thread: 0,
             thread_last_errors: Default::default(),
+            thread_proc_permissions: Default::default(),
             legacy_winsock: Default::default(),
             notification_icons: Default::default(),
             winsock_last_errors: Default::default(),
@@ -35788,6 +35814,40 @@ mod tests {
             DispatchOutcome::Halt
         );
         assert_eq!(kernel.process_exit_code, Some(23));
+    }
+
+    #[test]
+    fn process_permissions_are_saved_and_restored_per_thread() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(
+            set_proc_permissions(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(DEFAULT_PROC_PERMISSIONS)
+        );
+        assert_eq!(
+            get_current_permissions(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        ctx.kernel.current_thread = 1;
+        assert_eq!(
+            get_current_permissions(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(DEFAULT_PROC_PERMISSIONS)
+        );
+        ctx.kernel.current_thread = 0;
+        ctx.cpu
+            .write_reg(ArmReg::R0, DEFAULT_PROC_PERMISSIONS)
+            .unwrap();
+        assert_eq!(
+            set_proc_permissions(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
     }
 
     #[test]
