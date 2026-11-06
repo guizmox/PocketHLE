@@ -10764,11 +10764,16 @@ fn initial_window_rect(
     style: u32,
     mut rect: (i32, i32, i32, i32),
     screen: (u32, u32),
+    work_top: i32,
 ) -> (i32, i32, i32, i32) {
     let overlapped = style & 0xc000_0000 == 0;
     if rect.0 == i32::MIN {
         rect.0 = 0;
-        rect.1 = 0;
+        rect.1 = if overlapped {
+            work_top.min(screen.1 as i32)
+        } else {
+            0
+        };
     }
     if rect.2 == i32::MIN {
         if overlapped {
@@ -10930,6 +10935,11 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             ctx.arg_u32(7)? as i32,
         ),
         screen_dims(ctx),
+        if ctx.kernel.pocket_pc_taskbar_visible() {
+            pocket_kernel::shell_menu::HEIGHT
+        } else {
+            0
+        },
     );
     // A built-in control class: on a device the window procedure lives
     // inside coredll, not in the application. Hand back a handle of its
@@ -13311,7 +13321,7 @@ fn control_action_message(
             let ptr = if let Some(ptr) = ctx.kernel.window_extra.get(&key).copied() {
                 ptr
             } else {
-                let ptr = ctx.kernel.heap.alloc(44).unwrap_or(0);
+                let ptr = ctx.kernel.heap.alloc(48).unwrap_or(0);
                 if ptr == 0 {
                     return Some(None);
                 }
@@ -13331,24 +13341,50 @@ fn control_action_message(
             } else {
                 2
             };
-            let words = [
-                hwnd,
-                id,
-                code,
-                index as u32,
-                0,
-                new_state,
-                0,
-                8,
-                0,
-                0,
-                ctx.kernel
-                    .controls
-                    .get(hwnd)
-                    .and_then(|c| c.list_items.get(index.max(0) as usize))
-                    .map_or(0, |i| i.1),
-            ];
-            let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            let item_param = ctx
+                .kernel
+                .controls
+                .get(hwnd)
+                .and_then(|c| c.list_items.get(index.max(0) as usize))
+                .map_or(0, |item| item.1);
+            let words = if new_state == 3 && code == (-2i32) as u32 {
+                // NMITEMACTIVATE carries the client point and item data,
+                // followed by the key flags appended below.
+                let (x, y) = ctx.kernel.controls.cursor_position;
+                let (ox, oy, _, _) = ctx.kernel.controls.screen_rect(hwnd).unwrap_or_default();
+                [
+                    hwnd,
+                    id,
+                    code,
+                    index as u32,
+                    0,
+                    new_state,
+                    new_state,
+                    0,
+                    x.saturating_sub(ox) as u32,
+                    y.saturating_sub(oy) as u32,
+                    item_param,
+                ]
+            } else {
+                [
+                    hwnd,
+                    id,
+                    code,
+                    index as u32,
+                    0,
+                    new_state,
+                    0,
+                    8,
+                    0,
+                    0,
+                    item_param,
+                ]
+            };
+            let bytes: Vec<_> = words
+                .into_iter()
+                .chain([0])
+                .flat_map(u32::to_le_bytes)
+                .collect();
             if ctx.cpu.write_mem(ptr, &bytes).is_err() {
                 return Some(None);
             }
@@ -36620,6 +36656,23 @@ mod tests {
         assert_eq!(
             &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
             &0x001fu16.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn default_overlapped_window_uses_pocket_pc_work_area() {
+        let defaults = (i32::MIN, i32::MIN, i32::MIN, i32::MIN);
+        assert_eq!(
+            initial_window_rect(0x1000_0000, defaults, (240, 320), 26),
+            (0, 26, 240, 294)
+        );
+        assert_eq!(
+            initial_window_rect(0x8000_0000, defaults, (240, 320), 26),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(
+            initial_window_rect(0x1000_0000, (0, 0, 240, 320), (240, 320), 26),
+            (0, 0, 240, 320)
         );
     }
 

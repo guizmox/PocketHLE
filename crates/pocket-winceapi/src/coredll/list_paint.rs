@@ -4,6 +4,14 @@ use super::*;
 use pocket_kernel::gdi::ListPaintFrame;
 
 fn restore(ctx: &mut CallCtx<'_>, f: &ListPaintFrame) -> Result<DispatchOutcome, KernelError> {
+    // The report header is painted independently of NM_CUSTOMDRAW for items.
+    // Draw it on the same DC before the guest blits or the DIB is synchronized.
+    if let Some(c) = local_control(ctx, f.hwnd).filter(|c| c.list_header_height() > 0) {
+        let font = pocket_kernel::text::selected(&ctx.kernel.gdi, c.font);
+        if let Some(mut surface) = surface_for_dc(ctx.kernel, f.dc) {
+            c.render_list_header(&mut surface, font.as_ref());
+        }
+    }
     sync_dst_dib_to_guest(ctx, f.dc)?;
     // WM_PAINT may target a temporary double buffer before the control has
     // ever acquired a window DC. Retain the completed custom drawing for

@@ -1,3 +1,5 @@
 crates\pocket-kernel\src\controls.rs
 crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\coredll\graphics_tests.rs
 crates\pocket-winceapi\src\coredll\images.rs
+crates\pocket-winceapi\src\coredll\list_paint.rs

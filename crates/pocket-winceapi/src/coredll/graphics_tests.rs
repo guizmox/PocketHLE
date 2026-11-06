@@ -1773,20 +1773,20 @@ fn default_overlapped_geometry_reaches_create_size_and_window_rect() {
 #[test]
 fn default_geometry_keeps_explicit_sizes_and_does_not_fullscreen_children() {
     assert_eq!(
-        initial_window_rect(0, (10, 20, 80, 60), (320, 240)),
+        initial_window_rect(0, (10, 20, 80, 60), (320, 240), 0),
         (10, 20, 80, 60)
     );
     assert_eq!(
-        initial_window_rect(0, (10, 20, i32::MIN, 999), (320, 240)),
+        initial_window_rect(0, (10, 20, i32::MIN, 999), (320, 240), 0),
         (10, 20, 310, 220)
     );
     for style in [0x40000000, 0x80000000] {
         assert_eq!(
-            initial_window_rect(style, (i32::MIN, 99, i32::MIN, 999), (320, 240)),
+            initial_window_rect(style, (i32::MIN, 99, i32::MIN, 999), (320, 240), 0),
             (0, 0, 0, 0)
         );
         assert_eq!(
-            initial_window_rect(style, (-5, 3, 40, 50), (320, 240)),
+            initial_window_rect(style, (-5, 3, 40, 50), (320, 240), 0),
             (-5, 3, 40, 50)
         );
     }

@@ -783,8 +783,8 @@ impl ChildWindow {
         if y < header || y >= self.h {
             return None;
         }
-        let index =
-            (i64::from(y - header) + i64::from(self.list_scroll_y)) / i64::from(self.list_row_height());
+        let index = (i64::from(y - header) + i64::from(self.list_scroll_y))
+            / i64::from(self.list_row_height());
         usize::try_from(index)
             .ok()
             .filter(|i| *i < self.list_items.len())
@@ -884,24 +884,32 @@ impl ChildWindow {
                 );
             }
         }
-        if header > 0 {
-            surf.fill_rect(self.x, self.y, self.w, header.min(self.h), Self::FACE);
-            let font_height = crate::text::layout(face, &[]).height;
-            if font_height <= header.min(self.h) {
-                let y = self.y + (header - font_height) / 2;
-                let mut left = self.x;
-                for column in &self.list_report_columns {
-                    let end = left.saturating_add(column.width).min(right);
-                    if end > left {
-                        let x = list_aligned_x(face, &column.title, left + 2, end - 2, column.format);
-                        draw_clipped_font(surf, x, y, &column.title, Self::TEXT, end - 1, face);
-                        surf.fill_rect(end - 1, self.y, 1, header.min(self.h), Self::SHADOW);
-                    }
-                    left = end;
-                    if left >= right {
-                        break;
-                    }
+        self.render_list_header(surf, face);
+    }
+
+    /// Paint the header separately from the list item's custom draw stages.
+    pub fn render_list_header(&self, surf: &mut Surface<'_>, face: Option<&crate::gdi::Font>) {
+        let header = self.list_header_height().min(self.h);
+        if header <= 0 {
+            return;
+        }
+        surf.fill_rect(self.x, self.y, self.w, header, Self::FACE);
+        let font_height = crate::text::layout(face, &[]).height;
+        let right = self.x.saturating_add(self.w);
+        let mut left = self.x;
+        for column in &self.list_report_columns {
+            let end = left.saturating_add(column.width).min(right);
+            if end > left {
+                surf.fill_rect(end - 1, self.y, 1, header, Self::SHADOW);
+                if font_height <= header {
+                    let y = self.y + (header - font_height) / 2;
+                    let x = list_aligned_x(face, &column.title, left + 2, end - 2, column.format);
+                    draw_clipped_font(surf, x, y, &column.title, Self::TEXT, end - 1, face);
                 }
+            }
+            left = end;
+            if left >= right {
+                break;
             }
         }
     }
@@ -2518,6 +2526,9 @@ impl Controls {
                 child.list_item_at_point(x - origin.0 - child.x, y - origin.1 - child.y)
             {
                 child.list_selected = Some(index);
+                self.capture = hwnd;
+                self.focus = hwnd;
+                return Some(ControlAction::Consumed);
             }
         }
         if child.class == ControlClass::Static {
@@ -2544,21 +2555,24 @@ impl Controls {
     /// Stylus up. A button only notifies its parent when the release
     /// lands back inside the rectangle the press started in.
     pub fn pointer_up(&mut self, x: i32, y: i32) -> Option<ControlAction> {
-        if let Some(hwnd) = self.hit_test(x, y) {
-            if let Some(c) = self
-                .get(hwnd)
-                .filter(|c| c.class == ControlClass::ListView && c.enabled)
-            {
-                if let Some(index) = c.list_selected {
-                    return Some(ControlAction::Notify {
+        let hwnd = self.capture;
+        if let Some(c) = self.get(hwnd).filter(|c| c.class == ControlClass::ListView) {
+            let (ox, oy) = self.parent_origin(c.parent);
+            let row = c.list_item_at_point(x - ox - c.x, y - oy - c.y);
+            let action = match row {
+                Some(index) if c.enabled && c.list_selected == Some(index) => {
+                    ControlAction::Notify {
                         parent: c.parent,
                         id: c.id,
                         hwnd,
                         code: (-2i32) as u32,
                         index: index as i32,
-                    });
+                    }
                 }
-            }
+                _ => ControlAction::Consumed,
+            };
+            self.capture = 0;
+            return Some(action);
         }
         let captured = self.capture;
         if captured == 0 {
@@ -3784,6 +3798,40 @@ mod tests {
         ctrls.destroy_children_of(PARENT);
         assert!(ctrls.is_empty());
         assert_eq!(ctrls.focus, 0);
+    }
+
+    #[test]
+    fn report_header_and_blank_area_do_not_activate_selected_row() {
+        let mut controls = Controls::default();
+        let hwnd = controls.create(
+            PARENT,
+            ControlClass::ListView,
+            100,
+            String::new(),
+            WS_VISIBLE | 1,
+            0,
+            0,
+            100,
+            60,
+        );
+        let c = controls.get_mut(hwnd).unwrap();
+        c.list_items.push(("disc.iso".into(), 0));
+        c.list_report_columns.push(ListColumn {
+            title: "Name".into(),
+            width: 100,
+            format: 0,
+            subitem: 0,
+        });
+        let header = c.list_header_height();
+        controls.pointer_down(12, header + 1);
+        assert!(matches!(
+            controls.pointer_up(12, header + 1),
+            Some(ControlAction::Notify { index: 0, .. })
+        ));
+        controls.pointer_down(12, 1);
+        assert_eq!(controls.pointer_up(12, 1), Some(ControlAction::Consumed));
+        controls.pointer_down(12, header + 1);
+        assert_eq!(controls.pointer_up(12, 59), Some(ControlAction::Consumed));
     }
 
     #[test]
