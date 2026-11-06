@@ -326,18 +326,16 @@ pub fn set_gizmondo_goforce_driver(enabled: bool) {
     });
 }
 
-/// Recognize clients that query and load GoForce programs at runtime.
+/// Recognize clients that query the GoForce extension at runtime.
 pub fn uses_nv_combiner(image: &pocket_pe::LoadedImage) -> bool {
-    let contains = |marker: &[u8]| {
-        image.sections.iter().any(|section| {
-            section.is_readable()
-                && section
-                    .data
-                    .windows(marker.len())
-                    .any(|bytes| bytes == marker)
-        })
-    };
-    contains(b"GL_NV_combiner_program\0") && contains(b"glProgramStringNV\0")
+    let marker = b"GL_NV_combiner_program\0";
+    image.sections.iter().any(|section| {
+        section.is_readable()
+            && section
+                .data
+                .windows(marker.len())
+                .any(|bytes| bytes == marker)
+    })
 }
 
 /// Set the extension policy independently of the Gizmondo driver profile.
