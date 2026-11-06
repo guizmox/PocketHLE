@@ -45,6 +45,10 @@ mod dc_state;
 pub mod ddraw;
 mod dialog_keys;
 mod directshow;
+pub use directshow::{
+    system_media_command, system_media_status, SystemMediaCommand, SystemMediaInput,
+    SystemMediaStatus,
+};
 pub mod dlgtemplate;
 pub mod game_dlls;
 pub mod gles;

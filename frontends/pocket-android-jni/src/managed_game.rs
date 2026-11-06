@@ -330,6 +330,7 @@ pub(crate) fn run(
         loop {
             match input_rx.try_recv() {
                 Ok(InputCommand::Input(event)) => game.handle(event),
+                Ok(InputCommand::SystemMedia(_)) => {}
                 Ok(InputCommand::Stop) => stop = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => stop = true,

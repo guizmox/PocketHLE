@@ -382,7 +382,7 @@ impl Drop for Movie {
     }
 }
 fn restart(
-    ctx: &mut CallCtx<'_>,
+    kernel: &mut pocket_kernel::KernelState,
     id: u32,
     m: &mut Movie,
     start: f64,
@@ -404,7 +404,7 @@ fn restart(
         Err(_) => return Ok(0x80004005),
     };
     m.cancel_decode();
-    ctx.kernel.audio.stop_mas_stream(id);
+    kernel.audio.stop_mas_stream(id);
     m.receiver = Some(decoded.0);
     m.cancel = Some(decoded.2);
     m.worker = Some(decoded.3);
@@ -461,7 +461,8 @@ fn auto_show(m: &mut Movie) {
 }
 
 fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelError> {
-    if !m.playing {
+    let preview = id == SYSTEM_PLAYER && m.is_paused && m.frame.is_none() && !m.ended;
+    if !m.playing && !preview {
         return Ok(());
     }
     let mut budget = 64;
@@ -471,16 +472,19 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
         }
         budget -= 1;
         if let Some(frame) = m.pending.take() {
-            if m.start.is_none() {
+            if !preview && m.start.is_none() {
                 m.start = Some(Instant::now());
             }
             let due = Duration::from_secs_f64(m.frame_number as f64 / 30.0);
-            if elapsed(m) < due {
+            if !preview && elapsed(m) < due {
                 m.pending = Some(frame);
                 break;
             }
             m.frame = Some(frame);
             m.frame_number += 1;
+            if preview {
+                break;
+            }
             // WinCE's renderer announces readiness even if the owner has
             // parked its window off-screen while waiting for this event.
             if !m.frame_ready_sent {
@@ -500,7 +504,7 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
         match packet {
             Some(Packet::Audio(audio)) => {
                 m.audio = Some(audio);
-                if m.info.width == 0 && m.start.is_none() {
+                if !preview && m.info.width == 0 && m.start.is_none() {
                     m.start = Some(Instant::now());
                 }
             }
@@ -586,7 +590,8 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
             }
         }
     }
-    if m.ended
+    if !preview
+        && m.ended
         && m.pending.is_none()
         && elapsed(m) >= Duration::from_secs_f64(m.frame_number as f64 / 30.0)
         && ctx.kernel.audio.mas_playback_cursor(id) >= m.audio_end
@@ -609,6 +614,150 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
 // which does not expose a DirectShow COM object to the launching application.
 const SYSTEM_PLAYER: u32 = 0;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SystemMediaStatus {
+    pub paused: bool,
+    pub duration: f64,
+    offset: f64,
+    elapsed: Duration,
+    started: Option<Instant>,
+}
+
+impl SystemMediaStatus {
+    pub fn position(&self) -> f64 {
+        (self.offset
+            + (self.elapsed
+                + self
+                    .started
+                    .map(|start| start.elapsed())
+                    .unwrap_or_default())
+            .as_secs_f64())
+        .min(self.duration)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemMediaCommand {
+    TogglePause,
+    Stop,
+    Rewind,
+    Forward,
+}
+
+#[derive(Default)]
+pub struct SystemMediaInput {
+    keys: std::collections::HashSet<u16>,
+    pointer: bool,
+}
+
+impl SystemMediaInput {
+    /// Capture both edges of a press, even if playback ends before release.
+    pub fn capture(
+        &mut self,
+        event: pocket_kernel::InputEvent,
+        active: bool,
+        commands: &mut Vec<SystemMediaCommand>,
+    ) -> bool {
+        use pocket_kernel::InputEvent::*;
+        match event {
+            KeyDown { vk } if active => {
+                self.keys.insert(vk);
+                true
+            }
+            KeyUp { vk } if self.keys.remove(&vk) => {
+                if active {
+                    let command = match vk {
+                        0x0d | 0xc3 => Some(SystemMediaCommand::TogglePause),
+                        0x11 | 0x1b | 0xc4 => Some(SystemMediaCommand::Stop),
+                        0x10 | 0xc2 => Some(SystemMediaCommand::Rewind),
+                        0x20 | 0xc1 => Some(SystemMediaCommand::Forward),
+                        _ => None,
+                    };
+                    commands.extend(command);
+                }
+                true
+            }
+            PointerDown { .. } if active => {
+                self.pointer = true;
+                true
+            }
+            PointerMove { .. } => active || self.pointer,
+            PointerUp { .. } => std::mem::take(&mut self.pointer),
+            Text { .. } | TouchSteeringPosition { .. } | StylusAim { .. } | MouseMessage { .. } => {
+                active
+            }
+            _ => false,
+        }
+    }
+}
+
+pub fn system_media_status() -> Option<SystemMediaStatus> {
+    MOVIES.with(|registry| {
+        let movies = registry.lock().unwrap();
+        let movie = movies.get(&SYSTEM_PLAYER)?;
+        Some(SystemMediaStatus {
+            paused: movie.is_paused,
+            duration: movie.info.duration,
+            offset: movie.offset,
+            elapsed: movie.paused,
+            started: movie.start,
+        })
+    })
+}
+
+fn clear_system_media_output(kernel: &mut pocket_kernel::KernelState) {
+    kernel.audio.stop_mas_stream(SYSTEM_PLAYER);
+    if kernel.framebuffer.replace_system_video(None) {
+        kernel.invalidate_presentation();
+    }
+}
+
+pub fn system_media_command(kernel: &mut pocket_kernel::KernelState, command: SystemMediaCommand) {
+    MOVIES.with(|registry| {
+        let mut movies = registry.lock().unwrap();
+        match command {
+            SystemMediaCommand::TogglePause => {
+                let Some(movie) = movies.get_mut(&SYSTEM_PLAYER) else {
+                    return;
+                };
+                movie.is_paused = !movie.is_paused;
+                movie.playing = !movie.is_paused;
+                if movie.is_paused {
+                    movie.paused = elapsed(movie);
+                    movie.start = None;
+                } else if movie.frame.is_some() || movie.audio.is_some() {
+                    movie.start = Some(Instant::now());
+                }
+                kernel
+                    .audio
+                    .pause_mas_stream(SYSTEM_PLAYER, movie.is_paused);
+            }
+            SystemMediaCommand::Rewind | SystemMediaCommand::Forward => {
+                let Some(movie) = movies.get_mut(&SYSTEM_PLAYER) else {
+                    return;
+                };
+                if movie.stop.is_finite() && movie.stop > 0.0 {
+                    let delta = match command {
+                        SystemMediaCommand::Rewind => -10.0,
+                        _ => 10.0,
+                    };
+                    let target = (movie.position() + delta).clamp(0.0, movie.stop);
+                    match restart(kernel, SYSTEM_PLAYER, movie, target, movie.stop) {
+                        Ok(0) => {}
+                        Ok(code) => log::warn!("System media seek failed: {code:#010x}"),
+                        Err(error) => log::warn!("System media seek failed: {error}"),
+                    }
+                }
+            }
+            SystemMediaCommand::Stop => {
+                if movies.remove(&SYSTEM_PLAYER).is_some() {
+                    clear_system_media_output(kernel);
+                }
+            }
+        }
+    });
+}
+
 pub(crate) fn play_system_media(ctx: &mut CallCtx<'_>, path: &str) -> Result<(), u32> {
     let host = ctx
         .kernel
@@ -629,10 +778,7 @@ pub(crate) fn play_system_media(ctx: &mut CallCtx<'_>, path: &str) -> Result<(),
     movie.cancel = Some(cancel);
     movie.worker = Some(worker);
     movie.playing = true;
-    ctx.kernel.audio.stop_mas_stream(SYSTEM_PLAYER);
-    if ctx.kernel.framebuffer.replace_system_video(None) {
-        ctx.kernel.invalidate_presentation();
-    }
+    clear_system_media_output(ctx.kernel);
     MOVIES.with(|registry| {
         registry.lock().unwrap().insert(SYSTEM_PLAYER, movie);
     });
@@ -651,10 +797,7 @@ pub(crate) fn service(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
             .is_some_and(|movie| movie.completed)
         {
             movies.remove(&SYSTEM_PLAYER);
-            ctx.kernel.audio.stop_mas_stream(SYSTEM_PLAYER);
-            if ctx.kernel.framebuffer.replace_system_video(None) {
-                ctx.kernel.invalidate_presentation();
-            }
+            clear_system_media_output(ctx.kernel);
         }
         Ok(())
     })
@@ -794,7 +937,7 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             }
             ("control", 7) | ("filter", 6) => {
                 if m.receiver.is_none() {
-                    let code = restart(ctx, id, m, m.position(), m.stop)?;
+                    let code = restart(ctx.kernel, id, m, m.position(), m.stop)?;
                     if code != 0 {
                         return Ok(DispatchOutcome::ReturnedR0(code));
                     }
@@ -993,6 +1136,67 @@ pub(crate) static TEST_GRAPH_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn system_player_captures_gizmondo_transport_buttons() {
+        use pocket_kernel::InputEvent::{KeyDown, KeyUp};
+        use SystemMediaCommand::*;
+        let mut input = SystemMediaInput::default();
+        let mut commands = Vec::new();
+        for (vk, command) in [
+            (0x11, Stop),
+            (0x10, Rewind),
+            (0x20, Forward),
+            (0x0d, TogglePause),
+        ] {
+            assert!(!input.capture(KeyDown { vk }, false, &mut commands));
+            assert!(input.capture(KeyDown { vk }, true, &mut commands));
+            assert!(input.capture(KeyUp { vk }, true, &mut commands));
+            assert_eq!(commands.pop(), Some(command));
+        }
+        assert!(input.capture(KeyDown { vk: 0x11 }, true, &mut commands));
+        assert!(input.capture(KeyUp { vk: 0x11 }, false, &mut commands));
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn system_player_pause_resume_and_stop_preserve_guest_graph() {
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let mut movie = Movie::new();
+        movie.path = Some("sample.wmv".into());
+        movie.info.width = 2;
+        movie.info.duration = 10.0;
+        movie.stop = 10.0;
+        movie.start = Some(Instant::now() - Duration::from_secs(2));
+        movie.playing = true;
+        movie.frame = Some(vec![0; 8]);
+        MOVIES.with(|registry| {
+            let mut movies = registry.lock().unwrap();
+            movies.insert(SYSTEM_PLAYER, movie);
+            movies.insert(1, Movie::new());
+        });
+        let frame =
+            pocket_kernel::Framebuffer::new(kernel.framebuffer.width, kernel.framebuffer.height);
+        kernel.framebuffer.replace_system_video(Some(frame));
+
+        system_media_command(&mut kernel, SystemMediaCommand::TogglePause);
+        let paused = system_media_status().unwrap();
+        assert!(paused.paused);
+        assert!(paused.position() >= 2.0);
+        assert_eq!(paused.position(), system_media_status().unwrap().position());
+        assert!(kernel.framebuffer.has_system_video());
+
+        system_media_command(&mut kernel, SystemMediaCommand::TogglePause);
+        let resumed = system_media_status().unwrap();
+        assert!(!resumed.paused);
+        assert!(resumed.position() >= paused.position());
+
+        system_media_command(&mut kernel, SystemMediaCommand::Stop);
+        assert!(system_media_status().is_none());
+        assert!(!kernel.framebuffer.has_system_video());
+        MOVIES.with(|registry| assert!(registry.lock().unwrap().contains_key(&1)));
+        reset();
+    }
+
     #[test]
     fn launcher_preview_survives_swaps_between_video_frames() {
         MOVIES.with(|registry| {
@@ -1419,6 +1623,47 @@ mod tests {
 #[cfg(all(test, feature = "video-static"))]
 mod decoder_tests {
     use super::*;
+    #[test]
+    fn system_player_decodes_video_and_restores_guest_frame_on_stop() {
+        let mut cpu = pocket_cpu::stub::StubCpu::new();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        kernel.vfs.mount(
+            r"\Media",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+        );
+        let thunk = pocket_kernel::Thunk {
+            thunk_va: 0,
+            dll: "coredll.dll".into(),
+            iat_va: 0,
+            binding: pocket_pe::ImportBinding::Name("ShellExecuteEx".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        play_system_media(&mut ctx, r"\Media\seeking.wmv").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ctx.kernel.framebuffer.has_system_video() {
+            assert!(Instant::now() < deadline, "video did not produce a frame");
+            service(&mut ctx).unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        system_media_command(ctx.kernel, SystemMediaCommand::TogglePause);
+        system_media_command(ctx.kernel, SystemMediaCommand::Forward);
+        let at_end = system_media_status().unwrap();
+        assert!(at_end.paused);
+        assert_eq!(at_end.position(), at_end.duration);
+        system_media_command(ctx.kernel, SystemMediaCommand::Rewind);
+        let rewound = system_media_status().unwrap();
+        assert!(rewound.paused);
+        assert_eq!(rewound.position(), 0.0);
+        system_media_command(ctx.kernel, SystemMediaCommand::Stop);
+        assert!(!ctx.kernel.framebuffer.has_system_video());
+        assert!(system_media_status().is_none());
+    }
+
     #[test]
     fn native_seek_bounds_audio_and_video_and_can_restart_repeatedly() {
         let _graph_gate = TEST_GRAPH_GATE.lock().unwrap_or_else(|e| e.into_inner());

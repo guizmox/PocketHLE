@@ -55,6 +55,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use pocket_core::kernel::{FrameAction, FrameHook, InputEvent, KernelState};
+use pocket_core::winceapi::{self, SystemMediaCommand, SystemMediaInput, SystemMediaStatus};
 use pocket_core::Emulator;
 use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry, Library};
 
@@ -116,6 +117,7 @@ impl FrameSnapshot {
 /// Kotlin → emulator command. Mirrors `pocket_desktop::runner::InputCommand`.
 #[derive(Debug, Clone, Copy)]
 pub enum InputCommand {
+    SystemMedia(SystemMediaCommand),
     Input(InputEvent),
     Stop,
 }
@@ -123,6 +125,7 @@ pub enum InputCommand {
 /// Shared between the worker thread and the UI thread for the
 /// lifetime of one game session.
 pub(crate) struct SessionState {
+    system_media: Mutex<Option<SystemMediaStatus>>,
     stop_all: Arc<AtomicBool>,
     /// Latest framebuffer the guest produced. The polling loop on
     /// the UI thread drains this slot and paints it; a write
@@ -150,6 +153,7 @@ impl SessionState {
         Self {
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
+            system_media: Mutex::new(None),
             presentation_stats: Mutex::new(None),
             gps_notice: Mutex::new(None),
             dependency_notices: Mutex::new(Default::default()),
@@ -168,6 +172,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn system_media(&self) -> Option<SystemMediaStatus> {
+        self.state.system_media.lock().ok()?.clone()
+    }
+
     pub fn poll_dependency_notice(&self) -> Option<String> {
         self.state.dependency_notices.lock().ok()?.pop_front()
     }
@@ -873,6 +881,8 @@ pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
 /// Bridges the UI thread (Kotlin) and the running emulator on the
 /// worker thread.
 struct SessionHook {
+    media_input: SystemMediaInput,
+    media_commands: Vec<SystemMediaCommand>,
     colors_random_gps: Option<pocket_library::LauncherConfig>,
     geofence_down: bool,
     state: Arc<SessionState>,
@@ -1142,6 +1152,8 @@ impl SessionHook {
         Self {
             colors_random_gps: None,
             geofence_down: false,
+            media_input: SystemMediaInput::default(),
+            media_commands: Vec::new(),
             stop_all: Arc::clone(&state.stop_all),
             state,
             input_rx: Arc::new(Mutex::new(input_rx)),
@@ -1164,13 +1176,25 @@ impl FrameHook for SessionHook {
         self.reap_children();
         let mut stop_requested = self.stop_all.load(Ordering::Acquire);
         if !self.input_disconnected && self.foreground.load(Ordering::Acquire) == self.pid {
+            let status = winceapi::system_media_status();
+            let media_active = status.is_some();
             let input_rx = Arc::clone(&self.input_rx);
             let input = input_rx.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 match input.try_recv() {
                     Ok(InputCommand::Input(ev)) => {
-                        self.queue_input(ev, &kernel.vfs.gps_service(), &mut kernel.pending_input);
+                        if !self
+                            .media_input
+                            .capture(ev, media_active, &mut self.media_commands)
+                        {
+                            self.queue_input(
+                                ev,
+                                &kernel.vfs.gps_service(),
+                                &mut kernel.pending_input,
+                            );
+                        }
                     }
+                    Ok(InputCommand::SystemMedia(command)) => self.media_commands.push(command),
                     Ok(InputCommand::Stop) => stop_requested = true,
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -1178,6 +1202,18 @@ impl FrameHook for SessionHook {
                         break;
                     }
                 }
+            }
+            drop(input);
+            let status = if self.media_commands.is_empty() {
+                status
+            } else {
+                for command in self.media_commands.drain(..) {
+                    winceapi::system_media_command(kernel, command);
+                }
+                winceapi::system_media_status()
+            };
+            if let Ok(mut slot) = self.state.system_media.lock() {
+                *slot = status;
             }
         }
 

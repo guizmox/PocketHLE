@@ -130,6 +130,14 @@ object NativeBridge {
     /** Completed guest presentations per second, or -1 if no boundary was observed. */
     @JvmStatic external fun nativeSubmittedFrameFps(handle: Long): Float
 
+    const val MEDIA_PLAY_PAUSE = 0
+    const val MEDIA_STOP = 1
+    const val MEDIA_REWIND = 2
+    const val MEDIA_FORWARD = 3
+
+    @JvmStatic external fun nativeSystemMedia(handle: Long): String?
+    @JvmStatic external fun nativeSystemMediaCommand(handle: Long, command: Int)
+
     /**
      * Poll for the latest framebuffer the worker has produced.
      * Returns `null` if no new frame is available, or a flat byte

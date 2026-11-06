@@ -177,7 +177,7 @@ pub(super) fn extended(
                 }
             }
             if cf & 3 != 0 || sf & 3 != 0 {
-                let result = restart(ctx, id, m, next, end)?;
+                let result = restart(ctx.kernel, id, m, next, end)?;
                 if result != 0 {
                     return Ok(result);
                 }
@@ -228,7 +228,7 @@ pub(super) fn extended(
                 return Ok(if value == 0.0 { 0 } else { UNSUPPORTED });
             }
             restart(
-                ctx,
+                ctx.kernel,
                 id,
                 m,
                 if slot == 8 { value } else { m.position() },

@@ -953,6 +953,47 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSubmittedFrameF
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSystemMedia(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jstring {
+    let Some(status) = session_from_handle(handle).and_then(Session::system_media) else {
+        return std::ptr::null_mut();
+    };
+    let progress = (status.duration.is_finite() && status.duration > 0.0)
+        .then(|| status.position() / status.duration);
+    new_jstring(
+        &env,
+        serde_json::json!({
+            "paused": status.paused,
+            "progress": progress,
+        })
+        .to_string(),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSystemMediaCommand(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    command: jint,
+) {
+    use pocket_core::winceapi::SystemMediaCommand;
+    let command = match command {
+        0 => SystemMediaCommand::TogglePause,
+        1 => SystemMediaCommand::Stop,
+        2 => SystemMediaCommand::Rewind,
+        3 => SystemMediaCommand::Forward,
+        _ => return,
+    };
+    if let Some(session) = session_from_handle(handle) {
+        session.send_input(InputCommand::SystemMedia(command));
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollFrame<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,

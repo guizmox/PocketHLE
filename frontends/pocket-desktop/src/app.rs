@@ -19,7 +19,8 @@ use pocket_library::{
     PreparedImport, RotationPref, ScreenPref,
 };
 
-use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner};
+use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner, SystemMediaView};
+use pocket_core::winceapi::SystemMediaCommand;
 
 #[derive(Clone)]
 struct TitleMarquee {
@@ -310,6 +311,8 @@ pub struct PocketLauncher {
     /// Channel for sending [`InputCommand`]s (taps / D-pad / stop)
     /// to the running emulator. Mirrors `frame_rx`.
     input_tx: Option<Sender<InputCommand>>,
+    system_media: SystemMediaView,
+    media_keys_down: [bool; 2],
     /// Which guest buttons are held right now, and by which input
     /// source, so we can fire the matching `WM_KEYUP` on release.
     held: HeldButtons,
@@ -938,6 +941,8 @@ impl PocketLauncher {
             dependency_notice: None,
             gps_notice: None,
             input_tx: None,
+            system_media: SystemMediaView::default(),
+            media_keys_down: [false; 2],
             held: HeldButtons::default(),
             gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone()),
             gamepad_devices: Vec::new(),
@@ -1159,6 +1164,7 @@ impl PocketLauncher {
                     self.status = outcome.summary;
                     self.frame_rx = None;
                     self.input_tx = None;
+                    self.system_media = SystemMediaView::default();
                     self.release_all_keys();
                     self.pointer_down_at = None;
                     self.running_game = None;
@@ -3463,6 +3469,7 @@ impl PocketLauncher {
             });
             self.paint_recording_indicator(ui, rect);
             self.paint_rate_indicators(ui, rect);
+            self.ui_system_media(ui.ctx(), rect);
             return;
         }
         if let Some(tex) = self.last_frame_texture.as_ref() {
@@ -3525,6 +3532,7 @@ impl PocketLauncher {
         }
         self.paint_recording_indicator(ui, rect);
         self.paint_rate_indicators(ui, rect);
+        self.ui_system_media(ui.ctx(), rect);
     }
 
     /// Host overlay: use the actual displayed image bounds, including rotation
@@ -4254,6 +4262,51 @@ impl PocketLauncher {
             });
             self.stylus_last = vector;
         }
+    }
+
+    fn media_command(&self, command: SystemMediaCommand) {
+        if let Some(tx) = &self.input_tx {
+            let _ = tx.send(InputCommand::SystemMedia(command));
+        }
+    }
+
+    fn media_active(&self) -> bool {
+        self.system_media.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    fn ui_system_media(&self, ctx: &egui::Context, display: Rect) {
+        let media = self.system_media.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(media) = media else { return };
+        let has_progress = media.duration.is_finite() && media.duration > 0.0;
+        let height = if has_progress { 34.0 } else { 25.0 };
+        ctx.request_repaint_after(Duration::from_secs(1));
+        egui::Area::new(egui::Id::new("system_media_controls"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(display.left_bottom() - Vec2::new(0.0, height))
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.set_width(display.width());
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let panel = Rect::from_min_size(ui.cursor().min, Vec2::new(display.width(), height));
+                ui.painter().rect_filled(panel, 0.0, Color32::from_black_alpha(225));
+                if has_progress {
+                    ui.add(egui::ProgressBar::new((media.position() / media.duration) as f32)
+                        .desired_width(display.width()).desired_height(9.0));
+                }
+                ui.horizontal(|ui| {
+                    for (label, command, enabled) in [
+                        ("−10 s", SystemMediaCommand::Rewind, has_progress),
+                        (if media.paused { "Play" } else { "Pause" }, SystemMediaCommand::TogglePause, true),
+                        ("Stop", SystemMediaCommand::Stop, true),
+                        ("+10 s", SystemMediaCommand::Forward, has_progress),
+                    ] {
+                        if ui.add_enabled(enabled, egui::Button::new(label)
+                            .min_size(Vec2::new(display.width() / 4.0, 25.0))).clicked() {
+                            self.media_command(command);
+                        }
+                    }
+                });
+            });
     }
 
     fn send_input(&self, ev: InputEvent) {
@@ -5583,6 +5636,9 @@ impl PocketLauncher {
         self.gps_notice = None;
         self.frame_rx = Some(frame_rx);
         self.input_tx = Some(input_tx);
+        self.system_media = SystemMediaView::default();
+        self.media_keys_down = [false; 2];
+        let system_media = self.system_media.clone();
         if !self.running_is_gizmondo {
             self.send_input(InputEvent::KeyboardRotation {
                 turns: rotation_turns(self.game_rotation),
@@ -5602,6 +5658,7 @@ impl PocketLauncher {
                 Some(input_rx),
                 Some(gps_notice_tx),
                 Some(dependency_notice_tx),
+                system_media,
             );
             let _ = tx.send(UiEvent::RunFinished(outcome));
         }));
@@ -5683,6 +5740,32 @@ impl eframe::App for PocketLauncher {
         }
     }
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.screen == Screen::Run {
+            let active = self.media_active();
+            raw.events.retain(|event| {
+                let egui::Event::Key { key, pressed, .. } = event else {
+                    return true;
+                };
+                let (index, command) = match key {
+                    egui::Key::Enter => (0, SystemMediaCommand::TogglePause),
+                    egui::Key::Escape => (1, SystemMediaCommand::Stop),
+                    _ => return true,
+                };
+                let captured = self.media_keys_down[index];
+                if *pressed && active {
+                    self.media_keys_down[index] = true;
+                    return false;
+                }
+                if !*pressed && captured {
+                    self.media_keys_down[index] = false;
+                    if active {
+                        self.media_command(command);
+                    }
+                    return false;
+                }
+                true
+            });
+        }
         crate::desktop_pointer::finish_missing_releases(ctx, raw);
         self.controller_ui.prepare_input(
             ctx,

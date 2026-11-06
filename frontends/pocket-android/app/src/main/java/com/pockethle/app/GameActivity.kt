@@ -16,6 +16,8 @@ import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
+import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -144,6 +146,79 @@ class GameActivity : AppCompatActivity() {
             }
         }
     }
+    private var mediaBar: LinearLayout? = null
+    private lateinit var mediaProgress: ProgressBar
+    private lateinit var mediaButtons: List<TextView>
+
+    private fun mediaCommand(command: Int) {
+        if (session != 0L) NativeBridge.nativeSystemMediaCommand(session, command)
+    }
+
+    private fun updateMediaBar() {
+        val media = NativeBridge.nativeSystemMedia(session)
+        val frame = lastFrame
+        if (media == null || frame == null || surface.width <= 0 || surface.height <= 0) {
+            mediaBar?.visibility = View.GONE
+            return
+        }
+        val status = JSONObject(media)
+        val host = findViewById<FrameLayout>(android.R.id.content)
+        val bar = mediaBar ?: LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xe6000000.toInt())
+            isClickable = true
+            mediaProgress = ProgressBar(this@GameActivity, null, android.R.attr.progressBarStyleHorizontal)
+            mediaProgress.max = 1000
+            addView(mediaProgress, LinearLayout.LayoutParams(-1, (4 * resources.displayMetrics.density).toInt()))
+            val row = LinearLayout(this@GameActivity)
+            mediaButtons = listOf(
+                "−10 s" to NativeBridge.MEDIA_REWIND,
+                "Play" to NativeBridge.MEDIA_PLAY_PAUSE,
+                "Stop" to NativeBridge.MEDIA_STOP,
+                "+10 s" to NativeBridge.MEDIA_FORWARD,
+            ).map { (label, command) ->
+                TextView(this@GameActivity).apply {
+                    text = label
+                    setTextColor(android.graphics.Color.WHITE)
+                    gravity = android.view.Gravity.CENTER
+                    isFocusable = true
+                    setOnClickListener { mediaCommand(command) }
+                    row.addView(this, LinearLayout.LayoutParams(0, -1, 1f))
+                }
+            }
+            addView(row, LinearLayout.LayoutParams(-1, (40 * resources.displayMetrics.density).toInt()))
+            host.addView(this, FrameLayout.LayoutParams(0, 0))
+            mediaBar = this
+        }
+        val seekable = !status.isNull("progress")
+        mediaProgress.visibility = if (seekable) View.VISIBLE else View.GONE
+        if (seekable) mediaProgress.progress = (status.getDouble("progress") * 1000).toInt()
+        mediaButtons[0].isEnabled = seekable
+        mediaButtons[1].text = if (status.getBoolean("paused")) "Play" else "Pause"
+        mediaButtons[3].isEnabled = seekable
+        val rect = renderedDisplayRect(
+            surface.width, surface.height, frame.width, frame.height, frame.textureWidth,
+            frame.textureHeight, rotationDegrees, displayScale, !gizmondoGame,
+            controllerFullscreenHost.active,
+        )
+        val screen = IntArray(2).also { surface.getLocationInWindow(it) }
+        val origin = IntArray(2).also { host.getLocationInWindow(it) }
+        val height = ((if (seekable) 44 else 40) * resources.displayMetrics.density).toInt()
+        val layout = bar.layoutParams as FrameLayout.LayoutParams
+        val left = screen[0] - origin[0] + rect.left
+        val top = screen[1] - origin[1] + rect.top + rect.height - height
+        if (layout.width != rect.width || layout.height != height ||
+            layout.leftMargin != left || layout.topMargin != top) {
+            layout.width = rect.width
+            layout.height = height
+            layout.leftMargin = left
+            layout.topMargin = top
+            layout.gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
+            bar.layoutParams = layout
+        }
+        bar.visibility = View.VISIBLE
+    }
+
     private val pollTick = object : Runnable {
         override fun run() {
             if (session == 0L) return
@@ -168,6 +243,7 @@ class GameActivity : AppCompatActivity() {
             NativeBridge.nativePollGpsNotice(session)?.let { message ->
                 android.widget.Toast.makeText(this@GameActivity, message, android.widget.Toast.LENGTH_LONG).show()
             }
+            updateMediaBar()
             updateFpsOverlay()
             updateIpsOverlay()
             if (NativeBridge.nativeIsRunning(session) == 0) {
@@ -412,6 +488,10 @@ class GameActivity : AppCompatActivity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (joiningSession) return
+        if (mediaBar?.visibility == View.VISIBLE) {
+            mediaCommand(NativeBridge.MEDIA_STOP)
+            return
+        }
         if (controllerFullscreenHost.active) { setControllerFullscreen(false); return }
         if (!gizmondoGame && pocketPcFullscreen) {
             releaseHeldInput()

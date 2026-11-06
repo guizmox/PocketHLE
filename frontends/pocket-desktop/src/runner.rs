@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::sync::Mutex;
+use pocket_core::winceapi::{self, SystemMediaCommand, SystemMediaInput, SystemMediaStatus};
 use std::time::{Duration, Instant};
 
 use pocket_core::kernel::{FrameAction, FrameHook, InputEvent, KernelState};
@@ -110,6 +111,7 @@ impl Runner {
         self.missing_api_logging.store(enabled, Ordering::Relaxed);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_game(
         &self,
         library_root: PathBuf,
@@ -118,9 +120,11 @@ impl Runner {
         input_rx: Option<Receiver<InputCommand>>,
         gps_notice_tx: Option<Sender<(f64, f64)>>,
         dependency_notice_tx: Option<Sender<String>>,
+        system_media: SystemMediaView,
     ) -> RunOutcome {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
+        hook.system_media = system_media;
         hook.gps_notice_tx = gps_notice_tx;
         hook.dependency_notice_tx = dependency_notice_tx;
         let card_root = game.gizmondo_storage_card_root(&library_root);
@@ -945,9 +949,12 @@ impl FrameSnapshot {
     }
 }
 
+pub(crate) type SystemMediaView = Arc<Mutex<Option<SystemMediaStatus>>>;
+
 /// Command pushed by the GUI thread into the running emulator.
 #[derive(Debug, Clone)]
 pub enum InputCommand {
+    SystemMedia(SystemMediaCommand),
     RecordAudio(Option<Arc<pocket_core::kernel::audio::OutputRecording>>),
     /// User input (tap / D-pad / key) to forward to the guest.
     Input(InputEvent),
@@ -1018,6 +1025,11 @@ struct ChildJob {
 }
 
 struct RunHook {
+    system_media: SystemMediaView,
+    last_system_media: Option<SystemMediaStatus>,
+    media_was_foreground: bool,
+    media_commands: Vec<SystemMediaCommand>,
+    media_input: SystemMediaInput,
     recording_audio: Option<Arc<pocket_core::kernel::audio::OutputRecording>>,
     recording_audio_pending: bool,
     colors_random_gps: Option<pocket_library::LauncherConfig>,
@@ -1219,7 +1231,17 @@ impl RunHook {
         }
     }
 
+    fn sync_system_media(&mut self) {
+        let status = winceapi::system_media_status();
+        if !self.media_was_foreground || status != self.last_system_media {
+            self.media_was_foreground = true;
+            self.last_system_media = status.clone();
+            *self.system_media.lock().unwrap_or_else(|e| e.into_inner()) = status;
+        }
+    }
+
     fn drain_input(&mut self, pending: &mut std::collections::VecDeque<InputEvent>) -> bool {
+        let media_active = self.last_system_media.is_some();
         let mut stop_requested = self.stop_all.load(Ordering::Acquire);
         if !self.input_disconnected {
             if let Some(rx) = self.input_rx.as_ref() {
@@ -1227,6 +1249,9 @@ impl RunHook {
                 loop {
                     match rx.try_recv() {
                         Ok(InputCommand::Input(ev)) => {
+                            if self.media_input.capture(ev, media_active, &mut self.media_commands) {
+                                continue;
+                            }
                             match ev {
                                 InputEvent::KeyDown { vk: 0x73 } => {
                                     if !self.geofence_down && self.colors_random_gps.is_some() {
@@ -1241,6 +1266,9 @@ impl RunHook {
                             pending.push_back(ev);
                         }
 
+                        Ok(InputCommand::SystemMedia(command)) => {
+                            self.media_commands.push(command);
+                        }
                         Ok(InputCommand::RefreshColorsGps) => self.refresh_colors_gps = true,
                         Ok(InputCommand::RecordAudio(recording)) => {
                             self.recording_audio = recording;
@@ -1266,6 +1294,7 @@ impl RunHook {
     fn child_hook(&self) -> Self {
         let mut hook = Self::new(self.frame_tx.clone(), None);
         hook.dependency_notice_tx = self.dependency_notice_tx.clone();
+        hook.system_media = self.system_media.clone();
         hook.recording_audio = self.recording_audio.clone();
         hook.recording_audio_pending = true;
         hook.input_rx = self.input_rx.clone();
@@ -1313,6 +1342,11 @@ impl RunHook {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
+            system_media: SystemMediaView::default(),
+            last_system_media: None,
+            media_was_foreground: false,
+            media_commands: Vec::new(),
+            media_input: SystemMediaInput::default(),
             recording_audio: None,
             recording_audio_pending: false,
             colors_random_gps: None,
@@ -1345,8 +1379,17 @@ impl FrameHook for RunHook {
         self.reap_children();
         let active = self.foreground.load(Ordering::Acquire) == self.pid;
         let mut stop_requested = if active {
-            self.drain_input(&mut state.pending_input)
+            self.sync_system_media();
+            let stop = self.drain_input(&mut state.pending_input);
+            if !self.media_commands.is_empty() {
+                for command in self.media_commands.drain(..) {
+                    winceapi::system_media_command(state, command);
+                }
+                self.sync_system_media();
+            }
+            stop
         } else {
+            self.media_was_foreground = false;
             self.stop_all.load(Ordering::Acquire)
         };
         if std::mem::take(&mut self.recording_audio_pending) {
