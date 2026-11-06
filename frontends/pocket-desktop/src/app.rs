@@ -281,7 +281,7 @@ pub struct PocketLauncher {
     rename_draft: Option<(String, String, bool)>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
-    frame_pacing_warnings: std::collections::VecDeque<String>,
+    pocketpc_import_options: std::collections::VecDeque<(String, bool)>,
     updating_import: bool,
     library_busy: bool,
     restore_archive: Option<std::path::PathBuf>,
@@ -734,21 +734,24 @@ pub enum UiEvent {
 #[derive(Debug)]
 pub struct ImportedGames {
     entries: Vec<GameEntry>,
-    frame_pacing_warnings: Vec<String>,
+    pocketpc_import_options: Vec<(String, bool)>,
 }
 
 impl ImportedGames {
     fn analyze(entries: Vec<GameEntry>, library: &Library, existing_ids: &[String]) -> Self {
-        let frame_pacing_warnings = entries
+        let pocketpc_import_options = entries
             .iter()
             .filter(|game| !existing_ids.contains(&game.id) && !library.is_demo_card(&game.id))
             .filter(|game| !is_gizmondo_game(game, library.root()))
-            .filter(|game| crate::frame_pacing::may_run_fast(&game.executable_path(library.root())))
-            .map(|game| game.id.clone())
+            .map(|game| {
+                let may_run_fast =
+                    crate::frame_pacing::may_run_fast(&game.executable_path(library.root()));
+                (game.id.clone(), may_run_fast)
+            })
             .collect();
         Self {
             entries,
-            frame_pacing_warnings,
+            pocketpc_import_options,
         }
     }
 }
@@ -920,7 +923,7 @@ impl PocketLauncher {
             rename_draft: None,
             demo_import: None,
             pending_import: None,
-            frame_pacing_warnings: Default::default(),
+            pocketpc_import_options: Default::default(),
             updating_import: false,
             library_busy: false,
             restore_archive: None,
@@ -1080,9 +1083,9 @@ impl PocketLauncher {
                 }
                 UiEvent::ImportFinished(Ok(ImportedGames {
                     entries,
-                    frame_pacing_warnings,
+                    pocketpc_import_options,
                 })) => {
-                    self.frame_pacing_warnings.extend(frame_pacing_warnings);
+                    self.pocketpc_import_options.extend(pocketpc_import_options);
                     self.library_busy = false;
                     let updated = self.updating_import;
                     self.updating_import = false;
@@ -2284,15 +2287,15 @@ impl PocketLauncher {
         }
     }
 
-    fn ui_frame_pacing_warning(&mut self, ctx: &egui::Context) -> bool {
+    fn ui_pocketpc_import_options(&mut self, ctx: &egui::Context) -> bool {
         if self.screen != Screen::Library || self.rename_draft.is_some() {
             return false;
         }
-        let Some(id) = self.frame_pacing_warnings.front() else {
+        let Some((id, may_run_fast)) = self.pocketpc_import_options.front() else {
             return false;
         };
         let Some(game) = self.library.games().iter().find(|game| &game.id == id) else {
-            self.frame_pacing_warnings.pop_front();
+            self.pocketpc_import_options.pop_front();
             ctx.request_repaint();
             return false;
         };
@@ -2301,14 +2304,18 @@ impl PocketLauncher {
         let mut open_settings = false;
         let mut dismiss = false;
         egui::CentralPanel::default().show(ctx, |_| {});
-        egui::Window::new("Possible speed issue")
+        egui::Window::new("PocketPC display settings")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_max_width(380.0);
                 ui.strong(&game.display_name);
-                ui.label("Some animations in this game may run faster at higher frame rates. If the game seems too fast, try setting an FPS limit in its launch settings. Would you like to open those settings now?");
+                ui.label("PocketPC games were designed for different screen sizes and orientations. If the game appears sideways, stretched, or cut off, you can adjust Screen and Rotate display in its launch settings.");
+                if *may_run_fast {
+                    ui.label("This game may run too fast at higher frame rates. If that happens, try setting an FPS limit in the same settings.");
+                }
+                ui.label("Would you like to open the launch settings now?");
                 ui.horizontal(|ui| {
                     open_settings = crate::controller_ui::button(ui, "Open Launch Settings").clicked();
                     dismiss = crate::controller_ui::button(ui, "Not Now").clicked();
@@ -2320,7 +2327,7 @@ impl PocketLauncher {
             self.screen = Screen::GameSettings;
         }
         if open_settings || dismiss {
-            self.frame_pacing_warnings.pop_front();
+            self.pocketpc_import_options.pop_front();
             ctx.request_repaint();
         }
         self.controller_ui.show(ctx);
@@ -6020,7 +6027,7 @@ impl eframe::App for PocketLauncher {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
-        if self.ui_frame_pacing_warning(ctx) {
+        if self.ui_pocketpc_import_options(ctx) {
             return;
         }
         if self.ui_release_update(ctx) {

@@ -1,3 +1,1 @@
-Cargo.lock
-Cargo.toml
-frontends\pocket-android\app\build.gradle.kts
+frontends\pocket-desktop\src\app.rs
