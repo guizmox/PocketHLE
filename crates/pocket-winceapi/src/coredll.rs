@@ -251,6 +251,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "memmove", memcpy);
     d.register_handler(dll, "memchr", memchr);
     d.register_handler(dll, "memcmp", memcmp);
+    d.register_handler(dll, "_memicmp", memicmp);
     d.register_handler(dll, "strlen", strlen);
     d.register_handler(dll, "wcslen", wcslen);
     d.register_handler(dll, "_wcsrev", wcsrev);
@@ -406,6 +407,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetFileAttributesExW", get_file_attributes_ex_w);
     d.register_handler(dll, "SetFileAttributesW", set_file_attributes_w);
     d.register_handler(dll, "CreateDirectoryW", create_directory_w);
+    d.register_handler(dll, "GetTempPathW", get_temp_path_w);
     d.register_handler(dll, "RemoveDirectoryW", remove_directory_w);
     d.register_handler(dll, "CopyFileW", copy_file_w);
     d.register_handler(dll, "MoveFileW", move_file_w);
@@ -957,6 +959,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "InterlockedExchangeAdd", interlocked_exchange_add);
     d.register_handler(dll, "InterlockedTestExchange", interlocked_compare_exchange);
     d.register_handler(dll, "GetSystemInfo", get_system_info);
+    d.register_handler(dll, "IsProcessorFeaturePresent", is_processor_feature_present);
+    d.register_handler(dll, "FlushInstructionCache", flush_instruction_cache);
     d.register_handler(dll, "SetKMode", set_kmode);
     d.register_handler(dll, "GetCurrentPermissions", get_current_permissions);
     d.register_handler(dll, "SetProcPermissions", set_proc_permissions);
@@ -6252,9 +6256,20 @@ fn memchr(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn memcmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    compare_memory(ctx, false)
+}
+
+fn memicmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    compare_memory(ctx, true)
+}
+
+fn compare_memory(ctx: &mut CallCtx<'_>, ignore_case: bool) -> Result<DispatchOutcome, KernelError> {
     let a = ctx.arg_u32(0)?;
     let b = ctx.arg_u32(1)?;
     let len = ctx.arg_u32(2)? as usize;
+    if len == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     // Pull both sides through the kernel scratch buffers so we
     // skip the per-call `Vec` alloc on each side.
     let (lhs, rhs) = (
@@ -6269,12 +6284,15 @@ fn memcmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     ctx.cpu.read_mem_into(a, &mut lhs[..len])?;
     ctx.cpu.read_mem_into(b, &mut rhs[..len])?;
-    let r = match lhs[..len].cmp(&rhs[..len]) {
-        std::cmp::Ordering::Less => -1i32,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
+    let order = if ignore_case {
+        lhs[..len]
+            .iter()
+            .map(u8::to_ascii_lowercase)
+            .cmp(rhs[..len].iter().map(u8::to_ascii_lowercase))
+    } else {
+        lhs[..len].cmp(&rhs[..len])
     };
-    Ok(DispatchOutcome::ReturnedR0(r as u32))
+    Ok(DispatchOutcome::ReturnedR0(cmp_to_int(order) as u32))
 }
 
 /// How far ahead to read when scanning for a NUL terminator. The
@@ -9302,6 +9320,24 @@ fn vfs_api_bool(
             Ok(DispatchOutcome::ReturnedR0(0))
         }
     }
+}
+
+fn get_temp_path_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let capacity = ctx.arg_u32(0)?;
+    let buffer = ctx.arg_u32(1)?;
+    // The Pocket PC object store provisions this guest directory.
+    const PATH: &str = r"\Temp\";
+    let path: Vec<u16> = PATH.encode_utf16().chain(std::iter::once(0)).collect();
+    let required = path.len() as u32;
+    if capacity < required {
+        return Ok(DispatchOutcome::ReturnedR0(required));
+    }
+    if buffer == 0 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    ctx.cpu.write_mem(buffer, &wide_to_bytes(&path))?;
+    Ok(DispatchOutcome::ReturnedR0(required - 1))
 }
 
 fn create_directory_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -21918,6 +21954,31 @@ fn tls_set_value(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     ctx.kernel.sync_thread_tls(ctx.cpu)?;
     ctx.cpu
         .write_mem(USER_KDATA_TLS_ARRAY_VA + slot * 4, &value.to_le_bytes())?;
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn is_processor_feature_present(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const PF_ARM_V4: u32 = 0x8000_0001;
+    const PF_ARM_THUMB: u32 = 0x8000_0005;
+    let feature = ctx.arg_u32(0)?;
+    let supported = ctx.cpu.arch() == pocket_cpu::Arch::Arm
+        && matches!(feature, PF_ARM_V4 | PF_ARM_THUMB);
+    Ok(DispatchOutcome::ReturnedR0(u32::from(supported)))
+}
+
+fn flush_instruction_cache(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let process = ctx.arg_u32(0)?;
+    let base = ctx.arg_u32(1)?;
+    let size = ctx.arg_u32(2)?;
+    if !matches!(handle_object(ctx.kernel, process), Some(HandleObject::CurrentProcess)) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if base != 0 && u64::from(base) + u64::from(size) > (1u64 << 32) {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    ctx.cpu.flush_instruction_cache((base != 0).then_some((base, size)))?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -36414,6 +36475,49 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert!(ctx.kernel.multimedia_timer_joins.is_empty());
+    }
+
+    #[test]
+    fn nfs_startup_apis_follow_wince_contracts() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+
+        for (feature, expected) in [(0x8000_0001, 1), (0x8000_0005, 1), (0x8000_0018, 0)] {
+            ctx.cpu.write_reg(ArmReg::R0, feature).unwrap();
+            assert_eq!(is_processor_feature_present(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(expected));
+        }
+
+        ctx.cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
+        ctx.cpu.write_mem(0x1000, &[0xaa; 14]).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 6).unwrap();
+        assert_eq!(get_temp_path_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(7));
+        assert_eq!(ctx.cpu.read_mem(0x1000, 14).unwrap(), vec![0xaa; 14]);
+        ctx.cpu.write_reg(ArmReg::R0, 7).unwrap();
+        assert_eq!(get_temp_path_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(6));
+        assert_eq!(ctx.cpu.read_mem(0x1000, 14).unwrap(), wide_to_bytes(&[92, 84, 101, 109, 112, 92, 0]));
+
+        ctx.cpu.write_mem(0x1000, b"A\0Z").unwrap();
+        ctx.cpu.write_mem(0x1100, b"a\0y").unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
+        for (len, expected) in [(2, 0), (3, 1)] {
+            ctx.cpu.write_reg(ArmReg::R2, len).unwrap();
+            assert_eq!(memicmp(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(expected));
+        }
+
+        ctx.cpu.write_reg(ArmReg::R0, pocket_kernel::CE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
+        ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
+        assert_eq!(flush_instruction_cache(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(flush_instruction_cache(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(ctx.kernel.thread_last_errors[&0], ERROR_INVALID_HANDLE);
     }
 
     #[test]

@@ -1,4 +1,6 @@
 crates\pocket-core\src\lib.rs
+crates\pocket-cpu\src\lib.rs
+crates\pocket-cpu\src\unicorn.rs
 crates\pocket-kernel\src\controls.rs
 crates\pocket-kernel\src\lib.rs
 crates\pocket-kernel\src\registry.rs

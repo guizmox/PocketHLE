@@ -828,6 +828,18 @@ impl Cpu for UnicornCpu {
         let _ = self.uc.ctl_flush_tlb();
         Ok(())
     }
+    fn flush_instruction_cache(&mut self, range: Option<(u32, u32)>) -> Result<(), CpuError> {
+        let result = match range {
+            Some((base, size)) if size != 0 => {
+                let end = u64::from(base) + u64::from(size);
+                self.uc.ctl_remove_cache(u64::from(base), end)
+            }
+            Some(_) => return Ok(()),
+            None => self.uc.ctl_flush_tb(),
+        };
+        result.map_err(|error| CpuError::Backend(format!("flush instruction cache: {error:?}")))
+    }
+
     fn protect_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError> {
         if prot.contains(Prot::WRITE)
             && self.shared_regions.iter().any(|(&base, (len, region))| {
@@ -1634,7 +1646,7 @@ mod tests {
             cpu.write_mem(0x3000, &(0xe2800000u32 | increment).to_le_bytes())
                 .unwrap();
             // Unicorn host writes require explicit translated-code invalidation.
-            cpu.uc.ctl_remove_cache(0x3000, 0x3003).unwrap();
+            cpu.flush_instruction_cache(Some((0x3000, 4))).unwrap();
             cpu.write_reg(ArmReg::R0, 0).unwrap();
             cpu.write_reg(ArmReg::R2, 5000).unwrap();
             assert_eq!(

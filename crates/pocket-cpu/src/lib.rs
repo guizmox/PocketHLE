@@ -234,6 +234,11 @@ pub trait Cpu {
     fn protect_region(&mut self, _va: u32, _size: u32, _prot: Prot) -> Result<(), CpuError> {
         Err(CpuError::Unsupported("page protection"))
     }
+    /// Invalidate translated instructions for a guest range, or the entire
+    /// instruction cache if no range is supplied. Interpreters have no cache.
+    fn flush_instruction_cache(&mut self, _range: Option<(u32, u32)>) -> Result<(), CpuError> {
+        Ok(())
+    }
     /// Validate an API buffer against guest permissions without materializing pages.
     /// Host loader reads/writes intentionally bypass protection; guest API buffers do not.
     fn check_guest_access(&self, _va: u32, _len: u32, _required: Prot) -> Result<(), CpuError> {

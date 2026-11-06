@@ -2526,14 +2526,14 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 ui.label("");
-                ui.small("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.");
+                ui.add(egui::Label::new("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.").wrap(true));
                 ui.end_row();
         });
         ui.separator();
         ui.heading("Graphics compatibility");
         crate::controller_ui::checkbox(ui, &mut draft.pocketpc_intel2700g_depth_bias,
             "Intel 2700G depth-bias compatibility");
-        ui.small("Use if projected lights or ground decals show through foreground objects. Reproduces the original WinCE driver's integer constant bias without its slope term, with 24-bit depth. Applies to PocketPC games on the next launch, in software and GPU modes.");
+        ui.add(egui::Label::new("Use if projected lights or ground decals show through foreground objects. Reproduces the original WinCE driver's integer constant bias without its slope term, with 24-bit depth. Applies to PocketPC games on the next launch, in software and GPU modes.").wrap(true));
         } else {
         let library_root = self.library.root().display().to_string();
         ui.add_space(10.0);
@@ -2551,7 +2551,7 @@ impl PocketLauncher {
                         if crate::controller_ui::button(ui, "Choose GPU in Windows…").clicked() {
                             crate::host_gpu::open_settings();
                         }
-                        ui.small("Select this PocketHLE executable in Windows Graphics settings, choose a GPU, then restart PocketHLE. By default, PocketHLE lets the system choose the GPU.");
+                        ui.add(egui::Label::new("Select this PocketHLE executable in Windows Graphics settings, choose a GPU, then restart PocketHLE. By default, PocketHLE lets the system choose the GPU.").wrap(true));
                     });
                     ui.end_row();
                 }
@@ -2569,13 +2569,13 @@ impl PocketLauncher {
                 }).response.on_hover_text("Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch.");
                 ui.end_row();
                 ui.label("");
-                ui.small("2x/3x/4x increases the rendered resolution; display zoom then scales that image. Applies next launch.");
+                ui.add(egui::Label::new("2x/3x/4x increases the rendered resolution; display zoom then scales that image. Applies next launch.").wrap(true));
                 ui.end_row();
                 ui.label("VSync (PC / Steam Deck)");
                 crate::controller_ui::checkbox(ui, &mut draft.desktop_vsync, "Synchronize with the display");
                 ui.end_row();
                 ui.label("");
-                ui.small("Limits window presentation to the display refresh rate and prevents tearing. Restart PocketHLE after changing this setting.");
+                ui.add(egui::Label::new("Limits window presentation to the display refresh rate and prevents tearing. Restart PocketHLE after changing this setting.").wrap(true));
                 ui.end_row();
                 ui.label("Frame rate limit");
                 crate::controller_ui::ComboBox::from_id_source("global_frame_rate_limit")
@@ -2587,7 +2587,7 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 ui.label("");
-                ui.small("Default maximum game FPS. Games can inherit this limit or choose another value, including Unlimited. Applies next launch.");
+                ui.add(egui::Label::new("Default maximum game FPS. Games can inherit this limit or choose another value, including Unlimited. Applies next launch.").wrap(true));
                 ui.end_row();
 
 
@@ -3298,7 +3298,7 @@ impl PocketLauncher {
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_random_seed, "Empty = normal randomness");
                     ui.end_row();
                     ui.label("");
-                    ui.small("Use to reproduce a legacy registration request. Decimal value; overrides every srand seed for this game. Not a hardware identity field. Leave empty for normal randomness.");
+                    ui.add(egui::Label::new("Use to reproduce a legacy registration request. Decimal value; overrides every srand seed for this game. Not a hardware identity field. Leave empty for normal randomness.").wrap(true));
                     ui.end_row();
                     ui.label("Owner name (PocketPC)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_owner_name, "Device default");
