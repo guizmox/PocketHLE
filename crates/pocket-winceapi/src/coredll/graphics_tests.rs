@@ -1041,6 +1041,8 @@ fn showing_an_existing_dialog_brings_its_pixels_above_newer_dialogs() {
                 caption: None,
                 ok_pressed: false,
                 caption_height: None,
+                caption_command: Some(1),
+                caption_help: false,
             });
         let h = kernel.controls.create(
             hwnd,
@@ -1825,6 +1827,8 @@ fn activating_dialog_keeps_child_dialogs_above_parent_background() {
                 caption: None,
                 ok_pressed: false,
                 caption_height: None,
+                caption_command: Some(1),
+                caption_help: false,
             });
     }
     kernel.window_parents.insert(child, parent);
@@ -2458,6 +2462,8 @@ fn screen_client_conversion_accounts_for_modal_origin_and_caption() {
         caption: Some("Dialog".into()),
         ok_pressed: false,
         caption_height: None,
+        caption_command: Some(1),
+        caption_help: false,
     });
     let origin = kernel.controls.panel(hwnd).unwrap().client_origin();
     let thunk = thunk_at(0x70000100);
@@ -2755,6 +2761,8 @@ fn custom_native_child_surface_survives_dialog_and_control_compositing() {
             caption: None,
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
     kernel.window_parents.insert(map, panel);
     kernel.window_rects.insert(map, (40, 50, 280, 165));
@@ -2807,6 +2815,8 @@ fn native_pointer_uses_hit_window_and_client_origin_instead_of_key_focus() {
             caption: Some("Map".into()),
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
     kernel.active_window = panel;
     kernel.window_rects.insert(map, (5, 7, 100, 80));

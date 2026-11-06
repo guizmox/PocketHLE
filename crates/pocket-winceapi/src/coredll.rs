@@ -13257,6 +13257,26 @@ fn controls_take_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
 ) -> Option<Option<(u32, u32, u32, u32)>> {
+    if let Some(panel) = ctx.kernel.controls.panel(ctx.kernel.active_window).filter(|panel| {
+        panel.visible && (!panel.uses_navigation_bar() || ctx.kernel.pocket_pc_taskbar_visible())
+    }) {
+        let hwnd = panel.hwnd;
+        let action = match ev {
+            InputEvent::PointerDown { x, y }
+                if panel.ok_box_contains(i32::from(x), i32::from(y)) =>
+            {
+                ctx.kernel.controls.pointer_down_in(hwnd, i32::from(x), i32::from(y))
+            }
+            InputEvent::PointerUp { x, y } if panel.ok_pressed => {
+                ctx.kernel.controls.pointer_up_in(hwnd, i32::from(x), i32::from(y))
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            repaint_controls(ctx);
+            return control_action_message(ctx, action);
+        }
+    }
     let shell = &mut ctx.kernel.gdi.shell_menus;
     if shell.taskbar_captured {
         match ev {
@@ -13709,6 +13729,21 @@ fn set_focus(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }))
 }
 
+// Ordinary Pocket PC dialogs are positioned within the work area. Dialogs
+// initialized by the shell already account for the navigation bar internally.
+fn dialog_work_area_top(kernel: &KernelState, hwnd: u32) -> Option<i32> {
+    if kernel.pocket_pc_taskbar_visible()
+        && !kernel
+            .controls
+            .panel(hwnd)
+            .is_some_and(|panel| panel.uses_navigation_bar())
+    {
+        Some(pocket_kernel::shell_menu::HEIGHT)
+    } else {
+        None
+    }
+}
+
 /// `BOOL MoveWindow(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint)`.
 ///
 /// Controls are routinely created `0x0` and positioned from the parent's
@@ -13719,6 +13754,11 @@ fn move_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let x = ctx.arg_u32(1)? as i32;
     let y = ctx.arg_u32(2)? as i32;
+    let y = if ctx.kernel.controls.panel(hwnd).is_some() {
+        dialog_work_area_top(ctx.kernel, hwnd).map_or(y, |top| y.max(top))
+    } else {
+        y
+    };
     let w = ctx.arg_u32(3)? as i32;
     let h = ctx.arg_u32(4)? as i32;
     if ctx.kernel.window_rects.contains_key(&hwnd) {
@@ -13766,6 +13806,11 @@ fn set_window_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     let insert_after = ctx.arg_u32(1)?;
     let x = ctx.arg_u32(2)? as i32;
     let y = ctx.arg_u32(3)? as i32;
+    let y = if ctx.kernel.controls.panel(hwnd).is_some() {
+        dialog_work_area_top(ctx.kernel, hwnd).map_or(y, |top| y.max(top))
+    } else {
+        y
+    };
     let w = ctx.arg_u32(4)? as i32;
     let h = ctx.arg_u32(5)? as i32;
     let flags = ctx.arg_u32(6).unwrap_or(0);
@@ -18855,7 +18900,12 @@ fn set_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         } else {
             &mut entry.1
         };
-        std::mem::replace(slot, new_long)
+        let previous = std::mem::replace(slot, new_long);
+        if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
+            panel.set_caption_styles(entry.0, entry.1);
+            repaint_controls(ctx);
+        }
+        previous
     } else {
         0
     };
@@ -23586,22 +23636,23 @@ fn build_dialog_from_template_for(
     // the panel against the edge. Clamp so the panel is on screen even
     // if an app never does that.
     let (screen_w, screen_h) = screen_dims(ctx);
+    let top = dialog_work_area_top(ctx.kernel, owner_hwnd).unwrap_or(0);
     let (x, y) = if modal {
         (
             ((screen_w as i32 - win_w) / 2).max(0),
-            ((screen_h as i32 - win_h) / 2).max(0),
+            ((screen_h as i32 - win_h) / 2).max(top),
         )
     } else {
         (
             px.min(screen_w as i32 - win_w).max(0),
-            py.min(screen_h as i32 - win_h).max(0),
+            py.min(screen_h as i32 - win_h).max(top),
         )
     };
 
     // Clear a previous incarnation first: this also drops the old panel,
     // so it has to happen before the new one is registered.
     ctx.kernel.controls.destroy_children_of(owner_hwnd);
-    ctx.kernel.controls.add_panel(DialogPanel {
+    let mut panel = DialogPanel {
         hwnd: owner_hwnd,
         x,
         y,
@@ -23616,7 +23667,11 @@ fn build_dialog_from_template_for(
         caption,
         ok_pressed: false,
         caption_height: None,
-    });
+        caption_command: Some(1),
+        caption_help: false,
+    };
+    panel.set_caption_styles(tmpl.style, tmpl.ex_style);
+    ctx.kernel.controls.add_panel(panel);
 
     if modal {
         ctx.kernel
@@ -26964,6 +27019,8 @@ mod tests {
             visible: true,
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         let ev = InputEvent::PointerUp { x: 25, y: 50 };
         assert_eq!(
@@ -34258,6 +34315,8 @@ mod tests {
                 caption: None,
                 ok_pressed: false,
                 caption_height: None,
+                caption_command: Some(1),
+                caption_help: false,
             });
         assert!(!kernel.controls.is_empty());
         kernel
@@ -34304,6 +34363,8 @@ mod tests {
                 caption: None,
                 ok_pressed: false,
                 caption_height: None,
+                caption_command: Some(1),
+                caption_help: false,
             });
         assert!(!kernel.window_rects.contains_key(&hwnd));
         let mut ctx = CallCtx {
@@ -42026,6 +42087,8 @@ mod pocket_shell_geometry_tests {
                 border,
                 caption: Some(String::new()),
                 caption_height: Some(caption_height),
+                caption_command: Some(1),
+                caption_help: false,
                 ok_pressed: false,
             });
             let sp = cpu.read_reg(ArmReg::Sp).unwrap();

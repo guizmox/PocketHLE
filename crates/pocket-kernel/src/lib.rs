@@ -2450,6 +2450,9 @@ impl KernelState {
             .get(&title_owner)
             .map(String::as_str)
             .unwrap_or("");
+        let navigation_dialog = controls
+            .panel(self.active_window)
+            .filter(|panel| panel.visible && panel.uses_navigation_bar());
         let mut layers = Vec::new();
         let mut native_paint_changed = false;
         for (&hwnd, &dc) in &self.window_dcs {
@@ -2593,7 +2596,7 @@ impl KernelState {
         if taskbar {
             self.gdi
                 .shell_menus
-                .render_taskbar(&mut surf, taskbar_title);
+                .render_taskbar(&mut surf, taskbar_title, navigation_dialog);
         }
         if !self.shell_keyboard.sip {
             self.shell_keyboard.render(&mut surf);
@@ -5739,6 +5742,8 @@ mod tests {
             caption: None,
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         state.composite_controls();
         assert_eq!(source.reads.load(Ordering::Relaxed), 0);
@@ -5867,6 +5872,8 @@ mod tests {
             caption: Some("Test".into()),
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         let list = state.controls.create(
             parent,

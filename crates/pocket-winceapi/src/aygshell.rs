@@ -462,9 +462,11 @@ fn sh_init_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         if flags & 1 != 0 {
             if let Some(style) = ctx.kernel.window_styles.get_mut(&hwnd) {
                 style.0 |= 0x00c00000;
+                style.1 |= pocket_kernel::controls::DialogPanel::WS_EX_CAPTIONOKBTN;
             }
             if let Some(panel) = ctx.kernel.controls.panel_mut(hwnd) {
                 panel.caption.get_or_insert_with(String::new);
+                panel.caption_command = Some(pocket_kernel::controls::IDOK);
             }
         }
         if flags & 0x54 != 0 {
@@ -911,6 +913,8 @@ mod fullscreen_dialog_layout_tests {
                 border: true,
                 caption: None,
                 caption_height: None,
+                caption_command: Some(1),
+                caption_help: false,
                 ok_pressed: false,
             });
             cpu.write_mem(

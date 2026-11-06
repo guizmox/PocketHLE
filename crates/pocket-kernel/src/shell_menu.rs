@@ -71,7 +71,12 @@ fn enabled(item: &MenuItem, menu: u32, states: &HashMap<u32, HashMap<u32, u32>>)
             == 0
 }
 impl ShellMenus {
-    pub fn render_taskbar(&self, surface: &mut Surface<'_>, caption: &str) {
+    pub fn render_taskbar(
+        &self,
+        surface: &mut Surface<'_>,
+        caption: &str,
+        dialog: Option<&crate::controls::DialogPanel>,
+    ) {
         let (width, height) = surface.dimensions();
         let width = width as i32;
         for y in 0..HEIGHT {
@@ -127,27 +132,19 @@ impl ShellMenus {
                 }
             }
         }
-        let clip = [0, 0, width, HEIGHT];
-        let (hour, minute) = host_local_clock();
-        let clock = format!("{hour:02}:{minute:02}");
-        let clock_font = crate::gdi::Font::new(-13);
-        let clock = text::layout(Some(&clock_font), &clock.encode_utf16().collect::<Vec<_>>());
-        // Reserve the clock area: the guest caption is clipped underneath it,
-        // never compressed or wrapped onto a second line (PocketPC shell style).
         let title_font = crate::gdi::Font::new(-12);
         let title = text::layout(
             Some(&title_font),
             &caption.encode_utf16().collect::<Vec<_>>(),
         );
-        let title_clip = [30, 0, (width - clock.width - 16).max(30), HEIGHT];
+        let title_right = dialog
+            .and_then(|panel| panel.help_box().or_else(|| panel.ok_box()))
+            .map_or(width - 5, |(left, ..)| left - 4);
+        let title_clip = [30, 0, title_right.max(30), HEIGHT];
         title.draw(surface, 30, (HEIGHT - title.height) / 2, 0xffff, title_clip);
-        clock.draw(
-            surface,
-            width - clock.width - 8,
-            (HEIGHT - clock.height) / 2,
-            0xffff,
-            clip,
-        );
+        if let Some(dialog) = dialog {
+            dialog.render_caption_buttons(surface);
+        }
         surface.fill_rect(0, HEIGHT - 1, width, 1, 0x3d5b);
     }
 
@@ -762,31 +759,4 @@ mod tests {
         );
         assert!(!shell.path.is_empty());
     }
-}
-
-/// Shell chrome follows the host's local civil time, including its DST rules.
-/// This does not change the guest's separately modeled WinCE time zone.
-fn host_local_clock() -> (u16, u16) {
-    #[cfg(unix)]
-    unsafe {
-        let timestamp = libc::time(std::ptr::null_mut());
-        let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
-        if !libc::localtime_r(&timestamp, local.as_mut_ptr()).is_null() {
-            let local = local.assume_init();
-            return (local.tm_hour as u16, local.tm_min as u16);
-        }
-    }
-    #[cfg(windows)]
-    unsafe {
-        // SYSTEMTIME consists of eight WORD fields, in this exact order.
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetLocalTime(time: *mut [u16; 8]);
-        }
-        let mut local = [0u16; 8];
-        GetLocalTime(&mut local);
-        return (local[4], local[5]);
-    }
-    #[allow(unreachable_code)]
-    (0, 0)
 }

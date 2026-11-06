@@ -636,6 +636,8 @@ mod tests {
                         caption: Some("Budget".into()),
                         ok_pressed: false,
                         caption_height: None,
+                        caption_command: Some(1),
+                        caption_help: false,
                     });
             }
 

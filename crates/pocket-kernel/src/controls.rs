@@ -125,7 +125,9 @@ pub struct DialogPanel {
     /// Shell-managed fullscreen captions share the PocketPC navigation strip.
     /// None retains ordinary popup/dialog caption metrics.
     pub caption_height: Option<i32>,
-    /// Is the OK box currently held down?
+    pub caption_command: Option<u32>,
+    pub caption_help: bool,
+    /// Is the caption button currently held down?
     pub ok_pressed: bool,
 }
 
@@ -141,6 +143,7 @@ impl DialogPanel {
     /// to be wide enough for two glyphs plus a pixel of padding either
     /// side. The `?` box beside it is square.
     const BOX_H: i32 = 11;
+    const NAVIGATION_BOX: i32 = 20;
     const OK_BOX: i32 = 2 * font::GLYPH_W + 4;
     const HELP_BOX: i32 = Self::BOX_H;
     /// Gap between the two boxes.
@@ -153,10 +156,32 @@ impl DialogPanel {
     /// The OK label is drawn in the caption blue, as on a device.
     const OK_FG: u16 = 0x0010;
 
+    pub const WS_EX_CAPTIONOKBTN: u32 = 0x8000_0000;
+
+    pub fn set_caption_styles(&mut self, style: u32, extended: u32) {
+        const WS_SYSMENU: u32 = 0x0008_0000;
+        self.caption_command = if extended & Self::WS_EX_CAPTIONOKBTN != 0 {
+            Some(IDOK)
+        } else if style & WS_SYSMENU != 0 {
+            Some(IDCANCEL)
+        } else {
+            None
+        };
+        const DS_CONTEXTHELP: u32 = 0x0000_2000;
+        const WS_EX_CONTEXTHELP: u32 = 0x0000_0400;
+        self.caption_help = style & DS_CONTEXTHELP != 0 || extended & WS_EX_CONTEXTHELP != 0;
+    }
+
     /// Height the caption takes off the top of the window, or 0.
     pub fn caption_h(&self) -> i32 {
         if self.caption.is_some() {
-            self.caption_height.unwrap_or(Self::CAPTION_H).max(0)
+            match self.caption_height {
+                Some(navigation) if navigation > 0 => {
+                    (navigation - self.y - i32::from(self.border)).max(0)
+                }
+                Some(_) => 0,
+                None => Self::CAPTION_H,
+            }
         } else {
             0
         }
@@ -177,28 +202,47 @@ impl DialogPanel {
     /// why an app like Solitaire applies its Options as they are
     /// toggled rather than on the way out.
     pub fn ok_box(&self) -> Option<(i32, i32, i32, i32)> {
+        self.caption_command?;
+        self.caption_button_rect()
+    }
+
+    fn caption_button_rect(&self) -> Option<(i32, i32, i32, i32)> {
         self.caption.as_ref()?;
-        if self.caption_h() < Self::BOX_H {
+        let (top, height, width, box_height) = if let Some(height) = self.caption_height {
+            (0, height, Self::NAVIGATION_BOX, Self::NAVIGATION_BOX)
+        } else {
+            (
+                self.y + i32::from(self.border),
+                Self::CAPTION_H,
+                Self::OK_BOX,
+                Self::BOX_H,
+            )
+        };
+        if height < box_height {
             return None;
         }
-        let inset = i32::from(self.border);
-        let pad = (self.caption_h() - Self::BOX_H) / 2;
+        let pad = (height - box_height) / 2;
         Some((
-            self.x + self.w - inset - pad - Self::OK_BOX,
-            self.y + inset + pad,
-            Self::OK_BOX,
-            Self::BOX_H,
+            self.x + self.w - i32::from(self.border) - pad - width,
+            top + pad,
+            width,
+            box_height,
         ))
     }
 
-    /// Screen rectangle of the `?` box, immediately left of the OK one.
-    ///
-    /// Pocket PC puts context help here. We draw it because the caption
-    /// looks wrong without it, but it is inert: there is no help file to
-    /// show, and tapping it must not be mistaken for the OK box.
+    /// Screen rectangle of the help box, immediately left of the OK box.
     pub fn help_box(&self) -> Option<(i32, i32, i32, i32)> {
-        let (bx, by, _, bh) = self.ok_box()?;
-        Some((bx - Self::BOX_GAP - Self::HELP_BOX, by, Self::HELP_BOX, bh))
+        if !self.caption_help {
+            return None;
+        }
+        let (bx, by, bw, bh) = self.caption_button_rect()?;
+        let width = if self.uses_navigation_bar() {
+            Self::NAVIGATION_BOX
+        } else {
+            Self::HELP_BOX
+        };
+        let right = if self.caption_command.is_some() { bx - Self::BOX_GAP } else { bx + bw };
+        Some((right - width, by, width, bh))
     }
 
     /// Is `(x, y)`, in screen coordinates, inside the OK box?
@@ -222,7 +266,13 @@ impl DialogPanel {
         if self.border {
             stroke(surf, self.x, self.y, self.w, self.h, ChildWindow::TEXT);
         }
-        self.render_caption(surf);
+        if !self.uses_navigation_bar() {
+            self.render_caption(surf);
+        }
+    }
+
+    pub fn uses_navigation_bar(&self) -> bool {
+        self.caption_height.is_some()
     }
 
     /// Paint the caption bar and its OK box.
@@ -245,16 +295,26 @@ impl DialogPanel {
         // Stop the title before the boxes rather than under them.
         let right = self
             .help_box()
+            .or_else(|| self.ok_box())
             .map(|(bx, ..)| bx - 2)
             .unwrap_or(cx + cw)
             .min(cx + cw);
         draw_clipped(surf, cx + 3, ty, title, Self::CAPTION_FG, right);
 
+        self.render_caption_buttons(surf);
+    }
+
+    pub(crate) fn render_caption_buttons(&self, surf: &mut Surface<'_>) {
         if let Some((bx, by, bw, bh)) = self.help_box() {
             self.render_caption_box(surf, (bx, by, bw, bh), "?", false);
         }
         if let Some((bx, by, bw, bh)) = self.ok_box() {
-            self.render_caption_box(surf, (bx, by, bw, bh), "OK", self.ok_pressed);
+            let label = if self.caption_command == Some(IDCANCEL) {
+                "X"
+            } else {
+                "OK"
+            };
+            self.render_caption_box(surf, (bx, by, bw, bh), label, self.ok_pressed);
         }
     }
 
@@ -278,6 +338,18 @@ impl DialogPanel {
         };
         draw_edge(surf, bx, by, bw, bh, tl, br);
         let nudge = i32::from(pressed);
+        if self.uses_navigation_bar() {
+            let font = crate::gdi::Font::new(-14);
+            let label = crate::text::layout(Some(&font), &label.encode_utf16().collect::<Vec<_>>());
+            label.draw(
+                surf,
+                bx + (bw - label.width) / 2 + nudge,
+                by + (bh - label.height) / 2 + nudge,
+                Self::OK_FG,
+                [bx + 1, by + 1, bx + bw - 1, by + bh - 1],
+            );
+            return;
+        }
         let tx = bx + (bw - font::str_width(label)).max(0) / 2 + nudge;
         let ty = by + (bh - font::GLYPH_H) / 2 + nudge;
         draw_clipped(surf, tx, ty, label, Self::OK_FG, bx + bw - 1);
@@ -2662,18 +2734,16 @@ impl Controls {
 
     /// [`Self::pointer_up`] restricted to the children of `parent`.
     pub fn pointer_up_in(&mut self, parent: u32, x: i32, y: i32) -> Option<ControlAction> {
-        // Releasing the caption's OK box is the dialog's accept: report
-        // it as `IDOK` from the panel itself, which is what the shell
-        // sends on a device.
+        // Dispatch the command selected by the caption style.
         if let Some(panel) = self.panel_mut(parent) {
             if panel.ok_pressed {
                 panel.ok_pressed = false;
-                let hit = panel.ok_box_contains(x, y);
+                let command = panel.caption_command.filter(|_| panel.ok_box_contains(x, y));
                 let hwnd = panel.hwnd;
-                return Some(if hit {
+                return Some(if let Some(id) = command {
                     ControlAction::Clicked {
                         parent,
-                        id: IDOK,
+                        id,
                         hwnd,
                     }
                 } else {
@@ -3352,6 +3422,8 @@ mod tests {
             caption: None,
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         button(&mut controls, 2, 10, 10);
         let mut bitmap = Bitmap::new(100, 80);
@@ -3378,6 +3450,8 @@ mod tests {
             caption: None,
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         controls.render(&mut Surface::Bitmap(&mut bitmap));
         assert_ne!(pixel(&bitmap, 90, 70), 0xf800); // another dialog remains above
@@ -3999,6 +4073,8 @@ mod tests {
             caption: Some("Options".into()),
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: true,
         }
     }
 
@@ -4068,6 +4144,31 @@ mod tests {
         assert!(!titled.ok_box_contains(bx - 4, by + bh / 2));
         assert!(bare.ok_box().is_none());
         assert!(!bare.ok_box_contains(bx + bw / 2, by + bh / 2));
+    }
+
+    #[test]
+    fn caption_styles_choose_close_done_and_context_help() {
+        let hwnd = 0xDEAD_0002;
+        let mut panel = captioned_panel(hwnd);
+        panel.set_caption_styles(0, 0);
+        assert!(panel.ok_box().is_none());
+        assert!(panel.help_box().is_none());
+
+        panel.set_caption_styles(0x0008_0000, 0);
+        assert!(panel.help_box().is_none());
+        let (x, y, _, _) = panel.ok_box().unwrap();
+        let mut controls = Controls::default();
+        controls.add_panel(panel);
+        controls.pointer_down_in(hwnd, x, y);
+        assert!(matches!(
+            controls.pointer_up_in(hwnd, x, y),
+            Some(ControlAction::Clicked { id: IDCANCEL, .. })
+        ));
+
+        let panel = controls.panel_mut(hwnd).unwrap();
+        panel.set_caption_styles(0, DialogPanel::WS_EX_CAPTIONOKBTN | 0x400);
+        assert_eq!(panel.caption_command, Some(IDOK));
+        assert!(panel.help_box().is_some());
     }
 
     #[test]
@@ -4200,6 +4301,8 @@ mod tests {
             caption: None,
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         ctrls.create(
             STRIP,
@@ -4223,6 +4326,8 @@ mod tests {
             caption: Some("Options".into()),
             ok_pressed: false,
             caption_height: None,
+            caption_command: Some(1),
+            caption_help: false,
         });
         ctrls.render(&mut surf);
 
