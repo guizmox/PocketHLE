@@ -241,7 +241,11 @@ impl DialogPanel {
         } else {
             Self::HELP_BOX
         };
-        let right = if self.caption_command.is_some() { bx - Self::BOX_GAP } else { bx + bw };
+        let right = if self.caption_command.is_some() {
+            bx - Self::BOX_GAP
+        } else {
+            bx + bw
+        };
         Some((right - width, by, width, bh))
     }
 
@@ -2738,14 +2742,12 @@ impl Controls {
         if let Some(panel) = self.panel_mut(parent) {
             if panel.ok_pressed {
                 panel.ok_pressed = false;
-                let command = panel.caption_command.filter(|_| panel.ok_box_contains(x, y));
+                let command = panel
+                    .caption_command
+                    .filter(|_| panel.ok_box_contains(x, y));
                 let hwnd = panel.hwnd;
                 return Some(if let Some(id) = command {
-                    ControlAction::Clicked {
-                        parent,
-                        id,
-                        hwnd,
-                    }
+                    ControlAction::Clicked { parent, id, hwnd }
                 } else {
                     ControlAction::Consumed
                 });

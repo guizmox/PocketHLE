@@ -6988,9 +6988,8 @@ fn executable_heap_inherits_and_round_trips_an_explicit_override() {
             executable_heap: Some(enabled),
             ..Default::default()
         };
-        let restored: GameSettings = serde_json::from_str(
-            &serde_json::to_string(&game).unwrap(),
-        ).unwrap();
+        let restored: GameSettings =
+            serde_json::from_str(&serde_json::to_string(&game).unwrap()).unwrap();
         assert_eq!(restored.effective_executable_heap(&config), enabled);
     }
 }

@@ -959,7 +959,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "InterlockedExchangeAdd", interlocked_exchange_add);
     d.register_handler(dll, "InterlockedTestExchange", interlocked_compare_exchange);
     d.register_handler(dll, "GetSystemInfo", get_system_info);
-    d.register_handler(dll, "IsProcessorFeaturePresent", is_processor_feature_present);
+    d.register_handler(
+        dll,
+        "IsProcessorFeaturePresent",
+        is_processor_feature_present,
+    );
     d.register_handler(dll, "FlushInstructionCache", flush_instruction_cache);
     d.register_handler(dll, "SetKMode", set_kmode);
     d.register_handler(dll, "GetCurrentPermissions", get_current_permissions);
@@ -6263,7 +6267,10 @@ fn memicmp(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     compare_memory(ctx, true)
 }
 
-fn compare_memory(ctx: &mut CallCtx<'_>, ignore_case: bool) -> Result<DispatchOutcome, KernelError> {
+fn compare_memory(
+    ctx: &mut CallCtx<'_>,
+    ignore_case: bool,
+) -> Result<DispatchOutcome, KernelError> {
     let a = ctx.arg_u32(0)?;
     let b = ctx.arg_u32(1)?;
     let len = ctx.arg_u32(2)? as usize;
@@ -13293,19 +13300,28 @@ fn controls_take_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
 ) -> Option<Option<(u32, u32, u32, u32)>> {
-    if let Some(panel) = ctx.kernel.controls.panel(ctx.kernel.active_window).filter(|panel| {
-        panel.visible && (!panel.uses_navigation_bar() || ctx.kernel.pocket_pc_taskbar_visible())
-    }) {
+    if let Some(panel) = ctx
+        .kernel
+        .controls
+        .panel(ctx.kernel.active_window)
+        .filter(|panel| {
+            panel.visible
+                && (!panel.uses_navigation_bar() || ctx.kernel.pocket_pc_taskbar_visible())
+        })
+    {
         let hwnd = panel.hwnd;
         let action = match ev {
             InputEvent::PointerDown { x, y }
                 if panel.ok_box_contains(i32::from(x), i32::from(y)) =>
             {
-                ctx.kernel.controls.pointer_down_in(hwnd, i32::from(x), i32::from(y))
+                ctx.kernel
+                    .controls
+                    .pointer_down_in(hwnd, i32::from(x), i32::from(y))
             }
-            InputEvent::PointerUp { x, y } if panel.ok_pressed => {
-                ctx.kernel.controls.pointer_up_in(hwnd, i32::from(x), i32::from(y))
-            }
+            InputEvent::PointerUp { x, y } if panel.ok_pressed => ctx
+                .kernel
+                .controls
+                .pointer_up_in(hwnd, i32::from(x), i32::from(y)),
             _ => None,
         };
         if let Some(action) = action {
@@ -21961,8 +21977,8 @@ fn is_processor_feature_present(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome
     const PF_ARM_V4: u32 = 0x8000_0001;
     const PF_ARM_THUMB: u32 = 0x8000_0005;
     let feature = ctx.arg_u32(0)?;
-    let supported = ctx.cpu.arch() == pocket_cpu::Arch::Arm
-        && matches!(feature, PF_ARM_V4 | PF_ARM_THUMB);
+    let supported =
+        ctx.cpu.arch() == pocket_cpu::Arch::Arm && matches!(feature, PF_ARM_V4 | PF_ARM_THUMB);
     Ok(DispatchOutcome::ReturnedR0(u32::from(supported)))
 }
 
@@ -21970,7 +21986,10 @@ fn flush_instruction_cache(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
     let process = ctx.arg_u32(0)?;
     let base = ctx.arg_u32(1)?;
     let size = ctx.arg_u32(2)?;
-    if !matches!(handle_object(ctx.kernel, process), Some(HandleObject::CurrentProcess)) {
+    if !matches!(
+        handle_object(ctx.kernel, process),
+        Some(HandleObject::CurrentProcess)
+    ) {
         set_thread_error(ctx, ERROR_INVALID_HANDLE);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -21978,7 +21997,8 @@ fn flush_instruction_cache(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    ctx.cpu.flush_instruction_cache((base != 0).then_some((base, size)))?;
+    ctx.cpu
+        .flush_instruction_cache((base != 0).then_some((base, size)))?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -36490,17 +36510,29 @@ mod tests {
 
         for (feature, expected) in [(0x8000_0001, 1), (0x8000_0005, 1), (0x8000_0018, 0)] {
             ctx.cpu.write_reg(ArmReg::R0, feature).unwrap();
-            assert_eq!(is_processor_feature_present(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(expected));
+            assert_eq!(
+                is_processor_feature_present(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
         }
 
         ctx.cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
         ctx.cpu.write_mem(0x1000, &[0xaa; 14]).unwrap();
         ctx.cpu.write_reg(ArmReg::R0, 6).unwrap();
-        assert_eq!(get_temp_path_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(7));
+        assert_eq!(
+            get_temp_path_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(7)
+        );
         assert_eq!(ctx.cpu.read_mem(0x1000, 14).unwrap(), vec![0xaa; 14]);
         ctx.cpu.write_reg(ArmReg::R0, 7).unwrap();
-        assert_eq!(get_temp_path_w(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(6));
-        assert_eq!(ctx.cpu.read_mem(0x1000, 14).unwrap(), wide_to_bytes(&[92, 84, 101, 109, 112, 92, 0]));
+        assert_eq!(
+            get_temp_path_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(6)
+        );
+        assert_eq!(
+            ctx.cpu.read_mem(0x1000, 14).unwrap(),
+            wide_to_bytes(&[92, 84, 101, 109, 112, 92, 0])
+        );
 
         ctx.cpu.write_mem(0x1000, b"A\0Z").unwrap();
         ctx.cpu.write_mem(0x1100, b"a\0y").unwrap();
@@ -36508,15 +36540,26 @@ mod tests {
         ctx.cpu.write_reg(ArmReg::R1, 0x1100).unwrap();
         for (len, expected) in [(2, 0), (3, 1)] {
             ctx.cpu.write_reg(ArmReg::R2, len).unwrap();
-            assert_eq!(memicmp(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(expected));
+            assert_eq!(
+                memicmp(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
         }
 
-        ctx.cpu.write_reg(ArmReg::R0, pocket_kernel::CE_CURRENT_PROCESS_HANDLE).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R0, pocket_kernel::CE_CURRENT_PROCESS_HANDLE)
+            .unwrap();
         ctx.cpu.write_reg(ArmReg::R1, 0).unwrap();
         ctx.cpu.write_reg(ArmReg::R2, 0).unwrap();
-        assert_eq!(flush_instruction_cache(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            flush_instruction_cache(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
-        assert_eq!(flush_instruction_cache(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            flush_instruction_cache(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
         assert_eq!(ctx.kernel.thread_last_errors[&0], ERROR_INVALID_HANDLE);
     }
 

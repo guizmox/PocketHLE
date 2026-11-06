@@ -460,9 +460,9 @@ fn run_process(
 
     let is_gizmondo = is_gizmondo_game(entry, library_root);
     if let Err(e) = emu.load_pe_with_executable_heap(
-            &exe,
-            is_gizmondo || entry.settings.effective_executable_heap(&launcher_config),
-        ) {
+        &exe,
+        is_gizmondo || entry.settings.effective_executable_heap(&launcher_config),
+    ) {
         summary_lines.push(format!("load_pe failed: {e:#}"));
         return (summary_lines.join("\n"), 0xc0000135);
     }
