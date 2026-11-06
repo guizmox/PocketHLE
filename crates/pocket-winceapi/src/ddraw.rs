@@ -1218,12 +1218,8 @@ fn surface_unlock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// `Blt(LPRECT dst, LPDIRECTDRAWSURFACE src, LPRECT srcRect, DWORD flags,
 /// LPDDBLTFX fx)` — the last two arrive on the stack.
 ///
-/// Two shapes matter. `DDBLT_COLORFILL` with a NULL source clears a
-/// rectangle to `fx->dwFillColor`, which is how a game starts its frame;
-/// everything else is a surface-to-surface copy, which is how it ends
-/// one. Scaling is not implemented: the copy takes the overlap of the
-/// two rectangles, which is what a CE game asking for a straight present
-/// gets anyway.
+/// Color fills and RGB565 copies use the existing paths. Differently sized
+/// rectangles request a stretch, including the 2× present of VGA CE games.
 fn surface_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let dest_rect = ctx.arg_u32(1)?;
     let source = ctx.arg_u32(2)?;
@@ -1233,7 +1229,8 @@ fn surface_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let Some(dest) = this_surface(ctx)? else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let dest_area = read_rect(ctx, dest_rect, dest);
+    let target = read_blt_rect(ctx, dest_rect, dest);
+    let dest_area = clip_rect(target, dest);
     if flags & 0x0000_0400 != 0 {
         // DDBLT_COLORFILL. dwFillColor is the third DWORD of CE's
         // DDBLTFX, after dwSize and dwROP.
@@ -1244,8 +1241,13 @@ fn surface_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         };
         fill_rect(ctx, dest, dest_area, colour)?;
     } else if let Some(src) = surface_record(ctx, source) {
-        let source_area = read_rect(ctx, source_rect, src);
-        copy_rect(ctx, src, source_area, dest, dest_area)?;
+        let source = read_blt_rect(ctx, source_rect, src);
+        if (source.2 - source.0, source.3 - source.1) == (target.2 - target.0, target.3 - target.1)
+        {
+            copy_rect(ctx, src, clip_rect(source, src), dest, dest_area)?;
+        } else {
+            stretch_rect(ctx, src, source, dest, target)?;
+        }
     }
     if dest.primary {
         publish_framebuffer(ctx)?;
@@ -1253,22 +1255,38 @@ fn surface_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+type BltRect = (i64, i64, i64, i64);
+
+fn read_blt_rect(ctx: &mut CallCtx<'_>, rect: u32, surface: SurfaceRecord) -> BltRect {
+    let whole = (0, 0, i64::from(surface.width), i64::from(surface.height));
+    let mut bytes = [0u8; 16];
+    if rect == 0 || ctx.cpu.read_mem_into(rect, &mut bytes).is_err() {
+        return whole;
+    }
+    let word = |i: usize| {
+        i64::from(i32::from_le_bytes(
+            bytes[i * 4..i * 4 + 4].try_into().unwrap(),
+        ))
+    };
+    (word(0), word(1), word(2), word(3))
+}
+
+fn clip_rect((left, top, right, bottom): BltRect, surface: SurfaceRecord) -> (u32, u32, u32, u32) {
+    let width = i64::from(surface.width);
+    let height = i64::from(surface.height);
+    let left = left.clamp(0, width);
+    let top = top.clamp(0, height);
+    (
+        left as u32,
+        top as u32,
+        right.clamp(left, width) as u32,
+        bottom.clamp(top, height) as u32,
+    )
+}
+
 /// A `RECT` clamped to a surface, or the whole surface when NULL.
 fn read_rect(ctx: &mut CallCtx<'_>, rect: u32, surface: SurfaceRecord) -> (u32, u32, u32, u32) {
-    let whole = (0, 0, surface.width, surface.height);
-    if rect == 0 {
-        return whole;
-    }
-    let mut bytes = [0u8; 16];
-    if ctx.cpu.read_mem_into(rect, &mut bytes).is_err() {
-        return whole;
-    }
-    let word = |i: usize| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
-    let left = word(0).clamp(0, surface.width as i32) as u32;
-    let top = word(1).clamp(0, surface.height as i32) as u32;
-    let right = word(2).clamp(left as i32, surface.width as i32) as u32;
-    let bottom = word(3).clamp(top as i32, surface.height as i32) as u32;
-    (left, top, right, bottom)
+    clip_rect(read_blt_rect(ctx, rect, surface), surface)
 }
 
 fn fill_rect(
@@ -1309,6 +1327,79 @@ fn copy_rect(
             .read_mem_into(src.pixels + (st + y) * src.pitch + sl * 2, &mut row)?;
         ctx.cpu
             .write_mem(dest.pixels + (dt + y) * dest.pitch + dl * 2, &row)?;
+    }
+    Ok(())
+}
+
+/// Nearest-neighbor RGB565 stretch. Clip in destination space without
+/// changing the scale or origin of the requested mapping.
+fn stretch_rect(
+    ctx: &mut CallCtx<'_>,
+    src: SurfaceRecord,
+    (sl, st, sr, sb): BltRect,
+    dest: SurfaceRecord,
+    (dl, dt, dr, db): BltRect,
+) -> Result<(), KernelError> {
+    if sr <= sl || sb <= st || dr <= dl || db <= dt {
+        return Ok(());
+    }
+    let sample = |pixel: i64, start: i64, extent: i64, dst_start: i64, dst_extent: i64| {
+        start + (((pixel - dst_start) as u64 * extent as u64) / dst_extent as u64) as i64
+    };
+    let columns: Vec<_> = (dl.max(0)..dr.min(i64::from(dest.width)))
+        .filter_map(|x| {
+            let sx = sample(x, sl, sr - sl, dl, dr - dl);
+            (0..i64::from(src.width))
+                .contains(&sx)
+                .then_some((x as u32, sx as u32))
+        })
+        .collect();
+    let rows: Vec<_> = (dt.max(0)..db.min(i64::from(dest.height)))
+        .filter_map(|y| {
+            let sy = sample(y, st, sb - st, dt, db - dt);
+            (0..i64::from(src.height))
+                .contains(&sy)
+                .then_some((y as u32, sy as u32))
+        })
+        .collect();
+    let (Some(&(left, first_x)), Some(&(_, last_x)), Some(&(_, first_y)), Some(&(_, last_y))) =
+        (columns.first(), columns.last(), rows.first(), rows.last())
+    else {
+        return Ok(());
+    };
+    let source_bytes = ((last_x - first_x + 1) * 2) as usize;
+    let mut input = vec![0; source_bytes];
+    // A stretch in place can overwrite source rows before they are sampled.
+    let snapshot = if src.pixels == dest.pixels {
+        let mut pixels = vec![0; source_bytes * (last_y - first_y + 1) as usize];
+        for (row, y) in pixels.chunks_exact_mut(source_bytes).zip(first_y..=last_y) {
+            ctx.cpu
+                .read_mem_into(src.pixels + y * src.pitch + first_x * 2, row)?;
+        }
+        Some(pixels)
+    } else {
+        None
+    };
+    let mut output = vec![0; columns.len() * 2];
+    let mut previous = None;
+    for (y, sy) in rows {
+        if previous != Some(sy) {
+            let row = if let Some(pixels) = &snapshot {
+                let offset = (sy - first_y) as usize * source_bytes;
+                &pixels[offset..offset + source_bytes]
+            } else {
+                ctx.cpu
+                    .read_mem_into(src.pixels + sy * src.pitch + first_x * 2, &mut input)?;
+                &input
+            };
+            for (pixel, &(_, sx)) in output.chunks_exact_mut(2).zip(&columns) {
+                let offset = (sx - first_x) as usize * 2;
+                pixel.copy_from_slice(&row[offset..offset + 2]);
+            }
+            previous = Some(sy);
+        }
+        ctx.cpu
+            .write_mem(dest.pixels + y * dest.pitch + left * 2, &output)?;
     }
     Ok(())
 }
@@ -1390,6 +1481,53 @@ mod tests {
         pixel_format_bytes, surface_desc_bytes, CLIPPER_METHODS, DDRAW_METHODS, PALETTE_METHODS,
         SURFACE_METHODS,
     };
+
+    #[test]
+    fn rgb565_stretch_preserves_sampling_when_destination_is_clipped() {
+        use super::*;
+        use pocket_cpu::{stub::StubCpu, Cpu, Prot};
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x1000, &[1, 0, 2, 0, 3, 0, 4, 0]).unwrap();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "ddraw.dll".into(),
+            binding: ImportBinding::Name("surface_blt".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let src = SurfaceRecord {
+            pixels: 0x1000,
+            width: 2,
+            height: 2,
+            pitch: 4,
+            primary: false,
+        };
+        let dest = SurfaceRecord {
+            pixels: 0x1100,
+            width: 4,
+            height: 4,
+            pitch: 8,
+            primary: false,
+        };
+        stretch_rect(&mut ctx, src, (0, 0, 2, 2), dest, (-1, -1, 3, 3)).unwrap();
+        assert_eq!(
+            ctx.cpu.read_mem(0x1100, 32).unwrap(),
+            [
+                1, 0, 2, 0, 2, 0, 0, 0, 3, 0, 4, 0, 4, 0, 0, 0, 3, 0, 4, 0, 4, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0
+            ]
+        );
+    }
 
     #[test]
     fn vertical_blank_retries_preserve_arguments_and_really_wait() {

@@ -1,2 +1,1 @@
-crates\pocket-winceapi\data\coredll-ordinals.json
-crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\ddraw.rs
