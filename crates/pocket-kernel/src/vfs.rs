@@ -729,6 +729,15 @@ impl Vfs {
     /// Whether a host path belongs to another mount's private backing subtree.
     fn hidden_backing(&self, mount: &Mount, path: &Path) -> bool {
         self.mounts.iter().any(|other| {
+            if !other.read_only
+                && path
+                    .strip_prefix(&other.host_dir)
+                    .ok()
+                    .and_then(|path| path.components().next())
+                    .is_some_and(|component| component.as_os_str() == Self::OVERLAY_DELETIONS)
+            {
+                return true;
+            }
             other.isolated && !std::ptr::eq(mount, other) && path.starts_with(&other.host_dir)
         })
     }
@@ -934,8 +943,69 @@ impl Vfs {
         mounts
     }
 
+    // Store overlay deletions in a private host directory, outside the guest
+    // namespace. An upper file always wins, even if a lower file is masked.
+    const OVERLAY_DELETIONS: &'static str = ".pockethle-whiteouts";
+
+    fn overlay_marker(mount: &Mount, normal: &str) -> Option<PathBuf> {
+        use sha1::{Digest, Sha1};
+        use std::fmt::Write as _;
+
+        let prefix = normal.get(..mount.prefix.len())?;
+        if !prefix.eq_ignore_ascii_case(&mount.prefix) {
+            return None;
+        }
+        let relative = &normal[mount.prefix.len()..];
+        let mut parts = Vec::new();
+        for component in Path::new(relative).components() {
+            match component {
+                Component::Normal(part) => parts.push(part.to_str()?),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    parts.pop()?;
+                }
+                _ => return None,
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let hash = Sha1::digest(parts.join("/").to_ascii_lowercase().as_bytes());
+        let mut filename = String::with_capacity(hash.len() * 2);
+        for byte in hash {
+            write!(&mut filename, "{byte:02x}").unwrap();
+        }
+        Some(mount.host_dir.join(Self::OVERLAY_DELETIONS).join(filename))
+    }
+
+    fn overlay_marker_exists(marker: &Path) -> bool {
+        marker
+            .parent()
+            .is_some_and(|parent| parent.symlink_metadata().is_ok_and(|meta| meta.is_dir()))
+            && marker.symlink_metadata().is_ok_and(|meta| meta.is_file())
+    }
+
+    fn masked_lower_path(&self, mount: &Mount, normal: &str) -> bool {
+        mount.read_only
+            && self.mounts.iter().any(|upper| {
+                !upper.read_only
+                    && upper.prefix == mount.prefix
+                    && upper
+                        .host_dir
+                        .join(Self::OVERLAY_DELETIONS)
+                        .symlink_metadata()
+                        .is_ok_and(|meta| meta.is_dir())
+                    && Self::overlay_marker(upper, normal).is_some_and(|marker| {
+                        marker.symlink_metadata().is_ok_and(|meta| meta.is_file())
+                    })
+            })
+    }
+
     fn host_path_for_mount(&self, mount: &Mount, normalised: &str) -> Option<PathBuf> {
         let root = mount.prefix.trim_end_matches('/');
+        if self.masked_lower_path(mount, normalised) {
+            return None;
+        }
         if normalised.eq_ignore_ascii_case(root) {
             return (!self.hidden_backing(mount, &mount.host_dir)).then(|| mount.host_dir.clone());
         }
@@ -945,6 +1015,9 @@ impl Vfs {
             match comp {
                 Component::Normal(n) => {
                     let wanted = n.to_string_lossy();
+                    if wanted.eq_ignore_ascii_case(Self::OVERLAY_DELETIONS) {
+                        return None;
+                    }
                     let exact = p.join(n);
                     // exists() cannot tell us the stored spelling: on Windows
                     // it succeeds for "vehicle.dat" when the real name is
@@ -1152,6 +1225,12 @@ impl Vfs {
                     .any(|parent| parent.is_dir());
             }
         }
+        if mounts
+            .iter()
+            .any(|mount| self.masked_lower_path(mount, &normalised))
+        {
+            return fallback;
+        }
         let wanted: Vec<_> = normalised
             .split('/')
             .filter(|part| !part.is_empty())
@@ -1244,6 +1323,14 @@ impl Vfs {
                 }
                 let Ok(meta) = entry.metadata() else { continue };
                 let name = entry.file_name().to_string_lossy().to_string();
+                if name.eq_ignore_ascii_case(Self::OVERLAY_DELETIONS)
+                    || self.masked_lower_path(
+                        mount,
+                        &format!("{}/{}", normalised.trim_end_matches('/'), name),
+                    )
+                {
+                    continue;
+                }
                 merged.entry(name.to_ascii_lowercase()).or_insert((
                     name,
                     meta.len(),

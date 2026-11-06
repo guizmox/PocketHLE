@@ -1075,17 +1075,93 @@ impl Vfs {
     }
     pub fn delete(&self, path: &str) -> Result<(), u32> {
         let attrs = self.attributes(path)?;
-        if attrs & 0x11 != 0 {
+        if attrs & 0x10 != 0 {
             return Err(5);
         }
-        let key = self.file_key(path, true)?;
+        let mut overlay = None;
+        if !self.is_ram_path(path) {
+            let normal = self.normalise_guest_path(path);
+            let (upper, mount) = self.exact_path(path, true)?;
+            let lower = self
+                .mounts
+                .iter()
+                .filter(|layer| layer.read_only && layer.prefix == mount.prefix)
+                .filter_map(|layer| self.host_path_for_mount(layer, &normal))
+                .find(|file| file.is_file());
+            if let Some(lower) = lower {
+                // Real read-only attributes remain effective. The install
+                // mount's read-only policy protects host data, not the guest name.
+                let installed_read_only = lower
+                    .metadata()
+                    .map_err(|error| io_error(&error))?
+                    .permissions()
+                    .readonly();
+                if attrs & 1 != 0 && (upper.exists() || installed_read_only) {
+                    return Err(5);
+                }
+                overlay = Some((
+                    upper.exists(),
+                    Self::overlay_marker(mount, &normal).ok_or(5u32)?,
+                    lower
+                        .canonicalize()
+                        .map_err(|error| io_error(&error))?
+                        .to_string_lossy()
+                        .to_ascii_lowercase(),
+                ));
+            }
+        }
+        if attrs & 1 != 0 && overlay.is_none() {
+            return Err(5);
+        }
+        let key = match &overlay {
+            Some((false, _, lower_key)) => lower_key.clone(),
+            _ => self.file_key(path, true)?,
+        };
         let shared = self.shared.clone();
         let mut s = shared.0.lock().unwrap();
-        if busy(&mut s, &key) {
+        if s.attributes.get(&key).is_some_and(|value| value & 1 != 0)
+            || self
+                .file_key(path, true)
+                .ok()
+                .and_then(|key| s.attributes.get(&key))
+                .is_some_and(|value| value & 1 != 0)
+        {
+            return Err(5);
+        }
+        if busy(&mut s, &key)
+            || overlay
+                .as_ref()
+                .is_some_and(|(_, _, lower)| lower != &key && busy(&mut s, lower))
+        {
             return Err(32);
         }
         s.volume_usage.clear();
-        if !self.delete_file_raw(path) {
+        if let Some((has_upper, marker, _)) = overlay {
+            let directory = marker.parent().ok_or(5u32)?;
+            match std::fs::create_dir(directory) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && directory.symlink_metadata().is_ok_and(|meta| meta.is_dir()) => {}
+                Err(error) => return Err(io_error(&error)),
+            }
+            let created = if Self::overlay_marker_exists(&marker) {
+                false
+            } else {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker)
+                    .map_err(|error| io_error(&error))?;
+                true
+            };
+            if has_upper && !self.delete_file_raw(path) {
+                if created {
+                    let _ = std::fs::remove_file(marker);
+                }
+                return Err(5);
+            }
+        } else if !self.delete_file_raw(path) {
             return Err(5);
         }
         s.attributes.remove(&key);
@@ -1142,6 +1218,41 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn save_overlay_can_delete_and_replace_an_installed_file() {
+        let installed = tempfile::tempdir().unwrap();
+        let saved = tempfile::tempdir().unwrap();
+        std::fs::write(installed.path().join("Prefs.dat"), b"original").unwrap();
+        std::fs::write(saved.path().join("new.tmp"), b"updated").unwrap();
+        let open = || {
+            let mut v = Vfs::new();
+            v.mount_read_only("/App/", installed.path());
+            v.mount_save_dir("/App/", saved.path());
+            v
+        };
+        let v = open();
+        v.delete("/App/prefs.dat").unwrap();
+        assert_eq!(v.attributes("/App/PREFS.DAT"), Err(2));
+        assert_eq!(
+            v.list_dir("/App/").unwrap(),
+            vec![("new.tmp".into(), 7, false)]
+        );
+        drop(v);
+        let v = open();
+        assert_eq!(v.attributes("/App/Prefs.dat"), Err(2));
+        v.rename("/App/new.tmp", "/App/Prefs.dat").unwrap();
+        assert_eq!(
+            std::fs::read(v.resolve("/App/Prefs.dat").unwrap()).unwrap(),
+            b"updated"
+        );
+        assert_eq!(
+            std::fs::read(installed.path().join("Prefs.dat")).unwrap(),
+            b"original"
+        );
+        v.delete("/App/Prefs.dat").unwrap();
+        assert_eq!(open().attributes("/App/Prefs.dat"), Err(2));
+    }
+
     #[test]
     fn metadata_queries_cover_overlay_directories_ram_and_exclusive_handles() {
         let installed = tempfile::tempdir().unwrap();
