@@ -10296,11 +10296,21 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     }
     let old_block = ctx.kernel.heap.virtual_block(addr);
     let old = old_block.as_ref().map(|b| b.2.clone()).unwrap_or_default();
-    let Some(base) =
+    let commit = kind & 0x1000 != 0;
+    let nearby = if addr == 0
+        && prot.contains(Prot::EXEC)
+        && ctx.cpu.arch() == pocket_cpu::Arch::Arm
+        && ctx.cpu.read_reg(ArmReg::Lr)? < 0x0200_0000
+    {
+        ctx.kernel.heap.virtual_alloc_in_private_slot(size, commit)
+    } else {
+        None
+    };
+    let Some(base) = nearby.or_else(|| {
         ctx.kernel
             .heap
-            .virtual_alloc(addr, size, kind & 0x2000 != 0, kind & 0x1000 != 0)
-    else {
+            .virtual_alloc(addr, size, kind & 0x2000 != 0, commit)
+    }) else {
         set_thread_error(ctx, 8);
         return Ok(DispatchOutcome::ReturnedR0(0));
     };

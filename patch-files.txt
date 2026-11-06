@@ -1,4 +1,6 @@
 crates\pocket-kernel\src\controls.rs
+crates\pocket-kernel\src\heap_virtual_tests.rs
+crates\pocket-kernel\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
 crates\pocket-winceapi\src\coredll\graphics_tests.rs
 crates\pocket-winceapi\src\coredll\images.rs

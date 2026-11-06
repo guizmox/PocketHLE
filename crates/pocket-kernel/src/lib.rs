@@ -3290,6 +3290,19 @@ impl Heap {
         self.image_memory.clone()
     }
 
+    /// Try the existing CE process slot before using a separate VA arena.
+    /// ARM code in slot zero can branch directly to any other code there.
+    pub fn virtual_alloc_in_private_slot(&mut self, size: u32, commit: bool) -> Option<u32> {
+        const SLOT_END: u32 = 0x0200_0000;
+        let span = size.checked_add(0xffff)? & !0xffff;
+        let base = self.free.iter().find_map(|&(start, len)| {
+            let base = start.checked_add(0xffff)? & !0xffff;
+            let end = base.checked_add(span)?;
+            (base != 0 && end <= SLOT_END && end <= start.checked_add(len)?).then_some(base)
+        })?;
+        self.virtual_alloc(base, size, true, commit)
+    }
+
     /// Page-aligned reservations share the same virtual arenas as the heap,
     /// but consume physical pages only when committed.
     pub fn virtual_alloc(
