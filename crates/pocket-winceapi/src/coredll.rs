@@ -1368,6 +1368,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "??_M@YAXPAXIHP6AX0@Z@Z", vector_dtor_iterator);
     d.register_handler(dll, "__security_gen_cookie", security_gen_cookie);
     d.register_handler(dll, "__report_gsfailure", report_gsfailure);
+    // The HLE runtime does not dispatch guest C++ exception unwinding.
+    d.register_constant(dll, "uncaught_exception", 0, zero_returning);
     d.register_constant(dll, "CacheSync", 1, one_returning);
     d.register_constant(dll, "ord:1825", 0, zero_returning);
     d.register_handler(

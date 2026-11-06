@@ -1,1 +1,2 @@
-frontends\pocket-desktop\src\app.rs
+crates\pocket-winceapi\data\coredll-ordinals.json
+crates\pocket-winceapi\src\coredll.rs
