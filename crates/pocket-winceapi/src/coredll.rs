@@ -21131,56 +21131,37 @@ fn ext_escape(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     const GETGXINFO: u32 = 0x0002_0000;
     const GETRAWFRAMEBUFFER: u32 = 0x0002_0001;
     const KF_DIRECT565: u32 = 0x0000_0080;
+    const QUERYESCSUPPORT: u32 = 8;
     let escape = ctx.arg_u32(1)?;
+    let columns = pocket_kernel::gapi_uses_columns(ctx.kernel);
+    // A legacy landscape driver can expose logical geometry and the base
+    // address of rotated LCD storage. Portrait column layouts use the
+    // signed strides from RawFrameBufferInfo instead.
+    let supports_gxinfo = !columns || ctx.kernel.framebuffer.width > ctx.kernel.framebuffer.height;
+    if escape == QUERYESCSUPPORT {
+        let input_size = ctx.arg_u32(2)?;
+        let input = ctx.arg_u32(3)?;
+        if input_size != 4 || input == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        let supported = match ctx.cpu.read_u32_le(input) {
+            Ok(GETGXINFO) => supports_gxinfo,
+            Ok(GETRAWFRAMEBUFFER) => true,
+            _ => false,
+        };
+        return Ok(DispatchOutcome::ReturnedR0(u32::from(supported)));
+    }
     let out_count = ctx.arg_u32(4)?;
     let out_data = ctx.arg_u32(5)?;
-    if out_data == 0 || out_count == 0 {
+    let required_size = match escape {
+        GETRAWFRAMEBUFFER => 24,
+        GETGXINFO if supports_gxinfo => 0x84,
+        _ => return Ok(DispatchOutcome::ReturnedR0(0)),
+    };
+    if out_data == 0 || out_count < required_size {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let columns = pocket_kernel::gapi_uses_columns(ctx.kernel);
-    if columns && escape == GETGXINFO {
-        // GXDeviceInfo's single scanline stride cannot describe a column panel.
-        // Let callers fall back to GXDisplayProperties or RawFrameBufferInfo.
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    if columns && escape == GETRAWFRAMEBUFFER {
-        crate::gx::ensure_fb_mapped(ctx)?;
-    }
-    if matches!(escape, GETRAWFRAMEBUFFER | GETGXINFO) && !ctx.kernel.fb_mapped {
-        let pitch = if ctx
-            .kernel
-            .module_path
-            .to_ascii_lowercase()
-            .contains("pocket bass pro")
-        {
-            512
-        } else {
-            ctx.kernel.framebuffer.stride_bytes()
-        };
-        ctx.kernel.guest_fb_pitch = pitch;
-        let bytes = (pitch
-            .saturating_mul(ctx.kernel.framebuffer.height)
-            .max(ctx.kernel.framebuffer.byte_size())
-            + 0xfff)
-            & !0xfff;
-        ctx.cpu
-            .map_region(SYNTHETIC_FRAMEBUFFER_BASE, bytes, Prot::READ | Prot::WRITE)?;
-        let row_bytes = ctx.kernel.framebuffer.stride_bytes() as usize;
-        for row in 0..ctx.kernel.framebuffer.height as usize {
-            let src = row * row_bytes;
-            let dst = SYNTHETIC_FRAMEBUFFER_BASE + (row * pitch as usize) as u32;
-            ctx.cpu.write_mem(
-                dst,
-                &ctx.kernel
-                    .framebuffer
-                    .cpu()
-                    .map_err(KernelError::Dispatch)?
-                    .pixels[src..src + row_bytes],
-            )?;
-        }
-        ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
-        ctx.kernel.fb_mapped = true;
-    }
+    crate::gx::ensure_fb_mapped(ctx)?;
     log::debug!(
         "ExtEscape escape=0x{escape:08x} out_count={out_count} out_data=0x{out_data:08x} fb_mapped={}",
         ctx.kernel.fb_mapped

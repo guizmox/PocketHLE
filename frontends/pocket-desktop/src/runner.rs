@@ -499,7 +499,6 @@ impl Runner {
                         &game.settings.pocketpc_platform_type,
                     )
                 })
-                .map(|_| emu.set_pocketpc_gapi_columns(game.settings.pocketpc_gapi_columns))
             {
                 summary_lines.push(format!("Invalid PocketPC identity: {e}"));
                 return (
@@ -511,6 +510,7 @@ impl Runner {
                 );
             }
         }
+        emu.set_pocketpc_gapi_columns(game.settings.pocketpc_gapi_columns);
         let (screen_w, screen_h) = if is_gizmondo {
             game.settings.screen.gizmondo_size()
         } else {

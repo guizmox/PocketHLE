@@ -630,12 +630,12 @@ fn run_process(
                     &entry.settings.pocketpc_platform_type,
                 )
             })
-            .map(|_| emu.set_pocketpc_gapi_columns(entry.settings.pocketpc_gapi_columns))
         {
             summary_lines.push(format!("Invalid PocketPC identity: {error}"));
             return (summary_lines.join("\n"), 87);
         }
     }
+    emu.set_pocketpc_gapi_columns(entry.settings.pocketpc_gapi_columns);
     for value in &entry.registry {
         let registry_value = if let Some(text) = value.string.as_deref() {
             pocket_core::kernel::registry::RegistryValue::Sz(text.to_string())

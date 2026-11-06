@@ -3726,3 +3726,42 @@ fn direct_display_idle_does_not_invalidate_but_explicit_paints_are_delivered() {
     ctx.kernel.synthetic_paint_next_ms = 0;
     assert_eq!(legacy_paint_if_due(&mut ctx), Some((hwnd, WM_PAINT, 0, 0)));
 }
+
+#[test]
+fn display_escape_queries_match_available_framebuffer_layouts() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    const INPUT: u32 = 0x1100;
+    const OUTPUT: u32 = 0x1200;
+    const GETGXINFO: u32 = 0x20000;
+    for (width, height, columns, supported) in [
+        (240, 320, false, 1),
+        (240, 320, true, 0),
+        (320, 240, true, 1),
+    ] {
+        ctx.kernel.framebuffer.resize(width, height);
+        ctx.kernel.gapi_column_major = columns;
+        ctx.cpu.write_mem(INPUT, &GETGXINFO.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(&mut ctx, ext_escape, &[0, 8, 4, INPUT, 0, 0]),
+            supported
+        );
+        assert!(!ctx.kernel.fb_mapped);
+    }
+    assert_eq!(call(&mut ctx, ext_escape, &[0, 8, 4, 0, 0, 0]), 0);
+    assert_eq!(
+        call(&mut ctx, ext_escape, &[0, GETGXINFO, 0, 0, 0x84, OUTPUT]),
+        0x84
+    );
+    assert!(ctx.kernel.fb_mapped);
+    assert_eq!(
+        ctx.cpu.read_u32_le(OUTPUT + 4).unwrap(),
+        SYNTHETIC_FRAMEBUFFER_BASE
+    );
+}
