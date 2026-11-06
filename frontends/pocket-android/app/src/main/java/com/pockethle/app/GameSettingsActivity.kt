@@ -173,6 +173,7 @@ class GameSettingsActivity : AppCompatActivity() {
                 }
             }
             findPreference<ListPreference>("executable_heap")?.apply {
+                isVisible = !NativeBridge.isGizmondoGame(rootDir, gameId)
                 entries = arrayOf("Use emulator setting", "Enabled", "Disabled")
                 entryValues = arrayOf("inherit", "enabled", "disabled")
                 value = when (current.executableHeap) {

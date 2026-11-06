@@ -3130,13 +3130,12 @@ impl PocketLauncher {
         let mut cancel_clicked = false;
         ui.heading(format!("Settings: {display_name}"));
         ui.add_space(8.0);
-        egui::Grid::new("game_settings_grid")
+        ui.separator();
+        ui.heading("Controls");
+        egui::Grid::new("game_settings_controls")
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
-                ui.heading("Controls");
-                ui.label("");
-                ui.end_row();
                 ui.label("D-pad dead zone");
                 crate::controller_ui::ComboBox::from_id_source("game_dpad_deadzone")
                     .selected_text(draft.dpad_deadzone.label())
@@ -3173,9 +3172,14 @@ impl PocketLauncher {
                     });
                     ui.end_row();
                 }
-                ui.heading("Graphics");
-                ui.label("");
-                ui.end_row();
+            });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Graphics");
+        egui::Grid::new("game_settings_graphics")
+            .num_columns(2)
+            .spacing(Vec2::new(12.0, 8.0))
+            .show(ui, |ui| {
                 ui.label("Frame rate limit");
                 let inherited_limit_label = format!("Emulator default ({})", self.library.config().frame_rate_limit.label());
                 crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
@@ -3265,29 +3269,43 @@ impl PocketLauncher {
                         }).response.on_hover_text("Changes the physical layout of direct framebuffer memory. Use columns for software designed for a rotated LCD. Applies on next launch.");
                     ui.end_row();
                 }
-                ui.label("Executable heap");
-                crate::controller_ui::ComboBox::from_id_source("game_executable_heap")
-                    .selected_text(match draft.executable_heap {
-                        None => "Use emulator setting",
-                        Some(true) => "Enabled",
-                        Some(false) => "Disabled",
-                    })
-                    .show_ui(ui, |ui| {
-                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, None, "Use emulator setting");
-                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(true), "Enabled");
-                        crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(false), "Disabled");
-                    });
-                ui.end_row();
-                ui.label("");
-                ui.add(egui::Label::new(EXECUTABLE_HEAP_HELP).wrap(true));
-                ui.end_row();
-                ui.heading("Sound");
-                ui.label("No per-game sound options yet.");
-                ui.end_row();
-                if !is_gizmondo {
-                    ui.heading("Device Identity");
-                    ui.label("");
+            });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Sound");
+        ui.label("No per-game sound options yet.");
+        if !is_gizmondo {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.heading("Misc");
+            egui::Grid::new("game_settings_misc")
+                .num_columns(2)
+                .spacing(Vec2::new(12.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label("Executable heap");
+                    crate::controller_ui::ComboBox::from_id_source("game_executable_heap")
+                        .selected_text(match draft.executable_heap {
+                            None => "Use emulator setting",
+                            Some(true) => "Enabled",
+                            Some(false) => "Disabled",
+                        })
+                        .show_ui(ui, |ui| {
+                            crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, None, "Use emulator setting");
+                            crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(true), "Enabled");
+                            crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(false), "Disabled");
+                        });
                     ui.end_row();
+                    ui.label("");
+                    ui.add(egui::Label::new(EXECUTABLE_HEAP_HELP).wrap(true));
+                    ui.end_row();
+                });
+            ui.add_space(10.0);
+            ui.separator();
+            ui.heading("Device Identity");
+            egui::Grid::new("game_settings_identity")
+                .num_columns(2)
+                .spacing(Vec2::new(12.0, 8.0))
+                .show(ui, |ui| {
                     ui.label("OEM model (readable text)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_oem_info, "PocketHLE");
                     ui.end_row();
@@ -3312,8 +3330,8 @@ impl PocketLauncher {
                     ui.label("PocketPC ID (Platform ID — hexadecimal)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_device_id, "Device default");
                     ui.end_row();
-                }
-            });
+                });
+        }
 
         // Satellite libraries are not a setting — they are a fact about
         // what got imported. Showing them here is how a user confirms

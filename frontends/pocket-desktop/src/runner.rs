@@ -267,9 +267,10 @@ impl Runner {
         emu.max_slices = game.settings.max_slices;
         emu.instruction_budget_per_slice = game.settings.instructions_per_slice;
 
+        let is_gizmondo = is_gizmondo_game(&game, &library_root);
         if let Err(e) = emu.load_pe_with_executable_heap(
             &exe,
-            game.settings.effective_executable_heap(&launcher_config),
+            is_gizmondo || game.settings.effective_executable_heap(&launcher_config),
         ) {
             summary_lines.push(format!("load_pe failed: {e:#}"));
             return (
@@ -288,7 +289,6 @@ impl Runner {
         // load succeeds.
         // Gizmondo hardware has a native 320x240 landscape LCD. Detect the
         // platform before the title starts so GAPI sees the real geometry.
-        let is_gizmondo = is_gizmondo_game(&game, &library_root);
         emu.set_pocket_pc_input(!is_gizmondo);
         if is_gizmondo {
             emu.set_gizmondo_platform_identity();
