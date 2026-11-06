@@ -878,10 +878,20 @@ pub enum ScreenPref {
 }
 
 impl ScreenPref {
+    /// Gizmondo normally exposes its native landscape LCD. An explicit QVGA
+    /// profile also supports software that rotates a portrait surface itself.
+    pub fn gizmondo_size(self) -> (u32, u32) {
+        if self == Self::Qvga {
+            self.size()
+        } else {
+            (320, 240)
+        }
+    }
+
     /// CEUX/HI_RES_AWARE is the Windows Mobile declaration that a program
     /// accepts native high-resolution coordinates. Use a VGA device for that
     /// declaration; keep legacy QVGA for unmarked software. Explicit profiles
-    /// always win, and Gizmondo callers continue to force 320x240.
+    /// always win. Gizmondo callers use their own native default.
     pub fn resolve_image(self, image: Option<&pocket_pe::LoadedImage>) -> (u32, u32) {
         if self != Self::Portrait {
             return self.size();

@@ -3162,7 +3162,21 @@ impl PocketLauncher {
                         .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
                 });
                 ui.end_row();
-                if !is_gizmondo {
+                if is_gizmondo {
+                    ui.label("Screen");
+                    let portrait = draft.screen == ScreenPref::Qvga;
+                    crate::controller_ui::ComboBox::from_id_source("game_screen")
+                        .selected_text(if portrait { "QVGA portrait (240 × 320)" } else { "Gizmondo default (320 × 240)" })
+                        .show_ui(ui, |ui| {
+                            let mut choice = portrait;
+                            crate::controller_ui::selectable_value(ui, &mut choice, false, "Gizmondo default (320 × 240)");
+                            crate::controller_ui::selectable_value(ui, &mut choice, true, "QVGA portrait (240 × 320)");
+                            if choice != portrait {
+                                draft.screen = if choice { ScreenPref::Qvga } else { ScreenPref::Portrait };
+                            }
+                        });
+                    ui.end_row();
+                } else {
                     ui.label("Screen");
                     crate::controller_ui::ComboBox::from_id_source("game_screen")
                         .selected_text(draft.screen.label())

@@ -1,7 +1,8 @@
-crates\pocket-kernel\src\controls.rs
-crates\pocket-kernel\src\heap_virtual_tests.rs
-crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\vfs.rs
+crates\pocket-kernel\src\vfs_mapping.rs
+crates\pocket-library\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
-crates\pocket-winceapi\src\coredll\graphics_tests.rs
-crates\pocket-winceapi\src\coredll\images.rs
-crates\pocket-winceapi\src\coredll\list_paint.rs
+crates\pocket-winceapi\src\coredll\file_mapping.rs
+frontends\pocket-android-jni\src\runner.rs
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\runner.rs

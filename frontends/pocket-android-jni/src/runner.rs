@@ -661,7 +661,7 @@ fn run_process(
     }
     emu.start_audio();
     let (screen_width, screen_height) = if is_gizmondo {
-        (320, 240)
+        entry.settings.screen.gizmondo_size()
     } else {
         entry.settings.screen.resolve_image(image.as_ref().ok())
     };

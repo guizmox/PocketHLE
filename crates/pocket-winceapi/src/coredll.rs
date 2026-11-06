@@ -2647,15 +2647,14 @@ pub(crate) fn wake_due_worker(
     resume_worker_reenter(ctx)
 }
 
-/// FMOD-style live waveOut rings require their guest mixer to keep running
-/// while main or a resource worker unloads data in CPU-only loops. Reuse the
-/// normal quantum and callback exclusions, preserving the interrupted PC
-/// rather than retrying an API that did not run at this slice boundary.
+/// Audio workers must remain runnable while the main thread polls mixer state
+/// in guest code. Reuse the normal quantum and callback exclusions, preserving
+/// the interrupted PC across the handoff.
 pub(crate) fn schedule_audio_cpu_slice(
     cpu: &mut dyn pocket_cpu::Cpu,
     kernel: &mut KernelState,
 ) -> Result<Option<u32>, KernelError> {
-    if (kernel.wave_out.live_loops.is_empty() && kernel.multimedia_timers.is_empty())
+    if (kernel.wave_out.devices.is_empty() && kernel.multimedia_timers.is_empty())
         || kernel.threads.is_empty()
         || monotonic_ms() < kernel.worker_preempt_after_ms
     {
@@ -3190,7 +3189,12 @@ fn close_owned_handle(kernel: &mut KernelState, handle: u32) -> bool {
             }
         }
         HandleObject::RemoteProcess(_) | HandleObject::RemoteThread(..) => {}
-        HandleObject::CurrentProcess | HandleObject::Mapping(_) => {}
+        HandleObject::Mapping(_) => {
+            if let Some(file) = kernel.vfs.take_section_file(handle) {
+                close_owned_handle(kernel, file);
+            }
+        }
+        HandleObject::CurrentProcess => {}
     }
     true
 }
@@ -39434,7 +39438,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_cpu_slice_leaves_non_audio_and_blocked_workers_untouched() {
+    fn audio_cpu_slice_schedules_buffered_audio_only_when_worker_is_ready() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
         let mut worker = GuestThread::new(
@@ -39449,12 +39453,19 @@ mod tests {
             schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
             None
         );
-        kernel.wave_out.live_loops.insert(
+        kernel.wave_out.devices.insert(
             1,
-            pocket_kernel::LiveWaveLoop {
-                hdr: 0,
-                data: 0,
-                bytes: 0,
+            pocket_kernel::WaveOutDevice {
+                callback_kind: WaveCallbackKind::None,
+                callback_target: 0,
+                instance: 0,
+                owner_thread: 0,
+                format: pocket_kernel::audio::GuestFormat {
+                    sample_rate: 44100,
+                    channels: 2,
+                    bits_per_sample: 16,
+                },
+                paused: false,
             },
         );
         kernel.threads[0].sleep_until_ms = u64::MAX;
@@ -39475,6 +39486,13 @@ mod tests {
             schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
             None
         );
+        kernel.current_thread = 0;
+        kernel.worker_preempt_after_ms = 0;
+        assert_eq!(
+            schedule_audio_cpu_slice(&mut cpu, &mut kernel).unwrap(),
+            Some(0x10000)
+        );
+        assert_eq!(kernel.threads[0].saved_regs[15], 0x5010);
     }
 
     #[test]

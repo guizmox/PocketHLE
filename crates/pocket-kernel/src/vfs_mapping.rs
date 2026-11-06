@@ -15,6 +15,14 @@ impl Drop for MappingPin {
     }
 }
 impl Vfs {
+    pub fn attach_section_file(&mut self, section: u32, file: u32) {
+        self.section_files.insert(section, file);
+    }
+
+    pub fn take_section_file(&mut self, section: u32) -> Option<u32> {
+        self.section_files.remove(&section)
+    }
+
     pub fn mark_for_mapping(&mut self, handle: u32) {
         if let Some(f) = self.handles.get(&handle) {
             f.lock().unwrap().for_mapping = true;

@@ -31,10 +31,17 @@ fn create_file_mapping(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     let file = ctx.arg_u32(0)?;
     let consumed = ctx.kernel.vfs.is_for_mapping(file);
     let result = create_mapping_inner(ctx, file);
-    // CE transfers CreateFileForMapping ownership even when section creation
-    // fails. Ordinary CreateFile handles retain their independent lifetime.
+    // CE keeps a CreateFileForMapping handle alive until the section handle
+    // closes. A failed CreateFileMapping closes the file immediately.
     if consumed {
-        close_owned_handle(ctx.kernel, file);
+        match &result {
+            Ok(DispatchOutcome::ReturnedR0(section)) if *section != 0 => {
+                ctx.kernel.vfs.attach_section_file(*section, file);
+            }
+            _ => {
+                close_owned_handle(ctx.kernel, file);
+            }
+        }
     }
     result
 }
@@ -231,10 +238,11 @@ mod tests {
             create_file_mapping,
         );
         assert_ne!(section, 0);
-        assert!(!ctx.kernel.vfs.is_open(file));
+        assert_eq!(invoke(&mut ctx, &[file, 0], get_file_size), 4097);
         let base = invoke(&mut ctx, &[section, 0x000f001f, 0, 0, 0], map_view);
         assert_ne!(base, 0);
         assert!(close_owned_handle(ctx.kernel, section));
+        assert!(!ctx.kernel.vfs.is_open(file));
         ctx.cpu.write_mem(base + 4093, b"tail").unwrap();
         assert_eq!(invoke(&mut ctx, &[base, 0x1800, 28], virtual_query), 28);
         assert_eq!(ctx.cpu.read_u32_le(0x1818).unwrap(), 0x40000);

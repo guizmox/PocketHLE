@@ -512,7 +512,7 @@ impl Runner {
             }
         }
         let (screen_w, screen_h) = if is_gizmondo {
-            (320, 240)
+            game.settings.screen.gizmondo_size()
         } else {
             game.settings.screen.resolve_image(metadata.as_ref())
         };
