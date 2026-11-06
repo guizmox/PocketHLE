@@ -12707,7 +12707,42 @@ fn control_message(
     const BM_GETCHECK: u32 = 0x00F0;
     const BM_SETCHECK: u32 = 0x00F1;
     const EM_SETSEL: u32 = 0x00B1;
+    const EM_LINELENGTH: u32 = 0x00C1;
     const EM_REPLACESEL: u32 = 0x00C2;
+    const EM_GETLINE: u32 = 0x00C4;
+    const ES_MULTILINE: u32 = 0x0004;
+
+    if matches!(message, EM_LINELENGTH | EM_GETLINE) {
+        if let Some(control) = ctx.kernel.controls.get(hwnd).filter(|control| {
+            control.class == ControlClass::Edit && control.style & ES_MULTILINE == 0
+        }) {
+            let text = control.window_text();
+            if message == EM_LINELENGTH {
+                let length = text.encode_utf16().count() as u32;
+                return Ok(if wparam == u32::MAX || wparam <= length {
+                    length
+                } else {
+                    0
+                });
+            }
+
+            if lparam == 0 {
+                return Ok(0);
+            }
+            // Argentum uses the first WORD as capacity and terminates the copied text itself.
+            let capacity = ctx.cpu.read_mem(lparam, 2)?;
+            let capacity = u16::from_le_bytes([capacity[0], capacity[1]]) as usize;
+            let bytes: Vec<u8> = text
+                .encode_utf16()
+                .take(capacity)
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            if !bytes.is_empty() {
+                ctx.cpu.write_mem(lparam, &bytes)?;
+            }
+            return Ok((bytes.len() / 2) as u32);
+        }
+    }
 
     match message {
         WM_SETTEXT | EM_REPLACESEL => {
