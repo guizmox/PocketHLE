@@ -680,6 +680,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetCursorPos", get_cursor_pos);
     d.register_handler(dll, "mouse_event", mouse_event);
     d.register_handler(dll, "SetCursor", set_cursor);
+    d.register_handler(dll, "GetCursor", get_cursor);
     d.register_handler(dll, "GetClassInfoW", get_class_info_w);
     d.register_handler(
         dll,
@@ -902,6 +903,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     // applications save the old HIMC and restore it after their game UI.
     d.register_handler(dll, "ImmAssociateContext", imm_associate_context);
     d.register_handler(dll, "ImmGetContext", imm_get_context);
+    d.register_handler(dll, "ImmGetOpenStatus", imm_get_open_status);
+    d.register_handler(dll, "ImmSetOpenStatus", imm_set_open_status);
     d.register_handler(dll, "ImmReleaseContext", imm_release_context);
     d.register_constant(dll, "ImmSetCompositionWindow", 1, one_returning);
     d.register_handler(dll, "SystemParametersInfoW", system_parameters_info_w);
@@ -23189,8 +23192,16 @@ fn get_cursor_pos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
-fn set_cursor(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(1))
+fn set_cursor(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let cursor = ctx.arg_u32(0)?;
+    let previous = std::mem::replace(&mut ctx.kernel.controls.cursor_handle, cursor);
+    Ok(DispatchOutcome::ReturnedR0(previous))
+}
+
+fn get_cursor(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(
+        ctx.kernel.controls.cursor_handle,
+    ))
 }
 
 fn get_class_info_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -23672,6 +23683,10 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
     Ok(DispatchOutcome::JumpTo(dialog_proc))
 }
 
+fn imm_thread_context(thread: usize) -> Option<u32> {
+    u32::try_from(thread).ok()?.checked_add(0x494d_0001)
+}
+
 /// CE supports only the window thread's default HIMC or NULL, not arbitrary
 /// application-created contexts. HIMCs are opaque tokens, never guest pointers.
 /// https://learn.microsoft.com/en-us/previous-versions/windows/embedded/ms905984(v=msdn.10)
@@ -23686,7 +23701,7 @@ fn imm_default_context(kernel: &KernelState, hwnd: u32) -> Option<u32> {
     // Controls constructed from dialog templates inherit their parent's thread.
     for _ in 0..64 {
         if let Some(thread) = kernel.window_threads.get(&owner) {
-            return u32::try_from(*thread).ok()?.checked_add(0x494d_0001);
+            return imm_thread_context(*thread);
         }
         let parent = kernel
             .controls
@@ -23698,7 +23713,7 @@ fn imm_default_context(kernel: &KernelState, hwnd: u32) -> Option<u32> {
             _ => break,
         }
     }
-    Some(0x494d_0001) // legacy main-thread dialogs
+    imm_thread_context(0) // legacy main-thread dialogs
 }
 
 fn imm_get_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -23733,6 +23748,41 @@ fn imm_associate_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
         .insert(hwnd, context)
         .unwrap_or(default);
     Ok(DispatchOutcome::ReturnedR0(previous))
+}
+
+fn imm_get_open_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let context = ctx.arg_u32(0)?;
+    let open = Some(context) == imm_thread_context(ctx.kernel.current_thread)
+        && ctx.kernel.controls.ime_open_contexts.contains(&context);
+    Ok(DispatchOutcome::ReturnedR0(u32::from(open)))
+}
+
+fn imm_set_open_status(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let context = ctx.arg_u32(0)?;
+    if Some(context) != imm_thread_context(ctx.kernel.current_thread) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let open = ctx.arg_u32(1)? != 0;
+    let contexts = &mut ctx.kernel.controls.ime_open_contexts;
+    let changed = if open {
+        contexts.insert(context)
+    } else {
+        contexts.remove(&context)
+    };
+    if changed {
+        let hwnd = input_window(ctx.kernel);
+        let associated = ctx
+            .kernel
+            .window_input_contexts
+            .get(&hwnd)
+            .copied()
+            .or_else(|| imm_default_context(ctx.kernel, hwnd));
+        if associated == Some(context) && ctx.kernel.posted_messages.len() < 256 {
+            // WM_IME_NOTIFY, IMN_SETOPENSTATUS
+            ctx.kernel.posted_messages.push_back((hwnd, 0x0282, 8, 0));
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 fn imm_release_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {

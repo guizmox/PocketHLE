@@ -1938,6 +1938,10 @@ pub struct FileDialog {
 pub struct Controls {
     /// Latest consumed stylus position in screen coordinates.
     pub cursor_position: (i32, i32),
+    /// Guest cursor selected by SetCursor. Zero means no selected cursor.
+    pub cursor_handle: u32,
+    /// Default IMM contexts with their IME open.
+    pub ime_open_contexts: std::collections::HashSet<u32>,
     /// ShowCursor display counters keyed by stable guest thread ID. Guest devices
     /// expose a stylus, not a mouse, so an untouched counter starts at -1.
     pub cursor_display_counts: std::collections::HashMap<u32, i32>,
@@ -1973,6 +1977,8 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             cursor_position: (0, 0),
+            cursor_handle: 0,
+            ime_open_contexts: Default::default(),
             cursor_display_counts: Default::default(),
             message_positions: Default::default(),
             pointer_capture: Default::default(),
