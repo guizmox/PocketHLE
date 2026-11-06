@@ -3,7 +3,7 @@
 use crate::{CallCtx, WinCeDispatcher};
 #[path = "directshow_extended.rs"]
 mod extended;
-use extended::{extended, present};
+use extended::{extended, present, render_video};
 use pocket_kernel::{audio::GuestFormat, DispatchOutcome, KernelError};
 use std::{
     collections::HashMap,
@@ -555,17 +555,34 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
                 m.window,
                 m.source,
                 m.destination,
-                ctx.kernel.framebuffer.frame_counter,
+                if id == SYSTEM_PLAYER {
+                    0
+                } else {
+                    ctx.kernel.framebuffer.frame_counter
+                },
             );
             if m.presented != Some(key) {
-                present(ctx, m, frame)?;
-                m.presented = Some((
-                    key.0,
-                    key.1,
-                    key.2,
-                    key.3,
-                    ctx.kernel.framebuffer.frame_counter,
-                ));
+                if id == SYSTEM_PLAYER {
+                    let mut image = pocket_kernel::Framebuffer::new(
+                        ctx.kernel.framebuffer.width,
+                        ctx.kernel.framebuffer.height,
+                    );
+                    if let Some(pixels) = render_video(&image, m, frame) {
+                        image.pixels = pixels;
+                        ctx.kernel.framebuffer.replace_system_video(Some(image));
+                        ctx.kernel.invalidate_presentation();
+                    }
+                    m.presented = Some(key);
+                } else {
+                    present(ctx, m, frame)?;
+                    m.presented = Some((
+                        key.0,
+                        key.1,
+                        key.2,
+                        key.3,
+                        ctx.kernel.framebuffer.frame_counter,
+                    ));
+                }
             }
         }
     }
@@ -588,11 +605,56 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
     }
     Ok(())
 }
+// Graph IDs are guest object addresses. Zero is reserved for the system player,
+// which does not expose a DirectShow COM object to the launching application.
+const SYSTEM_PLAYER: u32 = 0;
+
+pub(crate) fn play_system_media(ctx: &mut CallCtx<'_>, path: &str) -> Result<(), u32> {
+    let host = ctx
+        .kernel
+        .vfs
+        .resolve(path)
+        .filter(|path| path.is_file())
+        .ok_or(2u32)?;
+    let (receiver, info, cancel, worker) =
+        decode(host.clone(), 0.0, f64::MAX).map_err(|error| {
+            log::warn!("System media player could not open {path:?}: {error}");
+            1155u32
+        })?;
+    let mut movie = Movie::new();
+    movie.path = Some(host);
+    movie.info = info;
+    movie.stop = info.duration;
+    movie.receiver = Some(receiver);
+    movie.cancel = Some(cancel);
+    movie.worker = Some(worker);
+    movie.playing = true;
+    ctx.kernel.audio.stop_mas_stream(SYSTEM_PLAYER);
+    if ctx.kernel.framebuffer.replace_system_video(None) {
+        ctx.kernel.invalidate_presentation();
+    }
+    MOVIES.with(|registry| {
+        registry.lock().unwrap().insert(SYSTEM_PLAYER, movie);
+    });
+    log::info!("System media player opened {path:?}");
+    Ok(())
+}
+
 pub(crate) fn service(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     MOVIES.with(|registry| {
         let mut movies = registry.lock().unwrap();
         for (&id, m) in movies.iter_mut() {
             update(ctx, id, m)?;
+        }
+        if movies
+            .get(&SYSTEM_PLAYER)
+            .is_some_and(|movie| movie.completed)
+        {
+            movies.remove(&SYSTEM_PLAYER);
+            ctx.kernel.audio.stop_mas_stream(SYSTEM_PLAYER);
+            if ctx.kernel.framebuffer.replace_system_video(None) {
+                ctx.kernel.invalidate_presentation();
+            }
         }
         Ok(())
     })

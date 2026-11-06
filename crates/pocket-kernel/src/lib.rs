@@ -2098,9 +2098,11 @@ impl KernelState {
         if (!self.shell_keyboard.sip || !self.shell_keyboard.visible)
             && self.gdi.shell_menus.tracking.is_none()
         {
-            return Ok(std::borrow::Cow::Borrowed(self.framebuffer.cpu()?));
+            return Ok(std::borrow::Cow::Borrowed(
+                self.framebuffer.presentation_cpu()?,
+            ));
         }
-        let mut frame = self.framebuffer.cpu()?.clone();
+        let mut frame = self.framebuffer.presentation_cpu()?.clone();
         // Native GDI/SIP overlays use guest coordinates and take precedence.
         frame.clear_render_presentation();
         if self.gdi.shell_menus.tracking.is_some() {

@@ -123,6 +123,7 @@ pub struct DeferredFramebuffer {
     resident: bool,
     epoch: u64,
     ips_image: Option<IpsImage>,
+    system_video: Option<Framebuffer>,
 }
 
 #[derive(Debug)]
@@ -170,8 +171,31 @@ impl DeferredFramebuffer {
             resident: true,
             epoch: 0,
             ips_image: None,
+            system_video: None,
         })
     }
+    pub fn has_system_video(&self) -> bool {
+        self.system_video.is_some()
+    }
+
+    /// Replace the host-only video image without modifying guest pixels.
+    pub fn replace_system_video(&mut self, frame: Option<Framebuffer>) -> bool {
+        let changed = frame.is_some() || self.system_video.is_some();
+        self.system_video = frame;
+        changed
+    }
+
+    pub(crate) fn presentation_cpu(&mut self) -> Result<&Framebuffer, String> {
+        if self.system_video.is_some() {
+            let frame = self.system_video.as_mut().unwrap();
+            frame.frame_counter = self.cpu.frame_counter;
+            frame.presentation_stats = self.cpu.presentation_stats.clone();
+            frame.set_backlight_level(self.cpu.backlight_level());
+            return Ok(frame);
+        }
+        self.cpu()
+    }
+
     pub fn enable_ips(&mut self) {
         self.ips_image = Some(IpsImage {
             revision: self.cpu.frame_counter,

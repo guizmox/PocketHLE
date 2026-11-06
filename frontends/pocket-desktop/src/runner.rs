@@ -1393,7 +1393,9 @@ impl FrameHook for RunHook {
                     // interval after each GPU readback/scheduler delay. The
                     // latter accumulates jitter and periodically skips frames.
                     if let Some(phase) = presentation_phase(self.last_emit_at, now, interval) {
-                        let shared = if !state.shell_keyboard.visible
+                        let shared = if state.framebuffer.has_system_video() {
+                            None
+                        } else if !state.shell_keyboard.visible
                             && state.gdi.shell_menus.tracking.is_none()
                         {
                             pocket_core::winceapi::gles::take_shared_window_frame(
@@ -1432,7 +1434,7 @@ impl FrameHook for RunHook {
                                     return FrameAction::Stop;
                                 }
                             };
-                            if black && self.saw_non_black {
+                            if black && self.saw_non_black && !state.framebuffer.has_system_video() {
                                 return if stop_requested {
                                     state.should_stop = true;
                                     FrameAction::Stop

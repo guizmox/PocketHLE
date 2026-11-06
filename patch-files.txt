@@ -1,6 +1,7 @@
-Cargo.lock
-crates\pocket-kernel\Cargo.toml
-crates\pocket-kernel\src\handles.rs
+crates\pocket-kernel\src\framebuffer\deferred.rs
 crates\pocket-kernel\src\lib.rs
-frontends\pocket-desktop\src\runner.rs
+crates\pocket-winceapi\src\directshow.rs
+crates\pocket-winceapi\src\directshow_extended.rs
+crates\pocket-winceapi\src\shell_execute.rs
 frontends\pocket-android-jni\src\runner.rs
+frontends\pocket-desktop\src\runner.rs

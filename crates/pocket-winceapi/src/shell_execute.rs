@@ -105,6 +105,28 @@ pub(super) fn execute(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     if !verb.is_empty() && !verb.eq_ignore_ascii_case("open") {
         return failed(ctx, ptr, 1155);
     }
+    // The ROM player is exposed as a system command. An explicit path to a
+    // different executable still uses the ordinary guest process launcher.
+    if file.eq_ignore_ascii_case("ceplayer")
+        || file.eq_ignore_ascii_case("ceplayer.exe")
+        || file.eq_ignore_ascii_case(r"\Windows\ceplayer.exe")
+    {
+        let path = parameters.trim();
+        let path = path
+            .strip_prefix('"')
+            .and_then(|path| path.strip_suffix('"'))
+            .unwrap_or(path);
+        if path.is_empty() {
+            return failed(ctx, ptr, ERROR_INVALID_PARAMETER);
+        }
+        if let Err(error) = crate::directshow::play_system_media(ctx, path) {
+            return failed(ctx, ptr, error);
+        }
+        // ShellExecute success uses a value greater than 32. There is no
+        // child process handle for an in-process system command.
+        ctx.cpu.write_mem(ptr + 32, &33u32.to_le_bytes())?;
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
     // Unknown document classes must fail honestly; an executable must actually
     // be loaded by the guest runner before reporting success.
     if !file.to_ascii_lowercase().ends_with(".exe") {

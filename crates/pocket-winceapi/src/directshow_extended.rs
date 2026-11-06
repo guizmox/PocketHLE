@@ -469,19 +469,18 @@ fn current_image(ctx: &mut CallCtx<'_>, m: &Movie) -> Result<u32, KernelError> {
     }
     write_output(ctx, dst, &dib)
 }
-pub(super) fn present(ctx: &mut CallCtx<'_>, m: &Movie, frame: &[u8]) -> Result<(), KernelError> {
-    let fb = ctx
-        .kernel
-        .framebuffer
-        .cpu_mut()
-        .map_err(KernelError::Dispatch)?;
+pub(super) fn render_video(
+    fb: &pocket_kernel::Framebuffer,
+    m: &Movie,
+    frame: &[u8],
+) -> Option<Vec<u8>> {
     let (width, height) = if m.info.width > 0 && m.info.height > 0 {
         (m.info.width, m.info.height)
     } else {
         (fb.width, fb.height)
     };
     if frame.len() != (width * height * 2) as usize || fb.bpp != 16 {
-        return Ok(());
+        return None;
     }
     let window = if m.window[2] > 0 {
         m.window
@@ -503,7 +502,7 @@ pub(super) fn present(ctx: &mut CallCtx<'_>, m: &Movie, frame: &[u8]) -> Result<
         }
     }
     if !valid_rect(source) || !valid_rect(destination) {
-        return Ok(());
+        return None;
     }
     let mut pixels = fb.pixels.clone();
     // Only the video window is cleared; unrelated guest UI remains intact.
@@ -574,6 +573,18 @@ pub(super) fn present(ctx: &mut CallCtx<'_>, m: &Movie, frame: &[u8]) -> Result<
             pixels[to..to + 2].copy_from_slice(&pixel.to_le_bytes());
         }
     }
+    Some(pixels)
+}
+
+pub(super) fn present(ctx: &mut CallCtx<'_>, m: &Movie, frame: &[u8]) -> Result<(), KernelError> {
+    let fb = ctx
+        .kernel
+        .framebuffer
+        .cpu_mut()
+        .map_err(KernelError::Dispatch)?;
+    let Some(pixels) = render_video(fb, m, frame) else {
+        return Ok(());
+    };
     if pixels != fb.pixels {
         fb.pixels = pixels;
         fb.mark_dirty();

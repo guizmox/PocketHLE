@@ -1299,6 +1299,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "lstrcatA", lstrcat_a);
     d.register_handler(dll, "lstrcmpW", lstrcmp_w);
     d.register_handler(dll, "lstrcmpA", lstrcmp_a);
+    d.register_handler(dll, "CompareStringW", compare_string_w);
     d.register_handler(dll, "lstrcmpiW", lstrcmpi_w);
     d.register_handler(dll, "lstrcmpiA", lstrcmpi_a);
 
@@ -22431,6 +22432,59 @@ fn lstrcmp_a(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(cmp_to_winapi(sa.cmp(&sb))))
 }
 
+fn compare_string_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const NORM_IGNORECASE: u32 = 1;
+    const ERROR_INVALID_FLAGS: u32 = 1004;
+    const MAX_UNITS: u32 = 0x10000;
+
+    let flags = ctx.arg_u32(1)?;
+    if flags & !NORM_IGNORECASE != 0 {
+        set_thread_error(ctx, ERROR_INVALID_FLAGS);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let first = (ctx.arg_u32(2)?, ctx.arg_u32(3)?);
+    let second = (ctx.arg_u32(4)?, ctx.arg_u32(5)?);
+    let mut read = |pointer: u32, count: u32| -> Option<Vec<u16>> {
+        if pointer == 0 || count == 0 {
+            return None;
+        }
+        let available = (u64::from(u32::MAX) + 1 - u64::from(pointer)) / 2;
+        if count == u32::MAX {
+            let max = u64::from(MAX_UNITS).min(available) as u32;
+            let units = read_wstr(ctx, pointer, max).ok()?;
+            return (units.len() < max as usize).then_some(units);
+        }
+        if count > MAX_UNITS || u64::from(count) > available {
+            return None;
+        }
+        let bytes = ctx.cpu.read_mem(pointer, count * 2).ok()?;
+        Some(
+            bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect(),
+        )
+    };
+    let (Some(first), Some(second)) = (read(first.0, first.1), read(second.0, second.1)) else {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    // PocketHLE has no locale collation tables. Use a deterministic Unicode
+    // fallback, retaining the WinCE return convention and counted lengths.
+    let order = if flags == NORM_IGNORECASE {
+        String::from_utf16_lossy(&first)
+            .to_lowercase()
+            .cmp(&String::from_utf16_lossy(&second).to_lowercase())
+    } else {
+        first.cmp(&second)
+    };
+    Ok(DispatchOutcome::ReturnedR0(match order {
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Equal => 2,
+        std::cmp::Ordering::Greater => 3,
+    }))
+}
+
 fn lstrcmpi_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let a = ctx.arg_u32(0)?;
     let b = ctx.arg_u32(1)?;
@@ -38610,6 +38664,37 @@ mod tests {
         assert!(dispatcher
             .registered_iter()
             .any(|(dll, name)| dll == "coredll.dll" && name == "InvalidateRgn"));
+    }
+
+    #[test]
+    fn compare_string_w_uses_counted_utf16_and_win_ce_result_codes() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x1100, b"A\0b\0X\0\0\0").unwrap();
+        cpu.write_mem(0x1200, b"a\0B\0Y\0\0\0").unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x400).unwrap();
+        cpu.write_reg(ArmReg::R1, 1).unwrap();
+        cpu.write_reg(ArmReg::R2, 0x1100).unwrap();
+        cpu.write_mem(0x1800, &0x1200u32.to_le_bytes()).unwrap();
+        let thunk = dummy_thunk();
+        for (first_len, second_len, expected) in
+            [(2u32, 2u32, 2), (u32::MAX, u32::MAX, 1), (3, 2, 3)]
+        {
+            cpu.write_reg(ArmReg::R3, first_len).unwrap();
+            cpu.write_mem(0x1804, &second_len.to_le_bytes()).unwrap();
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            assert_eq!(
+                compare_string_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
     }
 
     /// Call a handler with `args` already in r0.. and return r0.

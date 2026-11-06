@@ -1208,7 +1208,7 @@ impl FrameHook for SessionHook {
                         return FrameAction::Stop;
                     }
                 };
-                if black && self.saw_non_black {
+                if black && self.saw_non_black && !kernel.framebuffer.has_system_video() {
                     return if stop_requested {
                         kernel.should_stop = true;
                         FrameAction::Stop
