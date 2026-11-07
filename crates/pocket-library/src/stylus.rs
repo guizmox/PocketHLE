@@ -180,6 +180,35 @@ mod pointer_tests {
         assert!(saved.get("controller").is_none());
     }
     #[test]
+    fn keyboard_mode_key_and_directions_remain_editable_but_are_reserved_from_grids() {
+        use crate::{
+            input_gestures::binding_key, keybindings::keyboard_button_for_profile, GuestButton,
+            LauncherConfig,
+        };
+        let mut c = LauncherConfig::default();
+        assert_eq!(
+            keyboard_button_for_profile(&c.keybindings, "p", false),
+            Some(GuestButton::StylusClick)
+        );
+        assert_eq!(keyboard_button_for_profile(&c.keybindings, "P", true), None);
+        for key in ["P", "p", "O", "K", "L", "M"] {
+            assert!(c.stylus_keyboard_reserved(key));
+        }
+        c.short_press_bindings
+            .insert(binding_key(false, false, "P"), None);
+        c.short_press_bindings.insert(
+            binding_key(false, false, "J"),
+            Some(GuestButton::StylusClick),
+        );
+        c.short_press_bindings
+            .insert(binding_key(false, false, "O"), Some(GuestButton::Action));
+        assert!(!c.stylus_keyboard_reserved("P"));
+        assert!(!c.stylus_keyboard_reserved("O"));
+        assert!(c.stylus_keyboard_reserved("J"));
+        c.stylus_stick.keyboard[0] = vec!["I".into()];
+        assert!(c.stylus_keyboard_reserved("I"));
+    }
+    #[test]
     fn pointer_clamps_and_cancel_discards_pending_click() {
         let mut p = StylusPointer::default();
         p.pointer = true;

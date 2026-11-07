@@ -2,6 +2,7 @@ package com.pockethle.app
 
 /** Deck is the shared input reference. Policy is independent of Android events. */
 internal object DeckInputPolicy {
+    const val STYLUS_CLICK_COMMAND = 0x1003
     const val ROTATION_COMMAND = 0x1001
     const val SCREENSHOT_COMMAND = 0x1002 // Portable config tag; unsupported on Android.
     const val HOLD_MS = 650L
@@ -61,10 +62,11 @@ internal object DeckInputPolicy {
         if (current == "screenshot") return null
         if (gizmondo)
             return current?.takeUnless {
-                it == "turbo" || it == "center_tap" || it.startsWith("pocket_pc_app")
+                it == "turbo" || it == "stylus_click" || it == "center_tap" || it.startsWith("pocket_pc_app")
             }
         if (current?.startsWith("giz_piano") == true) return null
         return when {
+            name.equals("P",true) && current in listOf(null,"stylus_click") -> "stylus_click"
             name == "Tab" && current in listOf(null, "center_tap") -> "center_tap"
             name == "1" && current in listOf(null, "soft1", "pocket_pc_app1") -> "pocket_pc_app1"
             name == "2" && current in listOf(null, "soft2", "pocket_pc_app2") -> "pocket_pc_app2"

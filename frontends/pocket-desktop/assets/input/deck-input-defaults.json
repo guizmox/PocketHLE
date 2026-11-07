@@ -146,6 +146,10 @@
     {
       "button": "screenshot",
       "keys": []
+    },
+    {
+      "button": "stylus_click",
+      "keys": []
     }
   ],
   "ppc_overrides": {
@@ -184,6 +188,7 @@
     "turbo": 114,
     "center_tap": 4096,
     "rotate_screen": 4097,
-    "screenshot": 4098
+    "screenshot": 4098,
+    "stylus_click": 4099
   }
 }

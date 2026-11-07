@@ -69,6 +69,11 @@ impl PocketLauncher {
             .then_some(&self.running_stylus_grid)
     }
     pub(super) fn grid_assigned(&self, input: &HostInput) -> bool {
+        if matches!(input,HostInput::Keyboard(key) if self.library.config().stylus_keyboard_reserved(key))
+        {
+            return false;
+        }
+
         self.grid_settings().is_some_and(|s| {
             s.cell_for(input, self.library.config().gamepad_fullscreen.as_deref())
                 .is_some()
@@ -100,6 +105,11 @@ impl PocketLauncher {
         }
     }
     pub(super) fn route_grid(&mut self, input: HostInput, down: bool) -> bool {
+        if matches!(&input,HostInput::Keyboard(key) if self.library.config().stylus_keyboard_reserved(key))
+        {
+            return false;
+        }
+
         let Some(grid) = self.grid_settings().cloned() else {
             return false;
         };
@@ -225,6 +235,12 @@ impl PocketLauncher {
         } else if down {
             if let Some(cell) = editor.waiting {
                 if let Some((_, draft)) = self.game_settings_draft.as_mut() {
+                    if matches!(&input,HostInput::Keyboard(key) if self.library.config().stylus_keyboard_reserved(key))
+                    {
+                        editor.message="This key is currently assigned to the stylus. Reassign it in Keyboard bindings before using it in a grid.".into();
+                        self.stylus_editor = Some(editor);
+                        return true;
+                    }
                     match draft.pocketpc_stylus_grid.bind(
                         cell,
                         input,

@@ -422,6 +422,7 @@ class InputSettingsActivity : HostKeyActivity() {
         section(body, controllerOnly)
         if(!gizmondo) {
             if(controllerOnly) body.addView(text("Double-click R3 to switch stylus mode. Stick: automatic drags, single click unused. Pointer: move cursor, single click to tap. Right stick and R3 are reserved."))
+            if(!controllerOnly) body.addView(text("Stylus click / mode: P by default. Double-press to switch mode; single press taps in Pointer mode. Reassign this key and stylus directions with Assign an input. Current stylus keys cannot be used in per-game grids."))
             val speedLabel=text("Stylus speed (pixels): ${state.stylus.optInt("speed",240).coerceIn(30,1200)}")
             body.addView(speedLabel)
             body.addView(android.widget.SeekBar(this).apply {
@@ -544,7 +545,7 @@ class InputSettingsActivity : HostKeyActivity() {
         summary(body, pad)
         val inputs = (diagram.controls.mapNotNull { it.input } + state.savedInputs(pad)).distinct()
         val missing =
-            state.visibleButtons(gizmondo).filter { target ->
+            state.visibleButtons(gizmondo).filter { !pad || it!="stylus_click" }.filter { target ->
                 !state.assigned(target, pad, gizmondo, inputs)
             }
         if (missing.isNotEmpty())

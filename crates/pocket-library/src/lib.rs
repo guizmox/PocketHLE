@@ -1329,6 +1329,25 @@ fn default_fullscreen_mode() -> String {
 }
 
 impl LauncherConfig {
+    /// Effective PocketPC stylus keyboard inputs are unavailable to per-game grids.
+    /// Explicit guest overrides free an old direction key for another purpose.
+    pub fn stylus_keyboard_reserved(&self, key: &str) -> bool {
+        let id = input_gestures::binding_key(false, false, key);
+        if let Some(binding) = self.short_press_bindings.get(&id) {
+            return *binding == Some(GuestButton::StylusClick);
+        }
+        if self.long_press_bindings.contains_key(&id) {
+            return false;
+        }
+        keybindings::keyboard_button_for_profile(&self.keybindings, key, false)
+            == Some(GuestButton::StylusClick)
+            || self
+                .stylus_stick
+                .keyboard
+                .iter()
+                .any(|keys| keys.iter().any(|k| keybindings::keys_match(k, key)))
+    }
+
     pub fn gamepad_toggles_fullscreen(&self, control: &str) -> bool {
         // Preserve an existing custom guest binding when upgrading old configs.
         self.gamepad_fullscreen.as_deref() == Some(control)

@@ -431,6 +431,7 @@ consumed by the frontend before any guest-key dispatch.
 | Keyboard Tab | Center tap | Unassigned |
 | Keyboard T | TURBO | Unassigned |
 | Keyboard F1–F5 | Unassigned | Home / Volume / Brightness / Geofence / Power |
+| Keyboard P | Stylus click / mode (customizable) | Unassigned |
 | Controller L1 / R1 | P1 / P2 | Volume / Home |
 | Controller L2 / R2 | P3 / P4 | L1 / R1 |
 | Controller North / South | A / Action | Stop / Play |
@@ -471,8 +472,11 @@ from key codes, independently of Unicode characters and modifiers.
 On Windows/Linux/Deck and Android with an external controller, the PocketPC
 right stick is permanently assigned to the stylus. **Double-click R3 to switch
 stylus mode** is shown below the input editor and in the read-only selected-input
-card. The controller picture and rails show **Mode ×2** on R3 and **Tab** on
-Guide; reserved inputs use red outlines. Gizmondo is unchanged.
+card. The controller picture shows one **Click / ×2** caption inside the right
+stick, with no overlaid direction captions; the rails retain the four direction
+assignments and **Mode ×2** on R3. Guide shows **Tab**. Long-press captions sit
+below Full/Filter rather than crossing their button outlines. Reserved inputs
+use red outlines. Gizmondo keeps its guest mappings.
 
 * **Stick** is the initial mode for each game session: the existing held-stylus
   drag behavior, including edge lift/recentering, remains. A single R3 click does
@@ -480,6 +484,13 @@ Guide; reserved inputs use red outlines. Gizmondo is unchanged.
 * **Pointer** moves a visible, outlined crosshair within the logical game screen.
   A single R3 click sends a 60 ms stylus pulse at the position captured on release.
   There is no automatic held drag or edge recentering in this mode.
+
+Keyboard **P** defaults to the same click/mode gesture for PocketPC. **Stylus
+click / mode** is an assignable keyboard command, not an immutable key: users
+can clear P, choose another key, or change the existing O/K/L/M stylus directions
+through the assistant. Assigning the gesture clears that key's old long binding;
+it is not offered as a long action. The keyboard picture and selected-input card
+show the effective mapping. The right stick/R3 remain fixed on controllers.
 
 The double-click window is 300 ms from the first release to the second press.
 The first click is deferred; a second press inside that window cancels it and
@@ -504,6 +515,15 @@ All immutable keyboard inputs (F7–F12) and controller inputs (View/Menu plus t
 PocketPC right stick/R3) are refused by per-game grid capture as well as the global
 assistant. A reserved-input attempt reports **This input is reserved by PocketHLE**.
 Existing saved grid entries for these inputs are ignored at runtime.
+
+Per-game grids also refuse the **current effective PocketPC stylus keyboard
+keys**, including the click/mode key (P by default) and all configured direction
+keys. This is a contextual conflict, not a global keyboard lock. Capture explains
+that the key is assigned to the stylus and must first be reassigned in Keyboard
+bindings. Runtime routing ignores stale grid bindings for those keys. The policy
+uses current profile overrides and direction tables, so a cleared/replaced old
+key is freed and a newly assigned key becomes protected from grids. Desktop and
+Android use the same precedence.
 
 ## Center tap
 

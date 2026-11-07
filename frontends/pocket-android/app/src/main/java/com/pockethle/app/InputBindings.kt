@@ -5,7 +5,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Same stable button and host-control names as pocket-library / desktop SDL. */
-internal class InputBindings(config: LauncherConfig, private val gizmondo: Boolean? = null) {
+internal class InputBindings(private val config: LauncherConfig, private val gizmondo: Boolean? = null) {
+    private val stylusKeyboard=StylusBindings(config)
     val keyboard = config.keybindingsJson?.let { JSONArray(it) } ?: defaultKeyboard()
     val controller =
         JSONObject(config.originalJson).optJSONObject("gamepad_bindings") ?: defaultController()
@@ -28,7 +29,7 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                 ?.second
                 ?.takeUnless {
                     it == DeckInputPolicy.SCREENSHOT_COMMAND ||
-                        (gizmondo == true && it == CenterTapPulse.COMMAND)
+                        (gizmondo == true && it in listOf(CenterTapPulse.COMMAND,DeckInputPolicy.STYLUS_CLICK_COMMAND))
                 }
 
     val longPress =
@@ -44,7 +45,7 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
         return buttons[longPress.optString(InputGestures.bindingKey(giz, pad, input))]
             ?.second
             ?.takeUnless {
-                it == DeckInputPolicy.SCREENSHOT_COMMAND || (giz && it == CenterTapPulse.COMMAND)
+                it == DeckInputPolicy.SCREENSHOT_COMMAND || (giz && it in listOf(CenterTapPulse.COMMAND,DeckInputPolicy.STYLUS_CLICK_COMMAND))
             }
     }
 
@@ -66,6 +67,13 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                     ?.second
         }
         return buttons[DeckInputPolicy.keyboardGuest(name, null, gizmondo ?: false)]?.second
+    }
+
+    fun stylusKeyboardReserved(name:String):Boolean {
+        if(gizmondo==true) return false
+        if(hasShort(name,false)) return shortKey(name,false)==DeckInputPolicy.STYLUS_CLICK_COMMAND
+        if(longKey(name,false)!=null) return false
+        return keyboardName(name)==DeckInputPolicy.STYLUS_CLICK_COMMAND || stylusKeyboard.key(name)!=null
     }
 
     fun keyboardKey(event: KeyEvent): Int? = keyName(event)?.let { keyboardName(it) }
@@ -107,6 +115,7 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                 "giz_piano5" to ("Power" to 0x7a),
                 "turbo" to ("Turbo (PocketHLE)" to 0x72),
                 "center_tap" to ("Center tap" to CenterTapPulse.COMMAND),
+                "stylus_click" to ("Stylus click / mode" to DeckInputPolicy.STYLUS_CLICK_COMMAND),
                 "rotate_screen" to ("Rotation" to DeckInputPolicy.ROTATION_COMMAND),
                 "screenshot" to ("Screenshot" to DeckInputPolicy.SCREENSHOT_COMMAND),
             )

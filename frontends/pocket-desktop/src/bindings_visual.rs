@@ -49,6 +49,7 @@ impl Assignment {
                 CenterTap => "Tap",
                 RotateScreen => "Rotate",
                 Screenshot => "Screenshot",
+                StylusClick => "Click ×2",
             },
         }
     }
@@ -142,7 +143,7 @@ impl Assignment {
     fn color(self) -> Color32 {
         match self {
             Self::Unbound => Color32::from_gray(90),
-            Self::Guest(GuestButton::CenterTap) => GREEN,
+            Self::Guest(GuestButton::CenterTap | GuestButton::StylusClick) => GREEN,
             Self::Guest(GuestButton::RotateScreen | GuestButton::Screenshot) => PURPLE,
             Self::Guest(_) => BLUE,
             Self::Stylus(_) => GREEN,
@@ -269,7 +270,7 @@ fn visible_buttons(gizmondo: bool) -> impl Iterator<Item = GuestButton> {
 }
 
 fn guest_assignment(button: GuestButton, gizmondo: bool) -> Assignment {
-    if gizmondo && button == GuestButton::CenterTap {
+    if gizmondo && matches!(button, GuestButton::CenterTap | GuestButton::StylusClick) {
         return Assignment::Unbound;
     }
     // The legacy Turbo binding sends VK_F3, which is Gizmondo's Brightness key.
@@ -421,6 +422,9 @@ fn set_assignment(
     }
     let direction = match target {
         Assignment::Guest(button) => {
+            if button == GuestButton::StylusClick {
+                config.long_press_bindings.remove(&key);
+            }
             config.short_press_bindings.insert(key, Some(button));
             return;
         }
@@ -453,7 +457,11 @@ fn assignment_targets(
 ) -> Vec<Assignment> {
     let stylus = !controller && !gizmondo && !long;
     std::iter::once(Assignment::Unbound)
-        .chain(visible_buttons(gizmondo).map(Assignment::Guest))
+        .chain(
+            visible_buttons(gizmondo)
+                .filter(|b| *b != GuestButton::StylusClick || (!long && !controller))
+                .map(Assignment::Guest),
+        )
         .chain((0..if stylus { 4 } else { 0 }).map(Assignment::Stylus))
         .collect()
 }
@@ -885,11 +893,18 @@ impl Editor {
         controller: bool,
         target: Assignment,
     ) -> bool {
-        if self.gizmondo && matches!(target, Assignment::Guest(GuestButton::CenterTap)) {
+        if self.gizmondo
+            && matches!(
+                target,
+                Assignment::Guest(GuestButton::CenterTap | GuestButton::StylusClick)
+            )
+        {
             return false;
         }
         if (controller
-            && (controller_fixed(input, self.gizmondo) || matches!(target, Assignment::Stylus(_))))
+            && (matches!(target, Assignment::Guest(GuestButton::StylusClick))
+                || controller_fixed(input, self.gizmondo)
+                || matches!(target, Assignment::Stylus(_))))
             || (!controller && keyboard_shortcut(input).is_some())
         {
             return false;
@@ -1084,6 +1099,7 @@ impl Editor {
         }
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
         let missing: Vec<_> = visible_buttons(self.gizmondo)
+            .filter(|b| !controller || *b != GuestButton::StylusClick)
             .filter(|button| {
                 if config.long_press_bindings.iter().any(|(key, b)| {
                     key.starts_with(&prefix)
@@ -1280,7 +1296,7 @@ impl Editor {
                     let configured_fullscreen = !controller_fixed(name, self.gizmondo)
                         && config.gamepad_toggles_fullscreen(name);
                     let label = if *name == "RightThumb" && !self.gizmondo {
-                        "Mode"
+                        "Click / ×2"
                     } else if configured_fullscreen {
                         "Full"
                     } else if shortcut.is_some() {
@@ -1319,21 +1335,23 @@ impl Editor {
                             label_point.y += distance;
                         }
                     }
-                    ui.painter().text(
-                        label_point,
-                        Align2::CENTER_CENTER,
-                        label,
-                        FontId::proportional((art_width / 760.0 * 14.0).clamp(8.0, 12.0)),
-                        if *name == "RightThumb" && !self.gizmondo {
-                            GREEN
-                        } else if shortcut.is_some() && controller_tap(name).is_none() {
-                            LONG_PRESS
-                        } else if shortcut.is_some() || configured_fullscreen {
-                            PURPLE
-                        } else {
-                            assignment.color()
-                        },
-                    );
+                    if self.gizmondo || !name.starts_with("RightStick") {
+                        ui.painter().text(
+                            label_point,
+                            Align2::CENTER_CENTER,
+                            label,
+                            FontId::proportional((art_width / 760.0 * 14.0).clamp(8.0, 12.0)),
+                            if *name == "RightThumb" && !self.gizmondo {
+                                GREEN
+                            } else if shortcut.is_some() && controller_tap(name).is_none() {
+                                LONG_PRESS
+                            } else if shortcut.is_some() || configured_fullscreen {
+                                PURPLE
+                            } else {
+                                assignment.color()
+                            },
+                        );
+                    }
                     let custom_hold = (!controller_fixed(name, self.gizmondo))
                         .then(|| {
                             config
@@ -1351,10 +1369,18 @@ impl Editor {
                         .or_else(|| short_hold(name, self.gizmondo))
                     {
                         ui.painter().text(
-                            point + Vec2::new(0.0, if *name == "Misc1" { 27.0 } else { 14.0 }),
+                            point
+                                + Vec2::new(
+                                    0.0,
+                                    if *name == "Misc1" {
+                                        27.0
+                                    } else {
+                                        30.0 * art_width / 760.0
+                                    },
+                                ),
                             Align2::CENTER_CENTER,
                             format!("Hold: {hold}"),
-                            FontId::proportional(8.5),
+                            FontId::proportional((8.5 * art_width / 760.0).clamp(7.0, 9.0)),
                             LONG_PRESS,
                         );
                     }
@@ -2325,6 +2351,81 @@ mod tests {
         assert_eq!(serde_json::to_value(&config).unwrap(), before);
     }
 
+    #[test]
+    fn controller_hold_captions_do_not_overlap_function_button_labels() {
+        for width in [400.0, 820.0, 1280.0] {
+            let ctx = egui::Context::default();
+            let mut e = Editor::default();
+            let c = LauncherConfig::default();
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(width, 1000.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| e.show(ui, &c, true));
+                },
+            );
+            let texts: Vec<_> = out
+                .shapes
+                .iter()
+                .filter_map(|s| {
+                    if let egui::Shape::Text(t) = &s.shape {
+                        Some((t.galley.text(), Rect::from_min_size(t.pos, t.galley.size())))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (caption, hold) in [("Full", "Hold: Exit"), ("Filter", "Hold: Record")] {
+                let function = texts.iter().find(|(text, _)| *text == caption).unwrap().1;
+                let label = texts
+                    .iter()
+                    .filter(|(text, _)| *text == hold)
+                    .min_by(|a, b| {
+                        (a.1.center().x - function.center().x)
+                            .abs()
+                            .total_cmp(&(b.1.center().x - function.center().x).abs())
+                    })
+                    .unwrap()
+                    .1;
+                assert!(
+                    !function.intersects(label),
+                    "{caption} overlaps {hold} at width {width}"
+                );
+                assert!(label.top() > function.bottom());
+            }
+        }
+    }
+    #[test]
+    fn keyboard_click_mode_and_stylus_directions_can_be_reassigned() {
+        let mut c = LauncherConfig::default();
+        let mut e = Editor::default();
+        assert_eq!(
+            keyboard_assignment(&c, "P", false),
+            Assignment::Guest(GuestButton::StylusClick)
+        );
+        assert!(e.assign_short(&mut c, "P", false, Assignment::Unbound));
+        assert!(e.assign_short(
+            &mut c,
+            "J",
+            false,
+            Assignment::Guest(GuestButton::StylusClick)
+        ));
+        assert!(e.assign_short(&mut c, "I", false, Assignment::Stylus(0)));
+        assert!(!c.stylus_keyboard_reserved("P"));
+        assert!(c.stylus_keyboard_reserved("J"));
+        assert!(c.stylus_keyboard_reserved("I"));
+        assert!(e.assign_short(&mut c, "O", false, Assignment::Unbound));
+        assert!(!c.stylus_keyboard_reserved("O"));
+        assert!(!assignment_targets(false, true, Some("South"), false)
+            .contains(&Assignment::Guest(GuestButton::StylusClick)));
+        assert!(!assignment_targets(false, false, Some("J"), true)
+            .contains(&Assignment::Guest(GuestButton::StylusClick)));
+    }
     #[test]
     fn reserved_stylus_input_card_explains_mode_switch_and_ignores_stale_overrides() {
         let ctx = egui::Context::default();

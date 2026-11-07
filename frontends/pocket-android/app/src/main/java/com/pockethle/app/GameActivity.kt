@@ -908,10 +908,7 @@ class GameActivity : AppCompatActivity() {
         val controllerName=if(isController) InputBindings.controllerName(event.keyCode) else null
         if(controllerName=="RightThumb" && !gizmondoGame) {
             if(event.repeatCount==0 && session!=0L && activityResumed && hasWindowFocus()) {
-                if(stylusPointer.button(event.action==KeyEvent.ACTION_DOWN,android.os.SystemClock.uptimeMillis())) {
-                    updateStylusAim()
-                    Toast.makeText(this,"Stylus mode: ${if(stylusPointer.pointer) "Pointer" else "Stick"}",Toast.LENGTH_SHORT).show()
-                }
+                stylusButton(event.action==KeyEvent.ACTION_DOWN)
             }
             return true
         }
@@ -1150,6 +1147,7 @@ class GameActivity : AppCompatActivity() {
     }
     private fun cancelGrid(){gridRouter?.cancel()?.let{sendGrid(it)}}
     private fun routeGrid(input:GridInput,down:Boolean):Boolean {
+        if(input.source=="keyboard" && bindings.stylusKeyboardReserved(input.name)) return false
         val router=gridRouter ?: return false
         if(!router.assigned(input)) return false
         if(!surfacePointerDown && activityResumed && hasWindowFocus()) router.input(input,down)?.let{sendGrid(it)}
@@ -1198,7 +1196,16 @@ class GameActivity : AppCompatActivity() {
         mainHandler.postDelayed(centerTapRelease,CenterTapPulse.DURATION_MS)
     }
 
+    private fun stylusButton(down:Boolean) {
+        if(gizmondoGame || session==0L || !activityResumed || !hasWindowFocus()) return
+        if(stylusPointer.button(down,android.os.SystemClock.uptimeMillis())) {
+            updateStylusAim()
+            Toast.makeText(this,"Stylus mode: ${if(stylusPointer.pointer) "Pointer" else "Stick"}",Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun acquireGuestKey(handle: Long, requestedVk: Int) {
+        if(requestedVk==DeckInputPolicy.STYLUS_CLICK_COMMAND) {if(handle==session) stylusButton(true);return}
         if (requestedVk == DeckInputPolicy.ROTATION_COMMAND) { if (handle == session) cycleRotation(); return }
         if (requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
         if (requestedVk == CenterTapPulse.COMMAND) { tapScreenCenter(handle); return }
@@ -1211,6 +1218,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseGuestKey(handle: Long, requestedVk: Int) {
+        if(requestedVk==DeckInputPolicy.STYLUS_CLICK_COMMAND) {if(handle==session) stylusButton(false);return}
         if (requestedVk == CenterTapPulse.COMMAND || requestedVk == DeckInputPolicy.ROTATION_COMMAND || requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
         val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: return

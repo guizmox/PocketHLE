@@ -33,13 +33,13 @@ internal class InputEditorState(raw: String) {
         InputBindings.buttons.keys
             .filter { it != "screenshot" }
             .filter {
-                if (gizmondo) !it.startsWith("pocket_pc_app") && it != "turbo" && it != "center_tap"
+                if (gizmondo) !it.startsWith("pocket_pc_app") && it != "turbo" && it != "center_tap" && it != "stylus_click"
                 else !it.startsWith("giz_piano")
             }
 
     fun targets(pad: Boolean, input: String?, long: Boolean, gizmondo: Boolean): List<String?> =
         listOf<String?>(null) +
-            visibleButtons(gizmondo) +
+            visibleButtons(gizmondo).filter { it!="stylus_click" || (!long && !pad) } +
             if (
                 !gizmondo &&
                     !long &&
@@ -91,6 +91,7 @@ internal class InputEditorState(raw: String) {
     fun short(target: String?, gizmondo: Boolean = false) =
         when {
             target == "center_tap" -> "Tap"
+            target == "stylus_click" -> "Click ×2"
             target == "rotate_screen" -> "Rotate"
             gizmondo && target in gizmondoNames -> gizmondoNames.getValue(target!!)
             target == "action" -> "Act"
@@ -194,11 +195,11 @@ internal class InputEditorState(raw: String) {
         if (fixed(input, pad, gizmondo)) null
         else
             longPress.optString(InputGestures.bindingKey(gizmondo, pad, input)).takeIf {
-                it.isNotEmpty() && it != "screenshot" && !(gizmondo && it == "center_tap")
+                it.isNotEmpty() && it != "screenshot" && !(gizmondo && it in listOf("center_tap","stylus_click"))
             }
 
     fun assignLong(input: String, pad: Boolean, target: String?, gizmondo: Boolean): Boolean {
-        if (fixed(input, pad, gizmondo) || (!pad && input == "Escape")) return false
+        if (target=="stylus_click" || fixed(input, pad, gizmondo) || (!pad && input == "Escape")) return false
         val key = InputGestures.bindingKey(gizmondo, pad, input)
         if (target == null) longPress.remove(key)
         else if (target in visibleButtons(gizmondo)) {
@@ -233,7 +234,7 @@ internal class InputEditorState(raw: String) {
     }
 
     private fun displayGuest(target: String?, gizmondo: Boolean) =
-        if (target == "screenshot" || (gizmondo && target == "center_tap")) null
+        if (target == "screenshot" || (gizmondo && target in listOf("center_tap","stylus_click"))) null
         else if (gizmondo && target == "turbo") "giz_piano3" else target
 
     fun fixed(input: String, pad: Boolean, gizmondo: Boolean) =
@@ -263,7 +264,7 @@ internal class InputEditorState(raw: String) {
     }
 
     fun assign(input: String, pad: Boolean, target: String?, gizmondo: Boolean? = null): Boolean {
-        if (target == "screenshot" || (gizmondo == true && target == "center_tap") || (pad && target?.startsWith("stylus:") == true)) return false
+        if ((pad && target=="stylus_click") || target == "screenshot" || (gizmondo == true && target in listOf("center_tap","stylus_click")) || (pad && target?.startsWith("stylus:") == true)) return false
         if (fixed(input, pad, gizmondo ?: false)) return false
         if (!pad && DeckInputPolicy.reservedKey(input)) return false
         if (gizmondo != null) {
@@ -272,6 +273,7 @@ internal class InputEditorState(raw: String) {
                 shortPress.remove(key)
                 longPress.remove(key)
             } else {
+                if(target=="stylus_click") longPress.remove(key)
                 shortPress.put(key, target ?: JSONObject.NULL)
                 if (pad && same(json.optString("gamepad_fullscreen"), input, true))
                     json.put("gamepad_fullscreen", JSONObject.NULL)

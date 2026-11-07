@@ -178,7 +178,7 @@ internal class InputSkinView(
                 paint.color = color
                 paint.textSize = 14f
                 paint.textAlign = Paint.Align.CENTER
-                canvas.drawText(label, x, y + 5f, paint)
+                if(gizmondo || !input.startsWith("RightStick")) canvas.drawText(if(input=="RightThumb" && !gizmondo) "Click / ×2" else label, x, y + 5f, paint)
                 val customHold = state.longTarget(input, true, gizmondo)
                 val holdLabel =
                     customHold?.let { state.short(it, gizmondo) }

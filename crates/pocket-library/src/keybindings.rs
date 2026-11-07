@@ -84,11 +84,12 @@ pub enum GuestButton {
     CenterTap,
     RotateScreen,
     Screenshot,
+    StylusClick,
 }
 
 impl GuestButton {
     /// Every button, in the order the settings UI lists them.
-    pub const ALL: [GuestButton; 23] = [
+    pub const ALL: [GuestButton; 24] = [
         GuestButton::DpadUp,
         GuestButton::DpadDown,
         GuestButton::DpadLeft,
@@ -112,6 +113,7 @@ impl GuestButton {
         GuestButton::CenterTap,
         GuestButton::RotateScreen,
         GuestButton::Screenshot,
+        GuestButton::StylusClick,
     ];
 
     /// Guest VK for device buttons, or a host-command tag consumed by frontends.
@@ -141,6 +143,7 @@ impl GuestButton {
             GuestButton::CenterTap => crate::center_tap::COMMAND,
             GuestButton::RotateScreen => ROTATION_COMMAND,
             GuestButton::Screenshot => SCREENSHOT_COMMAND,
+            GuestButton::StylusClick => STYLUS_CLICK_COMMAND,
         }
     }
 
@@ -169,6 +172,7 @@ impl GuestButton {
             GuestButton::CenterTap => "Center tap",
             GuestButton::RotateScreen => "Rotation",
             GuestButton::Screenshot => "Screenshot",
+            GuestButton::StylusClick => "Stylus click / mode",
         }
     }
 
@@ -204,7 +208,8 @@ impl GuestButton {
             | GuestButton::PocketPcApp4
             | GuestButton::CenterTap
             | GuestButton::RotateScreen
-            | GuestButton::Screenshot => &[],
+            | GuestButton::Screenshot
+            | GuestButton::StylusClick => &[],
         }
     }
 }
@@ -213,6 +218,8 @@ impl GuestButton {
 /// This does not reserve guest VK_F11 (Gizmondo Power), which other host keys can send.
 pub const ROTATION_COMMAND: u16 = 0x1001;
 pub const SCREENSHOT_COMMAND: u16 = 0x1002;
+pub const STYLUS_CLICK_COMMAND: u16 = 0x1003;
+pub const STYLUS_RELEASE_COMMAND: u16 = 0x1004;
 
 pub fn reserved_host_key(key: &str) -> bool {
     matches!(
@@ -904,7 +911,13 @@ pub fn keyboard_button_for_profile(
         return button.filter(|b| {
             !matches!(
                 b,
-                Turbo | PocketPcApp1 | PocketPcApp2 | PocketPcApp3 | PocketPcApp4 | CenterTap
+                Turbo
+                    | PocketPcApp1
+                    | PocketPcApp2
+                    | PocketPcApp3
+                    | PocketPcApp4
+                    | CenterTap
+                    | StylusClick
             )
         });
     }
@@ -915,6 +928,7 @@ pub fn keyboard_button_for_profile(
         return None;
     }
     match (key, button) {
+        (_, None | Some(StylusClick)) if key.eq_ignore_ascii_case("p") => Some(StylusClick),
         ("Tab", None | Some(CenterTap)) => Some(CenterTap),
         ("1", None | Some(Soft1 | PocketPcApp1)) => Some(PocketPcApp1),
         ("2", None | Some(Soft2 | PocketPcApp2)) => Some(PocketPcApp2),

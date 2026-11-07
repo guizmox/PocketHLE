@@ -154,6 +154,11 @@ and a visible Pointer. Single R3 does nothing in Stick mode; in Pointer mode it
 taps the cursor position after the 300 ms double-click window. A mode notice
 appears at the filter-notice location. The only setting is Stylus speed (pixels),
 shared by both modes. Old enable and controller-direction options are removed.
+Keyboard P defaults to click/mode switching and can be reassigned, like the
+O/K/L/M stylus directions. Per-game grids refuse the current stylus keyboard
+keys, including remapped ones, until they are freed in Keyboard bindings.
+The right-stick picture uses a single Click / ×2 caption; direction mappings
+stay in the rails. Full/Filter hold captions are outside their outlines.
 See [FRONTENDS.md](FRONTENDS.md#pocketpc-right-stick-stylus-modes) for timing,
 priority, cancellation and Android parity.
 

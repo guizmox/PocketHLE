@@ -20,7 +20,7 @@ internal class StylusControlsDialog(
 ):Dialog(context) {
     private val testing=settings.controlsMode()=="zones"
     private val grid=StylusGridConfig.parse(settings.pocketpcStylusGridJson)
-    private val bindings=InputBindings(config)
+    private val bindings=InputBindings(config,false)
     private val fullscreen=JSONObject(config.originalJson).optString("gamepad_fullscreen").takeIf{it.isNotEmpty() && it!="null"}
     private var virtualDialog:Dialog?=null
     private var waiting:Int?=null
@@ -187,7 +187,9 @@ internal class StylusControlsDialog(
     }
     private fun capture(input:GridInput) {
         val cell=waiting ?: return
-        val error=grid.bind(cell,input,fullscreen)
+        val error=if(input.source=="keyboard" && bindings.stylusKeyboardReserved(input.name))
+            "This key is currently assigned to the stylus. Reassign it in Keyboard bindings before using it in a grid."
+            else grid.bind(cell,input,fullscreen)
         if(error==null){waiting=null;status.text="Assigned ${input.label()}. Press Done to save.";refreshCells();virtualDialog?.dismiss()}else{status.text=error}
     }
     override fun onGenericMotionEvent(event:MotionEvent):Boolean {

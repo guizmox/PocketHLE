@@ -1440,7 +1440,7 @@ impl PocketLauncher {
                     .chain(self.held.pointer.iter())
                     .chain(self.held.gamepad.iter())
                 {
-                    if !matches!(*vk, pocket_library::center_tap::COMMAND | pocket_library::keybindings::ROTATION_COMMAND | pocket_library::keybindings::SCREENSHOT_COMMAND) { recording.observe(InputEvent::KeyDown { vk: *vk }); }
+                    if !matches!(*vk, pocket_library::center_tap::COMMAND | pocket_library::keybindings::ROTATION_COMMAND | pocket_library::keybindings::SCREENSHOT_COMMAND | pocket_library::keybindings::STYLUS_CLICK_COMMAND) { recording.observe(InputEvent::KeyDown { vk: *vk }); }
                 }
                 recording.observe(InputEvent::TouchSteeringPosition {
                     x: self.steering_axes.0,
@@ -2903,6 +2903,8 @@ impl PocketLauncher {
             ui.heading("Stylus");
             if controller {
                 ui.label("Double-click R3 to switch stylus mode. Stick: automatic drags, single click unused. Pointer: move the cursor, single click to tap. Right stick and R3 are reserved.");
+            } else {
+                ui.label("Stylus click / mode: P by default. Double-press to switch mode; single press taps in Pointer mode. Reassign this key and stylus directions with Assign an input. Current stylus keys cannot be used in per-game grids.");
             }
             let slider = ui.add(
                 egui::Slider::new(&mut draft.stylus_stick.speed, 30..=1200)
@@ -4088,6 +4090,34 @@ impl PocketLauncher {
         }
     }
 
+    fn stylus_button(&mut self, down: bool) {
+        if self.screen != Screen::Run
+            || self.running_is_gizmondo
+            || self
+                .last_frame_snapshot
+                .as_ref()
+                .is_some_and(|f| f.text_input)
+        {
+            return;
+        }
+        if self
+            .stylus_pointer
+            .button(down, self.stylus_clock.elapsed().as_millis() as u64)
+        {
+            self.send_input(InputEvent::StylusAim { x: 0, y: 0 });
+            self.stylus_last = (0, 0);
+            let mode = if self.stylus_pointer.pointer {
+                "Pointer"
+            } else {
+                "Stick"
+            };
+            self.control_notice = Some((
+                format!("Stylus mode: {mode}"),
+                Instant::now() + Duration::from_secs(3),
+            ));
+        }
+    }
+
     fn update_stylus_input(&mut self, ctx: &egui::Context) {
         let mut strengths = self.stylus_touch;
         let config = &self.library.config().stylus_stick;
@@ -4238,6 +4268,26 @@ impl PocketLauncher {
     fn send_input(&self, ev: InputEvent) {
         match ev {
             InputEvent::KeyDown {
+                vk: pocket_library::keybindings::STYLUS_CLICK_COMMAND,
+            } => {
+                if !self.running_is_gizmondo && self.screen == Screen::Run {
+                    self.pending_binding_commands
+                        .borrow_mut()
+                        .push(pocket_library::keybindings::STYLUS_CLICK_COMMAND);
+                }
+                return;
+            }
+            InputEvent::KeyUp {
+                vk: pocket_library::keybindings::STYLUS_CLICK_COMMAND,
+            } => {
+                if !self.running_is_gizmondo && self.screen == Screen::Run {
+                    self.pending_binding_commands
+                        .borrow_mut()
+                        .push(pocket_library::keybindings::STYLUS_RELEASE_COMMAND);
+                }
+                return;
+            }
+            InputEvent::KeyDown {
                 vk:
                     vk @ (pocket_library::keybindings::ROTATION_COMMAND
                     | pocket_library::keybindings::SCREENSHOT_COMMAND),
@@ -4384,6 +4434,7 @@ impl PocketLauncher {
             self.steering_axes = (0, 0);
         }
         self.stylus_pointer.cancel_click();
+        self.pending_binding_commands.borrow_mut().retain(|v|!matches!(*v,pocket_library::keybindings::STYLUS_CLICK_COMMAND|pocket_library::keybindings::STYLUS_RELEASE_COMMAND));
         self.stylus_tick=Instant::now();
         self.stylus_keyboard.clear();
         self.stylus_gamepad.clear();
@@ -4628,12 +4679,7 @@ impl PocketLauncher {
                     if self.screen == Screen::Run && !self.running_is_gizmondo && Some(device) == self.gamepad_selected
                         && pocket_library::stylus::controller_reserved(&control, false) {
                         if control == "RightThumb" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
-                            if self.stylus_pointer.button(down, self.stylus_clock.elapsed().as_millis() as u64) {
-                                self.send_input(InputEvent::StylusAim { x:0,y:0 });
-                                self.stylus_last=(0,0);
-                                let mode=if self.stylus_pointer.pointer { "Pointer" } else { "Stick" };
-                                self.control_notice=Some((format!("Stylus mode: {mode}"),Instant::now()+Duration::from_secs(3)));
-                            }
+                            self.stylus_button(down);
                         }
                         continue;
                     }
@@ -5838,7 +5884,11 @@ impl eframe::App for PocketLauncher {
         if let Some((x,y)) = released { self.dispatch_input(InputEvent::PointerUp {x,y}); }
         let commands=std::mem::take(&mut *self.pending_binding_commands.borrow_mut());
         for command in commands {
+            if matches!(command,pocket_library::keybindings::STYLUS_CLICK_COMMAND|pocket_library::keybindings::STYLUS_RELEASE_COMMAND)
+                && !ctx.input(|i|i.viewport().focused.unwrap_or(true)) {self.stylus_pointer.cancel_click();continue;}
             match command {
+                pocket_library::keybindings::STYLUS_CLICK_COMMAND => self.stylus_button(true),
+                pocket_library::keybindings::STYLUS_RELEASE_COMMAND => self.stylus_button(false),
                 pocket_library::keybindings::ROTATION_COMMAND => self.cycle_rotation(ctx),
                 pocket_library::keybindings::SCREENSHOT_COMMAND if self.last_frame_snapshot.is_some() => self.capture_screenshot(),
                 _ => {}
@@ -6071,6 +6121,7 @@ impl eframe::App for PocketLauncher {
         }
         self.handle_physical_keyboard(ctx);
         self.update_stylus_input(ctx);
+        if !self.pending_binding_commands.borrow().is_empty() {ctx.request_repaint();}
         self.drain_events(ctx);
         if let Some(result) = self
             .screenshot
