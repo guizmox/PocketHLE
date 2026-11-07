@@ -2020,6 +2020,19 @@ impl PocketLauncher {
                         self.screen = Screen::GameSettings;
                     }
                     4 => {
+                        let confirmed = rfd::MessageDialog::new()
+                            .set_title("Remove game?")
+                            .set_description(format!(
+                                "Remove {} from the library?\n\nThis permanently deletes its installed files, saves and per-game settings.",
+                                game.display_name
+                            ))
+                            .set_level(rfd::MessageLevel::Warning)
+                            .set_buttons(rfd::MessageButtons::YesNo)
+                            .show()
+                            == rfd::MessageDialogResult::Yes;
+                        if !confirmed {
+                            return;
+                        }
                         if let Err(e) = self.library.remove(&game.id) {
                             self.status = format!("Remove failed: {e}");
                         } else {

@@ -15,6 +15,12 @@ See [OPTIMIZATIONS.md](OPTIMIZATIONS.md). GPU/software renderer selection is a
 separate supported choice. Frame-limit inheritance and filters are defined in
 [GPU.md](GPU.md), not duplicated here.
 
+## Removing library games
+
+Desktop and Android require confirmation before removing a game from the library,
+for both PocketPC and Gizmondo. Desktop removal deletes the game's installed
+files, saves and per-game settings. Dismissing the confirmation cancels removal.
+
 ## Desktop and Gizmondo controls
 
 The desktop Gizmondo panel uses the PocketPC-style dark/translucent design,
