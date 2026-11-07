@@ -1,13 +1,12 @@
 package com.pockethle.app
 
 import android.os.Bundle
-import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.preference.ListPreference
 import org.json.JSONObject
 
 /** Per-game settings sheet. */
-class GameSettingsActivity : AppCompatActivity() {
+class GameSettingsActivity : HostKeyActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)

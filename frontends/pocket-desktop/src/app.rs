@@ -4191,7 +4191,7 @@ impl PocketLauncher {
                     self.running_is_gizmondo,
                 )
         } else {
-            matches!(input, "F10" | "F11" | "F12")
+            pocket_library::keybindings::reserved_host_key(input)
         };
         if reserved {
             return false;
@@ -4907,6 +4907,51 @@ impl PocketLauncher {
         }
     }
 
+    /// Run reserved host keys before any editor, grid or guest key consumer.
+    fn handle_host_keys(&mut self, ctx: &egui::Context) {
+        let keys = crate::host_shortcuts::take(ctx);
+        let mut fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        for key in keys {
+            match key {
+                egui::Key::F8 => {
+                    self.bindings_visual.clear_live();
+                    self.config_draft = None;
+                    self.game_settings_draft = None;
+                    self.file_dialog = None;
+                    self.stylus_editor = None;
+                    self.information_game = None;
+                    self.rename_draft = None;
+                    self.game_menu = None;
+                    if self.running_game.is_some() || self.game_viewport_active {
+                        self.return_to_library(ctx);
+                    } else {
+                        self.pending_run = None;
+                        self.release_all_keys();
+                        self.screen = Screen::Library;
+                        ctx.request_repaint();
+                    }
+                }
+                egui::Key::F9 => {
+                    self.cycle_deck_upscale_filter(ctx, true);
+                    if let Some(draft) = self.config_draft.as_mut() {
+                        draft.upscale_filter = self.upscale_filter.id().into();
+                    }
+                }
+                egui::Key::F10
+                    if self.screen != Screen::InputSettings
+                        && self.last_frame_snapshot.is_some() =>
+                {
+                    self.capture_screenshot()
+                }
+                egui::Key::F11 if self.screen != Screen::InputSettings => self.toggle_recording(),
+                egui::Key::F12 => {
+                    fullscreen = !fullscreen;
+                    self.set_fullscreen(ctx, fullscreen);
+                }
+                _ => {}
+            }
+        }
+    }
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
         if self.screen==Screen::InputSettings {return;}
 
@@ -4972,18 +5017,6 @@ impl PocketLauncher {
             else {
                 continue;
             };
-            if key == egui::Key::F10 {
-                if pressed && !repeat && self.last_frame_snapshot.is_some() {
-                    self.capture_screenshot();
-                }
-                continue;
-            }
-            if key == egui::Key::F11 {
-                if pressed && !repeat {
-                    self.toggle_recording();
-                }
-                continue;
-            }
             if key == egui::Key::F6
                 && self.screen == Screen::Run
                 && self.library.config().gps_fixed_enabled
@@ -4998,13 +5031,6 @@ impl PocketLauncher {
                     if let Some(tx) = self.input_tx.as_ref() {
                         let _ = tx.send(InputCommand::RefreshColorsGps);
                     }
-                }
-                continue;
-            }
-            if key == egui::Key::F12 {
-                if pressed && !repeat {
-                    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                    self.set_fullscreen(ctx, !fullscreen);
                 }
                 continue;
             }
@@ -5663,6 +5689,7 @@ impl eframe::App for PocketLauncher {
         );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_host_keys(ctx);
         if self.screen == Screen::InputSettings {
             self.bindings_visual.keyboard_shortcut(ctx, self.input_controller);
         }

@@ -12,6 +12,46 @@ class InputEditorStateTest {
         )
 
     @Test
+    fun functionKeysAreImmutableEvenWithLegacyGuestAndLongOverrides() {
+        for (name in listOf("F8", "F9", "F10", "F11", "F12")) {
+            val key = InputGestures.bindingKey(false, false, name)
+            val raw =
+                JSONObject()
+                    .put(
+                        "keybindings",
+                        JSONArray()
+                            .put(
+                                JSONObject()
+                                    .put("button", "action")
+                                    .put("keys", JSONArray().put(name))
+                            ),
+                    )
+                    .put("short_press_bindings", JSONObject().put(key, "action"))
+                    .put("long_press_bindings", JSONObject().put(key, "button_a"))
+            val state = InputEditorState(raw.toString())
+            assertFalse(state.assign(name, false, "action", false))
+            assertFalse(state.assignLong(name, false, "action", false))
+            assertEquals("host", state.assignment(name, false, false))
+            assertNull(state.longTarget(name, false, false))
+            val input =
+                InputBindings(
+                    LauncherConfig.default()
+                        .copy(
+                            originalJson = raw.toString(),
+                            keybindingsJson = raw.getJSONArray("keybindings").toString(),
+                        ),
+                    false,
+                )
+            assertNull(input.keyboardName(name))
+            assertNull(input.longKey(name, false))
+            assertNull(input.shortKey(name, false))
+        }
+        assertEquals(DeckInputPolicy.Action.EXIT, DeckInputPolicy.key("F8"))
+        assertEquals(DeckInputPolicy.Action.NEXT_FILTER, DeckInputPolicy.key("F9"))
+        assertEquals(DeckInputPolicy.Action.FULLSCREEN, DeckInputPolicy.key("F12"))
+    }
+
+    @Test
     fun assistantKeepsSupportedStylusAssignments() {
         val state = draft()
         assertTrue(state.targets(false, "O", false, false).contains("stylus:0"))

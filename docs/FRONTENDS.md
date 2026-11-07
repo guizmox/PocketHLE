@@ -262,6 +262,14 @@ independent of their saved guest assignments.
 
 After applying, **Assign another input** starts another capture, **Save and
 finish** persists the draft, and **Back to overview** returns without saving.
+The desktop assistant stays centered in the current viewport, including after a
+fullscreen/windowed resize. It owns navigation and its selected-row highlight;
+stale launcher widget focus cannot draw a border over the dialog title. Command
+lists reveal selection once on entry or when keyboard/controller navigation
+moves it. Mouse-wheel scrolling does not repeatedly recenter the selected row.
+Android mouse-wheel events are passed to the native ScrollView rather than
+being treated as joystick input.
+
 This permits assignment and saving without another mouse/touch interaction.
 The normal screen Save/Cancel actions remain. A reserved host input is rejected
 and capture restarts with an explanation; it is not silently rebound.
@@ -331,9 +339,9 @@ triggers clear on release, focus loss or device removal. Desktop uses the select
 controller; Android combines connected sources and keeps key/axis channels
 separate. Axis hysteresis avoids flicker. Modifier keycaps are not assignable but
 can show logical modifier feedback, so both matching keycaps may light together.
-Only OS-delivered keys can be shown. Outside the assistant, testing inputs does
-not trigger guest/host actions or alter bindings. Inside it, inputs capture or
-navigate the current step. Android capture is cancelled when the activity stops;
+Only OS-delivered keys can be shown. Outside the assistant, ordinary bindable
+inputs only test feedback. Inside it, they capture or navigate the current step.
+Reserved host function keys remain active before either route. Android capture is cancelled when the activity stops;
 draft/profile/selection survive recreation, but an active capture is not resumed.
 Returning to Android settings reloads saved config before another preference can
 overwrite it.
@@ -342,8 +350,28 @@ View/Select taps fullscreen; its 650 ms hold is Gizmondo Brightness or Pocket PC
 return to library. Menu/Start and Extra/Misc1 tap the next presentation filter
 and hold to toggle recording. Guide/Mode holds to return to library on Pocket PC
 only, when delivered by the OS. Extra has no standard Android key adapter and is
-marked desktop-only. F10 screenshots and F12 fullscreen work on both frontends;
-video recording/F11 remain desktop-only and Android labels them unavailable.
+marked desktop-only. Physical **F8–F12 are immutable host keys**, outlined in red
+on the keyboard skin (the red border remains during physical feedback):
+
+| Key | Host action |
+| --- | --- |
+| F8 | Return to the library from gameplay or another launcher page |
+| F9 | Next presentation/upscaling filter, in the same order as Menu |
+| F10 | Existing game screenshot action |
+| F11 | Existing video recording action (desktop only) |
+| F12 | Toggle fullscreen/windowed, including binding pages and the assistant |
+
+Host keys are removed before capture, per-game grids, stylus routes and guest
+bindings. Assignment APIs reject them; stored legacy/short/long guest mappings
+cannot override them. Reserving physical F11 does not reserve the guest's VK_F11:
+Gizmondo Power can still be sent through its normal F5 or another guest binding.
+F8 leaves an unsaved binding draft without saving it. In menus F10/F11 stay
+reserved rather than becoming new screenshot/recording UI commands. Android game
+F12 keeps its existing game-only layout; launcher F12 hides/restores app/system
+bars. Android F9 persists the global filter and keeps an open binding draft in
+sync; other launcher pages refresh their configuration. On desktop the open
+launcher draft is likewise synchronized so Save cannot restore the old filter.
+Video recording remains unavailable on Android.
 A host hold consumes its tap. Android filter changes run on the GL thread,
 invalidate presentation upload and lazily initialize/reuse SMAA without changing
 guest graphics state or geometry.

@@ -192,6 +192,15 @@ impl GuestButton {
     }
 }
 
+/// Physical F8-F12 belong to the frontend, never to a guest binding.
+/// This does not reserve guest VK_F11 (Gizmondo Power), which other host keys can send.
+pub fn reserved_host_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_uppercase().as_str(),
+        "F8" | "F9" | "F10" | "F11" | "F12"
+    )
+}
+
 /// Whether two stored host-key names refer to the same key.
 ///
 /// Case-insensitive, and tolerant of the two spellings egui accepts for
@@ -265,6 +274,9 @@ impl KeyBindings {
     pub fn set_keys(&mut self, button: GuestButton, keys: Vec<String>) {
         let mut deduped: Vec<String> = Vec::with_capacity(keys.len());
         for key in keys {
+            if reserved_host_key(&key) {
+                continue;
+            }
             if !deduped.iter().any(|k| keys_match(k, &key)) {
                 deduped.push(key);
             }
@@ -306,6 +318,9 @@ impl KeyBindings {
     /// The button a host key produces, if any. This is the lookup the
     /// desktop launcher's keyboard handler does on every key event.
     pub fn button_for_key(&self, key: &str) -> Option<GuestButton> {
+        if reserved_host_key(key) {
+            return None;
+        }
         self.bindings
             .iter()
             .find(|b| b.keys.iter().any(|k| keys_match(k, key)))
@@ -339,6 +354,18 @@ impl KeyBindings {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn host_function_keys_are_never_guest_bindings_even_in_legacy_json() {
+        let mut keys = super::KeyBindings::default();
+        for name in ["F8", "F9", "F10", "F11", "F12"] {
+            keys.bind(super::GuestButton::Action, name);
+            assert_eq!(keys.vk_for_key(name), None);
+            let raw = format!(r#"[{{"button":"action","keys":["{name}"]}}]"#);
+            let old: super::KeyBindings = serde_json::from_str(&raw).unwrap();
+            assert_eq!(old.vk_for_key(name), None);
+        }
+        assert_eq!(keys.vk_for_key("F5"), Some(0x7a)); // Guest Power/VK_F11 remains available.
+    }
+    #[test]
     fn pocket_pc_buttons_do_not_steal_legacy_bindings_and_survive_settings() {
         let mut bindings = super::KeyBindings::default();
         let before: Vec<_> = super::GuestButton::ALL[..16]
@@ -352,12 +379,12 @@ mod tests {
         for button in super::GuestButton::ALL[16..].iter() {
             assert!(bindings.keys_for(*button).is_empty());
         }
-        bindings.bind(super::GuestButton::PocketPcApp3, "F8");
-        bindings.bind(super::GuestButton::PocketPcApp4, "F9");
+        bindings.bind(super::GuestButton::PocketPcApp3, "F6");
+        bindings.bind(super::GuestButton::PocketPcApp4, "F7");
         let json = serde_json::to_string(&bindings).unwrap();
         let restored: super::KeyBindings = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.vk_for_key("F8"), Some(0xc3));
-        assert_eq!(restored.vk_for_key("F9"), Some(0xc4));
+        assert_eq!(restored.vk_for_key("F6"), Some(0xc3));
+        assert_eq!(restored.vk_for_key("F7"), Some(0xc4));
         let mut pad = super::xbox_gamepad_bindings();
         pad.insert("South".into(), super::GuestButton::PocketPcApp3);
         let json = serde_json::to_string(&pad).unwrap();

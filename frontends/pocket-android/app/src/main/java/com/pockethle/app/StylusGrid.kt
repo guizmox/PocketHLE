@@ -33,7 +33,7 @@ internal data class GridInput(val source:String,val name:String) {
     fun label()=if(source=="keyboard") "Key $name" else name.removePrefix("Touch:").let { if(name.startsWith("Touch:")) "Touch $it" else it }
     fun conflict(fullscreen:String?):String? {
         val input=canonical()
-        if(source=="keyboard" && input.name in listOf("ESCAPE","F10","F11","F12")) return "Reserved by PocketHLE (Escape / F10 / F11 / F12)."
+        if(source=="keyboard" && input.name in listOf("ESCAPE","F8","F9","F10","F11","F12")) return "Reserved by PocketHLE (Escape / F8–F12)."
         if(source=="controller" && input.name in listOf("Select","Start","Mode","Misc1")) return "Reserved by PocketHLE (fullscreen, filters, recording or system button)."
         if(source=="controller" && fullscreen!=null && input==GridInput("controller",fullscreen).canonical()) return "This input is assigned to fullscreen in PocketHLE settings."
         return null

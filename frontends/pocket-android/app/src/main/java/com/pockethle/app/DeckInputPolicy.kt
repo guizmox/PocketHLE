@@ -51,8 +51,12 @@ internal object DeckInputPolicy {
         }
     }
 
+    fun reservedKey(name:String) = name.uppercase() in listOf("F8","F9","F10","F11","F12")
+
     fun key(name: String): Action? =
-        when (name) {
+        when (name.uppercase()) {
+            "F8" -> Action.EXIT
+            "F9" -> Action.NEXT_FILTER
             "F10" -> Action.SCREENSHOT
             "F11" -> Action.RECORDING
             "F12" -> Action.FULLSCREEN

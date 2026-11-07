@@ -20,6 +20,7 @@ mod gamepad;
 mod gamepad_host;
 mod gizmondo_layout;
 mod host_gpu;
+mod host_shortcuts;
 mod latest_frame;
 mod launch_args;
 mod native_share;

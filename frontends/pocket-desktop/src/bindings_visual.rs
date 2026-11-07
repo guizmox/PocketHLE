@@ -2,6 +2,7 @@
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, Vec2};
 use pocket_library::{GuestButton, LauncherConfig};
 
+const RESERVED: Color32 = Color32::from_rgb(225, 95, 95);
 const LIVE: Color32 = Color32::from_rgb(115, 235, 250);
 const BLUE: Color32 = Color32::from_rgb(93, 179, 235);
 const GREEN: Color32 = Color32::from_rgb(93, 194, 162);
@@ -118,6 +119,7 @@ struct QuickAssign {
     pressed: Option<(String, std::time::Instant)>,
     choice: Option<(String, bool)>,
     index: usize,
+    reveal_choice: bool,
     message: String,
 }
 
@@ -232,6 +234,9 @@ fn short_hold(control: &str, gizmondo: bool) -> Option<&'static str> {
 }
 
 fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> Assignment {
+    if pocket_library::keybindings::reserved_host_key(key) {
+        return Assignment::Unbound;
+    }
     if let Some(button) =
         config
             .short_press_bindings
@@ -267,7 +272,9 @@ fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> As
 }
 
 fn keyboard_shortcut(key: &str) -> Option<&'static str> {
-    match key {
+    match key.to_ascii_uppercase().as_str() {
+        "F8" => Some("Return to library"),
+        "F9" => Some("Next filter"),
         "F10" => Some("Screenshot"),
         "F11" => Some("Start / stop recording"),
         "F12" => Some("Toggle fullscreen"),
@@ -405,6 +412,31 @@ fn assignment_targets(
         .collect()
 }
 
+fn assignment_choices(
+    ui: &mut Ui,
+    targets: &[Assignment],
+    selected: usize,
+    gizmondo: bool,
+    reveal: bool,
+) -> egui::scroll_area::ScrollAreaOutput<Option<usize>> {
+    egui::ScrollArea::vertical()
+        .id_source("input_assignment_choices")
+        .max_height(320.0)
+        .show(ui, |ui| {
+            let mut clicked = None;
+            for (index, target) in targets.iter().enumerate() {
+                let row = ui.selectable_label(index == selected, target.label_for(gizmondo));
+                if reveal && index == selected {
+                    row.scroll_to_me(Some(egui::Align::Center));
+                }
+                if row.clicked() {
+                    clicked = Some(index);
+                }
+            }
+            clicked
+        })
+}
+
 impl Editor {
     /// Called before the editor's ordinary key-event suppression.
     pub fn keyboard_shortcut(&mut self, ctx: &egui::Context, controller: bool) {
@@ -485,6 +517,7 @@ impl Editor {
         let Some(mut q) = self.quick.take() else {
             return;
         };
+        crate::controller_ui::claim_modal_input(ui.ctx());
         let mut cancel = false;
         let mut accept = false;
         let events = ui.input(|i| i.events.clone());
@@ -528,6 +561,7 @@ impl Editor {
                     {
                         let (name, at) = q.pressed.take().unwrap();
                         q.choice = Some((name, at.elapsed().as_millis() >= 650));
+                        q.reveal_choice = true;
                     }
                 }
             }
@@ -545,8 +579,14 @@ impl Editor {
         let count = if q.done { 3 } else { targets.len() };
         for nav in self.quick_nav.drain(..) {
             match nav.as_str() {
-                "DPadUp" | "LeftStickUp" => q.index = (q.index + count - 1) % count,
-                "DPadDown" | "LeftStickDown" => q.index = (q.index + 1) % count,
+                "DPadUp" | "LeftStickUp" => {
+                    q.index = (q.index + count - 1) % count;
+                    q.reveal_choice = true;
+                }
+                "DPadDown" | "LeftStickDown" => {
+                    q.index = (q.index + 1) % count;
+                    q.reveal_choice = true;
+                }
                 "South" => accept = true,
                 "East" => cancel = true,
                 _ => {}
@@ -568,6 +608,10 @@ impl Editor {
             }
         }
         egui::Window::new("Assign an input")
+            .id(egui::Id::new("input_assignment_assistant"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .movable(false)
+            .default_width((ui.ctx().screen_rect().width() - 32.0).clamp(180.0, 460.0))
             .collapsible(false)
             .resizable(false)
             .show(ui.ctx(), |ui| {
@@ -601,23 +645,13 @@ impl Editor {
                             "Adding a long action delays this input's short action until release.",
                         );
                     }
-                    egui::ScrollArea::vertical()
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            for (index, target) in targets.iter().enumerate() {
-                                let r = ui.selectable_label(
-                                    index == q.index,
-                                    target.label_for(self.gizmondo),
-                                );
-                                if index == q.index {
-                                    r.scroll_to_me(Some(egui::Align::Center));
-                                }
-                                if r.clicked() {
-                                    q.index = index;
-                                    accept = true;
-                                }
-                            }
-                        });
+                    if let Some(index) =
+                        assignment_choices(ui, &targets, q.index, self.gizmondo, q.reveal_choice)
+                            .inner
+                    {
+                        q.index = index;
+                        accept = true;
+                    }
                     if crate::controller_ui::button(ui, "Apply assignment").clicked() {
                         accept = true;
                     }
@@ -650,6 +684,7 @@ impl Editor {
                     cancel = true;
                 }
             });
+        q.reveal_choice = false;
         if accept && !cancel {
             if q.done {
                 match q.index {
@@ -743,6 +778,7 @@ impl Editor {
                 } else if q.pressed.as_ref().is_some_and(|(name, _)| name == control) {
                     let (name, at) = q.pressed.take().unwrap();
                     q.choice = Some((name, at.elapsed().as_millis() >= 650));
+                    q.reveal_choice = true;
                 }
             }
         }
@@ -964,11 +1000,14 @@ impl Editor {
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
         let missing: Vec<_> = visible_buttons(self.gizmondo)
             .filter(|button| {
-                if config
-                    .long_press_bindings
-                    .iter()
-                    .any(|(key, b)| key.starts_with(&prefix) && b == button)
-                {
+                if config.long_press_bindings.iter().any(|(key, b)| {
+                    key.starts_with(&prefix)
+                        && b == button
+                        && (controller
+                            || !pocket_library::keybindings::reserved_host_key(
+                                key.strip_prefix(&prefix).unwrap_or(""),
+                            ))
+                }) {
                     return false;
                 }
                 if controller && self.gizmondo && *button == GuestButton::GizPiano3 {
@@ -1063,8 +1102,11 @@ impl Editor {
                 (LONG_PRESS, "Long press"),
                 (Color32::GRAY, "Unassigned"),
                 (LIVE, "Pressed input"),
+                (RESERVED, "Reserved host key"),
             ] {
-                ui.colored_label(color, label);
+                if color != RESERVED || !controller {
+                    ui.colored_label(color, label);
+                }
             }
         });
     }
@@ -1251,6 +1293,7 @@ impl Editor {
         label: &str,
         rect: Rect,
     ) -> bool {
+        let reserved = !controller && pocket_library::keybindings::reserved_host_key(name);
         let assignment = if controller {
             controller_assignment(config, name, self.gizmondo)
         } else {
@@ -1328,8 +1371,18 @@ impl Editor {
                     Color32::TRANSPARENT
                 },
                 Stroke::new(
-                    if pressed || is_selected { 2.0 } else { 1.0 },
-                    if pressed { LIVE } else { color },
+                    if reserved || pressed || is_selected {
+                        2.0
+                    } else {
+                        1.0
+                    },
+                    if reserved {
+                        RESERVED
+                    } else if pressed {
+                        LIVE
+                    } else {
+                        color
+                    },
                 ),
             );
         }
@@ -1337,6 +1390,8 @@ impl Editor {
             "Fullscreen"
         } else if shortcut.is_some() {
             match name {
+                "F8" => "Library",
+                "F9" => "Filter",
                 "F10" => "Photo",
                 "F11" => "Video",
                 "F12" => "Full",
@@ -1466,6 +1521,89 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| editor.quick_assign(ui, config, true));
         });
+    }
+    #[test]
+    fn assistant_is_centered_when_opened_and_after_viewport_resize() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::default();
+        let mut c = LauncherConfig::default();
+        e.quick = Some(QuickAssign::default());
+        for size in [Vec2::new(800.0, 600.0), Vec2::new(1200.0, 800.0)] {
+            for _ in 0..3 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        crate::controller_ui::begin_frame(ctx);
+                        egui::CentralPanel::default()
+                            .show(ctx, |ui| e.quick_assign(ui, &mut c, false));
+                    },
+                );
+            }
+            let rect = ctx
+                .memory(|m| m.area_rect(egui::Id::new("input_assignment_assistant")))
+                .unwrap();
+            assert!(
+                (rect.center() - egui::pos2(size.x / 2.0, size.y / 2.0)).length() < 2.0,
+                "{rect:?} in {size:?}"
+            );
+        }
+    }
+    #[test]
+    fn mouse_wheel_does_not_snap_command_list_back_to_selected_top_row() {
+        let ctx = egui::Context::default();
+        let targets: Vec<_> = GuestButton::ALL
+            .into_iter()
+            .chain(GuestButton::ALL)
+            .map(Assignment::Guest)
+            .collect();
+        let mut offset = 0.0;
+        for frame in 0..15 {
+            let events = if frame == 2 {
+                vec![
+                    egui::Event::PointerMoved(egui::pos2(100.0, 100.0)),
+                    egui::Event::Scroll(Vec2::new(0.0, -180.0)),
+                ]
+            } else {
+                vec![]
+            };
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    time: Some(frame as f64 / 60.0),
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        offset = assignment_choices(ui, &targets, 0, false, frame == 0)
+                            .state
+                            .offset
+                            .y
+                    });
+                },
+            );
+        }
+        assert!(offset > 100.0, "wheel position snapped to {offset}");
+    }
+    #[test]
+    fn reserved_function_keys_reject_all_assignments_and_ignore_stale_overrides() {
+        let mut e = Editor::default();
+        let mut c = LauncherConfig::default();
+        for key in ["F8", "F9", "F10", "F11", "F12"] {
+            let id = pocket_library::input_gestures::binding_key(false, false, key);
+            c.short_press_bindings
+                .insert(id.clone(), Some(GuestButton::Action));
+            c.long_press_bindings.insert(id, GuestButton::ButtonA);
+            assert!(!e.assign_short(&mut c, key, false, Assignment::Guest(GuestButton::Action)));
+            assert_eq!(keyboard_assignment(&c, key, false), Assignment::Unbound);
+            assert!(keyboard_shortcut(key).is_some());
+        }
     }
     #[test]
     fn controller_launch_chord_waits_for_both_releases_without_binding_them() {

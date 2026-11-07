@@ -13,11 +13,14 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
         JSONObject(config.originalJson).optJSONObject("short_press_bindings") ?: JSONObject()
 
     fun hasShort(input: String, pad: Boolean) =
-        shortPress.has(InputGestures.bindingKey(gizmondo ?: false, pad, input))
+        (pad || !DeckInputPolicy.reservedKey(input)) &&
+            shortPress.has(InputGestures.bindingKey(gizmondo ?: false, pad, input))
 
-    fun shortKey(input: String, pad: Boolean) =
-        buttons[shortPress.optString(InputGestures.bindingKey(gizmondo ?: false, pad, input))]
-            ?.second
+    fun shortKey(input: String, pad: Boolean): Int? =
+        if (!pad && DeckInputPolicy.reservedKey(input)) null
+        else
+            buttons[shortPress.optString(InputGestures.bindingKey(gizmondo ?: false, pad, input))]
+                ?.second
 
     val longPress =
         JSONObject(config.originalJson).optJSONObject("long_press_bindings") ?: JSONObject()
@@ -26,13 +29,14 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
         val giz = gizmondo ?: false
         if (
             (pad && DeckInputPolicy.reserved(input, giz)) ||
-                (!pad && (DeckInputPolicy.key(input) != null || input == "Escape"))
+                (!pad && (DeckInputPolicy.reservedKey(input) || input == "Escape"))
         )
             return null
         return buttons[longPress.optString(InputGestures.bindingKey(giz, pad, input))]?.second
     }
 
     fun keyboardName(name: String): Int? {
+        if (DeckInputPolicy.reservedKey(name)) return null
         if (hasShort(name, false)) return shortKey(name, false)
         for (i in 0 until keyboard.length()) {
             val entry = keyboard.getJSONObject(i)
@@ -45,19 +49,7 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
         return null
     }
 
-    fun keyboardKey(event: KeyEvent): Int? {
-        val name = keyName(event) ?: return null
-        if (hasShort(name, false)) return shortKey(name, false)
-        for (i in 0 until keyboard.length()) {
-            val entry = keyboard.getJSONObject(i)
-            val keys = entry.optJSONArray("keys") ?: continue
-            for (j in 0 until keys.length()) if (
-                canonical(keys.getString(j)).equals(canonical(name), true)
-            )
-                return buttons[entry.optString("button")]?.second
-        }
-        return null
-    }
+    fun keyboardKey(event: KeyEvent): Int? = keyName(event)?.let { keyboardName(it) }
 
     fun controllerKey(name: String): Int? {
         if (gizmondo != null) {

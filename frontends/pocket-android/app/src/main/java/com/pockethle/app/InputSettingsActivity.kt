@@ -5,11 +5,10 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.*
 import android.widget.*
-import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
 
 /** Shared input-first assistant with read-only skin feedback and selected-input summary. */
-class InputSettingsActivity : AppCompatActivity() {
+class InputSettingsActivity : HostKeyActivity() {
     private val controllerOnly: Boolean
         get() = intent.getBooleanExtra("controller", false)
 
@@ -136,8 +135,17 @@ class InputSettingsActivity : AppCompatActivity() {
         return pad || name != null
     }
 
+    override fun onHostFilterChanged(filter: String) {
+        if (::state.isInitialized) state.json.put("upscale_filter", filter)
+    }
+
+    override fun onHostFullscreenChanged() {
+        assignmentDialog?.window?.let { applyHostFullscreen(it) }
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val recognized = recordKey(event)
+        if (handleHostKeyEvent(event)) return true
         if (event.keyCode == KeyEvent.KEYCODE_BACK && !controllerEvent(event))
             return super.dispatchKeyEvent(event)
         return if (recognized) true else super.dispatchKeyEvent(event)
@@ -381,7 +389,8 @@ class InputSettingsActivity : AppCompatActivity() {
                             "Shortcut · " to InputSkinView.PURPLE,
                             "Long press · " to InputSkinView.LONG_PRESS,
                             "Unassigned · " to Color.GRAY,
-                            "Pressed input" to InputSkinView.LIVE,
+                            "Pressed input · " to InputSkinView.LIVE,
+                            "Reserved host key" to InputSkinView.RESERVED,
                         )
                     )
             }
@@ -751,6 +760,7 @@ class InputSettingsActivity : AppCompatActivity() {
                 override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                     val waiting = shortcuts.awaitingRelease
                     recordKey(event)
+                    if (handleHostKeyEvent(event)) return true
                     if (waiting) {
                         if (!shortcuts.awaitingRelease) draw()
                         return true
@@ -793,6 +803,13 @@ class InputSettingsActivity : AppCompatActivity() {
                 }
 
                 override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+                    if (
+                        event.source and InputDevice.SOURCE_JOYSTICK !=
+                            InputDevice.SOURCE_JOYSTICK &&
+                            event.source and InputDevice.SOURCE_GAMEPAD !=
+                                InputDevice.SOURCE_GAMEPAD
+                    )
+                        return super.dispatchGenericMotionEvent(event)
                     val candidate = recordMotion(event)?.takeIf { it.second > .6f }?.first
                     if (shortcuts.awaitingRelease) return true
                     if (stage != 0) {
@@ -820,6 +837,7 @@ class InputSettingsActivity : AppCompatActivity() {
             refreshLive()
         }
         dialog.show()
+        dialog.window?.let { applyHostFullscreen(it) }
         dialog.draw()
     }
 

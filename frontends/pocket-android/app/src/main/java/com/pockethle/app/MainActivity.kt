@@ -12,7 +12,6 @@ import android.view.View
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
@@ -31,7 +30,7 @@ import org.json.JSONObject
  * RecyclerView of game cards, a "+" floating action button to import a
  * new `.CAB`, and per-card overflow menu (Run / Settings / Remove).
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : HostKeyActivity() {
 
     private lateinit var adapter: GameAdapter
     private var gizmondoTab = true

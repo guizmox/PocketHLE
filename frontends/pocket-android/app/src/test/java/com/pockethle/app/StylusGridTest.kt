@@ -18,7 +18,7 @@ class StylusGridTest {
     }
     @Test fun reservedInputsAndConfiguredFullscreenAreRefused() {
         val g=StylusGridConfig()
-        for(k in listOf("Escape","F10","F11","F12")) assertNotNull(g.bind(0,GridInput("keyboard",k),null))
+        for(k in listOf("Escape","F8","F9","F10","F11","F12")) assertNotNull(g.bind(0,GridInput("keyboard",k),null))
         for(k in listOf("Select","Back","Start","Guide","Mode","Misc1")) assertNotNull(g.bind(0,GridInput("controller",k),null))
         assertNotNull(g.bind(0,GridInput("controller","South"),"South"))
         g.bind(0,GridInput("controller","South"),null)

@@ -101,6 +101,17 @@ restores View as the additional fullscreen shortcut. Stylus configuration is
 not reset. Save is required. Do not confuse historical Start=Home/Volume
 migration values with the reserved Menu gestures above.
 
+## Physical keyboard host keys
+
+F8 returns to the library from gameplay or another launcher page. F9 advances
+the same presentation-filter carousel as Menu. F10/F11 retain game capture and
+recording, and F12 toggles fullscreen/windowed even in binding pages and their
+assistant. F8–F12 cannot be assigned to guest commands, including through a
+legacy configuration or a touch grid; the keyboard skin outlines them in red.
+See [FRONTENDS.md](FRONTENDS.md#visual-input-editor--desktop-and-android) for
+menu behavior and draft persistence. These are physical host keys, independent
+of the guest VK codes sent by the Deck's game buttons.
+
 ## Captures
 
 A long Menu press toggles recording; release is not required to keep recording.

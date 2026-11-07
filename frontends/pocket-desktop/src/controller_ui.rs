@@ -26,6 +26,7 @@ struct Widgets {
     last_toolbar: Option<Id>,
     last_page: Option<Id>,
     reveal_focus: Option<Id>,
+    modal_input: bool,
 }
 #[derive(Clone)]
 struct Popup {
@@ -160,6 +161,7 @@ impl Navigation {
         true
     }
     pub fn prepare_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, enabled: bool) {
+        if widgets(ctx).modal_input {self.stop_repeat();self.keyboard=None;return;}
         if !enabled || !raw.focused {
             self.pending.clear();
             self.held = None;
@@ -310,6 +312,7 @@ impl Navigation {
         }
     }
     pub fn show(&mut self, ctx: &egui::Context) {
+        if widgets(ctx).modal_input {self.stop_repeat();self.keyboard=None;return;}
         edit_widgets(ctx, |w| {
             if !w.page_seen {
                 w.page = None;
@@ -565,9 +568,17 @@ pub fn selectable_value<T: PartialEq>(
     response
 }
 
+/// The assistant owns navigation and its selected-row highlight while modal.
+/// Drop stale widget focus instead of drawing its old rectangle over the window title.
+pub fn claim_modal_input(ctx:&egui::Context) {
+    edit_widgets(ctx,|w|w.modal_input=true);
+    ctx.memory_mut(|memory|{if let Some(id)=memory.focused() {memory.surrender_focus(id);}});
+}
+
 pub fn begin_frame(ctx: &egui::Context) {
     let open = ctx.memory(|m| m.any_popup_open());
     edit_widgets(ctx, |w| {
+        w.modal_input=false;
         w.text.clear();
         w.page_seen = false;
         w.toolbar_seen = false;
@@ -704,6 +715,14 @@ mod tests {
             [button(ui, "First").id, button(ui, "Save").id]
         });
         (toolbar, page)
+    }
+    #[test] fn modal_owner_drops_old_focus_overlay_and_pending_navigation() {
+        let ctx=egui::Context::default();let mut nav=Navigation::default();
+        let _=ctx.run(Default::default(),|ctx| {
+            begin_frame(ctx);ctx.memory_mut(|m|m.request_focus(Id::new("old_assign_button")));
+            nav.press("DPadDown");claim_modal_input(ctx);nav.show(ctx);
+            assert!(ctx.memory(|m|m.focused()).is_none());assert!(nav.pending.is_empty());assert!(nav.held.is_none());
+        });
     }
     #[test]
     fn controller_reveals_offscreen_rows_in_nested_settings_scroll_area() {

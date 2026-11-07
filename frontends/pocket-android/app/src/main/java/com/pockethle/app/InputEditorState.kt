@@ -85,6 +85,7 @@ internal class InputEditorState(raw: String) {
         else InputBindings.canonical(a).equals(InputBindings.canonical(b), true)
 
     fun assignment(input: String, pad: Boolean, gizmondo: Boolean): String? {
+        if (!pad && DeckInputPolicy.reservedKey(input)) return "host"
         val customKey = InputGestures.bindingKey(gizmondo, pad, input)
         if (shortPress.has(customKey))
             return displayGuest(
@@ -92,7 +93,7 @@ internal class InputEditorState(raw: String) {
                 gizmondo,
             )
         if (
-            (!pad && DeckInputPolicy.key(input) != null) ||
+            (!pad && DeckInputPolicy.reservedKey(input)) ||
                 (pad && DeckInputPolicy.reserved(input, gizmondo))
         )
             return "host"
@@ -129,6 +130,7 @@ internal class InputEditorState(raw: String) {
     }
 
     fun shortFor(input: String, pad: Boolean, gizmondo: Boolean): String {
+        if (!pad && input.equals("F8", true)) return "Library"
         val target = assignment(input, pad, gizmondo)
         if (target != "host") return short(target)
         val action =
@@ -143,7 +145,8 @@ internal class InputEditorState(raw: String) {
         } ||
             longPress.keys().asSequence().any {
                 it.startsWith(InputGestures.bindingKey(gizmondo, pad, "")) &&
-                    longPress.optString(it) == target
+                    longPress.optString(it) == target &&
+                    (pad || !DeckInputPolicy.reservedKey(it.substringAfter(":keyboard:")))
             } ||
             (pad &&
                 gizmondo &&
@@ -158,9 +161,11 @@ internal class InputEditorState(raw: String) {
             ?: JSONObject().also { json.put("long_press_bindings", it) }
 
     fun longTarget(input: String, pad: Boolean, gizmondo: Boolean): String? =
-        longPress.optString(InputGestures.bindingKey(gizmondo, pad, input)).takeIf {
-            it.isNotEmpty()
-        }
+        if (!pad && DeckInputPolicy.reservedKey(input)) null
+        else
+            longPress.optString(InputGestures.bindingKey(gizmondo, pad, input)).takeIf {
+                it.isNotEmpty()
+            }
 
     fun assignLong(input: String, pad: Boolean, target: String?, gizmondo: Boolean): Boolean {
         if (fixed(input, pad, gizmondo) || (!pad && input == "Escape")) return false
@@ -201,7 +206,7 @@ internal class InputEditorState(raw: String) {
         if (gizmondo && target == "turbo") "giz_piano3" else target
 
     fun fixed(input: String, pad: Boolean, gizmondo: Boolean) =
-        if (pad) DeckInputPolicy.reserved(input, gizmondo) else DeckInputPolicy.key(input) != null
+        if (pad) DeckInputPolicy.reserved(input, gizmondo) else DeckInputPolicy.reservedKey(input)
 
     fun savedInputs(pad: Boolean): List<String> {
         val keys = mutableListOf<String>()
@@ -228,7 +233,7 @@ internal class InputEditorState(raw: String) {
 
     fun assign(input: String, pad: Boolean, target: String?, gizmondo: Boolean? = null): Boolean {
         if (gizmondo != null && fixed(input, pad, gizmondo)) return false
-        if (!pad && DeckInputPolicy.key(input) != null) return false
+        if (!pad && DeckInputPolicy.reservedKey(input)) return false
         if (gizmondo != null) {
             val key = InputGestures.bindingKey(gizmondo, pad, input)
             if (target?.startsWith("stylus:") == true) {

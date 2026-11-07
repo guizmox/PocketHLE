@@ -87,8 +87,12 @@ internal class InputSkinView(
             if (!pad) {
                 if (input != null) {
                     paint.style = Paint.Style.STROKE
-                    paint.strokeWidth = if (input == selected) 2.5f else 1f
-                    paint.color = if (pressed) LIVE else if (input == selected) BLUE else color
+                    paint.strokeWidth =
+                        if (DeckInputPolicy.reservedKey(input)) 2.5f
+                        else if (input == selected) 2.5f else 1f
+                    paint.color =
+                        if (DeckInputPolicy.reservedKey(input)) RESERVED
+                        else if (pressed) LIVE else if (input == selected) BLUE else color
                     canvas.drawRoundRect(rect, 4f, 4f, paint)
                 }
                 paint.style = Paint.Style.FILL
@@ -207,6 +211,7 @@ internal class InputSkinView(
 
     companion object {
         private val skins = mutableMapOf<Boolean, Bitmap>()
+        val RESERVED = Color.rgb(225, 95, 95)
         val LIVE = Color.rgb(115, 235, 250)
         val LONG_PRESS = Color.rgb(231, 181, 96)
         val PURPLE = Color.rgb(176, 135, 231)
