@@ -36,19 +36,6 @@ pub enum Event {
     },
     Error(String),
 }
-pub fn label(control: &str) -> String {
-    match control {
-        "South" => "South (Switch B / Xbox A)".into(),
-        "East" => "East (Switch A / Xbox B)".into(),
-        "North" => "North (Switch X / Xbox Y)".into(),
-        "West" => "West (Switch Y / Xbox X)".into(),
-        "LeftTrigger" => "L / LB".into(),
-        "RightTrigger" => "R / RB".into(),
-        "LeftTrigger2" => "ZL / LT".into(),
-        "RightTrigger2" => "ZR / RT".into(),
-        other => other.into(),
-    }
-}
 fn button_name(button: Button) -> String {
     match button {
         Button::A => "South",

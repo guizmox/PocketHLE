@@ -1171,11 +1171,6 @@ pub fn track_focus(ui: &Ui, response: &Response) {
         response.scroll_to_me(Some(egui::Align::Center));
     }
 }
-pub fn small_button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
-    let response = ui.small_button(text);
-    register(ui, &response, true);
-    response
-}
 pub fn sized_button(ui: &mut Ui, size: egui::Vec2, text: impl Into<WidgetText>) -> Response {
     let r = ui.add_sized(size, egui::Button::new(text).wrap(true));
     register(ui, &r, true);
