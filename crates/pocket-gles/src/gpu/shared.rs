@@ -419,13 +419,11 @@ impl Renderer {
         };
         let group = self.host.shared_source().1;
         if !Arc::ptr_eq(&source.1, &group)
-            || self.render_scale != 1
             || !self.rgb565
-            || !self.dirty
             || x < 0
             || y < 0
-            || (x as u32).saturating_add(width) > self.width
-            || (y as u32).saturating_add(height) > self.height
+            || (x as u32).saturating_add(width) > self.width / self.render_scale
+            || (y as u32).saturating_add(height) > self.height / self.render_scale
         {
             return Ok(None);
         }
@@ -446,9 +444,27 @@ impl Renderer {
                 group,
                 sync: Mutex::new(SlotSync::default()),
             });
-            (self.gl.BindFramebuffer)(0x8d40, self.fbo);
+            let fbo = if self.render_scale > 1 {
+                if !self.resolve_logical_image(
+                    self.width / self.render_scale,
+                    self.height / self.render_scale,
+                    false,
+                ) {
+                    return Ok(None);
+                }
+                self.logical_resolve.as_ref().unwrap().fbo
+            } else {
+                self.fbo
+            };
+            (self.gl.BindFramebuffer)(0x8d40, fbo);
             (self.gl.ActiveTexture)(GL_TEXTURE0);
             (self.gl.BindTexture)(GL_TEXTURE_2D, texture);
+            self.params(
+                Filter::Nearest,
+                Filter::Nearest,
+                Wrap::ClampToEdge,
+                Wrap::ClampToEdge,
+            );
             (self.gl.CopyTexImage2D)(
                 GL_TEXTURE_2D,
                 0,
@@ -459,10 +475,106 @@ impl Renderer {
                 height as i32,
                 0,
             );
+            (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             self.check()?;
             let ready = sync.publish(self.gl.Flush);
             if ready == 0 {
                 return Err("guest texture copy fence failed".into());
+            }
+            slot.sync.lock().unwrap_or_else(|e| e.into_inner()).ready = ready;
+            Ok(Some(SharedFrame(slot)))
+        }
+    }
+
+    pub(crate) fn patch_guest_rgb_texture(
+        &mut self,
+        old: &Texture,
+        source: &SharedFrame,
+        x: i32,
+        y: i32,
+    ) -> Result<Option<SharedFrame>, String> {
+        let Some(copy) = self.gl.CopyTexSubImage2D else {
+            return Ok(None);
+        };
+        let group = self.host.shared_source().1;
+        let Ok((source_texture, source_ready, _)) = source.read_source(&group) else {
+            return Ok(None);
+        };
+        if old.gpu_copy.is_none() && old.rgba.len() != old.width as usize * old.height as usize * 4
+        {
+            return Ok(None);
+        }
+        self.host.make_current()?;
+        unsafe {
+            let sync = SyncApi::load(|n| self.host.load(n))?;
+            let mut texture = 0;
+            (self.gl.GenTextures)(1, &mut texture);
+            let slot = Arc::new(Slot {
+                texture,
+                width: old.width,
+                height: old.height,
+                rgb565: true,
+                group: group.clone(),
+                sync: Mutex::new(SlotSync::default()),
+            });
+            (self.gl.ActiveTexture)(GL_TEXTURE0);
+            (self.gl.BindTexture)(GL_TEXTURE_2D, texture);
+            self.params(
+                Filter::Nearest,
+                Filter::Nearest,
+                Wrap::ClampToEdge,
+                Wrap::ClampToEdge,
+            );
+            let mut fbo = 0;
+            (self.gl.GenFramebuffers)(1, &mut fbo);
+            let result = (|| {
+                (self.gl.BindFramebuffer)(0x8d40, fbo);
+                if let Some(frame) = &old.gpu_copy {
+                    let (previous, ready, _) = frame.read_source(&group)?;
+                    sync.wait(ready);
+                    (self.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, previous, 0);
+                    if (self.gl.CheckFramebufferStatus)(0x8d40) != 0x8cd5 {
+                        return Err("texture patch source framebuffer incomplete".into());
+                    }
+                    (self.gl.CopyTexImage2D)(
+                        GL_TEXTURE_2D,
+                        0,
+                        GL_RGBA,
+                        0,
+                        0,
+                        old.width as i32,
+                        old.height as i32,
+                        0,
+                    );
+                } else {
+                    (self.gl.PixelStorei)(0x0cf5, 1);
+                    (self.gl.TexImage2D)(
+                        GL_TEXTURE_2D,
+                        0,
+                        GL_RGBA as i32,
+                        old.width as i32,
+                        old.height as i32,
+                        0,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        old.rgba.as_ptr().cast(),
+                    );
+                }
+                sync.wait(source_ready);
+                (self.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, source_texture, 0);
+                if (self.gl.CheckFramebufferStatus)(0x8d40) != 0x8cd5 {
+                    return Err("texture patch framebuffer incomplete".into());
+                }
+                let (width, height) = source.size();
+                copy(GL_TEXTURE_2D, 0, x, y, 0, 0, width as i32, height as i32);
+                self.check()
+            })();
+            (self.gl.BindFramebuffer)(0x8d40, self.fbo);
+            (self.gl.DeleteFramebuffers)(1, &fbo);
+            result?;
+            let ready = sync.publish(self.gl.Flush);
+            if ready == 0 {
+                return Err("texture patch fence failed".into());
             }
             slot.sync.lock().unwrap_or_else(|e| e.into_inner()).ready = ready;
             Ok(Some(SharedFrame(slot)))

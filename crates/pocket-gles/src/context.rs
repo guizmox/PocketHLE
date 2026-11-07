@@ -1397,6 +1397,37 @@ impl Context {
         if width == 0 || height == 0 {
             return;
         }
+        if level == 0
+            && format == GL_RGB
+            && !self.gpu_failed
+            && !self.textures[&name].generate_mipmap
+        {
+            if let Some(gpu) = self.gpu.as_mut() {
+                let copied = (|| {
+                    let Some(source) =
+                        gpu.copy_guest_rgb_texture(x, y, width as u32, height as u32)?
+                    else {
+                        return Ok(None);
+                    };
+                    gpu.patch_guest_rgb_texture(&self.textures[&name], &source, xo, yo)
+                })();
+                match copied {
+                    Ok(Some(frame)) => {
+                        let texture = self.textures.get_mut(&name).unwrap();
+                        texture.gpu_copy = Some(frame);
+                        texture.rgba.clear();
+                        texture.compressed.remove(&0);
+                        texture.revision = texture.revision.wrapping_add(1);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.gpu_failure("copy texture subimage", error);
+                        return;
+                    }
+                }
+            }
+        }
         self.sync_gpu();
         if self.gpu_failed {
             return;

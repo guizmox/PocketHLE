@@ -3,6 +3,7 @@ mod platform;
 mod readback;
 mod resolve;
 mod shared;
+mod transfer;
 pub use platform::SharedConsumer;
 pub use readback::SharedReadback;
 pub use shared::{SharedFrame, SHARED_DISPLAY_FRAGMENT};
@@ -1333,6 +1334,9 @@ pub struct Renderer {
     point_drawing: bool,
     texture_params: HashMap<u32, (Filter, Filter, Wrap, Wrap)>,
     fbo: u32,
+    upload_source: u32,
+    upload_transfer_failed: bool,
+    transfers: HashMap<(u32, bool, transfer::Quantization), transfer::TransferPass>,
     logic_destination: u32,
     destination_format: Option<(u32, u32, bool)>,
     rgb565: bool,
@@ -1348,6 +1352,11 @@ pub struct Renderer {
     uniforms: HashMap<String, i32>,
     scratch: Vec<f32>,
     readback: Vec<u8>,
+    display_target: Option<(u32, u32, u32, u32)>,
+    display_prepared: bool,
+    packed_target: Option<(u32, u32, u32, u32)>,
+    packed_readback: Vec<u8>,
+    logical_packed: Vec<u8>,
     logical_resolve: Option<resolve::LogicalResolve>,
     shared_frames: Option<shared::FramePool>,
     shared_export_failed: bool,
@@ -1532,6 +1541,9 @@ impl Renderer {
                 point_drawing: false,
                 texture_params: HashMap::new(),
                 fbo: 0,
+                upload_source: 0,
+                upload_transfer_failed: false,
+                transfers: HashMap::new(),
                 logic_destination: 0,
                 destination_format: None,
                 rgb565: false,
@@ -1545,6 +1557,11 @@ impl Renderer {
                 uniforms: HashMap::new(),
                 scratch: Vec::new(),
                 readback: Vec::new(),
+                display_target: None,
+                display_prepared: false,
+                packed_target: None,
+                packed_readback: Vec::new(),
+                logical_packed: Vec::new(),
                 logical_resolve: None,
                 shared_frames: None,
                 shared_export_failed: false,
@@ -2179,6 +2196,50 @@ impl Renderer {
             || self.height != height * self.render_scale
         {
             return Err("incompatible native pixmap upload".into());
+        }
+        self.host.make_current()?;
+        if !self.upload_transfer_failed {
+            let uploaded = (|| unsafe {
+                if self.upload_source == 0 {
+                    (self.gl.GenTextures)(1, &mut self.upload_source);
+                }
+                (self.gl.ActiveTexture)(GL_TEXTURE0);
+                (self.gl.BindTexture)(GL_TEXTURE_2D, self.upload_source);
+                self.params(
+                    Filter::Nearest,
+                    Filter::Nearest,
+                    Wrap::ClampToEdge,
+                    Wrap::ClampToEdge,
+                );
+                (self.gl.PixelStorei)(0x0cf5, 1);
+                (self.gl.TexImage2D)(
+                    GL_TEXTURE_2D,
+                    0,
+                    if self.host.es { GL_RGB as i32 } else { 0x8d62 },
+                    width as i32,
+                    height as i32,
+                    0,
+                    GL_RGB,
+                    GL_UNSIGNED_SHORT_5_6_5,
+                    pixels.as_ptr().cast(),
+                );
+                self.check()?;
+                self.transfer_pixels(
+                    self.upload_source,
+                    self.fbo,
+                    self.width,
+                    self.height,
+                    1,
+                    true,
+                    transfer::Quantization::Preserve,
+                    (width, height),
+                )
+            })();
+            if uploaded.is_ok() {
+                self.dirty = true;
+                return Ok(());
+            }
+            self.upload_transfer_failed = true;
         }
         let mut upload = vec![0u8; self.width as usize * self.height as usize * 2];
         for y in 0..self.height as usize {
@@ -3378,6 +3439,10 @@ impl Renderer {
             return None;
         }
         out.resize((self.width * self.height * 2) as usize, 0);
+        if self.display_prepared {
+            out.copy_from_slice(&self.packed_readback);
+            return Some((self.width, self.height));
+        }
         for y in 0..self.height as usize {
             let row = self.height as usize - 1 - y;
             for x in 0..self.width as usize {
@@ -3402,6 +3467,10 @@ impl Renderer {
             return None;
         }
         out.resize(self.readback.len(), 0);
+        if self.display_prepared {
+            out.copy_from_slice(&self.readback);
+            return Some((self.width, self.height));
+        }
         let stride = self.width as usize * 4;
         for (src, dst) in self
             .readback
@@ -3445,7 +3514,11 @@ impl Renderer {
         self.poll_error()?;
         if !self.dirty {
             if let Some(out) = rgb565 {
-                target.to_rgb565(out);
+                if out.len() == self.logical_packed.len() && !self.logical_packed.is_empty() {
+                    out.copy_from_slice(&self.logical_packed);
+                } else {
+                    target.to_rgb565(out);
+                }
             }
             return Ok(());
         }
@@ -3455,6 +3528,31 @@ impl Renderer {
         let gpu_resolved = self.render_scale > 1
             && unsafe { self.resolve_logical_gpu(target.width, target.height) };
         unsafe {
+            self.display_prepared = false;
+            self.logical_packed.clear();
+            if gpu_resolved {
+                let prepared = (|| {
+                    let logical_texture = self.logical_resolve.as_ref().unwrap().texture;
+                    self.pack_rgb565_readback(logical_texture, target.width, target.height)?;
+                    self.logical_packed.extend_from_slice(&self.packed_readback);
+                    self.prepare_display_readback()
+                })();
+                if prepared.is_ok() {
+                    target
+                        .color
+                        .copy_from_slice(&self.logical_resolve.as_ref().unwrap().pixels);
+                    if let Some(out) = rgb565 {
+                        if out.len() == self.logical_packed.len() {
+                            out.copy_from_slice(&self.logical_packed);
+                        } else {
+                            target.to_rgb565(out);
+                        }
+                    }
+                    self.dirty = false;
+                    return Ok(());
+                }
+                self.logical_packed.clear();
+            }
             self.readback
                 .resize((self.width * self.height * 4) as usize, 0);
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
@@ -3470,23 +3568,9 @@ impl Renderer {
             );
             self.check()?;
             if gpu_resolved {
-                let logical = &self.logical_resolve.as_ref().unwrap().pixels;
-                let stride = target.width as usize * 4;
-                for (row, out) in target.color.chunks_exact_mut(stride).enumerate() {
-                    let start = (target.height as usize - 1 - row) * stride;
-                    for (src, dst) in logical[start..start + stride]
-                        .chunks_exact(4)
-                        .zip(out.chunks_exact_mut(4))
-                    {
-                        let p = [src[0], src[1], src[2], src[3]];
-                        let p = if target.rgb565 {
-                            crate::raster::rgb565_pixel(p)
-                        } else {
-                            p
-                        };
-                        dst.copy_from_slice(&p);
-                    }
-                }
+                target
+                    .color
+                    .copy_from_slice(&self.logical_resolve.as_ref().unwrap().pixels);
                 if let Some(out) = rgb565 {
                     target.to_rgb565(out);
                 }
@@ -3580,13 +3664,19 @@ impl Drop for Renderer {
         }
         self.retire_shared_frames();
         unsafe {
+            self.delete_transfers();
             if let Some(resolve) = self.logical_resolve.take() {
                 resolve.delete(&self.gl);
             }
             for (id, _) in self.textures.values() {
                 (self.gl.DeleteTextures)(1, id);
             }
-            for id in [self.color, self.white, self.logic_destination] {
+            for id in [
+                self.color,
+                self.white,
+                self.logic_destination,
+                self.upload_source,
+            ] {
                 (self.gl.DeleteTextures)(1, &id);
             }
             (self.gl.DeleteRenderbuffers)(1, &self.depth);

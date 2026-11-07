@@ -1,13 +1,15 @@
-//! Host-only box reduction. The full native readback remains the display cache.
+//! GPU box reduction to guest dimensions, with optional CPU materialization.
 use super::*;
 
 pub(super) struct LogicalResolve {
     program: u32,
-    fbo: u32,
-    texture: u32,
+    pub(super) fbo: u32,
+    pub(super) texture: u32,
     buffer: u32,
     source_location: i32,
     inverse_size_location: i32,
+    flip_location: i32,
+    quantize_location: i32,
     scale: u32,
     width: u32,
     height: u32,
@@ -25,7 +27,7 @@ impl LogicalResolve {
 fn sources(scale: u32) -> (String, String) {
     let vertex = "attribute vec2 position; void main(){gl_Position=vec4(position,0.0,1.0);}";
     let mut fragment = format!(
-        "#ifdef GL_ES\nprecision highp float;\n#endif\nuniform sampler2D sourceImage;\nuniform vec2 inverseSize;\nvoid main(){{vec2 base=floor(gl_FragCoord.xy)*{scale}.0;vec4 sum=vec4(0.0);\n"
+        "#ifdef GL_ES\nprecision highp float;\n#endif\nuniform sampler2D sourceImage;\nuniform vec2 inverseSize;uniform float flipOutput,outputHeight,quantize565;\nvoid main(){{vec2 pixel=floor(gl_FragCoord.xy);if(flipOutput>0.5)pixel.y=outputHeight-1.0-pixel.y;vec2 base=pixel*{scale}.0;vec4 sum=vec4(0.0);\n"
     );
     for y in 0..scale {
         for x in 0..scale {
@@ -38,7 +40,7 @@ fn sources(scale: u32) -> (String, String) {
     // protects exact quotients from reciprocal-rounding error without moving
     // the next lower quotient across an integer boundary (including ES highp).
     fragment.push_str(&format!(
-        "gl_FragColor=floor(sum/{}.0+0.015625)/255.0;}}",
+        "vec4 b=floor(sum/{}.0+0.015625);if(quantize565>0.5){{vec3 levels=vec3(31.0,63.0,31.0);vec3 q=floor((b.rgb*levels+127.0)/255.0);b=vec4(floor((q*255.0+floor(levels/2.0))/levels),255.0);}}gl_FragColor=b/255.0;}}",
         scale * scale
     ));
     (vertex.into(), fragment)
@@ -59,6 +61,8 @@ impl Renderer {
             buffer: 0,
             source_location: (self.gl.GetUniformLocation)(program, c"sourceImage".as_ptr()),
             inverse_size_location: (self.gl.GetUniformLocation)(program, c"inverseSize".as_ptr()),
+            flip_location: (self.gl.GetUniformLocation)(program, c"flipOutput".as_ptr()),
+            quantize_location: (self.gl.GetUniformLocation)(program, c"quantize565".as_ptr()),
             scale: self.render_scale,
             width,
             height,
@@ -121,7 +125,16 @@ impl Renderer {
 
     /// Errors in this optional pass keep the established CPU resolve usable.
     pub(super) unsafe fn resolve_logical_gpu(&mut self, width: u32, height: u32) -> bool {
-        if self.logical_resolve_disabled || !(2..=4).contains(&self.render_scale) {
+        self.resolve_logical_image(width, height, true)
+    }
+
+    pub(super) unsafe fn resolve_logical_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        read_pixels: bool,
+    ) -> bool {
+        if self.logical_resolve_disabled || !(1..=4).contains(&self.render_scale) {
             return false;
         }
         // Dithering must not perturb the integer result written to RGBA8.
@@ -155,6 +168,12 @@ impl Renderer {
                 (self.gl.ActiveTexture)(GL_TEXTURE0);
                 (self.gl.BindTexture)(GL_TEXTURE_2D, self.color);
                 (self.gl.Uniform1i)(r.source_location, 0);
+                (self.gl.Uniform1f)(r.flip_location, if read_pixels { 1. } else { 0. });
+                (self.gl.Uniform1f)(r.quantize_location, if self.rgb565 { 1. } else { 0. });
+                (self.gl.Uniform1f)(
+                    (self.gl.GetUniformLocation)(r.program, c"outputHeight".as_ptr()),
+                    height as f32,
+                );
                 (self.gl.Uniform2f)(
                     r.inverse_size_location,
                     1. / self.width as f32,
@@ -171,16 +190,18 @@ impl Renderer {
                     return Err(format!("logical resolve setup: 0x{error:04x}"));
                 }
                 (self.gl.DrawArrays)(GL_TRIANGLE_STRIP, 0, 4);
-                (self.gl.PixelStorei)(0x0d05, 1);
-                (self.gl.ReadPixels)(
-                    0,
-                    0,
-                    width as i32,
-                    height as i32,
-                    GL_RGBA,
-                    GL_UNSIGNED_BYTE,
-                    r.pixels.as_mut_ptr().cast(),
-                );
+                if read_pixels {
+                    (self.gl.PixelStorei)(0x0d05, 1);
+                    (self.gl.ReadPixels)(
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        r.pixels.as_mut_ptr().cast(),
+                    );
+                }
                 self.check()
             })();
         // Next guest draw must rebuild state and attribute pointers. Program
@@ -291,7 +312,8 @@ mod tests {
                     gpu.logical_resolve_disabled = true;
                     gpu.dirty = true;
                     gpu.read(&mut reference).unwrap();
-                    let native = gpu.readback.clone();
+                    let mut native = Vec::new();
+                    gpu.scaled_display_rgba_into(&mut native).unwrap();
                     let mut actual = RenderTarget::with_format(width, height, rgb565);
                     gpu.logical_resolve_disabled = false;
                     gpu.dirty = true;
@@ -309,7 +331,9 @@ mod tests {
                         differences.is_empty(),
                         "es={es} rgb565={rgb565} scale={scale}: {differences:?}"
                     );
-                    assert_eq!(gpu.readback, native, "native display pixels changed");
+                    let mut display = Vec::new();
+                    gpu.scaled_display_rgba_into(&mut display).unwrap();
+                    assert_eq!(display, native, "native display pixels changed");
                 }
             }
         }

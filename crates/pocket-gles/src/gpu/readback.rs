@@ -13,6 +13,9 @@ pub struct SharedReadback {
     group: Arc<shared::ShareGroup>,
     cached: Option<SharedFrame>,
     native: Vec<u8>,
+    processor: Option<Renderer>,
+    prepared: Option<(SharedFrame, (u32, u32), transfer::Quantization, bool)>,
+    pixels: Vec<u8>,
 }
 impl SharedReadback {
     pub fn new(source: &SharedContextSource) -> Result<Self, String> {
@@ -35,6 +38,9 @@ impl SharedReadback {
             group: source.1.clone(),
             cached: None,
             native: Vec::new(),
+            processor: None,
+            prepared: None,
+            pixels: Vec::new(),
         };
         previous.restore()?;
         Ok(reader)
@@ -106,9 +112,165 @@ impl SharedReadback {
         Ok(out)
     }
 
+    fn prepare_pixels(
+        &mut self,
+        frame: &SharedFrame,
+        size: (u32, u32),
+        quantize: transfer::Quantization,
+        packed: bool,
+    ) -> Result<(), String> {
+        match self.prepare_pixels_gpu(frame, size, quantize, packed) {
+            Ok(()) => return Ok(()),
+            Err(_) => self.ensure_native(frame)?,
+        }
+        let (width, height) = size;
+        let (native_width, native_height) = frame.size();
+        if width == 0
+            || height == 0
+            || native_width % width != 0
+            || native_height % height != 0
+            || native_width / width != native_height / height
+            || !(1..=4).contains(&(native_width / width))
+        {
+            return Err("snapshot logical size does not match native scale".into());
+        }
+        let scale = native_width / width;
+        let mut pixels =
+            Vec::with_capacity(width as usize * height as usize * if packed { 2 } else { 4 });
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum = [0u32; 4];
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let index = (((native_height - 1 - (y * scale + dy)) * native_width
+                            + x * scale
+                            + dx)
+                            * 4) as usize;
+                        for channel in 0..4 {
+                            sum[channel] += u32::from(self.native[index + channel]);
+                        }
+                    }
+                }
+                let mut pixel = sum.map(|value| (value / (scale * scale)) as u8);
+                match quantize {
+                    transfer::Quantization::Preserve => {}
+                    transfer::Quantization::LogicalRgb565 => {
+                        pixel = crate::raster::rgb565_pixel(pixel)
+                    }
+                    transfer::Quantization::DisplayRgb565 => {
+                        let r = pixel[0] >> 3;
+                        let g = pixel[1] >> 2;
+                        let b = pixel[2] >> 3;
+                        pixel = [
+                            (r << 3) | (r >> 2),
+                            (g << 2) | (g >> 4),
+                            (b << 3) | (b >> 2),
+                            255,
+                        ];
+                    }
+                }
+                if packed {
+                    let value = ((pixel[0] as u16 >> 3) << 11)
+                        | ((pixel[1] as u16 >> 2) << 5)
+                        | (pixel[2] as u16 >> 3);
+                    pixels.extend_from_slice(&value.to_le_bytes());
+                } else {
+                    pixels.extend_from_slice(&pixel);
+                }
+            }
+        }
+        self.pixels = pixels;
+        self.prepared = Some((frame.clone(), size, quantize, packed));
+        Ok(())
+    }
+
+    fn prepare_pixels_gpu(
+        &mut self,
+        frame: &SharedFrame,
+        size: (u32, u32),
+        quantize: transfer::Quantization,
+        packed: bool,
+    ) -> Result<(), String> {
+        frame.read_source(&self.group)?;
+        if self.prepared.as_ref().is_some_and(|(f, s, q, p)| {
+            f.same_snapshot(frame) && *s == size && *q == quantize && *p == packed
+        }) {
+            return Ok(());
+        }
+        if self.fbo == 0 {
+            return Err("snapshot readback framebuffer unavailable".into());
+        }
+        self.prepared = None;
+        let (width, height) = size;
+        let (native_width, native_height) = frame.size();
+        if width == 0
+            || height == 0
+            || native_width % width != 0
+            || native_height % height != 0
+            || native_width / width != native_height / height
+            || !(1..=4).contains(&(native_width / width))
+        {
+            return Err("snapshot logical size does not match native scale".into());
+        }
+        let mut previous = platform::SavedCurrent::capture()?;
+        let result = (|| {
+            if self.processor.is_none() {
+                self.processor = Some(Renderer::new_shared(
+                    &self.host.shared_source(),
+                    width,
+                    height,
+                )?);
+            }
+            let processor = self.processor.as_mut().unwrap();
+            processor.resize(width, height)?;
+            processor.host.bind_client_api()?;
+            processor.host.make_current()?;
+            let (texture, ready, _) = frame.read_source(&self.group)?;
+            self.pixels.resize(width as usize * height as usize * 4, 0);
+            unsafe {
+                self.sync.wait(ready);
+                processor.transfer_pixels(
+                    texture,
+                    processor.fbo,
+                    width,
+                    height,
+                    native_width / width,
+                    true,
+                    quantize,
+                    frame.size(),
+                )?;
+                if packed {
+                    processor.pack_rgb565_readback(processor.color, width, height)?;
+                    self.pixels.clear();
+                    self.pixels.extend_from_slice(&processor.packed_readback);
+                    Ok(())
+                } else {
+                    (processor.gl.BindFramebuffer)(0x8d40, processor.fbo);
+                    (processor.gl.PixelStorei)(0x0d05, 1);
+                    (processor.gl.ReadPixels)(
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        self.pixels.as_mut_ptr().cast(),
+                    );
+                    processor.check()
+                }
+            }
+        })();
+        let restored = previous.restore();
+        result?;
+        restored?;
+        self.prepared = Some((frame.clone(), size, quantize, packed));
+        Ok(())
+    }
+
     /// Release the retained slot once the caller owns its materialized bytes.
     pub fn clear_cache(&mut self) {
         self.cached = None;
+        self.prepared = None;
     }
     pub fn matches_source(&self, source: &SharedContextSource) -> bool {
         Arc::ptr_eq(&self.group, &source.1)
@@ -119,33 +281,14 @@ impl SharedReadback {
         frame: &SharedFrame,
         out: &mut Vec<u8>,
     ) -> Result<(), String> {
-        self.ensure_native(frame)?;
-        let (w, _) = frame.size();
-        let len = self.native.len();
-        if len > out.len() {
-            out.try_reserve_exact(len - out.len())
-                .map_err(|e| e.to_string())?;
-        }
-        out.resize(len, 0);
-        let stride = w as usize * 4;
-        for (src, dst) in self
-            .native
-            .chunks_exact(stride)
-            .rev()
-            .zip(out.chunks_exact_mut(stride))
-        {
-            for (p, q) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-                let r = p[0] >> 3;
-                let g = p[1] >> 2;
-                let b = p[2] >> 3;
-                q.copy_from_slice(&[
-                    (r << 3) | (r >> 2),
-                    (g << 2) | (g >> 4),
-                    (b << 3) | (b >> 2),
-                    255,
-                ]);
-            }
-        }
+        self.prepare_pixels(
+            frame,
+            frame.size(),
+            transfer::Quantization::DisplayRgb565,
+            false,
+        )?;
+        out.clear();
+        out.extend_from_slice(&self.pixels);
         Ok(())
     }
     /// Produce the existing logical top-down RGB565 bytes. Scaled RGB565
@@ -178,36 +321,18 @@ impl SharedReadback {
             out.try_reserve_exact(len - out.len())
                 .map_err(|e| e.to_string())?;
         }
-        self.ensure_native(frame)?;
+        self.prepare_pixels(
+            frame,
+            logical,
+            if rgb565 && w > lw {
+                transfer::Quantization::LogicalRgb565
+            } else {
+                transfer::Quantization::Preserve
+            },
+            true,
+        )?;
         out.resize(len, 0);
-        let k = (w / lw) as usize;
-        let count = (k * k) as u32;
-        for y in 0..lh as usize {
-            for x in 0..lw as usize {
-                let mut sum = [0u32; 3];
-                for dy in 0..k {
-                    for dx in 0..k {
-                        let p = ((h as usize - 1 - (y * k + dy)) * w as usize + x * k + dx) * 4;
-                        for c in 0..3 {
-                            sum[c] += self.native[p + c] as u32;
-                        }
-                    }
-                }
-                let mut p = [
-                    (sum[0] / count) as u8,
-                    (sum[1] / count) as u8,
-                    (sum[2] / count) as u8,
-                    255,
-                ];
-                if k > 1 && rgb565 {
-                    p = crate::raster::rgb565_pixel(p);
-                }
-                let value =
-                    ((p[0] as u16 >> 3) << 11) | ((p[1] as u16 >> 2) << 5) | (p[2] as u16 >> 3);
-                let at = (y * lw as usize + x) * 2;
-                out[at..at + 2].copy_from_slice(&value.to_le_bytes());
-            }
-        }
+        out.copy_from_slice(&self.pixels[..len]);
         Ok(())
     }
 }
@@ -222,6 +347,8 @@ impl Drop for SharedReadback {
             }
         }
         self.cached.take();
+        self.prepared.take();
+        self.processor.take();
         if let Err(error) = previous.restore() {
             log::warn!("Snapshot reader teardown: {error}");
         }

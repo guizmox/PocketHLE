@@ -216,3 +216,67 @@ fn guest_texture_copy_survives_producer_surface_change() {
         );
     });
 }
+
+#[test]
+#[ignore = "requires native shared OpenGL"]
+fn supersampled_guest_texture_copies_and_subimages_keep_logical_pixels() {
+    let root = Renderer::new(4, 4).unwrap();
+    let source = root.shared_context_source();
+    with_shared_context_source(Some(source.clone()), || {
+        for policy in [1, 3, 4, 5] {
+            let mut producer = Renderer::new(320, 240).unwrap();
+            producer.set_surface_rgb565(true).unwrap();
+            producer.set_render_scale(policy).unwrap();
+            let state = PipelineState {
+                viewport: (0, 0, 320, 240),
+                ..Default::default()
+            };
+            producer
+                .clear(320, 240, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            let original = producer
+                .copy_guest_rgb_texture(1, 1, 4, 4)
+                .unwrap()
+                .unwrap();
+            producer
+                .clear(320, 240, &state, [0., 1., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            let patch = producer
+                .copy_guest_rgb_texture(0, 0, 2, 2)
+                .unwrap()
+                .unwrap();
+            let mut texture = Texture::default();
+            texture.set_level(0, 4, 4, Vec::new());
+            texture.gpu_copy = Some(original.clone());
+            let result = producer
+                .patch_guest_rgb_texture(&texture, &patch, 1, 1)
+                .unwrap()
+                .unwrap();
+            assert!(
+                producer.readback.is_empty(),
+                "copy downloaded native framebuffer"
+            );
+            let mut reader = SharedReadback::new(&source).unwrap();
+            let pixels = reader.read_guest_rgb_texture(&result).unwrap();
+            for y in 0..4 {
+                for x in 0..4 {
+                    let expected = if (1..3).contains(&x) && (1..3).contains(&y) {
+                        [0, 255, 0, 255]
+                    } else {
+                        [255, 0, 0, 255]
+                    };
+                    let offset = (y * 4 + x) * 4;
+                    assert_eq!(
+                        &pixels[offset..offset + 4],
+                        &expected,
+                        "policy={policy} x={x} y={y}"
+                    );
+                }
+            }
+            assert_eq!(
+                reader.read_guest_rgb_texture(&original).unwrap(),
+                [255, 0, 0, 255].repeat(16)
+            );
+        }
+    });
+}
