@@ -22,13 +22,13 @@ class InputGesturesTest {
         val s = InputEditorState("{}")
         assertTrue(s.assign("South", true, "soft1", false))
         assertEquals("soft1", s.assignment("South", true, false))
-        val config = LauncherConfig(originalJson = s.json.toString())
+        val config = LauncherConfig.default().copy(originalJson = s.json.toString())
         assertEquals(9, InputBindings(config, false).controllerKey("South"))
         assertEquals(13, InputBindings(config, true).controllerKey("South"))
         assertTrue(s.assignLong("South", true, "action", false))
         assertEquals(
             13,
-            InputBindings(LauncherConfig(originalJson = s.json.toString()), false)
+            InputBindings(LauncherConfig.default().copy(originalJson = s.json.toString()), false)
                 .longKey("South", true),
         )
     }
@@ -86,10 +86,11 @@ class InputGesturesTest {
         assertEquals("action", restored.longTarget("X", false, false))
         val bindings =
             InputBindings(
-                LauncherConfig(
-                    keybindingsJson = restored.keyboard.toString(),
-                    originalJson = restored.json.toString(),
-                ),
+                LauncherConfig.default()
+                    .copy(
+                        keybindingsJson = restored.keyboard.toString(),
+                        originalJson = restored.json.toString(),
+                    ),
                 false,
             )
         assertEquals(0x0d, bindings.longKey("X", false))

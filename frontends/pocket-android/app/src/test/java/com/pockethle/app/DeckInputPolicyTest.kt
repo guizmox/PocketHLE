@@ -10,11 +10,19 @@ class DeckInputPolicyTest {
             javaClass.getResourceAsStream("/deck-input-defaults.json")!!.bufferedReader().readText()
         )
 
+    // Android's org.json API has no similar(); compare these string-only fixtures
+    // structurally without depending on object-key order or a desktop JSON extension.
+    private fun stringMap(value: JSONObject): Map<String, String> =
+        value.keys().asSequence().associateWith { value.getString(it) }
+
+    private fun stringList(value: org.json.JSONArray): List<String> =
+        (0 until value.length()).map { value.getString(it) }
+
     @Test
     fun factoryMapsAndProfileOverridesMatchSharedDeckReference() {
         val reference = defaults()
         val expected = reference.getJSONObject("controller")
-        assertTrue(InputBindings.defaultController().similar(expected))
+        assertEquals(stringMap(expected), stringMap(InputBindings.defaultController()))
         val codes = reference.getJSONObject("vk_codes")
         codes.keys().forEach { name ->
             assertEquals(codes.getInt(name), InputBindings.buttons[name]!!.second)
@@ -30,7 +38,10 @@ class DeckInputPolicyTest {
                 (0 until actualKeys.length())
                     .map { actualKeys.getJSONObject(it) }
                     .single { it.getString("button") == entry.getString("button") }
-            assertTrue(other.getJSONArray("keys").similar(entry.getJSONArray("keys")))
+            assertEquals(
+                stringList(entry.getJSONArray("keys")),
+                stringList(other.getJSONArray("keys")),
+            )
         }
         for ((gizmondo, field) in listOf(false to "ppc_overrides", true to "gizmondo_overrides")) {
             val overrides = reference.getJSONObject(field)
@@ -79,7 +90,7 @@ class DeckInputPolicyTest {
         assertTrue(state.assigned("giz_piano3", true, true, listOf("Select")))
         assertEquals(DeckInputPolicy.Action.BRIGHTNESS, DeckInputPolicy.hold("Select", true))
         state.reset(true, defaults())
-        assertTrue(state.controller.similar(defaults().getJSONObject("controller")))
+        assertEquals(stringMap(defaults().getJSONObject("controller")), stringMap(state.controller))
     }
 
     @Test

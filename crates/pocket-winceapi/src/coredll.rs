@@ -42215,11 +42215,18 @@ mod pocket_shell_geometry_tests {
     use pocket_kernel::controls::DialogPanel;
     #[test]
     fn dialog_init_return_reports_the_same_client_size_as_get_client_rect() {
-        for (width, height, caption_height, border) in [
-            (240, 294, 26, false),
-            (320, 214, 26, false),
-            (480, 614, 26, false),
-            (160, 100, 14, true),
+        for (width, height, y, caption_height, border, expected_top, expected_height) in [
+            (240, 294, 0, Some(26), false, 26, 268),
+            (320, 214, 0, Some(26), false, 26, 188),
+            (480, 614, 0, Some(26), false, 26, 588),
+            // Some(height) is the absolute bottom of the shell navigation strip:
+            // the top border is inside it, so only the bottom border is additional.
+            (160, 100, 0, Some(14), true, 14, 85),
+            (160, 100, 5, Some(26), true, 26, 78),
+            (160, 100, 30, Some(26), true, 31, 98),
+            (160, 100, 0, Some(0), true, 1, 98),
+            // An ordinary popup caption is relative to the inside of its border.
+            (160, 100, 0, None, true, 15, 84),
         ] {
             let mut cpu = scanf_cpu();
             let mut kernel = fresh_kernel();
@@ -42227,17 +42234,21 @@ mod pocket_shell_geometry_tests {
             kernel.controls.add_panel(DialogPanel {
                 hwnd,
                 x: 0,
-                y: 0,
+                y,
                 w: width,
                 h: height,
                 visible: true,
                 border,
                 caption: Some(String::new()),
-                caption_height: Some(caption_height),
+                caption_height,
                 caption_command: Some(1),
                 caption_help: false,
                 ok_pressed: false,
             });
+            assert_eq!(
+                kernel.controls.panel(hwnd).unwrap().client_origin().1,
+                expected_top
+            );
             let sp = cpu.read_reg(ArmReg::Sp).unwrap();
             kernel.dialog_frame = Some(GuestCallFrame {
                 args: [0; 4],
@@ -42268,10 +42279,7 @@ mod pocket_shell_geometry_tests {
             get_client_rect(&mut ctx).unwrap();
             assert_eq!(size & 0xffff, ctx.cpu.read_u32_le(0x1808).unwrap());
             assert_eq!(size >> 16, ctx.cpu.read_u32_le(0x180c).unwrap());
-            assert_eq!(
-                size >> 16,
-                (height - caption_height - 2 * i32::from(border)) as u32
-            );
+            assert_eq!(size >> 16, expected_height);
         }
     }
 

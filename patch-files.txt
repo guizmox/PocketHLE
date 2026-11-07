@@ -1,2 +1,3 @@
-docs\FRONTENDS.md
-docs\STEAMDECK.md
+crates\pocket-winceapi\src\coredll.rs
+frontends\pocket-android\app\src\test\java\com\pockethle\app\DeckInputPolicyTest.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\InputGesturesTest.kt
