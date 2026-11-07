@@ -584,8 +584,12 @@ impl Response {
             // but once shown we keep showing it until the mouse leaves the parent.
 
             if !self.ctx.input(|i| i.pointer.is_still()) && !self.is_tooltip_open() {
-                // wait for mouse to stop
-                self.ctx.request_repaint();
+                // Image-driven integrations already update hover state on
+                // their own cadence. Polling here would restart a continuous
+                // redraw loop despite repaint_on_input being disabled.
+                if self.ctx.options(|options| options.repaint_on_input) {
+                    self.ctx.request_repaint();
+                }
                 return false;
             }
         }
@@ -1032,5 +1036,94 @@ impl<R> InnerResponse<R> {
     #[inline]
     pub fn new(inner: R, response: Response) -> Self {
         Self { inner, response }
+    }
+}
+
+#[cfg(test)]
+mod tooltip_repaint_tests {
+    use super::*;
+    use crate::{pos2, vec2, CentralPanel, Event, RawInput, ViewportId};
+
+    fn hover_frames(repaint_on_input: bool) -> std::time::Duration {
+        let ctx = Context::default();
+        ctx.options_mut(|options| {
+            options.repaint_on_input = repaint_on_input;
+            options.repaint_on_widget_change = false;
+        });
+        let mut delay = std::time::Duration::MAX;
+        for frame in 0..12 {
+            let position = if frame < 2 {
+                pos2(200.0, 150.0)
+            } else {
+                pos2(20.0 + (frame % 8) as f32 * 8.0, 20.0)
+            };
+            let output = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(320.0, 240.0))),
+                    time: Some(frame as f64 / 60.0),
+                    events: vec![Event::PointerMoved(position)],
+                    ..Default::default()
+                },
+                |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        let response =
+                            ui.add_sized(vec2(100.0, 40.0), crate::Button::new("Control"));
+                        if frame > 2 {
+                            assert!(
+                                response.hovered(),
+                                "button is not hovered at {position:?}, rect {:?}",
+                                response.rect
+                            );
+                            assert!(!ctx.input(|input| input.pointer.is_still()));
+                        }
+                        response.on_hover_text("Keyboard binding");
+                    });
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                },
+            );
+            delay = output.viewport_output[&ViewportId::ROOT].repaint_delay;
+        }
+        delay
+    }
+
+    #[test]
+    fn moving_over_tooltip_respects_image_driven_redraws() {
+        assert!(hover_frames(false) > std::time::Duration::ZERO);
+        assert_eq!(hover_frames(true), std::time::Duration::ZERO);
+    }
+    #[test]
+    fn image_driven_hover_still_opens_tooltip_after_pointer_stops() {
+        let ctx = Context::default();
+        ctx.options_mut(|options| {
+            options.repaint_on_input = false;
+            options.repaint_on_widget_change = false;
+        });
+        let mut shown = false;
+        for frame in 0..20 {
+            let position = if frame < 2 {
+                pos2(200.0, 150.0)
+            } else {
+                pos2(40.0, 20.0)
+            };
+            let _ = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(320.0, 240.0))),
+                    time: Some(frame as f64 * 0.1),
+                    events: vec![Event::PointerMoved(position)],
+                    ..Default::default()
+                },
+                |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        let response =
+                            ui.add_sized(vec2(100.0, 40.0), crate::Button::new("Control"));
+                        response.on_hover_ui(|ui| {
+                            shown = true;
+                            ui.label("Keyboard binding");
+                        });
+                    });
+                },
+            );
+        }
+        assert!(shown);
     }
 }

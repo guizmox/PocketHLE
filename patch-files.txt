@@ -1,7 +1,2 @@
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\gpu\mod.rs
-crates\pocket-gles\src\gpu\readback.rs
-crates\pocket-gles\src\gpu\resolve.rs
-crates\pocket-gles\src\gpu\shared.rs
-crates\pocket-gles\src\gpu\shared_present_tests.rs
-crates\pocket-gles\src\gpu\transfer.rs
+vendor\egui\src\response.rs
+vendor\egui\POCKETHLE-NOTES.txt
