@@ -222,7 +222,7 @@ Keyboard & controller settings use the same flat, unbranded keyboard/controller
 skins on both frontends. Their PNGs, SVG originals and hitbox JSON are bundled
 from `frontends/pocket-desktop/assets/input/`; Android's Gradle assets source
 points directly at this directory. Neither artwork nor control geometry is
-independently recreated on Android. Modifier-only keyboard keycaps are decorative.
+independently recreated on Android. Modifier-only keyboard keycaps are not assignable but show physical feedback.
 Direction labels use ASCII words to avoid unsupported arrow glyphs.
 
 Select a physical input to inspect, replace or clear its assignment, or capture
@@ -294,3 +294,12 @@ baseline follows the global default; explicit Normal controls equal default
 controls. Non-default screen/rotation settings count, including those selected
 automatically during import. The marker describes the saved configuration, not a
 history of user edits; restoring the defaults removes it.
+
+Physical input feedback in the binding editor uses cyan borders and a dark teal
+fill, independent of assignment colors and selection. Keyboard keys, controller
+buttons, stick directions and triggers stay highlighted until released. Desktop
+uses the selected controller; Android combines connected input sources. Independent
+keys and axis channels preserve simultaneous presses, with axis hysteresis. Focus
+loss and device removal clear feedback. Testing inputs does not invoke game/host
+shortcuts or alter assignments. Keyboard modifiers are logical (both matching
+keycaps can light); system-reserved keys only work when delivered by the OS.

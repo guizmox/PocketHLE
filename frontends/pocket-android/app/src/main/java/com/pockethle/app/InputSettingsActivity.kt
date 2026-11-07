@@ -10,6 +10,178 @@ import org.json.JSONObject
 
 /** The desktop editor's two sections, adapted to touch and narrow screens. */
 class InputSettingsActivity : AppCompatActivity() {
+    private val liveInput = InputLiveState()
+    private val livePictures = mutableListOf<InputSkinView>()
+    private val liveRows = mutableMapOf<String, Button>()
+    private var listening = false
+    private val inputListener =
+        object : android.hardware.input.InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(id: Int) {
+                if (::state.isInitialized) render()
+            }
+
+            override fun onInputDeviceChanged(id: Int) {
+                liveInput.removeDevice(id)
+                refreshLive()
+            }
+
+            override fun onInputDeviceRemoved(id: Int) {
+                liveInput.removeDevice(id)
+                if (::state.isInitialized) render()
+            }
+        }
+
+    override fun onResume() {
+        super.onResume()
+        if (::state.isInitialized) {
+            liveInput.clear()
+            render()
+            (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager)
+                .registerInputDeviceListener(inputListener, null)
+            listening = true
+        }
+    }
+
+    override fun onPause() {
+        if (listening) {
+            (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager)
+                .unregisterInputDeviceListener(inputListener)
+            listening = false
+        }
+        liveInput.clear()
+        refreshLive()
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(focused: Boolean) {
+        super.onWindowFocusChanged(focused)
+        if (!focused) {
+            liveInput.clear()
+            refreshLive()
+        }
+    }
+
+    private fun refreshLive() {
+        livePictures.forEach { it.invalidate() }
+        liveRows.forEach { (name, row) -> row.isActivated = liveInput.isDown(name, true) }
+    }
+
+    private fun controllerEvent(event: KeyEvent): Boolean {
+        val sources = event.device?.sources ?: event.source
+        return sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
+            sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+    }
+
+    private fun recordKey(event: KeyEvent): Boolean {
+        val pad = controllerEvent(event)
+        val name =
+            if (pad) InputBindings.controllerName(event.keyCode)
+            else
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_SHIFT_LEFT,
+                    KeyEvent.KEYCODE_SHIFT_RIGHT -> "Shift"
+                    KeyEvent.KEYCODE_CTRL_LEFT,
+                    KeyEvent.KEYCODE_CTRL_RIGHT -> "Ctrl"
+                    KeyEvent.KEYCODE_ALT_LEFT,
+                    KeyEvent.KEYCODE_ALT_RIGHT -> "Alt"
+                    KeyEvent.KEYCODE_META_LEFT,
+                    KeyEvent.KEYCODE_META_RIGHT -> "Super"
+                    KeyEvent.KEYCODE_CAPS_LOCK -> "CapsLock"
+                    KeyEvent.KEYCODE_MENU -> "ContextMenu"
+                    KeyEvent.KEYCODE_GRAVE -> "Backtick"
+                    KeyEvent.KEYCODE_APOSTROPHE -> "Quote"
+                    else -> InputBindings.keyName(event)
+                }
+        if (
+            name != null &&
+                (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
+        ) {
+            liveInput.key(
+                event.deviceId,
+                pad,
+                event.keyCode,
+                name,
+                event.action == KeyEvent.ACTION_DOWN,
+            )
+            refreshLive()
+        }
+        return pad || name != null
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val recognized = recordKey(event)
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && !controllerEvent(event))
+            return super.dispatchKeyEvent(event)
+        return if (recognized) true else super.dispatchKeyEvent(event)
+    }
+
+    private fun recordMotion(event: MotionEvent): Pair<String, Float>? {
+        if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            liveInput.removeDevice(event.deviceId)
+            refreshLive()
+            return null
+        }
+        var strongest: Pair<String, Float>? = null
+        fun available(preferred: Int, fallback: Int) =
+            if (
+                event.device == null ||
+                    event.device?.getMotionRange(preferred, event.source) != null
+            )
+                preferred
+            else fallback
+        fun axis(id: Int, negative: String?, positive: String, trigger: Boolean = false) {
+            val value = event.getAxisValue(id)
+            liveInput.axis(
+                event.deviceId,
+                id,
+                value,
+                negative,
+                positive,
+                if (trigger) .5f else .25f,
+                if (trigger) .3f else .15f,
+            )
+            val candidate = if (value >= 0) positive to value else negative?.let { it to -value }
+            if (
+                candidate != null &&
+                    candidate.second.isFinite() &&
+                    candidate.second > (strongest?.second ?: 0f)
+            )
+                strongest = candidate
+        }
+        axis(MotionEvent.AXIS_X, "LeftStickLeft", "LeftStickRight")
+        axis(MotionEvent.AXIS_Y, "LeftStickUp", "LeftStickDown")
+        axis(
+            available(MotionEvent.AXIS_Z, MotionEvent.AXIS_RX),
+            "RightStickLeft",
+            "RightStickRight",
+        )
+        axis(available(MotionEvent.AXIS_RZ, MotionEvent.AXIS_RY), "RightStickUp", "RightStickDown")
+        axis(MotionEvent.AXIS_HAT_X, "DPadLeft", "DPadRight")
+        axis(MotionEvent.AXIS_HAT_Y, "DPadUp", "DPadDown")
+        axis(
+            available(MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE),
+            null,
+            "LeftTrigger2",
+            true,
+        )
+        axis(
+            available(MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS),
+            null,
+            "RightTrigger2",
+            true,
+        )
+        refreshLive()
+        return strongest
+    }
+
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) {
+            recordMotion(event)
+            return true
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
     private lateinit var state: InputEditorState
     private lateinit var rootDir: String
     private var gizmondo = false
@@ -45,6 +217,10 @@ class InputSettingsActivity : AppCompatActivity() {
                 }
             background =
                 android.graphics.drawable.StateListDrawable().apply {
+                    addState(
+                        intArrayOf(android.R.attr.state_activated),
+                        shape(Color.rgb(30, 62, 72)).apply { setStroke(dp(2), InputSkinView.LIVE) },
+                    )
                     addState(intArrayOf(android.R.attr.state_pressed), shape(Color.rgb(55, 76, 99)))
                     addState(
                         intArrayOf(android.R.attr.state_selected),
@@ -120,6 +296,8 @@ class InputSettingsActivity : AppCompatActivity() {
     }
 
     private fun render() {
+        livePictures.clear()
+        liveRows.clear()
         val oldY = scroll?.scrollY ?: 0
         val oldX = keyboardScroll?.scrollX ?: 0
         val root =
@@ -164,7 +342,8 @@ class InputSettingsActivity : AppCompatActivity() {
                             "Stylus · " to InputSkinView.GREEN,
                             "Shortcut · " to InputSkinView.PURPLE,
                             "Long press · " to InputSkinView.LONG_PRESS,
-                            "Unassigned" to Color.GRAY,
+                            "Unassigned · " to Color.GRAY,
+                            "Pressed input" to InputSkinView.LIVE,
                         )
                     )
             }
@@ -190,10 +369,11 @@ class InputSettingsActivity : AppCompatActivity() {
         )
         body.addView(text(if (pad) "Controller" else "Keyboard", 20f))
         val diagram =
-            InputSkinView(this, pad, state, gizmondo, selected[pad]) { input ->
+            InputSkinView(this, pad, state, gizmondo, selected[pad], liveInput) { input ->
                 selected[pad] = input
                 render()
             }
+        livePictures.add(diagram)
         if (pad) {
             val devices =
                 InputDevice.getDeviceIds()
@@ -222,6 +402,8 @@ class InputSettingsActivity : AppCompatActivity() {
                             render()
                         }
                         .apply {
+                            liveRows[control.input!!] = this
+                            isActivated = liveInput.isDown(control.input!!, true)
                             isSelected = selected[true] == control.input
                             isEnabled = control.input != "Misc1"
                             alpha = if (isEnabled) 1f else .45f
@@ -310,6 +492,10 @@ class InputSettingsActivity : AppCompatActivity() {
         )
         panel.addView(text("Assignment", 18f))
         val target = state.assignment(input, pad, gizmondo)
+        if (pad && input == "Misc1")
+            panel.addView(
+                text("Extra is a desktop-only input in the current Android adapter.", 12f)
+            )
         val physical =
             if (pad)
                 InputSkinView.loadControls(this, true).firstOrNull { it.input == input }?.label
@@ -422,6 +608,7 @@ class InputSettingsActivity : AppCompatActivity() {
                 }
 
                 override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                    recordKey(event)
                     if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
                     if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
                     val sources = event.device?.sources ?: event.source
@@ -442,35 +629,7 @@ class InputSettingsActivity : AppCompatActivity() {
                                 InputDevice.SOURCE_JOYSTICK
                     )
                         return super.dispatchGenericMotionEvent(event)
-                    val axes =
-                        listOf(
-                            "LeftStickRight" to event.getAxisValue(MotionEvent.AXIS_X),
-                            "LeftStickLeft" to -event.getAxisValue(MotionEvent.AXIS_X),
-                            "LeftStickDown" to event.getAxisValue(MotionEvent.AXIS_Y),
-                            "LeftStickUp" to -event.getAxisValue(MotionEvent.AXIS_Y),
-                            "RightStickRight" to event.getAxisValue(MotionEvent.AXIS_Z),
-                            "RightStickLeft" to -event.getAxisValue(MotionEvent.AXIS_Z),
-                            "RightStickDown" to event.getAxisValue(MotionEvent.AXIS_RZ),
-                            "RightStickUp" to -event.getAxisValue(MotionEvent.AXIS_RZ),
-                            "DPadRight" to event.getAxisValue(MotionEvent.AXIS_HAT_X),
-                            "DPadLeft" to -event.getAxisValue(MotionEvent.AXIS_HAT_X),
-                            "DPadDown" to event.getAxisValue(MotionEvent.AXIS_HAT_Y),
-                            "DPadUp" to -event.getAxisValue(MotionEvent.AXIS_HAT_Y),
-                            "LeftTrigger2" to
-                                maxOf(
-                                    event.getAxisValue(MotionEvent.AXIS_LTRIGGER),
-                                    event.getAxisValue(MotionEvent.AXIS_BRAKE),
-                                ),
-                            "RightTrigger2" to
-                                maxOf(
-                                    event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
-                                    event.getAxisValue(MotionEvent.AXIS_GAS),
-                                ),
-                        )
-                    axes
-                        .maxByOrNull { it.second }
-                        ?.takeIf { it.second > .6f }
-                        ?.let { accept(it.first) }
+                    recordMotion(event)?.takeIf { it.second > .6f }?.let { accept(it.first) }
                     return true
                 }
             }

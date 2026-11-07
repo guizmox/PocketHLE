@@ -137,7 +137,8 @@
       75,
       44,
       44
-    ]
+    ],
+    "live_key": "Backtick"
   },
   {
     "input": "1",
@@ -417,7 +418,8 @@
       175,
       84,
       44
-    ]
+    ],
+    "live_key": "CapsLock"
   },
   {
     "input": "Q",
@@ -527,7 +529,8 @@
       175,
       76,
       44
-    ]
+    ],
+    "live_key": "Quote"
   },
   {
     "input": null,
@@ -537,7 +540,8 @@
       225,
       108,
       44
-    ]
+    ],
+    "live_key": "Shift"
   },
   {
     "input": "W",
@@ -637,7 +641,8 @@
       225,
       188,
       44
-    ]
+    ],
+    "live_key": "Shift"
   },
   {
     "input": null,
@@ -647,7 +652,8 @@
       275,
       68,
       44
-    ]
+    ],
+    "live_key": "Ctrl"
   },
   {
     "input": null,
@@ -657,7 +663,8 @@
       275,
       44,
       44
-    ]
+    ],
+    "live_key": "Super"
   },
   {
     "input": null,
@@ -667,7 +674,8 @@
       275,
       68,
       44
-    ]
+    ],
+    "live_key": "Alt"
   },
   {
     "input": "Space",
@@ -687,7 +695,8 @@
       275,
       68,
       44
-    ]
+    ],
+    "live_key": "Alt"
   },
   {
     "input": null,
@@ -697,7 +706,8 @@
       275,
       48,
       44
-    ]
+    ],
+    "live_key": "ContextMenu"
   },
   {
     "input": null,
@@ -707,7 +717,8 @@
       275,
       64,
       44
-    ]
+    ],
+    "live_key": "Ctrl"
   },
   {
     "input": "Insert",

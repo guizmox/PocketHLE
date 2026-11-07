@@ -15,5 +15,9 @@
 <rect x="312" y="160" width="46" height="24" rx="10" fill="#23272d" stroke="#858d98" stroke-width="2"/>
 <rect x="402" y="160" width="46" height="24" rx="10" fill="#23272d" stroke="#858d98" stroke-width="2"/>
 <circle cx="380" cy="230" r="17" fill="#23272d" stroke="#858d98" stroke-width="2"/>
+<circle cx="380" cy="290" r="18" fill="#23272d" stroke="#858d98" stroke-width="2"/>
+<circle cx="373" cy="290" r="1.8" fill="#858d98"/>
+<circle cx="380" cy="290" r="1.8" fill="#858d98"/>
+<circle cx="387" cy="290" r="1.8" fill="#858d98"/>
 <polygon points="254,246 286,246 286,274 314,274 314,306 286,306 286,334 254,334 254,306 226,306 226,274 254,274" fill="#23272d" stroke="#858d98" stroke-width="2"/>
 </svg>

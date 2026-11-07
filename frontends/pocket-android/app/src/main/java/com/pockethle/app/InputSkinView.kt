@@ -7,7 +7,12 @@ import android.view.View
 import kotlin.math.hypot
 import org.json.JSONArray
 
-internal data class InputSkinControl(val input: String?, val label: String, val rect: RectF)
+internal data class InputSkinControl(
+    val input: String?,
+    val label: String,
+    val rect: RectF,
+    val liveKey: String? = input,
+)
 
 /** Uses the exact PNGs and geometry bundled by the desktop editor. */
 internal class InputSkinView(
@@ -16,6 +21,7 @@ internal class InputSkinView(
     val state: InputEditorState,
     var gizmondo: Boolean,
     var selected: String?,
+    val live: InputLiveState,
     val select: (String) -> Unit,
 ) : View(context) {
     private val bitmap =
@@ -56,11 +62,33 @@ internal class InputSkinView(
                 if (pad && target == "host" && DeckInputPolicy.tap(input!!) == null) LONG_PRESS
                 else color(target)
             val rect = control.rect
+            val pressed = control.liveKey?.let { live.isDown(it, pad) } ?: false
+            if (pressed) {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.rgb(30, 62, 72)
+                if (pad) canvas.drawCircle(rect.centerX(), rect.centerY(), 22f, paint)
+                else canvas.drawRoundRect(rect, 4f, 4f, paint)
+                paint.style = Paint.Style.STROKE
+                paint.color = LIVE
+                paint.strokeWidth = 3f
+                if (pad) canvas.drawCircle(rect.centerX(), rect.centerY(), 22f, paint)
+                else canvas.drawRoundRect(rect, 4f, 4f, paint)
+            }
+            if (pressed && pad && input == "Misc1") {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.LTGRAY
+                for (dx in listOf(-7f, 0f, 7f)) canvas.drawCircle(
+                    rect.centerX() + dx,
+                    rect.centerY(),
+                    1.8f,
+                    paint,
+                )
+            }
             if (!pad) {
                 if (input != null) {
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = if (input == selected) 2.5f else 1f
-                    paint.color = if (input == selected) BLUE else color
+                    paint.color = if (pressed) LIVE else if (input == selected) BLUE else color
                     canvas.drawRoundRect(rect, 4f, 4f, paint)
                 }
                 paint.style = Paint.Style.FILL
@@ -83,9 +111,10 @@ internal class InputSkinView(
                         paint,
                     )
                 }
-            } else if (input != null && input != "Misc1") {
+            } else if (input != null) {
                 var x = rect.centerX()
                 var y = rect.centerY()
+                if (input == "Misc1") y += 24f
                 if (input.startsWith("LeftStick") || input.startsWith("RightStick")) {
                     if (input.endsWith("Left")) x -= 14f
                     if (input.endsWith("Right")) x += 14f
@@ -119,7 +148,7 @@ internal class InputSkinView(
                         canvas.drawText(
                             "Hold: ${DeckInputPolicy.short(it)}",
                             rect.centerX(),
-                            rect.centerY() + 26f,
+                            rect.centerY() + if (input == "Misc1") 43f else 26f,
                             paint,
                         )
                     }
@@ -169,6 +198,7 @@ internal class InputSkinView(
 
     companion object {
         private val skins = mutableMapOf<Boolean, Bitmap>()
+        val LIVE = Color.rgb(115, 235, 250)
         val LONG_PRESS = Color.rgb(231, 181, 96)
         val PURPLE = Color.rgb(176, 135, 231)
         val GREEN = Color.rgb(93, 194, 162)
@@ -199,15 +229,19 @@ internal class InputSkinView(
                     if (pad) {
                         val x = item.getDouble("x").toFloat()
                         val y = item.getDouble("y").toFloat()
-                        if (name == "Misc1") RectF(-100f, -100f, -90f, -90f)
-                        else RectF(x - 18, y - 18, x + 18, y + 18)
+                        RectF(x - 18, y - 18, x + 18, y + 18)
                     } else
                         item.getJSONArray("rect").let { r ->
                             val x = r.getDouble(0).toFloat()
                             val y = r.getDouble(1).toFloat()
                             RectF(x, y, x + r.getDouble(2).toFloat(), y + r.getDouble(3).toFloat())
                         }
-                InputSkinControl(name, item.getString("label"), rect)
+                InputSkinControl(
+                    name,
+                    item.getString("label"),
+                    rect,
+                    item.optString("live_key").takeIf { it.isNotEmpty() } ?: name,
+                )
             }
         }
     }

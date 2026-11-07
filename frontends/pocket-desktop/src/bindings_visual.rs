@@ -2,6 +2,7 @@
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, Vec2};
 use pocket_library::{GuestButton, LauncherConfig};
 
+const LIVE: Color32 = Color32::from_rgb(115, 235, 250);
 const BLUE: Color32 = Color32::from_rgb(93, 179, 235);
 const GREEN: Color32 = Color32::from_rgb(93, 194, 162);
 pub(crate) const LONG_PRESS: Color32 = Color32::from_rgb(231, 181, 96);
@@ -91,6 +92,8 @@ pub enum Capture {
 
 #[derive(Clone, serde::Deserialize)]
 struct SkinKey {
+    #[serde(default)]
+    live_key: Option<String>,
     input: Option<String>,
     label: String,
     rect: [f32; 4],
@@ -116,6 +119,7 @@ fn load_skin(ctx: &egui::Context, name: &str, bytes: &[u8]) -> egui::TextureHand
 
 pub struct Editor {
     gizmondo: bool,
+    live_controls: std::collections::HashSet<(usize, String)>,
     controller_skin: Option<egui::TextureHandle>,
     keyboard_skin: Option<egui::TextureHandle>,
     keyboard_layout: Vec<SkinKey>,
@@ -129,6 +133,7 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             gizmondo: false,
+            live_controls: Default::default(),
             controller_skin: None,
             keyboard_skin: None,
             keyboard_layout: {
@@ -316,6 +321,40 @@ fn set_assignment(config: &mut LauncherConfig, input: &str, controller: bool, ta
 }
 
 impl Editor {
+    pub fn live_input(&mut self, device: usize, control: &str, down: bool) {
+        let key = (device, control.to_owned());
+        if down {
+            self.live_controls.insert(key);
+        } else {
+            self.live_controls.remove(&key);
+        }
+    }
+    pub fn clear_live(&mut self) {
+        self.live_controls.clear();
+    }
+    pub fn retain_live_devices(&mut self, devices: &[(usize, String)]) {
+        self.live_controls
+            .retain(|(id, _)| devices.iter().any(|(device, _)| device == id));
+    }
+    fn live_control(&self, name: &str) -> bool {
+        self.live_controls
+            .iter()
+            .any(|(_, control)| control == name)
+    }
+    fn live_key(ui: &Ui, name: &str) -> bool {
+        ui.input(|input| {
+            if !input.viewport().focused.unwrap_or(true) {
+                return false;
+            }
+            match name {
+                "Shift" => input.modifiers.shift,
+                "Ctrl" => input.modifiers.ctrl,
+                "Alt" => input.modifiers.alt,
+                "Super" => input.modifiers.mac_cmd,
+                _ => egui::Key::from_name(name).is_some_and(|key| input.key_down(key)),
+            }
+        })
+    }
     pub fn is_gizmondo(&self) -> bool {
         self.gizmondo
     }
@@ -667,6 +706,18 @@ impl Editor {
                 if let Some(input) = key.input {
                     self.control(ui, config, false, &input, &key.label, rect);
                 } else {
+                    if key
+                        .live_key
+                        .as_deref()
+                        .is_some_and(|name| Self::live_key(ui, name))
+                    {
+                        ui.painter().rect(
+                            rect,
+                            3.0,
+                            Color32::from_rgb(30, 62, 72),
+                            Stroke::new(2.0, LIVE),
+                        );
+                    }
                     ui.painter().text(
                         rect.center(),
                         Align2::CENTER_CENTER,
@@ -676,7 +727,7 @@ impl Editor {
                     );
                 }
             }
-            ui.label("AZERTY keyboard. Select a key, then choose its assignment.");
+            ui.label("AZERTY keyboard. Press a key to identify it; click to edit its assignment.");
         }
         ui.horizontal_wrapped(|ui| {
             for (color, label) in [
@@ -685,6 +736,7 @@ impl Editor {
                 (PURPLE, "Shortcut"),
                 (LONG_PRESS, "Long press"),
                 (Color32::GRAY, "Unassigned"),
+                (LIVE, "Pressed input"),
             ] {
                 ui.colored_label(color, label);
             }
@@ -740,7 +792,24 @@ impl Editor {
                 );
                 let point = art.min + Vec2::new(*x, *y) * (art_width / 760.0);
                 let active = self.control(ui, config, true, name, label, rail);
-                if *name != "Misc1" {
+                {
+                    if self.live_control(name) {
+                        ui.painter().circle(
+                            point,
+                            (art_width * 0.028).max(9.0),
+                            Color32::from_rgb(30, 62, 72),
+                            Stroke::new(2.5, LIVE),
+                        );
+                    }
+                    if *name == "Misc1" && self.live_control(name) {
+                        for dx in [-4.0, 0.0, 4.0] {
+                            ui.painter().circle_filled(
+                                point + Vec2::new(dx, 0.0),
+                                1.2,
+                                Color32::LIGHT_GRAY,
+                            );
+                        }
+                    }
                     let assignment = controller_assignment(config, name, self.gizmondo);
                     let shortcut = controller_shortcut(name, self.gizmondo);
                     let configured_fullscreen = !controller_fixed(name, self.gizmondo)
@@ -771,6 +840,9 @@ impl Editor {
                         }
                     };
                     let mut label_point = point;
+                    if *name == "Misc1" {
+                        label_point.y += 17.0;
+                    }
                     if name.starts_with("LeftStick") || name.starts_with("RightStick") {
                         let distance = 14.0 * art_width / 760.0;
                         if name.ends_with("Left") {
@@ -801,7 +873,7 @@ impl Editor {
                     );
                     if let Some(hold) = short_hold(name, self.gizmondo) {
                         ui.painter().text(
-                            point + Vec2::new(0.0, 14.0),
+                            point + Vec2::new(0.0, if *name == "Misc1" { 27.0 } else { 14.0 }),
                             Align2::CENTER_CENTER,
                             format!("Hold: {hold}"),
                             FontId::proportional(8.5),
@@ -866,6 +938,11 @@ impl Editor {
         };
         let selected = if controller { &self.control } else { &self.key };
         let is_selected = selected.as_deref() == Some(name);
+        let pressed = if controller {
+            self.live_control(name)
+        } else {
+            Self::live_key(ui, name)
+        };
         // A child UI supplies a real navigable button without moving the diagram's cursor.
         let mut hit_ui = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
         let widgets = &mut hit_ui.style_mut().visuals.widgets;
@@ -888,14 +965,18 @@ impl Editor {
             ui.painter().rect(
                 rect,
                 4.0,
-                if is_selected {
+                if pressed {
+                    Color32::from_rgb(30, 62, 72)
+                } else if is_selected {
                     Color32::from_rgb(36, 55, 72)
                 } else {
                     Color32::from_rgb(34, 38, 44)
                 },
                 Stroke::new(
                     1.0,
-                    if is_selected {
+                    if pressed {
+                        LIVE
+                    } else if is_selected {
                         BLUE
                     } else {
                         Color32::from_gray(68)
@@ -906,12 +987,17 @@ impl Editor {
             ui.painter().rect(
                 rect.shrink(0.5),
                 3.0,
-                if is_selected {
+                if pressed {
+                    Color32::from_rgb(30, 62, 72)
+                } else if is_selected {
                     Color32::from_rgba_unmultiplied(65, 130, 180, 65)
                 } else {
                     Color32::TRANSPARENT
                 },
-                Stroke::new(if is_selected { 2.0 } else { 1.0 }, color),
+                Stroke::new(
+                    if pressed || is_selected { 2.0 } else { 1.0 },
+                    if pressed { LIVE } else { color },
+                ),
             );
         }
         let command = if fullscreen {
@@ -1027,6 +1113,48 @@ fn controller_inputs() -> Vec<(&'static str, &'static str, f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_keyboard_state_survives_editor_event_consumption_and_releases() {
+        let ctx = egui::Context::default();
+        for down in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Z,
+                        physical_key: Some(egui::Key::Z),
+                        pressed: down,
+                        repeat: false,
+                        modifiers: egui::Modifiers::default(),
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    ctx.input_mut(|input| input.events.clear());
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| assert_eq!(Editor::live_key(ui, "Z"), down));
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn live_controls_release_independently_and_clear_on_disconnect() {
+        let mut editor = Editor::default();
+        editor.live_input(1, "South", true);
+        editor.live_input(2, "South", true);
+        editor.live_input(1, "South", false);
+        assert!(editor.live_control("South"));
+        editor.retain_live_devices(&[(1, "pad".into())]);
+        assert!(!editor.live_control("South"));
+        editor.live_input(1, "Misc1", true);
+        editor.clear_live();
+        assert!(!editor.live_control("Misc1"));
+        assert!(controller_inputs()
+            .iter()
+            .find(|(name, _, _, _)| *name == "Misc1")
+            .is_some_and(|(_, _, x, y)| *x > 0.0 && *y > 0.0));
+    }
 
     #[test]
     fn keyboard_skin_hitboxes_are_distinct_and_inside_the_asset() {

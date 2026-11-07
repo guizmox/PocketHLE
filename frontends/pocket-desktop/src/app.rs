@@ -324,7 +324,6 @@ pub struct PocketLauncher {
     gamepad_error: Option<String>,
     gamepad_held: std::collections::HashMap<(usize, String), u16>,
     gamepad_capture: Option<ControllerCapture>,
-    gamepad_last_input: Option<String>,
     /// `Some` while a stylus drag is in progress — carries the last
     /// reported game-space coordinates so we don't spam the guest
     /// with redundant events.
@@ -956,7 +955,6 @@ impl PocketLauncher {
             gamepad_error: None,
             gamepad_held: Default::default(),
             gamepad_capture: None,
-            gamepad_last_input: None,
             pointer_down_at: None,
             running_game: None,
             status: String::new(),
@@ -2827,6 +2825,11 @@ impl PocketLauncher {
                 ) {
                     capture = None;
                 }
+                ui.ctx().input_mut(|input| {
+                    input.events.retain(|event| {
+                        !matches!(event, egui::Event::Key { .. } | egui::Event::Text(_))
+                    })
+                });
             }
         }
 
@@ -2871,6 +2874,7 @@ impl PocketLauncher {
                             }
                         });
                     if old != self.gamepad_selected {
+                        self.bindings_visual.clear_live();
                         self.deck_nav_repeat = None;
                         self.deck_menu_press = None;
                         self.deck_view_press = None;
@@ -2881,13 +2885,6 @@ impl PocketLauncher {
                         }
                     }
                 }
-                ui.label(format!(
-                    "Last controller input: {}",
-                    self.gamepad_last_input
-                        .as_deref()
-                        .unwrap_or("waiting for a button / stick…")
-                ));
-
                 if !ui.ctx().input(|i| i.viewport().focused.unwrap_or(true)) {
                     ui.colored_label(
                         Color32::YELLOW,
@@ -3025,6 +3022,11 @@ impl PocketLauncher {
                     ) {
                         self.stylus_capture = None;
                     }
+                    ui.ctx().input_mut(|input| {
+                        input.events.retain(|event| {
+                            !matches!(event, egui::Event::Key { .. } | egui::Event::Text(_))
+                        })
+                    });
                 }
             }
             egui::Grid::new("stylus_bindings").show(ui, |ui| {
@@ -4372,6 +4374,8 @@ impl PocketLauncher {
 
     fn update_gamepad_input(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if self.screen!=Screen::InputSettings || !focused {self.bindings_visual.clear_live();}
+        if self.screen==Screen::InputSettings {self.deck_menu_press=None;self.deck_view_press=None;self.deck_fn_press.clear();}
         if self.screen != Screen::Run
             || !focused
             || self.file_dialog.is_some()
@@ -4481,7 +4485,7 @@ impl PocketLauncher {
                         }
                     }
                 }
-                crate::gamepad::Event::Error(error) => self.gamepad_error = Some(error),
+                crate::gamepad::Event::Error(error) => {self.gamepad_error=Some(error);self.bindings_visual.clear_live();},
                 crate::gamepad::Event::Devices(devices) => {
                     if self
                         .gamepad_selected
@@ -4501,6 +4505,7 @@ impl PocketLauncher {
                     self.deck_view_press = None;
                     self.deck_fn_press.clear();
                     self.gamepad_devices = devices;
+                    self.bindings_visual.retain_live_devices(&self.gamepad_devices);
                     self.stylus_gamepad.retain(|(id, _), _| {
                         self.gamepad_devices.iter().any(|(device, _)| device == id)
                     });
@@ -4531,6 +4536,15 @@ impl PocketLauncher {
                     control,
                     down,
                 } => {
+                    if self.screen==Screen::InputSettings {
+                        let focused=ctx.input(|i|i.viewport().focused.unwrap_or(true));
+                        if Some(device)==self.gamepad_selected && focused {
+                            self.bindings_visual.live_input(device,&control,down);
+                            ctx.request_repaint();
+                            if !down {self.controller_ui.release(&control);continue;}
+                            if self.gamepad_capture.is_none() {continue;}
+                        }
+                    }
                     if (self.file_dialog.is_some() || self.restore_archive.is_some())
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
@@ -4687,24 +4701,8 @@ impl PocketLauncher {
                         self.release_gamepad_control(&key);
                         continue;
                     }
-                    // Show reception before filtering: on Steam Deck/Proton,
-                    // detection alone cannot distinguish missing SDL reports
-                    // from a different device or an inactive egui window.
                     let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
                     let selected = Some(device) == self.gamepad_selected;
-                    let reason = if !selected {
-                        " (ignored: another controller is selected)"
-                    } else if !focused {
-                        " (ignored: window inactive)"
-                    } else {
-                        ""
-                    };
-                    self.gamepad_last_input = Some(format!(
-                        "{} [device {}]{}",
-                        crate::gamepad::label(&control),
-                        device,
-                        reason
-                    ));
                     if !selected || !focused {
                         continue;
                     }
@@ -5056,6 +5054,8 @@ impl PocketLauncher {
     }
 
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
+        if self.screen==Screen::InputSettings {return;}
+
         if self.stylus_editor_keyboard(ctx) {
             return;
         }
@@ -5808,6 +5808,12 @@ impl eframe::App for PocketLauncher {
         );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Input-editor keystrokes are visual tests; capture and open popups retain their events.
+        if self.screen==Screen::InputSettings && self.binding_capture.is_none() && self.stylus_capture.is_none()
+            && !ctx.memory(|memory|memory.any_popup_open()) {
+            ctx.input_mut(|input|input.events.retain(|event|!matches!(event,egui::Event::Key{..}|egui::Event::Text(_))));
+        }
+
         // Early-return dialogs retain ordinary host repaint behavior. Only a
         // complete Run update enables image-driven redraws.
         ctx.data_mut(|data| {
