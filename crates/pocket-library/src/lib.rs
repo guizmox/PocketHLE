@@ -1716,7 +1716,10 @@ impl Library {
             config.gizmondo_identity_revision = identity_revision();
             write_json(&root.join(CONFIG_FILE_NAME), &config)?;
         }
-        if keybindings::migrate_desktop_gamepad_layout(&mut config.gamepad_bindings, &mut config.gamepad_fullscreen) {
+        if keybindings::migrate_desktop_gamepad_layout(
+            &mut config.gamepad_bindings,
+            &mut config.gamepad_fullscreen,
+        ) {
             write_json(&root.join(CONFIG_FILE_NAME), &config)?;
         }
         keybindings::migrate_steam_deck_gamepad_bindings(&mut config.gamepad_bindings);
