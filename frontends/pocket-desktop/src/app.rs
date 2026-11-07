@@ -359,6 +359,7 @@ pub struct PocketLauncher {
     /// should drive it, while the keybinding editor is in "press a
     /// key" mode.
     binding_capture: Option<GuestButton>,
+    bindings_visual: crate::bindings_visual::Editor,
     stylus_capture: Option<usize>,
     stylus_keyboard: std::collections::HashSet<String>,
     stylus_gamepad: std::collections::HashMap<(usize, String), f32>,
@@ -974,6 +975,7 @@ impl PocketLauncher {
             running_game_id: None,
             running_is_gizmondo: false,
             binding_capture: None,
+            bindings_visual: Default::default(),
             stylus_capture: None,
             stylus_keyboard: Default::default(),
             stylus_gamepad: Default::default(),
@@ -2781,75 +2783,12 @@ impl PocketLauncher {
     /// event, which is what makes a rebind survive a restart.
     fn ui_keybindings(&mut self, ui: &mut egui::Ui, draft: &mut LauncherConfig) {
         ui.label(RichText::new("Keyboard & controller").strong());
-        ui.label(
-            RichText::new(
-                "Host keys for PocketPC and Gizmondo controls. Existing PocketPC buttons are reused \
-                 for their Gizmondo equivalents; only the five Gizmondo piano buttons are extra. \
-                 A key only ever drives one button, so rebinding it moves it from the old control.",
-            )
-            .small()
-            .color(Color32::from_gray(160)),
-        );
+        ui.label("Inspect and edit the saved keyboard and controller assignments. Changes take effect after Save.");
         ui.add_space(6.0);
-
-        ui.label("Connect your controller by USB or pair it in the operating system's Bluetooth settings.");
-        if let Some(error) = &self.gamepad_error {
-            ui.colored_label(
-                Color32::LIGHT_RED,
-                format!("Controller input unavailable: {error}"),
-            );
-        }
-        if self.gamepad_devices.is_empty() {
-            ui.label("No controller detected.");
-        } else {
-            let old = self.gamepad_selected;
-            crate::controller_ui::ComboBox::from_id_source("selected_controller")
-                .selected_text(
-                    self.gamepad_devices
-                        .iter()
-                        .find(|(id, _)| Some(*id) == old)
-                        .map(|(_, name)| name.as_str())
-                        .unwrap_or("Controller"),
-                )
-                .show_ui(ui, |ui| {
-                    for (id, name) in &self.gamepad_devices {
-                        crate::controller_ui::selectable_value(
-                            ui,
-                            &mut self.gamepad_selected,
-                            Some(*id),
-                            name,
-                        );
-                    }
-                });
-            if old != self.gamepad_selected {
-                self.deck_nav_repeat = None;
-                self.deck_menu_press = None;
-                self.deck_view_press = None;
-                self.deck_fn_press.clear();
-                let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
-                for key in keys {
-                    self.release_gamepad_control(&key);
-                }
-            }
-        }
-        ui.label(format!(
-            "Last controller input: {}",
-            self.gamepad_last_input
-                .as_deref()
-                .unwrap_or("waiting for a button / stick…")
-        ));
-
-        if !ui.ctx().input(|i| i.viewport().focused.unwrap_or(true)) {
-            ui.colored_label(
-                Color32::YELLOW,
-                "Window inactive: controller assignment is paused.",
-            );
-        }
 
         // Copied out so the closures below can mutate the capture state
         // without holding a second borrow of `self`.
         let mut capture = self.binding_capture;
-        let mut reset_clicked = false;
 
         // A capture is armed: the next key press the window sees becomes
         // the binding. Read the events directly rather than waiting for
@@ -2868,134 +2807,109 @@ impl PocketLauncher {
                 })
             });
             if let Some(key) = captured {
-                draft.keybindings.bind(button, key.name());
-                capture = None;
+                if self.bindings_visual.capture(
+                    draft,
+                    key.name(),
+                    false,
+                    crate::bindings_visual::Assignment::Guest(button),
+                ) {
+                    capture = None;
+                }
             }
         }
 
-        // Bound assignment columns keep long lists from growing the grid or
-        // wrapping key names between the removal and capture buttons.
-        let assignment_width = ((ui.available_width() - 125.0) / 2.0).clamp(120.0, 280.0);
-        egui::Grid::new("keybindings_grid")
-            .num_columns(3)
-            .spacing(Vec2::new(12.0, 10.0))
-            .show(ui, |ui| {
-                ui.label(RichText::new("Control").strong());
-                ui.label(RichText::new("Keyboard").strong());
-                ui.label(RichText::new("Controller").strong());
-                ui.end_row();
-                for (index, button) in GuestButton::ALL.into_iter().enumerate() {
-                    let section = match index {
-                        0 => Some("Shared controls — Pocket PC and Gizmondo"),
-                        10 => Some("Emulator shortcuts"),
-                        11 => Some("Gizmondo only — console system buttons"),
-                        16 => Some("Pocket PC only — hardware buttons"),
-                        _ => None,
-                    };
-                    if let Some(section) = section {
-                        ui.label(RichText::new(section).strong());
-                        ui.label("");
-                        ui.label("");
-                        ui.end_row();
-                    }
-                    ui.add(egui::Label::new(button.label()).wrap(false));
-                    let keys: Vec<String> = draft.keybindings.keys_for(button).to_vec();
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_source(("keyboard_assignments", button.label()))
-                            .max_width(assignment_width)
-                            .min_scrolled_width(assignment_width)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.set_min_height(ui.spacing().interact_size.y);
-                                    if keys.is_empty() {
-                                        ui.label(
-                                            RichText::new("unbound")
-                                                .small()
-                                                .color(Color32::from_gray(140)),
-                                        );
-                                    }
-                                    for key in &keys {
-                                        ui.add(
-                                            egui::Label::new(RichText::new(key).monospace())
-                                                .wrap(false),
-                                        );
-                                        if crate::controller_ui::small_button(ui, "✕")
-                                            .on_hover_text(format!("Remove {key}"))
-                                            .clicked()
-                                        {
-                                            draft.keybindings.unbind(button, key);
-                                        }
-                                    }
-                                });
-                            });
-                        if capture == Some(button) {
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new("press a key…")
-                                            .small()
-                                            .color(Color32::LIGHT_BLUE),
-                                    )
-                                    .wrap(false),
+        self.bindings_visual.profile(ui);
+        for controller in [false, true] {
+            if controller {
+                ui.label("Connect your controller by USB or pair it in the operating system's Bluetooth settings.");
+                if let Some(error) = &self.gamepad_error {
+                    ui.colored_label(
+                        Color32::LIGHT_RED,
+                        format!("Controller input unavailable: {error}"),
+                    );
+                }
+                if self.gamepad_devices.is_empty() {
+                    ui.label("No controller detected.");
+                } else {
+                    let old = self.gamepad_selected;
+                    crate::controller_ui::ComboBox::from_id_source("selected_controller")
+                        .selected_text(
+                            self.gamepad_devices
+                                .iter()
+                                .find(|(id, _)| Some(*id) == old)
+                                .map(|(_, name)| name.as_str())
+                                .unwrap_or("Controller"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &self.gamepad_devices {
+                                crate::controller_ui::selectable_value(
+                                    ui,
+                                    &mut self.gamepad_selected,
+                                    Some(*id),
+                                    name,
                                 );
-                                if crate::controller_ui::small_button(ui, "Cancel").clicked() {
-                                    capture = None;
-                                }
-                            });
-                        } else if crate::controller_ui::button(ui, "Add key").clicked() {
-                            self.gamepad_capture = None;
-                            capture = Some(button);
-                        }
-                    });
-                    ui.vertical(|ui| {
-                        let controls: Vec<_> = draft
-                            .gamepad_bindings
-                            .iter()
-                            .filter(|(_, mapped)| **mapped == button)
-                            .map(|(control, _)| control.clone())
-                            .collect();
-                        egui::ScrollArea::horizontal()
-                            .id_source(("controller_assignments", button.label()))
-                            .max_width(assignment_width)
-                            .min_scrolled_width(assignment_width)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.set_min_height(ui.spacing().interact_size.y);
-                                    if controls.is_empty() {
-                                        ui.label(
-                                            RichText::new("unbound")
-                                                .small()
-                                                .color(Color32::from_gray(140)),
-                                        );
-                                    }
-                                    for control in controls {
-                                        let label = crate::gamepad::label(&control);
-                                        ui.add(egui::Label::new(&label).wrap(false));
-                                        if crate::controller_ui::small_button(ui, "✕")
-                                            .on_hover_text(format!("Remove {label}"))
-                                            .clicked()
-                                        {
-                                            draft.gamepad_bindings.remove(&control);
-                                        }
-                                    }
-                                });
-                            });
-                        if self.gamepad_capture == Some(ControllerCapture::Guest(button)) {
-                            ui.add(egui::Label::new("Press a controller input…").wrap(false));
-                            if crate::controller_ui::small_button(ui, "Cancel controller").clicked()
-                            {
-                                self.gamepad_capture = None;
                             }
-                        } else if crate::controller_ui::button(ui, "Add controller input").clicked()
-                        {
-                            self.gamepad_capture = Some(ControllerCapture::Guest(button));
-                            capture = None;
+                        });
+                    if old != self.gamepad_selected {
+                        self.deck_nav_repeat = None;
+                        self.deck_menu_press = None;
+                        self.deck_view_press = None;
+                        self.deck_fn_press.clear();
+                        let keys: Vec<_> = self.gamepad_held.keys().cloned().collect();
+                        for key in keys {
+                            self.release_gamepad_control(&key);
                         }
-                    });
-                    ui.end_row();
+                    }
+                }
+                ui.label(format!(
+                    "Last controller input: {}",
+                    self.gamepad_last_input
+                        .as_deref()
+                        .unwrap_or("waiting for a button / stick…")
+                ));
+
+                if !ui.ctx().input(|i| i.viewport().focused.unwrap_or(true)) {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "Window inactive: controller assignment is paused.",
+                    );
+                }
+            }
+            if let Some(request) = self.bindings_visual.show(ui, draft, controller) {
+                capture = None;
+                self.gamepad_capture = None;
+                self.stylus_capture = None;
+                match request {
+                    crate::bindings_visual::Capture::Keyboard(button) => capture = Some(button),
+                    crate::bindings_visual::Capture::Controller(button) => {
+                        self.gamepad_capture = Some(ControllerCapture::Guest(button));
+                    }
+                    crate::bindings_visual::Capture::StylusKeyboard(direction) => {
+                        self.stylus_capture = Some(direction);
+                    }
+                    crate::bindings_visual::Capture::StylusController(direction) => {
+                        self.gamepad_capture = Some(ControllerCapture::Stylus(direction));
+                    }
+                }
+            }
+            if !controller && crate::controller_ui::button(ui, "Reset keys to defaults").clicked() {
+                draft.keybindings = pocket_library::KeyBindings::default();
+                capture = None;
+            }
+        }
+        if capture.is_some() || self.gamepad_capture.is_some() || self.stylus_capture.is_some() {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    Color32::LIGHT_BLUE,
+                    "Waiting for a free input… Reserved shortcuts keep their built-in action.",
+                );
+                if crate::controller_ui::button(ui, "Cancel assignment").clicked() {
+                    capture = None;
+                    self.gamepad_capture = None;
+                    self.stylus_capture = None;
                 }
             });
+        }
 
         ui.add_space(6.0);
         {
@@ -3031,13 +2945,6 @@ impl PocketLauncher {
                 self.gamepad_capture = None;
             }
         }
-        if crate::controller_ui::button(ui, "Reset keys to defaults").clicked() {
-            reset_clicked = true;
-        }
-        if reset_clicked {
-            draft.keybindings = pocket_library::KeyBindings::default();
-            capture = None;
-        }
         ui.separator();
         ui.heading("Pocket PC only — stylus stick");
         crate::controller_ui::checkbox(
@@ -3063,11 +2970,14 @@ impl PocketLauncher {
                     _ => None,
                 })
             }) {
-                for names in &mut draft.stylus_stick.keyboard {
-                    names.retain(|n| !pocket_library::keybindings::keys_match(n, key.name()));
+                if self.bindings_visual.capture(
+                    draft,
+                    key.name(),
+                    false,
+                    crate::bindings_visual::Assignment::Stylus(direction),
+                ) {
+                    self.stylus_capture = None;
                 }
-                draft.stylus_stick.keyboard[direction].push(key.name().into());
-                self.stylus_capture = None;
             }
         }
         egui::Grid::new("stylus_bindings").show(ui, |ui| {
@@ -4768,17 +4678,24 @@ impl PocketLauncher {
                         {
                             match button {
                                 ControllerCapture::Guest(button) => {
-                                    if draft.gamepad_fullscreen.as_deref() == Some(control.as_str())
-                                    {
-                                        draft.gamepad_fullscreen = None;
+                                    if !self.bindings_visual.capture(
+                                        draft,
+                                        &control,
+                                        true,
+                                        crate::bindings_visual::Assignment::Guest(button),
+                                    ) {
+                                        continue;
                                     }
-                                    draft.gamepad_bindings.insert(control.clone(), button);
                                 }
                                 ControllerCapture::Stylus(direction) => {
-                                    for names in &mut draft.stylus_stick.controller {
-                                        names.retain(|n| n != &control);
+                                    if !self.bindings_visual.capture(
+                                        draft,
+                                        &control,
+                                        true,
+                                        crate::bindings_visual::Assignment::Stylus(direction),
+                                    ) {
+                                        continue;
                                     }
-                                    draft.stylus_stick.controller[direction].push(control.clone());
                                 }
                                 ControllerCapture::Fullscreen => {
                                     draft.gamepad_bindings.remove(&control);

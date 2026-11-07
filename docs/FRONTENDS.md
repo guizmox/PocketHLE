@@ -215,3 +215,22 @@ changing the game renderer.
 
 HARDWARE DIAG's TIMETEST EGL pacing assertions require a 60 FPS per-game limit;
 Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
+
+## Desktop visual input editor
+
+Keyboard & controller settings contain separate interactive keyboard and generic,
+unbranded controller diagrams. Select an input to inspect, replace or clear its
+assignment; use physical input capture to bind the selected command elsewhere.
+Saved inputs absent from the compact diagram remain available in the selector.
+Blue marks guest commands, green the stylus stick, purple host shortcuts, and gray
+unassigned inputs. Each section also lists device commands without an effective
+assignment. The Pocket PC / Gizmondo preview changes only the displayed device;
+settings are still shared and persist through the existing Save/Cancel flow.
+Per-game button swaps and display rotation are applied during gameplay.
+
+The preview respects the existing built-in controller mapping and host shortcut
+priority. Those inputs are identified as built-in instead of offering ineffective
+edits; physical capture waits for a free input. Assigning an input moves it out of
+conflicting guest/stylus bindings and configurable fullscreen bindings. Assigning
+a stylus command enables the stylus stick. This does not change runtime dispatch,
+the controller preset, or Android's native settings UI.

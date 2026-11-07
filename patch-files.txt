@@ -1,2 +1,4 @@
-vendor\egui\src\response.rs
-vendor\egui\POCKETHLE-NOTES.txt
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\desktop_main.rs
+frontends\pocket-desktop\src\bindings_visual.rs
+docs\FRONTENDS.md
