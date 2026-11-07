@@ -216,36 +216,57 @@ changing the game renderer.
 HARDWARE DIAG's TIMETEST EGL pacing assertions require a 60 FPS per-game limit;
 Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
 
-## Desktop visual input editor
+## Visual input editor — desktop and Android
 
-Keyboard & controller settings contain separate interactive keyboard and generic,
-unbranded controller diagrams. Select an input to inspect, replace or clear its
-assignment; use physical input capture to bind the selected command elsewhere.
-Saved inputs absent from the compact diagram remain available in the selector.
-Blue marks guest commands, green the stylus stick, purple host shortcuts, and gray
-unassigned inputs. Each section also lists device commands without an effective
-assignment. The Pocket PC / Gizmondo preview changes only the displayed device;
-settings are still shared and persist through the existing Save/Cancel flow.
-Per-game button swaps and display rotation are applied during gameplay.
+Keyboard & controller settings use the same flat, unbranded keyboard/controller
+skins on both frontends. Their PNGs, SVG originals and hitbox JSON are bundled
+from `frontends/pocket-desktop/assets/input/`; Android's Gradle assets source
+points directly at this directory. Neither artwork nor control geometry is
+independently recreated on Android. Modifier-only keyboard keycaps are decorative.
+Direction labels use ASCII words to avoid unsupported arrow glyphs.
 
-The preview respects the existing built-in controller mapping and host shortcut
-priority. Those inputs are identified as built-in instead of offering ineffective
-edits; physical capture waits for a free input. Assigning an input moves it out of
-conflicting guest/stylus bindings and configurable fullscreen bindings. Assigning
-a stylus command enables the stylus stick. This does not change runtime dispatch,
-the controller preset, or Android's native settings UI.
+Select a physical input to inspect, replace or clear its assignment, or capture
+another input for a command. Blue indicates guest commands, green stylus, purple
+host shortcuts and gray unassigned inputs. The controller also displays compact
+live mappings on its actual controls. Selection highlights the control; unassigned
+commands and desktop host-shortcut details are separate collapsible blocks.
+The assignment inspector has its own panel rather than sharing an undifferentiated
+text flow. The Gizmondo preview hides Pocket PC stylus settings.
 
+Pocket PC / Gizmondo changes the preview only; saved bindings remain shared.
+Per-game grids, button swaps and display rotation still apply during gameplay.
+Each frontend displays its own real runtime priority: desktop built-in device and
+host shortcuts retain priority, while Android reserves F10 for screenshots and
+keeps its existing configurable gamepad mappings. This UI change does not impose
+desktop's View/Menu/L1 shortcut policy on Android.
+
+Android's native activity provides the same Keyboard / Controller sections,
+Save/Cancel draft semantics, assignment colors, missing commands and physical
+capture (keyboard, buttons, sticks, D-pad and triggers). The keyboard fits the
+screen initially, with an enlarged horizontally scrollable mode for accurate
+touch selection. Native input lists provide an accessible alternative to tapping
+a diagram. Controller rows use touch-sized buttons; capture is cancelled when
+the activity stops. Draft/profile/selection state survives recreation. Returning
+to settings reloads the config before another preference can overwrite it.
+
+Existing Android Back/Guide/LeftStick/RightStick click names accept desktop's
+Select/Mode/LeftThumb/RightThumb aliases. Conflicting aliases are removed together
+on reassignment, along with guest/stylus/configurable-fullscreen conflicts.
+Assigning a stylus command enables it. The existing stylus speed and enable
+preferences remain under Pocket PC settings.
 
 ## Library tile metadata
 
 Desktop and Android tiles show resolution followed by a compact graphics API hint
-(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI or GDI). A shared detector inspects
-only static imports of the selected executable. It prefers explicit 3D/framebuffer
-APIs over GDI menu drawing. Missing evidence leaves only the resolution; this is
-not a runtime renderer guarantee, and DLL-only/dynamically loaded renderers or
-unknown ordinal imports may be missed. Desktop caches the hint until library
-reload; Android computes it with the library list. Existing games benefit after
-restarting the updated launcher, without reimport or a new Refresh button.
+(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI, SDL or GDI). The shared detector
+inspects the selected executable, resolves COREDLL ordinals through the same
+bundled ARM/MIPS maps as runtime, and recognizes explicit graphics symbol strings
+when GetProcAddress is used. GDI menu drawing does not override stronger 3D or
+framebuffer evidence. SDL is identified as SDL without guessing its video backend.
+This remains a static hint rather than proof of the active rendering path; no
+DLL traversal, game-name rules, options or metadata migration are introduced.
+Missing evidence leaves only resolution. Existing games benefit after restarting
+the updated launcher, without reimport or a new Refresh button.
 
 A second line, “Custom settings”, appears for saved per-game overrides or runtime
 settings different from standard defaults. Explicit per-game overrides count
@@ -253,14 +274,4 @@ as custom even when their value currently equals the global setting. The CPU
 baseline follows the global default; explicit Normal controls equal default
 controls. Non-default screen/rotation settings count, including those selected
 automatically during import. The marker describes the saved configuration, not a
-history of user edits; restoring the defaults removes it. No metadata schema or
-import migration is introduced.
-
-
-Input diagrams use flat, unbranded vector skins bundled as PNGs for the existing
-image loader. Editable SVG originals live in `assets/input/`; the keyboard PNG
-and hitboxes use the same `keyboard-layout.json` geometry. Modifier-only keycaps
-are decorative because the existing key capture does not bind modifier keys on
-their own. Controller assignments sit around the device; selecting a row or an
-actual control highlights its location. Small-screen layouts put rows below the
-skin. Direction labels use ASCII words to avoid unsupported arrow glyphs.
+history of user edits; restoring the defaults removes it.

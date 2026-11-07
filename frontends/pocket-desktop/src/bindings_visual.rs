@@ -57,6 +57,20 @@ impl Assignment {
         }
     }
 
+    fn label_for(self, gizmondo: bool) -> String {
+        if let Self::Guest(button) = self {
+            let label = readable(button.label());
+            if let Some((ppc, giz)) = label.split_once(" / ") {
+                return if gizmondo {
+                    giz.trim_start_matches("Gizmondo ").into()
+                } else {
+                    ppc.into()
+                };
+            }
+        }
+        self.label()
+    }
+
     fn color(self) -> Color32 {
         match self {
             Self::Unbound => Color32::from_gray(90),
@@ -264,6 +278,9 @@ fn set_assignment(config: &mut LauncherConfig, input: &str, controller: bool, ta
 }
 
 impl Editor {
+    pub fn is_gizmondo(&self) -> bool {
+        self.gizmondo
+    }
     /// Reuse the visual editor's conflict handling for physical input capture.
     pub fn capture(
         &mut self,
@@ -332,15 +349,35 @@ impl Editor {
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
                     ui.set_width(inspector_width);
-                    request = self.inspector(ui, config, controller);
+                    request = self.inspector_card(ui, config, controller);
                 });
             });
         } else {
             self.diagram(ui, config, controller);
-            request = self.inspector(ui, config, controller);
+            request = self.inspector_card(ui, config, controller);
         }
         self.unassigned(ui, config, controller);
         request
+    }
+
+    fn inspector_card(
+        &mut self,
+        ui: &mut Ui,
+        config: &mut LauncherConfig,
+        controller: bool,
+    ) -> Option<Capture> {
+        ui.add_space(10.0);
+        egui::Frame::none()
+            .fill(Color32::from_rgb(31, 35, 41))
+            .stroke(Stroke::new(1.0, Color32::from_gray(65)))
+            .rounding(6.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Assignment").strong());
+                ui.add_space(8.0);
+                self.inspector(ui, config, controller)
+            })
+            .inner
     }
 
     fn inspector(
@@ -371,6 +408,11 @@ impl Editor {
         } else {
             &mut self.key
         };
+        ui.label(if controller {
+            "Controller input"
+        } else {
+            "Keyboard key"
+        });
         crate::controller_ui::ComboBox::from_id_source(("saved_input", controller))
             .selected_text(selected.as_deref().unwrap_or("Saved inputs"))
             .show_ui(ui, |ui| {
@@ -395,12 +437,17 @@ impl Editor {
             ui.label("Select a key or button on the diagram.");
             return None;
         };
-        ui.label(if controller {
-            "Selected control"
+        let physical = if controller {
+            controller_inputs()
+                .into_iter()
+                .find(|(name, _, _, _)| *name == input)
+                .map(|(_, label, _, _)| label)
+                .unwrap_or(&input)
         } else {
-            "Selected key"
-        });
-        ui.heading(&input);
+            &input
+        };
+        ui.heading(physical);
+        ui.separator();
         if !controller {
             if let Some(note) = keyboard_context_note(&input) {
                 ui.weak(note);
@@ -422,7 +469,7 @@ impl Editor {
             keyboard_assignment(config, &input, self.gizmondo)
         };
         if controller && controller_fixed(&input, self.gizmondo) {
-            ui.label(current.label());
+            ui.colored_label(current.color(), current.label_for(self.gizmondo));
             ui.label(
                 "Built-in device mapping. This takes priority over the saved controller table.",
             );
@@ -431,7 +478,8 @@ impl Editor {
         if controller && config.gamepad_toggles_fullscreen(&input) {
             ui.colored_label(PURPLE, "Fullscreen shortcut (configured below)");
         } else {
-            ui.label(format!("Current: {}", current.label()));
+            ui.label("Mapped to");
+            ui.colored_label(current.color(), current.label_for(self.gizmondo));
         }
         let draft = if controller {
             &mut self.controller_target
@@ -439,6 +487,8 @@ impl Editor {
             &mut self.keyboard_target
         };
         let mut target = draft.unwrap_or(current);
+        ui.add_space(8.0);
+        ui.label("Change assignment");
         crate::controller_ui::ComboBox::from_id_source(("visual_assignment", controller))
             .selected_text(target.short())
             .show_ui(ui, |ui| {
@@ -453,7 +503,7 @@ impl Editor {
                         ui,
                         &mut target,
                         Assignment::Guest(button),
-                        readable(button.label()),
+                        Assignment::Guest(button).label_for(self.gizmondo),
                     );
                 }
                 if !self.gizmondo {
@@ -478,7 +528,9 @@ impl Editor {
                 *draft = Some(Assignment::Unbound);
             }
         });
-        ui.label("Assign this command to another input");
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label("Add another input for this command");
         let mut capture = None;
         if target != Assignment::Unbound
             && crate::controller_ui::button(ui, "Press an input…").clicked()
@@ -517,20 +569,15 @@ impl Editor {
                 }
             })
             .collect();
-        if missing.is_empty() {
-            ui.label("All device commands have an assignment.");
-        } else {
-            ui.colored_label(
-                Color32::from_rgb(238, 193, 114),
-                format!(
-                    "Unassigned: {}",
-                    missing
-                        .iter()
-                        .map(|b| readable(b.label()))
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                ),
-            );
+        ui.add_space(8.0);
+        if !missing.is_empty() {
+            egui::CollapsingHeader::new(format!("Unassigned commands ({})", missing.len()))
+                .id_source(("unassigned_controls", controller))
+                .show(ui, |ui| {
+                    for button in missing {
+                        ui.label(Assignment::Guest(button).label_for(self.gizmondo));
+                    }
+                });
         }
     }
 
@@ -616,40 +663,10 @@ impl Editor {
         } else {
             width * 0.18
         };
-        let left = [
-            "LeftTrigger2",
-            "LeftTrigger",
-            "LeftStickUp",
-            "LeftStickLeft",
-            "LeftThumb",
-            "LeftStickRight",
-            "LeftStickDown",
-            "DPadUp",
-            "DPadLeft",
-            "DPadRight",
-            "DPadDown",
-            "Select",
-            "Misc1",
-        ];
-        let right = [
-            "RightTrigger2",
-            "RightTrigger",
-            "North",
-            "West",
-            "East",
-            "South",
-            "RightStickUp",
-            "RightStickLeft",
-            "RightThumb",
-            "RightStickRight",
-            "RightStickDown",
-            "Start",
-            "Mode",
-        ];
         let inputs = controller_inputs();
-        for (side, names) in [left, right].iter().enumerate() {
-            for (row, name) in names.iter().enumerate() {
-                let (_, label, x, y) = inputs.iter().find(|(n, _, _, _)| n == name).unwrap();
+        // The shared layout lists the left rail followed by the right rail.
+        for (side, controls) in inputs.chunks(13).enumerate() {
+            for (row, (name, label, x, y)) in controls.iter().enumerate() {
                 let rail = Rect::from_min_size(
                     bounds.min
                         + Vec2::new(
@@ -661,6 +678,62 @@ impl Editor {
                 let point = art.min + Vec2::new(*x, *y) * (art_width / 760.0);
                 let active = self.control(ui, config, true, name, label, rail);
                 if *name != "Misc1" {
+                    let assignment = controller_assignment(config, name, self.gizmondo);
+                    let shortcut = controller_shortcut(name, self.gizmondo);
+                    let configured_fullscreen = !controller_fixed(name, self.gizmondo)
+                        && config.gamepad_toggles_fullscreen(name);
+                    let label = if configured_fullscreen {
+                        "Full"
+                    } else if shortcut.is_some() {
+                        match *name {
+                            "Select" => "Full",
+                            "Start" => "Filter",
+                            "Mode" => "Exit",
+                            _ => "Host",
+                        }
+                    } else {
+                        match assignment {
+                            Assignment::Stylus(0) => "PenU",
+                            Assignment::Stylus(1) => "PenD",
+                            Assignment::Stylus(2) => "PenL",
+                            Assignment::Stylus(_) => "PenR",
+                            Assignment::Guest(GuestButton::Action) => "Act",
+                            Assignment::Guest(GuestButton::Soft1) => "S1",
+                            Assignment::Guest(GuestButton::Soft2) => "S2",
+                            Assignment::Guest(GuestButton::PocketPcApp1) => "P1",
+                            Assignment::Guest(GuestButton::PocketPcApp2) => "P2",
+                            Assignment::Guest(GuestButton::PocketPcApp3) => "P3",
+                            Assignment::Guest(GuestButton::PocketPcApp4) => "P4",
+                            _ => assignment.short(),
+                        }
+                    };
+                    let mut label_point = point;
+                    if name.starts_with("LeftStick") || name.starts_with("RightStick") {
+                        let distance = 14.0 * art_width / 760.0;
+                        if name.ends_with("Left") {
+                            label_point.x -= distance;
+                        }
+                        if name.ends_with("Right") {
+                            label_point.x += distance;
+                        }
+                        if name.ends_with("Up") {
+                            label_point.y -= distance;
+                        }
+                        if name.ends_with("Down") {
+                            label_point.y += distance;
+                        }
+                    }
+                    ui.painter().text(
+                        label_point,
+                        Align2::CENTER_CENTER,
+                        label,
+                        FontId::proportional((art_width / 760.0 * 14.0).clamp(8.0, 12.0)),
+                        if shortcut.is_some() || configured_fullscreen {
+                            PURPLE
+                        } else {
+                            assignment.color()
+                        },
+                    );
                     let hit =
                         Rect::from_center_size(point, Vec2::splat((art_width * 0.045).max(14.0)));
                     let response =
@@ -816,7 +889,7 @@ impl Editor {
             "{name}: {}",
             shortcut
                 .map(str::to_owned)
-                .unwrap_or_else(|| assignment.label())
+                .unwrap_or_else(|| assignment.label_for(self.gizmondo))
         ));
         if response.clicked() {
             if controller {
@@ -832,34 +905,29 @@ impl Editor {
 }
 
 fn controller_inputs() -> Vec<(&'static str, &'static str, f32, f32)> {
-    vec![
-        ("LeftTrigger2", "L2", 200.0, 54.0),
-        ("RightTrigger2", "R2", 560.0, 54.0),
-        ("LeftTrigger", "L1", 200.0, 89.0),
-        ("RightTrigger", "R1", 560.0, 89.0),
-        ("LeftStickUp", "LS Up", 210.0, 152.0),
-        ("LeftStickLeft", "LS Left", 182.0, 180.0),
-        ("LeftThumb", "L3", 210.0, 180.0),
-        ("LeftStickRight", "LS Right", 238.0, 180.0),
-        ("LeftStickDown", "LS Down", 210.0, 208.0),
-        ("DPadUp", "D-pad Up", 270.0, 260.0),
-        ("DPadLeft", "D-pad Left", 240.0, 290.0),
-        ("DPadRight", "D-pad Right", 300.0, 290.0),
-        ("DPadDown", "D-pad Down", 270.0, 320.0),
-        ("RightStickUp", "RS Up", 490.0, 262.0),
-        ("RightStickLeft", "RS Left", 462.0, 290.0),
-        ("RightThumb", "R3", 490.0, 290.0),
-        ("RightStickRight", "RS Right", 518.0, 290.0),
-        ("RightStickDown", "RS Down", 490.0, 318.0),
-        ("North", "North", 575.0, 130.0),
-        ("West", "West", 525.0, 180.0),
-        ("East", "East", 625.0, 180.0),
-        ("South", "South", 575.0, 230.0),
-        ("Select", "View", 335.0, 172.0),
-        ("Start", "Menu", 425.0, 172.0),
-        ("Mode", "Guide", 380.0, 230.0),
-        ("Misc1", "Extra", 0.0, 0.0),
-    ]
+    #[derive(serde::Deserialize)]
+    struct Control {
+        input: String,
+        label: String,
+        x: f32,
+        y: f32,
+    }
+    static LAYOUT: std::sync::OnceLock<Vec<Control>> = std::sync::OnceLock::new();
+    LAYOUT
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("../assets/input/controller-layout.json"))
+                .expect("bundled controller layout")
+        })
+        .iter()
+        .map(|control| {
+            (
+                control.input.as_str(),
+                control.label.as_str(),
+                control.x,
+                control.y,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

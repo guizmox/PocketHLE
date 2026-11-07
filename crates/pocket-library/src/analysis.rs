@@ -17,12 +17,82 @@ pub struct GameAnalysis {
     pub dependencies: Vec<(String, String)>,
 }
 
-/// Best-effort graphics label from the executable's static PE imports.
+/// Best-effort graphics label from PE imports and dynamic symbol references.
 /// This is an API hint, not proof of the active renderer. Unknown stays absent.
 /// Prefer framebuffer/3D APIs over GDI, which often only supplies menu text.
 pub fn detect_graphics_api(path: &std::path::Path) -> Option<&'static str> {
-    let image = pocket_pe::load_file(path).ok()?;
-    graphics_api_from_imports(&image.imports)
+    let bytes = std::fs::read(path).ok()?;
+    let image = pocket_pe::load_bytes(&bytes).ok()?;
+    let mut imports = image.imports;
+    // Use the same bundled COREDLL ordinal maps as the runtime, not game names.
+    static ARM: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    static MIPS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    let arm = ARM.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../pocket-winceapi/data/coredll-ordinals.json"
+        ))
+        .expect("bundled ordinals")
+    });
+    let mips = MIPS.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../pocket-winceapi/data/coredll-mips-ordinals.json"
+        ))
+        .expect("bundled MIPS ordinals")
+    });
+    for import in &mut imports {
+        if import.dll.eq_ignore_ascii_case("coredll.dll") {
+            if let pocket_pe::ImportBinding::Ordinal(ordinal) = import.binding {
+                let key = ordinal.to_string();
+                let name = if matches!(
+                    image.machine,
+                    pocket_pe::machine::MIPS_R3000 | pocket_pe::machine::MIPS_R4000
+                ) {
+                    mips["ordinals"][&key]
+                        .as_str()
+                        .or_else(|| arm["ordinals"][&key].as_str())
+                } else {
+                    arm["ordinals"][&key].as_str()
+                };
+                if let Some(name) = name {
+                    import.binding = pocket_pe::ImportBinding::Name(name.into());
+                }
+            }
+        }
+    }
+    let strings = binary_strings(&bytes);
+    graphics_api_from_evidence(&imports, &strings)
+}
+
+fn graphics_api_from_evidence(
+    imports: &[pocket_pe::ImportSymbol],
+    strings: &[String],
+) -> Option<&'static str> {
+    let mut imports = imports.to_vec();
+    let dynamic=imports.iter().any(|i| matches!(&i.binding,pocket_pe::ImportBinding::Name(name) if matches!(name.to_ascii_lowercase().as_str(),"getprocaddressw"|"getprocaddressa"|"getprocaddress")));
+    if dynamic {
+        let strings: Vec<_> = strings.iter().map(|s| s.to_ascii_lowercase()).collect();
+        let exact = |name: &str| strings.iter().any(|s| s == name);
+        let mut add = |name: &str| {
+            imports.push(pocket_pe::ImportSymbol {
+                dll: String::new(),
+                binding: pocket_pe::ImportBinding::Name(name.into()),
+                iat_va: 0,
+            })
+        };
+        if exact("eglinitialize") && exact("eglswapbuffers") {
+            add("eglSwapBuffers");
+        }
+        if strings.iter().any(|s| s.contains("gxbegindraw")) {
+            add("GXBeginDraw");
+        }
+        if exact("directdrawcreate") {
+            add("DirectDrawCreate");
+        }
+        if exact("direct3dmobilecreate") {
+            add("Direct3DMobileCreate");
+        }
+    }
+    graphics_api_from_imports(&imports)
 }
 
 fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'static str> {
@@ -31,6 +101,7 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
     let mut ddraw = false;
     let mut gapi = false;
     let mut gdi = false;
+    let mut sdl = false;
     for import in imports {
         let dll = import.dll.to_ascii_lowercase();
         gles |= matches!(
@@ -49,6 +120,10 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
             gles |= matches!(
                 name.as_str(),
                 "eglswapbuffers" | "glclear" | "gldrawarrays" | "gldrawelements"
+            );
+            sdl |= matches!(
+                name.as_str(),
+                "sdl_setvideomode" | "sdl_updaterects" | "sdl_createrenderer"
             );
             d3dm |= name == "direct3dmobilecreate";
             ddraw |= name == "directdrawcreate";
@@ -76,6 +151,8 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
         Some("DirectDraw")
     } else if gapi {
         Some("GAPI")
+    } else if sdl {
+        Some("SDL")
     } else if gdi {
         Some("GDI")
     } else {
@@ -773,6 +850,32 @@ mod graphics_api_tests {
             Some("OpenGL ES")
         );
     }
+    #[test]
+    fn dynamic_graphics_and_sdl_are_evidence_based() {
+        let resolver = import("COREDLL.dll", "GetProcAddressW");
+        let symbols = vec!["eglInitialize".into(), "eglSwapBuffers".into()];
+        assert_eq!(
+            graphics_api_from_evidence(&[resolver.clone()], &symbols),
+            Some("OpenGL ES")
+        );
+        assert_eq!(graphics_api_from_evidence(&[], &symbols), None);
+        assert_eq!(
+            graphics_api_from_evidence(
+                &[resolver],
+                &["GAPI: Calling GXBeginDraw() to retrieve framebuffer".into()]
+            ),
+            Some("GAPI")
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[import("SDL.dll", "SDL_SetVideoMode")]),
+            Some("SDL")
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[import("SDL.dll", "SDL_mutexP")]),
+            None
+        );
+    }
+
     #[test]
     fn no_renderer_guessed_from_input_or_unknown_ordinals() {
         assert_eq!(

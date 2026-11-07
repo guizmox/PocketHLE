@@ -9,7 +9,13 @@ Its rectangles match the SVG keycaps exactly. An `input` of null marks a decorat
 modifier keycap; other input names are canonicalized through `egui::Key` at load.
 Change the SVG, PNG and hitbox geometry together when changing the layout.
 
-The controller canvas is 760 × 500. Its hotspot coordinates are the explicit
-`controller_inputs` table in `bindings_visual.rs`. Assignment labels stay outside
-the device. Extra/Misc1 remains in the list because generic controllers need not
+The controller canvas is 760 × 500. Its hotspot coordinates are in
+`controller-layout.json`, loaded by both frontends. Compact live assignments are
+drawn on the device, with selection rows around/below it. Extra/Misc1 remains in the list because generic controllers need not
 have a physical extra button. Both profiles use the same artwork.
+
+On-device captions use short forms (Act, S1/S2, P1–P4, PenU/D/L/R) to fit real
+control spacing. Full command names remain in the selection inspector and rows.
+
+The 26 controller entries are ordered as 13 left-rail controls, then 13 right-rail
+controls. Both editors use this order for the corresponding selection rows.

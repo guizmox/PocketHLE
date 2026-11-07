@@ -1,0 +1,158 @@
+[
+  {
+    "input": "LeftTrigger2",
+    "label": "L2",
+    "x": 200.0,
+    "y": 54.0
+  },
+  {
+    "input": "LeftTrigger",
+    "label": "L1",
+    "x": 200.0,
+    "y": 89.0
+  },
+  {
+    "input": "LeftStickUp",
+    "label": "LS Up",
+    "x": 210.0,
+    "y": 152.0
+  },
+  {
+    "input": "LeftStickLeft",
+    "label": "LS Left",
+    "x": 182.0,
+    "y": 180.0
+  },
+  {
+    "input": "LeftThumb",
+    "label": "L3",
+    "x": 210.0,
+    "y": 180.0
+  },
+  {
+    "input": "LeftStickRight",
+    "label": "LS Right",
+    "x": 238.0,
+    "y": 180.0
+  },
+  {
+    "input": "LeftStickDown",
+    "label": "LS Down",
+    "x": 210.0,
+    "y": 208.0
+  },
+  {
+    "input": "DPadUp",
+    "label": "D-pad Up",
+    "x": 270.0,
+    "y": 260.0
+  },
+  {
+    "input": "DPadLeft",
+    "label": "D-pad Left",
+    "x": 240.0,
+    "y": 290.0
+  },
+  {
+    "input": "DPadRight",
+    "label": "D-pad Right",
+    "x": 300.0,
+    "y": 290.0
+  },
+  {
+    "input": "DPadDown",
+    "label": "D-pad Down",
+    "x": 270.0,
+    "y": 320.0
+  },
+  {
+    "input": "Select",
+    "label": "View",
+    "x": 335.0,
+    "y": 172.0
+  },
+  {
+    "input": "Misc1",
+    "label": "Extra",
+    "x": 0.0,
+    "y": 0.0
+  },
+  {
+    "input": "RightTrigger2",
+    "label": "R2",
+    "x": 560.0,
+    "y": 54.0
+  },
+  {
+    "input": "RightTrigger",
+    "label": "R1",
+    "x": 560.0,
+    "y": 89.0
+  },
+  {
+    "input": "North",
+    "label": "North",
+    "x": 575.0,
+    "y": 130.0
+  },
+  {
+    "input": "West",
+    "label": "West",
+    "x": 525.0,
+    "y": 180.0
+  },
+  {
+    "input": "East",
+    "label": "East",
+    "x": 625.0,
+    "y": 180.0
+  },
+  {
+    "input": "South",
+    "label": "South",
+    "x": 575.0,
+    "y": 230.0
+  },
+  {
+    "input": "RightStickUp",
+    "label": "RS Up",
+    "x": 490.0,
+    "y": 262.0
+  },
+  {
+    "input": "RightStickLeft",
+    "label": "RS Left",
+    "x": 462.0,
+    "y": 290.0
+  },
+  {
+    "input": "RightThumb",
+    "label": "R3",
+    "x": 490.0,
+    "y": 290.0
+  },
+  {
+    "input": "RightStickRight",
+    "label": "RS Right",
+    "x": 518.0,
+    "y": 290.0
+  },
+  {
+    "input": "RightStickDown",
+    "label": "RS Down",
+    "x": 490.0,
+    "y": 318.0
+  },
+  {
+    "input": "Start",
+    "label": "Menu",
+    "x": 425.0,
+    "y": 172.0
+  },
+  {
+    "input": "Mode",
+    "label": "Guide",
+    "x": 380.0,
+    "y": 230.0
+  }
+]

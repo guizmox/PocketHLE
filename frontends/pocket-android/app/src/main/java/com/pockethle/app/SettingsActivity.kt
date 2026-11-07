@@ -222,23 +222,13 @@ class SettingsActivity : AppCompatActivity() {
                     writeConfig(); true
                 }
             })
-            val keyboard = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="keyboard_options";title="Physical keyboard" }
-            val gamepad = androidx.preference.PreferenceScreen(requireContext(), null).apply { key="gamepad_options";title="Physical controller" }
-            input.addPreference(keyboard);input.addPreference(gamepad)
-            val controlGroups = listOf(
-                "Shared controls — Pocket PC and Gizmondo",
-                "Emulator shortcuts",
-                "Gizmondo only — console system buttons",
-                "Pocket PC only — hardware buttons"
-            )
-            fun categories(screen: androidx.preference.PreferenceScreen) = controlGroups.associateWith { group ->
-                androidx.preference.PreferenceCategory(requireContext()).apply {
-                    title = group
-                    screen.addPreference(this)
+            input.addPreference(Preference(requireContext()).apply {
+                key="visual_input_editor"; title="Keyboard & controller"
+                summary="Inspect and edit bindings on the same generic keyboard and controller skins as desktop."
+                setOnPreferenceClickListener {
+                    startActivity(android.content.Intent(requireContext(),InputSettingsActivity::class.java));true
                 }
-            }
-            val keyboardGroups = categories(keyboard)
-            val gamepadGroups = categories(gamepad)
+            })
             val stylusScreen=androidx.preference.PreferenceScreen(requireContext(),null).apply {
                 title="Pocket PC only — stylus stick";key="stylus_options"
             }
@@ -295,45 +285,6 @@ class SettingsActivity : AppCompatActivity() {
                         val j=stylusJson();val a=j.getJSONArray("controller");val name=v.toString()
                         for(k in 0..3) { val old=a.getJSONArray(k);val next=org.json.JSONArray();for(n in 0 until old.length()) if(old.getString(n)!=name) next.put(old.getString(n));a.put(k,next) }
                         a.put(i,org.json.JSONArray().apply { if(name.isNotEmpty()) put(name) });saveStylus(j);true
-                    }
-                })
-            }
-            InputBindings.buttons.forEach { (button,info) ->
-                val group = when {
-                    button.startsWith("pocket_pc_app") -> controlGroups[3]
-                    button.startsWith("giz_piano") -> controlGroups[2]
-                    button == "turbo" -> controlGroups[1]
-                    else -> controlGroups[0]
-                }
-                keyboardGroups.getValue(group).addPreference(Preference(requireContext()).apply {
-                    key="keyboard_$button";title=info.first;isPersistent=false
-                    val snapshot=InputBindings(current)
-                    val existing=(0 until snapshot.keyboard.length()).map { snapshot.keyboard.getJSONObject(it) }.find { it.optString("button")==button }?.optJSONArray("keys")
-                    summary=existing?.let { (0 until it.length()).joinToString(", ") { i -> it.getString(i) } }?.ifEmpty { "Unassigned" } ?: "Unassigned"
-                    setOnPreferenceClickListener {
-                        val dialog=androidx.appcompat.app.AlertDialog.Builder(requireContext()).setTitle(info.first).setMessage("Press a keyboard key (F10 is reserved for screenshots).")
-                            .setNegativeButton("Cancel",null).setNeutralButton("Clear") { _,_-> saveKeyboardBinding(button,null);summary="Unassigned" }.create()
-                        dialog.setOnKeyListener { _,code,event ->
-                            val name=InputBindings.keyName(event)
-                            if(code==android.view.KeyEvent.KEYCODE_BACK) false
-                            else if(event.action==android.view.KeyEvent.ACTION_DOWN && name!=null && name!="F10") {
-                                saveKeyboardBinding(button,name);summary=name;dialog.dismiss();true
-                            } else false
-                        }
-                        dialog.show();true
-                    }
-                })
-                gamepadGroups.getValue(group).addPreference(ListPreference(requireContext()).apply {
-                    key="gamepad_$button";title=info.first;isPersistent=false
-                    entries=(listOf("Unassigned")+InputBindings.controls).toTypedArray();entryValues=(listOf("")+InputBindings.controls).toTypedArray()
-                    val map=InputBindings(current).controller
-                    value=map.keys().asSequence().firstOrNull { map.optString(it)==button } ?: ""
-                    summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
-                    setOnPreferenceChangeListener { _,v ->
-                        val next=InputBindings(current).controller
-                        next.keys().asSequence().toList().filter { next.optString(it)==button }.forEach { next.remove(it) }
-                        if(v.toString().isNotEmpty()) next.put(v.toString(),button)
-                        current=current.copy(originalJson=current.toJson().put("gamepad_bindings",next).toString());writeConfig();true
                     }
                 })
             }
@@ -420,6 +371,7 @@ class SettingsActivity : AppCompatActivity() {
 
         override fun onResume() {
             super.onResume()
+            // Reload independently saved visual bindings before any later preference write.
             current=readConfig() ?: current
         }
 
@@ -431,20 +383,6 @@ class SettingsActivity : AppCompatActivity() {
                 return true
             }
             return super.onPreferenceTreeClick(preference)
-        }
-
-        private fun saveKeyboardBinding(button: String, name: String?) {
-            val old=InputBindings(current).keyboard
-            val next=org.json.JSONArray()
-            var found=false
-            for(i in 0 until old.length()) {
-                val entry=old.getJSONObject(i)
-                if(entry.optString("button")==button) { entry.put("keys",org.json.JSONArray().apply { if(name!=null) put(name) });found=true }
-                else if(name!=null) { val keys=entry.optJSONArray("keys") ?: org.json.JSONArray();entry.put("keys",org.json.JSONArray().apply { for(j in 0 until keys.length()) if(!InputBindings.canonical(keys.getString(j)).equals(InputBindings.canonical(name),true)) put(keys.getString(j)) }) }
-                next.put(entry)
-            }
-            if(!found) next.put(JSONObject().put("button",button).put("keys",org.json.JSONArray().apply { if(name!=null) put(name) }))
-            current=current.copy(keybindingsJson=next.toString());writeConfig()
         }
 
         private fun readConfig(): LauncherConfig? {

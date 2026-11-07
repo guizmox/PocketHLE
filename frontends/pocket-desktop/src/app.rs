@@ -2831,6 +2831,12 @@ impl PocketLauncher {
         }
 
         self.bindings_visual.profile(ui);
+        if self.bindings_visual.is_gizmondo() {
+            self.stylus_capture = None;
+            if matches!(self.gamepad_capture, Some(ControllerCapture::Stylus(_))) {
+                self.gamepad_capture = None;
+            }
+        }
         for controller in [false, true] {
             if controller {
                 ui.label("Connect your controller by USB or pair it in the operating system's Bluetooth settings.");
@@ -2924,9 +2930,10 @@ impl PocketLauncher {
         }
 
         ui.add_space(6.0);
-        {
-            ui.horizontal(|ui| {
-                ui.label("Controller fullscreen:");
+        egui::CollapsingHeader::new("Controller shortcuts and defaults").show(ui, |ui| {
+            ui.label("View tap always toggles fullscreen.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Additional fullscreen shortcut:");
                 ui.label(
                     draft
                         .gamepad_fullscreen
@@ -2939,112 +2946,136 @@ impl PocketLauncher {
                     if crate::controller_ui::button(ui, "Cancel fullscreen assignment").clicked() {
                         self.gamepad_capture = None;
                     }
-                } else if crate::controller_ui::button(ui, "Assign fullscreen").clicked() {
+                } else if crate::controller_ui::button(ui, "Assign shortcut").clicked() {
                     self.gamepad_capture = Some(ControllerCapture::Fullscreen);
                     capture = None;
                 }
-                if crate::controller_ui::button(ui, "Disable fullscreen button").clicked() {
+                if crate::controller_ui::button(ui, "Clear shortcut").clicked() {
                     draft.gamepad_fullscreen = None;
                     if self.gamepad_capture == Some(ControllerCapture::Fullscreen) {
                         self.gamepad_capture = None;
                     }
                 }
             });
-            ui.label("View tap toggles fullscreen in the UI and in game. PocketPC: View hold = exit, L3 = ESC, R3 = Action. Gizmondo: View hold = brightness; L1 = volume. Both: Menu / right FN tap = filter, hold = start/stop video. L1/L2/R1/R2 cycle catalogue tabs.");
-            if crate::controller_ui::button(ui, "Apply Steam Deck preset").clicked() {
+            ui.add_space(8.0);
+            egui::Grid::new("controller_builtin_shortcuts")
+                .num_columns(2)
+                .spacing(Vec2::new(16.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label("View hold");
+                    ui.label(if self.bindings_visual.is_gizmondo() {
+                        "Brightness"
+                    } else {
+                        "Return to library"
+                    });
+                    ui.end_row();
+                    ui.label("Menu / extra tap");
+                    ui.label("Next library filter");
+                    ui.end_row();
+                    ui.label("Menu / extra hold");
+                    ui.label("Start / stop recording");
+                    ui.end_row();
+                    ui.label("Library shoulders / triggers");
+                    ui.label("Previous / next catalogue tab");
+                    ui.end_row();
+                });
+            ui.add_space(8.0);
+            if crate::controller_ui::button(ui, "Reset controller defaults").clicked() {
                 draft.gamepad_bindings = pocket_library::keybindings::steam_deck_gamepad_bindings();
                 draft.gamepad_fullscreen = Some("Select".to_owned());
                 self.gamepad_capture = None;
             }
-        }
-        ui.separator();
-        ui.heading("Pocket PC only — stylus stick");
-        crate::controller_ui::checkbox(
-            ui,
-            &mut draft.stylus_stick.enabled,
-            "Enable stylus stick (right stick by default)",
-        );
-        ui.label("Emulates held-stylus drags; lifts and recentres at screen edges. Physical touch takes priority.");
-        let slider = ui.add(
-            egui::Slider::new(&mut draft.stylus_stick.speed, 30..=1200)
-                .text("Stylus speed (pixels/s)"),
-        );
-        crate::controller_ui::track_focus(ui, &slider);
-        if let Some(direction) = self.stylus_capture {
-            if let Some(key) = ui.ctx().input(|i| {
-                i.events.iter().find_map(|e| match e {
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        repeat: false,
-                        ..
-                    } => Some(*key),
-                    _ => None,
-                })
-            }) {
-                if self.bindings_visual.capture(
-                    draft,
-                    key.name(),
-                    false,
-                    crate::bindings_visual::Assignment::Stylus(direction),
-                ) {
-                    self.stylus_capture = None;
+        });
+        if !self.bindings_visual.is_gizmondo() {
+            ui.separator();
+            ui.heading("Stylus stick");
+            crate::controller_ui::checkbox(
+                ui,
+                &mut draft.stylus_stick.enabled,
+                "Enable stylus stick (right stick by default)",
+            );
+            ui.label("Emulates held-stylus drags; lifts and recentres at screen edges. Physical touch takes priority.");
+            let slider = ui.add(
+                egui::Slider::new(&mut draft.stylus_stick.speed, 30..=1200)
+                    .text("Stylus speed (pixels/s)"),
+            );
+            crate::controller_ui::track_focus(ui, &slider);
+            if let Some(direction) = self.stylus_capture {
+                if let Some(key) = ui.ctx().input(|i| {
+                    i.events.iter().find_map(|e| match e {
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        } => Some(*key),
+                        _ => None,
+                    })
+                }) {
+                    if self.bindings_visual.capture(
+                        draft,
+                        key.name(),
+                        false,
+                        crate::bindings_visual::Assignment::Stylus(direction),
+                    ) {
+                        self.stylus_capture = None;
+                    }
                 }
             }
-        }
-        egui::Grid::new("stylus_bindings").show(ui, |ui| {
-            for (i, name) in pocket_library::stylus::DIRECTIONS.iter().enumerate() {
-                ui.label(format!("Stylus {name}"));
-                ui.label(draft.stylus_stick.keyboard[i].join(", "));
-                if crate::controller_ui::button(
-                    ui,
-                    if self.stylus_capture == Some(i) {
-                        "Press a key…"
-                    } else {
-                        "Assign key"
-                    },
-                )
-                .clicked()
-                {
-                    self.stylus_capture = if self.stylus_capture == Some(i) {
-                        None
-                    } else {
-                        Some(i)
-                    };
-                    capture = None;
-                    self.gamepad_capture = None;
-                }
-                if crate::controller_ui::small_button(ui, "Clear key").clicked() {
-                    draft.stylus_stick.keyboard[i].clear();
-                    self.stylus_capture = None;
-                }
-                ui.label(draft.stylus_stick.controller[i].join(", "));
-                if crate::controller_ui::button(
-                    ui,
-                    if self.gamepad_capture == Some(ControllerCapture::Stylus(i)) {
-                        "Move controller…"
-                    } else {
-                        "Assign controller"
-                    },
-                )
-                .clicked()
-                {
-                    self.gamepad_capture =
-                        if self.gamepad_capture == Some(ControllerCapture::Stylus(i)) {
+            egui::Grid::new("stylus_bindings").show(ui, |ui| {
+                for (i, name) in pocket_library::stylus::DIRECTIONS.iter().enumerate() {
+                    ui.label(format!("Stylus {name}"));
+                    ui.label(draft.stylus_stick.keyboard[i].join(", "));
+                    if crate::controller_ui::button(
+                        ui,
+                        if self.stylus_capture == Some(i) {
+                            "Press a key…"
+                        } else {
+                            "Assign key"
+                        },
+                    )
+                    .clicked()
+                    {
+                        self.stylus_capture = if self.stylus_capture == Some(i) {
                             None
                         } else {
-                            Some(ControllerCapture::Stylus(i))
+                            Some(i)
                         };
-                    self.stylus_capture = None;
-                    capture = None;
+                        capture = None;
+                        self.gamepad_capture = None;
+                    }
+                    if crate::controller_ui::small_button(ui, "Clear key").clicked() {
+                        draft.stylus_stick.keyboard[i].clear();
+                        self.stylus_capture = None;
+                    }
+                    ui.label(draft.stylus_stick.controller[i].join(", "));
+                    if crate::controller_ui::button(
+                        ui,
+                        if self.gamepad_capture == Some(ControllerCapture::Stylus(i)) {
+                            "Move controller…"
+                        } else {
+                            "Assign controller"
+                        },
+                    )
+                    .clicked()
+                    {
+                        self.gamepad_capture =
+                            if self.gamepad_capture == Some(ControllerCapture::Stylus(i)) {
+                                None
+                            } else {
+                                Some(ControllerCapture::Stylus(i))
+                            };
+                        self.stylus_capture = None;
+                        capture = None;
+                    }
+                    if crate::controller_ui::small_button(ui, "Clear controller").clicked() {
+                        draft.stylus_stick.controller[i].clear();
+                        self.gamepad_capture = None;
+                    }
+                    ui.end_row();
                 }
-                if crate::controller_ui::small_button(ui, "Clear controller").clicked() {
-                    draft.stylus_stick.controller[i].clear();
-                    self.gamepad_capture = None;
-                }
-                ui.end_row();
-            }
-        });
+            });
+        }
         self.binding_capture = capture;
     }
 

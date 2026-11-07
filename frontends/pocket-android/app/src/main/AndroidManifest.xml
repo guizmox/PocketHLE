@@ -55,6 +55,8 @@
             android:exported="false"
             android:label="@string/settings_title"
             android:parentActivityName=".MainActivity" />
+        <activity android:name=".InputSettingsActivity" android:exported="false"
+            android:label="Keyboard &amp; controller" android:parentActivityName=".SettingsActivity" />
         <activity
             android:name=".GameSettingsActivity"
             android:screenOrientation="portrait"

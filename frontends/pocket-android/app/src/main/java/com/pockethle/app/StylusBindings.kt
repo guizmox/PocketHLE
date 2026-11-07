@@ -16,7 +16,7 @@ internal class StylusBindings(config: LauncherConfig) {
         return (0 until a.length()).map { a.getString(it) }
     }
     fun key(name:String)=keyboard.indexOfFirst { a -> a.any { InputBindings.canonical(it).equals(InputBindings.canonical(name),true) } }.takeIf { it>=0 }
-    fun pad(name:String)=controller.indexOfFirst { name in it }.takeIf { it>=0 }
+    fun pad(name:String)=controller.indexOfFirst { names -> names.any { InputBindings.controllerCanonical(it)==InputBindings.controllerCanonical(name) } }.takeIf { it>=0 }
     fun velocity(s:FloatArray,turns:Int):Pair<Int,Int> {
         if(!enabled) return 0 to 0
         var x=(s[3]-s[2]).coerceIn(-1f,1f); var y=(s[1]-s[0]).coerceIn(-1f,1f)

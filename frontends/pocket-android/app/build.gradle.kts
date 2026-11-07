@@ -62,7 +62,9 @@ android {
         jvmTarget = "17"
     }
     buildFeatures { buildConfig = true }
+    sourceSets.getByName("main").assets.srcDir(rootProject.file("../pocket-desktop/assets/input"))
     sourceSets.getByName("test").resources.srcDir(rootProject.file("../../crates/pocket-library/tests/data"))
+    sourceSets.getByName("test").resources.srcDir(rootProject.file("../pocket-desktop/assets/input"))
 }
 
 dependencies {

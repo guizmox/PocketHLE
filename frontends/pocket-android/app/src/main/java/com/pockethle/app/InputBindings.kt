@@ -16,7 +16,7 @@ internal class InputBindings(config: LauncherConfig) {
         }
         return null
     }
-    fun controllerKey(name: String): Int? = buttons[controller.optString(name)]?.second
+    fun controllerKey(name: String): Int? = controllerAliases(name).firstNotNullOfOrNull { buttons[controller.optString(it)]?.second }
     companion object {
         val buttons=linkedMapOf(
             "pocket_pc_app1" to ("Pocket PC P1" to 0xc1),
@@ -32,11 +32,24 @@ internal class InputBindings(config: LauncherConfig) {
             listOf("South" to "action","North" to "button_a","East" to "button_b","West" to "button_c","LeftTrigger" to "soft1","RightTrigger" to "soft2","LeftTrigger2" to "turbo","Start" to "giz_piano1").forEach { (a,b)->put(a,b) }
             listOf("Up","Down","Left","Right").forEach { direction -> put("DPad$direction","dpad_${direction.lowercase()}");put("LeftStick$direction","dpad_${direction.lowercase()}") }
         }
-        fun canonical(name: String)=if(name.startsWith("Arrow",true)) name.substring(5) else name
+        fun controllerCanonical(name: String) = when(name) {
+            "Back" -> "Select"; "Guide" -> "Mode"; "LeftStick" -> "LeftThumb"; "RightStick" -> "RightThumb"; else -> name
+        }
+        fun controllerAliases(name: String): List<String> {
+            val canonical=controllerCanonical(name)
+            val legacy=when(canonical) { "Select"->"Back";"Mode"->"Guide";"LeftThumb"->"LeftStick";"RightThumb"->"RightStick";else->canonical }
+            return listOf(legacy,canonical).distinct()
+        }
+        fun canonical(name: String): String = when(name) {
+            "Minus"->"-";"Equals"->"=";"OpenBracket"->"[";"CloseBracket"->"]";"Comma"->",";"Period"->".";"Slash"->"/"
+            else -> if(name.startsWith("Arrow",true)) name.substring(5) else name
+        }
         fun keyName(event: KeyEvent): String? = when(event.keyCode) {
             in KeyEvent.KEYCODE_F1..KeyEvent.KEYCODE_F12 -> "F${event.keyCode-KeyEvent.KEYCODE_F1+1}"
             KeyEvent.KEYCODE_DPAD_UP -> "Up";KeyEvent.KEYCODE_DPAD_DOWN -> "Down";KeyEvent.KEYCODE_DPAD_LEFT -> "Left";KeyEvent.KEYCODE_DPAD_RIGHT -> "Right"
             KeyEvent.KEYCODE_ENTER -> "Enter";KeyEvent.KEYCODE_SPACE -> "Space";KeyEvent.KEYCODE_TAB -> "Tab";KeyEvent.KEYCODE_ESCAPE -> "Escape"
+            KeyEvent.KEYCODE_MOVE_HOME -> "Home";KeyEvent.KEYCODE_MOVE_END -> "End"
+            KeyEvent.KEYCODE_PAGE_UP -> "PageUp";KeyEvent.KEYCODE_PAGE_DOWN -> "PageDown";KeyEvent.KEYCODE_INSERT -> "Insert"
             KeyEvent.KEYCODE_DEL -> "Backspace";KeyEvent.KEYCODE_FORWARD_DEL -> "Delete"
             else -> event.getUnicodeChar(0).takeIf { it>32 && it<=126 }?.toChar()?.uppercaseChar()?.toString()
         }
