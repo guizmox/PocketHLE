@@ -269,7 +269,18 @@ static inline bool _hook_exists_bounded(struct list_item *cur, uint64_t addr)
 typedef struct TargetPageBits TargetPageBits;
 typedef struct TCGContext TCGContext;
 
+/* Per-engine code-hook lookup cache. Entries retain list order, not callbacks. */
+#define UC_CODE_HOOK_CACHE_SIZE 256
+struct code_hook_cache_entry {
+    uint64_t address;
+    uint64_t generation;
+    struct list_item *first;
+    struct list_item *last;
+};
+
 struct uc_struct {
+    uint64_t code_hook_generation;
+    struct code_hook_cache_entry code_hook_cache[UC_CODE_HOOK_CACHE_SIZE];
     /* Private opt-in: caller guarantees identity virtual mappings. */
     bool ph_arm_identity_chaining;
     bool ph_mips_mapping_tlb;

@@ -73,6 +73,14 @@ static void restore_jit_state(uc_engine *uc)
 }
 #endif
 
+static void invalidate_code_hook_cache(uc_engine *uc)
+{
+    if (++uc->code_hook_generation == 0) {
+        memset(uc->code_hook_cache, 0, sizeof(uc->code_hook_cache));
+        uc->code_hook_generation = 1;
+    }
+}
+
 static void *hook_insert(struct list *l, struct hook *h)
 {
     void *item = list_insert(l, (void *)h);
@@ -1059,6 +1067,10 @@ static void clear_deleted_hooks(uc_engine *uc)
     struct hook *hook;
     int i;
 
+    if (uc->hooks_to_del.head != NULL) {
+        invalidate_code_hook_cache(uc);
+    }
+
     for (cur = uc->hooks_to_del.head;
          cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
         assert(hook->to_delete);
@@ -2016,6 +2028,9 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
                         return UC_ERR_NOMEM;
                     }
                 }
+                if (i == UC_HOOK_CODE_IDX) {
+                    invalidate_code_hook_cache(uc);
+                }
                 uc->hooks_count[i]++;
             }
         }
@@ -2047,6 +2062,9 @@ uc_err uc_hook_del(uc_engine *uc, uc_hook hh)
     // and store the type mask in the hook pointer.
     for (i = 0; i < UC_HOOK_MAX; i++) {
         if (list_exists(&uc->hook[i], (void *)hook)) {
+            if (i == UC_HOOK_CODE_IDX) {
+                invalidate_code_hook_cache(uc);
+            }
             g_hash_table_foreach(hook->hooked_regions, hook_invalidate_region,
                                  uc);
             g_hash_table_remove_all(hook->hooked_regions);
@@ -2094,13 +2112,44 @@ void helper_uc_traceopcode(struct hook *hook, uint64_t arg1, uint64_t arg2,
     }
 }
 
+/* Code hooks are stable across repeated calls to the same guest imports.
+ * Cache their first/last matching list nodes, retaining registration order and
+ * the ordinary bounds/deletion checks. Hook mutation invalidates the cache;
+ * a callback that changes the list resumes the original walk to its end. */
+static struct code_hook_cache_entry *code_hook_bounds(uc_engine *uc,
+                                                     uint64_t address)
+{
+    unsigned slot = ((address >> 2) ^ (address >> 11) ^ (address >> 20)) &
+                    (UC_CODE_HOOK_CACHE_SIZE - 1);
+    struct code_hook_cache_entry *entry = &uc->code_hook_cache[slot];
+    struct list_item *cur;
+
+    if (entry->generation == uc->code_hook_generation &&
+        entry->address == address) {
+        return entry;
+    }
+    entry->first = entry->last = NULL;
+    for (cur = uc->hook[UC_HOOK_CODE_IDX].head; cur != NULL; cur = cur->next) {
+        if (HOOK_BOUND_CHECK((struct hook *)cur->data, address)) {
+            if (entry->first == NULL) {
+                entry->first = cur;
+            }
+            entry->last = cur;
+        }
+    }
+    entry->address = address;
+    entry->generation = uc->code_hook_generation;
+    return entry;
+}
+
 void helper_uc_tracecode(int32_t size, uc_hook_idx index, void *handle,
                          int64_t address);
 void helper_uc_tracecode(int32_t size, uc_hook_idx index, void *handle,
                          int64_t address)
 {
     struct uc_struct *uc = handle;
-    struct list_item *cur;
+    struct list_item *cur, *last = NULL;
+    uint64_t generation = 0;
     struct hook *hook;
     int hook_flags =
         index &
@@ -2127,8 +2176,16 @@ void helper_uc_tracecode(int32_t size, uc_hook_idx index, void *handle,
         revert_uc_emu_stop(uc);
     }
 
-    for (cur = uc->hook[index].head;
-         cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
+    cur = uc->hook[index].head;
+    // Small lists and the instruction-counter sentinel retain the simple walk.
+    if (index == UC_HOOK_CODE_IDX && size != 0 &&
+        uc->hooks_count[UC_HOOK_CODE_IDX] >= 16) {
+        struct code_hook_cache_entry *entry = code_hook_bounds(uc, address);
+        cur = entry->first;
+        last = entry->last;
+        generation = entry->generation;
+    }
+    for (; cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
         if (hook->to_delete) {
             continue;
         }
@@ -2159,6 +2216,9 @@ void helper_uc_tracecode(int32_t size, uc_hook_idx index, void *handle,
         if (not_allow_stop && uc->stop_request) {
             revert_uc_emu_stop(uc);
         } else if (!not_allow_stop && uc->stop_request) {
+            break;
+        }
+        if (generation == uc->code_hook_generation && cur == last) {
             break;
         }
     }

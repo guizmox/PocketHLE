@@ -62,3 +62,21 @@ jump destinations, code rewriting/invalidation, unmap/remap, execute permissions
 code hooks and timeout checks. Small call/return programs also passed in MIPS32
 little/big endian and AArch64. Cube reached a textured in-game scene during a
 12-second GPU smoke run; no comparative Cube performance claim is made.
+
+## Code-hook lookup cache
+
+Repeated code notifications use a per-engine, generation-checked cache of the
+first/last matching hook-list nodes (256 entries; 8 KiB on 64-bit hosts). The
+full guest address remains part of the key. Lists shorter than 16 hooks and
+instruction-counter sentinel notifications retain the ordinary walk.
+
+Add/delete/cleanup invalidate the cached nodes. A callback that changes the list
+continues the original traversal, preserving callbacks appended during dispatch;
+nested notifications cannot overwrite the outer traversal's local bounds. The
+callback order, stop flags and instruction-count behavior are unchanged.
+
+Run `tools/tests/unicorn-code-hooks.c` against the rebuilt engine for matching,
+mutation, deletion/reuse, Thumb IT, nested callbacks and cross-architecture
+regressions. It also prints a checked repeated-hook microbenchmark; those numbers
+must not be presented as whole-game speedups. No game identifiers or runtime
+optimization switches are used.

@@ -66,3 +66,59 @@ lowering and cache/hash experiments are not retained optimizations.
 Historical synthetic gains and original validation counts are recorded in
 [implementation notes](IMPLEMENTATION-NOTES.md#history-cpu). They are not a
 promise of the same speedup on games, Windows, Android or MIPS.
+
+## Code-hook lookup cache
+
+The bundled Unicorn engine caches the first and last matching code-hook list
+nodes for repeated guest addresses. It retains registration order and the
+existing bounds/deletion checks. Hook addition, deletion and deferred cleanup
+invalidate the cache. A hook that mutates the list during its callback resumes
+the original traversal rather than skipping newly appended hooks.
+
+The cache is per engine, has 256 entries and is used only for non-sentinel code
+notifications with at least 16 code hooks. Smaller lists, other hook types and
+instruction-counter sentinel notifications retain the ordinary traversal. Full
+64-bit addresses and generations are checked; hash collisions cause a lookup,
+never a callback substitution. Nested callbacks use local bounds so a colliding
+inner lookup cannot replace the outer notification's remaining hooks.
+
+This changes host lookup work, not ARM arithmetic, translated-block validity,
+thread scheduling, guest timing or the presentation policy. It applies without
+application detection or settings. Storage costs 8 KiB per engine on 64-bit
+hosts (6 KiB with 32-bit pointers). Cold lookups can do more work than the old
+stop-at-first-callback walk; repeated import/helper addresses are the target.
+
+`tools/tests/unicorn-code-hooks.c` checks registration order, overlapping hooks,
+callback-time insertion/deletion, stop requests, deletion/re-registration, count
+mode, Thumb IT, wildcard hooks, independent engines, nested execution, full-width
+address collisions, AArch64 and MIPS. Its throughput test checks the same number
+of callbacks and is not a prediction of application FPS.
+
+### Q3CE validation (2026-11-07)
+
+Linux x86-64, native Release build, 640x480, GPU backend using Mesa llvmpipe.
+The same recorded Q3DM1 scene renders 580 timedemo frames per pass. Runs are
+sequential (reference, cache, cache, reference), without tracing or background
+builds. The replay fixes camera/server snapshots; it does not benchmark live
+server/bot simulation.
+
+| Code-hook lookup | First pass | Second pass | Engine frame rate |
+| --- | ---: | ---: | ---: |
+| Reference | 48.9 s | 49.1 s | 11.8–11.9 fps |
+| Cached | 31.1 s | 25.0 s | 18.6–23.2 fps |
+
+These are local measurements, not a prediction for Windows, physical GPUs,
+Android or other workloads. Both variants hit the same existing UIARM undefined
+instruction after completing/logging the timedemo, on return to the interface;
+this optimization does not suppress that separate failure.
+
+Native validation: 714 API tests, 341 kernel tests and 49 CPU tests pass. The API
+suite excludes exactly one independently reproduced baseline dialog-geometry
+failure (client height 85 versus expected 84); 13 existing tests remain ignored.
+Dedicated C tests also pass against the reference and cached ARM/AArch64/MIPS
+engines, including callback mutation, nested execution/deferred hook deletion,
+Thumb IT, instruction counting and 64-bit address collisions. The original
+native permissions, self-modifying code and shared-memory tests pass as well.
+
+A final rebuild of the delivered source (including the nested-deletion guard)
+repeats the 580 frames in 25.8 s, 22.5 fps. Formatting and diff checks pass.
