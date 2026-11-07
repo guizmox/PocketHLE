@@ -225,13 +225,14 @@ points directly at this directory. Neither artwork nor control geometry is
 independently recreated on Android. Modifier-only keyboard keycaps are not assignable but show physical feedback.
 Direction labels use ASCII words to avoid unsupported arrow glyphs.
 
-Select a physical input to inspect, replace or clear its assignment, or capture
-another input for a command. Blue indicates guest commands, green stylus, purple
+Select a physical input to inspect its assignments. Assign an input is the sole
+assignment workflow; the picture and selected-input summary are read-only. Blue indicates guest commands, green stylus, purple
 host shortcuts and gray unassigned inputs. The controller also displays compact
 live mappings on its actual controls. Selection highlights the control; unassigned
 commands and desktop host-shortcut details are separate collapsible blocks.
-The assignment inspector has its own panel rather than sharing an undifferentiated
-text flow. The Gizmondo preview hides Pocket PC stylus settings.
+The selected-input summary shows the input once and its short/long actions.
+The old assignment forms, target-first capture dialogs, temporary form state and
+duplicate stylus assignment preferences have been removed from both frontends. The Gizmondo preview hides Pocket PC stylus settings.
 
 The device profile selector chooses which guest assignments to edit. Legacy
 keyboard/controller tables remain shared; explicit short/long overrides are
@@ -265,15 +266,15 @@ Android's native activity provides the same Keyboard / Controller sections,
 Save/Cancel draft semantics, assignment colors, missing commands and physical
 capture (keyboard, buttons, sticks, D-pad and triggers). The keyboard fits the
 screen initially, with an enlarged horizontally scrollable mode for accurate
-touch selection. Native input lists provide an accessible alternative to tapping
-a diagram. Controller rows use touch-sized buttons; capture is cancelled when
+touch selection. The assistant accepts physical input without tapping a diagram. Controller rows use touch-sized buttons; capture is cancelled when
 the activity stops. Draft/profile/selection state survives recreation. Returning
 to settings reloads the config before another preference can overwrite it. Saved
 Android game bindings take effect when a running game is relaunched.
 
 Existing Android Back/Guide/LeftStick/RightStick click names accept desktop's
 Select/Mode/LeftThumb/RightThumb aliases. Conflicting aliases are removed together
-on reassignment, along with guest/stylus/configurable-fullscreen conflicts.
+where legacy stylus reassignment requires it. Explicit guest overrides preserve
+the legacy tables; configurable-fullscreen conflicts are cleared on assignment.
 Assigning a stylus command enables it. The existing stylus speed and enable
 preferences remain under Pocket PC settings.
 
@@ -317,7 +318,7 @@ selects the long action; shorter presses select the normal action. D-pad / left
 stick or keyboard arrows navigate; A / Enter applies; B / Escape cancels the
 choice. After assignment, Assign another input and Save and finish avoid a
 return to pointer/touch controls. Draft changes still require Save. Choosing
-Back to editor leaves the draft available for manual editing.
+Back to overview leaves the draft available to the assistant.
 
 `short_press_bindings` and `long_press_bindings` are optional maps in config.json.
 Keys have the form `pocketpc:keyboard:x` or `gizmondo:controller:South` (canonical
@@ -335,4 +336,8 @@ and remains down until release, suppressing the short action. A delayed event
 loop still emits an observable 80 ms long pulse. Sources are reference-counted,
 key-repeat does not restart timing, and focus loss/disconnect cancels pending
 holds without generating a short action. Amber marks custom long actions on
-controller captions and keycap indicators; the inspector shows their full name.
+controller captions and keycap indicators; the read-only summary shows their full name.
+
+Stylus direction assignment is available in the assistant for short presses on
+inputs supported by the stylus router. Enable/speed controls remain settings,
+not a second binding editor. Reset is visible directly in each device screen.

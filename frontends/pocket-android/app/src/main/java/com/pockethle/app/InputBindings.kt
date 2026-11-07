@@ -96,34 +96,6 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                 "giz_piano5" to ("Power" to 0x7a),
                 "turbo" to ("Turbo (PocketHLE)" to 0x72),
             )
-        val controls =
-            listOf(
-                "South",
-                "East",
-                "North",
-                "West",
-                "Start",
-                "Back",
-                "Guide",
-                "LeftTrigger",
-                "RightTrigger",
-                "LeftTrigger2",
-                "RightTrigger2",
-                "LeftStick",
-                "RightStick",
-                "DPadUp",
-                "DPadDown",
-                "DPadLeft",
-                "DPadRight",
-                "LeftStickUp",
-                "LeftStickDown",
-                "LeftStickLeft",
-                "LeftStickRight",
-                "RightStickUp",
-                "RightStickDown",
-                "RightStickLeft",
-                "RightStickRight",
-            )
 
         fun defaultKeyboard() =
             JSONArray().apply {

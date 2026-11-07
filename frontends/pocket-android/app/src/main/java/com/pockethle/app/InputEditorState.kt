@@ -41,6 +41,17 @@ internal class InputEditorState(raw: String) {
             else !it.startsWith("giz_piano")
         }
 
+    fun targets(pad: Boolean, input: String?, long: Boolean, gizmondo: Boolean): List<String?> =
+        listOf<String?>(null) +
+            visibleButtons(gizmondo) +
+            if (
+                !gizmondo &&
+                    !long &&
+                    (!pad || input?.let { DeckInputPolicy.guest(it, false) } == null)
+            )
+                (0..3).map { "stylus:$it" }
+            else emptyList()
+
     fun label(target: String?): String =
         when {
                 target == null -> "Unassigned"

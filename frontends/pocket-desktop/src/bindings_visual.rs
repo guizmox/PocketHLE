@@ -82,14 +82,6 @@ impl Assignment {
     }
 }
 
-#[derive(Clone, Copy)]
-pub enum Capture {
-    Keyboard(GuestButton),
-    Controller(GuestButton),
-    StylusKeyboard(usize),
-    StylusController(usize),
-}
-
 #[derive(Clone, serde::Deserialize)]
 struct SkinKey {
     #[serde(default)]
@@ -138,8 +130,6 @@ pub struct Editor {
     keyboard_layout: Vec<SkinKey>,
     key: Option<String>,
     control: Option<String>,
-    keyboard_target: Option<Assignment>,
-    controller_target: Option<Assignment>,
 }
 
 impl Default for Editor {
@@ -168,8 +158,6 @@ impl Default for Editor {
             },
             key: Some("Z".into()),
             control: Some("DPadUp".into()),
-            keyboard_target: None,
-            controller_target: None,
         }
     }
 }
@@ -362,7 +350,7 @@ fn set_assignment(
     if controller && config.gamepad_fullscreen.as_deref() == Some(input) {
         config.gamepad_fullscreen = None;
     }
-    match target {
+    let direction = match target {
         Assignment::Guest(button) => {
             config.short_press_bindings.insert(key, Some(button));
             return;
@@ -371,19 +359,18 @@ fn set_assignment(
             config.short_press_bindings.insert(key, None);
             return;
         }
-        Assignment::Stylus(_) => {
+        Assignment::Stylus(direction) => {
             config.short_press_bindings.remove(&key);
             config.long_press_bindings.remove(&key);
+            direction
         }
-    }
+    };
     if controller {
         config.gamepad_bindings.remove(input);
-        if config.gamepad_fullscreen.as_deref() == Some(input) {
-            config.gamepad_fullscreen = None;
-        }
         for keys in &mut config.stylus_stick.controller {
             keys.retain(|key| key != input);
         }
+        config.stylus_stick.controller[direction].push(input.into());
     } else {
         for button in GuestButton::ALL {
             config.keybindings.unbind(button, input);
@@ -391,21 +378,27 @@ fn set_assignment(
         for keys in &mut config.stylus_stick.keyboard {
             keys.retain(|key| !same_key(key, input));
         }
+        config.stylus_stick.keyboard[direction].push(input.into());
     }
-    if matches!(target, Assignment::Stylus(_)) {
-        config.stylus_stick.enabled = true;
-    }
-    match target {
-        Assignment::Guest(button) if controller => {
-            config.gamepad_bindings.insert(input.into(), button);
-        }
-        Assignment::Guest(button) => config.keybindings.bind(button, input),
-        Assignment::Stylus(direction) if controller => {
-            config.stylus_stick.controller[direction].push(input.into());
-        }
-        Assignment::Stylus(direction) => config.stylus_stick.keyboard[direction].push(input.into()),
-        Assignment::Unbound => {}
-    }
+    config.stylus_stick.enabled = true;
+}
+
+fn assignment_targets(
+    gizmondo: bool,
+    controller: bool,
+    input: Option<&str>,
+    long: bool,
+) -> Vec<Assignment> {
+    let stylus = !gizmondo
+        && !long
+        && !(controller
+            && input.is_some_and(|name| {
+                pocket_library::keybindings::steam_deck_guest_button(name, false).is_some()
+            }));
+    std::iter::once(Assignment::Unbound)
+        .chain(visible_buttons(gizmondo).map(Assignment::Guest))
+        .chain((0..if stylus { 4 } else { 0 }).map(Assignment::Stylus))
+        .collect()
 }
 
 impl Editor {
@@ -481,9 +474,12 @@ impl Editor {
             i.events
                 .retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
         });
-        let targets: Vec<_> = std::iter::once(Assignment::Unbound)
-            .chain(visible_buttons(self.gizmondo).map(Assignment::Guest))
-            .collect();
+        let targets = assignment_targets(
+            self.gizmondo,
+            controller,
+            q.choice.as_ref().map(|(input, _)| input.as_str()),
+            q.choice.as_ref().is_some_and(|(_, long)| *long),
+        );
         let count = if q.done { 3 } else { targets.len() };
         for nav in self.quick_nav.drain(..) {
             match nav.as_str() {
@@ -502,7 +498,8 @@ impl Editor {
                 keyboard_shortcut(input).is_some() || (*long && input == "Escape")
             };
             if fixed {
-                q.message = "This input has a built-in PocketHLE shortcut. Choose another input.".into();
+                q.message =
+                    "This input has a built-in PocketHLE shortcut. Choose another input.".into();
                 q.choice = None;
                 q.pressed = None;
                 accept = false;
@@ -518,7 +515,7 @@ impl Editor {
                 if q.done {
                     ui.label("Up / Down to choose · Enter / A to continue");
                     for (index, label) in
-                        ["Assign another input", "Save and finish", "Back to editor"]
+                        ["Assign another input", "Save and finish", "Back to overview"]
                             .iter()
                             .enumerate()
                     {
@@ -622,7 +619,7 @@ impl Editor {
                     }
                     true
                 } else {
-                    self.capture(config, &input, controller, target)
+                    self.assign_short(config, &input, controller, target)
                 };
                 if applied {
                     q.message = format!(
@@ -706,8 +703,8 @@ impl Editor {
     pub fn is_gizmondo(&self) -> bool {
         self.gizmondo
     }
-    /// Reuse the visual editor's conflict handling for physical input capture.
-    pub fn capture(
+    /// Apply the assistant's short assignment and select the affected input.
+    fn assign_short(
         &mut self,
         config: &mut LauncherConfig,
         input: &str,
@@ -722,10 +719,8 @@ impl Editor {
         set_assignment(config, input, controller, self.gizmondo, target);
         if controller {
             self.control = Some(input.into());
-            self.controller_target = None;
         } else {
             self.key = Some(input.into());
-            self.keyboard_target = None;
         }
         true
     }
@@ -738,20 +733,13 @@ impl Editor {
                     .changed()
                 {
                     self.quick = None;
-                    self.keyboard_target = None;
-                    self.controller_target = None;
                 }
             }
         });
-        ui.label("Select a key or control to inspect its saved assignment. The preview device does not change the game profile. Game-specific swaps and screen rotation apply when playing.");
+        ui.label("Select an input to inspect its assignments. Use Assign an input to change them. Guest button assignments apply to the selected device profile.");
     }
 
-    pub fn show(
-        &mut self,
-        ui: &mut Ui,
-        config: &mut LauncherConfig,
-        controller: bool,
-    ) -> Option<Capture> {
+    pub fn show(&mut self, ui: &mut Ui, config: &LauncherConfig, controller: bool) {
         // Controller heading belongs before the launcher's device diagnostics.
         if !controller {
             ui.separator();
@@ -763,8 +751,7 @@ impl Editor {
         } else {
             ui.available_width()
         };
-        let inspector_width = (ui.available_width() - diagram_width - 24.0).max(200.0);
-        let mut request = None;
+        let summary_width = (ui.available_width() - diagram_width - 24.0).max(200.0);
         if wide {
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
@@ -777,24 +764,18 @@ impl Editor {
                 );
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
-                    ui.set_width(inspector_width);
-                    request = self.inspector_card(ui, config, controller);
+                    ui.set_width(summary_width);
+                    self.summary_card(ui, config, controller);
                 });
             });
         } else {
             self.diagram(ui, config, controller);
-            request = self.inspector_card(ui, config, controller);
+            self.summary_card(ui, config, controller);
         }
         self.unassigned(ui, config, controller);
-        request
     }
 
-    fn inspector_card(
-        &mut self,
-        ui: &mut Ui,
-        config: &mut LauncherConfig,
-        controller: bool,
-    ) -> Option<Capture> {
+    fn summary_card(&mut self, ui: &mut Ui, config: &LauncherConfig, controller: bool) {
         ui.add_space(10.0);
         egui::Frame::none()
             .fill(Color32::from_rgb(31, 35, 41))
@@ -802,207 +783,80 @@ impl Editor {
             .rounding(6.0)
             .inner_margin(12.0)
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("Assignment").strong());
+                ui.label(egui::RichText::new("Selected input").strong());
                 ui.add_space(8.0);
-                self.inspector(ui, config, controller)
+                self.summary(ui, config, controller)
             })
             .inner
     }
 
-    fn inspector(
-        &mut self,
-        ui: &mut Ui,
-        config: &mut LauncherConfig,
-        controller: bool,
-    ) -> Option<Capture> {
-        // Also expose saved inputs that are absent from the compact schematic.
-        let mut inputs: Vec<String> = if controller {
-            config
-                .gamepad_bindings
-                .keys()
-                .cloned()
-                .chain(config.stylus_stick.controller.iter().flatten().cloned())
-                .collect()
+    fn summary(&self, ui: &mut Ui, config: &LauncherConfig, controller: bool) {
+        let input = if controller {
+            self.control.as_deref()
         } else {
-            GuestButton::ALL
-                .iter()
-                .flat_map(|button| config.keybindings.keys_for(*button).iter().cloned())
-                .chain(config.stylus_stick.keyboard.iter().flatten().cloned())
-                .collect()
+            self.key.as_deref()
         };
-        inputs.extend(configured_inputs(config, self.gizmondo, controller));
-        inputs.sort();
-        inputs.dedup();
-        let selected = if controller {
-            &mut self.control
-        } else {
-            &mut self.key
-        };
-        ui.label(if controller {
-            "Controller input"
-        } else {
-            "Keyboard key"
-        });
-        crate::controller_ui::ComboBox::from_id_source(("saved_input", controller))
-            .selected_text(selected.as_deref().unwrap_or("Saved inputs"))
-            .show_ui(ui, |ui| {
-                for input in inputs {
-                    if crate::controller_ui::selectable_value(
-                        ui,
-                        selected,
-                        Some(input.clone()),
-                        input,
-                    )
-                    .changed()
-                    {
-                        if controller {
-                            self.controller_target = None;
-                        } else {
-                            self.keyboard_target = None;
-                        }
-                    }
-                }
-            });
-        let Some(input) = selected.clone() else {
-            ui.label("Select a key or button on the diagram.");
-            return None;
+        let Some(input) = input else {
+            ui.label("Select an input on the diagram.");
+            return;
         };
         let physical = if controller {
             controller_inputs()
                 .into_iter()
                 .find(|(name, _, _, _)| *name == input)
                 .map(|(_, label, _, _)| label)
-                .unwrap_or(&input)
+                .unwrap_or(input)
         } else {
-            &input
+            input
         };
         ui.heading(physical);
-        let hold_key =
-            pocket_library::input_gestures::binding_key(self.gizmondo, controller, &input);
-        if let Some(button) = config.long_press_bindings.get(&hold_key) {
+        let shortcut = if controller {
+            controller_shortcut(input, self.gizmondo)
+        } else {
+            keyboard_shortcut(input)
+        };
+        if let Some(shortcut) = shortcut {
+            if controller {
+                if let Some(action) = controller_tap(input) {
+                    ui.colored_label(PURPLE, format!("Short press: {action}"));
+                }
+                if let Some(action) = controller_hold(input, self.gizmondo) {
+                    ui.colored_label(LONG_PRESS, format!("Long press: {action}"));
+                }
+            } else {
+                ui.colored_label(PURPLE, format!("Short press: {shortcut}"));
+            }
+        } else if controller && config.gamepad_toggles_fullscreen(input) {
+            ui.colored_label(PURPLE, "Short press: Fullscreen");
+            ui.weak("Long press: Unassigned");
+        } else {
+            let current = if controller {
+                controller_assignment(config, input, self.gizmondo)
+            } else {
+                keyboard_assignment(config, input, self.gizmondo)
+            };
             ui.colored_label(
-                LONG_PRESS,
-                format!(
-                    "Hold: {}",
-                    Assignment::Guest(*button).label_for(self.gizmondo)
-                ),
+                current.color(),
+                format!("Short press: {}", current.label_for(self.gizmondo)),
             );
-            if crate::controller_ui::button(ui, "Clear long press").clicked() {
-                config.long_press_bindings.remove(&hold_key);
+            let key = pocket_library::input_gestures::binding_key(self.gizmondo, controller, input);
+            if let Some(button) = config.long_press_bindings.get(&key) {
+                ui.colored_label(
+                    LONG_PRESS,
+                    format!(
+                        "Long press: {}",
+                        Assignment::Guest(*button).label_for(self.gizmondo)
+                    ),
+                );
+            } else {
+                ui.weak("Long press: Unassigned");
             }
         }
-        ui.separator();
         if !controller {
-            if let Some(note) = keyboard_context_note(&input) {
+            if let Some(note) = keyboard_context_note(input) {
                 ui.weak(note);
             }
         }
-        let shortcut = if controller {
-            controller_shortcut(&input, self.gizmondo)
-        } else {
-            keyboard_shortcut(&input)
-        };
-        if let Some(description) = shortcut {
-            if controller {
-                if let Some(action) = controller_tap(&input) {
-                    ui.colored_label(PURPLE, format!("Tap: {action}"));
-                }
-                if let Some(action) = controller_hold(&input, self.gizmondo) {
-                    ui.colored_label(LONG_PRESS, format!("Hold: {action}"));
-                }
-            } else {
-                ui.colored_label(PURPLE, description);
-            }
-            ui.label("Built-in PocketHLE shortcut.");
-            return None;
-        }
-        let current = if controller {
-            controller_assignment(config, &input, self.gizmondo)
-        } else {
-            keyboard_assignment(config, &input, self.gizmondo)
-        };
-        if controller && controller_fixed(&input, self.gizmondo) {
-            ui.colored_label(current.color(), current.label_for(self.gizmondo));
-            ui.label(
-                "Built-in device mapping. This takes priority over the saved controller table.",
-            );
-            return None;
-        }
-        if controller && config.gamepad_toggles_fullscreen(&input) {
-            ui.colored_label(PURPLE, "Fullscreen shortcut (configured below)");
-        } else {
-            ui.label("Mapped to");
-            ui.colored_label(current.color(), current.label_for(self.gizmondo));
-        }
-        let draft = if controller {
-            &mut self.controller_target
-        } else {
-            &mut self.keyboard_target
-        };
-        let mut target = draft.unwrap_or(current);
-        ui.add_space(8.0);
-        ui.label("Change assignment");
-        crate::controller_ui::ComboBox::from_id_source(("visual_assignment", controller))
-            .selected_text(target.short())
-            .show_ui(ui, |ui| {
-                crate::controller_ui::selectable_value(
-                    ui,
-                    &mut target,
-                    Assignment::Unbound,
-                    "Unassigned",
-                );
-                for button in visible_buttons(self.gizmondo) {
-                    crate::controller_ui::selectable_value(
-                        ui,
-                        &mut target,
-                        Assignment::Guest(button),
-                        Assignment::Guest(button).label_for(self.gizmondo),
-                    );
-                }
-                if !self.gizmondo {
-                    for (direction, label) in pocket_library::stylus::DIRECTIONS.iter().enumerate()
-                    {
-                        crate::controller_ui::selectable_value(
-                            ui,
-                            &mut target,
-                            Assignment::Stylus(direction),
-                            format!("Stylus {label}"),
-                        );
-                    }
-                }
-            });
-        *draft = Some(target);
-        ui.horizontal_wrapped(|ui| {
-            if crate::controller_ui::button(ui, "Apply assignment").clicked() {
-                set_assignment(config, &input, controller, self.gizmondo, target);
-            }
-            if crate::controller_ui::button(ui, "Clear").clicked() {
-                set_assignment(
-                    config,
-                    &input,
-                    controller,
-                    self.gizmondo,
-                    Assignment::Unbound,
-                );
-                *draft = Some(Assignment::Unbound);
-            }
-        });
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label("Add another input for this command");
-        let mut capture = None;
-        if target != Assignment::Unbound
-            && crate::controller_ui::button(ui, "Press an input…").clicked()
-        {
-            capture = match (controller, target) {
-                (false, Assignment::Guest(button)) => Some(Capture::Keyboard(button)),
-                (true, Assignment::Guest(button)) => Some(Capture::Controller(button)),
-                (false, Assignment::Stylus(direction)) => Some(Capture::StylusKeyboard(direction)),
-                (true, Assignment::Stylus(direction)) => Some(Capture::StylusController(direction)),
-                _ => None,
-            };
-        }
-        capture
     }
 
     fn unassigned(&mut self, ui: &mut Ui, config: &LauncherConfig, controller: bool) {
@@ -1280,7 +1134,6 @@ impl Editor {
                         ui.interact(hit, ui.id().with(("skin-hotspot", name)), Sense::click());
                     if response.clicked() {
                         self.control = Some((*name).into());
-                        self.controller_target = None;
                     }
                     if active || response.hovered() {
                         ui.painter().circle_stroke(
@@ -1484,10 +1337,8 @@ impl Editor {
         if response.clicked() {
             if controller {
                 self.control = Some(name.into());
-                self.controller_target = None;
             } else {
                 self.key = Some(name.into());
-                self.keyboard_target = None;
             }
         }
         is_selected || response.hovered()
@@ -1529,6 +1380,21 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| editor.quick_assign(ui, config, true));
         });
+    }
+    #[test]
+    fn assistant_keeps_supported_stylus_assignments_without_a_second_editor() {
+        assert!(assignment_targets(false, false, Some("O"), false).contains(&Assignment::Stylus(0)));
+        assert!(assignment_targets(false, true, Some("RightStickUp"), false)
+            .contains(&Assignment::Stylus(0)));
+        for (giz, pad, name, long) in [
+            (true, false, "O", false),
+            (false, false, "O", true),
+            (false, true, "South", false),
+        ] {
+            assert!(!assignment_targets(giz, pad, Some(name), long)
+                .iter()
+                .any(|target| matches!(target, Assignment::Stylus(_))));
+        }
     }
     #[test]
     fn keyboard_wizard_starts_from_button_then_uses_only_keys() {
@@ -1762,7 +1628,7 @@ mod tests {
     fn capture_moves_conflicting_bindings_and_selects_input() {
         let mut config = LauncherConfig::default();
         let mut editor = Editor::default();
-        assert!(editor.capture(
+        assert!(editor.assign_short(
             &mut config,
             "O",
             false,
@@ -1775,7 +1641,7 @@ mod tests {
         assert_eq!(keyboard_assignment(&config, "O", true), Assignment::Unbound);
         assert_eq!(editor.key.as_deref(), Some("O"));
         config.gamepad_fullscreen = Some("RightStickUp".into());
-        assert!(editor.capture(
+        assert!(editor.assign_short(
             &mut config,
             "RightStickUp",
             true,
@@ -1786,7 +1652,7 @@ mod tests {
             controller_assignment(&config, "RightStickUp", false),
             Assignment::Guest(GuestButton::Turbo)
         );
-        assert!(editor.capture(&mut config, "RightStickUp", true, Assignment::Stylus(1)));
+        assert!(editor.assign_short(&mut config, "RightStickUp", true, Assignment::Stylus(1)));
         assert!(!config.gamepad_bindings.contains_key("RightStickUp"));
         assert_eq!(
             controller_assignment(&config, "RightStickUp", false),
@@ -1800,14 +1666,14 @@ mod tests {
         let before = serde_json::to_value(&config).unwrap();
         let mut editor = Editor::default();
         for input in ["Start", "Select", "Mode"] {
-            assert!(!editor.capture(
+            assert!(!editor.assign_short(
                 &mut config,
                 input,
                 true,
                 Assignment::Guest(GuestButton::Turbo)
             ));
         }
-        assert!(!editor.capture(&mut config, "F12", false, Assignment::Stylus(0)));
+        assert!(!editor.assign_short(&mut config, "F12", false, Assignment::Stylus(0)));
         assert_eq!(serde_json::to_value(&config).unwrap(), before);
     }
 

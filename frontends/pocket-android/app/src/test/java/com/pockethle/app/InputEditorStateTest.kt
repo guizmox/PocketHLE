@@ -12,6 +12,22 @@ class InputEditorStateTest {
         )
 
     @Test
+    fun assistantKeepsSupportedStylusAssignments() {
+        val state = draft()
+        assertTrue(state.targets(false, "O", false, false).contains("stylus:0"))
+        assertTrue(state.targets(true, "RightStickUp", false, false).contains("stylus:0"))
+        assertFalse(
+            state.targets(true, "South", false, false).any { it?.startsWith("stylus:") == true }
+        )
+        assertFalse(
+            state.targets(false, "O", true, false).any { it?.startsWith("stylus:") == true }
+        )
+        assertFalse(
+            state.targets(false, "O", false, true).any { it?.startsWith("stylus:") == true }
+        )
+    }
+
+    @Test
     fun stylusPriorityAndDevicePreview() {
         val state = draft()
         assertEquals("stylus:0", state.assignment("O", false, false))

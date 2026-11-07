@@ -255,43 +255,6 @@ class SettingsActivity : AppCompatActivity() {
                 value=stylusJson().optInt("speed",240)
                 setOnPreferenceChangeListener { _,v -> saveStylus(stylusJson().put("speed",v as Int));true }
             })
-            StylusBindings.directions.forEachIndexed { i,direction ->
-                stylusScreen.addPreference(Preference(requireContext()).apply {
-                    title="Stylus $direction — keyboard";isPersistent=false
-                    summary=stylusJson().getJSONArray("keyboard").getJSONArray(i).join(", ")
-                    setOnPreferenceClickListener {
-                        val dialog=androidx.appcompat.app.AlertDialog.Builder(requireContext()).setTitle("Press a key")
-                            .setNegativeButton("Cancel",null).setNeutralButton("Clear") { _,_ ->
-                                val j=stylusJson();j.getJSONArray("keyboard").put(i,org.json.JSONArray());saveStylus(j);summary="Unbound"
-                            }.create()
-                        dialog.setOnKeyListener { _,code,event ->
-                            val name=InputBindings.keyName(event)
-                            if(code==android.view.KeyEvent.KEYCODE_BACK) false
-                            else if(event.action==android.view.KeyEvent.ACTION_DOWN && name!=null && name!="F10") {
-                                val j=stylusJson();val a=j.getJSONArray("keyboard")
-                                for(k in 0..3) {
-                                    val old=a.getJSONArray(k);val next=org.json.JSONArray()
-                                    for(n in 0 until old.length()) if(!InputBindings.canonical(old.getString(n)).equals(InputBindings.canonical(name),true)) next.put(old.getString(n))
-                                    a.put(k,next)
-                                }
-                                a.put(i,org.json.JSONArray().put(name));saveStylus(j);summary=name;dialog.dismiss();true
-                            } else false
-                        };dialog.show();true
-                    }
-                })
-                stylusScreen.addPreference(ListPreference(requireContext()).apply {
-                    title="Stylus $direction — controller";isPersistent=false
-                    val names=listOf("")+InputBindings.controls
-                    entries=names.map { if(it.isEmpty()) "Unbound" else it }.toTypedArray();entryValues=names.toTypedArray()
-                    value=stylusJson().getJSONArray("controller").getJSONArray(i).optString(0,"")
-                    summaryProvider=ListPreference.SimpleSummaryProvider.getInstance()
-                    setOnPreferenceChangeListener { _,v ->
-                        val j=stylusJson();val a=j.getJSONArray("controller");val name=v.toString()
-                        for(k in 0..3) { val old=a.getJSONArray(k);val next=org.json.JSONArray();for(n in 0 until old.length()) if(old.getString(n)!=name) next.put(old.getString(n));a.put(k,next) }
-                        a.put(i,org.json.JSONArray().apply { if(name.isNotEmpty()) put(name) });saveStylus(j);true
-                    }
-                })
-            }
             findPreference<androidx.preference.PreferenceCategory>("diagnostic_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="log_unimplemented_apis";title="Unimplemented API report";isPersistent=false;isChecked=current.logUnimplementedApis
                 summary="Writes pockethle-unimplemented.log in the library folder."

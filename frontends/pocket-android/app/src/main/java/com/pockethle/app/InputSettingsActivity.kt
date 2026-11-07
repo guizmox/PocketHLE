@@ -8,7 +8,7 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
 
-/** The desktop editor's two sections, adapted to touch and narrow screens. */
+/** Shared input-first assistant with read-only skin feedback and selected-input summary. */
 class InputSettingsActivity : AppCompatActivity() {
     private val controllerOnly: Boolean
         get() = intent.getBooleanExtra("controller", false)
@@ -29,7 +29,7 @@ class InputSettingsActivity : AppCompatActivity() {
             }
 
             override fun onInputDeviceRemoved(id: Int) {
-                captureDialog?.dismiss()
+                assignmentDialog?.dismiss()
                 liveInput.removeDevice(id)
                 if (::state.isInitialized) render()
             }
@@ -47,7 +47,7 @@ class InputSettingsActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        captureDialog?.dismiss()
+        assignmentDialog?.dismiss()
         if (listening) {
             (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager)
                 .unregisterInputDeviceListener(inputListener)
@@ -191,7 +191,7 @@ class InputSettingsActivity : AppCompatActivity() {
     private lateinit var rootDir: String
     private var gizmondo = false
     private var zoomKeyboard = false
-    private var captureDialog: Dialog? = null
+    private var assignmentDialog: Dialog? = null
     private var scroll: ScrollView? = null
     private var keyboardScroll: HorizontalScrollView? = null
     private val selected = mutableMapOf(false to "Z", true to "DPadUp")
@@ -274,8 +274,8 @@ class InputSettingsActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
-        captureDialog?.dismiss()
-        captureDialog = null
+        assignmentDialog?.dismiss()
+        assignmentDialog = null
         super.onStop()
     }
 
@@ -480,7 +480,7 @@ class InputSettingsActivity : AppCompatActivity() {
                 render()
             }
         )
-        inspector(body, pad)
+        summary(body, pad)
         val inputs = (diagram.controls.mapNotNull { it.input } + state.savedInputs(pad)).distinct()
         val missing =
             state.visibleButtons(gizmondo).filter { target ->
@@ -488,19 +488,13 @@ class InputSettingsActivity : AppCompatActivity() {
             }
         if (missing.isNotEmpty())
             body.addView(
-                button("Unassigned commands (${missing.size})") {
-                    android.app.AlertDialog.Builder(this)
-                        .setTitle("Choose a command to assign")
-                        .setItems(missing.map { state.label(it) }.toTypedArray()) { _, index ->
-                            capture(pad, missing[index])
-                        }
-                        .setNegativeButton("Cancel", null)
-                        .show()
+                text("Unassigned commands: ${missing.joinToString {state.label(it)}}", 12f).apply {
+                    setTextColor(Color.GRAY)
                 }
             )
     }
 
-    private fun inspector(body: LinearLayout, pad: Boolean) {
+    private fun summary(body: LinearLayout, pad: Boolean) {
         val input = selected[pad] ?: return
         val panel =
             column().apply {
@@ -514,37 +508,18 @@ class InputSettingsActivity : AppCompatActivity() {
                 bottomMargin = dp(8)
             },
         )
-        panel.addView(text("Assignment", 18f))
-        val longTarget = state.longTarget(input, pad, gizmondo)
-        if (longTarget != null) {
-            panel.addView(
-                text("Hold: ${state.label(longTarget)}").apply {
-                    setTextColor(InputSkinView.LONG_PRESS)
-                }
-            )
-            panel.addView(
-                button("Clear long press") {
-                    state.assignLong(input, pad, null, gizmondo)
-                    render()
-                }
-            )
-        }
-        val target = state.assignment(input, pad, gizmondo)
-        if (pad && input == "Misc1")
-            panel.addView(
-                text("Extra is a desktop-only input in the current Android adapter.", 12f)
-            )
         val physical =
             if (pad)
                 InputSkinView.loadControls(this, true).firstOrNull { it.input == input }?.label
                     ?: input
             else input
-        panel.addView(text("Selected ${if(pad) "control" else "key"}: $physical", 17f))
+        panel.addView(text("Selected input: $physical", 18f))
+        val target = state.assignment(input, pad, gizmondo)
         if (target == "host") {
             val tap = if (pad) DeckInputPolicy.tap(input) else DeckInputPolicy.key(input)
             tap?.let {
                 panel.addView(
-                    text("Tap: ${DeckInputPolicy.label(it)}").apply {
+                    text("Short press: ${DeckInputPolicy.label(it)}").apply {
                         setTextColor(InputSkinView.PURPLE)
                     }
                 )
@@ -552,93 +527,38 @@ class InputSettingsActivity : AppCompatActivity() {
             if (pad)
                 DeckInputPolicy.hold(input, gizmondo)?.let {
                     panel.addView(
-                        text("Hold: ${DeckInputPolicy.label(it)}").apply {
+                        text("Long press: ${DeckInputPolicy.label(it)}").apply {
                             setTextColor(InputSkinView.LONG_PRESS)
                         }
                     )
                 }
-        } else
+        } else {
             panel.addView(
-                text("Current: ${state.label(target)}").apply {
+                text("Short press: ${state.label(target)}").apply {
                     setTextColor(InputSkinView.color(target))
                 }
             )
-        panel.addView(
-            button("Choose input") {
-                val inputs =
-                    (InputSkinView.loadControls(this, pad).mapNotNull { it.input } +
-                            state.savedInputs(pad))
-                        .distinct()
-                        .filter { !(pad && it == "Misc1") }
-                        .sorted()
-                android.app.AlertDialog.Builder(this)
-                    .setTitle("Choose input")
-                    .setItems(inputs.toTypedArray()) { _, i ->
-                        selected[pad] = inputs[i]
-                        render()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
-            }
-        )
-        if (
-            target == "host" &&
-                (DeckInputPolicy.key(input) == DeckInputPolicy.Action.RECORDING ||
-                    (pad &&
-                        DeckInputPolicy.hold(input, gizmondo) == DeckInputPolicy.Action.RECORDING))
-        ) {
-            panel.addView(text("* Recording is currently available on desktop only.", 12f))
-        }
-        if (state.fixed(input, pad, gizmondo)) {
+            val long = state.longTarget(input, pad, gizmondo)
             panel.addView(
-                text(
-                    if (target == "host") "Built-in Deck shortcut."
-                    else "Built-in device mapping (Deck reference)."
-                )
+                text("Long press: ${state.label(long)}").apply {
+                    setTextColor(if (long == null) Color.GRAY else InputSkinView.LONG_PRESS)
+                }
             )
-            return
         }
-        panel.addView(
-            button("Change assignment") {
-                val targets =
-                    listOf<String?>(null) +
-                        state.visibleButtons(gizmondo) +
-                        if (gizmondo) emptyList() else (0..3).map { "stylus:$it" }
-                android.app.AlertDialog.Builder(this)
-                    .setTitle("Assign $physical")
-                    .setItems(targets.map { state.label(it) }.toTypedArray()) { _, i ->
-                        state.assign(input, pad, targets[i], gizmondo)
-                        render()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
-            }
-        )
-        val row = LinearLayout(this)
-        row.addView(
-            button("Clear") {
-                state.assign(input, pad, null, gizmondo)
-                render()
-            },
-            LinearLayout.LayoutParams(0, dp(48), 1f),
-        )
-        row.addView(
-            button("Press an input…") { if (target != null) capture(pad, target) }
-                .apply {
-                    isEnabled = target != null
-                    alpha = if (target != null) 1f else .45f
-                },
-            LinearLayout.LayoutParams(0, dp(48), 1f),
-        )
-        panel.addView(row)
+        if (pad && input == "Misc1")
+            panel.addView(
+                text("Extra is a desktop-only input in the current Android adapter.", 12f)
+            )
     }
 
     private fun quickAssign() {
-        captureDialog?.dismiss()
+        assignmentDialog?.dismiss()
         val pad = controllerOnly
-        val targets = listOf<String?>(null) + state.visibleButtons(gizmondo)
         val dialog =
             object : Dialog(this) {
+                val targets: List<String?>
+                    get() = state.targets(pad, input, long, gizmondo)
+
                 var stage = 0 // capture, choose guest action, then continue/save
                 var input: String? = null
                 var started = 0L
@@ -662,7 +582,8 @@ class InputSettingsActivity : AppCompatActivity() {
                     if (
                         state.fixed(input!!, pad, gizmondo) || (!pad && long && input == "Escape")
                     ) {
-                        notice = "This input has a built-in PocketHLE shortcut. Choose another input."
+                        notice =
+                            "This input has a built-in PocketHLE shortcut. Choose another input."
                         begin()
                         return
                     }
@@ -765,7 +686,12 @@ class InputSettingsActivity : AppCompatActivity() {
                         }
                         val choices =
                             if (stage == 1) targets.map { state.label(it) }
-                            else listOf("Assign another input", "Save and finish", "Back to editor")
+                            else
+                                listOf(
+                                    "Assign another input",
+                                    "Save and finish",
+                                    "Back to overview",
+                                )
                         val list = column()
                         var selectedView: View? = null
                         choices.forEachIndexed { i, label ->
@@ -846,71 +772,14 @@ class InputSettingsActivity : AppCompatActivity() {
                     return true
                 }
             }
-        captureDialog = dialog
+        assignmentDialog = dialog
         dialog.setOnDismissListener {
-            captureDialog = null
+            assignmentDialog = null
             liveInput.clear()
             refreshLive()
         }
         dialog.show()
         dialog.draw()
-    }
-
-    private fun capture(pad: Boolean, target: String) {
-        val dialog =
-            object : Dialog(this) {
-                fun accept(name: String): Boolean {
-                    if (state.assign(name, pad, target, gizmondo)) {
-                        selected[pad] = if (pad) InputBindings.controllerCanonical(name) else name
-                        dismiss()
-                        render()
-                    }
-                    return true
-                }
-
-                override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-                    recordKey(event)
-                    if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
-                    if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
-                    val sources = event.device?.sources ?: event.source
-                    val controller =
-                        sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-                            sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
-                    if (controller != pad) return true
-                    val name =
-                        if (pad) InputBindings.controllerName(event.keyCode)
-                        else InputBindings.keyName(event)
-                    return name?.let { accept(it) } ?: true
-                }
-
-                override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
-                    if (
-                        !pad ||
-                            event.source and InputDevice.SOURCE_JOYSTICK !=
-                                InputDevice.SOURCE_JOYSTICK
-                    )
-                        return super.dispatchGenericMotionEvent(event)
-                    recordMotion(event)?.takeIf { it.second > .6f }?.let { accept(it.first) }
-                    return true
-                }
-            }
-        val content =
-            column().apply {
-                setPadding(dp(20), dp(20), dp(20), dp(20))
-                setBackgroundColor(Color.rgb(30, 33, 38))
-            }
-        content.addView(
-            text(
-                "Press ${if(pad) "a controller input" else "a keyboard key"} for ${state.label(target)}",
-                18f,
-            )
-        )
-        content.addView(text("Reserved Deck controls keep their built-in assignment.", 12f))
-        content.addView(button("Cancel") { dialog.dismiss() })
-        dialog.setContentView(content)
-        captureDialog = dialog
-        dialog.setOnDismissListener { captureDialog = null }
-        dialog.show()
     }
 
     private fun save() {
