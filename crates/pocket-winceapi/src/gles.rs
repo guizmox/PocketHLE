@@ -1679,8 +1679,10 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             }
         }),
         pocket_gles::GL_VERSION => "OpenGL ES-CL 1.1",
+        // The ARB combine tokens and operations are identical to GLES 1.1 core.
+        // Older clients (including OGLESVirgin) still query the extension name.
         pocket_gles::GL_EXTENSIONS => {
-            "GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
+            "GL_ARB_texture_env_combine GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
         }
         _ => {
             with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
@@ -7021,6 +7023,30 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes[..16]).to_string();
         assert_eq!(text, "OpenGL ES-CL 1.1");
         assert_eq!(bytes[16], 0, "must be NUL-terminated");
+    }
+
+    #[test]
+    fn extensions_advertise_core_texture_env_combine_alias() {
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let pointer = call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_string,
+            &[pocket_gles::GL_EXTENSIONS],
+        );
+        let extensions = kernel
+            .gles_strings
+            .iter()
+            .find_map(|(text, &address)| (address == pointer).then_some(text))
+            .unwrap();
+        assert!(extensions
+            .split_ascii_whitespace()
+            .any(|name| name == "GL_ARB_texture_env_combine"));
     }
 
     #[test]
