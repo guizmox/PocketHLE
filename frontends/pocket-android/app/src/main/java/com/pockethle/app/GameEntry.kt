@@ -19,6 +19,8 @@ data class GameEntry(
     val titleId: String? = null,
     val screenWidth: Int = 240,
     val screenHeight: Int = 320,
+    val graphicsApi: String? = null,
+    val customSettings: Boolean = false,
 ) {
     companion object {
         fun fromJson(obj: JSONObject): GameEntry {
@@ -27,6 +29,8 @@ data class GameEntry(
                 id = obj.getString("id"),
                 screenWidth = obj.optInt("screen_width",240),
                 screenHeight = obj.optInt("screen_height",320),
+                customSettings = obj.optBoolean("custom_settings", false),
+                graphicsApi = obj.optString("graphics_api").takeIf { !obj.isNull("graphics_api") && it.isNotBlank() },
                 displayName = obj.getString("display_name"),
                 titleId = obj.optString("title_id").takeIf { !obj.isNull("title_id") && it.isNotEmpty() },
                 provider = obj.optString("provider").takeIf { !obj.isNull("provider") && it.isNotEmpty() },

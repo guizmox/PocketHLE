@@ -246,7 +246,7 @@ const SHARED_PRESENTATION_READY: bool = true;
 pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     game_card_metadata: std::collections::HashMap<String, (bool, Option<String>)>,
-    screen_cache: std::collections::HashMap<String, (ScreenPref, (u32, u32))>,
+    screen_cache: std::collections::HashMap<String, (ScreenPref, (u32, u32), Option<&'static str>)>,
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
     upscale_x2: bool,
     upscale_filter: UpscaleFilter,
@@ -1468,6 +1468,7 @@ impl PocketLauncher {
             Ok(lib) => {
                 self.library = lib;
                 self.analysis_cache.clear();
+                self.screen_cache.clear();
             }
             Err(e) => self.status = format!("Could not reload library: {e}"),
         }
@@ -2131,25 +2132,36 @@ impl PocketLauncher {
             label_rect.shrink2(Vec2::new(10.0, 7.0)),
             egui::Layout::top_down(egui::Align::Min),
         );
+        text_ui.spacing_mut().item_spacing.y = 1.0;
         library_title(&mut text_ui, &game.id, &game.display_name);
-        let (width, height) = match self.screen_cache.get(&game.id) {
-            Some((pref, size)) if *pref == game.settings.screen => *size,
+        let ((width, height), graphics_api) = match self.screen_cache.get(&game.id) {
+            Some((pref, size, api)) if *pref == game.settings.screen => (*size, *api),
             _ => {
                 let size = game.resolved_screen_size(self.library.root());
+                let api = pocket_library::analysis::detect_graphics_api(
+                    &game.executable_path(self.library.root()),
+                );
                 self.screen_cache
-                    .insert(game.id.clone(), (game.settings.screen, size));
-                size
+                    .insert(game.id.clone(), (game.settings.screen, size, api));
+                (size, api)
             }
         };
-        let caption = format!(
-            "{} • {width}×{height}",
-            if giz { "GIZMONDO" } else { "POCKET PC / WINCE" }
-        );
+        let caption = match graphics_api {
+            Some(api) => format!("{width}×{height} • {api}"),
+            None => format!("{width}×{height}"),
+        };
         text_ui.label(
             RichText::new(caption)
                 .size(12.0)
                 .color(Color32::from_gray(185)),
         );
+        if game.settings.has_custom_settings(self.library.config()) {
+            text_ui.label(
+                RichText::new("Custom settings")
+                    .size(11.0)
+                    .color(Color32::from_rgb(215, 181, 116)),
+            );
+        }
         if let Some(id) = title_id {
             text_ui.label(
                 RichText::new(id)

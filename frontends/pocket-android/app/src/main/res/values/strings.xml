@@ -132,4 +132,5 @@
     <string-array name="dpad_deadzone_entries"><item>Small (sensitive)</item><item>Medium</item><item>Large (precise)</item></string-array>
     <string-array name="dpad_deadzone_values"><item>small</item><item>medium</item><item>large</item></string-array>
     <string name="executable_heap_help">Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.</string>
+    <string name="custom_game_settings">Custom settings</string>
 </resources>

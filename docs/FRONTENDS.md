@@ -234,3 +234,33 @@ edits; physical capture waits for a free input. Assigning an input moves it out 
 conflicting guest/stylus bindings and configurable fullscreen bindings. Assigning
 a stylus command enables the stylus stick. This does not change runtime dispatch,
 the controller preset, or Android's native settings UI.
+
+
+## Library tile metadata
+
+Desktop and Android tiles show resolution followed by a compact graphics API hint
+(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI or GDI). A shared detector inspects
+only static imports of the selected executable. It prefers explicit 3D/framebuffer
+APIs over GDI menu drawing. Missing evidence leaves only the resolution; this is
+not a runtime renderer guarantee, and DLL-only/dynamically loaded renderers or
+unknown ordinal imports may be missed. Desktop caches the hint until library
+reload; Android computes it with the library list. Existing games benefit after
+restarting the updated launcher, without reimport or a new Refresh button.
+
+A second line, “Custom settings”, appears for saved per-game overrides or runtime
+settings different from standard defaults. Explicit per-game overrides count
+as custom even when their value currently equals the global setting. The CPU
+baseline follows the global default; explicit Normal controls equal default
+controls. Non-default screen/rotation settings count, including those selected
+automatically during import. The marker describes the saved configuration, not a
+history of user edits; restoring the defaults removes it. No metadata schema or
+import migration is introduced.
+
+
+Input diagrams use flat, unbranded vector skins bundled as PNGs for the existing
+image loader. Editable SVG originals live in `assets/input/`; the keyboard PNG
+and hitboxes use the same `keyboard-layout.json` geometry. Modifier-only keycaps
+are decorative because the existing key capture does not bind modifier keys on
+their own. Controller assignments sit around the device; selecting a row or an
+actual control highlights its location. Small-screen layouts put rows below the
+skin. Direction labels use ASCII words to avoid unsupported arrow glyphs.

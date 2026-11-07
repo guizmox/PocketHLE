@@ -17,6 +17,72 @@ pub struct GameAnalysis {
     pub dependencies: Vec<(String, String)>,
 }
 
+/// Best-effort graphics label from the executable's static PE imports.
+/// This is an API hint, not proof of the active renderer. Unknown stays absent.
+/// Prefer framebuffer/3D APIs over GDI, which often only supplies menu text.
+pub fn detect_graphics_api(path: &std::path::Path) -> Option<&'static str> {
+    let image = pocket_pe::load_file(path).ok()?;
+    graphics_api_from_imports(&image.imports)
+}
+
+fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'static str> {
+    let mut gles = false;
+    let mut d3dm = false;
+    let mut ddraw = false;
+    let mut gapi = false;
+    let mut gdi = false;
+    for import in imports {
+        let dll = import.dll.to_ascii_lowercase();
+        gles |= matches!(
+            dll.as_str(),
+            "libgles_cm.dll"
+                | "libgles_cl.dll"
+                | "libglesv1_cm.dll"
+                | "libglesv2.dll"
+                | "gles.dll"
+                | "libgles.dll"
+        );
+        d3dm |= dll == "d3dm.dll";
+        ddraw |= dll == "ddraw.dll";
+        if let pocket_pe::ImportBinding::Name(name) = &import.binding {
+            let name = name.to_ascii_lowercase();
+            gles |= matches!(
+                name.as_str(),
+                "eglswapbuffers" | "glclear" | "gldrawarrays" | "gldrawelements"
+            );
+            d3dm |= name == "direct3dmobilecreate";
+            ddraw |= name == "directdrawcreate";
+            // GXOpenInput/GXGetDefaultKeys alone do not imply GAPI rendering.
+            gapi |= ["gxopendisplay", "gxbegindraw", "gxenddraw"]
+                .iter()
+                .any(|api| name == *api || name.starts_with(&format!("?{api}@@")));
+            gdi |= matches!(
+                name.as_str(),
+                "bitblt"
+                    | "stretchblt"
+                    | "stretchdibits"
+                    | "setdibitstodevice"
+                    | "textoutw"
+                    | "exttextoutw"
+                    | "patblt"
+            );
+        }
+    }
+    if gles {
+        Some("OpenGL ES")
+    } else if d3dm {
+        Some("Direct3D Mobile")
+    } else if ddraw {
+        Some("DirectDraw")
+    } else if gapi {
+        Some("GAPI")
+    } else if gdi {
+        Some("GDI")
+    } else {
+        None
+    }
+}
+
 pub fn detect_gizmondo_title_id(root: &std::path::Path) -> Option<String> {
     fn scan(dir: &std::path::Path, depth: usize) -> Option<String> {
         if depth > 5 {
@@ -666,6 +732,64 @@ mod serial_gps_detection_tests {
             .collect();
         assert!(
             serial_gps_evidence(&binary_strings(&bytes).join(" ").to_ascii_lowercase()).is_some()
+        );
+    }
+}
+
+#[cfg(test)]
+mod graphics_api_tests {
+    use super::*;
+    fn import(dll: &str, name: &str) -> pocket_pe::ImportSymbol {
+        pocket_pe::ImportSymbol {
+            dll: dll.into(),
+            binding: pocket_pe::ImportBinding::Name(name.into()),
+            iat_va: 0,
+        }
+    }
+    #[test]
+    fn graphics_labels_and_rendering_priority() {
+        let gdi = import("COREDLL.dll", "BitBlt");
+        let gapi = import("gx.dll", "?GXBeginDraw@@YAPAXXZ");
+        assert_eq!(graphics_api_from_imports(&[gdi.clone()]), Some("GDI"));
+        assert_eq!(
+            graphics_api_from_imports(&[gdi.clone(), gapi.clone()]),
+            Some("GAPI")
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[gdi.clone(), import("DDRAW.dll", "DirectDrawCreate")]),
+            Some("DirectDraw")
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[import("d3dm.dll", "Direct3DMobileCreate")]),
+            Some("Direct3D Mobile")
+        );
+        let gles = pocket_pe::ImportSymbol {
+            dll: "libGLES_CM.dll".into(),
+            binding: pocket_pe::ImportBinding::Ordinal(1),
+            iat_va: 0,
+        };
+        assert_eq!(
+            graphics_api_from_imports(&[gdi, gapi, gles]),
+            Some("OpenGL ES")
+        );
+    }
+    #[test]
+    fn no_renderer_guessed_from_input_or_unknown_ordinals() {
+        assert_eq!(
+            graphics_api_from_imports(&[import("gx.dll", "?GXOpenInput@@YAHXZ")]),
+            None
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[pocket_pe::ImportSymbol {
+                dll: "coredll.dll".into(),
+                binding: pocket_pe::ImportBinding::Ordinal(1),
+                iat_va: 0
+            }]),
+            None
+        );
+        assert_eq!(
+            detect_graphics_api(std::path::Path::new("/nonexistent/pockethle.exe")),
+            None
         );
     }
 }

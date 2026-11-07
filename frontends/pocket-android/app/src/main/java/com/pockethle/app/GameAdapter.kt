@@ -47,6 +47,7 @@ class GameAdapter(
     inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         private val title: TextView = view.findViewById(R.id.game_title)
         private val caption: TextView = view.findViewById(R.id.game_caption)
+        private val customSettings: TextView = view.findViewById(R.id.game_custom_settings)
         private val serial: TextView = view.findViewById(R.id.game_serial)
         private val publisherLabel: TextView = view.findViewById(R.id.game_publisher)
         private val moreBtn: ImageButton = view.findViewById(R.id.btn_more)
@@ -67,7 +68,8 @@ class GameAdapter(
             artwork.visibility = if (showArtwork) View.VISIBLE else View.GONE
             label.visibility = if (showArtwork) View.GONE else View.VISIBLE
             itemView.contentDescription = entry.displayName
-            publisherLabel.text = "${if (gizmondo) "GIZMONDO" else "POCKET PC / WINCE"} • ${entry.screenWidth}×${entry.screenHeight}"
+            publisherLabel.text = "${entry.screenWidth}×${entry.screenHeight}" + (entry.graphicsApi?.let { " • $it" } ?: "")
+            customSettings.visibility = if (entry.customSettings) View.VISIBLE else View.GONE
             serial.text = entry.titleId
             serial.visibility = if (entry.titleId != null) View.VISIBLE else View.GONE
             itemView.setOnClickListener { onRun(entry) }

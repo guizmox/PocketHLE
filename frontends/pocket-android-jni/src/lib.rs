@@ -192,6 +192,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_listGames<'local>(
                 let (width, height) = game.resolved_screen_size(&root);
                 value["screen_width"] = width.into();
                 value["screen_height"] = height.into();
+                value["custom_settings"] = game.settings.has_custom_settings(lib.config()).into();
+                value["graphics_api"] = serde_json::to_value(
+                    pocket_library::analysis::detect_graphics_api(&game.executable_path(&root)),
+                )?;
                 Ok(value)
             })
             .collect::<Result<Vec<serde_json::Value>, serde_json::Error>>()?;

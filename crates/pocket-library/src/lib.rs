@@ -576,7 +576,7 @@ impl GameEntry {
 }
 
 /// Runtime settings stored per game.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable_heap: Option<bool>,
@@ -696,6 +696,19 @@ impl DpadDeadzone {
 }
 
 impl GameSettings {
+    /// Whether this game has saved overrides or nonstandard runtime settings.
+    pub fn has_custom_settings(&self, config: &LauncherConfig) -> bool {
+        let standard = Self {
+            cpu_backend: config.default_cpu_backend,
+            // Saving the explicit Normal control mode is equivalent to its default.
+            pocketpc_controls: self
+                .pocketpc_controls
+                .filter(|mode| *mode == stylus_grid::ControlsMode::Normal),
+            ..Self::default()
+        };
+        *self != standard
+    }
+
     pub fn effective_executable_heap(&self, config: &LauncherConfig) -> bool {
         self.executable_heap.unwrap_or(config.executable_heap)
     }
@@ -4156,6 +4169,24 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_settings_badge_follows_saved_overrides_and_reset() {
+        let config = super::LauncherConfig::default();
+        let mut settings = super::GameSettings::default();
+        assert!(!settings.has_custom_settings(&config));
+        settings.pocketpc_controls = Some(super::stylus_grid::ControlsMode::Normal);
+        assert!(!settings.has_custom_settings(&config));
+        settings.executable_heap = Some(config.executable_heap);
+        assert!(settings.has_custom_settings(&config));
+        settings.executable_heap = None;
+        assert!(!settings.has_custom_settings(&config));
+        settings.rotation = super::RotationPref::Cw90;
+        assert!(settings.has_custom_settings(&config));
+        settings = super::GameSettings::default();
+        settings.screen = super::ScreenPref::Qvga;
+        assert!(settings.has_custom_settings(&config));
+    }
+
     #[test]
     fn android_touch_layout_defaults_and_roundtrips_independently_of_size() {
         use super::*;

@@ -15,6 +15,7 @@
  <LinearLayout android:layout_width="match_parent" android:layout_height="78dp" android:orientation="vertical" android:background="#1c1d20" android:paddingHorizontal="10dp" android:paddingTop="7dp">
   <TextView android:id="@+id/game_caption" android:layout_width="match_parent" android:layout_height="wrap_content" android:textColor="#eeeeee" android:textSize="16sp" android:singleLine="true" android:ellipsize="marquee" android:marqueeRepeatLimit="marquee_forever" android:scrollHorizontally="true" android:requiresFadingEdge="horizontal" android:includeFontPadding="false"/>
   <TextView android:id="@+id/game_publisher" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:textColor="#b9b9b9" android:textSize="12sp" android:maxLines="1" android:includeFontPadding="false"/>
+  <TextView android:id="@+id/game_custom_settings" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:text="@string/custom_game_settings" android:textColor="#d7b574" android:textSize="11sp" android:maxLines="1" android:includeFontPadding="false" android:visibility="gone"/>
   <TextView android:id="@+id/game_serial" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:textColor="#919191" android:textSize="11sp" android:fontFamily="monospace" android:maxLines="1" android:includeFontPadding="false"/>
  </LinearLayout>
 </LinearLayout>

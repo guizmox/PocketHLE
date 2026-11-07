@@ -18,15 +18,15 @@ impl Assignment {
         use GuestButton::*;
         match self {
             Self::Unbound => "—",
-            Self::Stylus(0) => "Pen ↑",
-            Self::Stylus(1) => "Pen ↓",
-            Self::Stylus(2) => "Pen ←",
-            Self::Stylus(_) => "Pen →",
+            Self::Stylus(0) => "Pen Up",
+            Self::Stylus(1) => "Pen Down",
+            Self::Stylus(2) => "Pen Left",
+            Self::Stylus(_) => "Pen Right",
             Self::Guest(button) => match button {
-                DpadUp => "↑",
-                DpadDown => "↓",
-                DpadLeft => "←",
-                DpadRight => "→",
+                DpadUp => "Up",
+                DpadDown => "Down",
+                DpadLeft => "Left",
+                DpadRight => "Right",
                 Action => "Action",
                 ButtonA => "A",
                 ButtonB => "B",
@@ -50,7 +50,7 @@ impl Assignment {
     fn label(self) -> String {
         match self {
             Self::Unbound => "Unassigned".into(),
-            Self::Guest(button) => button.label().into(),
+            Self::Guest(button) => readable(button.label()),
             Self::Stylus(direction) => {
                 format!("Stylus {}", pocket_library::stylus::DIRECTIONS[direction])
             }
@@ -74,8 +74,36 @@ pub enum Capture {
     StylusController(usize),
 }
 
+#[derive(Clone, serde::Deserialize)]
+struct SkinKey {
+    input: Option<String>,
+    label: String,
+    rect: [f32; 4],
+}
+
+fn readable(text: &str) -> String {
+    text.replace('↑', "Up")
+        .replace('↓', "Down")
+        .replace('←', "Left")
+        .replace('→', "Right")
+}
+
+fn load_skin(ctx: &egui::Context, name: &str, bytes: &[u8]) -> egui::TextureHandle {
+    let image = image::load_from_memory(bytes)
+        .expect("bundled input skin")
+        .to_rgba8();
+    let pixels = egui::ColorImage::from_rgba_unmultiplied(
+        [image.width() as usize, image.height() as usize],
+        image.as_raw(),
+    );
+    ctx.load_texture(name, pixels, egui::TextureOptions::LINEAR)
+}
+
 pub struct Editor {
     gizmondo: bool,
+    controller_skin: Option<egui::TextureHandle>,
+    keyboard_skin: Option<egui::TextureHandle>,
+    keyboard_layout: Vec<SkinKey>,
     key: Option<String>,
     control: Option<String>,
     keyboard_target: Option<Assignment>,
@@ -86,6 +114,22 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             gizmondo: false,
+            controller_skin: None,
+            keyboard_skin: None,
+            keyboard_layout: {
+                let mut keys: Vec<SkinKey> =
+                    serde_json::from_str(include_str!("../assets/input/keyboard-layout.json"))
+                        .expect("bundled keyboard layout");
+                for key in &mut keys {
+                    if let Some(name) = key.input.as_mut() {
+                        *name = egui::Key::from_name(name)
+                            .expect("supported skin key")
+                            .name()
+                            .into();
+                    }
+                }
+                keys
+            },
             key: Some("Z".into()),
             control: Some("DPadUp".into()),
             keyboard_target: None,
@@ -267,9 +311,9 @@ impl Editor {
     ) -> Option<Capture> {
         ui.separator();
         ui.heading(if controller { "Controller" } else { "Keyboard" });
-        let wide = ui.available_width() >= 800.0;
+        let wide = ui.available_width() >= 1100.0;
         let diagram_width = if wide {
-            ui.available_width() * 0.64
+            ui.available_width() * 0.72
         } else {
             ui.available_width()
         };
@@ -409,7 +453,7 @@ impl Editor {
                         ui,
                         &mut target,
                         Assignment::Guest(button),
-                        button.label(),
+                        readable(button.label()),
                     );
                 }
                 if !self.gizmondo {
@@ -482,7 +526,7 @@ impl Editor {
                     "Unassigned: {}",
                     missing
                         .iter()
-                        .map(|b| b.label())
+                        .map(|b| readable(b.label()))
                         .collect::<Vec<_>>()
                         .join(" · ")
                 ),
@@ -492,73 +536,157 @@ impl Editor {
 
     fn diagram(&mut self, ui: &mut Ui, config: &LauncherConfig, controller: bool) {
         let width = ui.available_width().max(200.0);
-        let height = width * if controller { 0.53 } else { 0.34 };
-        let (bounds, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
         if controller {
-            let scale = width / 760.0;
-            let center = bounds.min + Vec2::new(380.0, 210.0) * scale;
-            ui.painter()
-                .rect(bounds, 12.0, Color32::from_gray(28), Stroke::NONE);
-            ui.painter().rect(
-                Rect::from_center_size(center, Vec2::new(505.0, 230.0) * scale),
-                65.0 * scale,
-                Color32::from_rgb(59, 67, 80),
-                Stroke::new(1.0, Color32::GRAY),
-            );
-            for x in [190.0, 570.0] {
-                ui.painter().circle_filled(
-                    bounds.min + Vec2::new(x, 285.0) * scale,
-                    80.0 * scale,
-                    Color32::from_rgb(59, 67, 80),
-                );
-            }
-            for (name, text, x, y) in controller_inputs() {
-                let rect = Rect::from_center_size(
-                    bounds.min + Vec2::new(x, y) * scale,
-                    Vec2::new(64.0, 38.0) * scale,
-                );
-                self.control(ui, config, true, name, text, rect);
-            }
+            self.controller_diagram(ui, config, width);
         } else {
-            let rows: &[&[&str]] = &[
-                &[
-                    "Escape", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11",
-                    "F12",
-                ],
-                &[
-                    "1",
-                    "2",
-                    "3",
-                    "4",
-                    "5",
-                    "6",
-                    "7",
-                    "8",
-                    "9",
-                    "0",
-                    "Backspace",
-                ],
-                &[
-                    "Tab", "A", "Z", "E", "R", "T", "Y", "U", "I", "O", "P", "Enter",
-                ],
-                &["Q", "S", "D", "F", "G", "H", "J", "K", "L", "M", "Up"],
-                &[
-                    "W", "X", "C", "V", "B", "N", "Space", "Left", "Down", "Right",
-                ],
-            ];
-            let cell = width / 13.0;
-            for (row, keys) in rows.iter().enumerate() {
-                for (column, key) in keys.iter().enumerate() {
-                    let min =
-                        bounds.min + Vec2::new(column as f32 * cell, row as f32 * height / 5.0);
-                    let rect = Rect::from_min_size(min, Vec2::new(cell - 3.0, height / 5.0 - 4.0));
-                    self.control(ui, config, false, key, key, rect);
+            let texture = self
+                .keyboard_skin
+                .get_or_insert_with(|| {
+                    load_skin(
+                        ui.ctx(),
+                        "input-keyboard-flat",
+                        include_bytes!("../assets/input/keyboard-flat.png"),
+                    )
+                })
+                .id();
+            let (bounds, _) =
+                ui.allocate_exact_size(Vec2::new(width, width * 0.34), Sense::hover());
+            ui.painter().image(
+                texture,
+                bounds,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            let scale = width / 1000.0;
+            for key in self.keyboard_layout.clone() {
+                let [x, y, w, h] = key.rect;
+                let rect = Rect::from_min_size(
+                    bounds.min + Vec2::new(x, y) * scale,
+                    Vec2::new(w, h) * scale,
+                );
+                if let Some(input) = key.input {
+                    self.control(ui, config, false, &input, &key.label, rect);
+                } else {
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        key.label,
+                        FontId::proportional((13.0 * scale).clamp(8.0, 13.0)),
+                        Color32::from_gray(175),
+                    );
                 }
             }
+            ui.label("AZERTY keyboard. Select a key, then choose its assignment.");
         }
         ui.label("Blue: game command · green: stylus · purple: host shortcut · gray: unassigned");
-        if !controller {
-            ui.label("AZERTY letter layout. Keys are stored by name. Other keys can be assigned using ‘Press an input…’.");
+    }
+
+    fn controller_diagram(&mut self, ui: &mut Ui, config: &LauncherConfig, width: f32) {
+        let texture = self
+            .controller_skin
+            .get_or_insert_with(|| {
+                load_skin(
+                    ui.ctx(),
+                    "input-controller-flat",
+                    include_bytes!("../assets/input/controller-flat.png"),
+                )
+            })
+            .id();
+        let compact = width < 620.0;
+        let art_width = if compact { width - 24.0 } else { width * 0.62 };
+        let art_height = art_width * 500.0 / 760.0;
+        let height = if compact {
+            art_height + 28.0 + 13.0 * 26.0
+        } else {
+            (art_height + 44.0).max(13.0 * 26.0 + 20.0)
+        };
+        let (bounds, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+        let art = Rect::from_min_size(
+            bounds.min + Vec2::new((width - art_width) * 0.5, 12.0),
+            Vec2::new(art_width, art_height),
+        );
+        ui.painter().image(
+            texture,
+            art,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        let rail_width = if compact {
+            (width - 12.0) * 0.5
+        } else {
+            width * 0.18
+        };
+        let left = [
+            "LeftTrigger2",
+            "LeftTrigger",
+            "LeftStickUp",
+            "LeftStickLeft",
+            "LeftThumb",
+            "LeftStickRight",
+            "LeftStickDown",
+            "DPadUp",
+            "DPadLeft",
+            "DPadRight",
+            "DPadDown",
+            "Select",
+            "Misc1",
+        ];
+        let right = [
+            "RightTrigger2",
+            "RightTrigger",
+            "North",
+            "West",
+            "East",
+            "South",
+            "RightStickUp",
+            "RightStickLeft",
+            "RightThumb",
+            "RightStickRight",
+            "RightStickDown",
+            "Start",
+            "Mode",
+        ];
+        let inputs = controller_inputs();
+        for (side, names) in [left, right].iter().enumerate() {
+            for (row, name) in names.iter().enumerate() {
+                let (_, label, x, y) = inputs.iter().find(|(n, _, _, _)| n == name).unwrap();
+                let rail = Rect::from_min_size(
+                    bounds.min
+                        + Vec2::new(
+                            if side == 0 { 0.0 } else { width - rail_width },
+                            if compact { art_height + 28.0 } else { 10.0 } + row as f32 * 26.0,
+                        ),
+                    Vec2::new(rail_width, 23.0),
+                );
+                let point = art.min + Vec2::new(*x, *y) * (art_width / 760.0);
+                let active = self.control(ui, config, true, name, label, rail);
+                if *name != "Misc1" {
+                    let hit =
+                        Rect::from_center_size(point, Vec2::splat((art_width * 0.045).max(14.0)));
+                    let response =
+                        ui.interact(hit, ui.id().with(("skin-hotspot", name)), Sense::click());
+                    if response.clicked() {
+                        self.control = Some((*name).into());
+                        self.controller_target = None;
+                    }
+                    if active || response.hovered() {
+                        ui.painter().circle_stroke(
+                            point,
+                            (art_width * 0.023).max(7.0),
+                            Stroke::new(1.5, BLUE),
+                        );
+                        if !compact {
+                            let from = if side == 0 {
+                                rail.right_center()
+                            } else {
+                                rail.left_center()
+                            };
+                            ui.painter()
+                                .line_segment([from, point], Stroke::new(1.0, BLUE));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -570,7 +698,7 @@ impl Editor {
         name: &str,
         label: &str,
         rect: Rect,
-    ) {
+    ) -> bool {
         let assignment = if controller {
             controller_assignment(config, name, self.gizmondo)
         } else {
@@ -593,42 +721,59 @@ impl Editor {
         let is_selected = selected.as_deref() == Some(name);
         // A child UI supplies a real navigable button without moving the diagram's cursor.
         let mut hit_ui = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
+        let widgets = &mut hit_ui.style_mut().visuals.widgets;
+        for visual in [
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+            &mut widgets.open,
+        ] {
+            visual.bg_fill = Color32::TRANSPARENT;
+            visual.weak_bg_fill = Color32::TRANSPARENT;
+            visual.bg_stroke = Stroke::NONE;
+        }
         let response = hit_ui
             .push_id(("binding_diagram", controller, name), |ui| {
                 crate::controller_ui::sized_button(ui, rect.size(), "")
             })
             .inner;
-        ui.painter().rect(
-            rect,
-            5.0,
-            if is_selected {
-                Color32::from_rgb(43, 83, 116)
-            } else {
-                Color32::from_rgb(35, 41, 51)
-            },
-            Stroke::new(if is_selected { 2.0 } else { 1.0 }, color),
-        );
-        let text = match label {
-            "Escape" => "Esc",
-            "Backspace" => "Back",
-            "Enter" => "Enter",
-            other => other,
-        };
-        ui.painter().text(
-            rect.center_top() + Vec2::new(0.0, rect.height() * 0.30),
-            Align2::CENTER_CENTER,
-            text,
-            FontId::proportional((rect.height() * 0.34).clamp(9.0, 15.0)),
-            Color32::WHITE,
-        );
+        if controller {
+            ui.painter().rect(
+                rect,
+                4.0,
+                if is_selected {
+                    Color32::from_rgb(36, 55, 72)
+                } else {
+                    Color32::from_rgb(34, 38, 44)
+                },
+                Stroke::new(
+                    1.0,
+                    if is_selected {
+                        BLUE
+                    } else {
+                        Color32::from_gray(68)
+                    },
+                ),
+            );
+        } else {
+            ui.painter().rect(
+                rect.shrink(0.5),
+                3.0,
+                if is_selected {
+                    Color32::from_rgba_unmultiplied(65, 130, 180, 65)
+                } else {
+                    Color32::TRANSPARENT
+                },
+                Stroke::new(if is_selected { 2.0 } else { 1.0 }, color),
+            );
+        }
         let command = if fullscreen {
-            "Fullscr"
+            "Fullscreen"
         } else if shortcut.is_some() {
             match name {
                 "F10" => "Photo",
                 "F11" => "Video",
-                "F12" => "Fullscr",
-                "Escape" => "Window",
+                "F12" => "Full",
                 "Select" => "View",
                 "Start" | "Misc1" => "Filter",
                 _ => "Host",
@@ -636,13 +781,37 @@ impl Editor {
         } else {
             assignment.short()
         };
-        ui.painter().text(
-            rect.center_top() + Vec2::new(0.0, rect.height() * 0.73),
-            Align2::CENTER_CENTER,
-            command,
-            FontId::proportional((rect.height() * 0.24).clamp(8.0, 12.0)),
-            color,
-        );
+        if controller {
+            ui.painter().text(
+                rect.left_center() + Vec2::new(6.0, 0.0),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(11.0),
+                Color32::from_gray(210),
+            );
+            ui.painter().text(
+                rect.right_center() - Vec2::new(6.0, 0.0),
+                Align2::RIGHT_CENTER,
+                command,
+                FontId::proportional(10.0),
+                color,
+            );
+        } else {
+            ui.painter().text(
+                rect.center_top() + Vec2::new(0.0, rect.height() * 0.28),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional((rect.height() * 0.30).clamp(8.0, 14.0)),
+                Color32::WHITE,
+            );
+            ui.painter().text(
+                rect.center_top() + Vec2::new(0.0, rect.height() * 0.74),
+                Align2::CENTER_CENTER,
+                command,
+                FontId::proportional((rect.height() * 0.22).clamp(7.0, 11.0)),
+                color,
+            );
+        }
         response.clone().on_hover_text(format!(
             "{name}: {}",
             shortcut
@@ -658,43 +827,60 @@ impl Editor {
                 self.keyboard_target = None;
             }
         }
+        is_selected || response.hovered()
     }
 }
 
 fn controller_inputs() -> Vec<(&'static str, &'static str, f32, f32)> {
     vec![
-        ("LeftTrigger2", "LT", 220.0, 36.0),
-        ("RightTrigger2", "RT", 540.0, 36.0),
-        ("LeftTrigger", "LB", 210.0, 88.0),
-        ("RightTrigger", "RB", 550.0, 88.0),
-        ("LeftStickUp", "LS ↑", 210.0, 145.0),
-        ("LeftStickLeft", "LS ←", 144.0, 186.0),
-        ("LeftThumb", "L3", 210.0, 186.0),
-        ("LeftStickRight", "LS →", 276.0, 186.0),
-        ("LeftStickDown", "LS ↓", 210.0, 227.0),
-        ("DPadUp", "↑", 240.0, 270.0),
-        ("DPadLeft", "←", 174.0, 311.0),
-        ("DPadRight", "→", 306.0, 311.0),
-        ("DPadDown", "↓", 240.0, 352.0),
-        ("RightStickUp", "RS ↑", 500.0, 270.0),
-        ("RightStickLeft", "RS ←", 434.0, 311.0),
-        ("RightThumb", "R3", 500.0, 311.0),
-        ("RightStickRight", "RS →", 566.0, 311.0),
-        ("RightStickDown", "RS ↓", 500.0, 352.0),
-        ("North", "North", 570.0, 145.0),
-        ("West", "West", 504.0, 186.0),
-        ("East", "East", 636.0, 186.0),
-        ("South", "South", 570.0, 227.0),
-        ("Select", "View", 335.0, 180.0),
-        ("Start", "Menu", 410.0, 180.0),
-        ("Mode", "Guide", 375.0, 125.0),
-        ("Misc1", "Extra", 690.0, 311.0),
+        ("LeftTrigger2", "L2", 200.0, 54.0),
+        ("RightTrigger2", "R2", 560.0, 54.0),
+        ("LeftTrigger", "L1", 200.0, 89.0),
+        ("RightTrigger", "R1", 560.0, 89.0),
+        ("LeftStickUp", "LS Up", 210.0, 152.0),
+        ("LeftStickLeft", "LS Left", 182.0, 180.0),
+        ("LeftThumb", "L3", 210.0, 180.0),
+        ("LeftStickRight", "LS Right", 238.0, 180.0),
+        ("LeftStickDown", "LS Down", 210.0, 208.0),
+        ("DPadUp", "D-pad Up", 270.0, 260.0),
+        ("DPadLeft", "D-pad Left", 240.0, 290.0),
+        ("DPadRight", "D-pad Right", 300.0, 290.0),
+        ("DPadDown", "D-pad Down", 270.0, 320.0),
+        ("RightStickUp", "RS Up", 490.0, 262.0),
+        ("RightStickLeft", "RS Left", 462.0, 290.0),
+        ("RightThumb", "R3", 490.0, 290.0),
+        ("RightStickRight", "RS Right", 518.0, 290.0),
+        ("RightStickDown", "RS Down", 490.0, 318.0),
+        ("North", "North", 575.0, 130.0),
+        ("West", "West", 525.0, 180.0),
+        ("East", "East", 625.0, 180.0),
+        ("South", "South", 575.0, 230.0),
+        ("Select", "View", 335.0, 172.0),
+        ("Start", "Menu", 425.0, 172.0),
+        ("Mode", "Guide", 380.0, 230.0),
+        ("Misc1", "Extra", 0.0, 0.0),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_skin_hitboxes_are_distinct_and_inside_the_asset() {
+        let editor = Editor::default();
+        for (index, key) in editor.keyboard_layout.iter().enumerate() {
+            let [x, y, w, h] = key.rect;
+            let rect = Rect::from_min_size(egui::pos2(x, y), Vec2::new(w, h));
+            assert!(x >= 0.0 && y >= 0.0 && rect.right() <= 1000.0 && rect.bottom() <= 340.0);
+            for other in &editor.keyboard_layout[index + 1..] {
+                let [ox, oy, ow, oh] = other.rect;
+                assert!(
+                    !rect.intersects(Rect::from_min_size(egui::pos2(ox, oy), Vec2::new(ow, oh)))
+                );
+            }
+        }
+    }
 
     #[test]
     fn preview_matches_runtime_priority() {
